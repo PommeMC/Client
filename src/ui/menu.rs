@@ -6,7 +6,7 @@ use crate::renderer::pipelines::menu_overlay::{
     ICON_PAINTBRUSH, ICON_USER,
 };
 
-use super::common::{self, WHITE, BTN_NORMAL, BTN_HOVER};
+use super::common::{self, WHITE};
 use super::server_list::{is_valid_address, ping_all_servers, PingResults, PingState, ServerEntry, ServerList};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -65,11 +65,8 @@ const FIELD_H: f32 = 20.0;
 
 const COL_DIM: [f32; 4] = [0.63, 0.63, 0.63, 1.0];
 const COL_DARK_DIM: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
-const COL_DISABLED: [f32; 4] = [0.4, 0.4, 0.4, 1.0];
 const COL_RED: [f32; 4] = [0.9, 0.22, 0.21, 1.0];
 const COL_SEP: [f32; 4] = [0.5, 0.5, 0.5, 0.4];
-
-const BTN_DISABLED: [f32; 4] = [0.12, 0.12, 0.12, 0.7];
 
 const FIELD_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.8];
 const FIELD_BORDER: [f32; 4] = [0.63, 0.63, 0.63, 0.6];
@@ -84,6 +81,7 @@ enum Screen {
     DirectConnect,
     AddServer,
     EditServer(usize),
+    Disconnected(String),
 }
 
 pub struct MainMenu {
@@ -140,6 +138,10 @@ impl MainMenu {
         }
     }
 
+    pub fn show_disconnect(&mut self, reason: String) {
+        self.screen = Screen::Disconnected(reason);
+    }
+
     pub fn build(
         &mut self,
         screen_w: f32,
@@ -153,6 +155,7 @@ impl MainMenu {
             Screen::ConfirmDelete(_) => self.build_confirm_delete(screen_w, screen_h, input, &text_width_fn),
             Screen::DirectConnect => self.build_direct_connect(screen_w, screen_h, input, &text_width_fn),
             Screen::AddServer | Screen::EditServer(_) => self.build_edit_server(screen_w, screen_h, input, &text_width_fn),
+            Screen::Disconnected(_) => self.build_disconnected(screen_w, screen_h, input, &text_width_fn),
         }
     }
 
@@ -826,6 +829,60 @@ impl MainMenu {
         }
     }
 
+    fn build_disconnected(
+        &mut self,
+        screen_w: f32,
+        screen_h: f32,
+        input: &MenuInput,
+        _text_width_fn: &dyn Fn(&str, f32) -> f32,
+    ) -> MainMenuResult {
+        let reason = match &self.screen {
+            Screen::Disconnected(r) => r.clone(),
+            _ => return empty_result(2.0),
+        };
+
+        let gs = (screen_h / 400.0).max(1.0);
+        let title_size = 18.0 * gs;
+        let body_size = 11.0 * gs;
+        let btn_w = 160.0 * gs;
+        let btn_h = 30.0 * gs;
+        let gap = 12.0 * gs;
+
+        let cx = screen_w / 2.0;
+        let total_h = title_size + gap + body_size + gap * 2.0 + btn_h;
+        let top_y = (screen_h - total_h) / 2.0;
+
+        let mut elements = Vec::new();
+        let mut any_hovered = false;
+
+        elements.push(MenuElement::Text {
+            x: cx, y: top_y,
+            text: "Disconnected".into(),
+            scale: title_size,
+            color: [1.0, 0.4, 0.4, 1.0],
+            centered: true,
+        });
+
+        elements.push(MenuElement::Text {
+            x: cx, y: top_y + title_size + gap,
+            text: reason,
+            scale: body_size,
+            color: [0.85, 0.85, 0.85, 0.9],
+            centered: true,
+        });
+
+        let btn_y = top_y + title_size + gap + body_size + gap * 2.0;
+        if push_button(
+            &mut elements, &mut any_hovered,
+            input.cursor, cx - btn_w / 2.0, btn_y, btn_w, btn_h,
+            gs, "Back to Menu", true,
+        ) && input.clicked {
+            self.screen = Screen::Main;
+        }
+
+        MainMenuResult { elements, action: MenuAction::None, cursor_pointer: any_hovered, blur: 2.0 }
+    }
+
     fn refresh_servers(&self) {
         ping_all_servers(&self.rt, &self.server_list.servers, &self.ping_results);
     }
@@ -859,27 +916,8 @@ fn push_button(
     label: &str,
     enabled: bool,
 ) -> bool {
-    let rect = [x, y, w, h];
-    let hovered = enabled && common::hit_test(cursor, rect);
+    let hovered = common::push_button(elements, cursor, x, y, w, h, gs, FONT_SIZE * gs, label, enabled);
     *any_hovered |= hovered;
-
-    let (bg, text_col) = if !enabled {
-        (BTN_DISABLED, COL_DISABLED)
-    } else if hovered {
-        (BTN_HOVER, WHITE)
-    } else {
-        (BTN_NORMAL, WHITE)
-    };
-
-    elements.push(MenuElement::Rect {
-        x, y, w, h, corner_radius: 2.0 * gs, color: bg,
-    });
-    elements.push(MenuElement::Text {
-        x: x + w / 2.0, y: y + (h - FONT_SIZE * gs) / 2.0,
-        text: label.into(), scale: FONT_SIZE * gs,
-        color: text_col, centered: true,
-    });
-
     hovered
 }
 

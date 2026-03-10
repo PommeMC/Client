@@ -67,9 +67,12 @@ pub fn spawn_connection(
     rt.spawn(async move {
         if let Err(e) = connect_to_server(args, event_tx.clone(), chat_rx, game_packet_tx, packet_rx).await {
             log::error!("Network error: {e}");
-            let _ = event_tx.try_send(NetworkEvent::Disconnected {
-                reason: e.to_string(),
-            });
+            let reason = if is_connection_closed(&e) {
+                "Server closed".to_string()
+            } else {
+                e.to_string()
+            };
+            let _ = event_tx.try_send(NetworkEvent::Disconnected { reason });
         }
     });
     ConnectionHandle {
@@ -354,4 +357,11 @@ fn resolve_address(server: &str) -> Result<SocketAddr, ConnectionError> {
         .map_err(|e| ConnectionError::InvalidAddress(format!("{addr}: {e}")))?
         .next()
         .ok_or_else(|| ConnectionError::InvalidAddress(format!("{addr}: no addresses found")))
+}
+
+fn is_connection_closed(err: &ConnectionError) -> bool {
+    let msg = err.to_string();
+    msg.contains("Connection closed")
+        || msg.contains("connection reset")
+        || msg.contains("broken pipe")
 }

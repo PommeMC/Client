@@ -154,6 +154,24 @@ impl App {
         self.apply_cursor_grab();
     }
 
+    fn disconnect_to_menu(&mut self, reason: Option<String>) {
+        self.net_events = None;
+        self.chat_sender = None;
+        self.packet_sender = None;
+        self.state = GameState::Menu;
+        self.paused = false;
+        self.position_set = false;
+        self.chunk_store = ChunkStore::new(VIEW_DISTANCE);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.clear_chunk_meshes();
+            self.mesh_dispatcher = Some(renderer.create_mesh_dispatcher());
+        }
+        if let Some(reason) = reason {
+            self.menu.show_disconnect(reason);
+        }
+        self.apply_cursor_grab();
+    }
+
     fn send_chat_message(&self, msg: String) {
         if let Some(tx) = &self.chat_sender {
             let _ = tx.try_send(msg);
@@ -163,6 +181,7 @@ impl App {
     fn drain_network_events(&mut self) {
         let Some(rx) = &self.net_events else { return };
         let mut chunks_to_mesh = Vec::new();
+        let mut disconnect_reason: Option<String> = None;
 
         while let Ok(event) = rx.try_recv() {
             match event {
@@ -244,8 +263,14 @@ impl App {
                 }
                 NetworkEvent::Disconnected { reason } => {
                     log::warn!("Disconnected: {reason}");
+                    disconnect_reason = Some(reason);
                 }
             }
+        }
+
+        if let Some(reason) = disconnect_reason {
+            self.disconnect_to_menu(Some(reason));
+            return;
         }
 
         if let Some(dispatcher) = &self.mesh_dispatcher {
@@ -570,20 +595,7 @@ impl ApplicationHandler for App {
                                 self.apply_cursor_grab();
                             }
                             PauseAction::Disconnect => {
-                                self.net_events = None;
-                                self.state = GameState::Menu;
-                                self.paused = false;
-                                self.position_set = false;
-                                self.chunk_store = ChunkStore::new(VIEW_DISTANCE);
-                                if let Some(renderer) = &mut self.renderer {
-                                    renderer.clear_chunk_meshes();
-                                    self.mesh_dispatcher =
-                                        Some(renderer.create_mesh_dispatcher());
-                                }
-                                self.apply_cursor_grab();
-                            }
-                            PauseAction::Quit => {
-                                event_loop.exit();
+                                self.disconnect_to_menu(None);
                             }
                             PauseAction::None => {}
                         }
