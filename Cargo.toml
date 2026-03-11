@@ -24,6 +24,7 @@ azalea-auth = "0.15"
 azalea-entity = "0.15"
 azalea-world = "0.15"
 azalea-block = "0.15"
+azalea-chat = "0.15"
 azalea-core = "0.15"
 azalea-registry = "0.15"
 uuid = { version = "1", features = ["v4"] }

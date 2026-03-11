@@ -13,10 +13,20 @@ pub struct ServerEntry {
 }
 
 #[derive(Clone)]
+pub struct MotdSpan {
+    pub text: String,
+    pub color: [f32; 4],
+    pub bold: bool,
+    pub italic: bool,
+    pub strikethrough: bool,
+    pub underline: bool,
+}
+
+#[derive(Clone)]
 pub enum PingState {
     Pinging,
     Success {
-        motd: String,
+        motd: Vec<MotdSpan>,
         online: i32,
         max: i32,
         latency_ms: u64,
@@ -136,7 +146,7 @@ async fn ping_server(address: String, results: PingResults) {
         let _ = conn.read().await.map_err(|e| format!("Pong failed: {e}"))?;
         let latency_ms = ping_start.elapsed().as_millis() as u64;
 
-        let motd = format!("{}", status.description);
+        let motd = format_motd_spans(&status.description);
         let version = status.version.name.clone();
         let (online, max) = (status.players.online, status.players.max);
 
@@ -162,6 +172,79 @@ fn with_default_port(address: &str) -> String {
         address.to_string()
     } else {
         format!("{address}:25565")
+    }
+}
+
+fn format_motd_spans(text: &azalea_chat::FormattedText) -> Vec<MotdSpan> {
+    use azalea_chat::style::Style;
+    use std::cell::RefCell;
+
+    let white: azalea_chat::style::TextColor =
+        azalea_chat::style::ChatFormatting::White.try_into().unwrap();
+    let white_style = Style::default().color(white);
+
+    let spans: RefCell<Vec<MotdSpan>> = RefCell::new(Vec::new());
+    let current_style: RefCell<Option<Style>> = RefCell::new(None);
+
+    text.to_custom_format(
+        |_running, new| {
+            *current_style.borrow_mut() = Some(new.clone());
+            (String::new(), String::new())
+        },
+        |t| {
+            if !t.is_empty() {
+                let style = current_style.borrow();
+                let s = style.as_ref();
+                let color = s.map(|s| style_to_rgba(s)).unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                let bold = s.and_then(|s| s.bold).unwrap_or(false);
+                let italic = s.and_then(|s| s.italic).unwrap_or(false);
+                let strikethrough = s.and_then(|s| s.strikethrough).unwrap_or(false);
+                let underline = s.and_then(|s| s.underlined).unwrap_or(false);
+
+                spans.borrow_mut().push(MotdSpan {
+                    text: t.to_string(),
+                    color,
+                    bold,
+                    italic,
+                    strikethrough,
+                    underline,
+                });
+            }
+            String::new()
+        },
+        |_| String::new(),
+        &white_style,
+    );
+
+    let result = spans.into_inner();
+    if result.is_empty() {
+        let plain = format!("{text}");
+        if !plain.is_empty() {
+            return vec![MotdSpan {
+                text: plain,
+                color: [0.63, 0.63, 0.63, 1.0],
+                bold: false,
+                italic: false,
+                strikethrough: false,
+                underline: false,
+            }];
+        }
+    }
+
+    result
+}
+
+fn style_to_rgba(style: &azalea_chat::style::Style) -> [f32; 4] {
+    if let Some(color) = &style.color {
+        let v = color.value;
+        [
+            ((v >> 16) & 0xFF) as f32 / 255.0,
+            ((v >> 8) & 0xFF) as f32 / 255.0,
+            (v & 0xFF) as f32 / 255.0,
+            1.0,
+        ]
+    } else {
+        [1.0, 1.0, 1.0, 1.0]
     }
 }
 

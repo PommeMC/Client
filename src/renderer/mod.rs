@@ -279,6 +279,14 @@ impl Renderer {
             .set_position(glam::Vec3::new(x as f32, y as f32, z as f32), yaw, pitch);
     }
 
+    pub fn wait_for_all_frames(&self) {
+        unsafe {
+            let _ = self.ctx.device.wait_for_fences(
+                &self.ctx.in_flight_fences, true, u64::MAX,
+            );
+        }
+    }
+
     pub fn upload_chunk_mesh(&mut self, mesh: &ChunkMeshData) {
         self.chunk_buffers
             .upload(&self.ctx.device, &self.ctx.allocator, mesh);
@@ -290,6 +298,7 @@ impl Renderer {
     }
 
     pub fn clear_chunk_meshes(&mut self) {
+        self.wait_for_all_frames();
         self.chunk_buffers
             .clear(&self.ctx.device, &self.ctx.allocator);
     }

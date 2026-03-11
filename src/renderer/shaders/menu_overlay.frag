@@ -3,6 +3,7 @@
 layout(set = 1, binding = 0) uniform sampler2D font_tex;
 layout(set = 1, binding = 1) uniform sampler2D sprite_tex;
 layout(set = 1, binding = 2) uniform sampler2D item_tex;
+layout(set = 1, binding = 3) uniform sampler2D mc_font_tex;
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec4 v_color;
@@ -18,6 +19,12 @@ float sdf_rounded_rect(vec2 p, vec2 half_size, float radius) {
 }
 
 void main() {
+    if (v_mode > 3.5) {
+        vec4 tex = texture(mc_font_tex, v_uv);
+        out_color = vec4(v_color.rgb * tex.a * v_color.a, tex.a * v_color.a);
+        return;
+    }
+
     if (v_mode > 2.5) {
         vec4 tex = texture(item_tex, v_uv);
         out_color = vec4(tex.rgb * v_color.rgb * tex.a * v_color.a, tex.a * v_color.a);

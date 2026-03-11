@@ -1251,9 +1251,10 @@ fn push_server_status(
             });
         }
         PingState::Success { motd, online, max, latency_ms, .. } => {
-            elements.push(MenuElement::Text {
-                x: text_x, y: motd_y, text: motd.clone(),
-                scale: fs, color: COL_DARK_DIM, centered: false,
+            elements.push(MenuElement::McText {
+                x: text_x, y: motd_y,
+                spans: motd.clone(),
+                scale: fs,
             });
 
             let player_text = format!("{online}/{max}");

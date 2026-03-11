@@ -3557,6 +3557,7 @@ dependencies = [
  "ash-window",
  "azalea-auth",
  "azalea-block",
+ "azalea-chat",
  "azalea-core",
  "azalea-crypto",
  "azalea-entity",

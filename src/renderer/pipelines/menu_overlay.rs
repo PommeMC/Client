@@ -9,6 +9,8 @@ use std::path::Path;
 use crate::assets::{resolve_asset_path, AssetIndex};
 use crate::renderer::shader;
 use crate::renderer::util;
+use crate::ui::font::GlyphMap;
+use crate::ui::server_list::MotdSpan;
 
 const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
 const ICON_FONT_BYTES: &[u8] = include_bytes!("../fonts/fa-solid-900.ttf");
@@ -147,6 +149,13 @@ pub struct MenuOverlayPipeline {
     item_staging_buffer: vk::Buffer,
     item_staging_allocation: Option<Allocation>,
     item_atlas: ItemAtlas,
+    mc_font_image: vk::Image,
+    mc_font_view: vk::ImageView,
+    mc_font_sampler: vk::Sampler,
+    mc_font_allocation: Option<Allocation>,
+    mc_font_staging_buffer: vk::Buffer,
+    mc_font_staging_allocation: Option<Allocation>,
+    mc_glyph_map: Option<GlyphMap>,
     vertex_buffer: vk::Buffer,
     vertex_allocation: Option<Allocation>,
     atlas: FontAtlas,
@@ -192,6 +201,13 @@ impl MenuOverlayPipeline {
                 stage_flags: vk::ShaderStageFlags::FRAGMENT,
                 ..Default::default()
             },
+            vk::DescriptorSetLayoutBinding {
+                binding: 3,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                ..Default::default()
+            },
         ];
         let tex_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&tex_bindings);
         let tex_layout = unsafe { device.create_descriptor_set_layout(&tex_layout_info, None) }
@@ -206,7 +222,7 @@ impl MenuOverlayPipeline {
 
         let pool_sizes = [
             vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 1 },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 3 },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 4 },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(2)
@@ -264,6 +280,23 @@ impl MenuOverlayPipeline {
 
         let item_sampler = unsafe { util::create_nearest_sampler(device) };
 
+        let mc_glyph_map = GlyphMap::load(assets_dir, asset_index);
+        let (mc_font_image, mc_font_view, mc_font_alloc, mc_font_staging_buffer, mc_font_staging_alloc) =
+            if let Some(ref gm) = mc_glyph_map {
+                let (w, h) = gm.dimensions();
+                let (img, view, alloc) = util::create_gpu_image(device, allocator, w, h, "mc_font_atlas");
+                let (stg_buf, stg_alloc) = util::create_staging_buffer(device, allocator, gm.raw_pixels(), "mc_font_staging");
+                util::upload_image(device, queue, command_pool, stg_buf, img, w, h);
+                (img, view, Some(alloc), stg_buf, Some(stg_alloc))
+            } else {
+                let (img, view, alloc) = util::create_gpu_image(device, allocator, 1, 1, "mc_font_dummy");
+                let dummy = [0u8; 4];
+                let (stg_buf, stg_alloc) = util::create_staging_buffer(device, allocator, &dummy, "mc_font_dummy_stg");
+                util::upload_image(device, queue, command_pool, stg_buf, img, 1, 1);
+                (img, view, Some(alloc), stg_buf, Some(stg_alloc))
+            };
+        let mc_font_sampler = unsafe { util::create_nearest_sampler(device) };
+
         let font_img_info = [vk::DescriptorImageInfo {
             sampler: font_sampler,
             image_view: font_view,
@@ -277,6 +310,11 @@ impl MenuOverlayPipeline {
         let item_img_info = [vk::DescriptorImageInfo {
             sampler: item_sampler,
             image_view: item_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }];
+        let mc_font_img_info = [vk::DescriptorImageInfo {
+            sampler: mc_font_sampler,
+            image_view: mc_font_view,
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         }];
         let writes = [
@@ -295,6 +333,11 @@ impl MenuOverlayPipeline {
                 .dst_binding(2)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(&item_img_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(tex_set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&mc_font_img_info),
         ];
         unsafe { device.update_descriptor_sets(&writes, &[]) };
 
@@ -318,6 +361,11 @@ impl MenuOverlayPipeline {
             item_allocation: Some(item_alloc),
             item_staging_buffer, item_staging_allocation: item_staging_alloc,
             item_atlas: item_atlas_data,
+            mc_font_image, mc_font_view, mc_font_sampler,
+            mc_font_allocation: mc_font_alloc,
+            mc_font_staging_buffer,
+            mc_font_staging_allocation: mc_font_staging_alloc,
+            mc_glyph_map,
             vertex_buffer, vertex_allocation: Some(vertex_allocation),
             atlas,
         }
@@ -362,6 +410,11 @@ impl MenuOverlayPipeline {
                         push_textured_quad(&mut vertices, *x, *y, *w, *h, region, *tint, 3.0);
                     }
                 }
+                MenuElement::McText { x, y, spans, scale } => {
+                    if let Some(ref gm) = self.mc_glyph_map {
+                        push_mc_text(&mut vertices, gm, *x, *y, spans, *scale);
+                    }
+                }
             }
         }
 
@@ -393,6 +446,18 @@ impl MenuOverlayPipeline {
             .sum()
     }
 
+    #[allow(dead_code)]
+    pub fn mc_text_width(&self, text: &str, scale: f32) -> f32 {
+        let Some(ref gm) = self.mc_glyph_map else { return 0.0 };
+        let px_scale = scale / gm.cell_h as f32;
+        text.chars()
+            .map(|ch| {
+                let w = gm.glyphs.get(&ch).map(|g| g.width).unwrap_or(gm.cell_w / 2);
+                (w as f32 + 1.0) * px_scale
+            })
+            .sum()
+    }
+
     pub fn recreate_pipeline(&mut self, device: &ash::Device, render_pass: vk::RenderPass) {
         unsafe { device.destroy_pipeline(self.pipeline, None) };
         self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
@@ -421,6 +486,11 @@ impl MenuOverlayPipeline {
             sampler: self.item_sampler, image: self.item_image, view: self.item_view,
             image_alloc: self.item_allocation.take(), staging_buffer: self.item_staging_buffer,
             staging_alloc: self.item_staging_allocation.take(),
+        });
+        destroy_texture_resources(device, &mut alloc, &mut TextureResources {
+            sampler: self.mc_font_sampler, image: self.mc_font_image, view: self.mc_font_view,
+            image_alloc: self.mc_font_allocation.take(), staging_buffer: self.mc_font_staging_buffer,
+            staging_alloc: self.mc_font_staging_allocation.take(),
         });
 
         drop(alloc);
@@ -463,6 +533,11 @@ pub enum MenuElement {
         x: f32, y: f32, w: f32, h: f32,
         item_name: String,
         tint: [f32; 4],
+    },
+    McText {
+        x: f32, y: f32,
+        spans: Vec<MotdSpan>,
+        scale: f32,
     },
 }
 
@@ -787,6 +862,95 @@ fn push_icon_glyph(verts: &mut Vec<Vertex>, atlas: &FontAtlas, cx: f32, cy: f32,
 #[allow(clippy::too_many_arguments)]
 fn push_textured_quad(verts: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, region: &SpriteRegion, tint: [f32; 4], mode: f32) {
     push_quad(verts, x, y, w, h, region.u0, region.v0, region.u1, region.v1, tint, mode, [0.0, 0.0], 0.0);
+}
+
+fn push_mc_text(verts: &mut Vec<Vertex>, gm: &GlyphMap, x: f32, y: f32, spans: &[MotdSpan], scale: f32) {
+    let (tex_w, tex_h) = gm.dimensions();
+    let inv_w = 1.0 / tex_w as f32;
+    let inv_h = 1.0 / tex_h as f32;
+    let px_scale = scale / gm.cell_h as f32;
+    let glyph_h = scale;
+
+    let mut cx = x;
+    let mut cy = y;
+    let mut line = 0u32;
+
+    for span in spans {
+        let shadow_color = [
+            span.color[0] * 0.25,
+            span.color[1] * 0.25,
+            span.color[2] * 0.25,
+            span.color[3],
+        ];
+
+        for ch in span.text.chars() {
+            if ch == '\n' {
+                cx = x;
+                line += 1;
+                cy = y + line as f32 * (glyph_h + 2.0 * px_scale);
+                if line >= 2 { return; }
+                continue;
+            }
+
+            let Some(gi) = gm.glyphs.get(&ch) else { continue };
+            let glyph_w = gi.width as f32 * px_scale;
+
+            let u0 = gi.col as f32 * gm.cell_w as f32 * inv_w;
+            let v0 = gi.row as f32 * gm.cell_h as f32 * inv_h;
+            let u1 = (gi.col as f32 * gm.cell_w as f32 + gi.width as f32) * inv_w;
+            let v1 = (gi.row as f32 + 1.0) * gm.cell_h as f32 * inv_h;
+
+            let italic_offset = if span.italic { px_scale } else { 0.0 };
+
+            push_mc_glyph(verts, cx + px_scale, cy + px_scale, glyph_w, glyph_h, u0, v0, u1, v1, shadow_color, italic_offset);
+            if span.bold {
+                push_mc_glyph(verts, cx + 2.0 * px_scale, cy + px_scale, glyph_w, glyph_h, u0, v0, u1, v1, shadow_color, italic_offset);
+            }
+
+            push_mc_glyph(verts, cx, cy, glyph_w, glyph_h, u0, v0, u1, v1, span.color, italic_offset);
+            if span.bold {
+                push_mc_glyph(verts, cx + px_scale, cy, glyph_w, glyph_h, u0, v0, u1, v1, span.color, italic_offset);
+            }
+
+            if span.strikethrough || span.underline {
+                let lw = glyph_w + if span.bold { px_scale } else { 0.0 };
+                if span.strikethrough {
+                    let sy = cy + glyph_h * 0.45;
+                    push_quad(verts, cx, sy, lw, px_scale, 0.0, 0.0, 0.0, 0.0, span.color, 0.0, [lw, px_scale], 0.0);
+                }
+                if span.underline {
+                    let uy = cy + glyph_h - px_scale;
+                    push_quad(verts, cx, uy, lw, px_scale, 0.0, 0.0, 0.0, 0.0, span.color, 0.0, [lw, px_scale], 0.0);
+                }
+            }
+
+            let advance = (gi.width as f32 + 1.0) * px_scale;
+            cx += if span.bold { advance + px_scale } else { advance };
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_mc_glyph(
+    verts: &mut Vec<Vertex>,
+    x: f32, y: f32, w: f32, h: f32,
+    u0: f32, v0: f32, u1: f32, v1: f32,
+    color: [f32; 4], italic_offset: f32,
+) {
+    let positions = [
+        [x + italic_offset, y], [x + w + italic_offset, y], [x, y + h],
+        [x + w + italic_offset, y], [x + w, y + h], [x, y + h],
+    ];
+    let uvs = [
+        [u0, v0], [u1, v0], [u0, v1],
+        [u1, v0], [u1, v1], [u0, v1],
+    ];
+    for i in 0..6 {
+        verts.push(Vertex {
+            pos: positions[i], uv: uvs[i], color, mode: 4.0,
+            rect_size: [0.0, 0.0], corner_radius: 0.0,
+        });
+    }
 }
 
 fn create_pipeline(

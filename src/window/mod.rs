@@ -619,8 +619,12 @@ impl ApplicationHandler for App {
                         if let (Some(dispatcher), Some(renderer)) =
                             (&self.mesh_dispatcher, &mut self.renderer)
                         {
-                            for mesh in dispatcher.drain_results() {
-                                renderer.upload_chunk_mesh(&mesh);
+                            let results: Vec<_> = dispatcher.drain_results().collect();
+                            if !results.is_empty() {
+                                renderer.wait_for_all_frames();
+                                for mesh in &results {
+                                    renderer.upload_chunk_mesh(mesh);
+                                }
                             }
                         }
 
