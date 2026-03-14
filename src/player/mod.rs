@@ -16,6 +16,7 @@ pub struct LocalPlayer {
     pub saturation: f32,
     pub inventory: Inventory,
     pub sprinting: bool,
+    pub horizontal_collision: bool,
     pub sprint_toggle_timer: u32,
     pub was_forward_pressed: bool,
 }
@@ -33,6 +34,7 @@ impl LocalPlayer {
             saturation: 5.0,
             inventory: Inventory::new(),
             sprinting: false,
+            horizontal_collision: false,
             sprint_toggle_timer: 0,
             was_forward_pressed: false,
         }

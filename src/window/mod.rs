@@ -11,6 +11,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use azalea_protocol::packets::game::ServerboundGamePacket;
 use crate::net::NetworkEvent;
 use crate::physics::movement;
 use crate::player::interaction::InteractionState;
@@ -46,6 +47,19 @@ enum GameState {
 
 const TICK_RATE: f32 = 1.0 / 20.0;
 const VIEW_DISTANCE: u32 = 8;
+const POSITION_SEND_INTERVAL: u32 = 20;
+const POSITION_THRESHOLD_SQ: f64 = 4.0e-8;
+
+#[derive(Default, PartialEq)]
+struct PlayerInputState {
+    forward: bool,
+    backward: bool,
+    left: bool,
+    right: bool,
+    jump: bool,
+    shift: bool,
+    sprint: bool,
+}
 
 struct App {
     window: Option<Arc<Window>>,
@@ -75,6 +89,14 @@ struct App {
     sky_state: crate::renderer::SkyState,
     show_debug: bool,
     fps_counter: FpsCounter,
+    last_sent_input: PlayerInputState,
+    last_sent_pos: glam::Vec3,
+    last_sent_yaw: f32,
+    last_sent_pitch: f32,
+    last_sent_on_ground: bool,
+    last_sent_horizontal_collision: bool,
+    was_sprinting: bool,
+    position_send_counter: u32,
 }
 
 struct FpsCounter {
@@ -148,6 +170,14 @@ impl App {
             sky_state: crate::renderer::SkyState::default_day(),
             show_debug: false,
             fps_counter: FpsCounter::new(),
+            last_sent_input: PlayerInputState::default(),
+            last_sent_pos: glam::Vec3::ZERO,
+            last_sent_yaw: 0.0,
+            last_sent_pitch: 0.0,
+            last_sent_on_ground: false,
+            last_sent_horizontal_collision: false,
+            was_sprinting: false,
+            position_send_counter: 0,
         }
     }
 
@@ -346,6 +376,12 @@ impl App {
             renderer.update_fov(self.player.sprinting);
         }
 
+        if self.packet_sender.is_some() {
+            self.send_input_packet();
+            self.send_sprint_command();
+            self.send_position_packet();
+        }
+
         if !self.paused && !self.inventory_open && !self.chat.is_open() {
             let eye_pos = self.player.position + glam::Vec3::new(0.0, 1.62, 0.0);
             self.interaction
@@ -365,6 +401,120 @@ impl App {
 
             self.input.clear_click_events();
         }
+    }
+
+    fn send_input_packet(&mut self) {
+        let sender = self.packet_sender.as_ref().unwrap();
+        let current = PlayerInputState {
+            forward: self.input.key_pressed(KeyCode::KeyW),
+            backward: self.input.key_pressed(KeyCode::KeyS),
+            left: self.input.key_pressed(KeyCode::KeyA),
+            right: self.input.key_pressed(KeyCode::KeyD),
+            jump: self.input.key_pressed(KeyCode::Space),
+            shift: self.input.key_pressed(KeyCode::ShiftLeft),
+            sprint: self.player.sprinting,
+        };
+
+        if current != self.last_sent_input {
+            sender.send(ServerboundGamePacket::PlayerInput(
+                azalea_protocol::packets::game::s_player_input::ServerboundPlayerInput {
+                    forward: current.forward,
+                    backward: current.backward,
+                    left: current.left,
+                    right: current.right,
+                    jump: current.jump,
+                    shift: current.shift,
+                    sprint: current.sprint,
+                },
+            ));
+            self.last_sent_input = current;
+        }
+    }
+
+    fn send_sprint_command(&mut self) {
+        let sprinting = self.player.sprinting;
+        if sprinting != self.was_sprinting {
+            let sender = self.packet_sender.as_ref().unwrap();
+            let action = if sprinting {
+                azalea_protocol::packets::game::s_player_command::Action::StartSprinting
+            } else {
+                azalea_protocol::packets::game::s_player_command::Action::StopSprinting
+            };
+            sender.send(ServerboundGamePacket::PlayerCommand(
+                azalea_protocol::packets::game::s_player_command::ServerboundPlayerCommand {
+                    id: azalea_world::MinecraftEntityId(0),
+                    action,
+                    data: 0,
+                },
+            ));
+            self.was_sprinting = sprinting;
+        }
+    }
+
+    fn send_position_packet(&mut self) {
+        let sender = self.packet_sender.as_ref().unwrap();
+        use azalea_protocol::common::movements::MoveFlags;
+        use azalea_protocol::packets::game::*;
+
+        let pos = self.player.position;
+        let yaw = self.player.yaw.to_degrees();
+        let pitch = self.player.pitch.to_degrees();
+
+        let dx = (pos.x - self.last_sent_pos.x) as f64;
+        let dy = (pos.y - self.last_sent_pos.y) as f64;
+        let dz = (pos.z - self.last_sent_pos.z) as f64;
+        self.position_send_counter += 1;
+        let pos_changed = dx * dx + dy * dy + dz * dz > POSITION_THRESHOLD_SQ
+            || self.position_send_counter >= POSITION_SEND_INTERVAL;
+        let rot_changed = (yaw - self.last_sent_yaw) != 0.0
+            || (pitch - self.last_sent_pitch) != 0.0;
+
+        let flags = MoveFlags {
+            on_ground: self.player.on_ground,
+            horizontal_collision: self.player.horizontal_collision,
+        };
+
+        let net_pos = azalea_core::position::Vec3 {
+            x: pos.x as f64, y: pos.y as f64, z: pos.z as f64,
+        };
+        let look = azalea_entity::LookDirection::new(yaw, pitch);
+
+        if pos_changed && rot_changed {
+            sender.send(ServerboundGamePacket::MovePlayerPosRot(
+                s_move_player_pos_rot::ServerboundMovePlayerPosRot {
+                    pos: net_pos, look_direction: look, flags,
+                },
+            ));
+        } else if pos_changed {
+            sender.send(ServerboundGamePacket::MovePlayerPos(
+                s_move_player_pos::ServerboundMovePlayerPos {
+                    pos: net_pos, flags,
+                },
+            ));
+        } else if rot_changed {
+            sender.send(ServerboundGamePacket::MovePlayerRot(
+                s_move_player_rot::ServerboundMovePlayerRot {
+                    look_direction: look, flags,
+                },
+            ));
+        } else if self.player.on_ground != self.last_sent_on_ground
+            || self.player.horizontal_collision != self.last_sent_horizontal_collision
+        {
+            sender.send(ServerboundGamePacket::MovePlayerStatusOnly(
+                s_move_player_status_only::ServerboundMovePlayerStatusOnly { flags },
+            ));
+        }
+
+        if pos_changed {
+            self.last_sent_pos = pos;
+            self.position_send_counter = 0;
+        }
+        if rot_changed {
+            self.last_sent_yaw = yaw;
+            self.last_sent_pitch = pitch;
+        }
+        self.last_sent_on_ground = self.player.on_ground;
+        self.last_sent_horizontal_collision = self.player.horizontal_collision;
     }
 }
 

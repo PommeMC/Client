@@ -66,6 +66,7 @@ pub fn tick(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkSto
 
     player.position += resolved;
     player.on_ground = on_ground;
+    player.horizontal_collision = horizontal_collision;
 
     if player.sprinting && horizontal_collision && forward > 0.0 {
         if !is_minor_horizontal_collision(forward, strafe, sin_yaw, cos_yaw, &resolved) {
