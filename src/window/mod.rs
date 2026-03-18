@@ -964,6 +964,7 @@ impl ApplicationHandler for App {
                                     self.input.selected_slot(),
                                     self.player.health,
                                     self.player.food,
+                                    self.player.air_supply,
                                     debug.as_ref(),
                                     self.menu.gui_scale_setting,
                                 );

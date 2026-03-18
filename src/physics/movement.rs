@@ -1,3 +1,5 @@
+// TODO: fall damage - track fall distance, reset on water entry, apply damage on ground impact
+
 use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
@@ -16,6 +18,12 @@ const GROUND_ACCEL_FACTOR: f32 = 0.216;
 const MOVEMENT_SPEED: f32 = 0.1;
 const SPRINT_SPEED_MODIFIER: f32 = 0.3;
 const AIR_ACCELERATION: f32 = 0.02;
+// TODO: WATER_MOVEMENT_EFFICIENCY attribute - scales drag toward 0.546 and accel toward land speed
+const WATER_ACCELERATION: f32 = 0.02;
+const WATER_HORIZONTAL_DRAG: f32 = 0.8;
+const WATER_HORIZONTAL_DRAG_SPRINT: f32 = 0.9;
+const WATER_VERTICAL_DRAG: f32 = 0.8;
+const WATER_GRAVITY: f32 = 0.02;
 const STEP_HEIGHT: f32 = 0.6;
 const PLAYER_HALF_WIDTH: f32 = 0.3;
 const PLAYER_HEIGHT: f32 = 1.8;
@@ -25,6 +33,8 @@ const DEFAULT_SPRINT_WINDOW: u32 = 7;
 const MINOR_COLLISION_ANGLE: f32 = 0.13962634;
 
 pub fn tick(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkStore) {
+    player.update_water_state(chunk_store);
+
     let (forward, strafe) = movement_input(input);
     let forward_pressed = input.key_pressed(KeyCode::KeyW);
 
@@ -32,6 +42,25 @@ pub fn tick(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkSto
 
     let (sin_yaw, cos_yaw) = player.yaw.sin_cos();
 
+    if player.in_water {
+        tick_water(player, input, chunk_store, forward, strafe, sin_yaw, cos_yaw);
+    } else {
+        tick_land(player, input, chunk_store, forward, strafe, sin_yaw, cos_yaw);
+    }
+
+    player.tick_air_supply();
+    player.was_forward_pressed = forward_pressed;
+}
+
+fn tick_land(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunk_store: &ChunkStore,
+    forward: f32,
+    strafe: f32,
+    sin_yaw: f32,
+    cos_yaw: f32,
+) {
     if player.on_ground && input.key_pressed(KeyCode::Space) {
         player.velocity.y = JUMP_VELOCITY;
 
@@ -57,6 +86,77 @@ pub fn tick(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkSto
     player.velocity.x += move_x * accel;
     player.velocity.z += move_z * accel;
 
+    apply_collision(player, chunk_store, forward, strafe, sin_yaw, cos_yaw);
+
+    player.velocity.y -= GRAVITY;
+    player.velocity.y *= VERTICAL_DRAG;
+
+    let h_friction = if player.on_ground {
+        GROUND_FRICTION
+    } else {
+        HORIZONTAL_DRAG
+    };
+    player.velocity.x *= h_friction;
+    player.velocity.z *= h_friction;
+
+    if player.on_ground && player.velocity.y < 0.0 {
+        player.velocity.y = 0.0;
+    }
+}
+
+fn tick_water(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunk_store: &ChunkStore,
+    forward: f32,
+    strafe: f32,
+    sin_yaw: f32,
+    cos_yaw: f32,
+) {
+    if input.key_pressed(KeyCode::Space) {
+        player.velocity.y += 0.04;
+    }
+    if input.key_pressed(KeyCode::ShiftLeft) {
+        player.velocity.y -= 0.04;
+    }
+
+    let (move_x, move_z) = world_movement(forward, strafe, sin_yaw, cos_yaw);
+    player.velocity.x += move_x * WATER_ACCELERATION;
+    player.velocity.z += move_z * WATER_ACCELERATION;
+
+    if player.swimming {
+        let pitch_y = player.pitch.sin() as f64;
+        let boost = if pitch_y < -0.2 { 0.085 } else { 0.06 };
+        player.velocity.y += ((pitch_y - player.velocity.y as f64) * boost) as f32;
+    }
+
+    apply_collision(player, chunk_store, forward, strafe, sin_yaw, cos_yaw);
+
+    let h_drag = if player.sprinting {
+        WATER_HORIZONTAL_DRAG_SPRINT
+    } else {
+        WATER_HORIZONTAL_DRAG
+    };
+    player.velocity.x *= h_drag;
+    player.velocity.z *= h_drag;
+
+    let gravity = if player.velocity.y <= 0.0 && !player.swimming {
+        GRAVITY * 0.25
+    } else {
+        WATER_GRAVITY
+    };
+    player.velocity.y -= gravity;
+    player.velocity.y *= WATER_VERTICAL_DRAG;
+}
+
+fn apply_collision(
+    player: &mut LocalPlayer,
+    chunk_store: &ChunkStore,
+    forward: f32,
+    strafe: f32,
+    sin_yaw: f32,
+    cos_yaw: f32,
+) {
     let aabb = Aabb::from_center(player.position, PLAYER_HALF_WIDTH, PLAYER_HEIGHT / 2.0);
     let step_height = if player.on_ground { STEP_HEIGHT } else { 0.0 };
     let (resolved, on_ground) = resolve_collision(chunk_store, aabb, player.velocity, step_height);
@@ -73,23 +173,6 @@ pub fn tick(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkSto
             player.sprinting = false;
         }
     }
-
-    player.velocity.y -= GRAVITY;
-    player.velocity.y *= VERTICAL_DRAG;
-
-    let h_friction = if player.on_ground {
-        GROUND_FRICTION
-    } else {
-        HORIZONTAL_DRAG
-    };
-    player.velocity.x *= h_friction;
-    player.velocity.z *= h_friction;
-
-    if on_ground && player.velocity.y < 0.0 {
-        player.velocity.y = 0.0;
-    }
-
-    player.was_forward_pressed = forward_pressed;
 }
 
 fn update_sprint_state(

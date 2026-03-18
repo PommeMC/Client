@@ -51,6 +51,7 @@ pub fn build_hud(
     selected_slot: u8,
     health: f32,
     food: u32,
+    air_supply: i32,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
 ) {
@@ -113,6 +114,29 @@ pub fn build_hud(
         SpriteId::FoodHalf,
         gs,
     );
+
+    if air_supply < crate::player::MAX_AIR_SUPPLY {
+        let bubble_y = hotbar_y - 2.0 * gs - ICON_SIZE * gs - 1.0 * gs;
+        let bubbles = (air_supply.max(0) as f32 / 30.0).ceil() as u8;
+        let stride = ICON_STRIDE * gs;
+        let icon_size = ICON_SIZE * gs;
+        for i in 0..10u8 {
+            let bx = hotbar_x + hotbar_w - (i as f32 + 1.0) * stride;
+            let color = if i < bubbles {
+                [0.3, 0.6, 1.0, 0.9]
+            } else {
+                [0.2, 0.2, 0.2, 0.4]
+            };
+            elements.push(MenuElement::Rect {
+                x: bx + 1.0 * gs,
+                y: bubble_y + 1.0 * gs,
+                w: icon_size - 2.0 * gs,
+                h: icon_size - 2.0 * gs,
+                corner_radius: icon_size / 2.0,
+                color,
+            });
+        }
+    }
 }
 
 fn build_crosshair(elements: &mut Vec<MenuElement>, cx: f32, cy: f32) {
