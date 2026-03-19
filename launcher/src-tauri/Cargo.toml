@@ -19,7 +19,7 @@ sha1_smol = "1"
 open = "5"
 url = "2"
 base64 = "0.22"
-zip = { version = "8.2", default-features = false, features = ["deflate"] }
+zip = { version = "8.3", default-features = false, features = ["deflate"] }
 log = "0.4"
 rand = "0.10"
 keyring = { version = "3", features = ["sync-secret-service", "windows-native"] }
