@@ -62,6 +62,15 @@ enum RenderMode {
     },
 }
 
+#[derive(Default, Clone)]
+pub struct RenderTimings {
+    pub mesh_upload_ms: f32,
+    pub cull_ms: f32,
+    pub draw_ms: f32,
+    pub overlay_ms: f32,
+    pub frame_ms: f32,
+}
+
 pub struct Renderer {
     ctx: VulkanContext,
     swapchain: SwapchainState,
@@ -80,6 +89,7 @@ pub struct Renderer {
     swapchain_dirty: bool,
     width: u32,
     height: u32,
+    pub last_timings: RenderTimings,
 }
 
 impl Renderer {
@@ -240,6 +250,7 @@ impl Renderer {
             swapchain_dirty: false,
             width: size.width.max(1),
             height: size.height.max(1),
+            last_timings: RenderTimings::default(),
         })
     }
 
@@ -735,6 +746,8 @@ impl Renderer {
             let sw = self.swapchain.extent.width as f32;
             let sh = self.swapchain.extent.height as f32;
 
+            let frame_start = std::time::Instant::now();
+
             match &mode {
                 RenderMode::World {
                     overlay,
@@ -750,9 +763,11 @@ impl Renderer {
                         sky,
                     );
 
+                    let t_cull = std::time::Instant::now();
                     self.chunk_pipeline.bind(&self.ctx.device, cmd, frame);
                     self.chunk_buffers
                         .draw_indirect(&self.ctx.device, cmd, frame);
+                    let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
                     if let Some((block_pos, stage)) = destroy_info {
                         self.block_overlay_pipeline.draw(
@@ -792,8 +807,18 @@ impl Renderer {
                         *swing_progress,
                     );
 
+                    let t_overlay = std::time::Instant::now();
                     self.menu_pipeline
                         .draw(&self.ctx.device, cmd, sw, sh, overlay);
+                    let overlay_ms = t_overlay.elapsed().as_secs_f32() * 1000.0;
+
+                    self.last_timings = RenderTimings {
+                        mesh_upload_ms: 0.0,
+                        cull_ms,
+                        draw_ms: 0.0,
+                        overlay_ms,
+                        frame_ms: frame_start.elapsed().as_secs_f32() * 1000.0,
+                    };
                 }
                 RenderMode::MainMenu {
                     scroll,

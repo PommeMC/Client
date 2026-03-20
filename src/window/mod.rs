@@ -930,12 +930,17 @@ impl ApplicationHandler for App {
                                 break 'redraw;
                             }
 
+                            let t_mesh = std::time::Instant::now();
                             if let (Some(dispatcher), Some(renderer)) =
                                 (&self.mesh_dispatcher, &mut self.renderer)
                             {
                                 for mesh in dispatcher.drain_results() {
                                     renderer.upload_chunk_mesh(&mesh);
                                 }
+                            }
+                            let mesh_upload_ms = t_mesh.elapsed().as_secs_f32() * 1000.0;
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.last_timings.mesh_upload_ms = mesh_upload_ms;
                             }
 
                             if !self.paused && !self.inventory_open && !self.chat.is_open() {
@@ -1020,6 +1025,13 @@ impl ApplicationHandler for App {
                                         vulkan_version: renderer.vulkan_version(),
                                         screen_w: renderer.screen_width(),
                                         screen_h: renderer.screen_height(),
+                                        timings: Some(hud::FrameTimings {
+                                            mesh_upload_ms: renderer.last_timings.mesh_upload_ms,
+                                            cull_ms: renderer.last_timings.cull_ms,
+                                            draw_ms: renderer.last_timings.draw_ms,
+                                            overlay_ms: renderer.last_timings.overlay_ms,
+                                            frame_ms: renderer.last_timings.frame_ms,
+                                        }),
                                     })
                                 } else {
                                     None
