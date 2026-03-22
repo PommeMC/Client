@@ -249,10 +249,8 @@ async fn listen_for_callback(expected_state: &str) -> Result<String, String> {
         .ok_or("Invalid HTTP request")?;
 
     let query = path.split('?').nth(1).ok_or("No query params")?;
-    let params: std::collections::HashMap<&str, &str> = query
-        .split('&')
-        .filter_map(|p| p.split_once('='))
-        .collect();
+    let params: std::collections::HashMap<&str, &str> =
+        query.split('&').filter_map(|p| p.split_once('=')).collect();
 
     if let Some(error) = params.get("error") {
         let desc = params.get("error_description").unwrap_or(error);
