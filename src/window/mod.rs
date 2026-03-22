@@ -655,7 +655,6 @@ impl ApplicationHandler for App {
         self.apply_cursor_grab();
     }
 
-    // noinspection D
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
