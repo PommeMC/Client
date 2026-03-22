@@ -8,9 +8,12 @@ import { HiClipboardCopy } from "react-icons/hi";
 const getLogs: () => Promise<string[]> = async () => invoke("get_client_logs");
 
 const Log = ({ log }: { log: string }) => {
-  let split = log.split("]");
-  let start_str = split[0];
-  let message = split[1];
+  let splitIndex = log.indexOf("]");
+  if (splitIndex === -1) {
+    return <p className="console-log">{log}</p>;
+  }
+  let start_str = log.slice(0, splitIndex);
+  let message = log.slice(splitIndex + 1);
 
   let type = "";
 
@@ -21,11 +24,7 @@ const Log = ({ log }: { log: string }) => {
   }
 
   if (type === "") {
-    return (
-      <p className="console-log">
-        {log}
-      </p>
-    )
+    return <p className="console-log">{log}</p>;
   }
   return (
     <p className="console-log">
@@ -70,7 +69,8 @@ export default function Console() {
             {logs.map((object, key) => (
               <Log log={object} key={key} />
             ))}
-            <div ref={bottomRef} /> {/* element at the bottom that can be scrolled to */}
+            <div ref={bottomRef} />{" "}
+            {/* element at the bottom that can be scrolled to */}
           </div>
         </div>
         <div className="console-bottom-bar">
