@@ -4,11 +4,12 @@ use super::common::WHITE;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
 pub struct FrameTimings {
-    pub mesh_upload_ms: f32,
+    pub frame_ms: f32,
+    pub fence_ms: f32,
+    pub acquire_ms: f32,
     pub cull_ms: f32,
     pub draw_ms: f32,
-    pub overlay_ms: f32,
-    pub frame_ms: f32,
+    pub present_ms: f32,
 }
 
 pub struct DebugInfo<'a> {
@@ -274,10 +275,11 @@ fn build_debug_overlay(elements: &mut Vec<MenuElement>, info: &DebugInfo<'_>, gs
     if let Some(t) = &info.timings {
         right_lines.push(String::new());
         right_lines.push(format!("Frame: {:.2}ms", t.frame_ms));
-        right_lines.push(format!("  Mesh: {:.2}ms", t.mesh_upload_ms));
+        right_lines.push(format!("  Fence: {:.2}ms", t.fence_ms));
+        right_lines.push(format!("  Acquire: {:.2}ms", t.acquire_ms));
         right_lines.push(format!("  Cull: {:.2}ms", t.cull_ms));
         right_lines.push(format!("  Draw: {:.2}ms", t.draw_ms));
-        right_lines.push(format!("  Overlay: {:.2}ms", t.overlay_ms));
+        right_lines.push(format!("  Present: {:.2}ms", t.present_ms));
     }
     let right_x = info.screen_w as f32 - pad;
     push_debug_lines(elements, &right_lines, right_x, pad, fs, false);

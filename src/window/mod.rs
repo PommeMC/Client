@@ -277,7 +277,11 @@ impl App {
             }
             DisplayMode::Fullscreen => {
                 let monitor = window.current_monitor();
-                let video_mode = monitor.and_then(|m| m.video_modes().next());
+                let video_mode = monitor.and_then(|m| {
+                    m.video_modes().max_by_key(|v| {
+                        (v.refresh_rate_millihertz(), v.size().width, v.size().height)
+                    })
+                });
                 if let Some(mode) = video_mode {
                     window.set_fullscreen(Some(winit::window::Fullscreen::Exclusive(mode)));
                 } else {
@@ -992,17 +996,12 @@ impl ApplicationHandler for App {
                                 break 'redraw;
                             }
 
-                            let t_mesh = std::time::Instant::now();
                             if let (Some(dispatcher), Some(renderer)) =
                                 (&self.mesh_dispatcher, &mut self.renderer)
                             {
                                 for mesh in dispatcher.drain_results() {
                                     renderer.upload_chunk_mesh(&mesh);
                                 }
-                            }
-                            let mesh_upload_ms = t_mesh.elapsed().as_secs_f32() * 1000.0;
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.last_timings.mesh_upload_ms = mesh_upload_ms;
                             }
 
                             if !self.paused && !self.inventory_open && !self.chat.is_open() {
@@ -1088,11 +1087,12 @@ impl ApplicationHandler for App {
                                         screen_w: renderer.screen_width(),
                                         screen_h: renderer.screen_height(),
                                         timings: Some(hud::FrameTimings {
-                                            mesh_upload_ms: renderer.last_timings.mesh_upload_ms,
+                                            frame_ms: renderer.last_timings.frame_ms,
+                                            fence_ms: renderer.last_timings.fence_ms,
+                                            acquire_ms: renderer.last_timings.acquire_ms,
                                             cull_ms: renderer.last_timings.cull_ms,
                                             draw_ms: renderer.last_timings.draw_ms,
-                                            overlay_ms: renderer.last_timings.overlay_ms,
-                                            frame_ms: renderer.last_timings.frame_ms,
+                                            present_ms: renderer.last_timings.present_ms,
                                         }),
                                     })
                                 } else {

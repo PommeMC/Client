@@ -1,10 +1,13 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use azalea_block::BlockState;
 use azalea_core::position::ChunkPos;
+use binary_greedy_meshing as bgm;
 
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::world::block::model::{BakedModel, Direction};
-use crate::world::block::registry::{BlockRegistry, Tint};
+use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
 use crate::world::chunk::{self, ChunkStore};
 
 #[repr(C)]
@@ -125,6 +128,177 @@ impl ChunkStoreSnapshot {
     }
 }
 
+struct GreedyBlockInfo {
+    textures: FaceTextures,
+}
+
+struct BlockTypeMap {
+    state_to_id: HashMap<BlockState, u16>,
+    id_to_info: Vec<GreedyBlockInfo>,
+}
+
+impl BlockTypeMap {
+    fn build(
+        snapshot: &ChunkStoreSnapshot,
+        registry: &BlockRegistry,
+        world_x: i32,
+        world_z: i32,
+        min_y: i32,
+        max_y: i32,
+    ) -> Self {
+        let mut state_to_id = HashMap::new();
+        let mut id_to_info: Vec<GreedyBlockInfo> = Vec::new();
+        let mut next_id = 1u16;
+
+        for lz in -1..17i32 {
+            for lx in -1..17i32 {
+                let bx = world_x + lx;
+                let bz = world_z + lz;
+                for by in (min_y - 1)..=(max_y) {
+                    let state = snapshot.get_block_state(bx, by, bz);
+                    if state.is_air() || state_to_id.contains_key(&state) {
+                        continue;
+                    }
+                    let has_baked = registry.get_baked_model(state).is_some();
+                    let has_multipart = registry.get_multipart_quads(state).is_some();
+                    if has_baked || has_multipart {
+                        state_to_id.insert(state, 0);
+                        continue;
+                    }
+                    if let Some(textures) = registry.get_textures(state) {
+                        if textures.side_overlay.is_some() || !registry.is_opaque_full_cube(state) {
+                            state_to_id.insert(state, 0);
+                            continue;
+                        }
+                        state_to_id.insert(state, next_id);
+                        id_to_info.push(GreedyBlockInfo {
+                            textures: textures.clone(),
+                        });
+                        next_id += 1;
+                    } else {
+                        state_to_id.insert(state, 0);
+                    }
+                }
+            }
+        }
+
+        Self {
+            state_to_id,
+            id_to_info,
+        }
+    }
+
+    fn get_id(&self, state: BlockState) -> u16 {
+        if state.is_air() {
+            return 0;
+        }
+        self.state_to_id.get(&state).copied().unwrap_or(0)
+    }
+
+    fn get_info(&self, id: u16) -> Option<&GreedyBlockInfo> {
+        if id == 0 {
+            return None;
+        }
+        self.id_to_info.get((id - 1) as usize)
+    }
+}
+
+const SECTION_SIZE: usize = 16;
+
+fn greedy_face_light(face: bgm::Face) -> f32 {
+    match face {
+        bgm::Face::Up => 1.0,
+        bgm::Face::Down => 0.5,
+        bgm::Face::Right | bgm::Face::Left => 0.8,
+        bgm::Face::Front | bgm::Face::Back => 0.7,
+    }
+}
+
+fn face_texture_name(textures: &FaceTextures, face: bgm::Face) -> &str {
+    match face {
+        bgm::Face::Up => &textures.top,
+        bgm::Face::Down => &textures.bottom,
+        bgm::Face::Right => &textures.east,
+        bgm::Face::Left => &textures.west,
+        bgm::Face::Front => &textures.south,
+        bgm::Face::Back => &textures.north,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn greedy_mesh_section(
+    vertices: &mut Vec<ChunkVertex>,
+    indices: &mut Vec<u32>,
+    snapshot: &ChunkStoreSnapshot,
+    type_map: &BlockTypeMap,
+    uv_map: &AtlasUVMap,
+    world_x: i32,
+    section_y: i32,
+    world_z: i32,
+) {
+    let mut mesher = bgm::Mesher::<SECTION_SIZE>::new();
+    let mut voxels = [0u16; bgm::Mesher::<SECTION_SIZE>::CS_P3];
+
+    for lz in 0..18 {
+        for lx in 0..18 {
+            for ly in 0..18 {
+                let bx = world_x + lx as i32 - 1;
+                let by = section_y + ly as i32 - 1;
+                let bz = world_z + lz as i32 - 1;
+                let state = snapshot.get_block_state(bx, by, bz);
+                let id = type_map.get_id(state);
+                let cs_p = SECTION_SIZE + 2;
+                let idx = (ly * cs_p + lx) * cs_p + lz;
+                voxels[idx] = id;
+            }
+        }
+    }
+
+    let transparent_set = std::collections::BTreeSet::new();
+    mesher.mesh(&voxels, &transparent_set);
+
+    for face_idx in 0..6u8 {
+        let face = bgm::Face::from(face_idx);
+        let light = greedy_face_light(face);
+
+        for quad in &mesher.quads[face_idx as usize] {
+            let block_id = quad.voxel_id() as u16;
+
+            let info = match type_map.get_info(block_id) {
+                Some(i) => i,
+                None => continue,
+            };
+
+            let tex_name = face_texture_name(&info.textures, face);
+            let region = uv_map.get_region(tex_name);
+            let tint = tint_color(info.textures.tint);
+
+            let packed_verts = face.vertices_packed(*quad);
+            let base = vertices.len() as u32;
+
+            let u_span = region.u_max - region.u_min;
+            let v_span = region.v_max - region.v_min;
+
+            for pv in &packed_verts {
+                let x = pv.x() as f32 + world_x as f32;
+                let y = pv.y() as f32 + section_y as f32;
+                let z = pv.z() as f32 + world_z as f32;
+                let u = region.u_min + pv.u() as f32 * u_span;
+                let v = region.v_min + pv.v() as f32 * v_span;
+
+                vertices.push(ChunkVertex {
+                    position: [x, y, z],
+                    tex_coords: [u, v],
+                    light,
+                    tint,
+                });
+            }
+
+            indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+        }
+    }
+}
+
 fn mesh_chunk_snapshot(
     snapshot: &ChunkStoreSnapshot,
     pos: ChunkPos,
@@ -144,6 +318,31 @@ fn mesh_chunk_snapshot(
     let world_x = pos.x * 16;
     let world_z = pos.z * 16;
 
+    let type_map = if lod == 0 {
+        Some(BlockTypeMap::build(
+            snapshot, registry, world_x, world_z, min_y, max_y,
+        ))
+    } else {
+        None
+    };
+
+    if let Some(ref tm) = type_map {
+        let sections = (max_y - min_y) / 16;
+        for section in 0..sections {
+            let section_y = min_y + section * 16;
+            greedy_mesh_section(
+                &mut vertices,
+                &mut indices,
+                snapshot,
+                tm,
+                uv_map,
+                world_x,
+                section_y,
+                world_z,
+            );
+        }
+    }
+
     let mut local_z = 0i32;
     while local_z < 16 {
         let mut local_x = 0i32;
@@ -158,6 +357,15 @@ fn mesh_chunk_snapshot(
                 if matches!(kind, BlockKind::Air) {
                     by += step;
                     continue;
+                }
+
+                if lod == 0 {
+                    if let Some(ref tm) = type_map {
+                        if tm.get_id(state) != 0 {
+                            by += step;
+                            continue;
+                        }
+                    }
                 }
 
                 let block_pos = [bx as f32, by as f32, bz as f32];

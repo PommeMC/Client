@@ -20,7 +20,7 @@ fn main() {
 
     let args = args::LaunchArgs::parse();
 
-    if !cfg!(debug_assertions) {
+    if !cfg!(debug_assertions) && !args.dev {
         match &args.launch_token {
             Some(path) => {
                 let token_path = std::path::Path::new(path);

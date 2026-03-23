@@ -26,4 +26,7 @@ pub struct LaunchArgs {
 
     #[arg(long)]
     pub launch_token: Option<String>,
+
+    #[arg(long)]
+    pub dev: bool,
 }

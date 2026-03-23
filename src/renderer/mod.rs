@@ -64,11 +64,12 @@ enum RenderMode {
 
 #[derive(Default, Clone)]
 pub struct RenderTimings {
-    pub mesh_upload_ms: f32,
+    pub frame_ms: f32,
+    pub fence_ms: f32,
+    pub acquire_ms: f32,
     pub cull_ms: f32,
     pub draw_ms: f32,
-    pub overlay_ms: f32,
-    pub frame_ms: f32,
+    pub present_ms: f32,
 }
 
 pub struct Renderer {
@@ -659,10 +660,13 @@ impl Renderer {
         let render_finished = self.ctx.render_finished[frame];
         let cmd = self.ctx.command_buffers[frame];
 
+        let t_fence = std::time::Instant::now();
         unsafe {
             self.ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
         }
+        let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
 
+        let t_acquire = std::time::Instant::now();
         let image_index = match unsafe {
             self.ctx.swapchain_loader.acquire_next_image(
                 self.swapchain.swapchain,
@@ -678,6 +682,7 @@ impl Renderer {
             }
             Err(e) => return Err(e.into()),
         };
+        let acquire_ms = t_acquire.elapsed().as_secs_f32() * 1000.0;
 
         if matches!(mode, RenderMode::World { .. }) {
             let uniform = CameraUniform::from_camera(&self.camera);
@@ -833,18 +838,11 @@ impl Renderer {
                         *swing_progress,
                     );
 
-                    let t_overlay = std::time::Instant::now();
                     self.menu_pipeline
                         .draw(&self.ctx.device, cmd, sw, sh, overlay);
-                    let overlay_ms = t_overlay.elapsed().as_secs_f32() * 1000.0;
 
-                    self.last_timings = RenderTimings {
-                        mesh_upload_ms: 0.0,
-                        cull_ms,
-                        draw_ms: 0.0,
-                        overlay_ms,
-                        frame_ms: frame_start.elapsed().as_secs_f32() * 1000.0,
-                    };
+                    self.last_timings.cull_ms = cull_ms;
+                    self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
                 }
                 RenderMode::MainMenu {
                     scroll,
@@ -936,6 +934,7 @@ impl Renderer {
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
 
+            let t_present = std::time::Instant::now();
             match self
                 .ctx
                 .swapchain_loader
@@ -947,6 +946,10 @@ impl Renderer {
                 }
                 Err(e) => return Err(e.into()),
             }
+            let present_ms = t_present.elapsed().as_secs_f32() * 1000.0;
+            self.last_timings.fence_ms = fence_ms;
+            self.last_timings.acquire_ms = acquire_ms;
+            self.last_timings.present_ms = present_ms;
         }
 
         self.ctx.advance_frame();

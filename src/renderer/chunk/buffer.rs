@@ -12,7 +12,7 @@ use crate::renderer::MAX_FRAMES_IN_FLIGHT;
 
 const BUCKET_VERTICES: u32 = 32768;
 const BUCKET_INDICES: u32 = 49152;
-const TOTAL_BUCKETS: u32 = 4096;
+const TOTAL_BUCKETS: u32 = 1024;
 const VERTEX_SIZE: u64 = std::mem::size_of::<ChunkVertex>() as u64;
 const INDEX_SIZE: u64 = std::mem::size_of::<u32>() as u64;
 
