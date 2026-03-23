@@ -115,7 +115,6 @@ pub enum NetworkEvent {
     EntitiesRemoved {
         ids: Vec<i32>,
     },
-    #[allow(dead_code)]
     EntityItemData {
         id: i32,
         item_name: String,
@@ -128,6 +127,13 @@ pub enum NetworkEvent {
     EntityBabyFlag {
         id: i32,
         is_baby: bool,
+    },
+    /// An item entity was picked up by a player or mob.
+    ItemPickedUp {
+        /// The entity ID of the item being collected.
+        item_id: i32,
+        /// The entity ID of the collector (player/mob).
+        collector_id: i32,
     },
     Disconnected {
         reason: String,

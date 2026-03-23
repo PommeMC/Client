@@ -13,7 +13,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::assets::AssetIndex;
 use crate::dirs::DataDirs;
-use crate::entity::EntityStore;
+use crate::entity::{EntityStore, ItemEntityStore};
 use crate::net::NetworkEvent;
 use crate::physics::movement;
 use crate::player::LocalPlayer;
@@ -126,6 +126,7 @@ struct App {
     server_render_distance: u32,
     server_simulation_distance: u32,
     pending_skin_uuid: Option<uuid::Uuid>,
+    item_entity_store: ItemEntityStore,
 }
 
 struct FpsCounter {
@@ -197,6 +198,7 @@ impl App {
             server_render_distance: 0,
             server_simulation_distance: 0,
             pending_skin_uuid: None,
+            item_entity_store: ItemEntityStore::new(),
             player: LocalPlayer::new(),
             tick_accumulator: 0.0,
             prev_player_pos: glam::Vec3::ZERO,
@@ -329,6 +331,7 @@ impl App {
         self.position_set = false;
         self.chunk_store = ChunkStore::new(self.menu.render_distance);
         self.entity_store.clear();
+        self.item_entity_store.clear();
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_chunk_meshes();
             self.mesh_dispatcher =
@@ -520,9 +523,13 @@ impl App {
                             head_yaw,
                         );
                     }
+                    if entity_type == azalea_registry::builtin::EntityKind::Item {
+                        self.item_entity_store.spawn_item(id, glam::DVec3::new(x, y, z));
+                    }
                 }
                 NetworkEvent::EntityMoved { id, dx, dy, dz } => {
                     self.entity_store.move_living_delta(id, dx, dy, dz);
+                    self.item_entity_store.move_delta(id, dx, dy, dz);
                 }
                 NetworkEvent::EntityMovedRotated {
                     id,
@@ -534,6 +541,7 @@ impl App {
                 } => {
                     self.entity_store.move_living_delta(id, dx, dy, dz);
                     self.entity_store.update_living_rotation(id, yaw, pitch);
+                    self.item_entity_store.move_delta(id, dx, dy, dz);
                 }
                 NetworkEvent::EntityTeleported {
                     id,
@@ -545,18 +553,30 @@ impl App {
                 } => {
                     self.entity_store.teleport_living(id, x, y, z);
                     self.entity_store.update_living_rotation(id, yaw, pitch);
+                    self.item_entity_store.teleport(id, glam::DVec3::new(x, y, z));
                 }
                 NetworkEvent::EntitiesRemoved { ids } => {
-                    for id in ids {
-                        self.entity_store.remove_living(id);
+                    for id in &ids {
+                        self.entity_store.remove_living(*id);
                     }
+                    self.item_entity_store.remove(&ids);
                 }
                 NetworkEvent::EntityHeadRotation { id, head_yaw } => {
                     self.entity_store.update_head_rotation(id, head_yaw);
                 }
-                NetworkEvent::EntityItemData { .. } => {}
+                NetworkEvent::EntityItemData {
+                    id,
+                    item_name,
+                    count,
+                } => {
+                    log::trace!("Item data: id={id} name={item_name} count={count}");
+                    self.item_entity_store.set_item_data(id, item_name, count);
+                }
                 NetworkEvent::EntityBabyFlag { id, is_baby } => {
                     self.entity_store.set_baby(id, is_baby);
+                }
+                NetworkEvent::ItemPickedUp { item_id, collector_id: _ } => {
+                    self.item_entity_store.remove(&[item_id]);
                 }
                 NetworkEvent::Disconnected { reason } => {
                     log::warn!("Disconnected: {reason}");
@@ -1144,6 +1164,7 @@ impl ApplicationHandler for App {
                                 self.tick_accumulator += dt;
                                 while self.tick_accumulator >= TICK_RATE {
                                     self.tick_physics();
+                                    self.item_entity_store.tick();
                                     self.tick_accumulator -= TICK_RATE;
                                 }
                             }
@@ -1350,6 +1371,21 @@ impl ApplicationHandler for App {
                                     );
                                 }
 
+                                let cam_pos = glam::DVec3::new(
+                                    self.player.position.x as f64,
+                                    self.player.position.y as f64,
+                                    self.player.position.z as f64,
+                                );
+                                let partial_tick = self.tick_accumulator / TICK_RATE;
+                                let item_renders = build_item_render_infos(
+                                    &self.item_entity_store,
+                                    cam_pos,
+                                    partial_tick,
+                                );
+                                for info in &item_renders {
+                                    renderer.ensure_item_mesh(&info.item_name);
+                                }
+
                                 if let Err(e) = renderer.render_world(
                                     window,
                                     hide_cursor,
@@ -1359,6 +1395,7 @@ impl ApplicationHandler for App {
                                     self.show_chunk_borders,
                                     sky,
                                     &entity_renders,
+                                    &item_renders,
                                 ) {
                                     log::error!("Render error: {e}");
                                 }
@@ -1465,6 +1502,30 @@ fn chunk_lod(pos: azalea_core::position::ChunkPos, player: azalea_core::position
     } else {
         2
     }
+}
+
+fn build_item_render_infos(
+    entity_store: &crate::entity::ItemEntityStore,
+    camera_pos: glam::DVec3,
+    partial_tick: f32,
+) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
+    entity_store
+        .visible_items(camera_pos, 64.0)
+        .iter()
+        .map(|item| {
+            let age_f = item.age as f32 + partial_tick;
+            let bob_y = (age_f / 10.0 + item.bob_offset).sin() * 0.1 + 0.1;
+            let spin = age_f / 20.0 + item.bob_offset;
+            let pos = item.position.as_vec3();
+            let model = glam::Mat4::from_translation(pos + glam::Vec3::new(0.0, bob_y, 0.0))
+                * glam::Mat4::from_rotation_y(spin)
+                * glam::Mat4::from_scale(glam::Vec3::splat(0.25));
+            crate::renderer::pipelines::item_entity::ItemRenderInfo {
+                item_name: item.item_name.clone(),
+                model_matrix: model,
+            }
+        })
+        .collect()
 }
 
 pub fn run(

@@ -57,6 +57,7 @@ enum RenderMode<'a> {
         show_chunk_borders: bool,
         sky: SkyState,
         entities: &'a [EntityRenderInfo],
+        item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
     },
     MainMenu {
         scroll: f32,
@@ -95,6 +96,7 @@ pub struct Renderer {
     skin_preview: SkinPreviewPipeline,
     entity_renderer: EntityRenderer,
     chunk_border_pipeline: pipelines::chunk_borders::ChunkBorderPipeline,
+    item_entity_pipeline: pipelines::item_entity::ItemEntityPipeline,
     chunk_buffers: ChunkBufferStore,
     swapchain_dirty: bool,
     width: u32,
@@ -267,6 +269,13 @@ impl Renderer {
             &ctx.allocator,
         );
 
+        let item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
+            &ctx.device,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            &atlas,
+        );
+
         Ok(Self {
             ctx,
             swapchain: swapchain_state,
@@ -285,6 +294,7 @@ impl Renderer {
             skin_preview,
             entity_renderer,
             chunk_border_pipeline,
+            item_entity_pipeline,
             chunk_buffers,
             swapchain_dirty: false,
             width: size.width.max(1),
@@ -510,6 +520,8 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.entity_renderer
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.item_entity_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.blur_pipeline.resize(
             &self.ctx.device,
             &self.ctx.allocator,
@@ -638,6 +650,7 @@ impl Renderer {
         show_chunk_borders: bool,
         sky: SkyState,
         entities: &[EntityRenderInfo],
+        item_entities: &[pipelines::item_entity::ItemRenderInfo],
     ) -> Result<(), RendererError> {
         self.render_frame(
             window,
@@ -650,6 +663,7 @@ impl Renderer {
                 show_chunk_borders,
                 sky,
                 entities,
+                item_entities,
             },
         )
     }
@@ -736,6 +750,18 @@ impl Renderer {
         self.menu_pipeline.text_width(text, scale)
     }
 
+    pub fn ensure_item_mesh(&mut self, name: &str) {
+        if let Some(model) = self.registry.get_baked_model_by_name(name) {
+            self.item_entity_pipeline.ensure_mesh(
+                &self.ctx.device,
+                &self.ctx.allocator,
+                name,
+                model,
+                &self.atlas.uv_map,
+            );
+        }
+    }
+
     fn render_frame(
         &mut self,
         window: &Window,
@@ -783,6 +809,7 @@ impl Renderer {
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
             self.chunk_border_pipeline.update_camera(frame, &uniform);
+            self.item_entity_pipeline.update_camera(frame, &uniform);
         }
 
         if hide_cursor {
@@ -882,6 +909,7 @@ impl Renderer {
                     show_chunk_borders,
                     sky,
                     entities,
+                    item_entities,
                 } => {
                     self.sky_pipeline.update_and_draw(
                         &self.ctx.device,
@@ -909,6 +937,9 @@ impl Renderer {
 
                     self.entity_renderer
                         .draw(&self.ctx.device, cmd, frame, entities);
+
+                    self.item_entity_pipeline
+                        .draw(&self.ctx.device, cmd, frame, item_entities);
 
                     if *show_chunk_borders {
                         self.chunk_border_pipeline
@@ -1150,6 +1181,8 @@ impl Drop for Renderer {
         self.entity_renderer
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_border_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.item_entity_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
         self.swapchain.destroy(

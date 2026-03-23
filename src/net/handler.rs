@@ -188,13 +188,7 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::MoveEntityPos(p) => {
-            use azalea_core::delta::PositionDeltaTrait;
-            let _ = event_tx.try_send(NetworkEvent::EntityMoved {
-                id: p.entity_id.0,
-                dx: p.delta.x(),
-                dy: p.delta.y(),
-                dz: p.delta.z(),
-            });
+            send_entity_moved(event_tx, p.entity_id.0, &p.delta);
         }
         ClientboundGamePacket::MoveEntityPosRot(p) => {
             use azalea_core::delta::PositionDeltaTrait;
@@ -234,6 +228,7 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::SetEntityData(p) => {
             for item in p.packed_items.iter() {
+                // index 8 = item stack data for item entities
                 if item.index == 8
                     && let azalea_entity::EntityDataValue::ItemStack(
                         azalea_inventory::ItemStack::Present(data),
@@ -256,6 +251,12 @@ pub fn handle_game_packet(
                 }
             }
         }
+        ClientboundGamePacket::TakeItemEntity(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ItemPickedUp {
+                item_id: p.item_id as i32,
+                collector_id: p.player_id as i32,
+            });
+        }
         _other => {}
     }
 }
@@ -263,4 +264,17 @@ pub fn handle_game_packet(
 fn send_chat(event_tx: &Sender<NetworkEvent>, text: String) {
     log::info!("Chat: {text}");
     let _ = event_tx.try_send(NetworkEvent::ChatMessage { text });
+}
+
+fn send_entity_moved(
+    event_tx: &Sender<NetworkEvent>,
+    id: i32,
+    delta: &azalea_core::delta::PositionDelta8,
+) {
+    let _ = event_tx.try_send(NetworkEvent::EntityMoved {
+        id,
+        dx: delta.xa as f64 / 4096.0,
+        dy: delta.ya as f64 / 4096.0,
+        dz: delta.za as f64 / 4096.0,
+    });
 }

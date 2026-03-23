@@ -102,6 +102,14 @@ impl BlockRegistry {
         self.textures.get(block.id())
     }
 
+    pub fn get_baked_model_by_name(&self, name: &str) -> Option<&BakedModel> {
+        let variants = self.baked.get(name)?;
+        if variants.len() == 1 {
+            return variants.values().next();
+        }
+        variants.get("").or_else(|| variants.values().next())
+    }
+
     pub fn get_baked_model(&self, state: BlockState) -> Option<&BakedModel> {
         let block: Box<dyn azalea_block::BlockTrait> = state.into();
         let variants = self.baked.get(block.id())?;

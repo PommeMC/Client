@@ -4,6 +4,7 @@ pub mod chunk;
 pub mod chunk_borders;
 pub mod entity_renderer;
 pub mod hand;
+pub mod item_entity;
 pub mod menu_overlay;
 pub mod panorama;
 pub mod skin_preview;
