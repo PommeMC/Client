@@ -26,7 +26,6 @@ function App() {
     setAccounts,
     setActiveIndex,
     server,
-    setInstallations,
     selectedVersion,
     setVersions,
     setLaunching,
@@ -83,19 +82,9 @@ function App() {
       .then(setNews)
       .catch((e) => console.error("Failed to fetch news:", e));
     invoke<GameVersion[]>("get_versions", { showSnapshots: false })
-      .then((v) => {
-        setVersions(v);
-        if (v.length > 0) {
-          const latest = v[0].id;
-          setInstallations((prev) =>
-            prev.map((inst) =>
-              inst.id === "default" && !inst.version ? { ...inst, version: latest } : inst,
-            ),
-          );
-        }
-      })
+      .then(setVersions)
       .catch((e) => console.error("Failed to fetch versions:", e));
-  }, [loadSkin, setAccounts, setActiveIndex, setInstallations, setNews, setVersions]);
+  }, [loadSkin, setAccounts, setActiveIndex, setNews, setVersions]);
 
   useEffect(() => {
     requestAnimationFrame(() => getCurrentWindow().show());
