@@ -80,6 +80,12 @@ impl VulkanContext {
             required_extensions.push(debug_utils::NAME.as_ptr());
         }
 
+        let mut instance_flags = vk::InstanceCreateFlags::empty();
+        if cfg!(target_os = "macos") {
+            required_extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());
+            instance_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+        }
+
         let layer_names: Vec<CString> = if validation_available {
             vec![CString::new("VK_LAYER_KHRONOS_validation").unwrap()]
         } else {
@@ -93,7 +99,8 @@ impl VulkanContext {
         let instance_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_extension_names(&required_extensions)
-            .enabled_layer_names(&layer_ptrs);
+            .enabled_layer_names(&layer_ptrs)
+            .flags(instance_flags);
 
         let instance = unsafe { entry.create_instance(&instance_info, None)? };
 
@@ -163,7 +170,10 @@ impl VulkanContext {
             })
             .collect();
 
-        let device_extensions = [swapchain::NAME.as_ptr()];
+        let mut device_extensions = vec![swapchain::NAME.as_ptr()];
+        if cfg!(target_os = "macos") {
+            device_extensions.push(ash::khr::portability_subset::NAME.as_ptr());
+        }
 
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
