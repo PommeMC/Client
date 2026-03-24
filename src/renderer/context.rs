@@ -269,10 +269,6 @@ impl Drop for VulkanContext {
             }
 
             self.device.destroy_command_pool(self.command_pool, None);
-
-            // Allocator must be dropped before the device
-            drop(self.allocator.lock().unwrap());
-
             self.device.destroy_device(None);
 
             self.surface_loader.destroy_surface(self.surface, None);
