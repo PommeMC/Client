@@ -270,7 +270,6 @@ impl Drop for VulkanContext {
 
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
-
             self.surface_loader.destroy_surface(self.surface, None);
 
             if let (Some(loader), Some(messenger)) =
@@ -281,6 +280,7 @@ impl Drop for VulkanContext {
 
             self.instance.destroy_instance(None);
         }
+        std::process::exit(0);
     }
 }
 

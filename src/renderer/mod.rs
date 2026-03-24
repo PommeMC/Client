@@ -73,7 +73,6 @@ pub struct RenderTimings {
 }
 
 pub struct Renderer {
-    ctx: VulkanContext,
     swapchain: SwapchainState,
     camera: Camera,
     registry: BlockRegistry,
@@ -91,6 +90,7 @@ pub struct Renderer {
     width: u32,
     height: u32,
     pub last_timings: RenderTimings,
+    ctx: VulkanContext,
 }
 
 impl Renderer {
