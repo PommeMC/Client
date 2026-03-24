@@ -1,233 +1,259 @@
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 use azalea_registry::builtin::BlockKind;
 use glam::Vec3;
 
 use super::aabb::Aabb;
 use crate::world::chunk::ChunkStore;
 
+static NO_COLLISION: LazyLock<HashSet<BlockKind>> = LazyLock::new(|| {
+    HashSet::from([
+        BlockKind::AcaciaHangingSign,
+        BlockKind::AcaciaPressurePlate,
+        BlockKind::AcaciaSapling,
+        BlockKind::AcaciaSign,
+        BlockKind::AcaciaWallHangingSign,
+        BlockKind::AcaciaWallSign,
+        BlockKind::ActivatorRail,
+        BlockKind::Air,
+        BlockKind::Allium,
+        BlockKind::AzureBluet,
+        BlockKind::BambooHangingSign,
+        BlockKind::BambooPressurePlate,
+        BlockKind::BambooSapling,
+        BlockKind::BambooSign,
+        BlockKind::BambooWallHangingSign,
+        BlockKind::BambooWallSign,
+        BlockKind::Beetroots,
+        BlockKind::BigDripleafStem,
+        BlockKind::BirchHangingSign,
+        BlockKind::BirchPressurePlate,
+        BlockKind::BirchSapling,
+        BlockKind::BirchSign,
+        BlockKind::BirchWallHangingSign,
+        BlockKind::BirchWallSign,
+        BlockKind::BlackBanner,
+        BlockKind::BlackWallBanner,
+        BlockKind::BlueBanner,
+        BlockKind::BlueOrchid,
+        BlockKind::BlueWallBanner,
+        BlockKind::BrainCoral,
+        BlockKind::BrainCoralFan,
+        BlockKind::BrainCoralWallFan,
+        BlockKind::BrownBanner,
+        BlockKind::BrownMushroom,
+        BlockKind::BrownWallBanner,
+        BlockKind::BubbleColumn,
+        BlockKind::BubbleCoral,
+        BlockKind::BubbleCoralFan,
+        BlockKind::BubbleCoralWallFan,
+        BlockKind::Bush,
+        BlockKind::CactusFlower,
+        BlockKind::Carrots,
+        BlockKind::CaveAir,
+        BlockKind::CaveVines,
+        BlockKind::CaveVinesPlant,
+        BlockKind::CherryHangingSign,
+        BlockKind::CherryPressurePlate,
+        BlockKind::CherrySapling,
+        BlockKind::CherrySign,
+        BlockKind::CherryWallHangingSign,
+        BlockKind::CherryWallSign,
+        BlockKind::ClosedEyeblossom,
+        BlockKind::Cobweb,
+        BlockKind::CopperTorch,
+        BlockKind::CopperWallTorch,
+        BlockKind::Cornflower,
+        BlockKind::CrimsonFungus,
+        BlockKind::CrimsonHangingSign,
+        BlockKind::CrimsonPressurePlate,
+        BlockKind::CrimsonRoots,
+        BlockKind::CrimsonSign,
+        BlockKind::CrimsonWallHangingSign,
+        BlockKind::CrimsonWallSign,
+        BlockKind::CyanBanner,
+        BlockKind::CyanWallBanner,
+        BlockKind::Dandelion,
+        BlockKind::DarkOakHangingSign,
+        BlockKind::DarkOakPressurePlate,
+        BlockKind::DarkOakSapling,
+        BlockKind::DarkOakSign,
+        BlockKind::DarkOakWallHangingSign,
+        BlockKind::DarkOakWallSign,
+        BlockKind::DeadBrainCoral,
+        BlockKind::DeadBrainCoralFan,
+        BlockKind::DeadBrainCoralWallFan,
+        BlockKind::DeadBubbleCoral,
+        BlockKind::DeadBubbleCoralFan,
+        BlockKind::DeadBubbleCoralWallFan,
+        BlockKind::DeadBush,
+        BlockKind::DeadFireCoral,
+        BlockKind::DeadFireCoralFan,
+        BlockKind::DeadFireCoralWallFan,
+        BlockKind::DeadHornCoral,
+        BlockKind::DeadHornCoralFan,
+        BlockKind::DeadHornCoralWallFan,
+        BlockKind::DeadTubeCoral,
+        BlockKind::DeadTubeCoralFan,
+        BlockKind::DeadTubeCoralWallFan,
+        BlockKind::DetectorRail,
+        BlockKind::EndGateway,
+        BlockKind::EndPortal,
+        BlockKind::Fern,
+        BlockKind::Fire,
+        BlockKind::FireCoral,
+        BlockKind::FireCoralFan,
+        BlockKind::FireCoralWallFan,
+        BlockKind::FireflyBush,
+        BlockKind::Frogspawn,
+        BlockKind::GlowLichen,
+        BlockKind::GrayBanner,
+        BlockKind::GrayWallBanner,
+        BlockKind::GreenBanner,
+        BlockKind::GreenWallBanner,
+        BlockKind::HangingRoots,
+        BlockKind::HeavyWeightedPressurePlate,
+        BlockKind::HornCoral,
+        BlockKind::HornCoralFan,
+        BlockKind::HornCoralWallFan,
+        BlockKind::JungleHangingSign,
+        BlockKind::JunglePressurePlate,
+        BlockKind::JungleSapling,
+        BlockKind::JungleSign,
+        BlockKind::JungleWallHangingSign,
+        BlockKind::JungleWallSign,
+        BlockKind::Kelp,
+        BlockKind::KelpPlant,
+        BlockKind::LargeFern,
+        BlockKind::Lava,
+        BlockKind::LeafLitter,
+        BlockKind::Lever,
+        BlockKind::LightBlueBanner,
+        BlockKind::LightBlueWallBanner,
+        BlockKind::LightGrayBanner,
+        BlockKind::LightGrayWallBanner,
+        BlockKind::LightWeightedPressurePlate,
+        BlockKind::Lilac,
+        BlockKind::LilyOfTheValley,
+        BlockKind::LimeBanner,
+        BlockKind::LimeWallBanner,
+        BlockKind::MagentaBanner,
+        BlockKind::MagentaWallBanner,
+        BlockKind::MangroveHangingSign,
+        BlockKind::MangrovePressurePlate,
+        BlockKind::MangrovePropagule,
+        BlockKind::MangroveSign,
+        BlockKind::MangroveWallHangingSign,
+        BlockKind::MangroveWallSign,
+        BlockKind::NetherPortal,
+        BlockKind::NetherSprouts,
+        BlockKind::NetherWart,
+        BlockKind::OakHangingSign,
+        BlockKind::OakPressurePlate,
+        BlockKind::OakSapling,
+        BlockKind::OakSign,
+        BlockKind::OakWallHangingSign,
+        BlockKind::OakWallSign,
+        BlockKind::OpenEyeblossom,
+        BlockKind::OrangeBanner,
+        BlockKind::OrangeTulip,
+        BlockKind::OrangeWallBanner,
+        BlockKind::OxeyeDaisy,
+        BlockKind::PaleHangingMoss,
+        BlockKind::PaleOakHangingSign,
+        BlockKind::PaleOakPressurePlate,
+        BlockKind::PaleOakSapling,
+        BlockKind::PaleOakSign,
+        BlockKind::PaleOakWallHangingSign,
+        BlockKind::PaleOakWallSign,
+        BlockKind::Peony,
+        BlockKind::PinkBanner,
+        BlockKind::PinkPetals,
+        BlockKind::PinkTulip,
+        BlockKind::PinkWallBanner,
+        BlockKind::PitcherCrop,
+        BlockKind::PitcherPlant,
+        BlockKind::PolishedBlackstonePressurePlate,
+        BlockKind::Poppy,
+        BlockKind::Potatoes,
+        BlockKind::PoweredRail,
+        BlockKind::PurpleBanner,
+        BlockKind::PurpleWallBanner,
+        BlockKind::Rail,
+        BlockKind::RedBanner,
+        BlockKind::RedMushroom,
+        BlockKind::RedTulip,
+        BlockKind::RedWallBanner,
+        BlockKind::RedstoneTorch,
+        BlockKind::RedstoneWallTorch,
+        BlockKind::RedstoneWire,
+        BlockKind::ResinClump,
+        BlockKind::RoseBush,
+        BlockKind::Scaffolding,
+        BlockKind::SculkVein,
+        BlockKind::Seagrass,
+        BlockKind::ShortDryGrass,
+        BlockKind::ShortGrass,
+        BlockKind::SmallDripleaf,
+        BlockKind::SoulFire,
+        BlockKind::SoulTorch,
+        BlockKind::SoulWallTorch,
+        BlockKind::SporeBlossom,
+        BlockKind::SpruceHangingSign,
+        BlockKind::SprucePressurePlate,
+        BlockKind::SpruceSapling,
+        BlockKind::SpruceSign,
+        BlockKind::SpruceWallHangingSign,
+        BlockKind::SpruceWallSign,
+        BlockKind::StonePressurePlate,
+        BlockKind::StructureVoid,
+        BlockKind::SugarCane,
+        BlockKind::Sunflower,
+        BlockKind::SweetBerryBush,
+        BlockKind::TallDryGrass,
+        BlockKind::TallGrass,
+        BlockKind::TallSeagrass,
+        BlockKind::Torch,
+        BlockKind::Torchflower,
+        BlockKind::TorchflowerCrop,
+        BlockKind::Tripwire,
+        BlockKind::TripwireHook,
+        BlockKind::TubeCoral,
+        BlockKind::TubeCoralFan,
+        BlockKind::TubeCoralWallFan,
+        BlockKind::TwistingVines,
+        BlockKind::TwistingVinesPlant,
+        BlockKind::Vine,
+        BlockKind::VoidAir,
+        BlockKind::WallTorch,
+        BlockKind::WarpedFungus,
+        BlockKind::WarpedHangingSign,
+        BlockKind::WarpedPressurePlate,
+        BlockKind::WarpedRoots,
+        BlockKind::WarpedSign,
+        BlockKind::WarpedWallHangingSign,
+        BlockKind::WarpedWallSign,
+        BlockKind::Water,
+        BlockKind::WeepingVines,
+        BlockKind::WeepingVinesPlant,
+        BlockKind::Wheat,
+        BlockKind::WhiteBanner,
+        BlockKind::WhiteTulip,
+        BlockKind::WhiteWallBanner,
+        BlockKind::Wildflowers,
+        BlockKind::WitherRose,
+        BlockKind::YellowBanner,
+        BlockKind::YellowWallBanner,
+    ])
+});
+
 fn has_collision(state: azalea_block::BlockState) -> bool {
     if state.is_air() {
         return false;
     }
     let kind: BlockKind = state.into();
-    !matches!(
-        kind,
-        // Flowers
-        BlockKind::Dandelion
-            | BlockKind::Poppy
-            | BlockKind::BlueOrchid
-            | BlockKind::Allium
-            | BlockKind::AzureBluet
-            | BlockKind::RedTulip
-            | BlockKind::OrangeTulip
-            | BlockKind::WhiteTulip
-            | BlockKind::PinkTulip
-            | BlockKind::OxeyeDaisy
-            | BlockKind::Cornflower
-            | BlockKind::LilyOfTheValley
-            | BlockKind::WitherRose
-            | BlockKind::Torchflower
-            | BlockKind::CactusFlower
-            | BlockKind::OpenEyeblossom
-            | BlockKind::ClosedEyeblossom
-            | BlockKind::PinkPetals
-            | BlockKind::Wildflowers
-            | BlockKind::SporeBlossom
-            // Tall flowers
-            | BlockKind::Sunflower
-            | BlockKind::Lilac
-            | BlockKind::RoseBush
-            | BlockKind::Peony
-            | BlockKind::PitcherPlant
-            // Grass & ferns
-            | BlockKind::ShortGrass
-            | BlockKind::TallGrass
-            | BlockKind::Fern
-            | BlockKind::LargeFern
-            | BlockKind::DeadBush
-            | BlockKind::ShortDryGrass
-            | BlockKind::TallDryGrass
-            // Saplings
-            | BlockKind::OakSapling
-            | BlockKind::SpruceSapling
-            | BlockKind::BirchSapling
-            | BlockKind::JungleSapling
-            | BlockKind::AcaciaSapling
-            | BlockKind::DarkOakSapling
-            | BlockKind::CherrySapling
-            | BlockKind::PaleOakSapling
-            | BlockKind::BambooSapling
-            | BlockKind::MangrovePropagule
-            // Crops
-            | BlockKind::Wheat
-            | BlockKind::Carrots
-            | BlockKind::Potatoes
-            | BlockKind::Beetroots
-            | BlockKind::TorchflowerCrop
-            | BlockKind::PitcherCrop
-            | BlockKind::MelonStem
-            | BlockKind::PumpkinStem
-            | BlockKind::AttachedMelonStem
-            | BlockKind::AttachedPumpkinStem
-            | BlockKind::NetherWart
-            | BlockKind::SweetBerryBush
-            | BlockKind::SugarCane
-            // Underwater plants
-            | BlockKind::Seagrass
-            | BlockKind::TallSeagrass
-            | BlockKind::Kelp
-            | BlockKind::KelpPlant
-            // Corals
-            | BlockKind::BrainCoral
-            | BlockKind::BrainCoralFan
-            | BlockKind::BrainCoralWallFan
-            | BlockKind::BubbleCoral
-            | BlockKind::BubbleCoralFan
-            | BlockKind::BubbleCoralWallFan
-            | BlockKind::FireCoral
-            | BlockKind::FireCoralFan
-            | BlockKind::FireCoralWallFan
-            | BlockKind::HornCoral
-            | BlockKind::HornCoralFan
-            | BlockKind::HornCoralWallFan
-            | BlockKind::TubeCoral
-            | BlockKind::TubeCoralFan
-            | BlockKind::TubeCoralWallFan
-            | BlockKind::DeadBrainCoral
-            | BlockKind::DeadBrainCoralFan
-            | BlockKind::DeadBrainCoralWallFan
-            | BlockKind::DeadBubbleCoral
-            | BlockKind::DeadBubbleCoralFan
-            | BlockKind::DeadBubbleCoralWallFan
-            | BlockKind::DeadFireCoral
-            | BlockKind::DeadFireCoralFan
-            | BlockKind::DeadFireCoralWallFan
-            | BlockKind::DeadHornCoral
-            | BlockKind::DeadHornCoralFan
-            | BlockKind::DeadHornCoralWallFan
-            | BlockKind::DeadTubeCoral
-            | BlockKind::DeadTubeCoralFan
-            | BlockKind::DeadTubeCoralWallFan
-            // Mushrooms
-            | BlockKind::BrownMushroom
-            | BlockKind::RedMushroom
-            // Torches
-            | BlockKind::Torch
-            | BlockKind::WallTorch
-            | BlockKind::SoulTorch
-            | BlockKind::SoulWallTorch
-            | BlockKind::RedstoneTorch
-            | BlockKind::RedstoneWallTorch
-            | BlockKind::CopperTorch
-            | BlockKind::CopperWallTorch
-            // Redstone
-            | BlockKind::RedstoneWire
-            // Rails
-            | BlockKind::Rail
-            | BlockKind::PoweredRail
-            | BlockKind::DetectorRail
-            | BlockKind::ActivatorRail
-            // Signs
-            | BlockKind::OakSign
-            | BlockKind::SpruceSign
-            | BlockKind::BirchSign
-            | BlockKind::JungleSign
-            | BlockKind::AcaciaSign
-            | BlockKind::DarkOakSign
-            | BlockKind::CherrySign
-            | BlockKind::PaleOakSign
-            | BlockKind::MangroveSign
-            | BlockKind::BambooSign
-            | BlockKind::CrimsonSign
-            | BlockKind::WarpedSign
-            | BlockKind::OakWallSign
-            | BlockKind::SpruceWallSign
-            | BlockKind::BirchWallSign
-            | BlockKind::JungleWallSign
-            | BlockKind::AcaciaWallSign
-            | BlockKind::DarkOakWallSign
-            | BlockKind::CherryWallSign
-            | BlockKind::PaleOakWallSign
-            | BlockKind::MangroveWallSign
-            | BlockKind::BambooWallSign
-            | BlockKind::CrimsonWallSign
-            | BlockKind::WarpedWallSign
-            | BlockKind::OakHangingSign
-            | BlockKind::SpruceHangingSign
-            | BlockKind::BirchHangingSign
-            | BlockKind::JungleHangingSign
-            | BlockKind::AcaciaHangingSign
-            | BlockKind::DarkOakHangingSign
-            | BlockKind::CherryHangingSign
-            | BlockKind::PaleOakHangingSign
-            | BlockKind::MangroveHangingSign
-            | BlockKind::BambooHangingSign
-            | BlockKind::CrimsonHangingSign
-            | BlockKind::WarpedHangingSign
-            | BlockKind::OakWallHangingSign
-            | BlockKind::SpruceWallHangingSign
-            | BlockKind::BirchWallHangingSign
-            | BlockKind::JungleWallHangingSign
-            | BlockKind::AcaciaWallHangingSign
-            | BlockKind::DarkOakWallHangingSign
-            | BlockKind::CherryWallHangingSign
-            | BlockKind::PaleOakWallHangingSign
-            | BlockKind::MangroveWallHangingSign
-            | BlockKind::BambooWallHangingSign
-            | BlockKind::CrimsonWallHangingSign
-            | BlockKind::WarpedWallHangingSign
-            // Buttons
-            | BlockKind::StoneButton
-            | BlockKind::OakButton
-            | BlockKind::SpruceButton
-            | BlockKind::BirchButton
-            | BlockKind::JungleButton
-            | BlockKind::AcaciaButton
-            | BlockKind::DarkOakButton
-            | BlockKind::CherryButton
-            | BlockKind::PaleOakButton
-            | BlockKind::MangroveButton
-            | BlockKind::BambooButton
-            | BlockKind::CrimsonButton
-            | BlockKind::WarpedButton
-            | BlockKind::PolishedBlackstoneButton
-            // Vines & climbing plants
-            | BlockKind::Vine
-            | BlockKind::CaveVines
-            | BlockKind::CaveVinesPlant
-            | BlockKind::WeepingVines
-            | BlockKind::WeepingVinesPlant
-            | BlockKind::TwistingVines
-            | BlockKind::TwistingVinesPlant
-            | BlockKind::GlowLichen
-            | BlockKind::SculkVein
-            | BlockKind::ResinClump
-            // Nether plants
-            | BlockKind::CrimsonRoots
-            | BlockKind::WarpedRoots
-            | BlockKind::NetherSprouts
-            | BlockKind::HangingRoots
-            | BlockKind::WarpedFungus
-            | BlockKind::CrimsonFungus
-            // Fire
-            | BlockKind::Fire
-            | BlockKind::SoulFire
-            // Pale garden
-            | BlockKind::PaleHangingMoss
-            | BlockKind::PaleMossCarpet
-            // Other passable blocks
-            | BlockKind::Cobweb
-            | BlockKind::Water
-            | BlockKind::Lava
-            | BlockKind::Light
-            | BlockKind::StructureVoid
-            | BlockKind::VoidAir
-            | BlockKind::CaveAir
-            | BlockKind::Tripwire
-            | BlockKind::TripwireHook
-            | BlockKind::Frogspawn
-            | BlockKind::LeafLitter
-            | BlockKind::FireflyBush
-    )
+    !NO_COLLISION.contains(&kind)
 }
 
 pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb> {
@@ -256,7 +282,6 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
 
     aabbs
 }
-
 fn collide_along_axes(block_aabbs: &[Aabb], player_aabb: Aabb, mut velocity: Vec3) -> (Vec3, bool) {
     let original_y = velocity.y;
 
