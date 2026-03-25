@@ -1,4 +1,4 @@
-use glam::{Mat4, Vec3};
+use glam::{DVec3, Mat4, Vec3};
 
 use crate::window::input::InputState;
 
@@ -11,6 +11,7 @@ const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
 
 pub struct Camera {
     pub position: Vec3,
+    pub position_f64: DVec3,
     pub yaw: f32,
     pub pitch: f32,
     aspect_ratio: f32,
@@ -21,6 +22,7 @@ impl Camera {
     pub fn new(aspect_ratio: f32) -> Self {
         Self {
             position: Vec3::new(0.0, 2.0, 5.0),
+            position_f64: DVec3::new(0.0, 2.0, 5.0),
             yaw: 0.0,
             pitch: 0.0,
             aspect_ratio,
@@ -46,8 +48,19 @@ impl Camera {
 
     pub fn set_position(&mut self, position: Vec3, yaw_degrees: f32, pitch_degrees: f32) {
         self.position = position;
+        self.position_f64 = DVec3::new(position.x as f64, position.y as f64, position.z as f64);
         self.yaw = yaw_degrees.to_radians();
         self.pitch = pitch_degrees.to_radians();
+    }
+
+    pub fn set_position_f64(&mut self, pos: DVec3) {
+        self.position_f64 = pos;
+        self.position = pos.as_vec3();
+    }
+
+    #[allow(dead_code)]
+    pub fn camera_relative_f32(&self, world_pos: DVec3) -> Vec3 {
+        (world_pos - self.position_f64).as_vec3()
     }
 
     pub fn update_fov_modifier(&mut self, sprinting: bool) {
@@ -81,7 +94,7 @@ impl Camera {
             self.pitch.sin(),
             -self.yaw.cos() * self.pitch.cos(),
         );
-        let view = Mat4::look_to_rh(self.position, forward, UP);
+        let view = Mat4::look_to_rh(Vec3::ZERO, forward, UP);
         let fov = DEFAULT_FOV * self.fov_modifier;
         let mut proj = Mat4::perspective_rh(fov, self.aspect_ratio, NEAR, FAR);
         proj.y_axis.y *= -1.0;
@@ -93,12 +106,15 @@ impl Camera {
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    camera_pos: [f32; 4],
 }
 
 impl CameraUniform {
     pub fn from_camera(camera: &Camera) -> Self {
+        let pos = camera.position;
         Self {
             view_proj: camera.view_projection().to_cols_array_2d(),
+            camera_pos: [pos.x, pos.y, pos.z, 0.0],
         }
     }
 }

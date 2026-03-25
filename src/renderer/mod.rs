@@ -490,8 +490,8 @@ impl Renderer {
         self.camera.update_look(input);
     }
 
-    pub fn sync_camera_to_player(&mut self, eye_pos: glam::Vec3, yaw: f32, pitch: f32) {
-        self.camera.position = eye_pos;
+    pub fn sync_camera_to_player(&mut self, eye_pos: glam::DVec3, yaw: f32, pitch: f32) {
+        self.camera.set_position_f64(eye_pos);
         self.camera.yaw = yaw;
         self.camera.pitch = pitch;
     }
@@ -523,6 +523,7 @@ impl Renderer {
     pub fn set_camera_position(&mut self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) {
         self.camera
             .set_position(glam::Vec3::new(x as f32, y as f32, z as f32), yaw, pitch);
+        self.camera.position_f64 = glam::DVec3::new(x, y, z);
     }
 
     pub fn wait_for_all_frames(&self) {

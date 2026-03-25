@@ -1012,6 +1012,11 @@ impl ApplicationHandler for App {
                             let alpha = self.tick_accumulator / TICK_RATE;
                             let interp_pos = self.prev_player_pos.lerp(self.player.position, alpha);
                             let eye_pos = interp_pos + glam::Vec3::new(0.0, 1.62, 0.0);
+                            let eye_pos_f64 = glam::DVec3::new(
+                                eye_pos.x as f64,
+                                eye_pos.y as f64,
+                                eye_pos.z as f64,
+                            );
 
                             if !self.paused && !self.inventory_open && !self.chat.is_open() {
                                 let (yaw, pitch) = if let Some(r) = &self.renderer {
@@ -1043,7 +1048,7 @@ impl ApplicationHandler for App {
                                 (&mut self.renderer, &self.window)
                             {
                                 renderer.sync_camera_to_player(
-                                    eye_pos,
+                                    eye_pos_f64,
                                     renderer.camera_yaw(),
                                     renderer.camera_pitch(),
                                 );

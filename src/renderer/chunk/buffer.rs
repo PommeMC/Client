@@ -49,7 +49,7 @@ struct DrawCommand {
 struct FrustumData {
     planes: [[f32; 4]; 6],
     chunk_count: u32,
-    _pad: [u32; 3],
+    camera_pos: [f32; 3],
 }
 
 struct ChunkAlloc {
@@ -406,7 +406,7 @@ impl ChunkBufferStore {
         cmd: vk::CommandBuffer,
         frame: usize,
         frustum: &[[f32; 4]; 6],
-        _camera_pos: [f32; 3],
+        camera_pos: [f32; 3],
     ) {
         if self.chunks.is_empty() {
             return;
@@ -437,7 +437,7 @@ impl ChunkBufferStore {
         let frustum_data = FrustumData {
             planes: *frustum,
             chunk_count: count,
-            _pad: [0; 3],
+            camera_pos,
         };
         let frustum_bytes = bytemuck::bytes_of(&frustum_data);
         self.frustum_allocs[frame].mapped_slice_mut().unwrap()[..frustum_bytes.len()]
