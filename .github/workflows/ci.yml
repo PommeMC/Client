@@ -11,7 +11,19 @@ env:
 
 jobs:
   client:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: pomc-client-windows
+            binary: target/release/pomc.exe
+          - os: ubuntu-latest
+            artifact: pomc-client-linux
+            binary: target/release/pomc
+          - os: macos-latest
+            artifact: pomc-client-macos
+            binary: target/release/pomc
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -19,16 +31,35 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install Vulkan SDK (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk libxkbcommon-dev libwayland-dev
+
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: client
+          shared-key: client-${{ runner.os }}
           cache-on-failure: true
 
       - name: Format check
+        if: runner.os == 'Windows'
         run: cargo fmt -- --check
 
       - name: Clippy
+        if: runner.os == 'Windows'
         run: cargo clippy --release --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
 
   launcher-backend:
     runs-on: windows-latest
