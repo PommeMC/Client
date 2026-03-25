@@ -241,7 +241,7 @@ pub async fn refresh_account(uuid: String) -> Result<crate::auth::AuthAccount, S
 }
 
 #[tauri::command]
-pub async fn ensure_assets(app: tauri::AppHandle, version: String) -> Result<(), String> {
+pub async fn ensure_assets(app: AppHandle, version: String) -> Result<(), String> {
     if crate::downloader::needs_download(&version) {
         crate::downloader::download(&app, &version).await?;
     }
