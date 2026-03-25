@@ -16,7 +16,7 @@ POMC is a from-scratch Minecraft: Java Edition client built entirely in Rust. It
 
 - **Vulkan rendering** -chunk meshing, frustum culling, water/lava, sky, block overlays, hand animation
 - **Vanilla-exact physics** -sprinting, swimming, drowning, collision, all matched against decompiled source
-- **Full protocol support** -connects to 1.21.11 servers via azalea-protocol, handles chunk streaming, block updates, chat
+- **Full protocol support** -connects to 26.1 servers via azalea-protocol, handles chunk streaming, block updates, chat
 - **Microsoft authentication** -sign in with your Microsoft account, tokens stored in the OS keyring
 - **HUD & menus** -health, hunger, air bubbles, hotbar, F3 debug, chat, pause menu, options, server list
 - **Launcher** -Tauri-based launcher with frosted glass UI, multi-account management, Mojang patch notes, installation manager
@@ -59,7 +59,7 @@ cd launcher && pnpm tauri dev
 
 **Standalone client**:
 ```bash
-cargo run --release -- --server localhost:25565 --username Steve
+cargo run --release -- --dev --server localhost:25565 --username Steve
 ```
 
 ## Contributing
