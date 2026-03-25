@@ -43,6 +43,7 @@ fontdue = "0.9.3"
 binary-greedy-meshing = "0.5"
 open = "5"
 base64 = "0.22"
+simdnbt = { git = "https://github.com/azalea-rs/simdnbt" }
 
 [build-dependencies]
 shaderc = "0.10"

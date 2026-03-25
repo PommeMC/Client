@@ -124,6 +124,10 @@ pub async fn connect_to_server(
 
     let conn = conn.game();
     log::info!("Entering game state");
+    let biome_colors = extract_biome_climate(&registry_holder);
+    let _ = event_tx.try_send(NetworkEvent::BiomeColors {
+        colors: biome_colors,
+    });
     let _ = event_tx.try_send(NetworkEvent::Connected);
 
     game_loop(
@@ -302,6 +306,36 @@ async fn config_sequence(
             }
         }
     }
+}
+
+fn extract_biome_climate(
+    holder: &azalea_core::registry_holder::RegistryHolder,
+) -> std::collections::HashMap<u32, (f32, f32)> {
+    let mut result = std::collections::HashMap::new();
+    let biome_key: azalea_registry::identifier::Identifier = "minecraft:worldgen/biome".into();
+    if let Some(registry) = holder.extra.get(&biome_key) {
+        for (id, (_, nbt)) in registry.map.iter().enumerate() {
+            let temp = nbt
+                .get("temperature")
+                .and_then(|v| match v {
+                    simdnbt::owned::NbtTag::Float(f) => Some(*f),
+                    simdnbt::owned::NbtTag::Double(d) => Some(*d as f32),
+                    _ => None,
+                })
+                .unwrap_or(0.8);
+            let downfall = nbt
+                .get("downfall")
+                .and_then(|v| match v {
+                    simdnbt::owned::NbtTag::Float(f) => Some(*f),
+                    simdnbt::owned::NbtTag::Double(d) => Some(*d as f32),
+                    _ => None,
+                })
+                .unwrap_or(0.4);
+            result.insert(id as u32, (temp, downfall));
+        }
+    }
+    log::info!("Extracted {} biome climate entries", result.len());
+    result
 }
 
 async fn game_loop(

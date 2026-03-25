@@ -358,6 +358,7 @@ impl App {
                     log::info!("Connected to server");
                     self.state = GameState::Loading;
                 }
+                NetworkEvent::BiomeColors { .. } => {}
                 NetworkEvent::DimensionInfo { height, min_y } => {
                     log::info!("Dimension: height={height}, min_y={min_y}");
                     self.chunk_store =

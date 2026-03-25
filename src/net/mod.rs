@@ -12,6 +12,9 @@ use azalea_registry::builtin::EntityKind;
 
 pub enum NetworkEvent {
     Connected,
+    BiomeColors {
+        colors: std::collections::HashMap<u32, (f32, f32)>,
+    },
     DimensionInfo {
         height: u32,
         min_y: i32,
