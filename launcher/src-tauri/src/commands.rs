@@ -440,3 +440,32 @@ pub async fn set_keep_launcher_open(keep: bool) -> Result<(), String> {
 pub async fn set_launch_with_console(launch: bool) -> Result<(), String> {
     LauncherSettings::update(|s| s.launch_with_console = launch).await
 }
+
+#[tauri::command]
+pub async fn ping_server(address: String) -> crate::ping::ServerStatus {
+    crate::ping::ping_server(&address).await
+}
+
+#[tauri::command]
+pub async fn load_servers() -> Vec<crate::ping::SavedServer> {
+    let path = servers_path();
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn save_servers(servers: Vec<crate::ping::SavedServer>) -> Result<(), String> {
+    let path = servers_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let json = serde_json::to_string_pretty(&servers).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+fn servers_path() -> std::path::PathBuf {
+    storage::data_dir()
+        .join("instances")
+        .join("default")
+        .join("pomc_servers.json")
+}

@@ -25,7 +25,7 @@ interface NavItem {
 const NAV_ITEMS: Array<NavItem> = [
   { id: "home", label: "HOME", icon: <HiHome /> },
   { id: "installations", label: "INSTALLATIONS", icon: <HiSquares2X2 /> },
-  { id: "servers", label: "SERVERS", icon: <HiServer />, soon: true },
+  { id: "servers", label: "SERVERS", icon: <HiServer /> },
   { id: "friends", label: "FRIENDS", icon: <HiUserGroup />, soon: true },
   { id: "mods", label: "MODS", icon: <HiPuzzlePiece />, soon: true },
   { id: "news", label: "NEWS & UPDATES", icon: <HiNewspaper /> },

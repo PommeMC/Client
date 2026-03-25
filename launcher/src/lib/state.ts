@@ -9,6 +9,7 @@ import {
   PatchNote,
 } from "./types";
 import { invoke } from "@tauri-apps/api/core";
+import { useServers } from "./servers";
 
 const useLauncherSettings = () => {
   const [launcherSettings, setLauncherSettings] = useState<LauncherSettings>({
@@ -62,7 +63,7 @@ const useAppState = () => {
   const [activeIndex, setActiveIndex] = useState(0);
   const [accountDropdownOpen, setAccountDropdownOpen] = useState(false);
 
-  const [server] = useState("");
+  const [server, setServer] = useState("");
 
   const [modView, setModView] = useState<"list" | "grid">("list");
   const [modSearch, setModSearch] = useState("");
@@ -111,6 +112,7 @@ const useAppState = () => {
     accountDropdownOpen,
     setAccountDropdownOpen,
     server,
+    setServer,
     modView,
     setModView,
     modSearch,
@@ -147,6 +149,7 @@ const useAppState = () => {
     username,
 
     launcherSettings,
+    ...useServers(),
   };
 };
 

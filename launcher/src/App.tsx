@@ -210,7 +210,7 @@ function App() {
 
           {page === "news" && <NewsPage openPatchNote={openPatchNote} />}
 
-          {page === "servers" && <ServersPage />}
+          {page === "servers" && <ServersPage handleLaunch={handleLaunch} />}
 
           {page === "friends" && <FriendsPage />}
 

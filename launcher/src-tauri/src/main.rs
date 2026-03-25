@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 mod auth;
 mod commands;
 mod downloader;
+mod ping;
 mod settings;
 mod storage;
 
@@ -46,6 +47,9 @@ fn main() {
             commands::set_launcher_language,
             commands::set_keep_launcher_open,
             commands::set_launch_with_console,
+            commands::ping_server,
+            commands::load_servers,
+            commands::save_servers,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run POMC launcher");

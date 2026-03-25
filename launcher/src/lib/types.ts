@@ -43,3 +43,24 @@ export interface LauncherSettings {
   keepLauncherOpen: boolean;
   launchWithConsole: boolean;
 }
+
+export interface Server {
+  name: string;
+  ip: string;
+  category: string;
+  players: number;
+  max_players: number;
+  ping: number;
+  online: boolean;
+  motd: string;
+  version: string;
+}
+
+export interface ServerStatus {
+  online: boolean;
+  players: number;
+  max_players: number;
+  ping_ms: number;
+  motd: string;
+  version: string;
+}
