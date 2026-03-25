@@ -24,7 +24,7 @@ vec3 get_dir(vec2 uv) {
     float sp = sin(pitch);
     dir = vec3(dir.x, dir.y * cp - dir.z * sp, dir.y * sp + dir.z * cp);
 
-    float angle = scroll * 6.28318530718;
+    float angle = -scroll * 6.28318530718;
     float c = cos(angle);
     float s = sin(angle);
     return vec3(dir.x * c - dir.z * s, dir.y, dir.x * s + dir.z * c);
