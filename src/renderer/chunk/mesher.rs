@@ -26,40 +26,92 @@ pub struct ChunkMeshData {
 }
 
 const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
-const GRASS_TINT: [f32; 3] = [0.283_148_7, 0.508_881_3, 0.099_898_73];
-const FOLIAGE_TINT: [f32; 3] = [0.184_475, 0.407_240_2, 0.028_426_04];
-
-fn tint_color(tint: Tint) -> [f32; 3] {
+fn tint_color(tint: Tint, grass: [f32; 3]) -> [f32; 3] {
     match tint {
         Tint::None => WHITE,
-        Tint::Grass => GRASS_TINT,
-        Tint::Foliage => FOLIAGE_TINT,
+        Tint::Grass => grass,
+        Tint::Foliage => grass,
     }
 }
 
 const MAX_MESH_UPLOADS_PER_FRAME: usize = 16;
+
+pub struct GrassColormap {
+    pixels: Vec<[u8; 3]>,
+}
+
+impl GrassColormap {
+    pub fn load(
+        assets_dir: &std::path::Path,
+        asset_index: &Option<crate::assets::AssetIndex>,
+    ) -> Self {
+        let path = crate::assets::resolve_asset_path(
+            assets_dir,
+            asset_index,
+            "minecraft/textures/colormap/grass.png",
+        );
+        let pixels = crate::renderer::util::load_png(&path)
+            .map(|(data, _w, _h)| {
+                data.chunks(4)
+                    .take(256 * 256)
+                    .map(|c| [c[0], c[1], c[2]])
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![[145, 189, 89]; 256 * 256]);
+        Self { pixels }
+    }
+
+    fn lookup(&self, temperature: f32, downfall: f32) -> [f32; 3] {
+        let t = temperature.clamp(0.0, 1.0);
+        let d = (downfall.clamp(0.0, 1.0)) * t;
+        let x = ((1.0 - t) * 255.0) as usize;
+        let y = ((1.0 - d) * 255.0) as usize;
+        let idx = (y * 256 + x).min(256 * 256 - 1);
+        let [r, g, b] = self.pixels[idx];
+        [
+            (r as f32 / 255.0).powf(2.2),
+            (g as f32 / 255.0).powf(2.2),
+            (b as f32 / 255.0).powf(2.2),
+        ]
+    }
+}
 
 pub struct MeshDispatcher {
     result_rx: crossbeam_channel::Receiver<ChunkMeshData>,
     result_tx: crossbeam_channel::Sender<ChunkMeshData>,
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
+    grass_colormap: Arc<GrassColormap>,
+    biome_climate: Arc<std::collections::HashMap<u32, (f32, f32)>>,
 }
 
 impl MeshDispatcher {
-    pub fn new(registry: BlockRegistry, uv_map: AtlasUVMap) -> Self {
+    pub fn new(
+        registry: BlockRegistry,
+        uv_map: AtlasUVMap,
+        grass_colormap: GrassColormap,
+        biome_climate: Arc<std::collections::HashMap<u32, (f32, f32)>>,
+    ) -> Self {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         Self {
             result_rx,
             result_tx,
             registry: Arc::new(registry),
             uv_map: Arc::new(uv_map),
+            grass_colormap: Arc::new(grass_colormap),
+            biome_climate,
         }
+    }
+
+    pub fn set_biome_climate(&mut self, climate: Arc<std::collections::HashMap<u32, (f32, f32)>>) {
+        self.biome_climate = climate;
     }
 
     pub fn enqueue(&self, chunk_store: &ChunkStore, pos: ChunkPos, lod: u32) {
         let registry = Arc::clone(&self.registry);
         let uv_map = Arc::clone(&self.uv_map);
+        let grass_colormap = Arc::clone(&self.grass_colormap);
+        let biome_climate = Arc::clone(&self.biome_climate);
         let tx = self.result_tx.clone();
 
         let chunks_needed = [
@@ -92,10 +144,12 @@ impl MeshDispatcher {
             let snapshot = ChunkStoreSnapshot {
                 chunks: chunks_needed.into_iter().zip(chunk_arcs).collect(),
                 light,
+                grass_colormap,
+                biome_climate,
                 min_y,
                 height,
             };
-            let mesh = mesh_chunk_snapshot(&snapshot, pos, &registry, &uv_map, lod);
+            let mesh = mesh_chunk_snapshot(&snapshot, pos, &registry, &uv_map, 0);
             let _ = tx.send(mesh);
         });
     }
@@ -111,6 +165,8 @@ struct ChunkStoreSnapshot {
         Option<Arc<parking_lot::RwLock<azalea_world::Chunk>>>,
     )>,
     light: std::collections::HashMap<(i32, i32), crate::world::chunk::ChunkLightData>,
+    grass_colormap: Arc<GrassColormap>,
+    biome_climate: Arc<std::collections::HashMap<u32, (f32, f32)>>,
     min_y: i32,
     height: u32,
 }
@@ -157,6 +213,16 @@ impl ChunkStoreSnapshot {
             z: (z.rem_euclid(16) / 4) as u8,
         };
         c.get_biome(biome_pos, self.min_y).unwrap_or_default()
+    }
+
+    fn grass_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        let biome = self.get_biome(x, y, z);
+        let (temp, downfall) = self
+            .biome_climate
+            .get(&u32::from(biome))
+            .copied()
+            .unwrap_or((0.8, 0.4));
+        self.grass_colormap.lookup(temp, downfall)
     }
 
     fn get_light(&self, x: i32, y: i32, z: i32) -> f32 {
@@ -327,7 +393,10 @@ fn greedy_mesh_section(
 
             let tex_name = face_texture_name(&info.textures, face);
             let region = uv_map.get_region(tex_name);
-            let tint = tint_color(info.textures.tint);
+            let tint = tint_color(
+                info.textures.tint,
+                snapshot.grass_tint(world_x, section_y, world_z),
+            );
 
             let packed_verts = face.vertices_packed(*quad);
             let base = vertices.len() as u32;
@@ -545,7 +614,11 @@ fn emit_baked_model(
         }
 
         let region = uv_map.get_region(&quad.texture);
-        let tint = if quad.tinted { GRASS_TINT } else { WHITE };
+        let tint = if quad.tinted {
+            snapshot.grass_tint(bx, by, bz)
+        } else {
+            WHITE
+        };
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, bx, by, bz, dir)
         } else {
@@ -577,7 +650,7 @@ fn emit_cube_faces(
     by: i32,
     bz: i32,
 ) {
-    let tint = tint_color(textures.tint);
+    let tint = tint_color(textures.tint, snapshot.grass_tint(bx, by, bz));
 
     for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
         let offset = dir.offset();
@@ -727,7 +800,11 @@ fn emit_multipart(
         }
 
         let region = uv_map.get_region(&quad.texture);
-        let tint = if quad.tinted { GRASS_TINT } else { WHITE };
+        let tint = if quad.tinted {
+            snapshot.grass_tint(bx, by, bz)
+        } else {
+            WHITE
+        };
         emit_face(
             vertices,
             indices,
@@ -757,7 +834,7 @@ fn emit_lod_cube(
     step: i32,
 ) {
     let region = if let Some(textures) = registry.get_textures(state) {
-        let tint = tint_color(textures.tint);
+        let tint = tint_color(textures.tint, WHITE);
         let tex = uv_map.get_region(&textures.top);
         (tex, tint)
     } else {

@@ -102,6 +102,7 @@ struct App {
     player: LocalPlayer,
     tick_accumulator: f32,
     prev_player_pos: glam::Vec3,
+    biome_climate: std::sync::Arc<std::collections::HashMap<u32, (f32, f32)>>,
     mesh_dispatcher: Option<MeshDispatcher>,
     paused: bool,
     inventory_open: bool,
@@ -199,6 +200,7 @@ impl App {
             player: LocalPlayer::new(),
             tick_accumulator: 0.0,
             prev_player_pos: glam::Vec3::ZERO,
+            biome_climate: std::sync::Arc::new(std::collections::HashMap::new()),
             mesh_dispatcher: None,
             paused: false,
             inventory_open: false,
@@ -328,7 +330,8 @@ impl App {
         self.entity_store.clear();
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_chunk_meshes();
-            self.mesh_dispatcher = Some(renderer.create_mesh_dispatcher());
+            self.mesh_dispatcher =
+                Some(renderer.create_mesh_dispatcher(self.biome_climate.clone()));
         }
         if let Some(reason) = reason {
             self.menu.show_disconnect(reason);
@@ -358,14 +361,21 @@ impl App {
                     log::info!("Connected to server");
                     self.state = GameState::Loading;
                 }
-                NetworkEvent::BiomeColors { .. } => {}
+                NetworkEvent::BiomeColors { colors } => {
+                    log::info!("Received {} biome climate entries", colors.len());
+                    self.biome_climate = std::sync::Arc::new(colors);
+                    if let Some(dispatcher) = &mut self.mesh_dispatcher {
+                        dispatcher.set_biome_climate(self.biome_climate.clone());
+                    }
+                }
                 NetworkEvent::DimensionInfo { height, min_y } => {
                     log::info!("Dimension: height={height}, min_y={min_y}");
                     self.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
                     if let Some(renderer) = &mut self.renderer {
                         renderer.clear_chunk_meshes();
-                        self.mesh_dispatcher = Some(renderer.create_mesh_dispatcher());
+                        self.mesh_dispatcher =
+                            Some(renderer.create_mesh_dispatcher(self.biome_climate.clone()));
                     }
                 }
                 NetworkEvent::ChunkLoaded {
@@ -772,7 +782,7 @@ impl ApplicationHandler for App {
             }
         };
 
-        self.mesh_dispatcher = Some(renderer.create_mesh_dispatcher());
+        self.mesh_dispatcher = Some(renderer.create_mesh_dispatcher(self.biome_climate.clone()));
         if let Some(uuid) = self.pending_skin_uuid.take() {
             renderer.load_player_skin(&uuid, &self.tokio_rt);
         }

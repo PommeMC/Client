@@ -80,6 +80,8 @@ pub struct Renderer {
     swapchain: SwapchainState,
     camera: Camera,
     registry: BlockRegistry,
+    assets_dir: std::path::PathBuf,
+    asset_index: Option<AssetIndex>,
     atlas: TextureAtlas,
     chunk_pipeline: ChunkPipeline,
     hand_pipeline: HandPipeline,
@@ -252,6 +254,8 @@ impl Renderer {
             swapchain: swapchain_state,
             camera,
             registry,
+            assets_dir: assets_dir.to_path_buf(),
+            asset_index: asset_index.clone(),
             atlas,
             chunk_pipeline,
             hand_pipeline,
@@ -565,8 +569,20 @@ impl Renderer {
         self.chunk_buffers.clear();
     }
 
-    pub fn create_mesh_dispatcher(&self) -> MeshDispatcher {
-        MeshDispatcher::new(self.registry.clone(), self.atlas.uv_map.clone())
+    pub fn create_mesh_dispatcher(
+        &self,
+        biome_climate: std::sync::Arc<std::collections::HashMap<u32, (f32, f32)>>,
+    ) -> MeshDispatcher {
+        let grass_colormap = crate::renderer::chunk::mesher::GrassColormap::load(
+            &self.assets_dir,
+            &self.asset_index,
+        );
+        MeshDispatcher::new(
+            self.registry.clone(),
+            self.atlas.uv_map.clone(),
+            grass_colormap,
+            biome_climate,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
