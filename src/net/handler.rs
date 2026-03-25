@@ -164,6 +164,7 @@ pub fn handle_game_packet(
         ClientboundGamePacket::AddEntity(p) => {
             let yaw = (p.y_rot as f32) * 360.0 / 256.0;
             let pitch = (p.x_rot as f32) * 360.0 / 256.0;
+            let head_yaw = (p.y_head_rot as f32) * 360.0 / 256.0;
             let _ = event_tx.try_send(NetworkEvent::EntitySpawned {
                 id: p.id.0,
                 entity_type: p.entity_type,
@@ -172,6 +173,14 @@ pub fn handle_game_packet(
                 z: p.position.z,
                 yaw,
                 pitch,
+                head_yaw,
+            });
+        }
+        ClientboundGamePacket::RotateHead(p) => {
+            let head_yaw = (p.y_head_rot as f32) * 360.0 / 256.0;
+            let _ = event_tx.try_send(NetworkEvent::EntityHeadRotation {
+                id: p.entity_id.0,
+                head_yaw,
             });
         }
         ClientboundGamePacket::MoveEntityPos(p) => {

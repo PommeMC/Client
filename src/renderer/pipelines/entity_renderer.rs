@@ -31,15 +31,23 @@ pub struct EntityRenderer {
     texture_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     camera_sets: Vec<vk::DescriptorSet>,
-    texture_set: vk::DescriptorSet,
+    adult_texture_set: vk::DescriptorSet,
+    baby_texture_set: vk::DescriptorSet,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Allocation>,
-    vertex_buffer: vk::Buffer,
-    vertex_allocation: Allocation,
-    texture_image: vk::Image,
-    texture_view: vk::ImageView,
+    adult_vertex_buffer: vk::Buffer,
+    adult_vertex_allocation: Allocation,
+    adult_model: entity_model::BakedEntityModel,
+    baby_vertex_buffer: vk::Buffer,
+    baby_vertex_allocation: Allocation,
+    baby_model: entity_model::BakedEntityModel,
+    adult_texture_image: vk::Image,
+    adult_texture_view: vk::ImageView,
+    baby_texture_image: vk::Image,
+    baby_texture_view: vk::ImageView,
     texture_sampler: vk::Sampler,
-    texture_allocation: Allocation,
+    adult_texture_allocation: Allocation,
+    baby_texture_allocation: Allocation,
 }
 
 impl EntityRenderer {
@@ -87,11 +95,11 @@ impl EntityRenderer {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 1,
+                descriptor_count: 2,
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets((MAX_FRAMES_IN_FLIGHT + 1) as u32)
+            .max_sets((MAX_FRAMES_IN_FLIGHT + 2) as u32)
             .pool_sizes(&pool_sizes);
         let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
             .expect("failed to create entity descriptor pool");
@@ -103,12 +111,14 @@ impl EntityRenderer {
         let camera_sets = unsafe { device.allocate_descriptor_sets(&camera_alloc_info) }
             .expect("failed to allocate entity camera descriptor sets");
 
-        let tex_layouts = [texture_layout];
+        let tex_layouts = [texture_layout, texture_layout];
         let tex_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
             .set_layouts(&tex_layouts);
-        let texture_set = unsafe { device.allocate_descriptor_sets(&tex_alloc_info) }
-            .expect("failed to allocate entity texture descriptor set")[0];
+        let tex_sets = unsafe { device.allocate_descriptor_sets(&tex_alloc_info) }
+            .expect("failed to allocate entity texture descriptor sets");
+        let adult_texture_set = tex_sets[0];
+        let baby_texture_set = tex_sets[1];
 
         let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -137,35 +147,70 @@ impl EntityRenderer {
             camera_allocations.push(alloc);
         }
 
-        let (texture_image, texture_view, texture_allocation) = load_pig_texture(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            assets_dir,
-            asset_index,
-        );
+        let (adult_texture_image, adult_texture_view, adult_texture_allocation) =
+            load_entity_texture(
+                device,
+                queue,
+                command_pool,
+                allocator,
+                assets_dir,
+                asset_index,
+                &[
+                    "minecraft/textures/entity/pig/pig_temperate.png",
+                    "minecraft/textures/entity/pig/temperate_pig.png",
+                ],
+                "pig_adult_texture",
+                64,
+            );
+        let (baby_texture_image, baby_texture_view, baby_texture_allocation) =
+            load_entity_texture(
+                device,
+                queue,
+                command_pool,
+                allocator,
+                assets_dir,
+                asset_index,
+                &["minecraft/textures/entity/pig/pig_temperate_baby.png"],
+                "pig_baby_texture",
+                32,
+            );
         let texture_sampler = unsafe { util::create_nearest_sampler(device) };
 
-        let image_info = [vk::DescriptorImageInfo {
-            sampler: texture_sampler,
-            image_view: texture_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
-        let tex_write = vk::WriteDescriptorSet::default()
-            .dst_set(texture_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&image_info);
-        unsafe { device.update_descriptor_sets(&[tex_write], &[]) };
+        for (set, view) in [
+            (adult_texture_set, adult_texture_view),
+            (baby_texture_set, baby_texture_view),
+        ] {
+            let image_info = [vk::DescriptorImageInfo {
+                sampler: texture_sampler,
+                image_view: view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            }];
+            let tex_write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&image_info);
+            unsafe { device.update_descriptor_sets(&[tex_write], &[]) };
+        }
 
-        const MAX_ENTITY_VERTICES: usize = 50000;
-        let (vertex_buffer, vertex_allocation) = util::create_host_buffer(
+        let adult_model = entity_model::bake_pig_model();
+        let adult_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&adult_model.vertices);
+        let (adult_vertex_buffer, adult_vertex_allocation) = util::create_mapped_buffer(
             device,
             allocator,
-            (MAX_ENTITY_VERTICES * std::mem::size_of::<ChunkVertex>()) as u64,
+            adult_bytes,
             vk::BufferUsageFlags::VERTEX_BUFFER,
-            "entity_vertices",
+            "entity_adult_vertices",
+        );
+
+        let baby_model = entity_model::bake_baby_pig_model();
+        let baby_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&baby_model.vertices);
+        let (baby_vertex_buffer, baby_vertex_allocation) = util::create_mapped_buffer(
+            device,
+            allocator,
+            baby_bytes,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            "entity_baby_vertices",
         );
 
         Self {
@@ -175,15 +220,23 @@ impl EntityRenderer {
             texture_layout,
             descriptor_pool,
             camera_sets,
-            texture_set,
+            adult_texture_set,
+            baby_texture_set,
             camera_buffers,
             camera_allocations,
-            vertex_buffer,
-            vertex_allocation,
-            texture_image,
-            texture_view,
+            adult_vertex_buffer,
+            adult_vertex_allocation,
+            adult_model,
+            baby_vertex_buffer,
+            baby_vertex_allocation,
+            baby_model,
+            adult_texture_image,
+            adult_texture_view,
+            baby_texture_image,
+            baby_texture_view,
             texture_sampler,
-            texture_allocation,
+            adult_texture_allocation,
+            baby_texture_allocation,
         }
     }
 
@@ -204,70 +257,73 @@ impl EntityRenderer {
             return;
         }
 
-        let mapped = self.vertex_allocation.mapped_slice().unwrap();
-        let mut offset = 0usize;
-
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &[self.camera_sets[frame], self.texture_set],
-                &[],
-            );
-            device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
 
+            let mut last_baby = None;
             for info in entities {
-                let mut model = if info.is_baby {
-                    entity_model::build_baby_pig_model()
+                let (model, vertex_buffer, texture_set) = if info.is_baby {
+                    (
+                        &self.baby_model,
+                        self.baby_vertex_buffer,
+                        self.baby_texture_set,
+                    )
                 } else {
-                    entity_model::build_pig_model()
+                    (
+                        &self.adult_model,
+                        self.adult_vertex_buffer,
+                        self.adult_texture_set,
+                    )
                 };
 
-                entity_model::setup_quadruped_anim(
-                    &mut model,
+                if last_baby != Some(info.is_baby) {
+                    device.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.pipeline_layout,
+                        0,
+                        &[self.camera_sets[frame], texture_set],
+                        &[],
+                    );
+                    device.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buffer], &[0]);
+                    last_baby = Some(info.is_baby);
+                }
+
+                let entity_mat = glam::Mat4::from_translation(glam::Vec3::new(
+                    info.x as f32,
+                    info.y as f32,
+                    info.z as f32,
+                )) * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians());
+
+                let anim_rotations = entity_model::compute_quadruped_anim(
+                    model,
                     info.pitch,
                     info.head_yaw - info.yaw,
                     info.walk_anim_pos,
                     info.walk_anim_speed,
                 );
 
-                let verts = entity_model::generate_entity_vertices(&model, 64, 64);
-                let vert_count = verts.len() as u32;
-                let bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&verts);
+                let part_transforms = model.compute_part_transforms(&anim_rotations);
 
-                if offset + bytes.len() > mapped.len() {
-                    break;
+                for (i, (start, count)) in model.part_ranges.iter().enumerate() {
+                    if *count == 0 {
+                        continue;
+                    }
+
+                    let part_mat = entity_mat * part_transforms[i];
+
+                    let mat_array = part_mat.to_cols_array();
+                    let mat_bytes: &[u8] = bytemuck::cast_slice(&mat_array);
+                    device.cmd_push_constants(
+                        cmd,
+                        self.pipeline_layout,
+                        vk::ShaderStageFlags::VERTEX,
+                        0,
+                        mat_bytes,
+                    );
+
+                    device.cmd_draw(cmd, *count, 1, *start, 0);
                 }
-
-                std::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(),
-                    mapped.as_ptr().add(offset) as *mut u8,
-                    bytes.len(),
-                );
-
-                let model_mat = glam::Mat4::from_translation(glam::Vec3::new(
-                    info.x as f32,
-                    info.y as f32,
-                    info.z as f32,
-                )) * glam::Mat4::from_rotation_y(-info.yaw.to_radians());
-
-                let model_array = model_mat.to_cols_array();
-                let model_bytes: &[u8] = bytemuck::cast_slice(&model_array);
-                device.cmd_push_constants(
-                    cmd,
-                    self.pipeline_layout,
-                    vk::ShaderStageFlags::VERTEX,
-                    0,
-                    model_bytes,
-                );
-
-                let first_vertex = (offset / std::mem::size_of::<ChunkVertex>()) as u32;
-                device.cmd_draw(cmd, vert_count, 1, first_vertex, 0);
-
-                offset += bytes.len();
             }
         }
     }
@@ -288,23 +344,30 @@ impl EntityRenderer {
                 .ok();
         }
 
-        unsafe { device.destroy_buffer(self.vertex_buffer, None) };
-        alloc
-            .free(std::mem::replace(&mut self.vertex_allocation, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
+        for (buf, allocation) in [
+            (&self.adult_vertex_buffer, &mut self.adult_vertex_allocation),
+            (&self.baby_vertex_buffer, &mut self.baby_vertex_allocation),
+        ] {
+            unsafe { device.destroy_buffer(*buf, None) };
+            alloc
+                .free(std::mem::replace(allocation, unsafe { std::mem::zeroed() }))
+                .ok();
+        }
 
         unsafe {
             device.destroy_sampler(self.texture_sampler, None);
-            device.destroy_image_view(self.texture_view, None);
+            device.destroy_image_view(self.adult_texture_view, None);
+            device.destroy_image_view(self.baby_texture_view, None);
         }
-        alloc
-            .free(std::mem::replace(&mut self.texture_allocation, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
-        unsafe { device.destroy_image(self.texture_image, None) };
+        for (img, allocation) in [
+            (self.adult_texture_image, &mut self.adult_texture_allocation),
+            (self.baby_texture_image, &mut self.baby_texture_allocation),
+        ] {
+            alloc
+                .free(std::mem::replace(allocation, unsafe { std::mem::zeroed() }))
+                .ok();
+            unsafe { device.destroy_image(img, None) };
+        }
 
         drop(alloc);
 
@@ -318,51 +381,45 @@ impl EntityRenderer {
     }
 }
 
-fn load_pig_texture(
+#[allow(clippy::too_many_arguments)]
+fn load_entity_texture(
     device: &ash::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
     assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
+    asset_keys: &[&str],
+    label: &str,
+    fallback_size: u32,
 ) -> (vk::Image, vk::ImageView, Allocation) {
-    let key = "minecraft/textures/entity/pig/temperate_pig.png";
-    let path = resolve_asset_path(assets_dir, asset_index, key);
-
-    let (pixels, width, height) = util::load_png(&path).unwrap_or_else(|| {
-        log::warn!(
-            "Failed to load pig texture from {}, using fallback",
-            path.display()
-        );
-        fallback_pig_texture()
-    });
+    let (pixels, width, height) = asset_keys
+        .iter()
+        .find_map(|key| {
+            let path = resolve_asset_path(assets_dir, asset_index, key);
+            util::load_png(&path)
+        })
+        .unwrap_or_else(|| {
+            log::warn!("Failed to load entity texture {:?}, using fallback", asset_keys);
+            fallback_texture(fallback_size)
+        });
 
     let (image, view, allocation) =
-        util::create_gpu_image(device, allocator, width, height, "pig_texture");
+        util::create_gpu_image(device, allocator, width, height, label);
     let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, "pig_texture_staging");
-    util::upload_image(
-        device,
-        queue,
-        command_pool,
-        staging_buf,
-        image,
-        width,
-        height,
-    );
+        util::create_staging_buffer(device, allocator, &pixels, &format!("{label}_staging"));
+    util::upload_image(device, queue, command_pool, staging_buf, image, width, height);
     unsafe { device.destroy_buffer(staging_buf, None) };
     allocator.lock().unwrap().free(staging_alloc).ok();
     (image, view, allocation)
 }
 
-fn fallback_pig_texture() -> (Vec<u8>, u32, u32) {
-    let w = 64u32;
-    let h = 64u32;
-    let mut pixels = vec![0u8; (w * h * 4) as usize];
+fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
+    let mut pixels = vec![0u8; (size * size * 4) as usize];
     for pixel in pixels.chunks_exact_mut(4) {
         pixel.copy_from_slice(&[219, 148, 148, 255]);
     }
-    (pixels, w, h)
+    (pixels, size, size)
 }
 
 fn create_pipeline(

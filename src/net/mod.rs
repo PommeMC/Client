@@ -81,6 +81,7 @@ pub enum NetworkEvent {
         z: f64,
         yaw: f32,
         pitch: f32,
+        head_yaw: f32,
     },
     EntityMoved {
         id: i32,
@@ -112,6 +113,10 @@ pub enum NetworkEvent {
         id: i32,
         item_name: String,
         count: i32,
+    },
+    EntityHeadRotation {
+        id: i32,
+        head_yaw: f32,
     },
     EntityBabyFlag {
         id: i32,

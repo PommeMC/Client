@@ -57,7 +57,7 @@ pub struct ConnectionHandle {
 }
 
 pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> ConnectionHandle {
-    let (event_tx, event_rx) = crossbeam_channel::bounded(256);
+    let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
     let (chat_tx, chat_rx) = crossbeam_channel::bounded::<String>(64);
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<ServerboundGamePacket>();
     let game_packet_tx = packet_tx.clone();
