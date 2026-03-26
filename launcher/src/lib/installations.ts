@@ -11,10 +11,15 @@ export const useInstallations = () => {
     return invoke<Installation>("create_installation", { payload });
   };
 
+  const invokeDeleteInstallation = async (id: string): Promise<void> => {
+    return invoke("delete_installation", { id });
+  };
+
   return {
     installations,
     setInstallations,
     invokeCreateInstallation,
+    invokeDeleteInstallation,
     activeInstall,
     setActiveInstall,
     selectedInstall,

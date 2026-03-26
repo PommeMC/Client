@@ -26,3 +26,17 @@ pub fn register(installation: Installation) -> Result<(), InstallationError> {
     list.push(installation);
     save(&list)
 }
+
+pub fn unregister(id: &str) -> Result<(), InstallationError> {
+    let mut list = load()?;
+
+    list.retain(|i| i.id != id);
+
+    save(&list)
+}
+
+pub fn get_install(id: &str) -> Result<Option<Installation>, InstallationError> {
+    let list = load()?;
+
+    Ok(list.into_iter().find(|i| i.id == id))
+}

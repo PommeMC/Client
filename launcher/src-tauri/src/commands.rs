@@ -498,3 +498,17 @@ pub async fn get_installations(
 
     Ok(installations)
 }
+
+#[tauri::command]
+pub async fn delete_installation(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), InstallationError> {
+    use installations::{fs, registry};
+
+    let _guard = state.installations_lock.lock().await;
+    if let Some(install) = registry::get_install(&id)? {
+        fs::remove_installation_fs(&install.directory)?;
+    }
+    registry::unregister(&id)
+}

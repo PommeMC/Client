@@ -39,6 +39,7 @@ function App() {
     launcherSettings,
     invokeCreateInstallation,
     activeInstall,
+    invokeDeleteInstallation,
     setActiveInstall,
     setInstallations,
   } = useAppStateContext();
@@ -206,6 +207,14 @@ function App() {
     }
   };
 
+  const deleteInstallation = async (installation_id: string): Promise<void> => {
+    try {
+      await invokeDeleteInstallation(installation_id);
+    } catch (e) {
+      console.error("Failed to delete installation", e);
+    }
+  };
+
   useEffect(() => {
     invoke<Installation[]>("get_installations")
       .then((installs) => {
@@ -230,7 +239,9 @@ function App() {
             <Homepage handleLaunch={handleLaunch} openPatchNote={openPatchNote} />
           )}
 
-          {page === "installations" && <InstallationsPage />}
+          {page === "installations" && (
+            <InstallationsPage deleteInstallation={deleteInstallation} />
+          )}
 
           {page === "news" && <NewsPage openPatchNote={openPatchNote} />}
 

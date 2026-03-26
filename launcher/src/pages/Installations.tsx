@@ -11,7 +11,11 @@ import { useAppStateContext } from "../lib/state";
 import { useEffect } from "react";
 import { formatRelativeDate } from "../lib/helpers.ts";
 
-export default function InstallationsPage() {
+interface InstallationsPageProps {
+  deleteInstallation: (install_id: string) => Promise<void>;
+}
+
+export default function InstallationsPage({ deleteInstallation }: InstallationsPageProps) {
   const {
     activeInstall,
     setActiveInstall,
@@ -115,10 +119,16 @@ export default function InstallationsPage() {
                         title: `Deleting ${inst.name}`,
                         message: "Are you sure you want to delete this installation?",
                         onConfirm: async () => {
-                          setInstallations((prev) => prev.filter((i) => i.id !== inst.id));
-                          if (!activeInstall || activeInstall.id === inst.id) {
-                            setActiveInstall(() => installations[0]);
-                          }
+                          await deleteInstallation(inst.id);
+                          setInstallations((prev) => {
+                            const index = prev.findIndex((x) => x.id === inst.id);
+                            const newList = prev.filter((i) => i.id !== inst.id);
+                            setActiveInstall((current) => {
+                              if (current?.id !== inst.id) return current;
+                              return newList[index] || newList[index - 1] || null;
+                            });
+                            return newList;
+                          });
                         },
                       },
                     });
