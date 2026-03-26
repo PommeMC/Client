@@ -26,30 +26,58 @@ pub struct ChunkMeshData {
 }
 
 const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
-fn tint_color(tint: Tint, grass: [f32; 3]) -> [f32; 3] {
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum GrassColorModifier {
+    #[default]
+    None,
+    DarkForest,
+    Swamp,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BiomeClimate {
+    pub temperature: f32,
+    pub downfall: f32,
+    pub grass_color_override: Option<[f32; 3]>,
+    pub grass_color_modifier: GrassColorModifier,
+    pub foliage_color_override: Option<[f32; 3]>,
+}
+
+impl Default for BiomeClimate {
+    fn default() -> Self {
+        Self {
+            temperature: 0.8,
+            downfall: 0.4,
+            grass_color_override: None,
+            grass_color_modifier: GrassColorModifier::None,
+            foliage_color_override: None,
+        }
+    }
+}
+
+fn tint_color(tint: Tint, grass: [f32; 3], foliage: [f32; 3]) -> [f32; 3] {
     match tint {
         Tint::None => WHITE,
         Tint::Grass => grass,
-        Tint::Foliage => grass,
+        Tint::Foliage => foliage,
     }
 }
 
 const MAX_MESH_UPLOADS_PER_FRAME: usize = 16;
 
-pub struct GrassColormap {
+pub struct Colormap {
     pixels: Vec<[u8; 3]>,
 }
 
-impl GrassColormap {
+impl Colormap {
     pub fn load(
         assets_dir: &std::path::Path,
         asset_index: &Option<crate::assets::AssetIndex>,
+        colormap_path: &str,
     ) -> Self {
-        let path = crate::assets::resolve_asset_path(
-            assets_dir,
-            asset_index,
-            "minecraft/textures/colormap/grass.png",
-        );
+        let path =
+            crate::assets::resolve_asset_path(assets_dir, asset_index, colormap_path);
         let pixels = crate::renderer::util::load_png(&path)
             .map(|(data, _w, _h)| {
                 data.chunks(4)
@@ -68,12 +96,50 @@ impl GrassColormap {
         let y = ((1.0 - d) * 255.0) as usize;
         let idx = (y * 256 + x).min(256 * 256 - 1);
         let [r, g, b] = self.pixels[idx];
-        [
-            (r as f32 / 255.0).powf(2.2),
-            (g as f32 / 255.0).powf(2.2),
-            (b as f32 / 255.0).powf(2.2),
-        ]
+        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
     }
+}
+
+fn apply_grass_modifier(modifier: GrassColorModifier, base: [f32; 3], x: i32, z: i32) -> [f32; 3] {
+    match modifier {
+        GrassColorModifier::None => base,
+        GrassColorModifier::DarkForest => {
+            // Vanilla: ((baseColor & 0xFEFEFE) + 0x28340A) >> 1
+            let r = ((to_u8(base[0]) & 0xFE) as u32 + 0x28) >> 1;
+            let g = ((to_u8(base[1]) & 0xFE) as u32 + 0x34) >> 1;
+            let b = ((to_u8(base[2]) & 0xFE) as u32 + 0x0A) >> 1;
+            [r.min(255) as f32 / 255.0, g.min(255) as f32 / 255.0, b.min(255) as f32 / 255.0]
+        }
+        GrassColorModifier::Swamp => {
+            // Vanilla: perlin noise at (x * 0.0225, z * 0.0225)
+            // < -0.1 → 0x4C763C, else → 0x6A7039
+            let noise = simple_hash_noise(x as f64 * 0.0225, z as f64 * 0.0225);
+            if noise < -0.1 {
+                [0x4C as f32 / 255.0, 0x76 as f32 / 255.0, 0x3C as f32 / 255.0]
+            } else {
+                [0x6A as f32 / 255.0, 0x70 as f32 / 255.0, 0x39 as f32 / 255.0]
+            }
+        }
+    }
+}
+
+fn to_u8(f: f32) -> u8 {
+    (f * 255.0).round() as u8
+}
+
+/// Simple deterministic noise approximation for swamp grass color selection.
+fn simple_hash_noise(x: f64, z: f64) -> f64 {
+    let ix = (x * 1000.0) as i64;
+    let iz = (z * 1000.0) as i64;
+    let h = ix.wrapping_mul(6364136223846793005).wrapping_add(iz.wrapping_mul(1442695040888963407));
+    (h as f64) / (i64::MAX as f64)
+}
+
+pub fn int_to_rgb(color: i32) -> [f32; 3] {
+    let r = ((color >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((color >> 8) & 0xFF) as f32 / 255.0;
+    let b = (color & 0xFF) as f32 / 255.0;
+    [r, g, b]
 }
 
 pub struct MeshDispatcher {
@@ -81,16 +147,18 @@ pub struct MeshDispatcher {
     result_tx: crossbeam_channel::Sender<ChunkMeshData>,
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
-    grass_colormap: Arc<GrassColormap>,
-    biome_climate: Arc<std::collections::HashMap<u32, (f32, f32)>>,
+    grass_colormap: Arc<Colormap>,
+    foliage_colormap: Arc<Colormap>,
+    biome_climate: Arc<HashMap<u32, BiomeClimate>>,
 }
 
 impl MeshDispatcher {
     pub fn new(
         registry: BlockRegistry,
         uv_map: AtlasUVMap,
-        grass_colormap: GrassColormap,
-        biome_climate: Arc<std::collections::HashMap<u32, (f32, f32)>>,
+        grass_colormap: Colormap,
+        foliage_colormap: Colormap,
+        biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     ) -> Self {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         Self {
@@ -99,11 +167,12 @@ impl MeshDispatcher {
             registry: Arc::new(registry),
             uv_map: Arc::new(uv_map),
             grass_colormap: Arc::new(grass_colormap),
+            foliage_colormap: Arc::new(foliage_colormap),
             biome_climate,
         }
     }
 
-    pub fn set_biome_climate(&mut self, climate: Arc<std::collections::HashMap<u32, (f32, f32)>>) {
+    pub fn set_biome_climate(&mut self, climate: Arc<HashMap<u32, BiomeClimate>>) {
         self.biome_climate = climate;
     }
 
@@ -111,6 +180,7 @@ impl MeshDispatcher {
         let registry = Arc::clone(&self.registry);
         let uv_map = Arc::clone(&self.uv_map);
         let grass_colormap = Arc::clone(&self.grass_colormap);
+        let foliage_colormap = Arc::clone(&self.foliage_colormap);
         let biome_climate = Arc::clone(&self.biome_climate);
         let tx = self.result_tx.clone();
 
@@ -145,6 +215,7 @@ impl MeshDispatcher {
                 chunks: chunks_needed.into_iter().zip(chunk_arcs).collect(),
                 light,
                 grass_colormap,
+                foliage_colormap,
                 biome_climate,
                 min_y,
                 height,
@@ -165,8 +236,9 @@ struct ChunkStoreSnapshot {
         Option<Arc<parking_lot::RwLock<azalea_world::Chunk>>>,
     )>,
     light: std::collections::HashMap<(i32, i32), crate::world::chunk::ChunkLightData>,
-    grass_colormap: Arc<GrassColormap>,
-    biome_climate: Arc<std::collections::HashMap<u32, (f32, f32)>>,
+    grass_colormap: Arc<Colormap>,
+    foliage_colormap: Arc<Colormap>,
+    biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     min_y: i32,
     height: u32,
 }
@@ -215,14 +287,58 @@ impl ChunkStoreSnapshot {
         c.get_biome(biome_pos, self.min_y).unwrap_or_default()
     }
 
-    fn grass_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+    fn grass_color_at(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
         let biome = self.get_biome(x, y, z);
-        let (temp, downfall) = self
+        let climate = self
             .biome_climate
             .get(&u32::from(biome))
             .copied()
-            .unwrap_or((0.8, 0.4));
-        self.grass_colormap.lookup(temp, downfall)
+            .unwrap_or_default();
+        let base = if let Some(ovr) = climate.grass_color_override {
+            ovr
+        } else {
+            self.grass_colormap.lookup(climate.temperature, climate.downfall)
+        };
+        apply_grass_modifier(climate.grass_color_modifier, base, x, z)
+    }
+
+    fn foliage_color_at(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        let biome = self.get_biome(x, y, z);
+        let climate = self
+            .biome_climate
+            .get(&u32::from(biome))
+            .copied()
+            .unwrap_or_default();
+        if let Some(ovr) = climate.foliage_color_override {
+            ovr
+        } else {
+            self.foliage_colormap.lookup(climate.temperature, climate.downfall)
+        }
+    }
+
+    fn grass_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        self.blend_color(x, y, z, Self::grass_color_at)
+    }
+
+    fn foliage_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        self.blend_color(x, y, z, Self::foliage_color_at)
+    }
+
+    fn blend_color(&self, x: i32, y: i32, z: i32, color_fn: fn(&Self, i32, i32, i32) -> [f32; 3]) -> [f32; 3] {
+        const RADIUS: i32 = 2;
+        const COUNT: f32 = ((RADIUS * 2 + 1) * (RADIUS * 2 + 1)) as f32;
+        let mut r = 0.0f32;
+        let mut g = 0.0f32;
+        let mut b = 0.0f32;
+        for dz in -RADIUS..=RADIUS {
+            for dx in -RADIUS..=RADIUS {
+                let c = color_fn(self, x + dx, y, z + dz);
+                r += c[0];
+                g += c[1];
+                b += c[2];
+            }
+        }
+        [r / COUNT, g / COUNT, b / COUNT]
     }
 
     fn get_light(&self, x: i32, y: i32, z: i32) -> f32 {
@@ -396,6 +512,7 @@ fn greedy_mesh_section(
             let tint = tint_color(
                 info.textures.tint,
                 snapshot.grass_tint(world_x, section_y, world_z),
+                snapshot.foliage_tint(world_x, section_y, world_z),
             );
 
             let packed_verts = face.vertices_packed(*quad);
@@ -614,11 +731,7 @@ fn emit_baked_model(
         }
 
         let region = uv_map.get_region(&quad.texture);
-        let tint = if quad.tinted {
-            snapshot.grass_tint(bx, by, bz)
-        } else {
-            WHITE
-        };
+        let tint = tint_color(quad.tint, snapshot.grass_tint(bx, by, bz), snapshot.foliage_tint(bx, by, bz));
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, bx, by, bz, dir)
         } else {
@@ -650,7 +763,7 @@ fn emit_cube_faces(
     by: i32,
     bz: i32,
 ) {
-    let tint = tint_color(textures.tint, snapshot.grass_tint(bx, by, bz));
+    let tint = tint_color(textures.tint, snapshot.grass_tint(bx, by, bz), snapshot.foliage_tint(bx, by, bz));
 
     for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
         let offset = dir.offset();
@@ -800,11 +913,7 @@ fn emit_multipart(
         }
 
         let region = uv_map.get_region(&quad.texture);
-        let tint = if quad.tinted {
-            snapshot.grass_tint(bx, by, bz)
-        } else {
-            WHITE
-        };
+        let tint = tint_color(quad.tint, snapshot.grass_tint(bx, by, bz), snapshot.foliage_tint(bx, by, bz));
         emit_face(
             vertices,
             indices,
@@ -834,7 +943,7 @@ fn emit_lod_cube(
     step: i32,
 ) {
     let region = if let Some(textures) = registry.get_textures(state) {
-        let tint = tint_color(textures.tint, WHITE);
+        let tint = tint_color(textures.tint, WHITE, WHITE);
         let tex = uv_map.get_region(&textures.top);
         (tex, tint)
     } else {
@@ -979,58 +1088,132 @@ fn compute_face_ao(
     let s = |dx: i32, dy: i32, dz: i32| -> f32 {
         shade_brightness(snapshot.get_block_state(bx + dx, by + dy, bz + dz))
     };
+    let l = |dx: i32, dy: i32, dz: i32| -> f32 {
+        snapshot.get_light(bx + dx, by + dy, bz + dz)
+    };
     let dir_shade = match dir {
         Direction::Up => 1.0,
         Direction::Down => 0.5,
         Direction::North | Direction::South => 0.8,
         Direction::East | Direction::West => 0.6,
     };
-    let offset = dir.offset();
-    let base_light = snapshot.get_light(bx + offset[0], by + offset[1], bz + offset[2]) * dir_shade;
-    let ao = match dir {
-        Direction::Up => [
-            vertex_ao(s(0, 1, 1), s(-1, 1, 0), s(-1, 1, 1)),
-            vertex_ao(s(0, 1, 1), s(1, 1, 0), s(1, 1, 1)),
-            vertex_ao(s(0, 1, -1), s(1, 1, 0), s(1, 1, -1)),
-            vertex_ao(s(0, 1, -1), s(-1, 1, 0), s(-1, 1, -1)),
-        ],
-        Direction::Down => [
-            vertex_ao(s(0, -1, -1), s(-1, -1, 0), s(-1, -1, -1)),
-            vertex_ao(s(0, -1, -1), s(1, -1, 0), s(1, -1, -1)),
-            vertex_ao(s(0, -1, 1), s(1, -1, 0), s(1, -1, 1)),
-            vertex_ao(s(0, -1, 1), s(-1, -1, 0), s(-1, -1, 1)),
-        ],
-        Direction::North => [
-            vertex_ao(s(-1, 0, -1), s(0, -1, -1), s(-1, -1, -1)),
-            vertex_ao(s(-1, 0, -1), s(0, 1, -1), s(-1, 1, -1)),
-            vertex_ao(s(1, 0, -1), s(0, 1, -1), s(1, 1, -1)),
-            vertex_ao(s(1, 0, -1), s(0, -1, -1), s(1, -1, -1)),
-        ],
-        Direction::South => [
-            vertex_ao(s(1, 0, 1), s(0, -1, 1), s(1, -1, 1)),
-            vertex_ao(s(1, 0, 1), s(0, 1, 1), s(1, 1, 1)),
-            vertex_ao(s(-1, 0, 1), s(0, 1, 1), s(-1, 1, 1)),
-            vertex_ao(s(-1, 0, 1), s(0, -1, 1), s(-1, -1, 1)),
-        ],
-        Direction::East => [
-            vertex_ao(s(1, 0, -1), s(1, -1, 0), s(1, -1, -1)),
-            vertex_ao(s(1, 0, -1), s(1, 1, 0), s(1, 1, -1)),
-            vertex_ao(s(1, 0, 1), s(1, 1, 0), s(1, 1, 1)),
-            vertex_ao(s(1, 0, 1), s(1, -1, 0), s(1, -1, 1)),
-        ],
-        Direction::West => [
-            vertex_ao(s(-1, 0, 1), s(-1, -1, 0), s(-1, -1, 1)),
-            vertex_ao(s(-1, 0, 1), s(-1, 1, 0), s(-1, 1, 1)),
-            vertex_ao(s(-1, 0, -1), s(-1, 1, 0), s(-1, 1, -1)),
-            vertex_ao(s(-1, 0, -1), s(-1, -1, 0), s(-1, -1, -1)),
-        ],
+
+    // For each vertex: compute AO from 3 neighbors, and average light from 4 neighbors
+    // (the face-normal block + the same 3 used for AO).
+    let (ao, lights) = match dir {
+        Direction::Up => {
+            let n = [0, 1, 0];
+            (
+                [
+                    vertex_ao(s(0, 1, 1), s(-1, 1, 0), s(-1, 1, 1)),
+                    vertex_ao(s(0, 1, 1), s(1, 1, 0), s(1, 1, 1)),
+                    vertex_ao(s(0, 1, -1), s(1, 1, 0), s(1, 1, -1)),
+                    vertex_ao(s(0, 1, -1), s(-1, 1, 0), s(-1, 1, -1)),
+                ],
+                [
+                    avg4(l(n[0],n[1],n[2]), l(0,1,1), l(-1,1,0), l(-1,1,1)),
+                    avg4(l(n[0],n[1],n[2]), l(0,1,1), l(1,1,0), l(1,1,1)),
+                    avg4(l(n[0],n[1],n[2]), l(0,1,-1), l(1,1,0), l(1,1,-1)),
+                    avg4(l(n[0],n[1],n[2]), l(0,1,-1), l(-1,1,0), l(-1,1,-1)),
+                ],
+            )
+        }
+        Direction::Down => {
+            let n = [0, -1, 0];
+            (
+                [
+                    vertex_ao(s(0,-1,-1), s(-1,-1,0), s(-1,-1,-1)),
+                    vertex_ao(s(0,-1,-1), s(1,-1,0), s(1,-1,-1)),
+                    vertex_ao(s(0,-1,1), s(1,-1,0), s(1,-1,1)),
+                    vertex_ao(s(0,-1,1), s(-1,-1,0), s(-1,-1,1)),
+                ],
+                [
+                    avg4(l(n[0],n[1],n[2]), l(0,-1,-1), l(-1,-1,0), l(-1,-1,-1)),
+                    avg4(l(n[0],n[1],n[2]), l(0,-1,-1), l(1,-1,0), l(1,-1,-1)),
+                    avg4(l(n[0],n[1],n[2]), l(0,-1,1), l(1,-1,0), l(1,-1,1)),
+                    avg4(l(n[0],n[1],n[2]), l(0,-1,1), l(-1,-1,0), l(-1,-1,1)),
+                ],
+            )
+        }
+        Direction::North => {
+            let n = [0, 0, -1];
+            (
+                [
+                    vertex_ao(s(-1,0,-1), s(0,-1,-1), s(-1,-1,-1)),
+                    vertex_ao(s(-1,0,-1), s(0,1,-1), s(-1,1,-1)),
+                    vertex_ao(s(1,0,-1), s(0,1,-1), s(1,1,-1)),
+                    vertex_ao(s(1,0,-1), s(0,-1,-1), s(1,-1,-1)),
+                ],
+                [
+                    avg4(l(n[0],n[1],n[2]), l(-1,0,-1), l(0,-1,-1), l(-1,-1,-1)),
+                    avg4(l(n[0],n[1],n[2]), l(-1,0,-1), l(0,1,-1), l(-1,1,-1)),
+                    avg4(l(n[0],n[1],n[2]), l(1,0,-1), l(0,1,-1), l(1,1,-1)),
+                    avg4(l(n[0],n[1],n[2]), l(1,0,-1), l(0,-1,-1), l(1,-1,-1)),
+                ],
+            )
+        }
+        Direction::South => {
+            let n = [0, 0, 1];
+            (
+                [
+                    vertex_ao(s(1,0,1), s(0,-1,1), s(1,-1,1)),
+                    vertex_ao(s(1,0,1), s(0,1,1), s(1,1,1)),
+                    vertex_ao(s(-1,0,1), s(0,1,1), s(-1,1,1)),
+                    vertex_ao(s(-1,0,1), s(0,-1,1), s(-1,-1,1)),
+                ],
+                [
+                    avg4(l(n[0],n[1],n[2]), l(1,0,1), l(0,-1,1), l(1,-1,1)),
+                    avg4(l(n[0],n[1],n[2]), l(1,0,1), l(0,1,1), l(1,1,1)),
+                    avg4(l(n[0],n[1],n[2]), l(-1,0,1), l(0,1,1), l(-1,1,1)),
+                    avg4(l(n[0],n[1],n[2]), l(-1,0,1), l(0,-1,1), l(-1,-1,1)),
+                ],
+            )
+        }
+        Direction::East => {
+            let n = [1, 0, 0];
+            (
+                [
+                    vertex_ao(s(1,0,-1), s(1,-1,0), s(1,-1,-1)),
+                    vertex_ao(s(1,0,-1), s(1,1,0), s(1,1,-1)),
+                    vertex_ao(s(1,0,1), s(1,1,0), s(1,1,1)),
+                    vertex_ao(s(1,0,1), s(1,-1,0), s(1,-1,1)),
+                ],
+                [
+                    avg4(l(n[0],n[1],n[2]), l(1,0,-1), l(1,-1,0), l(1,-1,-1)),
+                    avg4(l(n[0],n[1],n[2]), l(1,0,-1), l(1,1,0), l(1,1,-1)),
+                    avg4(l(n[0],n[1],n[2]), l(1,0,1), l(1,1,0), l(1,1,1)),
+                    avg4(l(n[0],n[1],n[2]), l(1,0,1), l(1,-1,0), l(1,-1,1)),
+                ],
+            )
+        }
+        Direction::West => {
+            let n = [-1, 0, 0];
+            (
+                [
+                    vertex_ao(s(-1,0,1), s(-1,-1,0), s(-1,-1,1)),
+                    vertex_ao(s(-1,0,1), s(-1,1,0), s(-1,1,1)),
+                    vertex_ao(s(-1,0,-1), s(-1,1,0), s(-1,1,-1)),
+                    vertex_ao(s(-1,0,-1), s(-1,-1,0), s(-1,-1,-1)),
+                ],
+                [
+                    avg4(l(n[0],n[1],n[2]), l(-1,0,1), l(-1,-1,0), l(-1,-1,1)),
+                    avg4(l(n[0],n[1],n[2]), l(-1,0,1), l(-1,1,0), l(-1,1,1)),
+                    avg4(l(n[0],n[1],n[2]), l(-1,0,-1), l(-1,1,0), l(-1,1,-1)),
+                    avg4(l(n[0],n[1],n[2]), l(-1,0,-1), l(-1,-1,0), l(-1,-1,-1)),
+                ],
+            )
+        }
     };
     [
-        ao[0] * base_light,
-        ao[1] * base_light,
-        ao[2] * base_light,
-        ao[3] * base_light,
+        ao[0] * lights[0] * dir_shade,
+        ao[1] * lights[1] * dir_shade,
+        ao[2] * lights[2] * dir_shade,
+        ao[3] * lights[3] * dir_shade,
     ]
+}
+
+fn avg4(a: f32, b: f32, c: f32, d: f32) -> f32 {
+    (a + b + c + d) * 0.25
 }
 
 fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4], f32) {

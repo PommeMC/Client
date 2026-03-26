@@ -8,7 +8,7 @@ use crate::assets::AssetIndex;
 
 use super::model::{self, BakedModel};
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tint {
     None,
     Grass,

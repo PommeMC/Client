@@ -571,16 +571,23 @@ impl Renderer {
 
     pub fn create_mesh_dispatcher(
         &self,
-        biome_climate: std::sync::Arc<std::collections::HashMap<u32, (f32, f32)>>,
+        biome_climate: std::sync::Arc<std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>>,
     ) -> MeshDispatcher {
-        let grass_colormap = crate::renderer::chunk::mesher::GrassColormap::load(
+        let grass_colormap = crate::renderer::chunk::mesher::Colormap::load(
             &self.assets_dir,
             &self.asset_index,
+            "minecraft/textures/colormap/grass.png",
+        );
+        let foliage_colormap = crate::renderer::chunk::mesher::Colormap::load(
+            &self.assets_dir,
+            &self.asset_index,
+            "minecraft/textures/colormap/foliage.png",
         );
         MeshDispatcher::new(
             self.registry.clone(),
             self.atlas.uv_map.clone(),
             grass_colormap,
+            foliage_colormap,
             biome_climate,
         )
     }

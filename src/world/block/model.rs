@@ -188,7 +188,7 @@ pub struct BakedQuad {
     pub uvs: [[f32; 2]; 4],
     pub texture: String,
     pub cullface: Option<Direction>,
-    pub tinted: bool,
+    pub tint: super::registry::Tint,
     pub shade_light: f32,
 }
 
@@ -257,7 +257,7 @@ pub fn bake_all_models(
 
     for_each_blockstate(assets_dir, asset_index, |block_name, blockstate| {
         total += 1;
-        let has_tint = determine_tint(block_name) != Tint::None;
+        let block_tint = determine_tint(block_name);
         let mut variants_map: HashMap<String, BakedModel> = HashMap::new();
 
         if let Some(variants) = &blockstate.variants {
@@ -266,7 +266,7 @@ pub fn bake_all_models(
                 let resolved =
                     resolve_model(&model_ref.model, assets_dir, asset_index, &mut model_cache);
                 if let Some(baked) =
-                    bake_resolved_model(&resolved, model_ref.x, model_ref.y, has_tint)
+                    bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
                 {
                     variants_map.insert(variant_key.clone(), baked);
                 }
@@ -278,7 +278,7 @@ pub fn bake_all_models(
                 let resolved =
                     resolve_model(&model_ref.model, assets_dir, asset_index, &mut model_cache);
                 if let Some(baked) =
-                    bake_resolved_model(&resolved, model_ref.x, model_ref.y, has_tint)
+                    bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
                 {
                     let when = parse_when_condition(&case.when);
                     entries.push(MultipartEntry {
@@ -534,7 +534,7 @@ fn bake_resolved_model(
     resolved: &ResolvedModel,
     rot_x: i32,
     rot_y: i32,
-    has_tint: bool,
+    tint: super::registry::Tint,
 ) -> Option<BakedModel> {
     if resolved.elements.is_empty() {
         return None;
@@ -576,7 +576,7 @@ fn bake_resolved_model(
             } else {
                 1.0
             };
-            let tinted = has_tint && face_def.tint_index.is_some();
+            let quad_tint = if face_def.tint_index.is_some() { tint } else { super::registry::Tint::None };
 
             if rot_x != 0 || rot_y != 0 {
                 positions = rotate_positions(positions, rot_x, rot_y);
@@ -588,7 +588,7 @@ fn bake_resolved_model(
                 uvs,
                 texture: texture_name.to_string(),
                 cullface,
-                tinted,
+                tint: quad_tint,
                 shade_light,
             });
         }

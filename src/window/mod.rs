@@ -102,7 +102,7 @@ struct App {
     player: LocalPlayer,
     tick_accumulator: f32,
     prev_player_pos: glam::Vec3,
-    biome_climate: std::sync::Arc<std::collections::HashMap<u32, (f32, f32)>>,
+    biome_climate: std::sync::Arc<std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>>,
     mesh_dispatcher: Option<MeshDispatcher>,
     paused: bool,
     inventory_open: bool,
