@@ -5,17 +5,48 @@ import { HiChevronDown, HiFolder } from "react-icons/hi2";
 import { normalizeDirectoryName } from "../../lib/helpers.ts";
 import { useDropdown } from "../../lib/hooks.ts";
 import { useAppStateContext } from "../../lib/state.ts";
-import { GameVersion, Installation } from "../../lib/types.ts";
+import { GameVersion, Installation, InstallationError } from "../../lib/types.ts";
 
 export type InstallationDialogProps =
   | { editing: false }
   | { editing: true; installation: Installation };
 
+function assertNever(x: never): never {
+  throw new Error("Unhandled error: " + JSON.stringify(x));
+}
+
+function mapInstallationError(error: InstallationError): { name?: string; dir?: string } {
+  switch (error.kind) {
+    case "InvalidName":
+      return { name: "Invalid name" };
+    case "NameTooLong":
+      return { name: `Name too long (max ${error.detail} characters)` };
+    case "InvalidDirectory":
+      return { dir: "Invalid directory" };
+    case "DirectoryTooLong":
+      return { dir: `Directory name too long (max ${error.detail} characters)` };
+    case "InvalidCharacter":
+      return { dir: `Invalid character: ${error.detail}` };
+    case "TrailingDot":
+      return { dir: "Trailing dot not allowed" };
+    case "DirectoryAlreadyExists":
+      return { dir: "Directory already exists" };
+    case "Io":
+      return { dir: `IO error: ${error.detail}` };
+    case "Json":
+      return { dir: `JSON error: ${error.detail}` };
+    default:
+      assertNever(error);
+  }
+}
+
 export function InstallationDialog({
   handleCreateInstallation,
   ...dialogProps
 }: InstallationDialogProps & {
-  handleCreateInstallation: (payload: Installation) => Promise<Installation | null>;
+  handleCreateInstallation: (
+    payload: Installation,
+  ) => Promise<[Installation, null] | [null, InstallationError]>;
 }) {
   const {
     versions,
@@ -48,6 +79,8 @@ export function InstallationDialog({
   const { ref: versionDropdownRef, ...versionDropdown } = useDropdown();
   const [directoryTouched, setDirectoryTouched] = useState(false);
   const [showSnapshots, setShowSnapshots] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
+  const [dirError, setDirError] = useState<string | null>(null);
   const [editingInstall, setEditingInstall] = useState<Installation>(() =>
     dialogProps.editing ? { ...dialogProps.installation } : createEmptyInstallation(),
   );
@@ -63,6 +96,8 @@ export function InstallationDialog({
             value={editingInstall.name}
             onChange={(e) => {
               const name = e.target.value;
+              setNameError(null);
+              if (!directoryTouched) setDirError(null);
               setEditingInstall((prev) => {
                 if (!prev) return prev;
                 return {
@@ -75,6 +110,7 @@ export function InstallationDialog({
             placeholder="My Installation"
             autoFocus
           />
+          <span className={`dialog-field-info ${nameError ? "error" : ""}`}>{nameError}</span>
         </div>
         <div className="dialog-field">
           <label>VERSION</label>
@@ -128,11 +164,9 @@ export function InstallationDialog({
               value={editingInstall.directory}
               onChange={(e) => {
                 const dirname = e.target.value;
+                setDirError(null);
                 setDirectoryTouched(dirname !== "");
-                setEditingInstall((prev) => ({
-                  ...prev,
-                  directory: dirname,
-                }));
+                setEditingInstall((prev) => ({ ...prev, directory: dirname }));
               }}
               placeholder="default"
             />
@@ -141,21 +175,18 @@ export function InstallationDialog({
               onClick={async () => {
                 const path = await openNativeDialog({ directory: true });
                 if (path) {
-                  setEditingInstall((prev) => ({
-                    ...prev,
-                    directory: path as string,
-                  }));
+                  setEditingInstall((prev) => ({ ...prev, directory: path as string }));
                 }
               }}
             >
               <HiFolder />
             </button>
           </div>
-          <span
-            className="dialog-field-info"
-            hidden={editingInstall.directory === normalizeDirectoryName(editingInstall.directory)}
-          >
-            Will be created as: /{normalizeDirectoryName(editingInstall.directory)}
+          <span className={`dialog-field-info${dirError ? " error" : ""}`}>
+            {dirError ||
+              (editingInstall.directory !== normalizeDirectoryName(editingInstall.directory) &&
+                "Will be created as: /" +
+                  normalizeDirectoryName(editingInstall.directory || "my-installation"))}
           </span>
         </div>
         <div className="dialog-field">
@@ -215,16 +246,18 @@ export function InstallationDialog({
             // TODO: edit
 
             if (!editing) {
-              const install = await handleCreateInstallation(editedInstall);
-              if (!install) return;
+              const [install, err] = await handleCreateInstallation(editedInstall);
+
+              if (!install) {
+                const res = mapInstallationError(err);
+                if (res.name) setNameError(res.name);
+                if (res.dir) setDirError(res.dir);
+                return;
+              }
 
               setOpenedDialog(null);
               setPage("home");
-              setDownloadProgress({
-                downloaded: 0,
-                total: 1,
-                status: "Starting install...",
-              });
+              setDownloadProgress({ downloaded: 0, total: 1, status: "Starting install..." });
 
               try {
                 await invoke("ensure_assets", { version: install.version });

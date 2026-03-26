@@ -13,6 +13,7 @@
   --text: #e4e6f4;
   --text-dim: #8890b0;
   --text-muted: #4a5070;
+  --text-error: #e74c3c;
   --accent: #4ade80;
   --accent-dark: #22c55e;
   --accent-glow: rgba(74, 222, 128, 0.15);
@@ -1898,6 +1899,10 @@ body {
 .dialog-field-info {
   font-family: var(--font-display), sans-serif;
   font-size: 12px;
+}
+
+.dialog-field-info.error {
+  color: var(--text-error);
 }
 
 .custom-select-wrapper {

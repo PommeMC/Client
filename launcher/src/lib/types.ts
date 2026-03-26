@@ -37,6 +37,17 @@ export interface Installation {
   canDelete: boolean;
 }
 
+export type InstallationError =
+  | { kind: "InvalidName" }
+  | { kind: "NameTooLong"; detail: number }
+  | { kind: "InvalidDirectory" }
+  | { kind: "DirectoryTooLong"; detail: number }
+  | { kind: "InvalidCharacter"; detail: string }
+  | { kind: "TrailingDot" }
+  | { kind: "DirectoryAlreadyExists" }
+  | { kind: "Io"; detail: string }
+  | { kind: "Json"; detail: string };
+
 export interface GameVersion {
   id: string;
   version_type: string;

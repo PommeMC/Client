@@ -7,7 +7,14 @@ import Titlebar from "./components/Titlebar";
 import { ConfirmDialog } from "./components/dialogs/ConfirmDialog.tsx";
 import { InstallationDialog } from "./components/dialogs/InstallationDialog.tsx";
 import { useAppStateContext } from "./lib/state";
-import { AuthAccount, DownloadProgress, GameVersion, Installation, PatchNote } from "./lib/types";
+import {
+  AuthAccount,
+  DownloadProgress,
+  GameVersion,
+  Installation,
+  InstallationError,
+  PatchNote,
+} from "./lib/types";
 import FriendsPage from "./pages/Friends";
 import Homepage from "./pages/Home";
 import InstallationsPage from "./pages/Installations";
@@ -195,15 +202,17 @@ function App() {
 
   const dialogDragStartedInside = useRef(false);
 
-  const handleCreateInstallation = async (payload: Installation): Promise<Installation | null> => {
+  const handleCreateInstallation = async (
+    payload: Installation,
+  ): Promise<[Installation, null] | [null, InstallationError]> => {
     try {
       const inst = await invokeCreateInstallation(payload);
       setInstallations((prev) => [...prev, inst]);
       if (!activeInstall) setActiveInstall(inst);
-      return inst;
+      return [inst, null];
     } catch (e) {
       console.error("Failed to create installation", e);
-      return null;
+      return [null, e as InstallationError];
     }
   };
 
