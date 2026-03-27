@@ -141,10 +141,10 @@ async fn ping_inner(address: &str) -> Result<ServerStatus, Box<dyn std::error::E
 }
 
 fn parse_address(address: &str) -> (String, u16) {
-    if let Some((host, port_str)) = address.rsplit_once(':') {
-        if let Ok(port) = port_str.parse::<u16>() {
-            return (host.to_string(), port);
-        }
+    if let Some((host, port_str)) = address.rsplit_once(':')
+        && let Ok(port) = port_str.parse::<u16>()
+    {
+        return (host.to_string(), port);
     }
     (address.to_string(), 25565)
 }
