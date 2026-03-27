@@ -1896,6 +1896,11 @@ body {
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
+.dialog-field input:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 .dialog-field-info {
   font-family: var(--font-display), sans-serif;
   font-size: 12px;

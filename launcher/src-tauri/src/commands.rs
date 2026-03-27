@@ -176,14 +176,27 @@ pub fn remove_account(uuid: String) {
 
 #[derive(Deserialize)]
 struct VersionManifest {
+    latest: LatestVersions,
     versions: Vec<VersionEntry>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct VersionEntry {
     id: String,
     #[serde(rename = "type")]
     version_type: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LatestVersions {
+    pub release: String,
+    pub snapshot: String,
+}
+
+#[derive(Serialize)]
+pub struct Versions {
+    pub latest: LatestVersions,
+    pub versions: Vec<GameVersion>,
 }
 
 #[derive(Serialize, Clone)]
@@ -192,9 +205,9 @@ pub struct GameVersion {
     pub version_type: String,
 }
 
-static VERSION_CACHE: std::sync::OnceLock<Vec<GameVersion>> = std::sync::OnceLock::new();
+static VERSION_CACHE: std::sync::OnceLock<Versions> = std::sync::OnceLock::new();
 
-async fn fetch_versions() -> Result<&'static Vec<GameVersion>, String> {
+pub async fn fetch_versions() -> Result<&'static Versions, String> {
     if let Some(cached) = VERSION_CACHE.get() {
         return Ok(cached);
     }
@@ -216,7 +229,9 @@ async fn fetch_versions() -> Result<&'static Vec<GameVersion>, String> {
         })
         .collect();
 
-    Ok(VERSION_CACHE.get_or_init(|| versions))
+    let latest: LatestVersions = manifest.latest;
+
+    Ok(VERSION_CACHE.get_or_init(|| Versions { latest, versions }))
 }
 
 #[tauri::command]
@@ -224,6 +239,7 @@ pub async fn get_versions(show_snapshots: Option<bool>) -> Result<Vec<GameVersio
     let all = fetch_versions().await?;
     let include_snapshots = show_snapshots.unwrap_or(false);
     Ok(all
+        .versions
         .iter()
         .filter(|v| include_snapshots || v.version_type == "release")
         .cloned()
@@ -494,7 +510,7 @@ pub async fn get_installations(
     use installations::registry;
 
     let _guard = state.installations_lock.lock().await;
-    let installations = registry::get_all()?;
+    let installations = registry::get_all().await?;
 
     Ok(installations)
 }
@@ -510,7 +526,10 @@ pub async fn delete_installation(
     let id = Id::from(id);
 
     if let Some(install) = registry::get(&id)? {
-        fs::remove_installation_fs(&install.directory)?;
+        if !install.is_latest {
+            fs::remove_installation_fs(&install.directory)?;
+            registry::unregister(&id)?;
+        }
     }
-    registry::unregister(&id)
+    Ok(())
 }

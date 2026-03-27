@@ -1,7 +1,36 @@
-use crate::installations::{Id, Installation, InstallationError};
+use crate::installations::{
+    Directory, Id, Installation, InstallationError, Name, TimeStamp, Version,
+};
 use crate::storage::data_dir;
 
 use fslock::LockFile;
+
+async fn defaults() -> Result<Vec<Installation>, InstallationError> {
+    Ok(vec![
+        Installation {
+            id: Id::latest_release(),
+            name: Name::latest_release(),
+            version: Version::try_latest_release().await?,
+            last_played: None,
+            created_at: TimeStamp::now(),
+            directory: Directory::latest(),
+            width: 854,
+            height: 480,
+            is_latest: true,
+        },
+        Installation {
+            id: Id::latest_snapshot(),
+            name: Name::latest_snapshot(),
+            version: Version::try_latest_snapshot().await?,
+            last_played: None,
+            created_at: TimeStamp::now(),
+            directory: Directory::latest(),
+            width: 854,
+            height: 480,
+            is_latest: true,
+        },
+    ])
+}
 
 fn lock() -> Result<LockFile, InstallationError> {
     let path = data_dir().join("installations.lock");
@@ -25,16 +54,30 @@ fn save(list: &[Installation]) -> Result<(), InstallationError> {
     Ok(())
 }
 
-pub fn get_all() -> Result<Vec<Installation>, InstallationError> {
+pub async fn get_all() -> Result<Vec<Installation>, InstallationError> {
     let _lock = lock()?;
-    load()
+    let mut list = load()?;
+
+    let mut dirty = false;
+    for (i, default) in defaults().await?.into_iter().enumerate() {
+        if !list.iter().any(|i| i.id == default.id) {
+            list.insert(i, default);
+            dirty = true;
+        }
+    }
+
+    if dirty {
+        save(&list)?;
+    }
+
+    Ok(list)
 }
 
 pub fn register(installation: Installation) -> Result<(), InstallationError> {
     let _lock = lock()?;
     let mut list = load()?;
 
-    if list.iter().any(|i| i.directory == installation.directory) {
+    if !installation.is_latest && list.iter().any(|i| i.directory == installation.directory) {
         return Err(InstallationError::DirectoryAlreadyExists);
     }
 

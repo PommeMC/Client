@@ -7,6 +7,8 @@ use std::num::NonZeroU64;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::commands::fetch_versions;
+
 const MAX_NAME_LENGTH: usize = 35;
 const MAX_DIRNAME_LENGTH: usize = 60;
 #[cfg(target_os = "windows")]
@@ -41,12 +43,14 @@ pub enum InstallationError {
     Io(String),
     #[error("JSON error: {0}")]
     Json(String),
+    #[error("Error: {0}")]
+    Other(String),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Id(String);
 impl Id {
-    fn new(created_at: u64) -> Self {
+    pub fn new(created_at: u64) -> Self {
         const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
         let mut rng = rand::rng();
         let mut suffix = [0u8; 4];
@@ -55,6 +59,14 @@ impl Id {
         }
         let suffix = std::str::from_utf8(&suffix).unwrap();
         Id(format!("{created_at}-{suffix}"))
+    }
+
+    pub fn latest_release() -> Self {
+        Id(format!("latest-release"))
+    }
+
+    pub fn latest_snapshot() -> Self {
+        Id(format!("latest-snapshot"))
     }
 }
 
@@ -73,12 +85,31 @@ impl TryFrom<String> for Name {
         Ok(Name(value))
     }
 }
+impl Name {
+    pub fn latest_release() -> Self {
+        Name(format!("Latest Release"))
+    }
+    pub fn latest_snapshot() -> Self {
+        Name(format!("Latest Snapshot"))
+    }
+}
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Version(String);
 impl From<String> for Version {
     fn from(value: String) -> Self {
         Version(value)
+    }
+}
+
+impl Version {
+    pub async fn try_latest_release() -> Result<Self, InstallationError> {
+        let latest = &fetch_versions().await?.latest.release;
+        Ok(Version(latest.clone()))
+    }
+    pub async fn try_latest_snapshot() -> Result<Self, InstallationError> {
+        let latest = &fetch_versions().await?.latest.snapshot;
+        Ok(Version(latest.clone()))
     }
 }
 
@@ -122,9 +153,13 @@ impl TryFrom<String> for Directory {
         Ok(Directory(value))
     }
 }
-#[cfg(target_os = "windows")]
 impl Directory {
-    fn validate_directory_os(dir: &str) -> Result<(), InstallationError> {
+    pub fn latest() -> Self {
+        Directory("default".into())
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn validate_directory_os(dir: &str) -> Result<(), InstallationError> {
         let stem = dir.split('.').next().unwrap_or("").to_uppercase();
         if RESERVED_DIRNAMES.contains(&stem.as_str()) {
             return Err(InstallationError::ReservedName(dir.to_string()));
@@ -142,7 +177,6 @@ impl Directory {
 #[serde(rename_all = "camelCase")]
 pub struct Installation {
     pub id: Id,
-    pub icon: Option<String>,
     pub name: Name,
     pub version: Version,
     pub last_played: Option<NonZeroU64>,
@@ -150,13 +184,12 @@ pub struct Installation {
     pub directory: Directory,
     pub width: u32,
     pub height: u32,
-    pub can_delete: bool,
+    pub is_latest: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct NewInstallPayload {
-    pub icon: Option<String>,
     pub name: String,
     pub version: String,
     pub directory: String,
@@ -175,9 +208,8 @@ impl TryFrom<NewInstallPayload> for Installation {
             id: Id::new(millis),
             last_played: None,
             created_at: ts,
-            can_delete: true,
+            is_latest: false,
 
-            icon: value.icon,
             name: value.name.try_into()?,
             version: value.version.into(),
             directory: value.directory.try_into()?,
@@ -195,6 +227,11 @@ impl From<std::io::Error> for InstallationError {
 impl From<serde_json::Error> for InstallationError {
     fn from(e: serde_json::Error) -> Self {
         Self::Json(e.to_string())
+    }
+}
+impl From<String> for InstallationError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
     }
 }
 

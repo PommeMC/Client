@@ -64,14 +64,13 @@ export function InstallationDialog({
   function createEmptyInstallation(): Installation {
     return {
       id: "",
-      icon: null,
       name: "",
       version: versions[0]?.id || "",
       lastPlayed: null,
       directory: "",
       width: 854,
       height: 480,
-      canDelete: false,
+      isLatest: false,
       createdAt: 0,
     };
   }
@@ -95,6 +94,7 @@ export function InstallationDialog({
         <div className="dialog-field">
           <label>NAME</label>
           <input
+            disabled={editingInstall.isLatest}
             value={editingInstall.name}
             onChange={(e) => {
               const name = e.target.value;
@@ -233,7 +233,6 @@ export function InstallationDialog({
             const editedInstall: Installation = {
               ...editingInstall,
               name: editingInstall.name || "My Installation",
-              icon: editingInstall.icon || null,
               version: editingInstall.version || versions[0]?.id || "",
               width: editingInstall.width || 854,
               height: editingInstall.height || 480,

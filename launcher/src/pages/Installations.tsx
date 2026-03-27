@@ -91,6 +91,7 @@ export default function InstallationsPage({ deleteInstallation }: InstallationsP
               >
                 <HiPencil />
               </button>
+
               <button
                 className="install-action-btn"
                 title="Duplicate"
@@ -101,12 +102,15 @@ export default function InstallationsPage({ deleteInstallation }: InstallationsP
                     name: `${inst.name} (copy)`,
                     directory: `${inst.directory}-copy`,
                   };
-                  setEditingInstall(dup);
+                  setOpenedDialog({
+                    name: "installation",
+                    props: { editing: true, installation: dup },
+                  });
                 }}
               >
                 <HiDocumentDuplicate />
               </button>
-              {inst.canDelete && (
+              {!inst.isLatest && (
                 <button
                   className="install-action-btn delete"
                   title="Delete"

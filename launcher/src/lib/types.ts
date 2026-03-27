@@ -26,7 +26,6 @@ export interface AuthAccount {
 
 export interface Installation {
   id: string;
-  icon: string | null;
   name: string;
   version: string;
   lastPlayed: number | null;
@@ -34,7 +33,7 @@ export interface Installation {
   directory: string;
   width: number;
   height: number;
-  canDelete: boolean;
+  isLatest: boolean;
 }
 
 export type InstallationError =

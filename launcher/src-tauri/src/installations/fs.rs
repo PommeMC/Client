@@ -2,22 +2,19 @@ use crate::installations::{Directory, Installation, InstallationError};
 use crate::storage::installations_dir;
 use std::path::Path;
 
-pub fn write_icon(instance_dir: &Path, icon: Option<&str>) -> Result<(), InstallationError> {
-    let dest = instance_dir.join("icon.png");
+pub fn ensure_dirs(instance_dir: &Path) -> Result<(), InstallationError> {
+    for sub in &["mods", "resourcepacks", "shaderpacks"] {
+        std::fs::create_dir_all(instance_dir.join(sub))?;
+    }
 
-    match icon {
-        Some(data) if data.starts_with("data:image/png;base64,") => {
-            use base64::Engine;
-            let b64 = &data["data:image/png;base64,".len()..];
-            let bytes = &base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .map_err(|e| InstallationError::Io(e.to_string()))?;
-            std::fs::write(dest, bytes)?;
-        }
-        Some(path) => {
-            std::fs::copy(path, dest)?;
-        }
-        None => {}
+    let servers = instance_dir.join("server.json");
+    if !servers.exists() {
+        std::fs::write(servers, "[]")?;
+    }
+
+    let options = instance_dir.join("options.json");
+    if !options.exists() {
+        std::fs::write(options, "{}")?;
     }
 
     Ok(())
@@ -29,9 +26,7 @@ pub fn create_installation_fs(installation: &Installation) -> Result<(), Install
         return Err(InstallationError::DirectoryAlreadyExists);
     }
 
-    for sub in &["mods", "resourcepacks", "shaderpacks"] {
-        std::fs::create_dir_all(instance_dir.join(sub))?;
-    }
+    ensure_dirs(&instance_dir)?;
 
     let install_json = serde_json::to_string_pretty(installation)?;
     std::fs::write(instance_dir.join("installation.json"), install_json)?;
@@ -53,8 +48,6 @@ pub fn create_installation_fs(installation: &Installation) -> Result<(), Install
             }
         }))?,
     )?;
-
-    write_icon(&instance_dir, installation.icon.as_deref())?;
 
     Ok(())
 }
