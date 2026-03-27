@@ -564,20 +564,16 @@ impl Renderer {
         let mut dist = max;
         for jitter in &jitters {
             let from = eye_pos + *jitter;
-            let to = from + dir * max;
             let mut t = 0.0;
             let step = 0.1;
             while t < max {
-                let p = from + (to - from).normalize() * t;
+                let p = from + dir * t;
                 let bx = p.x.floor() as i32;
                 let by = p.y.floor() as i32;
                 let bz = p.z.floor() as i32;
                 let state = chunks.get_block_state(bx, by, bz);
-                if !state.is_air() {
-                    let hit_dist = t;
-                    if hit_dist < dist {
-                        dist = hit_dist;
-                    }
+                if self.registry.is_opaque_full_cube(state) {
+                    dist = dist.min(t);
                     break;
                 }
                 t += step;

@@ -715,11 +715,7 @@ impl App {
             return;
         }
         if let Some(renderer) = &self.renderer {
-            self.player.yaw = if renderer.is_first_person() {
-                renderer.camera_yaw()
-            } else {
-                renderer.camera_yaw() + std::f32::consts::PI
-            };
+            self.player.yaw = renderer.camera_yaw();
             self.player.pitch = renderer.camera_pitch();
         }
 

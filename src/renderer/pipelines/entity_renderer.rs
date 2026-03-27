@@ -308,12 +308,12 @@ impl EntityRenderer {
                     last_variant = variant_ptr;
                 }
 
-                let entity_mat =
-                    glam::Mat4::from_translation(glam::Vec3::new(
-                        info.x as f32,
-                        info.y as f32,
-                        info.z as f32,
-                    )) * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians());
+                let entity_mat = glam::Mat4::from_translation(glam::Vec3::new(
+                    info.x as f32,
+                    info.y as f32,
+                    info.z as f32,
+                )) * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0))
+                    * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians());
 
                 let anim_rotations = match entry.anim {
                     AnimationType::Quadruped => entity_model::compute_quadruped_anim(
