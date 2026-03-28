@@ -1,5 +1,5 @@
 use crate::settings::LauncherSettings;
-use crate::{installations, storage, AppState};
+use crate::{AppState, installations, storage};
 
 use crate::installations::{Installation, InstallationError, NewInstallPayload};
 use serde::{Deserialize, Serialize};
@@ -520,7 +520,7 @@ pub async fn delete_installation(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), InstallationError> {
-    use installations::{fs, registry, Id};
+    use installations::{Id, fs, registry};
 
     let _guard = state.installations_lock.lock().await;
     let id = Id::from(id);
