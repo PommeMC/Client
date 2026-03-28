@@ -9,6 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
+      issues: write
     steps:
       - name: Add patch label if no version label
         uses: actions/github-script@v8
