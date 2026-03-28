@@ -1,7 +1,7 @@
 use crate::settings::LauncherSettings;
 use crate::{AppState, installations, storage};
 
-use crate::installations::{Installation, InstallationError, NewInstallPayload};
+use crate::installations::{Installation, InstallationDraft, InstallationError};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -497,7 +497,7 @@ pub async fn load_installations(
 #[tauri::command]
 pub async fn create_installation(
     state: State<'_, AppState>,
-    payload: NewInstallPayload,
+    payload: InstallationDraft,
 ) -> Result<Installation, InstallationError> {
     let _guard = state.installations_lock.lock().await;
     installations::create_installation(payload).await
@@ -516,8 +516,18 @@ pub async fn delete_installation(
 pub async fn duplicate_installation(
     state: State<'_, AppState>,
     old_id: String,
-    payload: NewInstallPayload,
+    payload: InstallationDraft,
 ) -> Result<Installation, InstallationError> {
     let _guard = state.installations_lock.lock().await;
     installations::duplicate_installation(old_id, payload).await
+}
+
+#[tauri::command]
+pub async fn edit_installation(
+    state: State<'_, AppState>,
+    id: String,
+    payload: InstallationDraft,
+) -> Result<Installation, InstallationError> {
+    let _guard = state.installations_lock.lock().await;
+    installations::edit_installation(id, payload).await
 }

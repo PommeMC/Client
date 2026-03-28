@@ -10,9 +10,10 @@ import {
 } from "react-icons/hi2";
 import { formatRelativeDate } from "../lib/helpers.ts";
 import { useAppStateContext } from "../lib/state";
+import type { InstallationError } from "../lib/types.ts";
 
 interface InstallationsPageProps {
-  deleteInstallation: (install_id: string) => Promise<void>;
+  deleteInstallation: (install_id: string) => Promise<null | InstallationError>;
 }
 
 export default function InstallationsPage({ deleteInstallation }: InstallationsPageProps) {
@@ -122,15 +123,12 @@ export default function InstallationsPage({ deleteInstallation }: InstallationsP
                         title: `Deleting ${inst.name}`,
                         message: "Are you sure you want to delete this installation?",
                         onConfirm: async () => {
+                          const index = installations.findIndex((i) => i.id === inst.id);
                           await deleteInstallation(inst.id);
-                          setInstallations((prev) => {
-                            const index = prev.findIndex((x) => x.id === inst.id);
-                            const newList = prev.filter((i) => i.id !== inst.id);
-                            setActiveInstall((current) => {
-                              if (current?.id !== inst.id) return current;
-                              return newList[index] || newList[index - 1] || null;
-                            });
-                            return newList;
+                          setActiveInstall((current) => {
+                            if (current?.id !== inst.id) return current;
+                            const newList = installations.filter((i) => i.id !== inst.id);
+                            return newList[index] ?? newList[index - 1] ?? null;
                           });
                         },
                       },

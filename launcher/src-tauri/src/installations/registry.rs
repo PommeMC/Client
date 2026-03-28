@@ -1,4 +1,4 @@
-use crate::installations::{Id, Installation, InstallationError, fs};
+use crate::installations::{Id, Installation, InstallationDraft, InstallationError, fs};
 
 pub fn load() -> Result<Vec<Installation>, InstallationError> {
     let contents = std::fs::read_to_string(fs::registry_file())?;
@@ -41,4 +41,23 @@ pub fn unregister(install_id: &Id) -> Result<(), InstallationError> {
     list.retain(|i| i.id != *install_id);
     save(&list)?;
     Ok(())
+}
+
+pub fn update(install_id: &Id, data: InstallationDraft) -> Result<Installation, InstallationError> {
+    let mut list = load()?;
+
+    let install = list
+        .iter_mut()
+        .find(|i| i.id == *install_id)
+        .ok_or(InstallationError::InstallNotFound(install_id.clone()))?;
+
+    install.name = data.name.try_into()?;
+    install.version = data.version.into();
+    install.directory = data.directory.try_into()?;
+    install.width = data.width;
+    install.height = data.height;
+
+    let updated = install.clone();
+    save(&list)?;
+    Ok(updated)
 }

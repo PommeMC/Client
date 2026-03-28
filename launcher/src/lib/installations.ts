@@ -25,12 +25,20 @@ export const useInstallations = () => {
     });
   };
 
+  const invokeEditInstallation = async (
+    id: string,
+    payload: Installation,
+  ): Promise<Installation> => {
+    return invoke("edit_installation", { id: id, payload: payload });
+  };
+
   return {
     installations,
     setInstallations,
     invokeCreateInstallation,
     invokeDeleteInstallation,
     invokeDuplicateInstallation,
+    invokeEditInstallation,
     activeInstall,
     setActiveInstall,
     selectedInstall,

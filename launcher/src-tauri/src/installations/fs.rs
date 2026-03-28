@@ -60,3 +60,11 @@ pub fn duplicate_install_fs(src: &Directory, dst: &Directory) -> Result<(), Inst
     let dst_path: &Path = dst.as_ref();
     copy_dir(src_path, dst_path)
 }
+
+pub fn move_install_fs(src: &Directory, dst: &Directory) -> Result<(), InstallationError> {
+    let src_path: &Path = src.as_ref();
+    let dst_path: &Path = dst.as_ref();
+    copy_dir(src_path, dst_path)?;
+    std::fs::remove_dir_all(src_path)?;
+    Ok(())
+}

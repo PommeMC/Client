@@ -30,6 +30,8 @@ function mapInstallationError(error: InstallationError): { name?: string; dir?: 
       return { dir: `Reserved name: ${error.detail}` };
     case "DirectoryAlreadyExists":
       return { dir: "Directory already exists" };
+    case "InstallNotFound":
+      return { dir: `Install ${error.detail} not found.` };
     case "Io":
       return { dir: `IO error: ${error.detail}` };
     case "Json":
@@ -44,6 +46,7 @@ function mapInstallationError(error: InstallationError): { name?: string; dir?: 
 export function InstallationDialog({
   createInstallation,
   duplicateInstallation,
+  editInstallation,
   ...dialogProps
 }: InstallationDialogProps & {
   createInstallation: (
@@ -54,10 +57,14 @@ export function InstallationDialog({
     original_id: string,
     new_payload: Installation,
   ) => Promise<[Installation, null] | [null, InstallationError]>;
+} & {
+  editInstallation: (
+    install_id: string,
+    new_payload: Installation,
+  ) => Promise<null | InstallationError>;
 }) {
   const {
     versions,
-    installations,
     setActiveInstall,
     setPage,
     setVersions,
@@ -83,11 +90,12 @@ export function InstallationDialog({
   const dialogType = dialogProps.type;
 
   const { ref: versionDropdownRef, ...versionDropdown } = useDropdown();
-  const [directoryTouched, setDirectoryTouched] = useState(false);
+  const [directoryTouched, setDirectoryTouched] = useState(dialogType === "new" ? false : true);
   const [showSnapshots, setShowSnapshots] = useState(false);
 
   const [nameError, setNameError] = useState<string | null>(null);
   const [dirError, setDirError] = useState<string | null>(null);
+  const [versionError, setVersionError] = useState<string | null>(null);
 
   const [editingInstall, setEditingInstall] = useState<Installation>(() =>
     dialogType !== "new" ? { ...dialogProps.installation } : createEmptyInstallation(),
@@ -177,6 +185,7 @@ export function InstallationDialog({
               </div>
             )}
           </div>
+          <span className={`dialog-field-info error`}>{versionError || ""}</span>
         </div>
         <div className="dialog-field">
           <label>GAME DIRECTORY</label>
@@ -204,7 +213,7 @@ export function InstallationDialog({
               <HiFolder />
             </button>
           </div>
-          <span className={`dialog-field-info${dirError ? " error" : ""}`}>
+          <span className={`dialog-field-info ${dirError ? "error" : ""}`}>
             {dirError ||
               (!isAbsolutePath(editingInstall.directory) &&
                 editingInstall.directory !== normalizeDirectoryName(editingInstall.directory) &&
@@ -261,11 +270,9 @@ export function InstallationDialog({
               : normalizeDirectoryName(editingInstall.directory || editedInstall.name);
 
             if (editingInstall.version === "") {
-              console.error("Invalid version");
+              setVersionError("Invalid version");
               return;
             }
-
-            // TODO: edit
 
             if (dialogType !== "edit") {
               const [install, err] = await (dialogType === "new"
@@ -279,6 +286,8 @@ export function InstallationDialog({
                 return;
               }
 
+              setActiveInstall(install);
+
               setOpenedDialog(null);
               setPage("home");
               setDownloadProgress({ downloaded: 0, total: 1, status: "Starting install..." });
@@ -291,10 +300,17 @@ export function InstallationDialog({
               }
 
               setDownloadProgress(null);
-              if (installations.length === 0) {
-                setActiveInstall(install);
-              }
               setTimeout(() => setStatus(""), 3000);
+            } else {
+              const err = await editInstallation(editingInstall.id, editedInstall);
+              if (err) {
+                const res = mapInstallationError(err);
+                if (res.name) setNameError(res.name);
+                if (res.dir) setDirError(res.dir);
+                return;
+              }
+              setActiveInstall(editedInstall);
+              setOpenedDialog(null);
             }
           }}
         >

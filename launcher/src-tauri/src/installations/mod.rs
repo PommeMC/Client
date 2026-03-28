@@ -3,6 +3,7 @@ pub mod registry;
 
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::path::PathBuf;
@@ -37,6 +38,8 @@ pub enum InstallationError {
     ReservedName(String),
     #[error("Directory already exists")]
     DirectoryAlreadyExists,
+    #[error("Installation {0} not found")]
+    InstallNotFound(Id),
     #[error("IO error: {0}")]
     Io(String),
     #[error("JSON error: {0}")]
@@ -87,8 +90,13 @@ impl From<String> for Id {
         Id(value)
     }
 }
+impl Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Name(String);
 impl TryFrom<String> for Name {
     type Error = InstallationError;
@@ -111,6 +119,11 @@ impl Name {
         Name("Latest Snapshot".to_string())
     }
 }
+impl From<Name> for String {
+    fn from(value: Name) -> Self {
+        value.0
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Version(String);
@@ -127,6 +140,11 @@ impl Version {
     pub async fn try_latest_snapshot() -> Result<Self, InstallationError> {
         let latest = &fetch_versions().await?.latest.snapshot;
         Ok(Version(latest.clone()))
+    }
+}
+impl From<Version> for String {
+    fn from(value: Version) -> Self {
+        value.0
     }
 }
 
@@ -216,6 +234,11 @@ impl AsRef<Path> for Directory {
         self.0.as_ref()
     }
 }
+impl From<Directory> for String {
+    fn from(value: Directory) -> Self {
+        value.0.to_string_lossy().into_owned()
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Installation {
@@ -229,7 +252,6 @@ pub struct Installation {
     pub height: u32,
     pub is_latest: bool,
 }
-
 impl Installation {
     pub async fn try_latest_release() -> Result<Self, InstallationError> {
         Ok(Self {
@@ -259,20 +281,30 @@ impl Installation {
         })
     }
 }
+impl From<Installation> for InstallationDraft {
+    fn from(value: Installation) -> Self {
+        Self {
+            directory: value.directory.into(),
+            height: value.height,
+            width: value.width,
+            name: value.name.into(),
+            version: value.version.into(),
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct NewInstallPayload {
+pub struct InstallationDraft {
     pub name: String,
     pub version: String,
     pub directory: String,
     pub width: u32,
     pub height: u32,
 }
-
-impl TryFrom<NewInstallPayload> for Installation {
+impl TryFrom<InstallationDraft> for Installation {
     type Error = InstallationError;
 
-    fn try_from(value: NewInstallPayload) -> Result<Self, Self::Error> {
+    fn try_from(value: InstallationDraft) -> Result<Self, Self::Error> {
         let ts = TimeStamp::now();
         let millis: u64 = ts.clone().into();
 
@@ -320,7 +352,7 @@ pub async fn load_installations() -> Result<Vec<Installation>, InstallationError
 }
 
 pub async fn create_installation(
-    payload: NewInstallPayload,
+    payload: InstallationDraft,
 ) -> Result<Installation, InstallationError> {
     let install: Installation = payload.try_into()?;
 
@@ -329,7 +361,7 @@ pub async fn create_installation(
     if let Err(e) = fs::ensure_install_fs(&install) {
         if let Err(rollback_err) = registry::unregister(&install.id) {
             log::warn!(
-                "Failed to roll back registry entry for failed `{:?}`: {}",
+                "Failed to roll back registry entry for `{}`: {}",
                 install.id,
                 rollback_err
             );
@@ -354,7 +386,7 @@ pub async fn delete_installation(id: String) -> Result<(), InstallationError> {
 
     if let Err(e) = fs::remove_install_fs(&install.directory) {
         log::warn!(
-            "Failed to delete installation directory for `{:?}`: {}",
+            "Failed to delete installation directory for `{}`: {}",
             install.id,
             e
         );
@@ -365,7 +397,7 @@ pub async fn delete_installation(id: String) -> Result<(), InstallationError> {
 
 pub async fn duplicate_installation(
     old_id: String,
-    payload: NewInstallPayload,
+    payload: InstallationDraft,
 ) -> Result<Installation, InstallationError> {
     let old_id: Id = old_id.into();
     let old_install = registry::find_by_id(&old_id)?;
@@ -376,7 +408,7 @@ pub async fn duplicate_installation(
     if let Err(e) = fs::duplicate_install_fs(&old_install.directory, &new_install.directory) {
         if let Err(rollback_err) = registry::unregister(&new_install.id) {
             log::warn!(
-                "Failed to roll back registry entry for failed `{:?}`: {}",
+                "Failed to roll back registry entry for `{}`: {}",
                 new_install.id,
                 rollback_err
             );
@@ -386,11 +418,45 @@ pub async fn duplicate_installation(
 
     if let Err(e) = fs::ensure_install_fs(&new_install) {
         log::warn!(
-            "Failed to ensure fs for duplicated installation `{:?}`: {}",
+            "Failed to ensure fs for duplicated installation `{}`: {}",
             new_install.id,
             e
         );
     }
 
+    Ok(new_install)
+}
+
+pub async fn edit_installation(
+    id: String,
+    payload: InstallationDraft,
+) -> Result<Installation, InstallationError> {
+    let id: Id = id.into();
+    let old_install = registry::find_by_id(&id)?;
+    let old_dir = old_install.directory.clone();
+
+    let payload = if id == Id::latest_release() || id == Id::latest_snapshot() {
+        InstallationDraft {
+            name: old_install.name.clone().into(),
+            ..payload
+        }
+    } else {
+        payload
+    };
+
+    let new_install = registry::update(&id, payload)?;
+
+    if new_install.directory != old_dir
+        && let Err(e) = fs::move_install_fs(&old_dir, &new_install.directory)
+    {
+        if let Err(rollback_err) = registry::update(&id, old_install.into()) {
+            log::warn!(
+                "Failed to roll back registry entry for `{}`: {}",
+                new_install.id,
+                rollback_err
+            );
+        }
+        return Err(e);
+    }
     Ok(new_install)
 }

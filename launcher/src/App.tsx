@@ -47,6 +47,7 @@ function App() {
     invokeCreateInstallation,
     invokeDeleteInstallation,
     invokeDuplicateInstallation,
+    invokeEditInstallation,
     activeInstall,
     setActiveInstall,
     setInstallations,
@@ -191,10 +192,10 @@ function App() {
       setStatus("");
     }, 3000);
   }, [
+    activeInstall,
     setLaunching,
     setStatus,
     setDownloadProgress,
-    activeInstall?.version,
     account?.uuid,
     server,
     launcherSettings.launchWithConsole,
@@ -208,7 +209,6 @@ function App() {
     try {
       const inst = await invokeCreateInstallation(payload);
       setInstallations((prev) => [...prev, inst]);
-      setActiveInstall(inst);
       return [inst, null];
     } catch (e) {
       console.error("Failed to create installation", e);
@@ -216,11 +216,14 @@ function App() {
     }
   };
 
-  const deleteInstallation = async (install_id: string): Promise<void> => {
+  const deleteInstallation = async (install_id: string): Promise<null | InstallationError> => {
     try {
       await invokeDeleteInstallation(install_id);
+      setInstallations((prev) => prev.filter((inst) => inst.id !== install_id));
+      return null;
     } catch (e) {
       console.error("Failed to delete installation", e);
+      return e as InstallationError;
     }
   };
 
@@ -231,11 +234,24 @@ function App() {
     try {
       const inst = await invokeDuplicateInstallation(install_id, new_payload);
       setInstallations((prev) => [...prev, inst]);
-      setActiveInstall(inst);
       return [inst, null];
     } catch (e) {
       console.error("Failed to duplicate installation", e);
       return [null, e as InstallationError];
+    }
+  };
+
+  const editInstallation = async (
+    install_id: string,
+    new_payload: Installation,
+  ): Promise<null | InstallationError> => {
+    try {
+      const inst = await invokeEditInstallation(install_id, new_payload);
+      setInstallations((prev) => prev.map((i) => (i.id === install_id ? inst : i)));
+      return null;
+    } catch (e) {
+      console.error("Failed to edit installation", e);
+      return e as InstallationError;
     }
   };
 
@@ -245,7 +261,7 @@ function App() {
         setInstallations(installs);
         if (!activeInstall) setActiveInstall(installs[0]);
       })
-      .catch((e) => console.error("Failed to load installations: ", e));
+      .catch((e) => setStatus("Failed to load installations: " + e));
   }, [setInstallations, setActiveInstall, activeInstall]);
 
   return (
@@ -297,6 +313,7 @@ function App() {
               {...openedDialog.props}
               createInstallation={createInstallation}
               duplicateInstallation={duplicateInstallation}
+              editInstallation={editInstallation}
             />
           )}
           {openedDialog.name === "confirm_dialog" && <ConfirmDialog {...openedDialog.props} />}

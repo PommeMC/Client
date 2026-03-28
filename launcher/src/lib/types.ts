@@ -43,6 +43,7 @@ export type InstallationError =
   | { kind: "InvalidCharacter"; detail: string }
   | { kind: "ReservedName"; detail: string }
   | { kind: "DirectoryAlreadyExists" }
+  | { kind: "InstallNotFound"; detail: string }
   | { kind: "Io"; detail: string }
   | { kind: "Json"; detail: string }
   | { kind: "Other"; detail: string };
