@@ -262,7 +262,7 @@ function App() {
         if (!activeInstall) setActiveInstall(installs[0]);
       })
       .catch((e) => setStatus("Failed to load installations: " + e));
-  }, [setInstallations, setActiveInstall, activeInstall]);
+  }, [setInstallations, setActiveInstall, activeInstall, setStatus]);
 
   return (
     <div className="app">
