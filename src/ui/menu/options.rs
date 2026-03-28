@@ -2,7 +2,13 @@ use super::*;
 
 impl MainMenu {
     pub(super) fn build_options(&mut self, sw: f32, sh: f32, input: &MenuInput) -> MainMenuResult {
-        let fov_label = format!("FOV: {}", 70);
+        let fov_label = if self.fov == 70 {
+            "FOV: Normal".to_string()
+        } else if self.fov >= 110 {
+            "FOV: Quake Pro".to_string()
+        } else {
+            format!("FOV: {}", self.fov)
+        };
         let rows: Vec<[&str; 2]> = vec![
             [&fov_label, "Online"],
             ["Skin Customization...", "Music & Sounds..."],
@@ -25,6 +31,8 @@ impl MainMenu {
             ("Credits & Attribution...", Screen::OptionsCredits),
         ];
 
+        let fov_frac = (self.fov as f32 - 30.0) / 80.0;
+        let sliders: &[(&str, f32)] = &[("FOV:", fov_frac)];
         self.build_options_grid(
             sw,
             sh,
@@ -33,7 +41,7 @@ impl MainMenu {
             Screen::Main,
             &rows,
             nav,
-            &[],
+            sliders,
             false,
         )
     }
@@ -298,6 +306,10 @@ impl MainMenu {
             }
             if *prefix == "Simulation Distance:" {
                 self.simulation_distance = (5.0 + value * 27.0).round() as u32;
+                self.save_settings();
+            }
+            if *prefix == "FOV:" {
+                self.fov = (30.0 + value * 80.0).round() as u32;
                 self.save_settings();
             }
         }

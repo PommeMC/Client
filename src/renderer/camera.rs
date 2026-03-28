@@ -3,7 +3,11 @@ use glam::{DVec3, Mat4, Vec3};
 use crate::window::input::InputState;
 
 const UP: Vec3 = Vec3::Y;
-pub const DEFAULT_FOV: f32 = 1.2217;
+pub const DEFAULT_FOV_DEGREES: f32 = 70.0;
+#[allow(dead_code)]
+pub const MIN_FOV_DEGREES: f32 = 30.0;
+#[allow(dead_code)]
+pub const MAX_FOV_DEGREES: f32 = 110.0;
 const NEAR: f32 = 0.1;
 const FAR: f32 = 1000.0;
 const SENSITIVITY: f32 = 0.003;
@@ -15,7 +19,9 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     aspect_ratio: f32,
+    pub base_fov_degrees: f32,
     fov_modifier: f32,
+    old_fov_modifier: f32,
 }
 
 impl Camera {
@@ -26,7 +32,9 @@ impl Camera {
             yaw: 0.0,
             pitch: 0.0,
             aspect_ratio,
+            base_fov_degrees: DEFAULT_FOV_DEGREES,
             fov_modifier: 1.0,
+            old_fov_modifier: 1.0,
         }
     }
 
@@ -63,9 +71,16 @@ impl Camera {
         (world_pos - self.position_f64).as_vec3()
     }
 
-    pub fn update_fov_modifier(&mut self, sprinting: bool) {
-        let target = if sprinting { 1.15 } else { 1.0 };
+    pub fn update_fov_modifier(&mut self, target: f32) {
+        self.old_fov_modifier = self.fov_modifier;
         self.fov_modifier += (target - self.fov_modifier) * 0.5;
+        self.fov_modifier = self.fov_modifier.clamp(0.1, 1.5);
+    }
+
+    pub fn fov_radians(&self, partial_tick: f32) -> f32 {
+        let modifier =
+            self.old_fov_modifier + (self.fov_modifier - self.old_fov_modifier) * partial_tick;
+        (self.base_fov_degrees * modifier).to_radians()
     }
 
     pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
@@ -89,13 +104,16 @@ impl Camera {
     }
 
     pub fn view_projection(&self) -> Mat4 {
+        self.view_projection_with_fov(self.fov_radians(1.0))
+    }
+
+    pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
         let forward = Vec3::new(
             -self.yaw.sin() * self.pitch.cos(),
             self.pitch.sin(),
             -self.yaw.cos() * self.pitch.cos(),
         );
         let view = Mat4::look_to_rh(Vec3::ZERO, forward, UP);
-        let fov = DEFAULT_FOV * self.fov_modifier;
         let mut proj = Mat4::perspective_rh(fov, self.aspect_ratio, NEAR, FAR);
         proj.y_axis.y *= -1.0;
         proj * view

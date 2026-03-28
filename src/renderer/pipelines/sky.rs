@@ -360,7 +360,7 @@ impl SkyPipeline {
         );
         let view_rotation = Mat4::look_to_rh(Vec3::ZERO, forward, Vec3::Y);
         let mut proj = Mat4::perspective_rh(
-            crate::renderer::camera::DEFAULT_FOV,
+            crate::renderer::camera::DEFAULT_FOV_DEGREES.to_radians(),
             camera.aspect_ratio(),
             0.01,
             1000.0,

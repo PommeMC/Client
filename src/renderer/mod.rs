@@ -533,8 +533,12 @@ impl Renderer {
         self.camera.pitch = pitch;
     }
 
-    pub fn update_fov(&mut self, sprinting: bool) {
-        self.camera.update_fov_modifier(sprinting);
+    pub fn update_fov(&mut self, modifier: f32) {
+        self.camera.update_fov_modifier(modifier);
+    }
+
+    pub fn set_base_fov(&mut self, degrees: f32) {
+        self.camera.base_fov_degrees = degrees;
     }
 
     pub fn camera_yaw(&self) -> f32 {

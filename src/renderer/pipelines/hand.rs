@@ -183,8 +183,12 @@ impl HandPipeline {
         aspect: f32,
         swing_progress: f32,
     ) {
-        let mut proj =
-            Mat4::perspective_rh(crate::renderer::camera::DEFAULT_FOV, aspect, NEAR, FAR);
+        let mut proj = Mat4::perspective_rh(
+            crate::renderer::camera::DEFAULT_FOV_DEGREES.to_radians(),
+            aspect,
+            NEAR,
+            FAR,
+        );
         proj.y_axis.y *= -1.0;
 
         let sp = swing_progress;

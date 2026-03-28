@@ -24,6 +24,12 @@ struct Settings {
     gui_scale: u32,
     render_distance: u32,
     simulation_distance: u32,
+    #[serde(default = "default_fov")]
+    fov: u32,
+}
+
+fn default_fov() -> u32 {
+    70
 }
 
 impl Default for Settings {
@@ -32,6 +38,7 @@ impl Default for Settings {
             gui_scale: 0,
             render_distance: 12,
             simulation_distance: 12,
+            fov: 70,
         }
     }
 }
@@ -209,6 +216,7 @@ pub struct MainMenu {
     pub gui_scale_setting: u32,
     pub render_distance: u32,
     pub simulation_distance: u32,
+    pub fov: u32,
     pub display_mode: DisplayMode,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
@@ -252,6 +260,7 @@ impl MainMenu {
             gui_scale_setting: settings.gui_scale,
             render_distance: settings.render_distance,
             simulation_distance: settings.simulation_distance,
+            fov: settings.fov,
             display_mode: DisplayMode::Windowed,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
@@ -266,6 +275,7 @@ impl MainMenu {
                 gui_scale: self.gui_scale_setting,
                 render_distance: self.render_distance,
                 simulation_distance: self.simulation_distance,
+                fov: self.fov,
             },
         );
     }

@@ -596,7 +596,8 @@ impl App {
         self.entity_store.tick_living();
 
         if let Some(renderer) = &mut self.renderer {
-            renderer.update_fov(self.player.sprinting);
+            renderer.set_base_fov(self.menu.fov as f32);
+            renderer.update_fov(compute_fov_modifier(&self.player));
         }
 
         if self.packet_sender.is_some() {
@@ -1428,6 +1429,22 @@ pub struct LaunchAuth {
     pub username: String,
     pub uuid: uuid::Uuid,
     pub access_token: String,
+}
+
+fn compute_fov_modifier(player: &LocalPlayer) -> f32 {
+    let base_walk_speed = 0.1;
+    let mut speed = base_walk_speed;
+    if player.sprinting {
+        speed *= 1.3;
+    }
+
+    let mut modifier = (speed / base_walk_speed + 1.0) / 2.0;
+
+    if player.game_mode == 1 && player.sprinting {
+        modifier *= 1.1;
+    }
+
+    modifier
 }
 
 fn chunk_lod(pos: azalea_core::position::ChunkPos, player: azalea_core::position::ChunkPos) -> u32 {
