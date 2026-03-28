@@ -113,6 +113,7 @@ struct App {
     interaction: InteractionState,
     sky_state: crate::renderer::SkyState,
     show_debug: bool,
+    show_chunk_borders: bool,
     fps_counter: FpsCounter,
     last_sent_input: PlayerInputState,
     last_sent_pos: glam::Vec3,
@@ -211,6 +212,7 @@ impl App {
             interaction: InteractionState::new(),
             sky_state: crate::renderer::SkyState::default_day(),
             show_debug: false,
+            show_chunk_borders: false,
             fps_counter: FpsCounter::new(),
             last_sent_input: PlayerInputState::default(),
             last_sent_pos: glam::Vec3::ZERO,
@@ -863,6 +865,9 @@ impl ApplicationHandler for App {
                                     KeyCode::F3 => {
                                         self.show_debug = !self.show_debug;
                                     }
+                                    KeyCode::KeyG if self.input.key_pressed(KeyCode::F3) => {
+                                        self.show_chunk_borders = !self.show_chunk_borders;
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1327,12 +1332,20 @@ impl ApplicationHandler for App {
                                     game_time: self.sky_state.game_time,
                                     rain_level: self.sky_state.rain_level,
                                 };
+                                if self.show_chunk_borders {
+                                    renderer.update_chunk_borders(
+                                        self.chunk_store.min_y(),
+                                        self.chunk_store.min_y() + self.chunk_store.height() as i32,
+                                    );
+                                }
+
                                 if let Err(e) = renderer.render_world(
                                     window,
                                     hide_cursor,
                                     elements,
                                     swing_progress,
                                     destroy_info,
+                                    self.show_chunk_borders,
                                     sky,
                                     &entity_renders,
                                 ) {

@@ -54,6 +54,7 @@ enum RenderMode<'a> {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         destroy_info: Option<(BlockPos, u32)>,
+        show_chunk_borders: bool,
         sky: SkyState,
         entities: &'a [EntityRenderInfo],
     },
@@ -92,6 +93,7 @@ pub struct Renderer {
     blur_pipeline: BlurPipeline,
     skin_preview: SkinPreviewPipeline,
     entity_renderer: EntityRenderer,
+    chunk_border_pipeline: pipelines::chunk_borders::ChunkBorderPipeline,
     chunk_buffers: ChunkBufferStore,
     swapchain_dirty: bool,
     width: u32,
@@ -247,6 +249,12 @@ impl Renderer {
             asset_index,
         );
 
+        let chunk_border_pipeline = pipelines::chunk_borders::ChunkBorderPipeline::new(
+            &ctx.device,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+        );
+
         let chunk_buffers = ChunkBufferStore::new(
             &ctx.device,
             &ctx.instance,
@@ -272,6 +280,7 @@ impl Renderer {
             blur_pipeline,
             skin_preview,
             entity_renderer,
+            chunk_border_pipeline,
             chunk_buffers,
             swapchain_dirty: false,
             width: size.width.max(1),
@@ -602,6 +611,13 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn update_chunk_borders(&mut self, min_y: i32, max_y: i32) {
+        let cam = self.camera.position;
+        self.chunk_border_pipeline
+            .update_lines(cam.x, cam.y, cam.z, min_y, max_y);
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn render_world(
         &mut self,
         window: &Window,
@@ -609,6 +625,7 @@ impl Renderer {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         destroy_info: Option<(BlockPos, u32)>,
+        show_chunk_borders: bool,
         sky: SkyState,
         entities: &[EntityRenderInfo],
     ) -> Result<(), RendererError> {
@@ -620,6 +637,7 @@ impl Renderer {
                 overlay,
                 swing_progress,
                 destroy_info,
+                show_chunk_borders,
                 sky,
                 entities,
             },
@@ -742,6 +760,7 @@ impl Renderer {
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
+            self.chunk_border_pipeline.update_camera(frame, &uniform);
         }
 
         if hide_cursor {
@@ -838,6 +857,7 @@ impl Renderer {
                     overlay,
                     swing_progress,
                     destroy_info,
+                    show_chunk_borders,
                     sky,
                     entities,
                 } => {
@@ -867,6 +887,11 @@ impl Renderer {
 
                     self.entity_renderer
                         .draw(&self.ctx.device, cmd, frame, entities);
+
+                    if *show_chunk_borders {
+                        self.chunk_border_pipeline
+                            .draw(&self.ctx.device, cmd, frame);
+                    }
 
                     let clear_attachment = vk::ClearAttachment {
                         aspect_mask: vk::ImageAspectFlags::DEPTH,
@@ -1098,6 +1123,8 @@ impl Drop for Renderer {
         self.skin_preview
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.entity_renderer
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.chunk_border_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
         self.swapchain.destroy(

@@ -33,6 +33,8 @@ fn main() {
         ("blur.frag", shaderc::ShaderKind::Fragment),
         ("entity.vert", shaderc::ShaderKind::Vertex),
         ("entity.frag", shaderc::ShaderKind::Fragment),
+        ("chunk_border.vert", shaderc::ShaderKind::Vertex),
+        ("chunk_border.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (file, kind) in &shaders {
