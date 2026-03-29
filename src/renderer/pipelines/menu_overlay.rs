@@ -1050,6 +1050,8 @@ pub enum SpriteId {
     MenuBackground,
     TooltipBackground,
     TooltipFrame,
+    Scroller,
+    ScrollerBackground,
 }
 
 struct SpriteRegion {
@@ -1213,6 +1215,16 @@ fn build_sprite_atlas(
             SpriteId::TooltipFrame,
             "minecraft/textures/gui/sprites/tooltip/frame.png",
             10.0,
+        ),
+        (
+            SpriteId::Scroller,
+            "minecraft/textures/gui/sprites/widget/scroller.png",
+            1.0,
+        ),
+        (
+            SpriteId::ScrollerBackground,
+            "minecraft/textures/gui/sprites/widget/scroller_background.png",
+            1.0,
         ),
     ];
 
