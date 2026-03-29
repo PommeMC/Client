@@ -452,7 +452,7 @@ impl MainMenu {
             });
         }
 
-        let content_pad = if header_footer { 30.0 * gs } else { 0.0 };
+        let content_pad = if header_footer { 4.0 * gs } else { 0.0 };
         let first_row_gap = if header_footer { 0.0 } else { 24.0 * gs };
         let grid_h =
             rows.len() as f32 * btn_h + (rows.len() as f32 - 1.0).max(0.0) * gap + first_row_gap;
@@ -479,12 +479,18 @@ impl MainMenu {
 
         let mut slider_results: Vec<(&str, f32)> = Vec::new();
 
+        if header_footer {
+            elements.push(MenuElement::ScissorPush {
+                x: 0.0,
+                y: content_top,
+                w: sw,
+                h: content_bottom - content_top,
+            });
+        }
+
         for (row, pair) in rows.iter().enumerate() {
             let extra = if row > 0 { first_row_gap } else { 0.0 };
             let by = top_y + row as f32 * (btn_h + gap) + extra;
-            if by + btn_h < content_top || by > content_bottom {
-                continue;
-            }
             let is_full_width = pair[1].is_empty();
             for (col, label) in pair.iter().enumerate() {
                 if label.is_empty() {
@@ -613,6 +619,8 @@ impl MainMenu {
                 self.save_settings();
             }
         }
+
+        elements.push(MenuElement::ScissorPop);
 
         if scrollable {
             let max_scroll = (grid_h + content_pad - content_h).max(0.001);

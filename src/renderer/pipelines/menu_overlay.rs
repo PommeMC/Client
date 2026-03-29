@@ -485,9 +485,29 @@ impl MenuOverlayPipeline {
 
         let mut vertices: Vec<Vertex> = Vec::with_capacity(elements.len() * 24);
         let mut deferred_tooltips: Vec<&MenuElement> = Vec::new();
+        let mut draw_cmds: Vec<(u32, u32, Option<[f32; 4]>)> = Vec::new();
+        let mut current_scissor: Option<[f32; 4]> = None;
+        let mut cmd_start: u32 = 0;
+
         for elem in elements {
             if matches!(elem, MenuElement::Tooltip { .. }) {
                 deferred_tooltips.push(elem);
+                continue;
+            }
+            if matches!(
+                elem,
+                MenuElement::ScissorPush { .. } | MenuElement::ScissorPop
+            ) {
+                let count = vertices.len() as u32 - cmd_start;
+                if count > 0 {
+                    draw_cmds.push((cmd_start, count, current_scissor));
+                }
+                cmd_start = vertices.len() as u32;
+                current_scissor = if let MenuElement::ScissorPush { x, y, w, h } = elem {
+                    Some([*x, *y, *w, *h])
+                } else {
+                    None
+                };
                 continue;
             }
             match elem {
@@ -784,6 +804,11 @@ impl MenuOverlayPipeline {
                 }
             }
         }
+        let final_count = vertices.len() as u32 - cmd_start;
+        if final_count > 0 {
+            draw_cmds.push((cmd_start, final_count, current_scissor));
+        }
+
         if vertices.is_empty() {
             return;
         }
@@ -797,6 +822,14 @@ impl MenuOverlayPipeline {
             .unwrap()[..byte_data.len()]
             .copy_from_slice(byte_data);
 
+        let default_scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: vk::Extent2D {
+                width: screen_w as u32,
+                height: screen_h as u32,
+            },
+        };
+
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             device.cmd_bind_descriptor_sets(
@@ -808,7 +841,25 @@ impl MenuOverlayPipeline {
                 &[],
             );
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
-            device.cmd_draw(cmd, count as u32, 1, 0, 0);
+            for &(start, vert_count, ref scissor) in &draw_cmds {
+                let rect = if let Some(s) = scissor {
+                    vk::Rect2D {
+                        offset: vk::Offset2D {
+                            x: s[0] as i32,
+                            y: s[1] as i32,
+                        },
+                        extent: vk::Extent2D {
+                            width: s[2] as u32,
+                            height: s[3] as u32,
+                        },
+                    }
+                } else {
+                    default_scissor
+                };
+                device.cmd_set_scissor(cmd, 0, &[rect]);
+                device.cmd_draw(cmd, vert_count, 1, start, 0);
+            }
+            device.cmd_set_scissor(cmd, 0, &[default_scissor]);
         }
     }
 
@@ -931,6 +982,13 @@ impl MenuOverlayPipeline {
 
 #[allow(dead_code)]
 pub enum MenuElement {
+    ScissorPush {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
+    ScissorPop,
     Rect {
         x: f32,
         y: f32,
