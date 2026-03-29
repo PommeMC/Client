@@ -14,7 +14,6 @@ import {
 } from "react-icons/hi2";
 import { useAppStateContext } from "../lib/state";
 import { Page } from "../lib/types";
-import React from "react";
 
 interface NavItem {
   id: Page;

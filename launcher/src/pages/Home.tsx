@@ -40,7 +40,7 @@ export default function Homepage({ handleLaunch, openPatchNote }: HomepageProps)
           onClick={handleLaunch}
           disabled={launching}
         >
-          <HiPlay className="play-icon" />{" "}
+          <HiPlay className="play-icon" />
           <span className="play-text">{launching ? "LAUNCHING..." : "PLAY"}</span>
         </button>
       </div>

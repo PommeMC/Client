@@ -146,7 +146,9 @@ function App() {
 
   const removeAccount = useCallback(
     (uuid: string) => {
-      invoke("remove_account", { uuid }).then((r) => console.error("Failed to remove account:", r));
+      invoke("remove_account", { uuid }).catch((e) =>
+        console.error("Failed to remove account:", e),
+      );
       setAccounts((prev) => prev.filter((a) => a.uuid !== uuid));
       setActiveIndex(0);
       setAccountDropdownOpen(false);
