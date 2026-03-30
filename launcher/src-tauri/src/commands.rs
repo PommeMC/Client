@@ -266,7 +266,7 @@ pub async fn launch_game(
     let token: String = (0..32)
         .map(|_| format!("{:02x}", rand::random::<u8>()))
         .collect();
-    let token_path = std::env::temp_dir().join("launch_token");
+    let token_path = std::env::temp_dir().join("pomc_launch_token");
     std::fs::write(&token_path, &token).map_err(|e| e.to_string())?;
 
     let mut cmd = tokio::process::Command::new(&exe);
