@@ -337,6 +337,19 @@ impl App {
         self.apply_cursor_grab();
     }
 
+    fn send_respawn(&mut self) {
+        if let Some(sender) = &self.packet_sender {
+            sender.send(ServerboundGamePacket::ClientCommand(
+                azalea_protocol::packets::game::s_client_command::ServerboundClientCommand {
+                    action:
+                        azalea_protocol::packets::game::s_client_command::Action::PerformRespawn,
+                },
+            ));
+        }
+        self.dead = false;
+        self.apply_cursor_grab();
+    }
+
     fn disconnect_to_menu(&mut self, reason: Option<String>) {
         self.packet_sender = None;
         self.chat_sender = None;
@@ -471,7 +484,15 @@ impl App {
                     self.player.health = health;
                     self.player.food = food;
                     self.player.saturation = saturation;
-                    if health > 0.0 && self.dead {
+                    if health <= 0.0 && !self.dead {
+                        self.dead = true;
+                        self.death_message.clear();
+                        self.death_ticks = 0;
+                        if let Some(window) = &self.window {
+                            let _ = window.set_cursor_grab(CursorGrabMode::None);
+                            window.set_cursor_visible(true);
+                        }
+                    } else if health > 0.0 && self.dead {
                         self.dead = false;
                         self.apply_cursor_grab();
                     }
@@ -1120,18 +1141,21 @@ impl ApplicationHandler for App {
                                     }
                                 }
 
-                                let ready = self.position_set
-                                    && self
-                                        .renderer
-                                        .as_ref()
-                                        .is_some_and(|r| r.loaded_chunk_count() > 0);
+                                let ready = self.dead
+                                    || (self.position_set
+                                        && self
+                                            .renderer
+                                            .as_ref()
+                                            .is_some_and(|r| r.loaded_chunk_count() > 0));
 
                                 if ready {
                                     if let Some(p) = &mut self.presence {
                                         p.playing_multiplayer(&self.version);
                                     }
                                     self.state = GameState::InGame;
-                                    self.apply_cursor_grab();
+                                    if !self.dead {
+                                        self.apply_cursor_grab();
+                                    }
                                     break 'redraw;
                                 }
                             }
@@ -1499,15 +1523,7 @@ impl ApplicationHandler for App {
 
                             match death_action {
                                 crate::ui::death::DeathAction::Respawn => {
-                                    if let Some(sender) = &self.packet_sender {
-                                        sender.send(ServerboundGamePacket::ClientCommand(
-                                            azalea_protocol::packets::game::s_client_command::ServerboundClientCommand {
-                                                action: azalea_protocol::packets::game::s_client_command::Action::PerformRespawn,
-                                            },
-                                        ));
-                                    }
-                                    self.dead = false;
-                                    self.apply_cursor_grab();
+                                    self.send_respawn();
                                 }
                                 crate::ui::death::DeathAction::TitleScreen => {
                                     self.disconnect_to_menu(None);
