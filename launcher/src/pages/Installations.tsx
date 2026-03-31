@@ -1,5 +1,6 @@
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useEffect } from "react";
+import { BiSolidDownload } from "react-icons/bi";
 import {
   HiCube,
   HiDocumentDuplicate,
@@ -25,6 +26,7 @@ export default function InstallationsPage({ deleteInstallation }: InstallationsP
     setInstallations,
     setPage,
     setOpenedDialog,
+    downloadedVersions,
   } = useAppStateContext();
 
   useEffect(() => {
@@ -65,15 +67,27 @@ export default function InstallationsPage({ deleteInstallation }: InstallationsP
             <span className="install-card-played">
               {inst.last_played ? formatRelativeDate(inst.last_played) : "Never"}
             </span>
-            <button
-              className="install-play-btn"
-              onClick={() => {
-                setActiveInstall(inst);
-                setPage("home");
-              }}
-            >
-              <HiPlay /> Play
-            </button>
+            {downloadedVersions.has(inst.version) ? (
+              <button
+                className="install-play-btn"
+                onClick={() => {
+                  setActiveInstall(inst);
+                  setPage("home");
+                }}
+              >
+                <HiPlay /> Play
+              </button>
+            ) : (
+              <button
+                className="install-download-btn"
+                onClick={() => {
+                  setActiveInstall(inst);
+                  setPage("home");
+                }}
+              >
+                <BiSolidDownload /> Install
+              </button>
+            )}
             <button
               className="install-folder-btn"
               onClick={async () => {

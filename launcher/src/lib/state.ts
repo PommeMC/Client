@@ -7,6 +7,7 @@ import {
   DownloadProgress,
   GameVersion,
   LauncherSettings,
+  LaunchingStatus,
   OpenedDialog,
   Page,
   PatchNote,
@@ -72,12 +73,13 @@ const useAppState = () => {
   const [modSearch, setModSearch] = useState("");
   const [modFilter, setModFilter] = useState("all");
   const [versions, setVersions] = useState<GameVersion[]>([]);
-  const [launching, setLaunching] = useState(false);
+  const [launchingStatus, setLaunchingStatus] = useState<LaunchingStatus>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [status, setStatus] = useState("");
   const [news, setNews] = useState<PatchNote[]>([]);
   const [skinUrl, setSkinUrl] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+  const [downloadedVersions, setDownloadedVersions] = useState<Set<string>>(new Set());
 
   const account = accounts[activeIndex] || null;
   const username = account?.username || "Steve";
@@ -106,8 +108,8 @@ const useAppState = () => {
     setModFilter,
     versions,
     setVersions,
-    launching,
-    setLaunching,
+    launchingStatus,
+    setLaunchingStatus,
     authLoading,
     setAuthLoading,
     status,
@@ -123,6 +125,8 @@ const useAppState = () => {
     username,
     openedDialog,
     setOpenedDialog,
+    downloadedVersions,
+    setDownloadedVersions,
 
     launcherSettings: useLauncherSettings(),
     ...useServers(),

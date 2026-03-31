@@ -1,3 +1,4 @@
+import { BiSolidDownload } from "react-icons/bi";
 import { HiChevronDown, HiCube, HiPlay } from "react-icons/hi2";
 import SkinRunner from "../components/SkinRunner";
 import { useDropdown } from "../lib/hooks";
@@ -11,12 +12,13 @@ interface HomepageProps {
 
 export default function Homepage({ handleLaunch, openPatchNote }: HomepageProps) {
   const {
-    launching,
+    launchingStatus,
     installations,
     activeInstall,
     setActiveInstall,
     news,
     status,
+    downloadedVersions,
     downloadProgress,
     skinUrl,
     setOpenedDialog,
@@ -36,12 +38,32 @@ export default function Homepage({ handleLaunch, openPatchNote }: HomepageProps)
 
       <div className="launch-bar">
         <button
-          className={`play-button ${launching ? "launching" : ""}`}
+          className={`play-button ${
+            launchingStatus === "installing" || launchingStatus === "checking_assets"
+              ? "installing"
+              : launchingStatus === "launching"
+                ? "launching"
+                : ""
+          }`}
           onClick={handleLaunch}
-          disabled={launching}
+          disabled={launchingStatus !== null}
         >
-          <HiPlay className="play-icon" />
-          <span className="play-text">{launching ? "LAUNCHING..." : "PLAY"}</span>
+          {launchingStatus === null && downloadedVersions.has(activeInstall?.version ?? "") ? (
+            <HiPlay className="play-icon" />
+          ) : (
+            <BiSolidDownload className="download-icon" />
+          )}
+          <span className="play-text">
+            {launchingStatus === null
+              ? downloadedVersions.has(activeInstall?.version ?? "")
+                ? "PLAY"
+                : "INSTALL"
+              : launchingStatus === "checking_assets"
+                ? "Checking assets..."
+                : launchingStatus === "installing"
+                  ? "Installing..."
+                  : "Launching..."}
+          </span>
         </button>
       </div>
 

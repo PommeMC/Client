@@ -838,9 +838,51 @@ body {
 
 .play-button.launching:disabled {
   cursor: wait;
+  animation: launching-pulse 1.5s ease-in-out infinite;
 }
 
-.play-icon {
+@keyframes launching-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 2px 20px var(--accent-glow),
+      inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  }
+  50% {
+    box-shadow:
+      0 4px 40px rgba(74, 222, 128, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  }
+}
+
+.play-button.installing:disabled {
+  cursor: progress;
+  animation: installing-shimmer 1.2s linear infinite;
+}
+
+.play-button.installing::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -60%;
+  width: 60%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+  animation: shimmer-slide 1.2s linear infinite;
+  transition: none;
+}
+
+@keyframes shimmer-slide {
+  0% {
+    left: -60%;
+  }
+  100% {
+    left: 120%;
+  }
+}
+
+.play-icon,
+.download-icon {
   font-size: 20px;
   color: #0a1a0a;
   flex-shrink: 0;
@@ -849,7 +891,7 @@ body {
 .play-text {
   font-size: 22px;
   font-weight: 700;
-  letter-spacing: 8px;
+  letter-spacing: 5px;
   color: #0a1a0a;
 }
 
@@ -1718,7 +1760,8 @@ body {
   flex-shrink: 0;
 }
 
-.install-play-btn {
+.install-play-btn,
+.install-download-btn {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1736,7 +1779,8 @@ body {
   flex-shrink: 0;
 }
 
-.install-play-btn:hover {
+.install-play-btn:hover,
+.install-download-btn:hover {
   box-shadow: 0 2px 12px var(--accent-glow);
   transform: translateY(-1px);
 }

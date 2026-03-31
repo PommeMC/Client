@@ -3,6 +3,8 @@ import { InstallationDialogProps } from "../components/dialogs/InstallationDialo
 
 export type Page = "home" | "installations" | "servers" | "friends" | "mods" | "news" | "settings";
 
+export type LaunchingStatus = null | "checking_assets" | "launching" | "installing";
+
 // dialog_name: typeof props
 type DialogMap = {
   installation: InstallationDialogProps;

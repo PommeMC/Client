@@ -34,7 +34,8 @@ function App() {
     setActiveIndex,
     server,
     setVersions,
-    setLaunching,
+    downloadedVersions,
+    setLaunchingStatus,
     setAuthLoading,
     setStatus,
     setNews,
@@ -51,6 +52,7 @@ function App() {
     activeInstall,
     setActiveInstall,
     setInstallations,
+    setDownloadedVersions,
   } = useAppStateContext();
 
   const { setIsOpen: setAccountDropdownOpen } = accountDropdown;
@@ -170,32 +172,40 @@ function App() {
       return;
     }
 
-    setLaunching(true);
     setStatus("Checking assets...");
     try {
-      await invoke("ensure_assets", { version: activeInstall?.version });
+      if (downloadedVersions.has(activeInstall.version)) {
+        setLaunchingStatus("checking_assets");
+      } else {
+        setLaunchingStatus("installing");
+      }
+      await invoke("ensure_assets", { version: activeInstall.version });
       setDownloadProgress(null);
+      setLaunchingStatus("launching");
       setStatus("Launching Pomme...");
       const result = await invoke<string>("launch_game", {
         uuid: account?.uuid || null,
         server: server || null,
         debugEnabled: launcherSettings.launchWithConsole || null,
-        version: activeInstall?.version,
+        version: activeInstall.version,
       });
       setStatus(result);
+      setLaunchingStatus(null);
+      setDownloadedVersions((prev) => prev.add(activeInstall.version));
     } catch (e) {
       setDownloadProgress(null);
       setStatus(`${e}`);
+      setLaunchingStatus(null);
     }
     setTimeout(() => {
-      setLaunching(false);
       setStatus("");
     }, 3000);
   }, [
     activeInstall,
-    setLaunching,
+    setLaunchingStatus,
     setStatus,
     setDownloadProgress,
+    downloadedVersions,
     account?.uuid,
     server,
     launcherSettings.launchWithConsole,
@@ -263,6 +273,14 @@ function App() {
       })
       .catch((e) => setStatus("Failed to load installations: " + e));
   }, [setInstallations, setActiveInstall, activeInstall, setStatus]);
+
+  useEffect(() => {
+    invoke<string[]>("get_downloaded_versions")
+      .then((versions) => {
+        setDownloadedVersions((prev) => new Set([...prev, ...versions]));
+      })
+      .catch((e) => console.error("Failed to load downloaded versions: " + e));
+  }, [setDownloadedVersions, setStatus]);
 
   return (
     <div className="app">

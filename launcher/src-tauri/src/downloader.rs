@@ -329,3 +329,19 @@ fn emit_progress(app: &AppHandle, downloaded: u32, total: u32, status: &str) {
         },
     );
 }
+
+pub async fn get_downloaded_versions() -> Vec<String> {
+    let mut matches = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(&storage::versions_dir()).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.is_dir()
+                && let Some(id) = path.file_name().and_then(|n| n.to_str())
+                && !needs_download(id)
+            {
+                matches.push(id.to_string());
+            }
+        }
+    }
+    matches
+}

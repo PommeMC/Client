@@ -262,6 +262,11 @@ pub async fn ensure_assets(app: AppHandle, version: String) -> Result<(), String
 }
 
 #[tauri::command]
+pub async fn get_downloaded_versions() -> Vec<String> {
+    crate::downloader::get_downloaded_versions().await
+}
+
+#[tauri::command]
 pub async fn launch_game(
     app: AppHandle,
     version: String,
