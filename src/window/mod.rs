@@ -398,6 +398,7 @@ impl App {
                     log::info!("Dimension: height={height}, min_y={min_y}");
                     self.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
+                    self.position_set = false;
                     if let Some(renderer) = &mut self.renderer {
                         renderer.clear_chunk_meshes();
                         self.mesh_dispatcher =
