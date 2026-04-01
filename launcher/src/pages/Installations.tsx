@@ -16,9 +16,15 @@ import type { InstallationError } from "../lib/types.ts";
 
 interface InstallationsPageProps {
   deleteInstallation: (install_id: string) => Promise<null | InstallationError>;
+  handleLaunch: () => Promise<void>;
+  ensureAssets: (version: string) => Promise<boolean>;
 }
 
-export default function InstallationsPage({ deleteInstallation }: InstallationsPageProps) {
+export default function InstallationsPage({
+  deleteInstallation,
+  handleLaunch,
+  ensureAssets,
+}: InstallationsPageProps) {
   const {
     activeInstall,
     setActiveInstall,
@@ -56,6 +62,9 @@ export default function InstallationsPage({ deleteInstallation }: InstallationsP
           <div
             key={inst.id}
             className={`install-card ${inst.id === activeInstall?.id ? "active" : ""}`}
+            onClick={() => {
+              setActiveInstall(inst);
+            }}
           >
             <div className="install-card-icon">
               <HiCube />
@@ -73,6 +82,7 @@ export default function InstallationsPage({ deleteInstallation }: InstallationsP
                 onClick={() => {
                   setActiveInstall(inst);
                   setPage("home");
+                  handleLaunch();
                 }}
               >
                 <HiPlay /> Play
@@ -83,6 +93,7 @@ export default function InstallationsPage({ deleteInstallation }: InstallationsP
                 onClick={() => {
                   setActiveInstall(inst);
                   setPage("home");
+                  ensureAssets(inst.version);
                 }}
               >
                 <BiSolidDownload /> Install

@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef } from "react";
 import Navbar from "./components/Navbar";
 import Titlebar from "./components/Titlebar";
+import AlertDialog from "./components/dialogs/AlertDialog.tsx";
 import { ConfirmDialog } from "./components/dialogs/ConfirmDialog.tsx";
 import { InstallationDialog } from "./components/dialogs/InstallationDialog.tsx";
 import { useAppStateContext } from "./lib/state";
@@ -165,6 +166,30 @@ function App() {
     [setAccountDropdownOpen, setAccounts, setActiveIndex, setSkinUrl],
   );
 
+  const ensureAssets = useCallback(
+    async (version: string) => {
+      setStatus("Checking assets...");
+      try {
+        if (downloadedVersions.has(version)) {
+          setLaunchingStatus("checking_assets");
+        } else {
+          setLaunchingStatus("installing");
+        }
+        await invoke("ensure_assets", { version });
+        setDownloadedVersions((prev) => prev.add(version));
+        return true;
+      } catch (e) {
+        setStatus(`${e}`);
+        return false;
+      } finally {
+        setStatus("");
+        setDownloadProgress(null);
+        setLaunchingStatus(null);
+      }
+    },
+    [downloadedVersions, setDownloadedVersions, setLaunchingStatus, setStatus, setDownloadProgress],
+  );
+
   const handleLaunch = useCallback(async () => {
     if (!activeInstall) {
       setStatus("No installation selected");
@@ -172,15 +197,11 @@ function App() {
       return;
     }
 
-    setStatus("Checking assets...");
+    if (!(await ensureAssets(activeInstall.version))) {
+      return;
+    }
+
     try {
-      if (downloadedVersions.has(activeInstall.version)) {
-        setLaunchingStatus("checking_assets");
-      } else {
-        setLaunchingStatus("installing");
-      }
-      await invoke("ensure_assets", { version: activeInstall.version });
-      setDownloadProgress(null);
       setLaunchingStatus("launching");
       setStatus("Launching Pomme...");
       const result = await invoke<string>("launch_game", {
@@ -188,19 +209,20 @@ function App() {
         server: server || null,
         debugEnabled: launcherSettings.launchWithConsole || null,
         version: activeInstall.version,
+        install_id: activeInstall.id,
       });
       setStatus(result);
-      setLaunchingStatus(null);
-      setDownloadedVersions((prev) => prev.add(activeInstall.version));
     } catch (e) {
-      setDownloadProgress(null);
       setStatus(`${e}`);
+    } finally {
+      setDownloadProgress(null);
       setLaunchingStatus(null);
+      setTimeout(() => {
+        setStatus("");
+      }, 3000);
     }
-    setTimeout(() => {
-      setStatus("");
-    }, 3000);
   }, [
+    ensureAssets,
     activeInstall,
     setLaunchingStatus,
     setStatus,
@@ -299,7 +321,11 @@ function App() {
           )}
 
           {page === "installations" && (
-            <InstallationsPage deleteInstallation={deleteInstallation} />
+            <InstallationsPage
+              deleteInstallation={deleteInstallation}
+              handleLaunch={handleLaunch}
+              ensureAssets={ensureAssets}
+            />
           )}
 
           {page === "news" && <NewsPage openPatchNote={openPatchNote} />}
@@ -335,6 +361,7 @@ function App() {
             />
           )}
           {openedDialog.name === "confirm_dialog" && <ConfirmDialog {...openedDialog.props} />}
+          {openedDialog.name === "alert_dialog" && <AlertDialog {...openedDialog.props} />}
         </div>
       )}
     </div>

@@ -1911,9 +1911,10 @@ body {
 .dialog-fields .dialog-text {
   font-family: var(--font-body);
   font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 2px;
-  color: var(--text-muted);
+  font-weight: 400;
+  letter-spacing: 0.3px;
+  color: var(--text-dim);
+  line-height: 1.6;
 }
 
 .dialog-field label {
