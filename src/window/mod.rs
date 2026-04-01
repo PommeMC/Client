@@ -485,15 +485,7 @@ impl App {
                     self.player.health = health;
                     self.player.food = food;
                     self.player.saturation = saturation;
-                    if health <= 0.0 && !self.dead {
-                        self.dead = true;
-                        self.death_message.clear();
-                        self.death_ticks = 0;
-                        if let Some(window) = &self.window {
-                            let _ = window.set_cursor_grab(CursorGrabMode::None);
-                            window.set_cursor_visible(true);
-                        }
-                    } else if health > 0.0 && self.dead {
+                    if health > 0.0 && self.dead {
                         self.dead = false;
                         self.apply_cursor_grab();
                     }
