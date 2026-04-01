@@ -41,7 +41,7 @@ pub fn build_death_screen(
     let title_fs = fs * 2.0;
     elements.push(MenuElement::Text {
         x: cx,
-        y: 30.0 * gs,
+        y: 60.0 * gs,
         text: "You Died!".into(),
         scale: title_fs,
         color: [1.0, 1.0, 1.0, 1.0],
