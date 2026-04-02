@@ -268,6 +268,7 @@ pub struct MainMenu {
     settings_dir: PathBuf,
     menu_open_time: Option<Instant>,
     last_favicon_count: usize,
+    favicon_dirty_since: Option<Instant>,
 }
 
 impl MainMenu {
@@ -323,6 +324,7 @@ impl MainMenu {
             settings_dir: game_dir.to_path_buf(),
             menu_open_time: None,
             last_favicon_count: 0,
+            favicon_dirty_since: None,
         }
     }
 
@@ -401,7 +403,15 @@ impl MainMenu {
             .count();
         if count != self.last_favicon_count {
             self.last_favicon_count = count;
-            true
+            self.favicon_dirty_since = Some(Instant::now());
+            false
+        } else if let Some(since) = self.favicon_dirty_since {
+            if since.elapsed().as_millis() >= 500 {
+                self.favicon_dirty_since = None;
+                true
+            } else {
+                false
+            }
         } else {
             false
         }

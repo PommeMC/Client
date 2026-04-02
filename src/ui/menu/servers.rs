@@ -153,7 +153,7 @@ impl MainMenu {
                     w: icon_size,
                     h: icon_size,
                     corner_radius: 0.0,
-                    color: [0.56, 0.56, 0.56, 0.63],
+                    color: [0.274, 0.274, 0.274, 0.63],
                 });
 
                 if on_icon {

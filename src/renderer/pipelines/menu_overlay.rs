@@ -1025,7 +1025,7 @@ impl MenuOverlayPipeline {
             regions.insert(addr.clone(), [u0, v0, u1, v1]);
         }
 
-        unsafe { device.device_wait_idle().unwrap() };
+        unsafe { device.queue_wait_idle(queue).unwrap() };
 
         if let Some(alloc) = self.favicon_allocation.take() {
             unsafe {
