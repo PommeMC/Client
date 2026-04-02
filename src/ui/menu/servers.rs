@@ -137,6 +137,15 @@ impl MainMenu {
                 size: icon_size,
                 address: server.address.clone(),
             });
+
+            let rel_x = cursor.0 - rect[0];
+            let rel_y = cursor.1 - icon_y;
+            let on_icon =
+                hovered && rel_x >= 0.0 && rel_x < icon_size && rel_y >= 0.0 && rel_y < icon_size;
+            let right_half = rel_x >= icon_size / 2.0;
+            let top_left = !right_half && rel_y < icon_size / 2.0;
+            let bottom_left = !right_half && rel_y >= icon_size / 2.0;
+
             if hovered {
                 elements.push(MenuElement::Rect {
                     x: rect[0],
@@ -147,15 +156,7 @@ impl MainMenu {
                     color: [0.56, 0.56, 0.56, 0.63],
                 });
 
-                let rel_x = cursor.0 - rect[0];
-                let rel_y = cursor.1 - icon_y;
-                let right_half = rel_x >= icon_size / 2.0 && rel_x < icon_size;
-                let icon_area =
-                    rel_x >= 0.0 && rel_x < icon_size && rel_y >= 0.0 && rel_y < icon_size;
-                let top_left = rel_x < icon_size / 2.0 && rel_y < icon_size / 2.0;
-                let bottom_left = rel_x < icon_size / 2.0 && rel_y >= icon_size / 2.0;
-
-                if icon_area {
+                if on_icon {
                     let join_sprite = if right_half {
                         SpriteId::ServerJoinHighlighted
                     } else {
@@ -229,29 +230,14 @@ impl MainMenu {
             );
 
             if clicked && hovered {
-                let rel_x = cursor.0 - rect[0];
-                let rel_y_click = cursor.1 - icon_y;
-                let on_icon = rel_x >= 0.0
-                    && rel_x < icon_size
-                    && rel_y_click >= 0.0
-                    && rel_y_click < icon_size;
-
-                if on_icon && rel_x >= icon_size / 2.0 {
+                if on_icon && right_half {
                     action = MenuAction::Connect {
                         server: server.address.clone(),
                         username: self.username.clone(),
                     };
-                } else if on_icon
-                    && rel_x < icon_size / 2.0
-                    && rel_y_click < icon_size / 2.0
-                    && i > 0
-                {
+                } else if on_icon && top_left && i > 0 {
                     pending_swap = Some((i, i - 1));
-                } else if on_icon
-                    && rel_x < icon_size / 2.0
-                    && rel_y_click >= icon_size / 2.0
-                    && i < self.server_list.servers.len() - 1
-                {
+                } else if on_icon && bottom_left && i < self.server_list.servers.len() - 1 {
                     pending_swap = Some((i, i + 1));
                 } else {
                     let now = Instant::now();
@@ -330,7 +316,7 @@ impl MainMenu {
                 w: track_w,
                 h: list_h,
                 sprite: SpriteId::ScrollerBackground,
-                border: 1.0 * gs,
+                border: gs,
                 tint: WHITE,
             });
             elements.push(MenuElement::NineSlice {
@@ -339,7 +325,7 @@ impl MainMenu {
                 w: track_w,
                 h: thumb_h,
                 sprite: SpriteId::Scroller,
-                border: 1.0 * gs,
+                border: gs,
                 tint: WHITE,
             });
         }

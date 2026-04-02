@@ -182,14 +182,21 @@ pub(super) fn push_server_status(
         return;
     };
 
+    let icon_w = 10.0 * gs;
+    let icon_h = 8.0 * gs;
+    let icon_x = entry_rect[0] + entry_rect[2] - icon_w - 5.0 * gs;
+    let icon_y = entry_rect[1];
+
     match state {
         PingState::Pinging => {
             let millis = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
-            let icon_idx = (millis / 100) & 7;
-            let frame = if icon_idx > 4 { 8 - icon_idx } else { icon_idx };
+            let frame = match (millis / 100) % 8 {
+                f if f > 4 => 8 - f,
+                f => f,
+            };
             let sprite = match frame {
                 0 => SpriteId::Pinging1,
                 1 => SpriteId::Pinging2,
@@ -197,13 +204,11 @@ pub(super) fn push_server_status(
                 3 => SpriteId::Pinging4,
                 _ => SpriteId::Pinging5,
             };
-            let bw = 10.0 * gs;
-            let bh = 8.0 * gs;
             elements.push(MenuElement::Image {
-                x: entry_rect[0] + entry_rect[2] - bw - 5.0 * gs,
-                y: entry_rect[1],
-                w: bw,
-                h: bh,
+                x: icon_x,
+                y: icon_y,
+                w: icon_w,
+                h: icon_h,
                 sprite,
                 tint: WHITE,
             });
@@ -244,15 +249,11 @@ pub(super) fn push_server_status(
             } else {
                 ping_sprite(*latency_ms)
             };
-            let bw = 10.0 * gs;
-            let bh = 8.0 * gs;
-            let bx = entry_rect[0] + entry_rect[2] - bw - 5.0 * gs;
-            let by = entry_rect[1];
             elements.push(MenuElement::Image {
-                x: bx,
-                y: by,
-                w: bw,
-                h: bh,
+                x: icon_x,
+                y: icon_y,
+                w: icon_w,
+                h: icon_h,
                 sprite: status_sprite,
                 tint: WHITE,
             });
@@ -268,7 +269,7 @@ pub(super) fn push_server_status(
                 COL_DARK_DIM
             };
             let pw = text_width_fn(&status_text, fs);
-            let status_x = bx - pw - 5.0 * gs;
+            let status_x = icon_x - pw - 5.0 * gs;
             elements.push(MenuElement::Text {
                 x: status_x,
                 y: entry_rect[1] + 1.0 * gs,
@@ -278,7 +279,7 @@ pub(super) fn push_server_status(
                 centered: false,
             });
 
-            if common::hit_test(cursor, [bx, by, bw, bh]) {
+            if common::hit_test(cursor, [icon_x, icon_y, icon_w, icon_h]) {
                 let tip = if !protocol_match {
                     "Incompatible version!".to_string()
                 } else {
@@ -306,13 +307,11 @@ pub(super) fn push_server_status(
                 color: COL_RED,
                 centered: false,
             });
-            let bw = 10.0 * gs;
-            let bh = 8.0 * gs;
             elements.push(MenuElement::Image {
-                x: entry_rect[0] + entry_rect[2] - bw - 5.0 * gs,
-                y: entry_rect[1],
-                w: bw,
-                h: bh,
+                x: icon_x,
+                y: icon_y,
+                w: icon_w,
+                h: icon_h,
                 sprite: SpriteId::Unreachable,
                 tint: WHITE,
             });
