@@ -329,9 +329,9 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ChunkVertex> 
         let u_span = region.u_max - region.u_min;
         let v_span = region.v_max - region.v_min;
         let tint = if matches!(quad.tint, crate::world::block::registry::Tint::None) {
-            [1.0, 1.0, 1.0]
+            crate::renderer::chunk::mesher::PACKED_WHITE
         } else {
-            [0.569, 0.741, 0.349]
+            crate::renderer::chunk::mesher::pack_tint([0.569, 0.741, 0.349])
         };
 
         for i in [0, 1, 2, 2, 3, 0] {
@@ -387,7 +387,7 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Chunk
             position: front[i],
             tex_coords: front_uvs[i],
             light: 1.0,
-            tint: [1.0, 1.0, 1.0],
+            tint: crate::renderer::chunk::mesher::PACKED_WHITE,
         });
     }
 
@@ -412,7 +412,7 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Chunk
             position: back[i],
             tex_coords: back_uvs[i],
             light: 1.0,
-            tint: [1.0, 1.0, 1.0],
+            tint: crate::renderer::chunk::mesher::PACKED_WHITE,
         });
     }
 
@@ -476,7 +476,7 @@ fn push_side_quad(
             position: *p,
             tex_coords: [u, v],
             light,
-            tint: [1.0, 1.0, 1.0],
+            tint: crate::renderer::chunk::mesher::PACKED_WHITE,
         });
     }
 }
@@ -506,7 +506,7 @@ fn build_flat_quad(region: AtlasRegion) -> Vec<ChunkVertex> {
             position: *p,
             tex_coords: *uv,
             light: 1.0,
-            tint: [1.0, 1.0, 1.0],
+            tint: crate::renderer::chunk::mesher::PACKED_WHITE,
         })
         .collect()
 }
@@ -559,7 +559,7 @@ fn create_pipeline(
         vk::VertexInputAttributeDescription {
             location: 3,
             binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
+            format: vk::Format::R8G8B8A8_UNORM,
             offset: 24,
         },
     ];

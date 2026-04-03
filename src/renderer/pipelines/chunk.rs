@@ -220,7 +220,7 @@ fn create_pipeline(
         vk::VertexInputAttributeDescription {
             location: 3,
             binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
+            format: vk::Format::R8G8B8A8_UNORM,
             offset: 24,
         },
     ];

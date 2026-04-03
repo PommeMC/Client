@@ -446,7 +446,7 @@ fn generate_cube_vertices(
                 position: face.positions[i],
                 tex_coords: uvs[i],
                 light: 1.0,
-                tint: [1.0, 1.0, 1.0],
+                tint: crate::renderer::chunk::mesher::PACKED_WHITE,
             });
         }
     }
