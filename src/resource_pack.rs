@@ -79,7 +79,7 @@ impl ResourcePackManager {
                 .map_err(|e| PackError::Download(e.to_string()))?
                 .bytes()
                 .map_err(|e| PackError::Download(e.to_string()))?;
-            log::info!("Downloaded {} bytes", data.len());
+            tracing::info!("Downloaded {} bytes", data.len());
             validate_hash(&data, hash)?;
             extract_zip(&data, &dir)?;
         }
@@ -101,7 +101,7 @@ impl ResourcePackManager {
                 ..info
             },
         });
-        log::info!("Applied server resource pack {id} (hash: {hash})");
+        tracing::info!("Applied server resource pack {id} (hash: {hash})");
     }
 
     pub fn remove_server_pack(&mut self, id: &uuid::Uuid) -> bool {
@@ -111,14 +111,14 @@ impl ResourcePackManager {
             .retain(|p| !(p.id == id_str && p.source == PackSource::Server));
         let removed = self.active_packs.len() < before;
         if removed {
-            log::info!("Removed server resource pack {id}");
+            tracing::info!("Removed server resource pack {id}");
         }
         removed
     }
 
     pub fn clear_server_packs(&mut self) {
         self.active_packs.retain(|p| p.source != PackSource::Server);
-        log::info!("Cleared all server resource packs");
+        tracing::info!("Cleared all server resource packs");
     }
 
     pub fn scan_local_packs(&mut self) {
@@ -175,13 +175,13 @@ impl ResourcePackManager {
                     ..info
                 },
             });
-            log::info!("Enabled local resource pack: {name}");
+            tracing::info!("Enabled local resource pack: {name}");
         } else if path.extension().is_some_and(|e| e == "zip")
             && let Ok(data) = std::fs::read(&path)
         {
             let extract_dir = self.server_cache_dir.join(format!("_local_{name}"));
             if let Err(e) = extract_zip(&data, &extract_dir) {
-                log::error!("Failed to extract zip pack {name}: {e}");
+                tracing::error!("Failed to extract zip pack {name}: {e}");
                 return;
             }
             let info = parse_pack_meta_dir(&extract_dir, name);
@@ -196,7 +196,7 @@ impl ResourcePackManager {
                     ..info
                 },
             });
-            log::info!("Enabled local resource pack: {name}");
+            tracing::info!("Enabled local resource pack: {name}");
         }
         self.scan_local_packs();
     }
@@ -204,7 +204,7 @@ impl ResourcePackManager {
     pub fn disable_local_pack(&mut self, name: &str) {
         self.active_packs
             .retain(|p| !(p.id == name && p.source == PackSource::Local));
-        log::info!("Disabled local resource pack: {name}");
+        tracing::info!("Disabled local resource pack: {name}");
         self.scan_local_packs();
     }
 
@@ -244,7 +244,7 @@ fn validate_hash(data: &[u8], expected: &str) -> Result<(), PackError> {
     }
     let actual = sha1_smol::Sha1::from(data).digest().to_string();
     if actual != expected {
-        log::error!("Hash mismatch: expected {expected}, got {actual}");
+        tracing::error!("Hash mismatch: expected {expected}, got {actual}");
         return Err(PackError::HashMismatch);
     }
     Ok(())
@@ -406,6 +406,6 @@ fn extract_zip(data: &[u8], dest: &Path) -> Result<(), PackError> {
         }
     }
 
-    log::info!("Extracted resource pack to {}", dest.display());
+    tracing::info!("Extracted resource pack to {}", dest.display());
     Ok(())
 }

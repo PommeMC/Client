@@ -704,7 +704,7 @@ impl Renderer {
 
         let cache_path = game_dir.join(crate::world::block::registry::BLOCK_CACHE_FILE);
         let _ = std::fs::remove_file(&cache_path);
-        log::info!("Invalidated block cache");
+        tracing::info!("Invalidated block cache");
 
         self.registry = BlockRegistry::load(
             &self.jar_assets_dir,
@@ -731,7 +731,7 @@ impl Renderer {
         self.chunk_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
 
-        log::info!("Assets reloaded");
+        tracing::info!("Assets reloaded");
     }
 
     pub fn reload_panorama(

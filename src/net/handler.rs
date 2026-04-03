@@ -283,13 +283,13 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::PlayerCombatKill(p) => {
-            log::info!("Player died: {}", p.message);
+            tracing::info!("Player died: {}", p.message);
             let _ = event_tx.try_send(NetworkEvent::PlayerDied {
                 message: p.message.to_string(),
             });
         }
         ClientboundGamePacket::ResourcePackPush(p) => {
-            log::info!(
+            tracing::info!(
                 "Server pushing resource pack {} (required: {})",
                 p.id,
                 p.required
@@ -308,7 +308,7 @@ pub fn handle_game_packet(
             ));
         }
         ClientboundGamePacket::ResourcePackPop(p) => {
-            log::info!("Server popping resource pack {:?}", p.id);
+            tracing::info!("Server popping resource pack {:?}", p.id);
             let _ = event_tx.try_send(NetworkEvent::ResourcePackPop { id: p.id });
         }
         _other => {}

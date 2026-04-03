@@ -305,7 +305,7 @@ async fn config_sequence(
                 .await?;
             }
             ClientboundConfigPacket::ResourcePackPush(p) => {
-                log::info!(
+                tracing::info!(
                     "Server pushing resource pack {} (required: {})",
                     p.id,
                     p.required
@@ -325,7 +325,7 @@ async fn config_sequence(
                 .await?;
             }
             ClientboundConfigPacket::ResourcePackPop(p) => {
-                log::info!("Server popping resource pack {:?}", p.id);
+                tracing::info!("Server popping resource pack {:?}", p.id);
                 let _ = event_tx.try_send(NetworkEvent::ResourcePackPop { id: p.id });
             }
             _ => {

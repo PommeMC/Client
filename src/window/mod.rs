@@ -698,7 +698,7 @@ impl App {
                     hash,
                     required,
                 } => {
-                    log::info!("Resource pack push: {id} url={url} required={required}");
+                    tracing::info!("Resource pack push: {id} url={url} required={required}");
                     let cache_dir = self.resource_packs.server_cache_dir().to_path_buf();
                     self.pending_pack_download = Some(std::thread::spawn(move || {
                         let result =
@@ -738,12 +738,12 @@ impl App {
             let action = match &dl.result {
                 Ok(_) => {
                     self.resource_packs.apply_server_pack(dl.id, &dl.hash);
-                    log::info!("Resource pack {} loaded successfully", dl.id);
+                    tracing::info!("Resource pack {} loaded successfully", dl.id);
                     self.menu.reload_assets = true;
                     s_resource_pack::Action::SuccessfullyLoaded
                 }
                 Err(e) => {
-                    log::error!("Resource pack {} failed: {e}", dl.id);
+                    tracing::error!("Resource pack {} failed: {e}", dl.id);
                     if dl.required {
                         disconnect_reason = Some(format!("Required resource pack failed: {e}"));
                     }
