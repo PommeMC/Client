@@ -3,6 +3,151 @@ use std::collections::HashMap;
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
+fn item_move(
+    pos: &mut DVec3,
+    vel: DVec3,
+    half_w: f64,
+    height: f64,
+    is_solid: &impl Fn(i32, i32, i32) -> bool,
+) -> DVec3 {
+    let mut remaining = vel;
+
+    if remaining.y != 0.0 {
+        remaining.y = sweep_axis_y(pos, remaining.y, half_w, height, is_solid);
+    }
+    if remaining.x.abs() >= remaining.z.abs() {
+        if remaining.x != 0.0 {
+            remaining.x = sweep_axis_x(pos, remaining.x, half_w, height, is_solid);
+        }
+        if remaining.z != 0.0 {
+            remaining.z = sweep_axis_z(pos, remaining.z, half_w, height, is_solid);
+        }
+    } else {
+        if remaining.z != 0.0 {
+            remaining.z = sweep_axis_z(pos, remaining.z, half_w, height, is_solid);
+        }
+        if remaining.x != 0.0 {
+            remaining.x = sweep_axis_x(pos, remaining.x, half_w, height, is_solid);
+        }
+    }
+
+    remaining
+}
+
+fn sweep_axis_y(
+    pos: &mut DVec3,
+    dy: f64,
+    half_w: f64,
+    height: f64,
+    is_solid: &impl Fn(i32, i32, i32) -> bool,
+) -> f64 {
+    let min_x = (pos.x - half_w).floor() as i32;
+    let max_x = (pos.x + half_w).floor() as i32;
+    let min_z = (pos.z - half_w).floor() as i32;
+    let max_z = (pos.z + half_w).floor() as i32;
+
+    if dy < 0.0 {
+        let target_y = pos.y + dy;
+        let by = target_y.floor() as i32;
+        for bx in min_x..=max_x {
+            for bz in min_z..=max_z {
+                if is_solid(bx, by, bz) {
+                    let floor = by as f64 + 1.0;
+                    if floor > target_y && floor <= pos.y {
+                        pos.y = floor;
+                        return 0.0;
+                    }
+                }
+            }
+        }
+        pos.y = target_y;
+    } else if dy > 0.0 {
+        let target_y = pos.y + height + dy;
+        let by = target_y.floor() as i32;
+        for bx in min_x..=max_x {
+            for bz in min_z..=max_z {
+                if is_solid(bx, by, bz) {
+                    let ceil = by as f64;
+                    pos.y = ceil - height;
+                    return 0.0;
+                }
+            }
+        }
+        pos.y += dy;
+    }
+    dy
+}
+
+fn sweep_axis_x(
+    pos: &mut DVec3,
+    dx: f64,
+    half_w: f64,
+    height: f64,
+    is_solid: &impl Fn(i32, i32, i32) -> bool,
+) -> f64 {
+    let min_y = pos.y.floor() as i32;
+    let max_y = (pos.y + height).floor() as i32;
+    let min_z = (pos.z - half_w).floor() as i32;
+    let max_z = (pos.z + half_w).floor() as i32;
+
+    let edge = if dx > 0.0 {
+        pos.x + half_w + dx
+    } else {
+        pos.x - half_w + dx
+    };
+    let bx = edge.floor() as i32;
+
+    for by in min_y..=max_y {
+        for bz in min_z..=max_z {
+            if is_solid(bx, by, bz) {
+                if dx > 0.0 {
+                    pos.x = bx as f64 - half_w;
+                } else {
+                    pos.x = bx as f64 + 1.0 + half_w;
+                }
+                return 0.0;
+            }
+        }
+    }
+    pos.x += dx;
+    dx
+}
+
+fn sweep_axis_z(
+    pos: &mut DVec3,
+    dz: f64,
+    half_w: f64,
+    height: f64,
+    is_solid: &impl Fn(i32, i32, i32) -> bool,
+) -> f64 {
+    let min_y = pos.y.floor() as i32;
+    let max_y = (pos.y + height).floor() as i32;
+    let min_x = (pos.x - half_w).floor() as i32;
+    let max_x = (pos.x + half_w).floor() as i32;
+
+    let edge = if dz > 0.0 {
+        pos.z + half_w + dz
+    } else {
+        pos.z - half_w + dz
+    };
+    let bz = edge.floor() as i32;
+
+    for by in min_y..=max_y {
+        for bx in min_x..=max_x {
+            if is_solid(bx, by, bz) {
+                if dz > 0.0 {
+                    pos.z = bz as f64 - half_w;
+                } else {
+                    pos.z = bz as f64 + 1.0 + half_w;
+                }
+                return 0.0;
+            }
+        }
+    }
+    pos.z += dz;
+    dz
+}
+
 const INTERPOLATION_STEPS: i32 = 3;
 
 #[allow(dead_code)]
@@ -119,10 +264,14 @@ impl LivingEntity {
 
 pub struct ItemEntity {
     pub position: DVec3,
+    pub prev_position: DVec3,
+    pub velocity: DVec3,
+    pub on_ground: bool,
     pub item_name: String,
     pub count: i32,
     pub age: u32,
     pub bob_offset: f32,
+    pub is_block_model: bool,
 }
 
 struct PickupAnimation {
@@ -132,6 +281,7 @@ struct PickupAnimation {
     bob_offset: f32,
     age: u32,
     life: u32,
+    is_block_model: bool,
 }
 
 pub struct PickupRenderInfo {
@@ -139,6 +289,7 @@ pub struct PickupRenderInfo {
     pub position: DVec3,
     pub bob_offset: f32,
     pub age: u32,
+    pub is_block_model: bool,
 }
 
 const PICKUP_LIFE: u32 = 3;
@@ -156,30 +307,36 @@ impl ItemEntityStore {
         }
     }
 
-    pub fn spawn_item(&mut self, id: i32, position: DVec3) {
+    pub fn spawn_item(&mut self, id: i32, position: DVec3, velocity: DVec3) {
         let bob_offset =
             ((id as u32).wrapping_mul(2654435761)) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
         self.items.insert(
             id,
             ItemEntity {
                 position,
+                prev_position: position,
+                velocity,
+                on_ground: false,
                 item_name: String::new(),
                 count: 1,
                 age: 0,
                 bob_offset,
+                is_block_model: false,
             },
         );
     }
 
-    pub fn set_item_data(&mut self, id: i32, item_name: String, count: i32) {
+    pub fn set_item_data(&mut self, id: i32, item_name: String, count: i32, is_block_model: bool) {
         if let Some(entity) = self.items.get_mut(&id) {
             entity.item_name = item_name;
             entity.count = count;
+            entity.is_block_model = is_block_model;
         }
     }
 
     pub fn move_delta(&mut self, id: i32, dx: f64, dy: f64, dz: f64) {
         if let Some(entity) = self.items.get_mut(&id) {
+            entity.prev_position = entity.position;
             entity.position.x += dx;
             entity.position.y += dy;
             entity.position.z += dz;
@@ -188,6 +345,7 @@ impl ItemEntityStore {
 
     pub fn teleport(&mut self, id: i32, position: DVec3) {
         if let Some(entity) = self.items.get_mut(&id) {
+            entity.prev_position = entity.position;
             entity.position = position;
         }
     }
@@ -203,6 +361,7 @@ impl ItemEntityStore {
                 bob_offset: entity.bob_offset,
                 age: entity.age,
                 life: 0,
+                is_block_model: entity.is_block_model,
             });
         }
     }
@@ -213,9 +372,54 @@ impl ItemEntityStore {
         }
     }
 
-    pub fn tick(&mut self) {
+    pub fn tick(
+        &mut self,
+        is_solid: impl Fn(i32, i32, i32) -> bool,
+        get_friction: impl Fn(i32, i32, i32) -> f32,
+    ) {
+        const GRAVITY: f64 = -0.04;
+        const HALF_W: f64 = 0.125;
+        const HEIGHT: f64 = 0.25;
+
         for entity in self.items.values_mut() {
+            entity.prev_position = entity.position;
             entity.age += 1;
+
+            entity.velocity.y += GRAVITY;
+
+            let moved = item_move(
+                &mut entity.position,
+                entity.velocity,
+                HALF_W,
+                HEIGHT,
+                &is_solid,
+            );
+
+            entity.on_ground = entity.velocity.y < 0.0 && moved.y != entity.velocity.y;
+
+            if moved.x != entity.velocity.x {
+                entity.velocity.x = 0.0;
+            }
+            if moved.z != entity.velocity.z {
+                entity.velocity.z = 0.0;
+            }
+
+            let friction = if entity.on_ground {
+                let bx = entity.position.x.floor() as i32;
+                let by = (entity.position.y - 0.5001).floor() as i32;
+                let bz = entity.position.z.floor() as i32;
+                get_friction(bx, by, bz) * 0.98
+            } else {
+                0.98
+            };
+
+            if entity.on_ground && entity.velocity.y < 0.0 {
+                entity.velocity.y *= -0.5;
+            }
+
+            entity.velocity.x *= friction as f64;
+            entity.velocity.y *= 0.98;
+            entity.velocity.z *= friction as f64;
         }
         for pickup in &mut self.pickups {
             pickup.life += 1;
@@ -238,12 +442,14 @@ impl ItemEntityStore {
             .iter()
             .map(|p| {
                 let t = (p.life as f32 + partial_tick) / PICKUP_LIFE as f32;
+                let t = t * t;
                 let pos = p.start_pos.lerp(p.target_pos, t as f64);
                 PickupRenderInfo {
                     item_name: p.item_name.clone(),
                     position: pos,
                     bob_offset: p.bob_offset,
                     age: p.age,
+                    is_block_model: p.is_block_model,
                 }
             })
             .collect()

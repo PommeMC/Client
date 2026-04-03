@@ -750,7 +750,10 @@ impl Renderer {
         self.menu_pipeline.text_width(text, scale)
     }
 
-    pub fn ensure_item_mesh(&mut self, name: &str) {
+    pub fn ensure_item_mesh(&mut self, name: &str) -> bool {
+        if self.item_entity_pipeline.has_mesh(name) {
+            return self.registry.get_baked_model_by_name(name).is_some();
+        }
         if let Some(model) = self.registry.get_baked_model_by_name(name) {
             self.item_entity_pipeline.ensure_mesh(
                 &self.ctx.device,
@@ -759,6 +762,7 @@ impl Renderer {
                 model,
                 &self.atlas.uv_map,
             );
+            true
         } else {
             self.item_entity_pipeline.ensure_flat_mesh(
                 &self.ctx.device,
@@ -768,6 +772,7 @@ impl Renderer {
                 &self.jar_assets_dir,
                 &self.asset_index,
             );
+            false
         }
     }
 

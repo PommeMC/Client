@@ -133,7 +133,6 @@ impl ChunkStore {
         );
     }
 
-    #[allow(dead_code)]
     pub fn get_sky_light(&self, x: i32, y: i32, z: i32) -> u8 {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -144,7 +143,6 @@ impl ChunkStore {
         }
     }
 
-    #[allow(dead_code)]
     pub fn get_block_light(&self, x: i32, y: i32, z: i32) -> u8 {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);

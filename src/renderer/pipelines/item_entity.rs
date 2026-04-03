@@ -21,6 +21,7 @@ const VERTEX_SIZE: usize = std::mem::size_of::<ChunkVertex>();
 pub struct ItemRenderInfo {
     pub item_name: String,
     pub model_matrix: Mat4,
+    pub light: f32,
 }
 
 struct MeshEntry {
@@ -61,9 +62,9 @@ impl ItemEntityPipeline {
         );
 
         let push_range = [vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::VERTEX,
+            stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             offset: 0,
-            size: 64,
+            size: 68,
         }];
         let layouts = [camera_layout, atlas_layout];
         let layout_info = vk::PipelineLayoutCreateInfo::default()
@@ -188,6 +189,10 @@ impl ItemEntityPipeline {
         );
     }
 
+    pub fn has_mesh(&self, name: &str) -> bool {
+        self.meshes.contains_key(name)
+    }
+
     pub fn ensure_mesh(
         &mut self,
         device: &ash::Device,
@@ -205,7 +210,6 @@ impl ItemEntityPipeline {
         }
     }
 
-    /// Create a flat centered quad mesh for items that lack a baked 3D model.
     #[allow(clippy::too_many_arguments)]
     pub fn ensure_flat_mesh(
         &mut self,
@@ -269,15 +273,23 @@ impl ItemEntityPipeline {
 
             let mvp_data = item.model_matrix.to_cols_array();
             let mvp_bytes = bytemuck::bytes_of(&mvp_data);
+            let light_bytes = bytemuck::bytes_of(&item.light);
 
             unsafe {
                 device.cmd_bind_vertex_buffers(cmd, 0, &[mesh.buffer], &[0]);
                 device.cmd_push_constants(
                     cmd,
                     self.pipeline_layout,
-                    vk::ShaderStageFlags::VERTEX,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0,
                     mvp_bytes,
+                );
+                device.cmd_push_constants(
+                    cmd,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    64,
+                    light_bytes,
                 );
                 device.cmd_draw(cmd, mesh.vertex_count, 1, 0, 0);
             }

@@ -89,6 +89,7 @@ pub enum NetworkEvent {
         yaw: f32,
         pitch: f32,
         head_yaw: f32,
+        velocity: [f64; 3],
     },
     EntityMoved {
         id: i32,
@@ -128,13 +129,8 @@ pub enum NetworkEvent {
         id: i32,
         is_baby: bool,
     },
-    /// An item entity was picked up by a player or mob.
     ItemPickedUp {
-        /// The entity ID of the item being collected.
         item_id: i32,
-        /// The entity ID of the collector - will be used to resolve pickup
-        /// target once player entity_id tracking is merged.
-        #[allow(dead_code)]
         collector_id: i32,
     },
     Disconnected {
