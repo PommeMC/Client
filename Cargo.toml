@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["full", "tracing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-chrono = "0.4"
+time = { version = "0.3", features = ["formatting", "macros"] }
 flate2 = "1"
 azalea-protocol = { version = "0.16", features = ["connecting"] }
 azalea-crypto = "0.16"

@@ -40,7 +40,7 @@ fn main() {
     if let Err(e) = logging::rotate(&log_dir) {
         eprintln!("Failed to rotate logs: {e}");
     }
-    logging::init(&log_dir);
+    let _guard = logging::init(&log_dir);
 
     if !cfg!(debug_assertions) && !args.dev {
         match &args.launch_token {
@@ -62,8 +62,7 @@ fn main() {
 
     if !SUPPORTED_VERSIONS.contains(&version) {
         tracing::error!(
-            "{} is not currently supported. Supported versions: {:?}",
-            version,
+            "{version} is not currently supported. Supported versions: {:#?}",
             SUPPORTED_VERSIONS
         );
         if !cfg!(debug_assertions) && !args.dev {
