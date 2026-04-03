@@ -27,6 +27,8 @@ pub fn init(log_dir: &Path) -> WorkerGuard {
     guard
 }
 
+const MAX_LOG_FILES: usize = 5;
+
 pub fn rotate(log_dir: &Path) -> std::io::Result<()> {
     let latest = log_dir.join("latest.log");
     if !latest.exists() {
@@ -52,5 +54,30 @@ pub fn rotate(log_dir: &Path) -> std::io::Result<()> {
     encoder.finish().map_err(std::io::Error::other)?;
     std::fs::remove_file(&latest)?;
 
+    cleanup_old_logs(log_dir);
+
     Ok(())
+}
+
+fn cleanup_old_logs(log_dir: &Path) {
+    let mut gz_files: Vec<_> = std::fs::read_dir(log_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "gz"))
+        .collect();
+
+    if gz_files.len() <= MAX_LOG_FILES {
+        return;
+    }
+
+    gz_files.sort_by_key(|e| {
+        e.metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
+
+    for entry in &gz_files[..gz_files.len() - MAX_LOG_FILES] {
+        let _ = std::fs::remove_file(entry.path());
+    }
 }
