@@ -102,7 +102,7 @@ use helpers::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PanoramaTheme {
-    Pomc,
+    Pomme,
     Default,
 }
 
@@ -295,7 +295,7 @@ impl MainMenu {
             rt,
             links_open: false,
             theme_open: false,
-            theme: PanoramaTheme::Pomc,
+            theme: PanoramaTheme::Pomme,
             transition: None,
             scroll_offset: 0.0,
             focused_field: None,

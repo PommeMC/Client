@@ -34,7 +34,7 @@ fn main() {
             }
             None => {
                 eprintln!("Please use the Pomme Launcher to start the game.");
-                eprintln!("Download it at: https://github.com/Purdze/Pomme");
+                eprintln!("Download it at: https://github.com/PommeMC/Pomme-Client");
                 std::process::exit(1);
             }
         }

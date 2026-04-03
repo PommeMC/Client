@@ -365,7 +365,7 @@ impl MainMenu {
             let drop_x = anchor_x + icon_size - drop_w;
             let drop_y = icon_area_y - 2.0 * s;
             let themes: [(&str, PanoramaTheme); 2] = [
-                ("Pomme", PanoramaTheme::Pomc),
+                ("Pomme", PanoramaTheme::Pomme),
                 ("Default", PanoramaTheme::Default),
             ];
             let total_h = themes.len() as f32 * drop_style.item_h;

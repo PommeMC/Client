@@ -2,7 +2,7 @@
   <h1 align="center">Pomme</h1>
   <p align="center">A high-performance Minecraft client written in Rust</p>
   <p align="center">
-    <a href="https://discord.gg/ucBA55bHPR">Discord</a> · <a href="https://github.com/Purdze/Pomme/issues">Issues</a> · <a href="https://github.com/Purdze/Pomme/releases">Releases</a>
+    <a href="https://discord.gg/ucBA55bHPR">Discord</a> · <a href="https://github.com/PommeMC/Pomme-Client/issues">Issues</a> · <a href="https://github.com/PommeMC/Pomme-Client/releases">Releases</a>
   </p>
 </p>
 

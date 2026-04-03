@@ -1003,7 +1003,7 @@ impl ApplicationHandler for App {
                                                 PanoramaTheme::Default => {
                                                     self.data_dirs.jar_assets_dir.clone()
                                                 }
-                                                PanoramaTheme::Pomc => self
+                                                PanoramaTheme::Pomme => self
                                                     .data_dirs
                                                     .pomme_assets_dir
                                                     .join("panoramas"),

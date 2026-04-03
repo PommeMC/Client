@@ -7,8 +7,8 @@ Thanks for your interest in contributing to Pomme!
 1. Fork the repository
 2. Clone your fork and set up the development environment:
    ```bash
-   git clone https://github.com/<your-username>/Pomme.git
-   cd Pomme
+   git clone https://github.com/<your-username>/Pomme-Client.git
+   cd Pomme-Client
    rustup override set nightly
    ```
 3. Extract vanilla 1.21.11 assets into `reference/assets/`:
