@@ -16,31 +16,10 @@ use clap::Parser;
 use net::connection::ConnectArgs;
 use std::sync::Arc;
 
-const SUPPORTED_VERSIONS: &[&str] = &["26.1", "26.1.1-rc-1", "26.1.1"];
-const _: () = assert!(!SUPPORTED_VERSIONS.is_empty());
+const SUPPORTED_VERSIONS: [&str; 3] = ["26.1", "26.1.1-rc-1", "26.1.1"];
 
 fn main() {
     let args = args::LaunchArgs::parse();
-
-    let version = args
-        .version
-        .as_deref()
-        .unwrap_or_else(|| SUPPORTED_VERSIONS.first().unwrap());
-
-    let data_dirs = dirs::DataDirs::resolve(
-        version,
-        args.assets_dir.as_deref(),
-        args.versions_dir.as_deref(),
-        args.game_dir.as_deref(),
-    );
-
-    let log_dir = data_dirs.game_dir.join("logs");
-    std::fs::create_dir_all(&log_dir).unwrap();
-
-    if let Err(e) = logging::rotate(&log_dir) {
-        eprintln!("Failed to rotate logs: {e}");
-    }
-    let _guard = logging::init(&log_dir);
 
     if !cfg!(debug_assertions) && !args.dev {
         match &args.launch_token {
@@ -60,8 +39,13 @@ fn main() {
         }
     }
 
+    let version = args
+        .version
+        .as_deref()
+        .unwrap_or_else(|| SUPPORTED_VERSIONS.first().unwrap());
+
     if !SUPPORTED_VERSIONS.contains(&version) {
-        tracing::error!(
+        eprintln!(
             "{version} is not currently supported. Supported versions: {:#?}",
             SUPPORTED_VERSIONS
         );
@@ -70,12 +54,25 @@ fn main() {
         }
     }
 
+    let data_dirs = dirs::DataDirs::resolve(
+        version,
+        args.assets_dir.as_deref(),
+        args.versions_dir.as_deref(),
+        args.game_dir.as_deref(),
+    );
+
+    let log_dir = data_dirs.game_dir.join("logs");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    if let Err(e) = logging::rotate(&log_dir) {
+        eprintln!("Failed to rotate logs: {e}. latest.log will probably be overwritten.");
+    }
+    let _guard = logging::init(&log_dir);
+
     if let Err(e) = data_dirs.verify() {
-        tracing::error!("Failed to verify directories: {e}");
+        eprintln!("Failed to verify directories: {e}");
         std::process::exit(1);
     }
     data_dirs.ensure_game_dir().ok();
-
     tracing::info!("Installation directory: {}", data_dirs.game_dir.display());
 
     let rt = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"));
