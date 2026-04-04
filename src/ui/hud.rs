@@ -66,6 +66,7 @@ pub fn build_hud(
     food: u32,
     air_supply: i32,
     hotbar: &[ItemStack],
+    first_person: bool,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
 ) {
@@ -73,7 +74,9 @@ pub fn build_hud(
     let cx = screen_w / 2.0;
     let cy = screen_h / 2.0;
 
-    build_crosshair(elements, cx, cy);
+    if first_person {
+        build_crosshair(elements, cx, cy);
+    }
 
     if let Some(info) = debug {
         build_debug_overlay(elements, info, gs);

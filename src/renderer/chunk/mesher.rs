@@ -132,8 +132,14 @@ impl Colormap {
         jar_assets_dir: &std::path::Path,
         asset_index: &Option<crate::assets::AssetIndex>,
         colormap_path: &str,
+        packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Self {
-        let path = crate::assets::resolve_asset_path(jar_assets_dir, asset_index, colormap_path);
+        let path = crate::assets::resolve_asset_path_with_packs(
+            jar_assets_dir,
+            asset_index,
+            colormap_path,
+            packs,
+        );
         let pixels = crate::renderer::util::load_png(&path)
             .map(|(data, _w, _h)| {
                 data.chunks(4)

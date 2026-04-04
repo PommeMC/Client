@@ -4,6 +4,8 @@ use std::path::Path;
 use azalea_block::BlockState;
 use serde::{Deserialize, Serialize};
 
+pub const BLOCK_CACHE_FILE: &str = "block_cache.json";
+
 use crate::assets::AssetIndex;
 
 use super::model::{self, BakedModel};
@@ -64,14 +66,27 @@ pub struct BlockRegistry {
 }
 
 impl BlockRegistry {
-    pub fn load(jar_assets_dir: &Path, asset_index: &Option<AssetIndex>, game_dir: &Path) -> Self {
-        let cache_path = game_dir.join("block_cache.json");
+    pub fn load(
+        jar_assets_dir: &Path,
+        asset_index: &Option<AssetIndex>,
+        game_dir: &Path,
+        packs: Option<&crate::resource_pack::ResourcePackManager>,
+    ) -> Self {
+        let cache_path = game_dir.join(BLOCK_CACHE_FILE);
 
-        let textures = if let Some(cached) = load_cache(&cache_path) {
-            tracing::info!("Block registry: {} blocks (cached textures)", cached.len());
-            cached
+        let textures = if packs.is_none() {
+            if let Some(cached) = load_cache(&cache_path) {
+                tracing::info!("Block registry: {} blocks (cached textures)", cached.len());
+                Some(cached)
+            } else {
+                None
+            }
         } else {
-            let mut textures = model::load_all_block_textures(jar_assets_dir, asset_index);
+            None
+        };
+
+        let textures = textures.unwrap_or_else(|| {
+            let mut textures = model::load_all_block_textures(jar_assets_dir, asset_index, packs);
 
             textures
                 .entry("water".into())
@@ -86,9 +101,9 @@ impl BlockRegistry {
                 textures.len()
             );
             textures
-        };
+        });
 
-        let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index);
+        let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
 
         Self {
             textures,

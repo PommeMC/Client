@@ -75,6 +75,13 @@ impl ChunkStore {
         }
     }
 
+    pub fn loaded_positions(&self) -> Vec<ChunkPos> {
+        self.light_data
+            .keys()
+            .map(|&(x, z)| ChunkPos::new(x, z))
+            .collect()
+    }
+
     pub fn load_chunk(
         &mut self,
         pos: ChunkPos,

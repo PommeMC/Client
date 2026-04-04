@@ -126,9 +126,14 @@ body {
 }
 
 .titlebar-icon {
-  color: var(--accent);
-  font-size: 14px;
-  filter: drop-shadow(0 0 6px var(--accent-glow));
+  display: flex;
+  align-items: center;
+}
+
+.titlebar-logo {
+  width: 16px;
+  height: 16px;
+  image-rendering: pixelated;
 }
 
 .titlebar-title {
@@ -206,11 +211,12 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, var(--accent-dark), var(--accent));
-  border-radius: var(--radius);
-  font-size: 18px;
-  color: white;
-  box-shadow: 0 2px 12px var(--accent-glow);
+}
+
+.brand-logo {
+  width: 36px;
+  height: 36px;
+  image-rendering: pixelated;
 }
 
 .brand-text {

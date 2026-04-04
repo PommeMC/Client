@@ -118,7 +118,7 @@ impl Renderer {
             let asset_index = asset_index.clone();
             let game_dir = game_dir.to_path_buf();
             std::thread::spawn(move || {
-                BlockRegistry::load(&jar_assets_dir, &asset_index, &game_dir)
+                BlockRegistry::load(&jar_assets_dir, &asset_index, &game_dir, None)
             })
         };
 
@@ -174,6 +174,7 @@ impl Renderer {
             jar_assets_dir,
             asset_index,
             &texture_names,
+            None,
         )?;
 
         splash(&mut menu_pipeline, 0.5, "Creating pipelines...");
@@ -550,6 +551,58 @@ impl Renderer {
         self.camera.pitch = pitch;
     }
 
+    pub fn update_third_person_distance(
+        &mut self,
+        eye_pos: glam::Vec3,
+        chunks: &crate::world::chunk::ChunkStore,
+    ) {
+        if self.camera.mode == camera::CameraMode::FirstPerson {
+            return;
+        }
+        let max = camera::THIRD_PERSON_DISTANCE;
+        let fwd = self.camera.forward_vec();
+        let dir = if self.camera.mode == camera::CameraMode::ThirdPersonFront {
+            fwd
+        } else {
+            -fwd
+        };
+        let mut dist = max;
+
+        let m = 0.4;
+        let corners = [
+            glam::Vec3::new(m, m, m),
+            glam::Vec3::new(m, m, -m),
+            glam::Vec3::new(m, -m, m),
+            glam::Vec3::new(m, -m, -m),
+            glam::Vec3::new(-m, m, m),
+            glam::Vec3::new(-m, m, -m),
+            glam::Vec3::new(-m, -m, m),
+            glam::Vec3::new(-m, -m, -m),
+        ];
+
+        let step = 0.2;
+        let mut t = step;
+        while t <= max {
+            let p = eye_pos + dir * t;
+            let hit = corners.iter().any(|off| {
+                let check = p + *off;
+                let state = chunks.get_block_state(
+                    check.x.floor() as i32,
+                    check.y.floor() as i32,
+                    check.z.floor() as i32,
+                );
+                self.registry.is_opaque_full_cube(state)
+            });
+            if hit {
+                dist = (t - 0.3).max(0.5);
+                break;
+            }
+            t += step;
+        }
+
+        self.camera.third_person_dist = dist.max(0.5);
+    }
+
     pub fn update_fov(&mut self, modifier: f32) {
         self.camera.update_fov_modifier(modifier);
     }
@@ -564,6 +617,14 @@ impl Renderer {
 
     pub fn camera_pitch(&self) -> f32 {
         self.camera.pitch
+    }
+
+    pub fn cycle_camera_mode(&mut self) {
+        self.camera.mode = self.camera.mode.cycle();
+    }
+
+    pub fn is_first_person(&self) -> bool {
+        self.camera.mode == camera::CameraMode::FirstPerson
     }
 
     pub fn gpu_name(&self) -> &str {
@@ -612,16 +673,19 @@ impl Renderer {
         biome_climate: std::sync::Arc<
             std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
         >,
+        packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> MeshDispatcher {
         let grass_colormap = crate::renderer::chunk::mesher::Colormap::load(
             &self.jar_assets_dir,
             &self.asset_index,
             "minecraft/textures/colormap/grass.png",
+            packs,
         );
         let foliage_colormap = crate::renderer::chunk::mesher::Colormap::load(
             &self.jar_assets_dir,
             &self.asset_index,
             "minecraft/textures/colormap/foliage.png",
+            packs,
         );
         MeshDispatcher::new(
             self.registry.clone(),
@@ -689,6 +753,45 @@ impl Renderer {
                 show_skin,
             },
         )
+    }
+
+    pub fn reload_assets(
+        &mut self,
+        game_dir: &Path,
+        packs: &crate::resource_pack::ResourcePackManager,
+    ) {
+        unsafe { self.ctx.device.device_wait_idle().unwrap() };
+
+        let cache_path = game_dir.join(crate::world::block::registry::BLOCK_CACHE_FILE);
+        let _ = std::fs::remove_file(&cache_path);
+        tracing::info!("Invalidated block cache");
+
+        self.registry = BlockRegistry::load(
+            &self.jar_assets_dir,
+            &self.asset_index,
+            game_dir,
+            Some(packs),
+        );
+
+        self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
+        let texture_names: std::collections::HashSet<&str> =
+            self.registry.texture_names().collect();
+        self.atlas = TextureAtlas::build(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &texture_names,
+            Some(packs),
+        )
+        .expect("failed to rebuild atlas");
+
+        self.chunk_pipeline
+            .rebind_atlas(&self.ctx.device, &self.atlas);
+
+        tracing::info!("Assets reloaded");
     }
 
     pub fn reload_panorama(
@@ -979,14 +1082,16 @@ impl Renderer {
                         .device
                         .cmd_clear_attachments(cmd, &[clear_attachment], &[clear_rect]);
 
-                    let aspect = sw / sh.max(1.0);
-                    self.hand_pipeline.update_and_draw(
-                        &self.ctx.device,
-                        cmd,
-                        frame,
-                        aspect,
-                        *swing_progress,
-                    );
+                    if self.camera.mode == camera::CameraMode::FirstPerson {
+                        let aspect = sw / sh.max(1.0);
+                        self.hand_pipeline.update_and_draw(
+                            &self.ctx.device,
+                            cmd,
+                            frame,
+                            aspect,
+                            *swing_progress,
+                        );
+                    }
 
                     self.menu_pipeline
                         .draw(&self.ctx.device, cmd, sw, sh, overlay);

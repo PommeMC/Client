@@ -134,6 +134,20 @@ impl ChunkPipeline {
             .copy_from_slice(bytes);
     }
 
+    pub fn rebind_atlas(&self, device: &ash::Device, atlas: &TextureAtlas) {
+        let image_info = [vk::DescriptorImageInfo {
+            sampler: atlas.sampler,
+            image_view: atlas.view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }];
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(self.atlas_set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&image_info);
+        unsafe { device.update_descriptor_sets(&[write], &[]) };
+    }
+
     pub fn bind(&self, device: &ash::Device, cmd: vk::CommandBuffer, frame: usize) {
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);

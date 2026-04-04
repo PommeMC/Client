@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { HiCube, HiMinus, HiSquare2Stack, HiXMark } from "react-icons/hi2";
+import { HiMinus, HiSquare2Stack, HiXMark } from "react-icons/hi2";
 
 export default function Titlebar({ name }: { name?: string } = { name: "Pomme Launcher" }) {
   const appWindow = getCurrentWindow();
@@ -18,7 +18,7 @@ export default function Titlebar({ name }: { name?: string } = { name: "Pomme La
     <div className="titlebar" data-tauri-drag-region>
       <div className="titlebar-left" data-tauri-drag-region>
         <span className="titlebar-icon">
-          <HiCube />
+          <img src="/pomme.png" alt="Pomme" className="titlebar-logo" />
         </span>
       </div>
       <span className="titlebar-title" data-tauri-drag-region>

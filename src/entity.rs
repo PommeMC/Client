@@ -532,11 +532,13 @@ impl EntityStore {
             entity.tick_body_rotation();
             let dx = entity.position.x - entity.prev_position.x;
             let dz = entity.position.z - entity.prev_position.z;
-            let distance = ((dx * dx + dz * dz) as f32).sqrt();
-            let target_speed = (distance * 4.0).min(1.0);
-            entity.prev_walk_anim_speed = entity.walk_anim_speed;
-            entity.walk_anim_speed += (target_speed - entity.walk_anim_speed) * 0.4;
-            entity.walk_anim_pos += entity.walk_anim_speed;
+            update_walk_animation(
+                dx,
+                dz,
+                &mut entity.walk_anim_pos,
+                &mut entity.walk_anim_speed,
+                &mut entity.prev_walk_anim_speed,
+            );
         }
     }
 
@@ -545,7 +547,21 @@ impl EntityStore {
     }
 }
 
-fn wrap_degrees(deg: f32) -> f32 {
+pub fn update_walk_animation(
+    dx: f64,
+    dz: f64,
+    walk_pos: &mut f32,
+    walk_speed: &mut f32,
+    prev_walk_speed: &mut f32,
+) {
+    let distance = ((dx * dx + dz * dz) as f32).sqrt();
+    let target_speed = (distance * 4.0).min(1.0);
+    *prev_walk_speed = *walk_speed;
+    *walk_speed += (target_speed - *walk_speed) * 0.4;
+    *walk_pos += *walk_speed;
+}
+
+pub fn wrap_degrees(deg: f32) -> f32 {
     let mut d = deg % 360.0;
     if d >= 180.0 {
         d -= 360.0;

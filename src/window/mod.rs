@@ -107,6 +107,9 @@ struct App {
     prev_player_pos: glam::Vec3,
     biome_climate:
         Arc<std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>>,
+    player_walk_pos: f32,
+    player_walk_speed: f32,
+    player_prev_walk_speed: f32,
     mesh_dispatcher: Option<MeshDispatcher>,
     paused: bool,
     dead: bool,
@@ -137,6 +140,15 @@ struct App {
     server_simulation_distance: u32,
     pending_skin_uuid: Option<uuid::Uuid>,
     item_entity_store: ItemEntityStore,
+    resource_packs: crate::resource_pack::ResourcePackManager,
+    pending_pack_download: Option<std::thread::JoinHandle<PackDownloadResult>>,
+}
+
+struct PackDownloadResult {
+    id: uuid::Uuid,
+    hash: String,
+    required: bool,
+    result: Result<std::path::PathBuf, crate::resource_pack::PackError>,
 }
 
 struct FpsCounter {
@@ -188,6 +200,7 @@ impl App {
             GameState::Menu
         };
 
+        let resource_packs = crate::resource_pack::ResourcePackManager::new(&data_dirs.game_dir);
         Self {
             presence,
             display_mode: DisplayMode::Windowed,
@@ -218,6 +231,9 @@ impl App {
             tick_accumulator: 0.0,
             prev_player_pos: glam::Vec3::ZERO,
             biome_climate: Arc::new(std::collections::HashMap::new()),
+            player_walk_pos: 0.0,
+            player_walk_speed: 0.0,
+            player_prev_walk_speed: 0.0,
             mesh_dispatcher: None,
             paused: false,
             dead: false,
@@ -242,6 +258,8 @@ impl App {
             last_sent_horizontal_collision: false,
             was_sprinting: false,
             position_send_counter: 0,
+            resource_packs,
+            pending_pack_download: None,
         }
     }
 
@@ -376,7 +394,7 @@ impl App {
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_chunk_meshes();
             self.mesh_dispatcher =
-                Some(renderer.create_mesh_dispatcher(self.biome_climate.clone()));
+                Some(renderer.create_mesh_dispatcher(self.biome_climate.clone(), None));
         }
         if let Some(reason) = reason {
             self.menu.show_disconnect(reason);
@@ -424,7 +442,7 @@ impl App {
                     if let Some(renderer) = &mut self.renderer {
                         renderer.clear_chunk_meshes();
                         self.mesh_dispatcher =
-                            Some(renderer.create_mesh_dispatcher(self.biome_climate.clone()));
+                            Some(renderer.create_mesh_dispatcher(self.biome_climate.clone(), None));
                     }
                 }
                 NetworkEvent::ChunkLoaded {
@@ -680,11 +698,70 @@ impl App {
                         window.set_cursor_visible(true);
                     }
                 }
+                NetworkEvent::ResourcePackPush {
+                    id,
+                    url,
+                    hash,
+                    required,
+                } => {
+                    tracing::info!("Resource pack push: {id} url={url} required={required}");
+                    let cache_dir = self.resource_packs.server_cache_dir().to_path_buf();
+                    self.pending_pack_download = Some(std::thread::spawn(move || {
+                        let result =
+                            crate::resource_pack::ResourcePackManager::download_server_pack(
+                                &cache_dir, &url, &hash,
+                            );
+                        PackDownloadResult {
+                            id,
+                            hash,
+                            required,
+                            result,
+                        }
+                    }));
+                }
+                NetworkEvent::ResourcePackPop { id } => {
+                    if let Some(id) = id {
+                        self.resource_packs.remove_server_pack(&id);
+                    } else {
+                        self.resource_packs.clear_server_packs();
+                    }
+                    self.menu.active_packs = self.resource_packs.active_pack_info();
+                    self.menu.reload_assets = true;
+                }
                 NetworkEvent::Disconnected { reason } => {
                     tracing::warn!("Disconnected: {reason}");
                     disconnect_reason = Some(reason);
                 }
             }
+        }
+
+        if let Some(handle) = &self.pending_pack_download
+            && handle.is_finished()
+        {
+            let handle = self.pending_pack_download.take().unwrap();
+            let dl = handle.join().expect("pack download thread panicked");
+            use azalea_protocol::packets::game::s_resource_pack;
+            let action = match &dl.result {
+                Ok(_) => {
+                    self.resource_packs.apply_server_pack(dl.id, &dl.hash);
+                    tracing::info!("Resource pack {} loaded successfully", dl.id);
+                    self.menu.reload_assets = true;
+                    s_resource_pack::Action::SuccessfullyLoaded
+                }
+                Err(e) => {
+                    tracing::error!("Resource pack {} failed: {e}", dl.id);
+                    if dl.required {
+                        disconnect_reason = Some(format!("Required resource pack failed: {e}"));
+                    }
+                    s_resource_pack::Action::FailedDownload
+                }
+            };
+            if let Some(sender) = &self.packet_sender {
+                sender.send(ServerboundGamePacket::ResourcePack(
+                    s_resource_pack::ServerboundResourcePack { id: dl.id, action },
+                ));
+            }
+            self.menu.active_packs = self.resource_packs.active_pack_info();
         }
 
         if let Some(reason) = disconnect_reason {
@@ -709,13 +786,27 @@ impl App {
             return;
         }
         if let Some(renderer) = &self.renderer {
-            self.player.yaw = renderer.camera_yaw();
+            self.player.yaw = if renderer.is_first_person() {
+                renderer.camera_yaw()
+            } else {
+                renderer.camera_yaw() + std::f32::consts::PI
+            };
             self.player.pitch = renderer.camera_pitch();
         }
 
         self.prev_player_pos = self.player.position;
         movement::tick(&mut self.player, &self.input, &self.chunk_store);
         self.entity_store.tick_living();
+
+        let dx = (self.player.position.x - self.prev_player_pos.x) as f64;
+        let dz = (self.player.position.z - self.prev_player_pos.z) as f64;
+        crate::entity::update_walk_animation(
+            dx,
+            dz,
+            &mut self.player_walk_pos,
+            &mut self.player_walk_speed,
+            &mut self.player_prev_walk_speed,
+        );
 
         if let Some(renderer) = &mut self.renderer {
             renderer.set_base_fov(self.menu.fov as f32);
@@ -913,7 +1004,8 @@ impl ApplicationHandler for App {
             p.set_in_menu(&self.version);
         }
 
-        self.mesh_dispatcher = Some(renderer.create_mesh_dispatcher(self.biome_climate.clone()));
+        self.mesh_dispatcher =
+            Some(renderer.create_mesh_dispatcher(self.biome_climate.clone(), None));
         if let Some(uuid) = self.pending_skin_uuid.take() {
             renderer.load_player_skin(&uuid, &self.tokio_rt);
         }
@@ -1006,6 +1098,11 @@ impl ApplicationHandler for App {
                                     }
                                     KeyCode::KeyG if self.input.key_pressed(KeyCode::F3) => {
                                         self.show_chunk_borders = !self.show_chunk_borders;
+                                    }
+                                    KeyCode::F5 => {
+                                        if let Some(r) = &mut self.renderer {
+                                            r.cycle_camera_mode();
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -1125,6 +1222,44 @@ impl ApplicationHandler for App {
                                 if self.menu.display_mode != self.display_mode {
                                     self.display_mode = self.menu.display_mode;
                                     self.apply_display_mode();
+                                }
+
+                                if self.menu.rescan_packs {
+                                    self.menu.rescan_packs = false;
+                                    self.resource_packs.scan_local_packs();
+                                    self.menu.available_packs =
+                                        self.resource_packs.available_local_packs().to_vec();
+                                    self.menu.active_packs = self.resource_packs.active_pack_info();
+                                }
+
+                                if let Some((name, enable)) = self.menu.pack_toggle.take() {
+                                    if enable {
+                                        self.resource_packs.enable_local_pack(&name);
+                                    } else {
+                                        self.resource_packs.disable_local_pack(&name);
+                                    }
+                                    self.menu.active_packs = self.resource_packs.active_pack_info();
+                                    self.menu.available_packs =
+                                        self.resource_packs.available_local_packs().to_vec();
+                                }
+
+                                if self.menu.reload_assets {
+                                    self.menu.reload_assets = false;
+                                    if let Some(renderer) = &mut self.renderer {
+                                        renderer.reload_assets(
+                                            &self.data_dirs.game_dir,
+                                            &self.resource_packs,
+                                        );
+                                        if let Some(ref mut dispatcher) = self.mesh_dispatcher {
+                                            *dispatcher = renderer.create_mesh_dispatcher(
+                                                self.biome_climate.clone(),
+                                                Some(&self.resource_packs),
+                                            );
+                                            for pos in self.chunk_store.loaded_positions() {
+                                                dispatcher.enqueue(&self.chunk_store, pos, 0);
+                                            }
+                                        }
+                                    }
                                 }
 
                                 if result.clicked_button
@@ -1347,6 +1482,7 @@ impl ApplicationHandler for App {
                                     renderer.camera_yaw(),
                                     renderer.camera_pitch(),
                                 );
+                                renderer.update_third_person_distance(eye_pos, &self.chunk_store);
 
                                 let sw = renderer.screen_width() as f32;
                                 let sh = renderer.screen_height() as f32;
@@ -1401,6 +1537,7 @@ impl ApplicationHandler for App {
                                     self.player.food,
                                     self.player.air_supply,
                                     self.player.inventory.hotbar_slots(),
+                                    renderer.is_first_person(),
                                     debug.as_ref(),
                                     self.menu.gui_scale_setting,
                                 );
@@ -1496,7 +1633,7 @@ impl ApplicationHandler for App {
                                 let destroy_info = self.interaction.destroy_stage();
 
                                 let alpha = self.tick_accumulator / TICK_RATE;
-                                let entity_renders: Vec<EntityRenderInfo> = self
+                                let mut entity_renders: Vec<EntityRenderInfo> = self
                                     .entity_store
                                     .living
                                     .values()
@@ -1528,6 +1665,27 @@ impl ApplicationHandler for App {
                                         }
                                     })
                                     .collect();
+
+                                if !renderer.is_first_person() {
+                                    let cam_yaw_deg = -renderer.camera_yaw().to_degrees();
+                                    entity_renders.push(EntityRenderInfo {
+                                        x: interp_pos.x as f64,
+                                        y: interp_pos.y as f64,
+                                        z: interp_pos.z as f64,
+                                        yaw: cam_yaw_deg,
+                                        pitch: renderer.camera_pitch().to_degrees(),
+                                        head_yaw: cam_yaw_deg,
+                                        is_baby: false,
+                                        walk_anim_pos: self.player_walk_pos
+                                            - self.player_walk_speed * (1.0 - alpha),
+                                        walk_anim_speed: (self.player_prev_walk_speed
+                                            + (self.player_walk_speed
+                                                - self.player_prev_walk_speed)
+                                                * alpha)
+                                            .min(1.0),
+                                        entity_kind: azalea_registry::builtin::EntityKind::Player,
+                                    });
+                                }
 
                                 let sky = crate::renderer::SkyState {
                                     day_time: self.sky_state.day_time,

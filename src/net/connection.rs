@@ -122,7 +122,7 @@ pub async fn connect_to_server(
     let mut conn = conn.config();
 
     tracing::info!("Entering configuration phase");
-    let registry_holder = config_sequence(&mut conn, args.view_distance).await?;
+    let registry_holder = config_sequence(&mut conn, args.view_distance, &event_tx).await?;
 
     let conn = conn.game();
     tracing::info!("Entering game state");
@@ -228,6 +228,7 @@ async fn handle_encryption(
 async fn config_sequence(
     conn: &mut Connection<ClientboundConfigPacket, ServerboundConfigPacket>,
     view_distance: u8,
+    event_tx: &Sender<NetworkEvent>,
 ) -> Result<azalea_core::registry_holder::RegistryHolder, ConnectionError> {
     use azalea_core::registry_holder::RegistryHolder;
     use azalea_entity::HumanoidArm;
@@ -302,6 +303,30 @@ async fn config_sequence(
                     },
                 ))
                 .await?;
+            }
+            ClientboundConfigPacket::ResourcePackPush(p) => {
+                tracing::info!(
+                    "Server pushing resource pack {} (required: {})",
+                    p.id,
+                    p.required
+                );
+                let _ = event_tx.try_send(NetworkEvent::ResourcePackPush {
+                    id: p.id,
+                    url: p.url.clone(),
+                    hash: p.hash.clone(),
+                    required: p.required,
+                });
+                conn.write(ServerboundConfigPacket::ResourcePack(
+                    s_resource_pack::ServerboundResourcePack {
+                        id: p.id,
+                        action: s_resource_pack::Action::Accepted,
+                    },
+                ))
+                .await?;
+            }
+            ClientboundConfigPacket::ResourcePackPop(p) => {
+                tracing::info!("Server popping resource pack {:?}", p.id);
+                let _ = event_tx.try_send(NetworkEvent::ResourcePackPop { id: p.id });
             }
             _ => {
                 tracing::debug!("Config packet: {:?}", std::mem::discriminant(&packet));

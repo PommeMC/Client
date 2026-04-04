@@ -1,4 +1,13 @@
 use super::*;
+use crate::resource_pack::PackCompat;
+
+fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
+    match compat {
+        PackCompat::Compatible => ("Compatible", [0.33, 0.87, 0.33, 1.0]),
+        PackCompat::TooOld => ("Made for an older version", COL_RED),
+        PackCompat::TooNew => ("Made for a newer version", COL_RED),
+    }
+}
 
 impl MainMenu {
     pub(super) fn build_options(&mut self, sw: f32, sh: f32, input: &MenuInput) -> MainMenuResult {
@@ -551,6 +560,9 @@ impl MainMenu {
                 }
                 if clicked && h {
                     if let Some((_, target)) = nav.iter().find(|(l, _)| *l == *label) {
+                        if matches!(target, Screen::OptionsResourcePacks) {
+                            self.rescan_packs = true;
+                        }
                         self.screen = target.clone_screen();
                     }
                     if label.starts_with("GUI Scale:") {
@@ -665,6 +677,301 @@ impl MainMenu {
         any_hovered |= h;
         if clicked && h {
             self.screen = back;
+        }
+
+        MainMenuResult {
+            elements,
+            action: MenuAction::None,
+            cursor_pointer: any_hovered,
+            blur: 2.0,
+            clicked_button: false,
+        }
+    }
+
+    pub(super) fn build_options_resource_packs(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: &dyn Fn(&str, f32) -> f32,
+    ) -> MainMenuResult {
+        use crate::resource_pack::PackSource;
+
+        if input.escape {
+            self.pack_search.clear();
+            self.screen = Screen::Options;
+            return empty_result(2.0);
+        }
+
+        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let fs = common::FONT_SIZE * gs;
+        let btn_h = common::BTN_H * gs;
+        let gap = BTN_GAP * gs;
+        let cx = sw / 2.0;
+        let cursor = input.cursor;
+        let clicked = input.clicked;
+
+        let mut elements = Vec::new();
+        let mut any_hovered = false;
+
+        common::push_overlay(&mut elements, sw, sh, 0.4);
+
+        let pad = 4.0 * gs;
+        let entry_h = 36.0 * gs;
+        let entry_gap = 2.0 * gs;
+        let small_fs = 6.0 * gs;
+        let list_w = 200.0 * gs;
+        let list_gap = 15.0 * gs;
+        let left_x = cx - list_gap - list_w;
+        let right_x = cx + list_gap;
+        let text_x = 34.0 * gs;
+        let field_h = 15.0 * gs;
+        let hover_color: [f32; 4] = [1.0, 1.0, 1.0, 0.1];
+        let drag_text = "Drag and drop files into this window to add packs";
+
+        let mut header_y = pad;
+        elements.push(MenuElement::Text {
+            x: cx,
+            y: header_y,
+            text: "Select Resource Packs".into(),
+            scale: fs,
+            color: WHITE,
+            centered: true,
+        });
+        header_y += fs + pad;
+        elements.push(MenuElement::Text {
+            x: cx,
+            y: header_y,
+            text: drag_text.into(),
+            scale: fs,
+            color: COL_DIM,
+            centered: true,
+        });
+        header_y += fs + pad;
+
+        for ch in &input.typed_chars {
+            self.pack_search.push(*ch);
+        }
+        if input.backspace {
+            self.pack_search.pop();
+        }
+
+        push_text_field(
+            &mut elements,
+            cx - list_w / 2.0,
+            header_y,
+            list_w,
+            field_h,
+            fs,
+            gs,
+            if self.pack_search.is_empty() {
+                "Search..."
+            } else {
+                &self.pack_search
+            },
+            true,
+            &self.cursor_blink,
+            text_width_fn,
+        );
+        header_y += field_h + pad;
+
+        let content_top = header_y;
+        let footer_h = 33.0 * gs;
+        let content_bottom = sh - footer_h;
+        let done_y = sh - footer_h + (footer_h - btn_h) / 2.0;
+
+        elements.push(MenuElement::ScissorPush {
+            x: 0.0,
+            y: content_top,
+            w: sw,
+            h: content_bottom - content_top,
+        });
+
+        let list_top = content_top + pad;
+        let label_h = fs * 1.5;
+
+        elements.push(MenuElement::Text {
+            x: left_x + list_w / 2.0,
+            y: list_top + (label_h - fs) / 2.0,
+            text: "Available".into(),
+            scale: fs,
+            color: WHITE,
+            centered: true,
+        });
+        elements.push(MenuElement::Text {
+            x: right_x + list_w / 2.0,
+            y: list_top + (label_h - fs) / 2.0,
+            text: "Selected".into(),
+            scale: fs,
+            color: WHITE,
+            centered: true,
+        });
+
+        let entries_top = list_top + label_h + pad;
+
+        let search_lower = self.pack_search.to_lowercase();
+        let available: Vec<_> = self
+            .available_packs
+            .iter()
+            .filter(|p| {
+                !p.enabled
+                    && (search_lower.is_empty()
+                        || p.name.to_lowercase().contains(&search_lower)
+                        || p.description.to_lowercase().contains(&search_lower))
+            })
+            .cloned()
+            .collect();
+
+        let push_entry = |elements: &mut Vec<MenuElement>,
+                          any_hovered: &mut bool,
+                          panel_x: f32,
+                          ey: f32,
+                          name: &str,
+                          desc: &str,
+                          name_color: [f32; 4],
+                          compat: crate::resource_pack::PackCompat,
+                          interactive: bool|
+         -> bool {
+            let hovered = interactive && common::hit_test(cursor, [panel_x, ey, list_w, entry_h]);
+            if hovered {
+                elements.push(MenuElement::Rect {
+                    x: panel_x,
+                    y: ey,
+                    w: list_w,
+                    h: entry_h,
+                    corner_radius: 0.0,
+                    color: hover_color,
+                });
+            }
+            elements.push(MenuElement::Text {
+                x: panel_x + text_x,
+                y: ey + 4.0 * gs,
+                text: name.into(),
+                scale: fs,
+                color: name_color,
+                centered: false,
+            });
+            elements.push(MenuElement::Text {
+                x: panel_x + text_x,
+                y: ey + 4.0 * gs + fs + gs,
+                text: desc.into(),
+                scale: small_fs,
+                color: COL_DIM,
+                centered: false,
+            });
+            let (ct, cc) = compat_label(compat);
+            elements.push(MenuElement::Text {
+                x: panel_x + text_x,
+                y: ey + 4.0 * gs + fs + gs + small_fs + gs,
+                text: ct.into(),
+                scale: small_fs,
+                color: cc,
+                centered: false,
+            });
+            *any_hovered |= hovered;
+            hovered
+        };
+
+        for (i, pack) in available.iter().enumerate() {
+            let ey = entries_top + i as f32 * (entry_h + entry_gap);
+            if push_entry(
+                &mut elements,
+                &mut any_hovered,
+                left_x,
+                ey,
+                &pack.name,
+                &pack.description,
+                WHITE,
+                pack.compat,
+                true,
+            ) && clicked
+            {
+                self.pack_toggle = Some((pack.name.clone(), true));
+                self.reload_assets = true;
+            }
+        }
+
+        let selected: Vec<_> = self.active_packs.clone();
+        let default_offset = selected.len() as f32;
+
+        for (i, pack) in selected.iter().enumerate() {
+            let ey = entries_top + i as f32 * (entry_h + entry_gap);
+            let is_server = pack.source == PackSource::Server;
+            let label = if is_server {
+                format!("[Server] {}", pack.name)
+            } else {
+                pack.name.clone()
+            };
+            let name_color = if is_server {
+                common::COL_DISABLED
+            } else {
+                WHITE
+            };
+            if push_entry(
+                &mut elements,
+                &mut any_hovered,
+                right_x,
+                ey,
+                &label,
+                &pack.description,
+                name_color,
+                pack.compat,
+                !is_server,
+            ) && clicked
+            {
+                self.pack_toggle = Some((pack.name.clone(), false));
+                self.reload_assets = true;
+            }
+        }
+
+        push_entry(
+            &mut elements,
+            &mut any_hovered,
+            right_x,
+            entries_top + default_offset * (entry_h + entry_gap),
+            "Default",
+            "The default look and feel of Minecraft",
+            WHITE,
+            crate::resource_pack::PackCompat::Compatible,
+            false,
+        );
+
+        elements.push(MenuElement::ScissorPop);
+
+        let btn_w = 150.0 * gs;
+        let h = common::push_button(
+            &mut elements,
+            cursor,
+            cx - btn_w - gap / 2.0,
+            done_y,
+            btn_w,
+            btn_h,
+            gs,
+            fs,
+            "Open Pack Folder",
+            true,
+        );
+        any_hovered |= h;
+        if clicked && h {
+            let _ = open::that_detached(&self.packs_dir);
+        }
+
+        let h = common::push_button(
+            &mut elements,
+            cursor,
+            cx + gap / 2.0,
+            done_y,
+            btn_w,
+            btn_h,
+            gs,
+            fs,
+            "Done",
+            true,
+        );
+        any_hovered |= h;
+        if clicked && h {
+            self.pack_search.clear();
+            self.screen = Screen::Options;
         }
 
         MainMenuResult {

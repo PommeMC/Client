@@ -143,6 +143,15 @@ pub enum NetworkEvent {
     PlayerDied {
         message: String,
     },
+    ResourcePackPush {
+        id: uuid::Uuid,
+        url: String,
+        hash: String,
+        required: bool,
+    },
+    ResourcePackPop {
+        id: Option<uuid::Uuid>,
+    },
     Disconnected {
         reason: String,
     },

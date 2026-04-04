@@ -12,12 +12,32 @@ const NEAR: f32 = 0.1;
 const FAR: f32 = 1000.0;
 const SENSITIVITY: f32 = 0.003;
 const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
+pub const THIRD_PERSON_DISTANCE: f32 = 4.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CameraMode {
+    FirstPerson,
+    ThirdPersonBack,
+    ThirdPersonFront,
+}
+
+impl CameraMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::FirstPerson => Self::ThirdPersonBack,
+            Self::ThirdPersonBack => Self::ThirdPersonFront,
+            Self::ThirdPersonFront => Self::FirstPerson,
+        }
+    }
+}
 
 pub struct Camera {
     pub position: Vec3,
     pub position_f64: DVec3,
     pub yaw: f32,
     pub pitch: f32,
+    pub mode: CameraMode,
+    pub third_person_dist: f32,
     aspect_ratio: f32,
     pub base_fov_degrees: f32,
     fov_modifier: f32,
@@ -31,6 +51,8 @@ impl Camera {
             position_f64: DVec3::new(0.0, 2.0, 5.0),
             yaw: 0.0,
             pitch: 0.0,
+            mode: CameraMode::FirstPerson,
+            third_person_dist: THIRD_PERSON_DISTANCE,
             aspect_ratio,
             base_fov_degrees: DEFAULT_FOV_DEGREES,
             fov_modifier: 1.0,
@@ -103,17 +125,36 @@ impl Camera {
         planes
     }
 
+    pub fn forward_vec(&self) -> Vec3 {
+        Vec3::new(
+            -self.yaw.sin() * self.pitch.cos(),
+            self.pitch.sin(),
+            -self.yaw.cos() * self.pitch.cos(),
+        )
+    }
+
+    pub fn third_person_offset(&self) -> Vec3 {
+        let fwd = self.forward_vec();
+        match self.mode {
+            CameraMode::FirstPerson => Vec3::ZERO,
+            CameraMode::ThirdPersonBack => -fwd * self.third_person_dist,
+            CameraMode::ThirdPersonFront => fwd * self.third_person_dist,
+        }
+    }
+
     pub fn view_projection(&self) -> Mat4 {
         self.view_projection_with_fov(self.fov_radians(1.0))
     }
 
     pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
-        let forward = Vec3::new(
-            -self.yaw.sin() * self.pitch.cos(),
-            self.pitch.sin(),
-            -self.yaw.cos() * self.pitch.cos(),
-        );
-        let view = Mat4::look_to_rh(Vec3::ZERO, forward, UP);
+        let forward = self.forward_vec();
+        let offset = self.third_person_offset();
+        let look_dir = if self.mode == CameraMode::ThirdPersonFront {
+            -forward
+        } else {
+            forward
+        };
+        let view = Mat4::look_to_rh(offset, look_dir, UP);
         let mut proj = Mat4::perspective_rh(fov, self.aspect_ratio, NEAR, FAR);
         proj.y_axis.y *= -1.0;
         proj * view
@@ -129,7 +170,8 @@ pub struct CameraUniform {
 
 impl CameraUniform {
     pub fn from_camera(camera: &Camera) -> Self {
-        let pos = camera.position;
+        let offset = camera.third_person_offset();
+        let pos = camera.position + offset;
         Self {
             view_proj: camera.view_projection().to_cols_array_2d(),
             camera_pos: [pos.x, pos.y, pos.z, 0.0],

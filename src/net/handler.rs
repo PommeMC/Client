@@ -288,6 +288,29 @@ pub fn handle_game_packet(
                 message: p.message.to_string(),
             });
         }
+        ClientboundGamePacket::ResourcePackPush(p) => {
+            tracing::info!(
+                "Server pushing resource pack {} (required: {})",
+                p.id,
+                p.required
+            );
+            let _ = event_tx.try_send(NetworkEvent::ResourcePackPush {
+                id: p.id,
+                url: p.url.clone(),
+                hash: p.hash.clone(),
+                required: p.required,
+            });
+            sender.send(ServerboundGamePacket::ResourcePack(
+                azalea_protocol::packets::game::s_resource_pack::ServerboundResourcePack {
+                    id: p.id,
+                    action: azalea_protocol::packets::game::s_resource_pack::Action::Accepted,
+                },
+            ));
+        }
+        ClientboundGamePacket::ResourcePackPop(p) => {
+            tracing::info!("Server popping resource pack {:?}", p.id);
+            let _ = event_tx.try_send(NetworkEvent::ResourcePackPop { id: p.id });
+        }
         _other => {}
     }
 }

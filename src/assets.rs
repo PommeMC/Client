@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::resource_pack::ResourcePackManager;
+
 pub fn load_image(path: &Path) -> Result<image::DynamicImage, image::ImageError> {
     image::open(path).or_else(|_| {
         let data = std::fs::read(path).map_err(image::ImageError::IoError)?;
@@ -13,6 +15,20 @@ pub fn resolve_asset_path(
     asset_index: &Option<AssetIndex>,
     asset_key: &str,
 ) -> PathBuf {
+    resolve_asset_path_with_packs(jar_assets_dir, asset_index, asset_key, None)
+}
+
+pub fn resolve_asset_path_with_packs(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    asset_key: &str,
+    packs: Option<&ResourcePackManager>,
+) -> PathBuf {
+    if let Some(packs) = packs
+        && let Some(path) = packs.resolve_asset(asset_key)
+    {
+        return path;
+    }
     if let Some(path) = asset_index.as_ref().and_then(|idx| idx.resolve(asset_key)) {
         return path;
     }
