@@ -2,7 +2,6 @@ import {
   HiArrowRightOnRectangle,
   HiChevronDown,
   HiCog6Tooth,
-  HiCube,
   HiHome,
   HiNewspaper,
   HiPuzzlePiece,
@@ -63,7 +62,7 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
     <nav className="sidebar">
       <div className="sidebar-brand">
         <div className="brand-icon">
-          <HiCube />
+          <img src="/pomme.png" alt="Pomme" className="brand-logo" />
         </div>
         <div className="brand-text">
           <span className="brand-name">POMME</span>
