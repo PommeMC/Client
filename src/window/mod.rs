@@ -972,10 +972,19 @@ impl ApplicationHandler for App {
             return;
         }
 
+        let window_icon = {
+            let png = include_bytes!("../../assets/icon.png");
+            let img = image::load_from_memory(png).expect("failed to decode icon");
+            let rgba = img.to_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
+        };
+
         let window_attrs = Window::default_attributes()
             .with_title("Pomme")
             .with_inner_size(winit::dpi::LogicalSize::new(854, 480))
-            .with_visible(false);
+            .with_visible(false)
+            .with_window_icon(window_icon);
 
         let window = match event_loop.create_window(window_attrs) {
             Ok(w) => Arc::new(w),
