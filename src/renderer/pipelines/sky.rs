@@ -128,7 +128,7 @@ pub struct SkyPipeline {
     descriptor_pool: vk::DescriptorPool,
     ubo_sets: Vec<vk::DescriptorSet>,
     sun_set: vk::DescriptorSet,
-    moon_set: vk::DescriptorSet,
+    moon_sets: [vk::DescriptorSet; 8],
     ubo_buffers: Vec<vk::Buffer>,
     ubo_allocations: Vec<Allocation>,
     vertex_buffer: vk::Buffer,
@@ -147,10 +147,10 @@ pub struct SkyPipeline {
     sun_view: vk::ImageView,
     sun_sampler: vk::Sampler,
     sun_allocation: Allocation,
-    moon_image: vk::Image,
-    moon_view: vk::ImageView,
+    moon_images: [vk::Image; 8],
+    moon_views: [vk::ImageView; 8],
     moon_sampler: vk::Sampler,
-    moon_allocation: Allocation,
+    moon_allocations: Vec<Allocation>,
 }
 
 impl SkyPipeline {
@@ -195,11 +195,11 @@ impl SkyPipeline {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 2,
+                descriptor_count: 9, // 1 sun + 8 moon phases
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets((MAX_FRAMES_IN_FLIGHT + 2) as u32)
+            .max_sets((MAX_FRAMES_IN_FLIGHT + 9) as u32)
             .pool_sizes(&pool_sizes);
         let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
             .expect("failed to create sky descriptor pool");
@@ -211,14 +211,14 @@ impl SkyPipeline {
         let ubo_sets = unsafe { device.allocate_descriptor_sets(&ubo_alloc_info) }
             .expect("failed to allocate sky ubo sets");
 
-        let tex_layouts = [tex_layout, tex_layout];
+        let tex_layouts: Vec<_> = (0..9).map(|_| tex_layout).collect(); // 1 sun + 8 moon
         let tex_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
             .set_layouts(&tex_layouts);
         let tex_sets = unsafe { device.allocate_descriptor_sets(&tex_alloc_info) }
             .expect("failed to allocate sky texture sets");
         let sun_set = tex_sets[0];
-        let moon_set = tex_sets[1];
+        let moon_sets: [vk::DescriptorSet; 8] = tex_sets[1..9].try_into().unwrap();
 
         let mut ubo_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut ubo_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -252,22 +252,40 @@ impl SkyPipeline {
             allocator,
             jar_assets_dir,
             asset_index,
-            "minecraft/textures/environment/sun.png",
+            "minecraft/textures/environment/celestial/sun.png",
         );
         let sun_sampler = unsafe { util::create_linear_sampler(device) };
         bind_texture_set(device, sun_set, sun_view, sun_sampler);
 
-        let (moon_image, moon_view, moon_allocation) = load_celestial_texture(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            jar_assets_dir,
-            asset_index,
-            "minecraft/textures/environment/moon_phases.png",
-        );
+        let moon_phase_paths = [
+            "minecraft/textures/environment/celestial/moon/full_moon.png",
+            "minecraft/textures/environment/celestial/moon/waning_gibbous.png",
+            "minecraft/textures/environment/celestial/moon/third_quarter.png",
+            "minecraft/textures/environment/celestial/moon/waning_crescent.png",
+            "minecraft/textures/environment/celestial/moon/new_moon.png",
+            "minecraft/textures/environment/celestial/moon/waxing_crescent.png",
+            "minecraft/textures/environment/celestial/moon/first_quarter.png",
+            "minecraft/textures/environment/celestial/moon/waxing_gibbous.png",
+        ];
         let moon_sampler = unsafe { util::create_linear_sampler(device) };
-        bind_texture_set(device, moon_set, moon_view, moon_sampler);
+        let mut moon_images = [vk::Image::null(); 8];
+        let mut moon_views = [vk::ImageView::null(); 8];
+        let mut moon_allocations = Vec::with_capacity(8);
+        for (i, &path) in moon_phase_paths.iter().enumerate() {
+            let (img, view, alloc) = load_celestial_texture(
+                device,
+                queue,
+                command_pool,
+                allocator,
+                jar_assets_dir,
+                asset_index,
+                path,
+            );
+            moon_images[i] = img;
+            moon_views[i] = view;
+            moon_allocations.push(alloc);
+            bind_texture_set(device, moon_sets[i], view, moon_sampler);
+        }
 
         let geom = build_all_geometry();
         let vertex_bytes = bytemuck::cast_slice::<SkyVertex, u8>(&geom.vertices);
@@ -295,7 +313,7 @@ impl SkyPipeline {
             descriptor_pool,
             ubo_sets,
             sun_set,
-            moon_set,
+            moon_sets,
             ubo_buffers,
             ubo_allocations,
             vertex_buffer,
@@ -314,10 +332,10 @@ impl SkyPipeline {
             sun_view,
             sun_sampler,
             sun_allocation,
-            moon_image,
-            moon_view,
+            moon_images,
+            moon_views,
             moon_sampler,
-            moon_allocation,
+            moon_allocations,
         }
     }
 
@@ -425,7 +443,7 @@ impl SkyPipeline {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 1,
-                &[self.moon_set],
+                &[self.moon_sets[moon_phase_idx]],
                 &[],
             );
             push_mode(device, 3);
@@ -464,28 +482,26 @@ impl SkyPipeline {
             }))
             .ok();
 
-        for (image, view, sampler, allocation) in [
-            (
-                &self.sun_image,
-                &self.sun_view,
-                &self.sun_sampler,
-                &mut self.sun_allocation,
-            ),
-            (
-                &self.moon_image,
-                &self.moon_view,
-                &self.moon_sampler,
-                &mut self.moon_allocation,
-            ),
-        ] {
-            unsafe {
-                device.destroy_sampler(*sampler, None);
-                device.destroy_image_view(*view, None);
-            }
+        unsafe {
+            device.destroy_sampler(self.sun_sampler, None);
+            device.destroy_image_view(self.sun_view, None);
+        }
+        alloc
+            .free(std::mem::replace(&mut self.sun_allocation, unsafe {
+                std::mem::zeroed()
+            }))
+            .ok();
+        unsafe { device.destroy_image(self.sun_image, None) };
+
+        unsafe { device.destroy_sampler(self.moon_sampler, None) };
+        for i in 0..8 {
+            unsafe { device.destroy_image_view(self.moon_views[i], None) };
             alloc
-                .free(std::mem::replace(allocation, unsafe { std::mem::zeroed() }))
+                .free(std::mem::replace(&mut self.moon_allocations[i], unsafe {
+                    std::mem::zeroed()
+                }))
                 .ok();
-            unsafe { device.destroy_image(*image, None) };
+            unsafe { device.destroy_image(self.moon_images[i], None) };
         }
 
         drop(alloc);
