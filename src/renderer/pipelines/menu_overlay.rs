@@ -1302,6 +1302,8 @@ pub enum SpriteId {
     AirFull,
     AirBursting,
     AirEmpty,
+    ExperienceBarBackground,
+    ExperienceBarProgress,
     InventoryBackground,
     EmptyHelmet,
     EmptyChestplate,
@@ -1434,6 +1436,16 @@ fn build_sprite_atlas(
         (
             SpriteId::AirEmpty,
             "minecraft/textures/gui/sprites/hud/air_empty.png",
+            0.0,
+        ),
+        (
+            SpriteId::ExperienceBarBackground,
+            "minecraft/textures/gui/sprites/hud/experience_bar_background.png",
+            0.0,
+        ),
+        (
+            SpriteId::ExperienceBarProgress,
+            "minecraft/textures/gui/sprites/hud/experience_bar_progress.png",
             0.0,
         ),
         (

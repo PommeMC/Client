@@ -101,6 +101,13 @@ pub fn handle_game_packet(
                 saturation: p.saturation,
             });
         }
+        ClientboundGamePacket::SetExperience(p) => {
+            let _ = event_tx.try_send(NetworkEvent::PlayerExperience {
+                progress: p.experience_progress,
+                level: p.experience_level as i32,
+                total: p.total_experience as i32,
+            });
+        }
         ClientboundGamePacket::SystemChat(p) if !p.overlay => {
             send_chat(event_tx, p.content.to_string());
         }

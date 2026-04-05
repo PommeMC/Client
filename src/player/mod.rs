@@ -46,6 +46,9 @@ pub struct LocalPlayer {
     pub game_mode: u8,
     pub score: i32,
     pub entity_id: i32,
+    pub experience_level: i32,
+    pub experience_progress: f32,
+    pub total_experience: i32,
 }
 
 impl LocalPlayer {
@@ -71,6 +74,9 @@ impl LocalPlayer {
             game_mode: 0,
             score: 0,
             entity_id: -1,
+            experience_level: 0,
+            experience_progress: 0.0,
+            total_experience: 0,
         }
     }
 
