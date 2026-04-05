@@ -66,6 +66,7 @@ pub fn build_hud(
     selected_slot: u8,
     health: f32,
     food: u32,
+    armor: u32,
     air_supply: i32,
     eyes_in_water: bool,
     experience_level: i32,
@@ -157,6 +158,21 @@ pub fn build_hud(
         SpriteId::FoodHalf,
         gs,
     );
+
+    if armor > 0 {
+        let armor_y = status_bar_y - (ICON_SIZE + 1.0) * gs;
+        build_status_bar(
+            elements,
+            hotbar_x,
+            armor_y,
+            armor as f32,
+            false,
+            SpriteId::ArmorEmpty,
+            SpriteId::ArmorFull,
+            SpriteId::ArmorHalf,
+            gs,
+        );
+    }
 
     if game_mode == 0 || game_mode == 2 {
         let xp_w = XP_BAR_W * gs;
@@ -301,32 +317,21 @@ fn build_status_bar(
         };
         let iy = y - icon_size;
 
+        let sprite = if i < full_icons {
+            full
+        } else if i == full_icons && has_half {
+            half
+        } else {
+            bg
+        };
         elements.push(MenuElement::Image {
             x,
             y: iy,
             w: icon_size,
             h: icon_size,
-            sprite: bg,
+            sprite,
             tint: WHITE,
         });
-
-        let icon = if i < full_icons {
-            Some(full)
-        } else if i == full_icons && has_half {
-            Some(half)
-        } else {
-            None
-        };
-        if let Some(sprite) = icon {
-            elements.push(MenuElement::Image {
-                x,
-                y: iy,
-                w: icon_size,
-                h: icon_size,
-                sprite,
-                tint: WHITE,
-            });
-        }
     }
 }
 

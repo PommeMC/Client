@@ -52,6 +52,10 @@ pub enum NetworkEvent {
         level: i32,
         total: i32,
     },
+    EntityArmorUpdate {
+        entity_id: i32,
+        armor: u32,
+    },
     InventoryContent {
         items: Vec<ItemStack>,
     },
