@@ -155,9 +155,8 @@ pub fn build_hud(
     let max_air = crate::player::MAX_AIR_SUPPLY;
     if eyes_in_water || air_supply < max_air {
         let air = air_supply.clamp(0, max_air);
-        let bubble_count = |offset: i32| -> i32 {
-            (((air + offset) * 10 + max_air - 1) / max_air).clamp(0, 10)
-        };
+        let bubble_count =
+            |offset: i32| -> i32 { (((air + offset) * 10 + max_air - 1) / max_air).clamp(0, 10) };
         let full_bubbles = bubble_count(-2);
         let popping_pos = bubble_count(0);
         let empty_delay = if air == 0 || !eyes_in_water { 0 } else { 1 };

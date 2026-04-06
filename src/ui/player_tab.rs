@@ -47,7 +47,8 @@ pub fn build_player_tab_overlay(
     }
 
     let cols_i = cols as i32;
-    let slot_width = ((cols_i * (HEAD_COL_W + max_name_w + 13)).min(gw as i32 - 50) / cols_i).max(1);
+    let slot_width =
+        ((cols_i * (HEAD_COL_W + max_name_w + 13)).min(gw as i32 - 50) / cols_i).max(1);
     let grid_w = slot_width * cols_i + (cols_i - 1) * 5;
     let xxo = (gw as i32) / 2 - grid_w / 2;
     let cx = (gw as i32) / 2;
@@ -69,36 +70,39 @@ pub fn build_player_tab_overlay(
         }
     }
 
-    let push_fill = |elements: &mut Vec<MenuElement>, x1: i32, y1: i32, x2: i32, y2: i32, color: [f32; 4]| {
-        elements.push(MenuElement::Rect {
-            x: x1 as f32 * gs,
-            y: y1 as f32 * gs,
-            w: (x2 - x1) as f32 * gs,
-            h: (y2 - y1) as f32 * gs,
-            corner_radius: 0.0,
-            color,
-        });
-    };
-    let push_text = |elements: &mut Vec<MenuElement>, s: String, x: i32, y: i32, color: [f32; 4]| {
-        elements.push(MenuElement::Text {
-            x: x as f32 * gs,
-            y: y as f32 * gs,
-            text: s,
-            scale: FONT_SIZE * gs,
-            color,
-            centered: false,
-        });
-    };
-    let push_image = |elements: &mut Vec<MenuElement>, x: i32, y: i32, w: i32, h: i32, sprite: SpriteId| {
-        elements.push(MenuElement::Image {
-            x: x as f32 * gs,
-            y: y as f32 * gs,
-            w: w as f32 * gs,
-            h: h as f32 * gs,
-            sprite,
-            tint: [1.0, 1.0, 1.0, 1.0],
-        });
-    };
+    let push_fill =
+        |elements: &mut Vec<MenuElement>, x1: i32, y1: i32, x2: i32, y2: i32, color: [f32; 4]| {
+            elements.push(MenuElement::Rect {
+                x: x1 as f32 * gs,
+                y: y1 as f32 * gs,
+                w: (x2 - x1) as f32 * gs,
+                h: (y2 - y1) as f32 * gs,
+                corner_radius: 0.0,
+                color,
+            });
+        };
+    let push_text =
+        |elements: &mut Vec<MenuElement>, s: String, x: i32, y: i32, color: [f32; 4]| {
+            elements.push(MenuElement::Text {
+                x: x as f32 * gs,
+                y: y as f32 * gs,
+                text: s,
+                scale: FONT_SIZE * gs,
+                color,
+                centered: false,
+            });
+        };
+    let push_image =
+        |elements: &mut Vec<MenuElement>, x: i32, y: i32, w: i32, h: i32, sprite: SpriteId| {
+            elements.push(MenuElement::Image {
+                x: x as f32 * gs,
+                y: y as f32 * gs,
+                w: w as f32 * gs,
+                h: h as f32 * gs,
+                sprite,
+                tint: [1.0, 1.0, 1.0, 1.0],
+            });
+        };
 
     let draw_text_block = |elements: &mut Vec<MenuElement>, lines: &[String], top: i32| {
         push_fill(
@@ -142,13 +146,37 @@ pub fn build_player_tab_overlay(
         let row_left = xxo + col * slot_width + col * 5;
         let yo = yyo + row * 9;
 
-        push_fill(elements, row_left, yo, row_left + slot_width, yo + 8, BG_ROW);
+        push_fill(
+            elements,
+            row_left,
+            yo,
+            row_left + slot_width,
+            yo + 8,
+            BG_ROW,
+        );
         push_image(elements, row_left, yo, 8, 8, SpriteId::SteveHead);
 
         let info = players[i];
-        let name_color = if info.game_mode == SPECTATOR_GAME_MODE { COL_SPECTATOR } else { COL_NAME };
-        push_text(elements, display_names[i].clone(), row_left + HEAD_COL_W, yo, name_color);
-        push_image(elements, row_left + slot_width - 11, yo, 10, 8, ping_sprite(info.latency));
+        let name_color = if info.game_mode == SPECTATOR_GAME_MODE {
+            COL_SPECTATOR
+        } else {
+            COL_NAME
+        };
+        push_text(
+            elements,
+            display_names[i].clone(),
+            row_left + HEAD_COL_W,
+            yo,
+            name_color,
+        );
+        push_image(
+            elements,
+            row_left + slot_width - 11,
+            yo,
+            10,
+            8,
+            ping_sprite(info.latency),
+        );
     }
 
     if let Some(lines) = &footer_lines {
