@@ -615,12 +615,9 @@ impl ChunkBufferStore {
         if self.meta_dirty || any_fading {
             self.cached_meta.clear();
             for alloc in self.chunks.values() {
-                let center = [
-                    (alloc.aabb.min[0] + alloc.aabb.max[0]) * 0.5 - camera_pos[0],
-                    (alloc.aabb.min[1] + alloc.aabb.max[1]) * 0.5 - camera_pos[1],
-                    (alloc.aabb.min[2] + alloc.aabb.max[2]) * 0.5 - camera_pos[2],
-                ];
-                let dist_sq = center[0] * center[0] + center[1] * center[1] + center[2] * center[2];
+                let dx = (alloc.aabb.min[0] + alloc.aabb.max[0]) * 0.5 - camera_pos[0];
+                let dz = (alloc.aabb.min[2] + alloc.aabb.max[2]) * 0.5 - camera_pos[2];
+                let dist_sq = dx * dx + dz * dz;
                 let vis = if !self.fade_enabled || dist_sq < NEARBY_DIST_SQ {
                     1.0
                 } else {

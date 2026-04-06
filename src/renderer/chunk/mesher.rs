@@ -87,8 +87,6 @@ pub struct ChunkMeshData {
     pub indices: Vec<u32>,
 }
 
-const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
-
 #[derive(Clone, Copy, Debug, Default)]
 pub enum GrassColorModifier {
     #[default]
@@ -767,7 +765,6 @@ fn mesh_chunk_snapshot(
     let mut logged_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let step = 1i32 << lod;
-    let scale = step as f32;
 
     let min_y = snapshot.min_y();
     let max_y = min_y + snapshot.height() as i32;
@@ -830,7 +827,6 @@ fn mesh_chunk_snapshot(
                         &mut vertices,
                         &mut indices,
                         block_pos,
-                        scale,
                         state,
                         snapshot,
                         registry,
@@ -1175,7 +1171,6 @@ fn emit_lod_cube(
     vertices: &mut Vec<ChunkVertex>,
     indices: &mut Vec<u32>,
     block_pos: [f32; 3],
-    scale: f32,
     state: azalea_block::BlockState,
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -1186,7 +1181,11 @@ fn emit_lod_cube(
     step: i32,
 ) {
     let region = if let Some(textures) = registry.get_textures(state) {
-        let tint = tint_color(textures.tint, WHITE, WHITE);
+        let tint = tint_color(
+            textures.tint,
+            snapshot.grass_tint(bx, by, bz),
+            snapshot.foliage_tint(bx, by, bz),
+        );
         let tex = uv_map.get_region(&textures.top);
         (tex, tint)
     } else {
@@ -1208,9 +1207,9 @@ fn emit_lod_cube(
         for i in 0..4 {
             vertices.push(ChunkVertex {
                 position: [
-                    block_pos[0] + positions[i][0] * scale,
-                    block_pos[1] + positions[i][1] * scale,
-                    block_pos[2] + positions[i][2] * scale,
+                    block_pos[0] + positions[i][0],
+                    block_pos[1] + positions[i][1],
+                    block_pos[2] + positions[i][2],
                 ],
                 tex_coords: pack_uv(
                     region.0.u_min + uvs[i][0] * (region.0.u_max - region.0.u_min),

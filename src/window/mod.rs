@@ -144,6 +144,8 @@ struct App {
     pending_pack_download: Option<std::thread::JoinHandle<PackDownloadResult>>,
     benchmark: Option<crate::benchmark::Benchmark>,
     benchmark_result: Option<crate::benchmark::BenchmarkResult>,
+    last_player_chunk: azalea_core::position::ChunkPos,
+    meshed_lod: std::collections::HashMap<azalea_core::position::ChunkPos, u32>,
 }
 
 struct PackDownloadResult {
@@ -264,6 +266,8 @@ impl App {
             pending_pack_download: None,
             benchmark: None,
             benchmark_result: None,
+            last_player_chunk: azalea_core::position::ChunkPos::new(0, 0),
+            meshed_lod: std::collections::HashMap::new(),
         }
     }
 
@@ -473,6 +477,7 @@ impl App {
                 }
                 NetworkEvent::ChunkUnloaded { pos } => {
                     self.chunk_store.unload_chunk(&pos);
+                    self.meshed_lod.remove(&pos);
                     if let Some(renderer) = &mut self.renderer {
                         renderer.remove_chunk_mesh(&pos);
                     }
@@ -780,7 +785,20 @@ impl App {
             );
             for pos in chunks_to_mesh {
                 let lod = chunk_lod(pos, player_chunk);
+                self.meshed_lod.insert(pos, lod);
                 dispatcher.enqueue(&self.chunk_store, pos, lod);
+            }
+
+            if player_chunk != self.last_player_chunk {
+                self.last_player_chunk = player_chunk;
+                for pos in self.chunk_store.loaded_positions() {
+                    let new_lod = chunk_lod(pos, player_chunk);
+                    let old_lod = self.meshed_lod.get(&pos).copied();
+                    if old_lod != Some(new_lod) {
+                        self.meshed_lod.insert(pos, new_lod);
+                        dispatcher.enqueue(&self.chunk_store, pos, new_lod);
+                    }
+                }
             }
         }
     }
