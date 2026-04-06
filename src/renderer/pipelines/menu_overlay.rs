@@ -1299,6 +1299,9 @@ pub enum SpriteId {
     FoodEmpty,
     FoodFull,
     FoodHalf,
+    AirFull,
+    AirBursting,
+    AirEmpty,
     InventoryBackground,
     EmptyHelmet,
     EmptyChestplate,
@@ -1416,6 +1419,21 @@ fn build_sprite_atlas(
         (
             SpriteId::FoodHalf,
             "minecraft/textures/gui/sprites/hud/food_half.png",
+            0.0,
+        ),
+        (
+            SpriteId::AirFull,
+            "minecraft/textures/gui/sprites/hud/air.png",
+            0.0,
+        ),
+        (
+            SpriteId::AirBursting,
+            "minecraft/textures/gui/sprites/hud/air_bursting.png",
+            0.0,
+        ),
+        (
+            SpriteId::AirEmpty,
+            "minecraft/textures/gui/sprites/hud/air_empty.png",
             0.0,
         ),
         (

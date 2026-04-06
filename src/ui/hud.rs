@@ -65,6 +65,7 @@ pub fn build_hud(
     health: f32,
     food: u32,
     air_supply: i32,
+    eyes_in_water: bool,
     hotbar: &[ItemStack],
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
@@ -151,25 +152,38 @@ pub fn build_hud(
         gs,
     );
 
-    if air_supply < crate::player::MAX_AIR_SUPPLY {
-        let bubble_y = hotbar_y - 2.0 * gs - ICON_SIZE * gs - 1.0 * gs;
-        let bubbles = (air_supply.max(0) as f32 / 30.0).ceil() as u8;
+    let max_air = crate::player::MAX_AIR_SUPPLY;
+    if eyes_in_water || air_supply < max_air {
+        let air = air_supply.clamp(0, max_air);
+        let bubble_count =
+            |offset: i32| -> i32 { (((air + offset) * 10 + max_air - 1) / max_air).clamp(0, 10) };
+        let full_bubbles = bubble_count(-2);
+        let popping_pos = bubble_count(0);
+        let empty_delay = if air == 0 || !eyes_in_water { 0 } else { 1 };
+        let empty_bubbles = 10 - bubble_count(empty_delay);
+        let is_popping = full_bubbles != popping_pos;
+
+        let bubble_y = hotbar_y - 2.0 * gs - ICON_SIZE * gs - (ICON_SIZE + 1.0) * gs;
         let stride = ICON_STRIDE * gs;
         let icon_size = ICON_SIZE * gs;
-        for i in 0..10u8 {
-            let bx = hotbar_x + hotbar_w - (i as f32 + 1.0) * stride;
-            let color = if i < bubbles {
-                [0.3, 0.6, 1.0, 0.9]
+        for b in 1..=10i32 {
+            let sprite = if b <= full_bubbles {
+                SpriteId::AirFull
+            } else if is_popping && b == popping_pos && eyes_in_water {
+                SpriteId::AirBursting
+            } else if b <= 10 - empty_bubbles {
+                continue;
             } else {
-                [0.2, 0.2, 0.2, 0.4]
+                SpriteId::AirEmpty
             };
-            elements.push(MenuElement::Rect {
-                x: bx + 1.0 * gs,
-                y: bubble_y + 1.0 * gs,
-                w: icon_size - 2.0 * gs,
-                h: icon_size - 2.0 * gs,
-                corner_radius: icon_size / 2.0,
-                color,
+            let x = hotbar_x + hotbar_w - (b - 1) as f32 * stride - icon_size;
+            elements.push(MenuElement::Image {
+                x,
+                y: bubble_y,
+                w: icon_size,
+                h: icon_size,
+                sprite,
+                tint: WHITE,
             });
         }
     }
