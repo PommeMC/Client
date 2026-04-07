@@ -530,14 +530,9 @@ impl App {
                         }
                     }
                 }
-                NetworkEvent::PlayerExperience {
-                    progress,
-                    level,
-                    total,
-                } => {
+                NetworkEvent::PlayerExperience { progress, level } => {
                     self.player.experience_progress = progress;
                     self.player.experience_level = level;
-                    self.player.total_experience = total;
                 }
                 NetworkEvent::InventoryContent { items } => {
                     self.player.inventory.set_contents(items);

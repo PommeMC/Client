@@ -50,7 +50,6 @@ pub enum NetworkEvent {
     PlayerExperience {
         progress: f32,
         level: i32,
-        total: i32,
     },
     InventoryContent {
         items: Vec<ItemStack>,
