@@ -126,7 +126,7 @@ pub fn handle_game_packet(
                         AttributeModifierOperation::AddMultipliedTotal => mul_total += m.amount,
                     }
                 }
-                let value = (base + add + base * mul_base) * (1.0 + mul_total);
+                let value = (base + add) * (1.0 + mul_base) * (1.0 + mul_total);
                 let armor = value.clamp(0.0, 30.0).round() as u32;
                 let _ = event_tx.try_send(NetworkEvent::EntityArmorUpdate {
                     entity_id: p.entity_id.0,
