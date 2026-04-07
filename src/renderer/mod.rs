@@ -419,6 +419,18 @@ impl Renderer {
                 vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
                 vk::ImageAspectFlags::COLOR,
             );
+            util::transition_image_layout(
+                &ctx.device,
+                cmd,
+                swapchain.depth_image,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::AccessFlags2::empty(),
+                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                vk::ImageAspectFlags::DEPTH,
+            );
 
             let color_attachment = vk::RenderingAttachmentInfo::default()
                 .image_view(swapchain.image_views[image_index as usize])
@@ -430,6 +442,17 @@ impl Renderer {
                         float32: [0.0, 0.0, 0.0, 1.0],
                     },
                 });
+            let depth_attachment = vk::RenderingAttachmentInfo::default()
+                .image_view(swapchain.depth_view)
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                });
             let color_attachments = [color_attachment];
             let rendering_info = vk::RenderingInfo::default()
                 .render_area(vk::Rect2D {
@@ -437,7 +460,8 @@ impl Renderer {
                     extent: swapchain.extent,
                 })
                 .layer_count(1)
-                .color_attachments(&color_attachments);
+                .color_attachments(&color_attachments)
+                .depth_attachment(&depth_attachment);
 
             ctx.device.cmd_begin_rendering(cmd, &rendering_info);
 
