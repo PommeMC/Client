@@ -111,8 +111,6 @@ pub struct ChunkBufferStore {
     compute_pipeline: vk::Pipeline,
     compute_layout: vk::PipelineLayout,
     compute_desc_layout: vk::DescriptorSetLayout,
-    compute_pool: vk::DescriptorPool,
-    compute_sets: Vec<vk::DescriptorSet>,
 
     meta_buffers: Vec<vk::Buffer>,
     meta_allocs: Vec<Allocation>,
@@ -292,65 +290,6 @@ impl ChunkBufferStore {
                 .expect("failed to create cull pipeline")[0];
         unsafe { device.destroy_shader_module(comp_module, None) };
 
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 3 * MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
-            .pool_sizes(&pool_sizes);
-        let compute_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
-            .expect("failed to create cull desc pool");
-
-        let layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT)
-            .map(|_| compute_desc_layout)
-            .collect();
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(compute_pool)
-            .set_layouts(&layouts);
-        let compute_sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }
-            .expect("failed to allocate cull desc sets");
-
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let writes = [
-                desc_write(
-                    compute_sets[i],
-                    0,
-                    vk::DescriptorType::STORAGE_BUFFER,
-                    meta_buffers[i],
-                    meta_size,
-                ),
-                desc_write(
-                    compute_sets[i],
-                    1,
-                    vk::DescriptorType::UNIFORM_BUFFER,
-                    frustum_buffers[i],
-                    frustum_size,
-                ),
-                desc_write(
-                    compute_sets[i],
-                    2,
-                    vk::DescriptorType::STORAGE_BUFFER,
-                    indirect_buffers[i],
-                    indirect_size,
-                ),
-                desc_write(
-                    compute_sets[i],
-                    3,
-                    vk::DescriptorType::STORAGE_BUFFER,
-                    count_buffers[i],
-                    count_size,
-                ),
-            ];
-            unsafe { device.update_descriptor_sets(&writes, &[]) };
-        }
-
         Self {
             total_buckets,
             vertex_buffer,
@@ -370,8 +309,6 @@ impl ChunkBufferStore {
             compute_pipeline,
             compute_layout,
             compute_desc_layout,
-            compute_pool,
-            compute_sets,
             meta_buffers,
             meta_allocs,
             indirect_buffers,
@@ -594,6 +531,7 @@ impl ChunkBufferStore {
     pub fn dispatch_cull(
         &mut self,
         device: &ash::Device,
+        push_desc: &ash::khr::push_descriptor::Device,
         cmd: vk::CommandBuffer,
         frame: usize,
         frustum: &[[f32; 4]; 6],
@@ -677,15 +615,60 @@ impl ChunkBufferStore {
         self.count_allocs[frame].mapped_slice_mut().unwrap()[..4]
             .copy_from_slice(&0u32.to_ne_bytes());
 
+        let max_meta = (self.total_buckets * 2) as u64;
+        let meta_size = max_meta * std::mem::size_of::<ChunkMeta>() as u64;
+        let indirect_size = max_meta * std::mem::size_of::<DrawCommand>() as u64;
+        let count_size = 4u64;
+        let frustum_size = std::mem::size_of::<FrustumData>() as u64;
+
+        let meta_buf_info = [vk::DescriptorBufferInfo {
+            buffer: self.meta_buffers[frame],
+            offset: 0,
+            range: meta_size,
+        }];
+        let frustum_buf_info = [vk::DescriptorBufferInfo {
+            buffer: self.frustum_buffers[frame],
+            offset: 0,
+            range: frustum_size,
+        }];
+        let indirect_buf_info = [vk::DescriptorBufferInfo {
+            buffer: self.indirect_buffers[frame],
+            offset: 0,
+            range: indirect_size,
+        }];
+        let count_buf_info = [vk::DescriptorBufferInfo {
+            buffer: self.count_buffers[frame],
+            offset: 0,
+            range: count_size,
+        }];
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&meta_buf_info),
+            vk::WriteDescriptorSet::default()
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&frustum_buf_info),
+            vk::WriteDescriptorSet::default()
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&indirect_buf_info),
+            vk::WriteDescriptorSet::default()
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&count_buf_info),
+        ];
+
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.compute_pipeline);
-            device.cmd_bind_descriptor_sets(
+            push_desc.cmd_push_descriptor_set(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.compute_layout,
                 0,
-                &[self.compute_sets[frame]],
-                &[],
+                &writes,
             );
             device.cmd_dispatch(cmd, count.div_ceil(64), 1, 1);
 
@@ -801,7 +784,6 @@ impl ChunkBufferStore {
             device.destroy_command_pool(self.transfer_pool, None);
             device.destroy_pipeline(self.compute_pipeline, None);
             device.destroy_pipeline_layout(self.compute_layout, None);
-            device.destroy_descriptor_pool(self.compute_pool, None);
             device.destroy_descriptor_set_layout(self.compute_desc_layout, None);
         }
     }
@@ -838,29 +820,9 @@ fn create_cull_desc_layout(device: &ash::Device) -> vk::DescriptorSetLayout {
             ..Default::default()
         },
     ];
-    let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    let info = vk::DescriptorSetLayoutCreateInfo::default()
+        .bindings(&bindings)
+        .flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR);
     unsafe { device.create_descriptor_set_layout(&info, None) }
         .expect("failed to create cull desc layout")
-}
-
-fn desc_write(
-    set: vk::DescriptorSet,
-    binding: u32,
-    ty: vk::DescriptorType,
-    buffer: vk::Buffer,
-    range: u64,
-) -> vk::WriteDescriptorSet<'static> {
-    // Safety: the DescriptorBufferInfo is stored inline in WriteDescriptorSet via the builder
-    // pattern, but ash's lifetime requirements need a reference. We use a leaked Box here
-    // because these writes only happen once at init time.
-    let info = Box::leak(Box::new([vk::DescriptorBufferInfo {
-        buffer,
-        offset: 0,
-        range,
-    }]));
-    vk::WriteDescriptorSet::default()
-        .dst_set(set)
-        .dst_binding(binding)
-        .descriptor_type(ty)
-        .buffer_info(info)
 }

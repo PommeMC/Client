@@ -457,7 +457,7 @@ impl Renderer {
             };
             ctx.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
-            menu.draw(&ctx.device, cmd, sw, sh, &elements);
+            menu.draw(&ctx.device, &ctx.push_descriptor, cmd, sw, sh, &elements);
 
             ctx.device.cmd_end_rendering(cmd);
 
@@ -1018,8 +1018,14 @@ impl Renderer {
                     self.camera.position.y,
                     self.camera.position.z,
                 ];
-                self.chunk_buffers
-                    .dispatch_cull(&self.ctx.device, cmd, frame, &frustum, cam_pos);
+                self.chunk_buffers.dispatch_cull(
+                    &self.ctx.device,
+                    &self.ctx.push_descriptor,
+                    cmd,
+                    frame,
+                    &frustum,
+                    cam_pos,
+                );
             }
 
             let swapchain_image = self.swapchain.images[image_index as usize];
@@ -1115,6 +1121,7 @@ impl Renderer {
                 } => {
                     self.sky_pipeline.update_and_draw(
                         &self.ctx.device,
+                        &self.ctx.push_descriptor,
                         cmd,
                         frame,
                         &self.camera,
@@ -1122,7 +1129,12 @@ impl Renderer {
                     );
 
                     let t_cull = std::time::Instant::now();
-                    self.chunk_pipeline.bind(&self.ctx.device, cmd, frame);
+                    self.chunk_pipeline.bind(
+                        &self.ctx.device,
+                        &self.ctx.push_descriptor,
+                        cmd,
+                        frame,
+                    );
                     self.chunk_buffers
                         .draw_indirect(&self.ctx.device, cmd, frame);
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
@@ -1130,6 +1142,7 @@ impl Renderer {
                     if let Some((block_pos, stage)) = destroy_info {
                         self.block_overlay_pipeline.draw(
                             &self.ctx.device,
+                            &self.ctx.push_descriptor,
                             cmd,
                             frame,
                             block_pos,
@@ -1137,15 +1150,29 @@ impl Renderer {
                         );
                     }
 
-                    self.entity_renderer
-                        .draw(&self.ctx.device, cmd, frame, entities);
+                    self.entity_renderer.draw(
+                        &self.ctx.device,
+                        &self.ctx.push_descriptor,
+                        cmd,
+                        frame,
+                        entities,
+                    );
 
-                    self.item_entity_pipeline
-                        .draw(&self.ctx.device, cmd, frame, item_entities);
+                    self.item_entity_pipeline.draw(
+                        &self.ctx.device,
+                        &self.ctx.push_descriptor,
+                        cmd,
+                        frame,
+                        item_entities,
+                    );
 
                     if *show_chunk_borders {
-                        self.chunk_border_pipeline
-                            .draw(&self.ctx.device, cmd, frame);
+                        self.chunk_border_pipeline.draw(
+                            &self.ctx.device,
+                            &self.ctx.push_descriptor,
+                            cmd,
+                            frame,
+                        );
                     }
 
                     let clear_attachment = vk::ClearAttachment {
@@ -1171,6 +1198,7 @@ impl Renderer {
                         let aspect = sw / sh.max(1.0);
                         self.hand_pipeline.update_and_draw(
                             &self.ctx.device,
+                            &self.ctx.push_descriptor,
                             cmd,
                             frame,
                             aspect,
@@ -1178,8 +1206,14 @@ impl Renderer {
                         );
                     }
 
-                    self.menu_pipeline
-                        .draw(&self.ctx.device, cmd, sw, sh, overlay);
+                    self.menu_pipeline.draw(
+                        &self.ctx.device,
+                        &self.ctx.push_descriptor,
+                        cmd,
+                        sw,
+                        sh,
+                        overlay,
+                    );
 
                     self.last_timings.cull_ms = cull_ms;
                     self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -1192,8 +1226,14 @@ impl Renderer {
                     show_skin,
                 } => {
                     let aspect = sw / sh.max(1.0);
-                    self.panorama_pipeline
-                        .draw(&self.ctx.device, cmd, *scroll, aspect, 0.0);
+                    self.panorama_pipeline.draw(
+                        &self.ctx.device,
+                        &self.ctx.push_descriptor,
+                        cmd,
+                        *scroll,
+                        aspect,
+                        0.0,
+                    );
 
                     if *blur > 0.01 {
                         self.ctx.device.cmd_end_rendering(cmd);
@@ -1201,6 +1241,7 @@ impl Renderer {
                         let iterations = ((*blur * 3.0).ceil() as u32).clamp(1, 4);
                         self.blur_pipeline.execute(
                             &self.ctx.device,
+                            &self.ctx.push_descriptor,
                             cmd,
                             swapchain_image,
                             self.swapchain.extent.width,
@@ -1262,6 +1303,7 @@ impl Renderer {
                     if *show_skin {
                         self.skin_preview.draw(
                             &self.ctx.device,
+                            &self.ctx.push_descriptor,
                             cmd,
                             frame,
                             aspect,
@@ -1274,8 +1316,14 @@ impl Renderer {
                         );
                     }
 
-                    self.menu_pipeline
-                        .draw(&self.ctx.device, cmd, sw, sh, elements);
+                    self.menu_pipeline.draw(
+                        &self.ctx.device,
+                        &self.ctx.push_descriptor,
+                        cmd,
+                        sw,
+                        sh,
+                        elements,
+                    );
                 }
             }
 

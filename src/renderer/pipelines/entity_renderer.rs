@@ -34,7 +34,6 @@ struct MobVariant {
     texture_image: vk::Image,
     texture_view: vk::ImageView,
     texture_allocation: Allocation,
-    texture_set: vk::DescriptorSet,
 }
 
 struct MobEntry {
@@ -58,8 +57,6 @@ pub struct EntityRenderer {
     pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
     texture_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    camera_sets: Vec<vk::DescriptorSet>,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Allocation>,
     texture_sampler: vk::Sampler,
@@ -151,57 +148,17 @@ impl EntityRenderer {
         let pipeline = create_pipeline(device, color_format, depth_format, pipeline_layout);
 
         let defs = mob_definitions();
-        let tex_count: u32 = defs
-            .iter()
-            .map(|d| if d.baby_model.is_some() { 2 } else { 1 })
-            .sum();
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: tex_count,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(MAX_FRAMES_IN_FLIGHT as u32 + tex_count)
-            .pool_sizes(&pool_sizes);
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
-            .expect("failed to create entity descriptor pool");
-
-        let camera_layouts_vec: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
-        let camera_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&camera_layouts_vec);
-        let camera_sets = unsafe { device.allocate_descriptor_sets(&camera_alloc_info) }
-            .expect("failed to allocate entity camera descriptor sets");
 
         let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
-        for &set in &camera_sets {
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
                 std::mem::size_of::<CameraUniform>() as u64,
                 "entity_camera_uniform",
             );
-
-            let buffer_info = [vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: std::mem::size_of::<CameraUniform>() as u64,
-            }];
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buffer_info);
-            unsafe { device.update_descriptor_sets(&[write], &[]) };
-
             camera_buffers.push(buf);
             camera_allocations.push(alloc);
         }
@@ -216,8 +173,6 @@ impl EntityRenderer {
                 queue,
                 command_pool,
                 allocator,
-                descriptor_pool,
-                texture_layout,
                 texture_sampler,
                 jar_assets_dir,
                 asset_index,
@@ -232,8 +187,6 @@ impl EntityRenderer {
                     queue,
                     command_pool,
                     allocator,
-                    descriptor_pool,
-                    texture_layout,
                     texture_sampler,
                     jar_assets_dir,
                     asset_index,
@@ -259,8 +212,6 @@ impl EntityRenderer {
             pipeline_layout,
             camera_layout,
             texture_layout,
-            descriptor_pool,
-            camera_sets,
             camera_buffers,
             camera_allocations,
             texture_sampler,
@@ -277,6 +228,7 @@ impl EntityRenderer {
     pub fn draw(
         &self,
         device: &ash::Device,
+        push_desc: &ash::khr::push_descriptor::Device,
         cmd: vk::CommandBuffer,
         frame: usize,
         entities: &[EntityRenderInfo],
@@ -285,8 +237,25 @@ impl EntityRenderer {
             return;
         }
 
+        let cam_buf_info = [vk::DescriptorBufferInfo {
+            buffer: self.camera_buffers[frame],
+            offset: 0,
+            range: std::mem::size_of::<CameraUniform>() as u64,
+        }];
+        let cam_write = vk::WriteDescriptorSet::default()
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(&cam_buf_info);
+
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            push_desc.cmd_push_descriptor_set(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[cam_write],
+            );
 
             let mut last_variant: *const MobVariant = std::ptr::null();
             for info in entities {
@@ -297,13 +266,21 @@ impl EntityRenderer {
 
                 let variant_ptr: *const MobVariant = variant;
                 if last_variant != variant_ptr {
-                    device.cmd_bind_descriptor_sets(
+                    let tex_img_info = [vk::DescriptorImageInfo {
+                        sampler: self.texture_sampler,
+                        image_view: variant.texture_view,
+                        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    }];
+                    let tex_write = vk::WriteDescriptorSet::default()
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&tex_img_info);
+                    push_desc.cmd_push_descriptor_set(
                         cmd,
                         vk::PipelineBindPoint::GRAPHICS,
                         self.pipeline_layout,
-                        0,
-                        &[self.camera_sets[frame], variant.texture_set],
-                        &[],
+                        1,
+                        &[tex_write],
                     );
                     device.cmd_bind_vertex_buffers(cmd, 0, &[variant.vertex_buffer], &[0]);
                     last_variant = variant_ptr;
@@ -397,7 +374,6 @@ impl EntityRenderer {
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.camera_layout, None);
             device.destroy_descriptor_set_layout(self.texture_layout, None);
         }
@@ -410,9 +386,7 @@ fn create_mob_variant(
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
-    descriptor_pool: vk::DescriptorPool,
-    texture_layout: vk::DescriptorSetLayout,
-    texture_sampler: vk::Sampler,
+    _texture_sampler: vk::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     model: BakedEntityModel,
@@ -439,25 +413,6 @@ fn create_mob_variant(
         fallback_tex_size,
     );
 
-    let tex_layouts = [texture_layout];
-    let tex_alloc_info = vk::DescriptorSetAllocateInfo::default()
-        .descriptor_pool(descriptor_pool)
-        .set_layouts(&tex_layouts);
-    let texture_set = unsafe { device.allocate_descriptor_sets(&tex_alloc_info) }
-        .expect("failed to allocate entity texture descriptor set")[0];
-
-    let image_info = [vk::DescriptorImageInfo {
-        sampler: texture_sampler,
-        image_view: texture_view,
-        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-    }];
-    let tex_write = vk::WriteDescriptorSet::default()
-        .dst_set(texture_set)
-        .dst_binding(0)
-        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .image_info(&image_info);
-    unsafe { device.update_descriptor_sets(&[tex_write], &[]) };
-
     MobVariant {
         model,
         vertex_buffer,
@@ -465,7 +420,6 @@ fn create_mob_variant(
         texture_image,
         texture_view,
         texture_allocation,
-        texture_set,
     }
 }
 

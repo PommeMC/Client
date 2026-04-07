@@ -30,9 +30,6 @@ pub struct HandPipeline {
     pipeline_layout: vk::PipelineLayout,
     mvp_layout: vk::DescriptorSetLayout,
     skin_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    mvp_sets: Vec<vk::DescriptorSet>,
-    skin_set: vk::DescriptorSet,
     mvp_buffers: Vec<vk::Buffer>,
     mvp_allocations: Vec<Allocation>,
     vertex_buffer: vk::Buffer,
@@ -73,59 +70,16 @@ impl HandPipeline {
 
         let pipeline = create_pipeline(device, color_format, depth_format, pipeline_layout);
 
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 1,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets((MAX_FRAMES_IN_FLIGHT + 1) as u32)
-            .pool_sizes(&pool_sizes);
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
-            .expect("failed to create hand descriptor pool");
-
-        let mvp_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| mvp_layout).collect();
-        let mvp_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&mvp_layouts);
-        let mvp_sets = unsafe { device.allocate_descriptor_sets(&mvp_alloc_info) }
-            .expect("failed to allocate hand mvp descriptor sets");
-
-        let skin_layouts = [skin_layout];
-        let skin_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&skin_layouts);
-        let skin_set = unsafe { device.allocate_descriptor_sets(&skin_alloc_info) }
-            .expect("failed to allocate hand skin descriptor set")[0];
-
         let mut mvp_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut mvp_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
-        for &set in &mvp_sets {
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
                 std::mem::size_of::<HandUniform>() as u64,
                 "hand_uniform",
             );
-
-            let buffer_info = [vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: std::mem::size_of::<HandUniform>() as u64,
-            }];
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buffer_info);
-            unsafe { device.update_descriptor_sets(&[write], &[]) };
-
             mvp_buffers.push(buf);
             mvp_allocations.push(alloc);
         }
@@ -140,8 +94,6 @@ impl HandPipeline {
         );
 
         let skin_sampler = unsafe { util::create_nearest_sampler(device) };
-
-        update_skin_descriptor(device, skin_set, skin_view, skin_sampler);
 
         let vertices = build_arm_vertices(skin_w, skin_h);
         let vertex_count = vertices.len() as u32;
@@ -163,9 +115,6 @@ impl HandPipeline {
             pipeline_layout,
             mvp_layout,
             skin_layout,
-            descriptor_pool,
-            mvp_sets,
-            skin_set,
             mvp_buffers,
             mvp_allocations,
             vertex_buffer,
@@ -181,6 +130,7 @@ impl HandPipeline {
     pub fn update_and_draw(
         &mut self,
         device: &ash::Device,
+        push_desc: &ash::khr::push_descriptor::Device,
         cmd: vk::CommandBuffer,
         frame: usize,
         aspect: f32,
@@ -229,15 +179,41 @@ impl HandPipeline {
         self.mvp_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
             .copy_from_slice(bytes);
 
+        let buffer_info = [vk::DescriptorBufferInfo {
+            buffer: self.mvp_buffers[frame],
+            offset: 0,
+            range: std::mem::size_of::<HandUniform>() as u64,
+        }];
+        let mvp_write = vk::WriteDescriptorSet::default()
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(&buffer_info);
+
+        let image_info = [vk::DescriptorImageInfo {
+            sampler: self.skin_sampler,
+            image_view: self.skin_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }];
+        let skin_write = vk::WriteDescriptorSet::default()
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&image_info);
+
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            device.cmd_bind_descriptor_sets(
+            push_desc.cmd_push_descriptor_set(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[self.mvp_sets[frame], self.skin_set],
-                &[],
+                &[mvp_write],
+            );
+            push_desc.cmd_push_descriptor_set(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                1,
+                &[skin_write],
             );
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
             device.cmd_draw(cmd, self.vertex_count, 1, 0, 0);
@@ -288,7 +264,6 @@ impl HandPipeline {
         self.skin_image = image;
         self.skin_view = view;
         self.skin_allocation = allocation;
-        update_skin_descriptor(device, self.skin_set, self.skin_view, self.skin_sampler);
 
         tracing::info!("Skin reloaded: {width}x{height}");
     }
@@ -327,7 +302,6 @@ impl HandPipeline {
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.mvp_layout, None);
             device.destroy_descriptor_set_layout(self.skin_layout, None);
         }
@@ -476,25 +450,6 @@ fn upload_skin_to_gpu(
     unsafe { device.destroy_buffer(staging_buf, None) };
     allocator.lock().unwrap().free(staging_alloc).ok();
     (image, view, allocation)
-}
-
-fn update_skin_descriptor(
-    device: &ash::Device,
-    set: vk::DescriptorSet,
-    view: vk::ImageView,
-    sampler: vk::Sampler,
-) {
-    let image_info = [vk::DescriptorImageInfo {
-        sampler,
-        image_view: view,
-        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-    }];
-    let write = vk::WriteDescriptorSet::default()
-        .dst_set(set)
-        .dst_binding(0)
-        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .image_info(&image_info);
-    unsafe { device.update_descriptor_sets(&[write], &[]) };
 }
 
 fn fallback_skin() -> (Vec<u8>, u32, u32) {

@@ -21,8 +21,6 @@ pub struct ChunkBorderPipeline {
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     desc_layout: vk::DescriptorSetLayout,
-    desc_pool: vk::DescriptorPool,
-    desc_sets: Vec<vk::DescriptorSet>,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocs: Vec<Allocation>,
     vertex_buffer: vk::Buffer,
@@ -42,8 +40,9 @@ impl ChunkBorderPipeline {
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::VERTEX);
-        let layout_info =
-            vk::DescriptorSetLayoutCreateInfo::default().bindings(std::slice::from_ref(&binding));
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(std::slice::from_ref(&binding))
+            .flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR);
         let desc_layout =
             unsafe { device.create_descriptor_set_layout(&layout_info, None) }.unwrap();
 
@@ -156,41 +155,15 @@ impl ChunkBorderPipeline {
             device.destroy_shader_module(frag_mod, None);
         }
 
-        let pool_sizes = [vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-        }];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
-            .pool_sizes(&pool_sizes);
-        let desc_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }.unwrap();
-
-        let layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| desc_layout).collect();
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(desc_pool)
-            .set_layouts(&layouts);
-        let desc_sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }.unwrap();
-
         let mut camera_buffers = Vec::new();
         let mut camera_allocs = Vec::new();
-        for desc_set in &desc_sets {
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
                 std::mem::size_of::<CameraUniform>() as u64,
                 "chunk_border_cam",
             );
-            let buf_info = [vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: std::mem::size_of::<CameraUniform>() as u64,
-            }];
-            let write = [vk::WriteDescriptorSet::default()
-                .dst_set(*desc_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buf_info)];
-            unsafe { device.update_descriptor_sets(&write, &[]) };
             camera_buffers.push(buf);
             camera_allocs.push(alloc);
         }
@@ -208,8 +181,6 @@ impl ChunkBorderPipeline {
             pipeline,
             pipeline_layout,
             desc_layout,
-            desc_pool,
-            desc_sets,
             camera_buffers,
             camera_allocs,
             vertex_buffer,
@@ -294,19 +265,33 @@ impl ChunkBorderPipeline {
         self.vertex_count = count as u32;
     }
 
-    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer, frame: usize) {
+    pub fn draw(
+        &self,
+        device: &ash::Device,
+        push_desc: &ash::khr::push_descriptor::Device,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+    ) {
         if self.vertex_count == 0 {
             return;
         }
+        let buf_info = [vk::DescriptorBufferInfo {
+            buffer: self.camera_buffers[frame],
+            offset: 0,
+            range: std::mem::size_of::<CameraUniform>() as u64,
+        }];
+        let cam_write = vk::WriteDescriptorSet::default()
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(&buf_info);
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            device.cmd_bind_descriptor_sets(
+            push_desc.cmd_push_descriptor_set(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[self.desc_sets[frame]],
-                &[],
+                &[cam_write],
             );
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
             device.cmd_draw(cmd, self.vertex_count, 1, 0, 0);
@@ -339,7 +324,6 @@ impl ChunkBorderPipeline {
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.desc_pool, None);
             device.destroy_descriptor_set_layout(self.desc_layout, None);
         }
     }

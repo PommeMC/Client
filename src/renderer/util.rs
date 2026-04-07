@@ -275,7 +275,9 @@ pub fn create_descriptor_set_layout(
         stage_flags,
         ..Default::default()
     }];
-    let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    let info = vk::DescriptorSetLayoutCreateInfo::default()
+        .bindings(&bindings)
+        .flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR);
     unsafe { device.create_descriptor_set_layout(&info, None) }
         .expect("failed to create descriptor set layout")
 }

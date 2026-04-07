@@ -17,9 +17,6 @@ pub struct BlurPipeline {
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     desc_layout: vk::DescriptorSetLayout,
-    desc_pool: vk::DescriptorPool,
-    set_read_a: vk::DescriptorSet,
-    set_read_b: vk::DescriptorSet,
     width: u32,
     height: u32,
     format: vk::Format,
@@ -63,7 +60,9 @@ impl BlurPipeline {
                 stage_flags: vk::ShaderStageFlags::FRAGMENT,
                 ..Default::default()
             }];
-            let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+            let info = vk::DescriptorSetLayoutCreateInfo::default()
+                .bindings(&bindings)
+                .flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR);
             unsafe { device.create_descriptor_set_layout(&info, None) }
                 .expect("failed to create blur desc layout")
         };
@@ -82,28 +81,6 @@ impl BlurPipeline {
 
         let pipeline = create_blur_graphics_pipeline(device, format, pipeline_layout);
 
-        let pool_sizes = [vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 2,
-        }];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(2)
-            .pool_sizes(&pool_sizes);
-        let desc_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
-            .expect("failed to create blur desc pool");
-
-        let alloc_layouts = [desc_layout, desc_layout];
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(desc_pool)
-            .set_layouts(&alloc_layouts);
-        let sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }
-            .expect("failed to allocate blur desc sets");
-        let set_read_a = sets[0];
-        let set_read_b = sets[1];
-
-        write_blur_descriptor(device, set_read_a, view_a, sampler);
-        write_blur_descriptor(device, set_read_b, view_b, sampler);
-
         Self {
             image_a,
             view_a,
@@ -115,9 +92,6 @@ impl BlurPipeline {
             pipeline,
             pipeline_layout,
             desc_layout,
-            desc_pool,
-            set_read_a,
-            set_read_b,
             width: blur_w,
             height: blur_h,
             format,
@@ -136,6 +110,7 @@ impl BlurPipeline {
     pub fn execute(
         &self,
         device: &ash::Device,
+        push_desc: &ash::khr::push_descriptor::Device,
         cmd: vk::CommandBuffer,
         src_image: vk::Image,
         src_width: u32,
@@ -319,13 +294,21 @@ impl BlurPipeline {
                 device.cmd_set_viewport(cmd, 0, &[viewport]);
                 device.cmd_set_scissor(cmd, 0, &[scissor]);
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-                device.cmd_bind_descriptor_sets(
+                let a_img_info = [vk::DescriptorImageInfo {
+                    sampler: self.sampler,
+                    image_view: self.view_a,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                }];
+                let a_write = vk::WriteDescriptorSet::default()
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&a_img_info);
+                push_desc.cmd_push_descriptor_set(
                     cmd,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline_layout,
                     0,
-                    &[self.set_read_a],
-                    &[],
+                    &[a_write],
                 );
                 device.cmd_push_constants(
                     cmd,
@@ -378,13 +361,21 @@ impl BlurPipeline {
                 device.cmd_set_viewport(cmd, 0, &[viewport]);
                 device.cmd_set_scissor(cmd, 0, &[scissor]);
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-                device.cmd_bind_descriptor_sets(
+                let b_img_info = [vk::DescriptorImageInfo {
+                    sampler: self.sampler,
+                    image_view: self.view_b,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                }];
+                let b_write = vk::WriteDescriptorSet::default()
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&b_img_info);
+                push_desc.cmd_push_descriptor_set(
                     cmd,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline_layout,
                     0,
-                    &[self.set_read_b],
-                    &[],
+                    &[b_write],
                 );
                 device.cmd_push_constants(
                     cmd,
@@ -446,9 +437,6 @@ impl BlurPipeline {
         self.view_b = vb;
         self.alloc_b = Some(ab);
 
-        write_blur_descriptor(device, self.set_read_a, va, self.sampler);
-        write_blur_descriptor(device, self.set_read_b, vb, self.sampler);
-
         self.width = bw;
         self.height = bh;
     }
@@ -474,7 +462,6 @@ impl BlurPipeline {
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.desc_pool, None);
             device.destroy_descriptor_set_layout(self.desc_layout, None);
             device.destroy_sampler(self.sampler, None);
         }
@@ -616,23 +603,4 @@ fn create_blur_graphics_pipeline(
     }
 
     pipeline
-}
-
-fn write_blur_descriptor(
-    device: &ash::Device,
-    set: vk::DescriptorSet,
-    view: vk::ImageView,
-    sampler: vk::Sampler,
-) {
-    let info = [vk::DescriptorImageInfo {
-        sampler,
-        image_view: view,
-        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-    }];
-    let write = [vk::WriteDescriptorSet::default()
-        .dst_set(set)
-        .dst_binding(0)
-        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .image_info(&info)];
-    unsafe { device.update_descriptor_sets(&write, &[]) };
 }

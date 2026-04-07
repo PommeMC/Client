@@ -161,8 +161,7 @@ pub struct SkyPipeline {
     pipeline_layout: vk::PipelineLayout,
     ubo_layout: vk::DescriptorSetLayout,
     tex_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    ubo_sets: Vec<vk::DescriptorSet>,
+    tex_descriptor_pool: vk::DescriptorPool,
     sun_set: vk::DescriptorSet,
     moon_sets: [vk::DescriptorSet; 8],
     ubo_buffers: Vec<vk::Buffer>,
@@ -226,32 +225,19 @@ impl SkyPipeline {
         let (pipeline, overlay_pipeline) =
             create_pipelines(device, color_format, depth_format, pipeline_layout);
 
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 9, // 1 sun + 8 moon phases
-            },
-        ];
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 9,
+        }];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets((MAX_FRAMES_IN_FLIGHT + 9) as u32)
+            .max_sets(9)
             .pool_sizes(&pool_sizes);
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
-            .expect("failed to create sky descriptor pool");
+        let tex_descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+            .expect("failed to create sky tex descriptor pool");
 
-        let ubo_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| ubo_layout).collect();
-        let ubo_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&ubo_layouts);
-        let ubo_sets = unsafe { device.allocate_descriptor_sets(&ubo_alloc_info) }
-            .expect("failed to allocate sky ubo sets");
-
-        let tex_layouts: Vec<_> = (0..9).map(|_| tex_layout).collect(); // 1 sun + 8 moon
+        let tex_layouts: Vec<_> = (0..9).map(|_| tex_layout).collect();
         let tex_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
+            .descriptor_pool(tex_descriptor_pool)
             .set_layouts(&tex_layouts);
         let tex_sets = unsafe { device.allocate_descriptor_sets(&tex_alloc_info) }
             .expect("failed to allocate sky texture sets");
@@ -261,24 +247,13 @@ impl SkyPipeline {
         let mut ubo_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut ubo_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
-        for &set in &ubo_sets {
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
                 std::mem::size_of::<SkyUniform>() as u64,
                 "sky_uniform",
             );
-            let buffer_info = [vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: std::mem::size_of::<SkyUniform>() as u64,
-            }];
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buffer_info);
-            unsafe { device.update_descriptor_sets(&[write], &[]) };
             ubo_buffers.push(buf);
             ubo_allocations.push(alloc);
         }
@@ -349,8 +324,7 @@ impl SkyPipeline {
             pipeline_layout,
             ubo_layout,
             tex_layout,
-            descriptor_pool,
-            ubo_sets,
+            tex_descriptor_pool,
             sun_set,
             moon_sets,
             ubo_buffers,
@@ -381,6 +355,7 @@ impl SkyPipeline {
     pub fn update_and_draw(
         &mut self,
         device: &ash::Device,
+        push_desc: &ash::khr::push_descriptor::Device,
         cmd: vk::CommandBuffer,
         frame: usize,
         camera: &Camera,
@@ -443,15 +418,32 @@ impl SkyPipeline {
             );
         };
 
+        let buffer_info = [vk::DescriptorBufferInfo {
+            buffer: self.ubo_buffers[frame],
+            offset: 0,
+            range: std::mem::size_of::<SkyUniform>() as u64,
+        }];
+        let ubo_write = vk::WriteDescriptorSet::default()
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(&buffer_info);
+
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
-            device.cmd_bind_descriptor_sets(
+            push_desc.cmd_push_descriptor_set(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[self.ubo_sets[frame], self.sun_set],
+                &[ubo_write.clone()],
+            );
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                1,
+                &[self.sun_set],
                 &[],
             );
 
@@ -465,12 +457,19 @@ impl SkyPipeline {
 
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.overlay_pipeline);
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
-            device.cmd_bind_descriptor_sets(
+            push_desc.cmd_push_descriptor_set(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[self.ubo_sets[frame], self.sun_set],
+                &[ubo_write],
+            );
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                1,
+                &[self.sun_set],
                 &[],
             );
 
@@ -543,14 +542,33 @@ impl SkyPipeline {
         drop(alloc);
 
         unsafe {
+            device.destroy_descriptor_pool(self.tex_descriptor_pool, None);
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline(self.overlay_pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.ubo_layout, None);
             device.destroy_descriptor_set_layout(self.tex_layout, None);
         }
     }
+}
+
+fn bind_texture_set(
+    device: &ash::Device,
+    set: vk::DescriptorSet,
+    view: vk::ImageView,
+    sampler: vk::Sampler,
+) {
+    let image_info = [vk::DescriptorImageInfo {
+        sampler,
+        image_view: view,
+        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+    }];
+    let write = vk::WriteDescriptorSet::default()
+        .dst_set(set)
+        .dst_binding(0)
+        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .image_info(&image_info);
+    unsafe { device.update_descriptor_sets(&[write], &[]) };
 }
 
 struct JavaRandom {
@@ -882,25 +900,6 @@ fn load_celestial_texture(
 
     tracing::info!("Sky: loaded {key} ({w}x{h})");
     (image, view, allocation)
-}
-
-fn bind_texture_set(
-    device: &ash::Device,
-    set: vk::DescriptorSet,
-    view: vk::ImageView,
-    sampler: vk::Sampler,
-) {
-    let image_info = [vk::DescriptorImageInfo {
-        sampler,
-        image_view: view,
-        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-    }];
-    let write = vk::WriteDescriptorSet::default()
-        .dst_set(set)
-        .dst_binding(0)
-        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .image_info(&image_info);
-    unsafe { device.update_descriptor_sets(&[write], &[]) };
 }
 
 fn create_pipelines(

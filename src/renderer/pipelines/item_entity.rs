@@ -33,11 +33,10 @@ pub struct ItemEntityPipeline {
     pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
     atlas_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    camera_sets: Vec<vk::DescriptorSet>,
-    atlas_set: vk::DescriptorSet,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Option<Allocation>>,
+    atlas_view: vk::ImageView,
+    atlas_sampler: vk::Sampler,
     meshes: HashMap<String, MeshEntry>,
 }
 
@@ -74,84 +73,30 @@ impl ItemEntityPipeline {
 
         let pipeline = create_pipeline(device, color_format, depth_format, pipeline_layout);
 
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 1,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets((MAX_FRAMES_IN_FLIGHT + 1) as u32)
-            .pool_sizes(&pool_sizes);
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
-            .expect("failed to create item entity descriptor pool");
-
-        let camera_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
-        let camera_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&camera_layouts);
-        let camera_sets = unsafe { device.allocate_descriptor_sets(&camera_alloc_info) }
-            .expect("failed to allocate item entity camera sets");
-
-        let atlas_layouts = [atlas_layout];
-        let atlas_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&atlas_layouts);
-        let atlas_set = unsafe { device.allocate_descriptor_sets(&atlas_alloc_info) }
-            .expect("failed to allocate item entity atlas set")[0];
-
         let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut camera_allocations: Vec<Option<Allocation>> =
             Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
-        for &set in &camera_sets {
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
                 std::mem::size_of::<CameraUniform>() as u64,
                 "item_entity_camera",
             );
-            let buffer_info = [vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: std::mem::size_of::<CameraUniform>() as u64,
-            }];
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buffer_info);
-            unsafe { device.update_descriptor_sets(&[write], &[]) };
             camera_buffers.push(buf);
             camera_allocations.push(Some(alloc));
         }
-
-        let image_info = [vk::DescriptorImageInfo {
-            sampler: atlas.sampler,
-            image_view: atlas.view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
-        let atlas_write = vk::WriteDescriptorSet::default()
-            .dst_set(atlas_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&image_info);
-        unsafe { device.update_descriptor_sets(&[atlas_write], &[]) };
 
         Self {
             pipeline,
             pipeline_layout,
             camera_layout,
             atlas_layout,
-            descriptor_pool,
-            camera_sets,
-            atlas_set,
             camera_buffers,
             camera_allocations,
+            atlas_view: atlas.view,
+            atlas_sampler: atlas.sampler,
             meshes: HashMap::new(),
         }
     }
@@ -244,6 +189,7 @@ impl ItemEntityPipeline {
     pub fn draw(
         &self,
         device: &ash::Device,
+        push_desc: &ash::khr::push_descriptor::Device,
         cmd: vk::CommandBuffer,
         frame: usize,
         items: &[ItemRenderInfo],
@@ -252,15 +198,41 @@ impl ItemEntityPipeline {
             return;
         }
 
+        let cam_buf_info = [vk::DescriptorBufferInfo {
+            buffer: self.camera_buffers[frame],
+            offset: 0,
+            range: std::mem::size_of::<CameraUniform>() as u64,
+        }];
+        let cam_write = vk::WriteDescriptorSet::default()
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(&cam_buf_info);
+
+        let atlas_img_info = [vk::DescriptorImageInfo {
+            sampler: self.atlas_sampler,
+            image_view: self.atlas_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }];
+        let atlas_write = vk::WriteDescriptorSet::default()
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&atlas_img_info);
+
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            device.cmd_bind_descriptor_sets(
+            push_desc.cmd_push_descriptor_set(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[self.camera_sets[frame], self.atlas_set],
-                &[],
+                &[cam_write],
+            );
+            push_desc.cmd_push_descriptor_set(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                1,
+                &[atlas_write],
             );
         }
 
@@ -309,7 +281,6 @@ impl ItemEntityPipeline {
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.camera_layout, None);
             device.destroy_descriptor_set_layout(self.atlas_layout, None);
         }
