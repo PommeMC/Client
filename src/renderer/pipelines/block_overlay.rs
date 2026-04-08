@@ -39,6 +39,7 @@ pub struct BlockOverlayPipeline {
 }
 
 impl BlockOverlayPipeline {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &ash::Device,
         queue: vk::Queue,

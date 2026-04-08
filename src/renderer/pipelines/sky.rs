@@ -189,6 +189,7 @@ pub struct SkyPipeline {
 }
 
 impl SkyPipeline {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &ash::Device,
         queue: vk::Queue,
@@ -436,7 +437,7 @@ impl SkyPipeline {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[ubo_write.clone()],
+                std::slice::from_ref(&ubo_write),
             );
             device.cmd_bind_descriptor_sets(
                 cmd,
