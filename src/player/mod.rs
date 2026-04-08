@@ -34,6 +34,7 @@ pub struct LocalPlayer {
     pub on_ground: bool,
     pub health: f32,
     pub food: u32,
+    pub armor: u32,
     pub saturation: f32,
     pub inventory: Inventory,
     pub sprinting: bool,
@@ -47,6 +48,8 @@ pub struct LocalPlayer {
     pub game_mode: u8,
     pub score: i32,
     pub entity_id: i32,
+    pub experience_level: i32,
+    pub experience_progress: f32,
 }
 
 impl LocalPlayer {
@@ -59,6 +62,7 @@ impl LocalPlayer {
             on_ground: false,
             health: 20.0,
             food: 20,
+            armor: 0,
             saturation: 5.0,
             inventory: Inventory::new(),
             sprinting: false,
@@ -72,6 +76,8 @@ impl LocalPlayer {
             game_mode: 0,
             score: 0,
             entity_id: -1,
+            experience_level: 0,
+            experience_progress: 0.0,
         }
     }
 

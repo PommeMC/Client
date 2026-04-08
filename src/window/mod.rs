@@ -539,6 +539,15 @@ impl App {
                         }
                     }
                 }
+                NetworkEvent::PlayerExperience { progress, level } => {
+                    self.player.experience_progress = progress;
+                    self.player.experience_level = level;
+                }
+                NetworkEvent::EntityArmorUpdate { entity_id, armor } => {
+                    if entity_id == self.player.entity_id {
+                        self.player.armor = armor;
+                    }
+                }
                 NetworkEvent::InventoryContent { items } => {
                     self.player.inventory.set_contents(items);
                 }
@@ -1591,8 +1600,12 @@ impl ApplicationHandler for App {
                                     self.input.selected_slot(),
                                     self.player.health,
                                     self.player.food,
+                                    self.player.armor,
                                     self.player.air_supply,
                                     self.player.eyes_in_water,
+                                    self.player.experience_level,
+                                    self.player.experience_progress,
+                                    self.player.game_mode,
                                     self.player.inventory.hotbar_slots(),
                                     renderer.is_first_person(),
                                     debug.as_ref(),

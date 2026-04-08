@@ -101,6 +101,39 @@ pub fn handle_game_packet(
                 saturation: p.saturation,
             });
         }
+        ClientboundGamePacket::SetExperience(p) => {
+            let _ = event_tx.try_send(NetworkEvent::PlayerExperience {
+                progress: p.experience_progress,
+                level: p.experience_level as i32,
+            });
+        }
+        ClientboundGamePacket::UpdateAttributes(p) => {
+            use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
+            use azalea_registry::builtin::Attribute;
+            for snapshot in &p.values {
+                if snapshot.attribute != Attribute::Armor {
+                    continue;
+                }
+                let base = snapshot.base;
+                let mut add = 0.0f64;
+                let mut mul_base = 0.0f64;
+                let mut mul_total = 0.0f64;
+                for m in &snapshot.modifiers {
+                    match m.operation {
+                        AttributeModifierOperation::AddValue => add += m.amount,
+                        AttributeModifierOperation::AddMultipliedBase => mul_base += m.amount,
+                        AttributeModifierOperation::AddMultipliedTotal => mul_total += m.amount,
+                    }
+                }
+                let value = (base + add) * (1.0 + mul_base) * (1.0 + mul_total);
+                let armor = value.clamp(0.0, 30.0).round() as u32;
+                let _ = event_tx.try_send(NetworkEvent::EntityArmorUpdate {
+                    entity_id: p.entity_id.0,
+                    armor,
+                });
+                break;
+            }
+        }
         ClientboundGamePacket::SystemChat(p) if !p.overlay => {
             send_chat(event_tx, p.content.to_string());
         }

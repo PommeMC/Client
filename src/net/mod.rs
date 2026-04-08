@@ -47,6 +47,14 @@ pub enum NetworkEvent {
         food: u32,
         saturation: f32,
     },
+    PlayerExperience {
+        progress: f32,
+        level: i32,
+    },
+    EntityArmorUpdate {
+        entity_id: i32,
+        armor: u32,
+    },
     InventoryContent {
         items: Vec<ItemStack>,
     },
