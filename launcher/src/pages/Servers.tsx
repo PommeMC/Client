@@ -10,15 +10,7 @@ import { restrictToWindowEdges } from "@dnd-kit/modifiers";
 import { rectSortingStrategy, SortableContext, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useState } from "react";
-import {
-  HiArrowPath,
-  HiChevronDown,
-  HiEllipsisVertical,
-  HiPencil,
-  HiPlay,
-  HiPlus,
-  HiTrash,
-} from "react-icons/hi2";
+import { HiArrowPath, HiChevronDown, HiEllipsisVertical, HiPlay, HiPlus } from "react-icons/hi2";
 import { useDropdown } from "../lib/hooks";
 import { useAppStateContext } from "../lib/state";
 import { Server } from "../lib/types";
@@ -30,15 +22,11 @@ function SortableServer({
   handleLaunch,
   startEdit,
   removeServer,
-  menuOpen,
-  setMenuOpen,
 }: {
   s: Server;
   handleLaunch: (ip: string) => void;
   startEdit: (s: Server) => void;
   removeServer: (ip: string) => void;
-  menuOpen: string | null;
-  setMenuOpen: (ip: string | null) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: s.id,
@@ -47,11 +35,16 @@ function SortableServer({
   const style = {
     transform: CSS.Transform.toString(transform),
     transition: isDragging ? "none" : transition,
-    opacity: isDragging ? 0.4 : 1,
   };
 
   return (
-    <div ref={setNodeRef} style={style} className="server" {...attributes} {...listeners}>
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`server ${isDragging ? "dragging" : ""}`}
+      {...attributes}
+      {...listeners}
+    >
       <div className="server-top">
         <div className="server-status">
           <div className={`dot ${s.online ? "on" : "off"}`} />
@@ -75,39 +68,12 @@ function SortableServer({
         >
           <HiPlay /> Join
         </button>
-        <div className="server-menu-wrapper">
-          <button
-            className="server-menu-btn"
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={() => setMenuOpen(menuOpen === s.id ? null : s.id)}
-          >
-            <HiEllipsisVertical />
-          </button>
-          {menuOpen === s.id && (
-            <>
-              <div className="click-away" onClick={() => setMenuOpen(null)} />
-              <div className="server-menu">
-                <button
-                  onClick={() => {
-                    startEdit(s);
-                    setMenuOpen(null);
-                  }}
-                >
-                  <HiPencil /> Edit
-                </button>
-                <button
-                  className="server-menu-danger"
-                  onClick={() => {
-                    removeServer(s.id);
-                    setMenuOpen(null);
-                  }}
-                >
-                  <HiTrash /> Delete
-                </button>
-              </div>
-            </>
-          )}
-        </div>
+        <button
+          className={`server-menu-btn ${false ? "active" : ""}`}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <HiEllipsisVertical />
+        </button>
       </div>
     </div>
   );
@@ -122,7 +88,6 @@ export default function ServersPage({
     useAppStateContext();
   const [addingServer, setAddingServer] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [newIp, setNewIp] = useState("");
   const [newCategory, setNewCategory] = useState("");
@@ -205,6 +170,7 @@ export default function ServersPage({
           </button>
         </div>
       </div>
+
       {showForm && (
         <div className="servers-add-form">
           <input
@@ -281,9 +247,11 @@ export default function ServersPage({
           </button>
         </div>
       )}
+
       {servers.length === 0 && (
         <p className="servers-empty">No servers added. Click "Add Server" to get started.</p>
       )}
+
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -302,8 +270,6 @@ export default function ServersPage({
                     handleLaunch={handleLaunch}
                     startEdit={startEdit}
                     removeServer={removeServer}
-                    menuOpen={menuOpen}
-                    setMenuOpen={setMenuOpen}
                   />
                 ))}
               </div>

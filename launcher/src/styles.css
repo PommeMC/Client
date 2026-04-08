@@ -1160,6 +1160,7 @@ body {
   padding: 24px 20px 32px;
   overflow: hidden;
   min-height: 100%;
+  position: relative;
 }
 
 .servers-header {
@@ -1414,9 +1415,15 @@ body {
 
 .servers-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, 1fr);
   gap: 8px;
-  margin-bottom: 16px;
+  transform-style: preserve-3d;
+}
+
+@media (max-width: 1200px) {
+  .servers-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .servers-category {
@@ -1440,8 +1447,28 @@ body {
   user-select: none;
 }
 
+.server.dragging {
+  opacity: 0.7;
+  z-index: 10;
+}
+
 .server-status {
   flex-shrink: 0;
+}
+
+.server-status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 100%;
+  background: rgba(40, 45, 80, 0.5);
+}
+
+.server-status .dot.on {
+  background: var(--accent);
+}
+
+.server-status .dot.off {
+  background: var(--ansi-red);
 }
 
 .server-info {
