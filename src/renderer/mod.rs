@@ -1037,7 +1037,7 @@ impl Renderer {
             self.ctx.device.begin_command_buffer(cmd, &begin_info)?;
 
             if matches!(&mode, RenderMode::World { .. }) {
-                let frustum = self.camera.frustum_planes();
+                let frustum = self.camera.cull_frustum_planes();
                 let cam_pos = [
                     self.camera.position.x,
                     self.camera.position.y,

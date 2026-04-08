@@ -101,24 +101,48 @@ impl Camera {
         (self.base_fov_degrees * modifier).to_radians()
     }
 
+    #[allow(dead_code)]
     pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
-        let m = self.view_projection();
-        let mt = m.transpose();
-        let r0 = mt.x_axis;
-        let r1 = mt.y_axis;
-        let r2 = mt.z_axis;
-        let r3 = mt.w_axis;
+        extract_planes(self.view_projection())
+    }
 
-        let raw = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 + r2, r3 - r2];
+    pub fn cull_frustum_planes(&self) -> [[f32; 4]; 6] {
+        let forward = self.forward_vec();
+        let look_dir = if self.mode == CameraMode::ThirdPersonFront {
+            -forward
+        } else {
+            forward
+        };
+        let fov = self.fov_radians(1.0);
+        let mut proj = Mat4::perspective_rh(fov, self.aspect_ratio, NEAR, FAR);
+        proj.y_axis.y *= -1.0;
 
-        let mut planes = [[0.0f32; 4]; 6];
-        for (i, v) in raw.iter().enumerate() {
-            let len = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
-            if len > 0.0 {
-                planes[i] = [v.x / len, v.y / len, v.z / len, v.w / len];
+        let base_offset = self.third_person_offset();
+        let cube_size = 8.0f32;
+        let min = Vec3::new(
+            (base_offset.x / cube_size).floor() * cube_size,
+            (base_offset.y / cube_size).floor() * cube_size,
+            (base_offset.z / cube_size).floor() * cube_size,
+        );
+        let max = Vec3::new(
+            (base_offset.x / cube_size).ceil() * cube_size,
+            (base_offset.y / cube_size).ceil() * cube_size,
+            (base_offset.z / cube_size).ceil() * cube_size,
+        );
+
+        let mut cam_offset = base_offset;
+        let view_dir = -look_dir;
+        for _ in 0..10 {
+            let view = Mat4::look_to_rh(cam_offset, look_dir, UP);
+            let vp = proj * view;
+            if aabb_inside_frustum(extract_planes(vp), min, max) {
+                break;
             }
+            cam_offset += view_dir * 4.0;
         }
-        planes
+
+        let view = Mat4::look_to_rh(cam_offset, look_dir, UP);
+        extract_planes(proj * view)
     }
 
     pub fn forward_vec(&self) -> Vec3 {
@@ -168,6 +192,47 @@ impl Camera {
         proj.y_axis.y *= -1.0;
         proj * view
     }
+}
+
+fn extract_planes(vp: Mat4) -> [[f32; 4]; 6] {
+    let mt = vp.transpose();
+    let r0 = mt.x_axis;
+    let r1 = mt.y_axis;
+    let r2 = mt.z_axis;
+    let r3 = mt.w_axis;
+
+    let raw = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 + r2, r3 - r2];
+
+    let mut planes = [[0.0f32; 4]; 6];
+    for (i, v) in raw.iter().enumerate() {
+        let len = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+        if len > 0.0 {
+            planes[i] = [v.x / len, v.y / len, v.z / len, v.w / len];
+        }
+    }
+    planes
+}
+
+fn aabb_inside_frustum(planes: [[f32; 4]; 6], min: Vec3, max: Vec3) -> bool {
+    let corners = [
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+        Vec3::new(max.x, max.y, max.z),
+    ];
+    for plane in &planes {
+        for corner in &corners {
+            let dist = plane[0] * corner.x + plane[1] * corner.y + plane[2] * corner.z + plane[3];
+            if dist < 0.0 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[repr(C)]
