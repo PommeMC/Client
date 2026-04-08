@@ -7,6 +7,7 @@ import Titlebar from "./components/Titlebar";
 import AlertDialog from "./components/dialogs/AlertDialog.tsx";
 import { ConfirmDialog } from "./components/dialogs/ConfirmDialog.tsx";
 import { InstallationDialog } from "./components/dialogs/InstallationDialog.tsx";
+import { ServerDialog } from "./components/dialogs/ServerDialog.tsx";
 import { useAppStateContext } from "./lib/state";
 import {
   AuthAccount,
@@ -378,7 +379,7 @@ function App() {
             }
           }}
         >
-          {openedDialog.name === "installation" && (
+          {openedDialog.name === "installation_dialog" && (
             <InstallationDialog
               {...openedDialog.props}
               createInstallation={createInstallation}
@@ -386,6 +387,7 @@ function App() {
               editInstallation={editInstallation}
             />
           )}
+          {openedDialog.name === "server_dialog" && <ServerDialog {...openedDialog.props} />}
           {openedDialog.name === "confirm_dialog" && <ConfirmDialog {...openedDialog.props} />}
           {openedDialog.name === "alert_dialog" && <AlertDialog {...openedDialog.props} />}
         </div>

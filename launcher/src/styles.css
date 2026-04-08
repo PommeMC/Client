@@ -22,6 +22,7 @@
   --font-body: "Inter", -apple-system, sans-serif;
   --titlebar-h: 36px;
   --sidebar-w: 220px;
+  --radius-sm: 6px;
   --radius: 10px;
   --radius-lg: 14px;
 
@@ -162,7 +163,7 @@ body {
   color: var(--text-dim);
   font-size: 10px;
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   transition: all 0.15s;
 }
 
@@ -1188,7 +1189,7 @@ body {
   padding: 8px;
   background: var(--glass);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   cursor: pointer;
   font-size: 14px;
@@ -1205,19 +1206,21 @@ body {
   align-items: center;
   gap: 6px;
   padding: 8px 14px;
-  background: var(--accent);
-  color: var(--bg-base);
-  border: none;
-  border-radius: 6px;
+  background: var(--accent-glow);
+  border: 1px solid rgba(74, 222, 128, 0.2);
+  border-radius: var(--radius);
+  color: var(--accent);
   font-family: var(--font-display);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
+  letter-spacing: 1px;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: all 0.2s;
 }
 
 .servers-add-btn:hover {
-  opacity: 0.85;
+  background: rgba(74, 222, 128, 0.15);
+  border-color: rgba(74, 222, 128, 0.3);
 }
 
 .servers-add-form {
@@ -1231,7 +1234,7 @@ body {
   padding: 8px 12px;
   background: var(--glass);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text);
   font-size: 13px;
   outline: none;
@@ -1246,7 +1249,7 @@ body {
   background: var(--accent);
   color: var(--bg-base);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-family: var(--font-display);
   font-size: 12px;
   font-weight: 600;
@@ -1282,15 +1285,14 @@ body {
 }
 
 .server-menu {
-  position: absolute;
-  right: 0;
-  top: 100%;
-  background: var(--bg-base);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  background: var(--glass-heavy);
+  backdrop-filter: blur(30px);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
   padding: 4px;
-  z-index: 10;
-  min-width: 120px;
+  min-width: 140px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  animation: fade-in 0.12s ease;
 }
 
 .server-menu button {
@@ -1298,21 +1300,30 @@ body {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 6px 10px;
+  padding: 8px 12px;
   background: none;
   border: none;
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font-size: 12px;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: all 0.15s;
 }
 
 .server-menu button:hover {
   background: var(--glass-hover);
+  color: var(--text);
 }
 
 .server-menu-danger {
+  color: rgba(239, 68, 68, 0.7) !important;
+}
+
+.server-menu-danger:hover {
+  background: rgba(239, 68, 68, 0.08) !important;
   color: #ef4444 !important;
 }
 
@@ -1329,7 +1340,7 @@ body {
   padding: 8px 12px;
   background: var(--glass);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text);
   font-size: 13px;
   text-align: left;
@@ -1358,7 +1369,7 @@ body {
   margin-top: 4px;
   background: var(--bg-base);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 4px;
   z-index: 10;
 }
@@ -1394,7 +1405,7 @@ body {
   padding: 8px 16px;
   background: var(--glass);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font-family: var(--font-display);
   font-size: 12px;
@@ -1559,7 +1570,7 @@ body {
   background: rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(12px);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-family: var(--font-display);
   font-size: 9px;
   font-weight: 700;
@@ -1801,7 +1812,7 @@ body {
   padding: 6px 16px;
   background: linear-gradient(135deg, var(--accent-dark), var(--accent));
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: #0a1a0a;
 
   font-size: 12px;
@@ -1826,7 +1837,7 @@ body {
   justify-content: center;
   background: none;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font-size: 14px;
   cursor: pointer;
@@ -1857,7 +1868,7 @@ body {
   justify-content: center;
   background: none;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font-size: 14px;
   cursor: pointer;
@@ -2613,7 +2624,7 @@ body {
   align-items: center;
   justify-content: center;
   background: linear-gradient(135deg, var(--purple), #a78bfa);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 
   font-size: 14px;
   font-weight: 700;
@@ -2655,7 +2666,7 @@ body {
   padding: 5px 12px;
   background: var(--glass-light);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--accent);
 
   font-size: 11px;
@@ -2863,7 +2874,7 @@ body {
   padding: 7px 18px;
   background: linear-gradient(135deg, var(--accent-dark), var(--accent));
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: #0a1a0a;
 
   font-size: 11px;

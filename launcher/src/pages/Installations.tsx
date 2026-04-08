@@ -50,7 +50,7 @@ export default function InstallationsPage({
         <button
           className="installs-new-btn"
           onClick={() => {
-            setOpenedDialog({ name: "installation", props: { type: "new" } });
+            setOpenedDialog({ name: "installation_dialog", props: { type: "new" } });
           }}
         >
           <HiPlus /> New Installation
@@ -112,7 +112,7 @@ export default function InstallationsPage({
                 className="install-action-btn"
                 onClick={() => {
                   setOpenedDialog({
-                    name: "installation",
+                    name: "installation_dialog",
                     props: { type: "edit", installation: { ...inst } },
                   });
                 }}
@@ -133,7 +133,7 @@ export default function InstallationsPage({
                     is_latest: false,
                   };
                   setOpenedDialog({
-                    name: "installation",
+                    name: "installation_dialog",
                     props: { type: "dupl", installation: dup, original_id: inst.id },
                   });
                 }}
