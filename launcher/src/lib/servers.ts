@@ -1,14 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { Server, ServerStatus } from "./types";
+import { commands } from "../bindings";
+import { SavedServer } from "../bindings/pomme_launcher/ping";
+import { Server } from "./types";
 
 const PING_INTERVAL_MS = 30_000;
-
-interface SavedServer {
-  name: string;
-  address: string;
-  category?: string;
-}
 
 export const useServers = () => {
   const [servers, setServers] = useState<Server[]>([]);
@@ -20,30 +15,28 @@ export const useServers = () => {
       address: s.ip,
       category: s.category || undefined,
     }));
-    invoke("save_servers", { servers: saved }).catch(console.error);
+    commands.saveServers(saved).then((res) => {
+      if (!res.ok) console.error(res.error);
+    });
   }, []);
 
   const pingOne = useCallback(async (id: string, ip: string) => {
-    try {
-      const status = await invoke<ServerStatus>("ping_server", { address: ip });
-      setServers((prev) =>
-        prev.map((s) =>
-          s.id === id
-            ? {
-                ...s,
-                online: status.online,
-                players: status.players,
-                max_players: status.max_players,
-                ping: status.ping_ms,
-                motd: status.motd,
-                version: status.version,
-              }
-            : s,
-        ),
-      );
-    } catch {
-      setServers((prev) => prev.map((s) => (s.id === id ? { ...s, online: false, ping: -1 } : s)));
-    }
+    const status = await commands.pingServer(ip);
+    setServers((prev) =>
+      prev.map((s) =>
+        s.id === id
+          ? {
+              ...s,
+              online: status.online,
+              players: status.players,
+              max_players: status.max_players,
+              ping: status.ping_ms,
+              motd: status.motd,
+              version: status.version,
+            }
+          : s,
+      ),
+    );
   }, []);
 
   const pingAll = useCallback(() => {
@@ -56,7 +49,7 @@ export const useServers = () => {
   }, [pingOne]);
 
   useEffect(() => {
-    invoke<SavedServer[]>("load_servers").then((saved) => {
+    commands.loadServers().then((saved) => {
       const list: Server[] = saved.map((s) => ({
         id: crypto.randomUUID(),
         name: s.name,

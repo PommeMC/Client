@@ -26,3 +26,16 @@ export interface DownloadProgress {
   total: number;
   status: string;
 }
+
+export interface Server {
+  id: string;
+  name: string;
+  ip: string;
+  category: string;
+  players: number;
+  max_players: number;
+  ping: number;
+  online: boolean;
+  motd: string;
+  version: string;
+}

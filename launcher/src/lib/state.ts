@@ -1,18 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
 import { createContext, createElement, ReactNode, useContext, useEffect, useState } from "react";
+import { commands } from "../bindings/index.ts";
+import { AuthAccount } from "../bindings/pomme_launcher/auth.ts";
+import { GameVersion, PatchNote } from "../bindings/pomme_launcher/commands.ts";
+import { LauncherSettings } from "../bindings/pomme_launcher/settings.ts";
 import { useDropdown } from "./hooks";
-import { useServers } from "./servers";
-import {
-  AuthAccount,
-  DownloadProgress,
-  GameVersion,
-  LauncherSettings,
-  LaunchingStatus,
-  OpenedDialog,
-  Page,
-  PatchNote,
-} from "./types";
 import { useInstallations } from "./installations.ts";
+import { useServers } from "./servers";
+import { DownloadProgress, LaunchingStatus, OpenedDialog, Page } from "./types";
 
 const useLauncherSettings = () => {
   const [launcherSettings, setLauncherSettings] = useState<LauncherSettings>({
@@ -22,33 +16,34 @@ const useLauncherSettings = () => {
   });
 
   useEffect(() => {
-    invoke<LauncherSettings>("load_launcher_settings")
+    commands
+      .loadLauncherSettings()
       .then((settings) => setLauncherSettings(settings))
       .catch(console.error);
   }, []);
 
   const setLanguage = async (language: string) => {
-    try {
-      await invoke("set_launcher_language", { language });
+    let res = await commands.setLauncherLanguage(language);
+    if (res.ok) {
       setLauncherSettings((prev) => ({ ...prev, language }));
-    } catch (err) {
-      console.error(err);
+    } else {
+      console.error("Error while setting `launcherLanguage: ", res.error);
     }
   };
   const setKeepLauncherOpen = async (keep: boolean) => {
-    try {
-      await invoke("set_keep_launcher_open", { keep });
+    let res = await commands.setKeepLauncherOpen(keep);
+    if (res.ok) {
       setLauncherSettings((prev) => ({ ...prev, keepLauncherOpen: keep }));
-    } catch (err) {
-      console.error(err);
+    } else {
+      console.error("Error while setting `keepLauncherOpen`: ", res.error);
     }
   };
   const setLaunchWithConsole = async (launch: boolean) => {
-    try {
-      await invoke("set_launch_with_console", { launch });
+    let res = await commands.setLaunchWithConsole(launch);
+    if (res.ok) {
       setLauncherSettings((prev) => ({ ...prev, launchWithConsole: launch }));
-    } catch (err) {
-      console.error(err);
+    } else {
+      console.error("Error while setting `launchWithConsole`: ", res.error);
     }
   };
 

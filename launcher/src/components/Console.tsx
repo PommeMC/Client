@@ -1,13 +1,20 @@
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AnsiHtml } from "fancy-ansi/react";
 import { useEffect, useRef, useState } from "react";
 import { HiClipboardCopy } from "react-icons/hi";
 import { HiXMark } from "react-icons/hi2";
+import { commands } from "../bindings";
 import "../styles.css";
 import Titlebar from "./Titlebar";
 
-const getLogs: () => Promise<string[]> = async () => invoke("get_client_logs");
+const getLogs = async (): Promise<string[]> => {
+  const res = await commands.getClientLogs();
+  if (res.ok) {
+    return res.value;
+  }
+  console.error("Error while getting client logs: ", res.error);
+  return [];
+};
 
 interface ConsoleMessage {
   type: "message" | "reset";
