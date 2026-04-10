@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "generate-bindings": "cd src-tauri && cargo test --lib generate_bindings",
+    "generate-bindings": "cd src-tauri && cargo test --lib generate_bindings --no-default-features",
     "dev": "vite",
     "build": "pnpm run generate-bindings && tsc && vite build",
     "preview": "vite preview",
