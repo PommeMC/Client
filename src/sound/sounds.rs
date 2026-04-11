@@ -3,9 +3,8 @@ use std::fmt::Display;
 use azalea_buf::BufReadError;
 use azalea_chat::text_component::TextComponent;
 use azalea_core::delta::AzBuf;
-use azalea_registry::identifier::Identifier;
 
-use crate::{sound::SoundEngine, util::rng::JavaRng};
+use crate::{resources::identifier::Identifier, sound::SoundEngine, util::rng::JavaRng};
 
 pub trait Weighted<T> {
     fn get_weight(&self) -> i32;
@@ -192,7 +191,7 @@ impl Sound {
 
     pub fn get_path(&self) -> Identifier {
         // SOUND_LISTER.id_to_file(&self.location)
-        unimplemented!()
+        unimplemented!("path not yet implented as there is not yet a full registry impl")
     }
 
     pub fn get_location(&self) -> &Identifier {

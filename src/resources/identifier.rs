@@ -2,6 +2,8 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use azalea_buf::AzBuf;
+
 pub const NAMESPACE_SEPARATOR: char = ':';
 pub const DEFAULT_NAMESPACE: &str = "minecraft";
 pub const REALMS_NAMESPACE: &str = "realms";
@@ -248,5 +250,15 @@ impl Ord for Identifier {
         self.path
             .cmp(&other.path)
             .then_with(|| self.namespace.cmp(&other.namespace))
+    }
+}
+
+impl AzBuf for Identifier {
+    fn azalea_read(buf: &mut std::io::Cursor<&[u8]>) -> Result<Self, azalea_buf::BufReadError> {
+        let location_string = String::azalea_read(buf)?;
+        Ok(Identifier::new(&location_string))
+    }
+    fn azalea_write(&self, buf: &mut impl std::io::Write) -> std::io::Result<()> {
+        self.to_string().azalea_write(buf)
     }
 }

@@ -15,7 +15,7 @@ impl SoundEngine {
         Self { assets }
     }
 
-    pub fn play(&self, sound: &dyn SoundInstance) {
+    pub fn play(&self, sound: &mut dyn SoundInstance) {
         if let Some(resolved) = sound.resolve(self) {
             debug!("Playing sound {}", resolved);
         } else {

@@ -23,7 +23,6 @@ use crate::renderer::chunk::mesher::MeshDispatcher;
 use crate::renderer::pipelines::entity_renderer::EntityRenderInfo;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::sound::SoundEngine;
-use crate::sound::sound_instance::SoundInstance;
 use crate::ui::chat::ChatState;
 use crate::ui::common::{self, WHITE};
 use crate::ui::death::{self, DeathAction};
@@ -148,7 +147,7 @@ struct App {
     pending_pack_download: Option<std::thread::JoinHandle<PackDownloadResult>>,
     benchmark: Option<crate::benchmark::Benchmark>,
     benchmark_result: Option<crate::benchmark::BenchmarkResult>,
-    audio_handle: SoundEngine,
+    sound_engine: SoundEngine,
     last_player_chunk: azalea_core::position::ChunkPos,
     meshed_lod: std::collections::HashMap<azalea_core::position::ChunkPos, u32>,
 }
@@ -277,7 +276,7 @@ impl App {
             pending_pack_download: None,
             benchmark: None,
             benchmark_result: None,
-            audio_handle: SoundEngine::new(asset_index),
+            sound_engine: SoundEngine::new(asset_index),
             last_player_chunk: azalea_core::position::ChunkPos::new(0, 0),
             meshed_lod: std::collections::HashMap::new(),
         }
@@ -765,8 +764,8 @@ impl App {
                 NetworkEvent::TabListHeaderFooter { header, footer } => {
                     self.tab_list.set_header_footer(header, footer);
                 }
-                NetworkEvent::PlaySound { sound } => todo!(),
-                NetworkEvent::PlayEntitySound { sound } => todo!(),
+                NetworkEvent::PlaySound { sound } => {}
+                NetworkEvent::PlayEntitySound { sound } => {}
             }
         }
 
