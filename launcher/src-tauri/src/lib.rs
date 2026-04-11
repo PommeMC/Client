@@ -82,11 +82,3 @@ pub fn generate_bindings() {
         )
         .unwrap();
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn generate_bindings() {
-        crate::generate_bindings();
-    }
-}

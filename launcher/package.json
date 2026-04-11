@@ -4,14 +4,14 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "generate-bindings": "cd src-tauri && cargo test --lib generate_bindings --no-default-features",
     "dev": "vite",
     "build": "pnpm run generate-bindings && tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint src/",
     "format": "prettier --write src/",
-    "format:check": "prettier --check src/"
+    "format:check": "prettier --check src/",
+    "generate-bindings": "cd src-tauri && cargo run --bin generate-bindings"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

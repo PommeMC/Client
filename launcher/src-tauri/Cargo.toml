@@ -1,5 +1,6 @@
 [package]
 name = "pomme-launcher"
+default-run = "pomme-launcher"
 version = "0.1.0"
 edition = "2024"
 
