@@ -47,6 +47,7 @@ open = "5"
 base64 = "0.22"
 simdnbt = "0.10"
 discord-rich-presence = "1.1"
+arboard = "3"
 
 [profile.dev]
 opt-level = 1

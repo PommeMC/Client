@@ -637,12 +637,12 @@ impl MainMenu {
             gs,
             &self.edit_address,
             self.focused_field == Some(0),
+            self.focused_field == Some(0) && self.field_all_selected,
             &self.cursor_blink,
             text_width_fn,
         );
         if clicked && common::hit_test(cursor, [form_x, y, form_w, field_h]) {
-            self.focused_field = Some(0);
-            self.cursor_blink = Instant::now();
+            self.on_field_click(0);
         }
         y += field_h + 28.0 * gs;
 
@@ -756,12 +756,12 @@ impl MainMenu {
             gs,
             &self.edit_name,
             self.focused_field == Some(0),
+            self.focused_field == Some(0) && self.field_all_selected,
             &self.cursor_blink,
             text_width_fn,
         );
         if clicked && common::hit_test(cursor, [form_x, y, form_w, field_h]) {
-            self.focused_field = Some(0);
-            self.cursor_blink = Instant::now();
+            self.on_field_click(0);
         }
         y += field_h + 12.0 * gs;
 
@@ -785,12 +785,12 @@ impl MainMenu {
             gs,
             &self.edit_address,
             self.focused_field == Some(1),
+            self.focused_field == Some(1) && self.field_all_selected,
             &self.cursor_blink,
             text_width_fn,
         );
         if clicked && common::hit_test(cursor, [form_x, y, form_w, field_h]) {
-            self.focused_field = Some(1);
-            self.cursor_blink = Instant::now();
+            self.on_field_click(1);
         }
         y += field_h + 28.0 * gs;
 
@@ -860,12 +860,24 @@ impl MainMenu {
         }
     }
 
+    pub(super) fn on_field_click(&mut self, field_idx: u8) {
+        let now = Instant::now();
+        let is_double = self.last_field_click == Some(field_idx)
+            && now.duration_since(self.last_field_click_time).as_millis() < DOUBLE_CLICK_MS;
+        self.focused_field = Some(field_idx);
+        self.cursor_blink = now;
+        self.field_all_selected = is_double;
+        self.last_field_click = Some(field_idx);
+        self.last_field_click_time = now;
+    }
+
     pub(super) fn handle_text_input(&mut self, input: &MenuInput, field_count: u8) {
         if input.tab {
             self.focused_field = Some(match self.focused_field {
                 Some(f) => (f + 1) % field_count,
                 None => 0,
             });
+            self.field_all_selected = false;
             self.cursor_blink = Instant::now();
         }
 
@@ -880,13 +892,50 @@ impl MainMenu {
             _ => return,
         };
 
-        for ch in &input.typed_chars {
-            text.push(*ch);
+        if input.copy && !text.is_empty()
+            && let Ok(mut cb) = arboard::Clipboard::new() {
+                let _ = cb.set_text(text.clone());
+            }
+
+        if input.undo
+            && let Some(pos) = self
+                .field_undo_stack
+                .iter()
+                .rposition(|(f, _)| *f == field_idx)
+        {
+            let (_, prev) = self.field_undo_stack.remove(pos);
+            *text = prev;
+            self.field_all_selected = false;
+            self.cursor_blink = Instant::now();
+            return;
+        }
+
+        if input.select_all {
+            self.field_all_selected = !text.is_empty();
+        }
+
+        let old_text = text.clone();
+
+        if !input.typed_chars.is_empty() {
+            if self.field_all_selected {
+                text.clear();
+                self.field_all_selected = false;
+            }
+            for ch in &input.typed_chars {
+                text.push(*ch);
+            }
         }
         if input.backspace {
-            text.pop();
+            if self.field_all_selected {
+                text.clear();
+                self.field_all_selected = false;
+            } else {
+                text.pop();
+            }
         }
-        if !input.typed_chars.is_empty() || input.backspace {
+
+        if *text != old_text {
+            push_undo(&mut self.field_undo_stack, field_idx, old_text);
             self.cursor_blink = Instant::now();
         }
     }
@@ -960,4 +1009,13 @@ impl MainMenu {
             clicked_button: false,
         }
     }
+}
+
+const UNDO_STACK_LIMIT: usize = 50;
+
+fn push_undo(stack: &mut Vec<(u8, String)>, field_idx: u8, prev: String) {
+    if stack.len() >= UNDO_STACK_LIMIT {
+        stack.remove(0);
+    }
+    stack.push((field_idx, prev));
 }

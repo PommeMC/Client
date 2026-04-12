@@ -770,6 +770,7 @@ impl MainMenu {
                 &self.pack_search
             },
             true,
+            false,
             &self.cursor_blink,
             text_width_fn,
         );
