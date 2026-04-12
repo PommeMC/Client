@@ -29,7 +29,4 @@ pub struct LaunchArgs {
 
     #[arg(long)]
     pub quick_access_server: Option<String>,
-
-    #[arg(long)]
-    pub dev: bool,
 }

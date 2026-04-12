@@ -43,7 +43,7 @@ Mojang patch notes, installation manager
 ## Architecture
 
 ```text
-pomme/             Minecraft client (Rust, Vulkan)
+pomme/            Minecraft client (Rust, Vulkan)
 launcher/         Launcher app (Tauri, React, TypeScript)
 ```
 
@@ -88,7 +88,7 @@ Running the standalone client requires assets, for which you have 2 options:
    cargo run -- --username Steve --quick-access-server localhost
    ```
 
-2. Download the assets yourself and extract them into `reference/assets/`:
+2. If you're on linux, extract the vanilla 26.1.1 assets to `reference/assets/`:
 
    ```bash
    mkdir -p reference/assets/indexes 

@@ -350,9 +350,6 @@ pub async fn launch_game(
         cmd.arg("--quick-access-server").arg(server);
     }
 
-    #[cfg(debug_assertions)]
-    cmd.arg("--dev");
-
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -461,7 +458,13 @@ fn find_client_binary() -> Result<std::path::PathBuf, String> {
             if !ancestor.pop() {
                 break;
             }
-            for profile in ["release", "debug"] {
+
+            #[cfg(debug_assertions)]
+            let profiles = ["debug", "release"];
+            #[cfg(not(debug_assertions))]
+            let profiles = ["release", "debug"];
+
+            for profile in profiles {
                 let candidate = ancestor.join("target").join(profile).join(EXENAME);
                 if candidate.exists() {
                     return Ok(candidate);
