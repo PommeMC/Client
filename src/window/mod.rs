@@ -98,6 +98,7 @@ struct App {
     data_dirs: DataDirs,
     asset_index: Option<AssetIndex>,
     position_set: bool,
+    player_loaded_sent: bool,
     state: GameState,
     menu: MainMenu,
     version: String,
@@ -222,6 +223,7 @@ impl App {
             entity_store: EntityStore::new(),
             asset_index: AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, &version),
             position_set: false,
+            player_loaded_sent: false,
             state,
             menu: MainMenu::new(&data_dirs.game_dir, Arc::clone(&tokio_rt)),
             tokio_rt,
@@ -400,6 +402,7 @@ impl App {
         self.dead = false;
         self.death_message = String::new();
         self.position_set = false;
+        self.player_loaded_sent = false;
         self.chunk_store = ChunkStore::new(self.menu.render_distance);
         self.entity_store.clear();
         self.item_entity_store.clear();
@@ -451,6 +454,7 @@ impl App {
                     self.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
                     self.position_set = false;
+                    self.player_loaded_sent = false;
                     if let Some(renderer) = &mut self.renderer {
                         renderer.clear_chunk_meshes();
                         self.mesh_dispatcher =
@@ -1373,6 +1377,18 @@ impl ApplicationHandler for App {
                                             .renderer
                                             .as_ref()
                                             .is_some_and(|r| r.loaded_chunk_count() > 0));
+
+                                // Mirror vanilla's `notifyPlayerLoaded`; servers gate
+                                // per-player entity tracking on it.
+                                if ready
+                                    && !self.player_loaded_sent
+                                    && let Some(sender) = &self.packet_sender
+                                {
+                                    sender.send(ServerboundGamePacket::PlayerLoaded(
+                                        azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
+                                    ));
+                                    self.player_loaded_sent = true;
+                                }
 
                                 if ready {
                                     if let Some(p) = &mut self.presence {

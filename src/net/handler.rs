@@ -63,6 +63,18 @@ pub fn handle_game_packet(
                     id: p.id,
                 },
             ));
+            // Vanilla echoes the position after every teleport; servers gate
+            // per-player entity tracking on it.
+            sender.send(ServerboundGamePacket::MovePlayerPosRot(
+                azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
+                    pos: p.change.pos,
+                    look_direction: p.change.look_direction,
+                    flags: azalea_protocol::common::movements::MoveFlags {
+                        on_ground: false,
+                        horizontal_collision: false,
+                    },
+                },
+            ));
         }
         ClientboundGamePacket::KeepAlive(p) => {
             sender.send(ServerboundGamePacket::KeepAlive(

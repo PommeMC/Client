@@ -230,12 +230,26 @@ async fn config_sequence(
     view_distance: u8,
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<azalea_core::registry_holder::RegistryHolder, ConnectionError> {
+    use azalea_core::delta::AzBuf;
     use azalea_core::registry_holder::RegistryHolder;
     use azalea_entity::HumanoidArm;
     use azalea_protocol::common::client_information::*;
     use azalea_protocol::packets::config::*;
 
     let mut registry_holder = RegistryHolder::default();
+
+    // Vanilla announces its brand in the config phase; some servers key off it.
+    let mut brand_payload = Vec::new();
+    String::from("pomme")
+        .azalea_write(&mut brand_payload)
+        .unwrap();
+    conn.write(ServerboundConfigPacket::CustomPayload(
+        s_custom_payload::ServerboundCustomPayload {
+            identifier: "minecraft:brand".into(),
+            data: brand_payload.into(),
+        },
+    ))
+    .await?;
 
     conn.write(ServerboundConfigPacket::ClientInformation(
         s_client_information::ServerboundClientInformation {
