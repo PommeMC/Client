@@ -143,14 +143,23 @@ export default function InstallationsPage({ handleLaunch }: InstallationsPagePro
                         onConfirm: async () => {
                           const index = installations.findIndex((i) => i.id === inst.id);
                           const res = await commands.deleteInstallation(inst.id);
-                          if (res.ok) {
+                          if (res.ok || res.error.kind === "InstallNotFound") {
+                            setInstallations((prev) => prev.filter((i) => i.id !== inst.id));
                             setActiveInstall((current) => {
                               if (current?.id !== inst.id) return current;
                               const newList = installations.filter((i) => i.id !== inst.id);
-                              return newList[index] ?? newList[index - 1] ?? null;
+                              const next = newList[index] ?? newList[index - 1] ?? null;
+                              if (
+                                !next ||
+                                (next &&
+                                  newList.every(
+                                    (i) => i.id === "latest-release" || i.id === "latest-snapshot",
+                                  ))
+                              ) {
+                                return newList.find((i) => i.id === "latest-release") ?? next;
+                              }
+                              return next;
                             });
-                          } else {
-                            console.error("Failed to delete installation: ", res.error);
                           }
                         },
                       },
