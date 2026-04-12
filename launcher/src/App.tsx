@@ -68,6 +68,8 @@ function App() {
           title: note.title,
           body,
           image_url: note.image_url,
+          date: note.date,
+          entry_type: note.entry_type,
         });
         setPage("news");
       } catch (e) {

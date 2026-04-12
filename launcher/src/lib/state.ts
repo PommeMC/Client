@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { createContext, createElement, ReactNode, useContext, useEffect, useState } from "react";
 import { useDropdown } from "./hooks";
+import { useInstallations } from "./installations.ts";
 import { useServers } from "./servers";
 import {
   AuthAccount,
@@ -12,7 +13,6 @@ import {
   Page,
   PatchNote,
 } from "./types";
-import { useInstallations } from "./installations.ts";
 
 const useLauncherSettings = () => {
   const [launcherSettings, setLauncherSettings] = useState<LauncherSettings>({
@@ -87,6 +87,8 @@ const useAppState = () => {
     title: string;
     body: string;
     image_url: string;
+    entry_type: string;
+    date: string;
   } | null>(null);
 
   return {

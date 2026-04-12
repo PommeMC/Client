@@ -16,14 +16,17 @@ export default function NewsPage({
           <button className="note-back" onClick={() => setSelectedNote(null)}>
             <HiArrowLeft /> Back
           </button>
-          <div
-            className="note-header-banner"
-            style={{
-              backgroundImage: `url(${selectedNote.image_url})`,
-            }}
-          >
-            <div className="note-header-gradient" />
+          <div className="note-header-banner">
+            <div className="note-header-img-wrap">
+              <img
+                src={selectedNote.image_url}
+                alt={selectedNote.title}
+                className="note-header-img"
+              />
+            </div>
             <div className="note-header-content">
+              <span className="news-type-badge">{selectedNote.entry_type}</span>
+              <span className="note-header-date">{selectedNote.date?.replace(/-/g, ".")}</span>
               <h2 className="note-header-title">{selectedNote.title}</h2>
             </div>
           </div>
@@ -39,17 +42,17 @@ export default function NewsPage({
                 key={item.version}
                 onClick={() => openPatchNote(item)}
               >
-                <div
-                  className="news-card-img-wide"
-                  style={{
-                    backgroundImage: `url(${item.image_url})`,
-                  }}
-                >
+                <div className="news-card-img-wide">
+                  <img src={item.image_url} alt={item.title} />
                   <span className="news-type-badge">{item.entry_type}</span>
                 </div>
                 <div className="news-card-body-wide">
-                  <span className="news-date">{item.date.replace(/-/g, ".")}</span>
+                  <div className="news-card-meta-wide">
+                    <span className="news-date">{item.date.replace(/-/g, ".")}</span>
+                    <span className="news-card-arrow">→</span>
+                  </div>
                   <h3 className="news-title">{item.title}</h3>
+                  <hr className="news-rule" />
                   <p className="news-desc-full">{item.summary}</p>
                   <span className="news-version">{item.version}</span>
                 </div>

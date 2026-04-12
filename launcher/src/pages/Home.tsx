@@ -144,12 +144,19 @@ export default function Homepage({ handleLaunch, openPatchNote }: HomepageProps)
         <div className="news-grid">
           {news.slice(0, 3).map((item) => (
             <div className="news-card" key={item.version} onClick={() => openPatchNote(item)}>
-              <div className="news-card-img" style={{ backgroundImage: `url(${item.image_url})` }}>
+              <div className="news-card-img">
+                <img src={item.image_url} alt={item.title} className="news-card-img-bg" />
                 <span className="news-type-badge">{item.entry_type}</span>
               </div>
+
               <div className="news-card-body">
-                <span className="news-date">{item.date.replace(/-/g, ".")}</span>
+                <div className="news-card-meta">
+                  <span className="news-date">{item.date.replace(/-/g, ".")}</span>
+                  <span className="news-card-arrow">→</span>
+                </div>
+
                 <h3 className="news-title">{item.title}</h3>
+                <hr className="news-rule" />
                 <p className="news-desc">{item.summary}</p>
               </div>
             </div>
