@@ -14,7 +14,7 @@ and handles physics, networking, and UI without any Mojang code.
 The goal is a lightweight, performant alternative to the official Java client.
 
 <p align="center">
-  <img width="1896" height="1030" alt="image" src="https://github.com/user-attachments/assets/7c6bf87e-2b28-4497-97c0-766b1525cdb5" />
+    TODO: place
 </p>
 
 ## Features
