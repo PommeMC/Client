@@ -14,7 +14,7 @@ and handles physics, networking, and UI without any Mojang code.
 The goal is a lightweight, performant alternative to the official Java client.
 
 <p align="center">
-  <img width="1896" height="1030" alt="image" src="https://github.com/user-attachments/assets/7c6bf87e-2b28-4497-97c0-766b1525cdb5" />
+  <img width="1920" height="1080" alt="pomme-launcher" src="https://github.com/user-attachments/assets/b8353f51-a23b-45c5-9f3d-457e498a5253" />
 </p>
 
 ## Features
@@ -82,7 +82,7 @@ cd launcher && pnpm tauri dev
 **Standalone client**:
 Running the standalone client requires assets, for which you have 2 options:
 
-1. Run the launcher and install the latest release. Then you can do:
+1. Run the launcher and install the latest supported release. Then you can do:
 
    ```bash
    cargo run -- --username Steve --quick-access-server localhost
