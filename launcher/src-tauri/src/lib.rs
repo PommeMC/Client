@@ -86,5 +86,5 @@ pub fn generate_bindings() {
             specta_typescript::Typescript::default().layout(specta_typescript::Layout::Files),
             "../src/bindings/",
         )
-        .unwrap();
+        .expect("tauri-specta failed to write TypeScript bindings");
 }

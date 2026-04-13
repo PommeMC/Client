@@ -269,8 +269,6 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
               setInstallations((prev) => [...prev, install]);
               setActiveInstall(install);
 
-              setActiveInstall(install);
-
               setOpenedDialog(null);
               setPage("home");
               setDownloadProgress({ downloaded: 0, total: 1, status: "Starting install..." });

@@ -30,6 +30,7 @@ hickory-resolver = { version = "0.25.2", features = ["tokio"] }
 thiserror = "2.0"
 tauri-plugin-opener = "2"
 
+# Pinned to rc.24 since the 2.0 API still churns between RCs; unpin once 2.0.0 ships.
 specta = "=2.0.0-rc.24"
 tauri-specta = { version = "=2.0.0-rc.24", features = ["derive", "typescript"] }
 specta-typescript = "0.0.11"

@@ -110,6 +110,16 @@ jobs:
         working-directory: launcher/src-tauri
         run: cargo clippy --release --all-targets --all-features -- -D warnings
 
+      - name: Verify generated bindings are up to date
+        working-directory: launcher/src-tauri
+        shell: bash
+        run: |
+          cargo run --quiet --bin generate-bindings
+          if ! git diff --exit-code -- ../src/bindings; then
+            echo "::error::launcher/src/bindings is stale. Run 'cargo run --bin generate-bindings' from launcher/src-tauri and commit."
+            exit 1
+          fi
+
   launcher-frontend:
     runs-on: ubuntu-latest
     steps:

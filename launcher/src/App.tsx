@@ -196,6 +196,7 @@ function App() {
       } else {
         setLaunchingStatus("installing");
       }
+      setStatus("Checking assets...");
 
       const err = await ensureAssets(currentInstall.version);
       if (err instanceof Error) {
