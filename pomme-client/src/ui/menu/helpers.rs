@@ -166,15 +166,7 @@ pub(super) fn push_text_field(
     });
 
     if focused && !all_selected {
-        common::push_cursor_blink(
-            elements,
-            cursor_blink,
-            x + pad,
-            text_y,
-            gs,
-            fs,
-            text_w,
-        );
+        common::push_cursor_blink(elements, cursor_blink, x + pad, text_y, gs, fs, text_w);
     }
 
     elements.push(MenuElement::ScissorPop);

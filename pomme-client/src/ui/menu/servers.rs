@@ -892,10 +892,12 @@ impl MainMenu {
             _ => return,
         };
 
-        if input.copy && !text.is_empty()
-            && let Ok(mut cb) = arboard::Clipboard::new() {
-                let _ = cb.set_text(text.clone());
-            }
+        if input.copy
+            && !text.is_empty()
+            && let Ok(mut cb) = arboard::Clipboard::new()
+        {
+            let _ = cb.set_text(text.clone());
+        }
 
         if input.undo
             && let Some(pos) = self
