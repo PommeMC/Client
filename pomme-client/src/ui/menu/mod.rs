@@ -353,6 +353,15 @@ impl MainMenu {
         }
     }
 
+    fn set_screen(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.focused_field = None;
+        self.field_all_selected = false;
+        self.last_field_click = None;
+        self.field_undo_stack.clear();
+        self.cursor_blink = Instant::now();
+    }
+
     fn save_settings(&self) {
         save_settings(
             &self.settings_dir,
@@ -376,7 +385,7 @@ impl MainMenu {
     }
 
     pub fn open_options(&mut self) {
-        self.screen = Screen::Options;
+        self.set_screen(Screen::Options);
     }
 
     pub fn is_options_screen(&self) -> bool {
@@ -462,7 +471,7 @@ impl MainMenu {
     }
 
     pub fn show_disconnect(&mut self, reason: String) {
-        self.screen = Screen::Disconnected(reason);
+        self.set_screen(Screen::Disconnected(reason));
     }
 
     pub fn build(

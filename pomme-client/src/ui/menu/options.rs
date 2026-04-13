@@ -373,7 +373,7 @@ impl MainMenu {
         tooltips: &[(&str, &str)],
     ) -> MainMenuResult {
         if input.escape {
-            self.screen = back.clone_screen();
+            self.set_screen(back.clone_screen());
             return empty_result(2.0);
         }
 
@@ -563,7 +563,7 @@ impl MainMenu {
                         if matches!(target, Screen::OptionsResourcePacks) {
                             self.rescan_packs = true;
                         }
-                        self.screen = target.clone_screen();
+                        self.set_screen(target.clone_screen());
                     }
                     if label.starts_with("GUI Scale:") {
                         let max = crate::ui::hud::max_gui_scale(sw, sh);
@@ -676,7 +676,7 @@ impl MainMenu {
         );
         any_hovered |= h;
         if clicked && h {
-            self.screen = back;
+            self.set_screen(back);
         }
 
         MainMenuResult {
@@ -699,7 +699,7 @@ impl MainMenu {
 
         if input.escape {
             self.pack_search.clear();
-            self.screen = Screen::Options;
+            self.set_screen(Screen::Options);
             return empty_result(2.0);
         }
 
@@ -972,7 +972,7 @@ impl MainMenu {
         any_hovered |= h;
         if clicked && h {
             self.pack_search.clear();
-            self.screen = Screen::Options;
+            self.set_screen(Screen::Options);
         }
 
         MainMenuResult {
@@ -993,7 +993,7 @@ impl MainMenu {
         back: Screen,
     ) -> MainMenuResult {
         if input.escape {
-            self.screen = back.clone_screen();
+            self.set_screen(back.clone_screen());
             return empty_result(2.0);
         }
 
@@ -1080,7 +1080,7 @@ impl MainMenu {
         );
         any_hovered |= h;
         if input.clicked && h {
-            self.screen = back;
+            self.set_screen(back);
         }
 
         MainMenuResult {

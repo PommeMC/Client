@@ -34,7 +34,7 @@ impl MainMenu {
             self.refresh_servers();
         }
         if input.escape {
-            self.screen = Screen::Main;
+            self.set_screen(Screen::Main);
             return MainMenuResult {
                 elements: Vec::new(),
                 action: MenuAction::None,
@@ -372,9 +372,8 @@ impl MainMenu {
         ) && clicked
         {
             self.edit_address = self.last_mp_ip.clone();
+            self.set_screen(Screen::DirectConnect);
             self.focused_field = Some(0);
-            self.cursor_blink = Instant::now();
-            self.screen = Screen::DirectConnect;
         }
         if push_button(
             &mut elements,
@@ -391,9 +390,8 @@ impl MainMenu {
         {
             self.edit_name.clear();
             self.edit_address.clear();
+            self.set_screen(Screen::AddServer);
             self.focused_field = Some(0);
-            self.cursor_blink = Instant::now();
-            self.screen = Screen::AddServer;
         }
 
         let row2_y = footer_y + btn_h + gap;
@@ -417,9 +415,8 @@ impl MainMenu {
         {
             self.edit_name = server.name.clone();
             self.edit_address = server.address.clone();
+            self.set_screen(Screen::EditServer(idx));
             self.focused_field = Some(0);
-            self.cursor_blink = Instant::now();
-            self.screen = Screen::EditServer(idx);
         }
         if push_button(
             &mut elements,
@@ -435,7 +432,7 @@ impl MainMenu {
         ) && clicked
             && let Some(idx) = self.selected_server
         {
-            self.screen = Screen::ConfirmDelete(idx);
+            self.set_screen(Screen::ConfirmDelete(idx));
         }
         if push_button(
             &mut elements,
@@ -465,7 +462,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.screen = Screen::Main;
+            self.set_screen(Screen::Main);
         }
 
         push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
@@ -498,7 +495,7 @@ impl MainMenu {
         let clicked = input.clicked;
 
         if input.escape {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
             return empty_result(2.0);
         }
 
@@ -548,7 +545,7 @@ impl MainMenu {
         {
             self.server_list.remove(idx);
             self.selected_server = None;
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
         }
         if push_button(
             &mut elements,
@@ -563,7 +560,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
         }
 
         push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
@@ -593,7 +590,7 @@ impl MainMenu {
         let clicked = input.clicked;
 
         if input.escape {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
             return empty_result(2.0);
         }
 
@@ -683,7 +680,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
         }
 
         push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
@@ -713,7 +710,7 @@ impl MainMenu {
         let clicked = input.clicked;
 
         if input.escape {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
             return empty_result(2.0);
         }
 
@@ -831,7 +828,7 @@ impl MainMenu {
                 }],
                 &self.ping_results,
             );
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
         }
         y += btn_h + gap;
         if push_button(
@@ -847,7 +844,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
         }
 
         push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
@@ -1000,7 +997,7 @@ impl MainMenu {
             true,
         ) && input.clicked
         {
-            self.screen = Screen::Main;
+            self.set_screen(Screen::Main);
         }
 
         MainMenuResult {
