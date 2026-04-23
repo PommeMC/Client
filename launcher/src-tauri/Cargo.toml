@@ -26,7 +26,7 @@ rand = "0.10"
 keyring = { version = "3", features = ["sync-secret-service", "windows-native"] }
 sha2 = "0.11"
 urlencoding = "2"
-hickory-resolver = { version = "0.25.2", features = ["tokio"] }
+hickory-resolver = { version = "0.26.0", features = ["tokio"] }
 thiserror = "2.0"
 tauri-plugin-opener = "2"
 
