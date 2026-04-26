@@ -106,6 +106,7 @@ pub(super) fn push_text_field(
     gs: f32,
     text: &str,
     focused: bool,
+    all_selected: bool,
     cursor_blink: &Instant,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) {
@@ -132,27 +133,62 @@ pub(super) fn push_text_field(
     });
 
     let pad = 4.0 * gs;
+    let text_y = y + (h - fs) / 2.0;
+    let inner_w = w - pad * 2.0;
+
+    let (visible_text, text_w) = fit_text_end(text, fs, inner_w, text_width_fn);
+
+    elements.push(MenuElement::ScissorPush {
+        x: x + pad,
+        y,
+        w: inner_w,
+        h,
+    });
+
+    if focused && all_selected && !visible_text.is_empty() {
+        elements.push(MenuElement::Rect {
+            x: x + pad,
+            y: text_y,
+            w: text_w,
+            h: fs,
+            corner_radius: 0.0,
+            color: [0.3, 0.5, 0.9, 0.6],
+        });
+    }
+
     elements.push(MenuElement::Text {
         x: x + pad,
-        y: y + (h - fs) / 2.0,
-        text: text.into(),
+        y: text_y,
+        text: visible_text.into(),
         scale: fs,
         color: WHITE,
         centered: false,
     });
 
-    if focused {
-        let text_w = text_width_fn(text, fs);
-        common::push_cursor_blink(
-            elements,
-            cursor_blink,
-            x + pad,
-            y + (h - fs) / 2.0,
-            gs,
-            fs,
-            text_w,
-        );
+    if focused && !all_selected {
+        common::push_cursor_blink(elements, cursor_blink, x + pad, text_y, gs, fs, text_w);
     }
+
+    elements.push(MenuElement::ScissorPop);
+}
+
+fn fit_text_end<'a>(
+    text: &'a str,
+    fs: f32,
+    max_w: f32,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
+) -> (&'a str, f32) {
+    let full_w = text_width_fn(text, fs);
+    if full_w <= max_w {
+        return (text, full_w);
+    }
+    for (i, _) in text.char_indices() {
+        let w = text_width_fn(&text[i..], fs);
+        if w <= max_w {
+            return (&text[i..], w);
+        }
+    }
+    ("", 0.0)
 }
 
 #[allow(clippy::too_many_arguments)]

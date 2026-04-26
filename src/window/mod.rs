@@ -1089,6 +1089,9 @@ impl ApplicationHandler for App {
                     renderer.resize(new_size);
                 }
             }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.input.set_modifiers(mods);
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state.is_pressed()
                     && let PhysicalKey::Code(KeyCode::F11) = event.physical_key
@@ -1237,6 +1240,9 @@ impl ApplicationHandler for App {
                                     escape: self.input.escape_pressed(),
                                     tab: self.input.tab_pressed(),
                                     f5: self.input.f5_pressed(),
+                                    select_all: self.input.select_all_pressed(),
+                                    copy: self.input.copy_pressed(),
+                                    undo: self.input.undo_pressed(),
                                     scroll_delta: self.input.consume_menu_scroll(),
                                 };
 
@@ -1756,6 +1762,9 @@ impl ApplicationHandler for App {
                                         escape: self.input.escape_pressed(),
                                         tab: self.input.tab_pressed(),
                                         f5: self.input.f5_pressed(),
+                                        select_all: self.input.select_all_pressed(),
+                                        copy: self.input.copy_pressed(),
+                                        undo: self.input.undo_pressed(),
                                         scroll_delta: self.input.consume_menu_scroll(),
                                     };
                                     let r = &*renderer;

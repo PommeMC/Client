@@ -13,7 +13,7 @@ impl MainMenu {
         };
 
         if input.escape {
-            self.screen = Screen::Main;
+            self.set_screen(Screen::Main);
             return empty_result(2.0);
         }
 
@@ -81,7 +81,7 @@ impl MainMenu {
             true,
         ) && input.clicked
         {
-            self.screen = Screen::Auth { pending };
+            self.set_screen(Screen::Auth { pending });
             auth::spawn_auth(
                 &self.rt,
                 Arc::clone(&self.auth_status),
@@ -103,7 +103,7 @@ impl MainMenu {
             true,
         ) && input.clicked
         {
-            self.screen = Screen::Main;
+            self.set_screen(Screen::Main);
         }
 
         MainMenuResult {
@@ -116,7 +116,7 @@ impl MainMenu {
     }
 
     pub(super) fn cancel_auth(&mut self) {
-        self.screen = Screen::Main;
+        self.set_screen(Screen::Main);
         *self.auth_status.lock() = AuthStatus::Idle;
     }
 
@@ -225,9 +225,9 @@ impl MainMenu {
                 }
 
                 match pending {
-                    AuthPending::None | AuthPending::Singleplayer => self.screen = Screen::Main,
+                    AuthPending::None | AuthPending::Singleplayer => self.set_screen(Screen::Main),
                     AuthPending::Multiplayer => {
-                        self.screen = Screen::ServerList;
+                        self.set_screen(Screen::ServerList);
                         self.scroll_offset = 0.0;
                         self.selected_server = None;
                     }
