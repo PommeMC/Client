@@ -2,6 +2,7 @@ pub mod block_overlay;
 pub mod blur;
 pub mod chunk;
 pub mod chunk_borders;
+pub mod cloud;
 pub mod entity_renderer;
 pub mod hand;
 pub mod item_entity;

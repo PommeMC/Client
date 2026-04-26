@@ -96,6 +96,7 @@ pub struct Renderer {
     entity_renderer: EntityRenderer,
     chunk_border_pipeline: pipelines::chunk_borders::ChunkBorderPipeline,
     item_entity_pipeline: pipelines::item_entity::ItemEntityPipeline,
+    cloud_pipeline: pipelines::cloud::CloudPipeline,
     chunk_buffers: ChunkBufferStore,
     swapchain_dirty: bool,
     width: u32,
@@ -277,6 +278,16 @@ impl Renderer {
             &atlas,
         );
 
+        let cloud_pipeline = pipelines::cloud::CloudPipeline::new(
+            &ctx.device,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            jar_assets_dir,
+            asset_index,
+        );
+
         Ok(Self {
             ctx,
             swapchain: swapchain_state,
@@ -296,6 +307,7 @@ impl Renderer {
             entity_renderer,
             chunk_border_pipeline,
             item_entity_pipeline,
+            cloud_pipeline,
             chunk_buffers,
             swapchain_dirty: false,
             width: size.width.max(1),
@@ -522,6 +534,8 @@ impl Renderer {
         self.entity_renderer
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.item_entity_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.cloud_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.blur_pipeline.resize(
             &self.ctx.device,
@@ -1045,6 +1059,9 @@ impl Renderer {
                         .draw_indirect(&self.ctx.device, cmd, frame);
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
+                    self.cloud_pipeline
+                        .draw(&self.ctx.device, cmd, frame, &self.camera, sky);
+
                     if let Some((block_pos, stage)) = destroy_info {
                         self.block_overlay_pipeline.draw(
                             &self.ctx.device,
@@ -1306,6 +1323,8 @@ impl Drop for Renderer {
         self.chunk_border_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.item_entity_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.cloud_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
         self.swapchain.destroy(
