@@ -456,10 +456,10 @@ pub async fn get_client_logs(state: State<'_, AppState>) -> Result<VecDeque<Stri
 
 fn find_client_binary() -> Result<std::path::PathBuf, String> {
     #[cfg(target_family = "windows")]
-    const EXENAME: &str = "pomme.exe";
+    const EXENAME: &str = "pomme-client.exe";
 
     #[cfg(target_family = "unix")]
-    const EXENAME: &str = "pomme";
+    const EXENAME: &str = "pomme-client";
 
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()

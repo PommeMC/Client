@@ -6,7 +6,7 @@ mod ping;
 mod settings;
 pub mod storage;
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, path::PathBuf};
 use tokio::sync::Mutex;
 
 #[derive(Default)]
@@ -17,7 +17,7 @@ pub struct AppState {
 
 /// Maps all supported versions to their protocol version.
 /// Snapshots encode as `(1 << 30) | base_protocol`.
-/// KEEP IN SYNC WITH src/main.rs
+/// KEEP IN SYNC WITH pomme-client/src/main.rs
 pub const VERSION_PROTOCOL_MAP: [(&str, i32); 3] =
     [("26.1", 775), ("26.1.1-rc-1", 0x40000130), ("26.1.1", 775)];
 
@@ -81,10 +81,12 @@ pub fn get_builder() -> tauri_specta::Builder {
 }
 
 pub fn generate_bindings() {
+    let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src/bindings");
+
     crate::get_builder()
         .export(
             specta_typescript::Typescript::default().layout(specta_typescript::Layout::Files),
-            "../src/bindings/",
+            out_dir,
         )
         .expect("tauri-specta failed to write TypeScript bindings");
 }

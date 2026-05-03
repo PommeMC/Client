@@ -1,0 +1,53 @@
+[package]
+name = "pomme-client"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[build-dependencies]
+shaderc = "0.10"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+directories = { workspace = true }
+sha1_smol = { workspace = true }
+open = { workspace = true }
+base64 = { workspace = true }
+zip = { workspace = true }
+tokio = { workspace = true, features = ["tracing"] }
+reqwest = { workspace = true, features = ["blocking"] }
+
+ash = "0.38"
+ash-window = "0.13"
+gpu-allocator = { version = "0.28", features = ["vulkan"] }
+raw-window-handle = "0.6"
+winit = "0.30"
+glam = "0.32"
+clap = { version = "4", features = ["derive"] }
+parking_lot = "0.12"
+bytemuck = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+time = { version = "0.3", features = ["formatting", "macros"] }
+flate2 = "1"
+azalea-protocol = { version = "0.16", features = ["connecting"] }
+azalea-crypto = "0.16"
+azalea-auth = "0.16"
+azalea-entity = "0.16"
+azalea-world = "0.16"
+azalea-block = "0.16"
+azalea-chat = "0.16"
+azalea-core = "0.16"
+azalea-registry = "0.16"
+azalea-inventory = "0.16"
+uuid = { version = "1", features = ["v4"] }
+crossbeam-channel = "0.5"
+png = "0.17"
+image = "0.25"
+rayon = "1.10"
+fontdue = "0.9.3"
+simdnbt = "0.10"
+discord-rich-presence = "1.1"

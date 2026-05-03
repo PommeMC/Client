@@ -1,5 +1,10 @@
 version: 2
 updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -13,18 +18,18 @@ updates:
           - "ash"
           - "ash-window"
           - "gpu-allocator"
-
-  - package-ecosystem: cargo
-    directory: /launcher/src-tauri
-    schedule:
-      interval: weekly
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-*"
 
   - package-ecosystem: npm
-    directory: /launcher
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-*"
+          - "@types/react*"

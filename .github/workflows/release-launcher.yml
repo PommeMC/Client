@@ -1,0 +1,115 @@
+name: Release launcher
+
+on:
+  push:
+    tags: ["launcher-v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-launcher:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: pomme-launcher-windows-x64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: pomme-launcher-linux-x64-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: pomme-launcher-macos-arm64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm --filter pomme-launcher tauri build --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          set -e
+          mkdir -p dist
+          case "${{ matrix.os }}" in
+            windows-latest) EXTS="exe" ;;
+            ubuntu-latest)  EXTS="AppImage deb rpm" ;;
+            *)              EXTS="dmg" ;;
+          esac
+          for EXT in $EXTS; do
+            FILE=$(find target/${{ matrix.target }}/release/bundle -type f -name "*.${EXT}" | head -n 1 || true)
+            if [ -n "$FILE" ]; then
+              mv "$FILE" "dist/${{ matrix.name }}.${EXT}"
+            fi
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+
+  release-launcher:
+    needs: build-launcher
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Get previous launcher tag
+        id: prev
+        shell: bash
+        run: |
+          git fetch --tags --force
+          PREV=$(git tag --list "launcher-v*" --sort=-v:refname | sed -n '2p')
+
+          if [ -z "$PREV" ]; then
+            echo "tag=" >> $GITHUB_OUTPUT
+          else
+            echo "tag=$PREV" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          previous_tag: ${{ steps.prev.outputs.tag || '' }}
+          files: dist/*
+          generate_release_notes: ${{ steps.prev.outputs.tag != '' }}

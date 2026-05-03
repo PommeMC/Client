@@ -26,7 +26,7 @@ The goal is a lightweight, performant alternative to the official Java client.
 -sprinting, swimming, drowning, collision, all matched against decompiled source
 
 - **Full protocol support**
--connects to 26.1 servers via azalea-protocol, handles chunk streaming,
+-connects to 26.1.1 servers via azalea-protocol, handles chunk streaming,
 block updates, chat
 
 - **Microsoft authentication**
@@ -42,9 +42,9 @@ Mojang patch notes, installation manager
 
 ## Architecture
 
-```text
-pomme/            Minecraft client (Rust, Vulkan)
-launcher/         Launcher app (Tauri, React, TypeScript)
+```bash
+pomme-client/    # Minecraft client (Rust, Vulkan)
+pomme-launcher/  # Launcher app (Tauri, React, TypeScript)
 ```
 
 The client is a standalone binary that receives launch arguments from
@@ -57,8 +57,16 @@ version management, and spawns the client with the appropriate flags.
 
 Requires the [Vulkan SDK](https://vulkan.lunarg.com/) and a Rust toolchain.
 
+Can be built with [pnpm](https://pnpm.io/) (recommended):
+
 ```bash
-cargo build --release
+pnpm client:build-release
+```
+
+or with cargo:
+
+```bash
+cargo build -p pomme-client --release
 ```
 
 ### Launcher
@@ -66,29 +74,29 @@ cargo build --release
 Requires [Node.js](https://nodejs.org/) and [pnpm](https://pnpm.io/).
 
 ```bash
-cd launcher
 pnpm install
-pnpm tauri build
+pnpm launcher:build-release
 ```
 
 ## Running
 
-**Via the launcher** (recommended):
+### Via the launcher (recommended)
 
 ```bash
-cd launcher && pnpm tauri dev
+pnpm launcher:dev
 ```
 
-**Standalone client**:
-Running the standalone client requires assets, for which you have 2 options:
+### Standalone client
+
+Running the standalone client requires minecraft assets, for which you have 2 options:
 
 1. Run the launcher and install the latest supported release. Then you can do:
 
    ```bash
-   cargo run -- --username Steve --quick-access-server localhost
+   pnpm client:dev -- --username Steve --quick-access-server localhost
    ```
 
-2. If you're on linux, extract the vanilla 26.1.1 assets to `reference/assets/`:
+2. If you're on linux, extract the vanilla 26.1.1 assets from `.minecraft/` to `reference/`:
 
    ```bash
    mkdir -p reference/assets/indexes 
@@ -96,13 +104,13 @@ Running the standalone client requires assets, for which you have 2 options:
    mkdir -p reference/versions/26.1.1/extracted
    mkdir -p reference/game-dir
    
-    # 30 is the asset index id for 26.1.1
+   # 30 is the asset index id for 26.1.1
    cp ~/.minecraft/assets/indexes/30.json reference/assets/indexes/26.1.1.json
    cp -r ~/.minecraft/assets/objects/. reference/assets/objects/
    cp ~/.minecraft/versions/26.1.1/26.1.1.jar reference/versions/26.1.1/
    unzip reference/versions/26.1.1/26.1.1.jar 'assets/*' -d reference/versions/26.1.1/extracted/
    
-   cargo run -- --username Steve --quick-access-server localhost \
+   pnpm client:dev -- --username Steve --quick-access-server localhost \
      --version 26.1.1 \
      --assets-dir $PWD/reference/assets \
      --versions-dir $PWD/reference/versions \
@@ -116,7 +124,10 @@ Please open an issue first to discuss what you'd like to change.
 
 ## License
 
-GPL-3.0-or-later. This project is not affiliated with Mojang or Microsoft.
+This project is licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later).
+
+It is not affiliated with or endorsed by Mojang Studios or Microsoft.
+Minecraft is a trademark of Mojang Studios.
 
 ## Community
 
