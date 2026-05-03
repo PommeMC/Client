@@ -4,7 +4,7 @@
     "launcher:dev": "pnpm --filter pomme-launcher tauri dev",
     "launcher:build-debug": "pnpm --filter pomme-launcher tauri build --debug",
     "launcher:build-release": "pnpm --filter pomme-launcher tauri build",
-    "launcher:pre-pr": "cargo fmt -p pomme-launcher -- --check && cargo clippy -p pomme-launcher --all-targets --all-features -- -D warnings && pnpm --filter pomme-launcher pre-pr",
+    "launcher:pre-pr": "cargo fmt -p pomme-launcher -- --check && cargo clippy -p pomme-launcher --release --all-targets --all-features -- -D warnings && pnpm --filter pomme-launcher pre-pr",
     "client:dev": "cargo run -p pomme-client",
     "client:build-debug": "cargo build -p pomme-client",
     "client:build-release": "cargo build -p pomme-client --release",
