@@ -116,7 +116,7 @@ jobs:
         run: cargo fmt -p pomme-launcher -- --check
 
       - name: Clippy
-        run: cargo clippy -p pomme-launcher --all-targets --all-features -- -D warnings
+        run: cargo clippy -p pomme-launcher --release --all-targets --all-features -- -D warnings
 
       - name: Check bindings are up to date
         if: matrix.os == 'ubuntu-latest'
