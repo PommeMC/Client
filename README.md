@@ -43,8 +43,8 @@ Mojang patch notes, installation manager
 ## Architecture
 
 ```bash
-pomme/              # Minecraft client (Rust, Vulkan)
-launcher/           # Launcher app (Tauri, React, TypeScript)
+pomme-client/    # Minecraft client (Rust, Vulkan)
+pomme-launcher/  # Launcher app (Tauri, React, TypeScript)
 ```
 
 The client is a standalone binary that receives launch arguments from
