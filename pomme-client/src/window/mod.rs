@@ -1015,6 +1015,25 @@ impl App {
         self.last_sent_on_ground = self.player.on_ground;
         self.last_sent_horizontal_collision = self.player.horizontal_collision;
     }
+
+    fn build_menu_input(input: &mut InputState) -> MenuInput {
+        MenuInput {
+            cursor: input.cursor_pos(),
+            clicked: input.left_just_pressed(),
+            mouse_held: input.left_held(),
+            typed_chars: input.drain_typed_chars(),
+            backspace: input.backspace_pressed(),
+            enter: input.enter_pressed(),
+            escape: input.escape_pressed(),
+            tab: input.tab_pressed(),
+            f5: input.f5_pressed(),
+            select_all: input.select_all_pressed(),
+            copy: input.copy_pressed(),
+            cut: input.cut_pressed(),
+            undo: input.undo_pressed(),
+            scroll_delta: input.consume_menu_scroll(),
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -1088,6 +1107,9 @@ impl ApplicationHandler for App {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(new_size);
                 }
+            }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.input.set_modifiers(mods);
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state.is_pressed()
@@ -1227,18 +1249,7 @@ impl ApplicationHandler for App {
                                 let sw = renderer.screen_width() as f32;
                                 let sh = renderer.screen_height() as f32;
 
-                                let menu_input = MenuInput {
-                                    cursor: self.input.cursor_pos(),
-                                    clicked: self.input.left_just_pressed(),
-                                    mouse_held: self.input.left_held(),
-                                    typed_chars: self.input.drain_typed_chars(),
-                                    backspace: self.input.backspace_pressed(),
-                                    enter: self.input.enter_pressed(),
-                                    escape: self.input.escape_pressed(),
-                                    tab: self.input.tab_pressed(),
-                                    f5: self.input.f5_pressed(),
-                                    scroll_delta: self.input.consume_menu_scroll(),
-                                };
+                                let menu_input = Self::build_menu_input(&mut self.input);
 
                                 let result = self.menu.build(sw, sh, &menu_input, |t, s| {
                                     renderer.menu_text_width(t, s)
@@ -1746,18 +1757,7 @@ impl ApplicationHandler for App {
                                 }
 
                                 if self.options_from_game {
-                                    let menu_input = MenuInput {
-                                        cursor: self.input.cursor_pos(),
-                                        clicked: self.input.left_just_pressed(),
-                                        mouse_held: self.input.left_held(),
-                                        typed_chars: self.input.drain_typed_chars(),
-                                        backspace: self.input.backspace_pressed(),
-                                        enter: self.input.enter_pressed(),
-                                        escape: self.input.escape_pressed(),
-                                        tab: self.input.tab_pressed(),
-                                        f5: self.input.f5_pressed(),
-                                        scroll_delta: self.input.consume_menu_scroll(),
-                                    };
+                                    let menu_input = Self::build_menu_input(&mut self.input);
                                     let r = &*renderer;
                                     let result = self
                                         .menu

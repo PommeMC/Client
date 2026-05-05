@@ -34,7 +34,7 @@ impl MainMenu {
             self.refresh_servers();
         }
         if input.escape {
-            self.screen = Screen::Main;
+            self.set_screen(Screen::Main);
             return MainMenuResult {
                 elements: Vec::new(),
                 action: MenuAction::None,
@@ -372,9 +372,8 @@ impl MainMenu {
         ) && clicked
         {
             self.edit_address = self.last_mp_ip.clone();
+            self.set_screen(Screen::DirectConnect);
             self.focused_field = Some(0);
-            self.cursor_blink = Instant::now();
-            self.screen = Screen::DirectConnect;
         }
         if push_button(
             &mut elements,
@@ -391,9 +390,8 @@ impl MainMenu {
         {
             self.edit_name.clear();
             self.edit_address.clear();
+            self.set_screen(Screen::AddServer);
             self.focused_field = Some(0);
-            self.cursor_blink = Instant::now();
-            self.screen = Screen::AddServer;
         }
 
         let row2_y = footer_y + btn_h + gap;
@@ -417,9 +415,8 @@ impl MainMenu {
         {
             self.edit_name = server.name.clone();
             self.edit_address = server.address.clone();
+            self.set_screen(Screen::EditServer(idx));
             self.focused_field = Some(0);
-            self.cursor_blink = Instant::now();
-            self.screen = Screen::EditServer(idx);
         }
         if push_button(
             &mut elements,
@@ -435,7 +432,7 @@ impl MainMenu {
         ) && clicked
             && let Some(idx) = self.selected_server
         {
-            self.screen = Screen::ConfirmDelete(idx);
+            self.set_screen(Screen::ConfirmDelete(idx));
         }
         if push_button(
             &mut elements,
@@ -465,7 +462,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.screen = Screen::Main;
+            self.set_screen(Screen::Main);
         }
 
         push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
@@ -498,7 +495,7 @@ impl MainMenu {
         let clicked = input.clicked;
 
         if input.escape {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
             return empty_result(2.0);
         }
 
@@ -548,7 +545,7 @@ impl MainMenu {
         {
             self.server_list.remove(idx);
             self.selected_server = None;
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
         }
         if push_button(
             &mut elements,
@@ -563,7 +560,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
         }
 
         push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
@@ -593,7 +590,7 @@ impl MainMenu {
         let clicked = input.clicked;
 
         if input.escape {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
             return empty_result(2.0);
         }
 
@@ -637,12 +634,12 @@ impl MainMenu {
             gs,
             &self.edit_address,
             self.focused_field == Some(0),
+            self.focused_field == Some(0) && self.field_all_selected,
             &self.cursor_blink,
             text_width_fn,
         );
         if clicked && common::hit_test(cursor, [form_x, y, form_w, field_h]) {
-            self.focused_field = Some(0);
-            self.cursor_blink = Instant::now();
+            self.on_field_click(0);
         }
         y += field_h + 28.0 * gs;
 
@@ -683,7 +680,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
         }
 
         push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
@@ -713,7 +710,7 @@ impl MainMenu {
         let clicked = input.clicked;
 
         if input.escape {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
             return empty_result(2.0);
         }
 
@@ -756,12 +753,12 @@ impl MainMenu {
             gs,
             &self.edit_name,
             self.focused_field == Some(0),
+            self.focused_field == Some(0) && self.field_all_selected,
             &self.cursor_blink,
             text_width_fn,
         );
         if clicked && common::hit_test(cursor, [form_x, y, form_w, field_h]) {
-            self.focused_field = Some(0);
-            self.cursor_blink = Instant::now();
+            self.on_field_click(0);
         }
         y += field_h + 12.0 * gs;
 
@@ -785,12 +782,12 @@ impl MainMenu {
             gs,
             &self.edit_address,
             self.focused_field == Some(1),
+            self.focused_field == Some(1) && self.field_all_selected,
             &self.cursor_blink,
             text_width_fn,
         );
         if clicked && common::hit_test(cursor, [form_x, y, form_w, field_h]) {
-            self.focused_field = Some(1);
-            self.cursor_blink = Instant::now();
+            self.on_field_click(1);
         }
         y += field_h + 28.0 * gs;
 
@@ -831,7 +828,7 @@ impl MainMenu {
                 }],
                 &self.ping_results,
             );
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
         }
         y += btn_h + gap;
         if push_button(
@@ -847,7 +844,7 @@ impl MainMenu {
             true,
         ) && clicked
         {
-            self.screen = Screen::ServerList;
+            self.set_screen(Screen::ServerList);
         }
 
         push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
@@ -860,33 +857,91 @@ impl MainMenu {
         }
     }
 
+    pub(super) fn on_field_click(&mut self, field_idx: u8) {
+        let now = Instant::now();
+        let is_double = self.last_field_click == Some(field_idx)
+            && now.duration_since(self.last_field_click_time).as_millis() < DOUBLE_CLICK_MS;
+        self.focused_field = Some(field_idx);
+        self.cursor_blink = now;
+        self.field_all_selected = is_double;
+        self.last_field_click = Some(field_idx);
+        self.last_field_click_time = now;
+    }
+
     pub(super) fn handle_text_input(&mut self, input: &MenuInput, field_count: u8) {
         if input.tab {
             self.focused_field = Some(match self.focused_field {
                 Some(f) => (f + 1) % field_count,
                 None => 0,
             });
+            self.field_all_selected = false;
             self.cursor_blink = Instant::now();
         }
 
         let Some(field_idx) = self.focused_field else {
             return;
         };
-        let is_edit_form = matches!(self.screen, Screen::AddServer | Screen::EditServer(_));
-        let text = match (is_edit_form, field_idx) {
-            (true, 0) => &mut self.edit_name,
-            (true, 1) => &mut self.edit_address,
-            (false, 0) => &mut self.edit_address,
+        let target = match (&self.screen, field_idx) {
+            (Screen::AddServer | Screen::EditServer(_), 0) => TextTarget::EditName,
+            (Screen::AddServer | Screen::EditServer(_), 1) => TextTarget::EditAddress,
+            (Screen::DirectConnect, 0) => TextTarget::EditAddress,
+            (Screen::OptionsResourcePacks, 0) => TextTarget::PackSearch,
             _ => return,
         };
+        let text: &mut String = match target {
+            TextTarget::EditName => &mut self.edit_name,
+            TextTarget::EditAddress => &mut self.edit_address,
+            TextTarget::PackSearch => &mut self.pack_search,
+        };
 
-        for ch in &input.typed_chars {
-            text.push(*ch);
+        if input.copy && !text.is_empty() {
+            write_clipboard(text);
+        }
+
+        if input.cut && !text.is_empty() && write_clipboard(text) {
+            text.clear();
+            self.field_all_selected = false;
+        }
+
+        if input.undo
+            && let Some(pos) = self
+                .field_undo_stack
+                .iter()
+                .rposition(|(f, _)| *f == field_idx)
+        {
+            let (_, prev) = self.field_undo_stack.remove(pos);
+            *text = prev;
+            self.field_all_selected = false;
+            self.cursor_blink = Instant::now();
+            return;
+        }
+
+        if input.select_all {
+            self.field_all_selected = !text.is_empty();
+        }
+
+        let old_text = text.clone();
+
+        if !input.typed_chars.is_empty() {
+            if self.field_all_selected {
+                text.clear();
+                self.field_all_selected = false;
+            }
+            for ch in &input.typed_chars {
+                text.push(*ch);
+            }
         }
         if input.backspace {
-            text.pop();
+            if self.field_all_selected {
+                text.clear();
+                self.field_all_selected = false;
+            } else {
+                text.pop();
+            }
         }
-        if !input.typed_chars.is_empty() || input.backspace {
+
+        if *text != old_text {
+            push_undo(&mut self.field_undo_stack, field_idx, old_text);
             self.cursor_blink = Instant::now();
         }
     }
@@ -949,7 +1004,7 @@ impl MainMenu {
             true,
         ) && input.clicked
         {
-            self.screen = Screen::Main;
+            self.set_screen(Screen::Main);
         }
 
         MainMenuResult {
@@ -960,4 +1015,25 @@ impl MainMenu {
             clicked_button: false,
         }
     }
+}
+
+const UNDO_STACK_LIMIT: usize = 50;
+
+enum TextTarget {
+    EditName,
+    EditAddress,
+    PackSearch,
+}
+
+fn push_undo(stack: &mut Vec<(u8, String)>, field_idx: u8, prev: String) {
+    if stack.len() >= UNDO_STACK_LIMIT {
+        stack.remove(0);
+    }
+    stack.push((field_idx, prev));
+}
+
+fn write_clipboard(text: &str) -> bool {
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text.to_string()))
+        .is_ok()
 }
