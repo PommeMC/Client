@@ -11,12 +11,15 @@ mod player;
 mod renderer;
 mod resource_pack;
 mod ui;
+mod user;
 mod window;
 mod world;
 
 use clap::Parser;
 use net::connection::ConnectArgs;
 use std::sync::Arc;
+
+use crate::user::UserData;
 
 /// Maps all supported versions to their protocol version.
 /// Snapshots encode as `(1 << 30) | base_protocol`.
@@ -105,16 +108,7 @@ fn main() {
         None
     };
 
-    let launch_auth = match (&args.username, &args.uuid, &args.access_token) {
-        (Some(username), Some(uuid_str), Some(token)) => {
-            uuid_str.parse().ok().map(|uuid| window::LaunchAuth {
-                username: username.clone(),
-                uuid,
-                access_token: token.clone(),
-            })
-        }
-        _ => None,
-    };
+    let user = UserData::from_args(args.username, args.uuid, args.access_token);
 
     let presence = crate::discord::DiscordPresence::start(version)
         .inspect_err(|e| tracing::warn!("Discord rich presence unavailable: {e}"))
@@ -125,7 +119,7 @@ fn main() {
         version.to_owned(),
         data_dirs,
         rt,
-        launch_auth,
+        user,
         presence,
     ) {
         tracing::error!("Fatal: {e}");

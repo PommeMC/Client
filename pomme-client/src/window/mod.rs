@@ -16,6 +16,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::assets::AssetIndex;
 use crate::benchmark::Benchmark;
 use crate::dirs::DataDirs;
+use crate::discord::DiscordPresence;
 use crate::entity::{EntityStore, ItemEntityStore};
 use crate::net::NetworkEvent;
 use crate::physics::movement;
@@ -31,14 +32,17 @@ use crate::ui::death::{self, DeathAction};
 use crate::ui::hud;
 use crate::ui::menu::{MainMenu, MenuAction, MenuInput, PanoramaTheme};
 use crate::ui::pause::{self, PauseAction};
+use crate::user::UserData;
 use crate::window::app::{AppState, ConnectingState, Runtime};
 use crate::window::state_slot::StateSlot;
 use crate::world::chunk::ChunkStore;
 
 pub struct AppCtx {
-    presence: Option<crate::discord::DiscordPresence>,
+    user: UserData,
+    presence: Option<DiscordPresence>,
     display_mode: DisplayMode,
     input: InputState,
+
     last_frame: Option<Instant>,
     net_events: Option<crossbeam_channel::Receiver<NetworkEvent>>,
     chat_sender: Option<crossbeam_channel::Sender<String>>,
@@ -109,6 +113,7 @@ impl AppCtx {
         data_dirs: DataDirs,
         tokio_rt: Arc<tokio::runtime::Runtime>,
         presence: Option<crate::discord::DiscordPresence>,
+        user: UserData,
     ) -> Self {
         let (net_events, chat_sender, packet_sender, net_task) = match connection {
             Some(handle) => (
@@ -127,7 +132,11 @@ impl AppCtx {
 
         let resource_packs = crate::resource_pack::ResourcePackManager::new(&data_dirs.game_dir);
 
+        let username = user.username.clone();
+
         Self {
+            user,
+
             presence,
             display_mode: DisplayMode::Windowed,
             input: InputState::new(),
@@ -142,7 +151,7 @@ impl AppCtx {
             position_set: false,
             player_loaded_sent: false,
             game_state: state,
-            menu: MainMenu::new(&data_dirs.game_dir, Arc::clone(&tokio_rt)),
+            menu: MainMenu::new(&data_dirs.game_dir, Arc::clone(&tokio_rt), username),
             tokio_rt,
             data_dirs,
             version,
@@ -259,10 +268,9 @@ impl AppCtx {
         address: String,
         username: String,
     ) -> AppState {
-        let (uuid, access_token) = match self.menu.auth_account() {
-            Some(account) => (account.uuid, Some(account.access_token.clone())),
-            None => (uuid::Uuid::nil(), None),
-        };
+        let uuid = self.user.uuid;
+        let access_token = self.user.access_token.clone();
+
         let connect_args = crate::net::connection::ConnectArgs {
             server: address,
             username,
@@ -1057,10 +1065,11 @@ impl App {
         data_dirs: DataDirs,
         tokio_rt: Arc<tokio::runtime::Runtime>,
         presence: Option<crate::discord::DiscordPresence>,
+        user: UserData,
     ) -> Self {
         Self {
             state: StateSlot::new(AppState::Setup),
-            ctx: AppCtx::new(connection, version, data_dirs, tokio_rt, presence),
+            ctx: AppCtx::new(connection, version, data_dirs, tokio_rt, presence, user),
         }
     }
 }
@@ -2086,12 +2095,6 @@ impl ApplicationHandler for App {
     }
 }
 
-pub struct LaunchAuth {
-    pub username: String,
-    pub uuid: uuid::Uuid,
-    pub access_token: String,
-}
-
 fn compute_fov_modifier(player: &LocalPlayer) -> f32 {
     let base_walk_speed = 0.1;
     let mut speed = base_walk_speed;
@@ -2255,17 +2258,11 @@ pub fn run(
     version: String,
     data_dirs: DataDirs,
     tokio_rt: Arc<tokio::runtime::Runtime>,
-    auth: Option<LaunchAuth>,
+    user: UserData,
     presence: Option<crate::discord::DiscordPresence>,
 ) -> Result<(), WindowError> {
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(connection, version, data_dirs, tokio_rt, presence);
-    if let Some(auth) = auth {
-        app.ctx.pending_skin_uuid = Some(auth.uuid);
-        app.ctx
-            .menu
-            .set_launch_auth(auth.username, auth.uuid, auth.access_token);
-    }
+    let mut app = App::new(connection, version, data_dirs, tokio_rt, presence, user);
 
     event_loop.run_app(&mut app)?;
     Ok(())

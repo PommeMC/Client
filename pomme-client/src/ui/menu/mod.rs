@@ -1,4 +1,3 @@
-mod auth_screens;
 mod helpers;
 mod main_screen;
 mod options;
@@ -7,8 +6,6 @@ mod servers;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
-
-use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -92,7 +89,6 @@ fn save_settings(game_dir: &Path, settings: &Settings) {
     }
 }
 
-use super::auth::{self, AuthAccount, AuthStatus};
 use super::common::{self, WHITE};
 use super::server_list::{
     PingResults, PingState, ServerEntry, ServerList, is_valid_address, ping_all_servers,
@@ -168,8 +164,6 @@ const DOUBLE_CLICK_MS: u128 = 400;
 
 enum Screen {
     Main,
-    AuthPrompt { pending: AuthPending },
-    Auth { pending: AuthPending },
     ServerList,
     ConfirmDelete(usize),
     DirectConnect,
@@ -211,20 +205,11 @@ impl Screen {
             Self::ServerList => Self::ServerList,
             Self::DirectConnect => Self::DirectConnect,
             Self::AddServer => Self::AddServer,
-            Self::AuthPrompt { pending } => Self::AuthPrompt { pending: *pending },
-            Self::Auth { pending } => Self::Auth { pending: *pending },
             Self::ConfirmDelete(i) => Self::ConfirmDelete(*i),
             Self::EditServer(i) => Self::EditServer(*i),
             Self::Disconnected(s) => Self::Disconnected(s.clone()),
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum AuthPending {
-    None,
-    Singleplayer,
-    Multiplayer,
 }
 
 pub struct MainMenu {
@@ -246,9 +231,6 @@ pub struct MainMenu {
     cursor_blink: Instant,
     last_click_time: Instant,
     last_click_index: Option<usize>,
-    auth_status: Arc<Mutex<AuthStatus>>,
-    auth_account: Option<AuthAccount>,
-    cache_file: PathBuf,
     pub gui_scale_setting: u32,
     pub render_distance: u32,
     pub simulation_distance: u32,
@@ -279,16 +261,10 @@ pub struct MainMenu {
 }
 
 impl MainMenu {
-    pub fn new(game_dir: &Path, rt: Arc<tokio::runtime::Runtime>) -> Self {
+    pub fn new(game_dir: &Path, rt: Arc<tokio::runtime::Runtime>, username: String) -> Self {
         let server_list = ServerList::load(game_dir);
         let ping_results: PingResults = Default::default();
         ping_all_servers(&rt, &server_list.servers, &ping_results);
-        let cache_file = game_dir.join("auth_cache.json");
-        let auth_account = auth::try_restore_cached(&cache_file);
-        let username = auth_account
-            .as_ref()
-            .map(|a| a.username.clone())
-            .unwrap_or_else(|| "Steve".into());
         let settings = load_settings(game_dir);
         Self {
             username,
@@ -309,9 +285,6 @@ impl MainMenu {
             cursor_blink: Instant::now(),
             last_click_time: Instant::now(),
             last_click_index: None,
-            auth_status: Arc::new(Mutex::new(AuthStatus::Idle)),
-            auth_account,
-            cache_file,
             gui_scale_setting: settings.gui_scale,
             render_distance: settings.render_distance,
             simulation_distance: settings.simulation_distance,
@@ -463,10 +436,7 @@ impl MainMenu {
     ) -> MainMenuResult {
         match self.screen {
             Screen::Main => self.build_main(screen_w, screen_h, input, text_width_fn),
-            Screen::AuthPrompt { .. } => {
-                self.build_auth_prompt(screen_w, screen_h, input, &text_width_fn)
-            }
-            Screen::Auth { .. } => self.build_auth(screen_w, screen_h, input, &text_width_fn),
+
             Screen::ServerList => self.build_server_list(screen_w, screen_h, input, &text_width_fn),
             Screen::ConfirmDelete(_) => {
                 self.build_confirm_delete(screen_w, screen_h, input, &text_width_fn)
@@ -518,19 +488,6 @@ impl MainMenu {
                 Screen::Options,
             ),
         }
-    }
-
-    pub fn set_launch_auth(&mut self, username: String, uuid: uuid::Uuid, access_token: String) {
-        self.username = username.clone();
-        self.auth_account = Some(AuthAccount {
-            username,
-            uuid,
-            access_token,
-        });
-    }
-
-    pub fn auth_account(&self) -> Option<&AuthAccount> {
-        self.auth_account.as_ref()
     }
 
     fn refresh_servers(&self) {

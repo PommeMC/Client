@@ -223,7 +223,7 @@ impl MainMenu {
                 any_clicked = true;
                 if def.id == 2 {
                     action = MenuAction::Quit;
-                } else if self.auth_account.is_some() {
+                } else {
                     match def.id {
                         0 => {}
                         1 => {
@@ -233,12 +233,6 @@ impl MainMenu {
                         }
                         _ => {}
                     }
-                } else {
-                    let pending = match def.id {
-                        0 => AuthPending::Singleplayer,
-                        _ => AuthPending::Multiplayer,
-                    };
-                    self.screen = Screen::AuthPrompt { pending };
                 }
             }
         }
@@ -286,11 +280,6 @@ impl MainMenu {
             if clicked && hovered {
                 any_clicked = true;
                 match icon {
-                    ICON_USER if self.auth_account.is_none() => {
-                        self.screen = Screen::AuthPrompt {
-                            pending: AuthPending::None,
-                        };
-                    }
                     ICON_LINK => {
                         self.links_open = !self.links_open;
                         if self.links_open {
