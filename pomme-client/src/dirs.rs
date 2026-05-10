@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 
+#[derive(Clone)]
 pub struct DataDirs {
     pub indexes_dir: PathBuf,
     pub objects_dir: PathBuf,
