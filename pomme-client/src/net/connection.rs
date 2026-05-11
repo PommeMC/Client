@@ -51,10 +51,16 @@ pub struct ConnectArgs {
 }
 
 pub struct ConnectionHandle {
-    pub events: crossbeam_channel::Receiver<NetworkEvent>,
+    pub event_rx: crossbeam_channel::Receiver<NetworkEvent>,
     pub chat_tx: crossbeam_channel::Sender<String>,
-    pub packet_tx: mpsc::UnboundedSender<ServerboundGamePacket>,
+    pub packet_tx: PacketSender,
     pub task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ConnectionHandle {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> ConnectionHandle {
@@ -62,6 +68,7 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
     let (chat_tx, chat_rx) = crossbeam_channel::bounded::<String>(64);
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<ServerboundGamePacket>();
     let game_packet_tx = packet_tx.clone();
+    let packet_tx = PacketSender::new(packet_tx);
     let task = rt.spawn(async move {
         if let Err(e) =
             connect_to_server(args, event_tx.clone(), chat_rx, game_packet_tx, packet_rx).await
@@ -72,7 +79,7 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
         }
     });
     ConnectionHandle {
-        events: event_rx,
+        event_rx,
         chat_tx,
         packet_tx,
         task,

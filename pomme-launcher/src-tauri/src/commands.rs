@@ -348,7 +348,7 @@ pub async fn launch_game(
             .arg(&acc.access_token);
     }
     if let Some(server_ip) = &server_ip {
-        cmd.arg("--quick-access-server").arg(server_ip);
+        cmd.arg("--quick-access-multiplayer").arg(server_ip);
     }
 
     #[cfg(unix)]

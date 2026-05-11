@@ -16,7 +16,6 @@ mod window;
 mod world;
 
 use clap::Parser;
-use net::connection::ConnectArgs;
 use std::sync::Arc;
 
 use crate::user::UserData;
@@ -90,24 +89,6 @@ fn main() {
 
     let rt = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"));
 
-    let connection = if let Some(ref server) = args.quick_access_server {
-        let connect_args = ConnectArgs {
-            server: server.clone(),
-            username: args.username.clone().unwrap_or_else(|| "Steve".into()),
-            uuid: args
-                .uuid
-                .as_deref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(uuid::Uuid::nil),
-            access_token: args.access_token.clone(),
-            view_distance: 12,
-        };
-
-        Some(net::connection::spawn_connection(&rt, connect_args))
-    } else {
-        None
-    };
-
     let user = UserData::from_args(args.username, args.uuid, args.access_token);
 
     let presence = crate::discord::DiscordPresence::start(version)
@@ -115,12 +96,12 @@ fn main() {
         .ok();
 
     if let Err(e) = window::run(
-        connection,
         version.to_owned(),
         data_dirs,
         rt,
         user,
         presence,
+        args.quick_access_multiplayer,
     ) {
         tracing::error!("Fatal: {e}");
         std::process::exit(1);

@@ -6,22 +6,20 @@ impl<T> StateSlot<T> {
     }
 
     pub fn transition(&mut self, f: impl FnOnce(T) -> T) {
-        // SAFETY: invariant guarantees this is always `Some`.
+        // SAFETY: `self.0` is `Some` on entry by the type invariant. The transient
+        // `None` during `f` is unobservable since we hold exclusive access via `&mut self`.
         let state = unsafe { self.0.take().unwrap_unchecked() };
         self.0 = Some(f(state));
     }
 
     pub const fn get(&self) -> &T {
-        // SAFETY: invariant guarantees this is always `Some`.
+        // SAFETY: all write paths (`new`, `set`, `transition`) restore `Some` before
+        // returning, and there is no safe constructor for the `None` variant.
         unsafe { self.0.as_ref().unwrap_unchecked() }
     }
 
     pub const fn get_mut(&mut self) -> &mut T {
-        // SAFETY: invariant guarantees this is always `Some`.
+        // SAFETY: same invariant as `get`.
         unsafe { self.0.as_mut().unwrap_unchecked() }
-    }
-
-    pub fn set(&mut self, state: T) {
-        self.0 = Some(state);
     }
 }

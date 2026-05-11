@@ -28,5 +28,5 @@ pub struct LaunchArgs {
     pub game_dir: Option<String>,
 
     #[arg(long)]
-    pub quick_access_server: Option<String>,
+    pub quick_access_multiplayer: Option<String>,
 }

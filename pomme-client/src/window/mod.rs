@@ -2,7 +2,9 @@ pub mod app;
 pub mod input;
 pub mod state_slot;
 
-use azalea_protocol::packets::game::ServerboundGamePacket;
+use azalea_protocol::packets::game::{
+    ServerboundClientCommand, ServerboundClientInformation, ServerboundGamePacket, s_client_command,
+};
 use input::InputState;
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,6 +21,7 @@ use crate::dirs::DataDirs;
 use crate::discord::DiscordPresence;
 use crate::entity::{EntityStore, ItemEntityStore};
 use crate::net::NetworkEvent;
+use crate::net::connection::{ConnectArgs, ConnectionHandle, spawn_connection};
 use crate::physics::movement;
 use crate::player::LocalPlayer;
 use crate::player::interaction::InteractionState;
@@ -45,10 +48,6 @@ pub struct AppCtx {
     menu: MainMenu,
     tokio_rt: Arc<tokio::runtime::Runtime>,
 
-    net_events: Option<crossbeam_channel::Receiver<NetworkEvent>>,
-    chat_sender: Option<crossbeam_channel::Sender<String>>,
-    packet_sender: Option<crate::net::sender::PacketSender>,
-    net_task: Option<tokio::task::JoinHandle<()>>,
     chunk_store: ChunkStore,
     entity_store: EntityStore,
     data_dirs: DataDirs,
@@ -105,23 +104,12 @@ pub struct AppCtx {
 
 impl AppCtx {
     pub fn new(
-        connection: Option<crate::net::connection::ConnectionHandle>,
         version: String,
         data_dirs: DataDirs,
         tokio_rt: Arc<tokio::runtime::Runtime>,
         presence: Option<crate::discord::DiscordPresence>,
         user: UserData,
     ) -> Self {
-        let (net_events, chat_sender, packet_sender, net_task) = match connection {
-            Some(handle) => (
-                Some(handle.events),
-                Some(handle.chat_tx),
-                Some(crate::net::sender::PacketSender::new(handle.packet_tx)),
-                Some(handle.task),
-            ),
-            None => (None, None, None, None),
-        };
-
         let resource_packs = crate::resource_pack::ResourcePackManager::new(&data_dirs.game_dir);
 
         let username = user.username.clone();
@@ -134,10 +122,6 @@ impl AppCtx {
             menu: MainMenu::new(&data_dirs.game_dir, Arc::clone(&tokio_rt), username),
             tokio_rt,
 
-            net_events,
-            chat_sender,
-            packet_sender,
-            net_task,
             chunk_store: ChunkStore::new(DEFAULT_RENDER_DISTANCE),
             entity_store: EntityStore::new(),
             asset_index: AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, &version),
@@ -192,15 +176,17 @@ impl AppCtx {
         }
     }
 
-    fn sync_render_distance(&mut self) {
+    fn sync_render_distance(&mut self, connection: &ConnectionHandle) {
         let rd = self.menu.render_distance;
         self.last_render_distance = rd;
         tracing::info!("Render distance changed to {rd}");
-        if let Some(sender) = &self.packet_sender {
-            use azalea_entity::HumanoidArm;
-            use azalea_protocol::common::client_information::*;
-            sender.send(ServerboundGamePacket::ClientInformation(
-                azalea_protocol::packets::game::s_client_information::ServerboundClientInformation {
+
+        use azalea_entity::HumanoidArm;
+        use azalea_protocol::common::client_information::*;
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::ClientInformation(
+                ServerboundClientInformation {
                     client_information: ClientInformation {
                         language: "en_us".into(),
                         view_distance: rd as u8,
@@ -222,7 +208,6 @@ impl AppCtx {
                     },
                 },
             ));
-        }
     }
 
     fn apply_display_mode(&mut self, window: &Window) {
@@ -268,34 +253,32 @@ impl AppCtx {
         }
     }
 
-    fn send_respawn(&mut self) {
-        if let Some(sender) = &self.packet_sender {
-            sender.send(ServerboundGamePacket::ClientCommand(
-                azalea_protocol::packets::game::s_client_command::ServerboundClientCommand {
-                    action:
-                        azalea_protocol::packets::game::s_client_command::Action::PerformRespawn,
+    fn send_respawn(&mut self, connection: &ConnectionHandle) {
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::ClientCommand(
+                ServerboundClientCommand {
+                    action: s_client_command::Action::PerformRespawn,
                 },
             ));
-        }
+
         self.death_confirm = false;
         self.respawn_sent = true;
     }
 
-    fn send_chat_message(&self, msg: String) {
-        if let Some(tx) = &self.chat_sender {
-            let _ = tx.try_send(msg);
-        }
+    fn send_chat_message(&self, connection: &ConnectionHandle, msg: String) {
+        let _ = connection.chat_tx.try_send(msg);
     }
 
     fn drain_network_events(
         &mut self,
+        connection: &ConnectionHandle,
         renderer: &mut Renderer,
         window: &Window,
         mut connecting_state: Option<&mut ConnectingState>,
     ) -> Option<String> {
-        let Some(rx) = &self.net_events else {
-            return None;
-        };
+        let rx = &connection.event_rx;
+
         let mut chunks_to_mesh = Vec::new();
         let mut disconnect_reason: Option<String> = None;
         let mut processed = 0u32;
@@ -659,11 +642,11 @@ impl AppCtx {
                     s_resource_pack::Action::FailedDownload
                 }
             };
-            if let Some(sender) = &self.packet_sender {
-                sender.send(ServerboundGamePacket::ResourcePack(
+            connection
+                .packet_tx
+                .send(ServerboundGamePacket::ResourcePack(
                     s_resource_pack::ServerboundResourcePack { id: dl.id, action },
                 ));
-            }
             self.menu.active_packs = self.resource_packs.active_pack_info();
         }
 
@@ -694,7 +677,7 @@ impl AppCtx {
         disconnect_reason
     }
 
-    fn tick_physics(&mut self, renderer: &mut Renderer) {
+    fn tick_physics(&mut self, renderer: &mut Renderer, connection: &ConnectionHandle) {
         if self.dead {
             return;
         }
@@ -723,11 +706,9 @@ impl AppCtx {
         renderer.set_base_fov(self.menu.fov as f32);
         renderer.update_fov(compute_fov_modifier(&self.player));
 
-        if self.packet_sender.is_some() {
-            self.send_input_packet();
-            self.send_sprint_command();
-            self.send_position_packet();
-        }
+        self.send_input_packet(connection);
+        self.send_sprint_command(connection);
+        self.send_position_packet(connection);
 
         if !self.paused && !self.inventory_open && !self.chat.is_open() {
             let eye_pos = self.player.position + glam::Vec3::new(0.0, 1.62, 0.0);
@@ -741,7 +722,7 @@ impl AppCtx {
             let dirty = self.interaction.tick(
                 &self.input,
                 &self.chunk_store,
-                self.packet_sender.as_ref(),
+                &connection.packet_tx,
                 self.player.on_ground,
                 self.player.game_mode == 1,
             );
@@ -755,8 +736,8 @@ impl AppCtx {
         }
     }
 
-    fn send_input_packet(&mut self) {
-        let sender = self.packet_sender.as_ref().unwrap();
+    fn send_input_packet(&mut self, connection: &ConnectionHandle) {
+        let sender = &connection.packet_tx;
         let current = PlayerInputState {
             forward: self.input.key_pressed(KeyCode::KeyW),
             backward: self.input.key_pressed(KeyCode::KeyS),
@@ -783,10 +764,10 @@ impl AppCtx {
         }
     }
 
-    fn send_sprint_command(&mut self) {
+    fn send_sprint_command(&mut self, connection: &ConnectionHandle) {
         let sprinting = self.player.sprinting;
         if sprinting != self.was_sprinting {
-            let sender = self.packet_sender.as_ref().unwrap();
+            let sender = &connection.packet_tx;
             let action = if sprinting {
                 azalea_protocol::packets::game::s_player_command::Action::StartSprinting
             } else {
@@ -803,8 +784,8 @@ impl AppCtx {
         }
     }
 
-    fn send_position_packet(&mut self) {
-        let sender = self.packet_sender.as_ref().unwrap();
+    fn send_position_packet(&mut self, connection: &ConnectionHandle) {
+        let sender = &connection.packet_tx;
         use azalea_protocol::common::movements::MoveFlags;
         use azalea_protocol::packets::game::*;
 
@@ -961,81 +942,111 @@ impl FpsCounter {
 
 impl App {
     fn new(
-        connection: Option<crate::net::connection::ConnectionHandle>,
         version: String,
         data_dirs: DataDirs,
         tokio_rt: Arc<tokio::runtime::Runtime>,
         presence: Option<crate::discord::DiscordPresence>,
         user: UserData,
+        quick_access_multiplayer: Option<String>,
     ) -> Self {
         Self {
-            state: StateSlot::new(AppState::Setup),
-            ctx: AppCtx::new(connection, version, data_dirs, tokio_rt, presence, user),
+            state: StateSlot::new(AppState::Setup {
+                quick_access_multiplayer,
+            }),
+            ctx: AppCtx::new(version, data_dirs, tokio_rt, presence, user),
         }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if !matches!(self.state.get(), AppState::Setup) {
-            return;
-        }
+        self.state.transition(|app| match app {
+            AppState::Setup {
+                quick_access_multiplayer,
+            } => {
+                let window_icon = {
+                    let png =
+                        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
+                    let img = image::load_from_memory(png).expect("failed to decode icon");
+                    let rgba = img.to_rgba8();
+                    let (w, h) = (rgba.width(), rgba.height());
+                    winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
+                };
 
-        let window_icon = {
-            let png = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
-            let img = image::load_from_memory(png).expect("failed to decode icon");
-            let rgba = img.to_rgba8();
-            let (w, h) = (rgba.width(), rgba.height());
-            winit::window::Icon::from_rgba(rgba.into_raw(), w, h).ok()
-        };
+                let window_attrs = Window::default_attributes()
+                    .with_title("Pomme")
+                    .with_inner_size(winit::dpi::LogicalSize::new(854, 480))
+                    .with_visible(false)
+                    .with_window_icon(window_icon);
 
-        let window_attrs = Window::default_attributes()
-            .with_title("Pomme")
-            .with_inner_size(winit::dpi::LogicalSize::new(854, 480))
-            .with_visible(false)
-            .with_window_icon(window_icon);
+                let window = match event_loop.create_window(window_attrs) {
+                    Ok(w) => Arc::new(w),
+                    Err(e) => {
+                        tracing::error!("Failed to create window: {e}");
+                        event_loop.exit();
+                        return AppState::Setup {
+                            quick_access_multiplayer,
+                        };
+                    }
+                };
 
-        let window = match event_loop.create_window(window_attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                tracing::error!("Failed to create window: {e}");
-                event_loop.exit();
-                return;
+                let mut renderer = match Renderer::new(
+                    Arc::clone(&window),
+                    &self.ctx.data_dirs.jar_assets_dir,
+                    &self.ctx.asset_index,
+                    &self.ctx.data_dirs.game_dir,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!("Failed to create renderer: {e}");
+                        event_loop.exit();
+                        return AppState::Setup {
+                            quick_access_multiplayer,
+                        };
+                    }
+                };
+
+                if let Some(p) = &mut self.ctx.presence {
+                    p.set_in_menu(&self.ctx.version);
+                }
+
+                self.ctx.mesh_dispatcher =
+                    Some(renderer.create_mesh_dispatcher(self.ctx.biome_climate.clone(), None));
+                if let Some(uuid) = self.ctx.pending_skin_uuid.take() {
+                    renderer.load_player_skin(&uuid, &self.ctx.tokio_rt);
+                }
+
+                self.ctx.apply_cursor_grab(false, &window);
+
+                let app_rt = Runtime {
+                    renderer: Box::new(renderer),
+                    window,
+                    last_frame: Instant::now(),
+                    fps_counter: FpsCounter::new(),
+                };
+
+                if let Some(server_ip) = quick_access_multiplayer {
+                    let connection = spawn_connection(
+                        &self.ctx.tokio_rt,
+                        ConnectArgs {
+                            server: server_ip,
+                            username: self.ctx.user.username.clone(),
+                            uuid: self.ctx.user.uuid,
+                            access_token: self.ctx.user.access_token.clone(),
+                            view_distance: self.ctx.menu.render_distance as u8,
+                        },
+                    );
+
+                    AppState::Connecting {
+                        runtime: app_rt,
+                        connect_state: ConnectingState::Connecting,
+                        connection,
+                    }
+                } else {
+                    AppState::InMenu { runtime: app_rt }
+                }
             }
-        };
-
-        let mut renderer = match Renderer::new(
-            Arc::clone(&window),
-            &self.ctx.data_dirs.jar_assets_dir,
-            &self.ctx.asset_index,
-            &self.ctx.data_dirs.game_dir,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("Failed to create renderer: {e}");
-                event_loop.exit();
-                return;
-            }
-        };
-
-        if let Some(p) = &mut self.ctx.presence {
-            p.set_in_menu(&self.ctx.version);
-        }
-
-        self.ctx.mesh_dispatcher =
-            Some(renderer.create_mesh_dispatcher(self.ctx.biome_climate.clone(), None));
-        if let Some(uuid) = self.ctx.pending_skin_uuid.take() {
-            renderer.load_player_skin(&uuid, &self.ctx.tokio_rt);
-        }
-
-        self.ctx.apply_cursor_grab(false, &window);
-        self.state.set(AppState::InMenu {
-            runtime: Runtime {
-                renderer: Box::new(renderer),
-                window,
-                last_frame: Instant::now(),
-                fps_counter: FpsCounter::new(),
-            },
+            _ => app,
         });
     }
 
@@ -1066,14 +1077,15 @@ impl ApplicationHandler for App {
                     }
 
                     match app {
-                        AppState::Setup => app,
+                        AppState::Setup { .. } => app,
                         AppState::InMenu { runtime } => {
                             self.ctx.input.on_menu_key_event(&event);
                             AppState::InMenu { runtime }
                         }
                         AppState::Connecting {
                             runtime: mut app_rt,
-                            state,
+                            connect_state,
+                            connection,
                         } => {
                             if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
@@ -1081,12 +1093,6 @@ impl ApplicationHandler for App {
                                 let ctx = &mut self.ctx;
                                 // TODO(proper-disconnect)
 
-                                ctx.packet_sender = None;
-                                ctx.chat_sender = None;
-                                ctx.net_events = None;
-                                if let Some(task) = ctx.net_task.take() {
-                                    task.abort();
-                                }
                                 ctx.paused = false;
                                 ctx.dead = false;
                                 ctx.death_message = String::new();
@@ -1113,12 +1119,14 @@ impl ApplicationHandler for App {
                             } else {
                                 AppState::Connecting {
                                     runtime: app_rt,
-                                    state,
+                                    connect_state,
+                                    connection,
                                 }
                             }
                         }
                         AppState::InGame {
                             runtime: mut app_rt,
+                            connection,
                         } => {
                             if event.state.is_pressed()
                                 && !event.repeat
@@ -1145,7 +1153,7 @@ impl ApplicationHandler for App {
                                                     >= 1.0 =>
                                         {
                                             self.ctx.death_confirm = false;
-                                            self.ctx.send_respawn();
+                                            self.ctx.send_respawn(&connection);
                                         }
                                         KeyCode::Escape if !self.ctx.dead => {
                                             if self.ctx.inventory_open {
@@ -1195,7 +1203,10 @@ impl ApplicationHandler for App {
                                 self.ctx.input.on_key_event(&event);
                             }
 
-                            AppState::InGame { runtime: app_rt }
+                            AppState::InGame {
+                                runtime: app_rt,
+                                connection,
+                            }
                         }
                     }
                 });
@@ -1206,12 +1217,11 @@ impl ApplicationHandler for App {
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
                 };
                 match self.state.get() {
-                    AppState::InMenu { .. }
-                    | AppState::Connecting { .. }
-                    | AppState::InGame { .. } => {
+                    AppState::InMenu { .. } | AppState::Connecting { .. } => {
                         self.ctx.input.on_menu_scroll(scroll);
                     }
-                    _ => self.ctx.input.on_scroll(scroll),
+                    _ if !self.ctx.inventory_open => self.ctx.input.on_scroll(scroll),
+                    _ => {}
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -1230,7 +1240,7 @@ impl ApplicationHandler for App {
                 self.ctx.input.on_mouse_button(button, state);
             }
             WindowEvent::RedrawRequested => {
-                if matches!(self.state.get(), AppState::Setup) {
+                if matches!(self.state.get(), AppState::Setup { .. }) {
                     return;
                 }
 
@@ -1248,7 +1258,7 @@ impl ApplicationHandler for App {
 
                 let ctx = &mut self.ctx;
                 self.state.transition(|app| match app {
-                    AppState::Setup => unreachable!(),
+                    AppState::Setup {..} => unreachable!(),
                     AppState::InMenu { runtime: mut app_rt } => {
 
                         ctx.panorama_scroll += dt * 0.00556;
@@ -1306,10 +1316,6 @@ impl ApplicationHandler for App {
 
                         ctx.input.clear_click_events();
 
-                        if ctx.menu.render_distance != ctx.last_render_distance {
-                            ctx.sync_render_distance();
-                        }
-
                         if ctx.menu.display_mode != ctx.display_mode {
                             ctx.display_mode = ctx.menu.display_mode;
                             ctx.apply_display_mode(&app_rt.window);
@@ -1366,17 +1372,14 @@ impl ApplicationHandler for App {
                                     view_distance: ctx.menu.render_distance as u8,
                                 };
 
-                                let handle = crate::net::connection::spawn_connection(&ctx.tokio_rt, connect_args);
-                                ctx.net_events = Some(handle.events);
-                                ctx.chat_sender = Some(handle.chat_tx);
-                                ctx.packet_sender = Some(crate::net::sender::PacketSender::new(handle.packet_tx));
-                                ctx.net_task = Some(handle.task);
+                                let connection = spawn_connection(&ctx.tokio_rt, connect_args);
 
                                 ctx.apply_cursor_grab(false, &app_rt.window);
 
                                 return AppState::Connecting {
                                     runtime: app_rt,
-                                    state: ConnectingState::Connecting,
+                                    connect_state: ConnectingState::Connecting,
+                                    connection,
                                 }
                             }
                             MenuAction::ChangeTheme(theme) => {
@@ -1393,7 +1396,7 @@ impl ApplicationHandler for App {
                             }
                             MenuAction::Quit => {
                                 event_loop.exit();
-                                return AppState::Setup;
+                                return AppState::InMenu { runtime: app_rt };
                             }
                             MenuAction::None => {}
                         }
@@ -1402,18 +1405,13 @@ impl ApplicationHandler for App {
                     }
                     AppState::Connecting {
                         runtime: mut app_rt,
-                        state: mut connection_state,
+                        mut connect_state,
+                        connection,
                     } => {
-                        let disconnect_reason = ctx.drain_network_events(&mut app_rt.renderer, &app_rt.window, Some(&mut connection_state));
+                        let disconnect_reason = ctx.drain_network_events(&connection, &mut app_rt.renderer, &app_rt.window, Some(&mut connect_state));
                         if let Some(reason) = disconnect_reason {
                             // TODO(proper-disconnect)
 
-                            ctx.packet_sender = None;
-                            ctx.chat_sender = None;
-                            ctx.net_events = None;
-                            if let Some(task) = ctx.net_task.take() {
-                                task.abort();
-                            }
                             ctx.paused = false;
                             ctx.dead = false;
                             ctx.death_message = String::new();
@@ -1437,7 +1435,7 @@ impl ApplicationHandler for App {
                             return AppState::InMenu { runtime: app_rt };
                         }
 
-                        if matches!(connection_state, ConnectingState::Loading) {
+                        if matches!(connect_state, ConnectingState::Loading) {
                             if let Some(dispatcher) =
                                 &ctx.mesh_dispatcher
                             {
@@ -1454,9 +1452,8 @@ impl ApplicationHandler for App {
                             // per-player entity tracking on it.
                             if ready
                                 && !ctx.player_loaded_sent
-                                && let Some(sender) = &ctx.packet_sender
                             {
-                                sender.send(ServerboundGamePacket::PlayerLoaded(
+                                connection.packet_tx.send(ServerboundGamePacket::PlayerLoaded(
                                     azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
                                 ));
                                 ctx.player_loaded_sent = true;
@@ -1468,11 +1465,11 @@ impl ApplicationHandler for App {
                                 }
                                 ctx.apply_cursor_grab(true, &app_rt.window);
 
-                                return AppState::InGame { runtime: app_rt };
+                                return AppState::InGame { runtime: app_rt, connection };
                             }
                         }
 
-                        let status_text = match connection_state {
+                        let status_text = match connect_state {
                             ConnectingState::Loading => "Loading terrain...",
                             ConnectingState::Connecting => "Connecting to the server...",
                         };
@@ -1541,12 +1538,6 @@ impl ApplicationHandler for App {
                         if cancel {
                             // TODO(proper-disconnect)
 
-                            ctx.packet_sender = None;
-                            ctx.chat_sender = None;
-                            ctx.net_events = None;
-                            if let Some(task) = ctx.net_task.take() {
-                                task.abort();
-                            }
                             ctx.paused = false;
                             ctx.dead = false;
                             ctx.death_message = String::new();
@@ -1569,19 +1560,13 @@ impl ApplicationHandler for App {
                             return AppState::InMenu { runtime: app_rt };
                         }
 
-                        AppState::Connecting { runtime: app_rt, state: connection_state }
+                        AppState::Connecting { runtime: app_rt, connect_state, connection }
                     },
-                    AppState::InGame {  runtime: mut app_rt } => {
-                        let disconnect_reason = ctx.drain_network_events(&mut app_rt.renderer, &app_rt.window, None);
+                    AppState::InGame {  runtime: mut app_rt, connection } => {
+                        let disconnect_reason = ctx.drain_network_events(&connection,&mut app_rt.renderer, &app_rt.window, None);
                         if let Some(reason) = disconnect_reason {
                             // TODO(proper-disconnect)
 
-                            ctx.packet_sender = None;
-                            ctx.chat_sender = None;
-                            ctx.net_events = None;
-                            if let Some(task) = ctx.net_task.take() {
-                                task.abort();
-                            }
                             ctx.paused = false;
                             ctx.dead = false;
                             ctx.death_message = String::new();
@@ -1627,7 +1612,7 @@ impl ApplicationHandler for App {
 
                             ctx.tick_accumulator += dt;
                             while ctx.tick_accumulator >= TICK_RATE {
-                                ctx.tick_physics(&mut app_rt.renderer);
+                                ctx.tick_physics(&mut app_rt.renderer, &connection);
                                 ctx.item_entity_store.tick(
                                     |bx, by, bz| {
                                         !ctx.chunk_store.get_block_state(bx, by, bz).is_air()
@@ -1669,7 +1654,7 @@ impl ApplicationHandler for App {
                         let enter = ctx.input.enter_pressed();
                         if let Some(msg) = ctx.chat.handle_key_input(&typed, backspace, enter)
                         {
-                            ctx.send_chat_message(msg);
+                            ctx.send_chat_message(&connection, msg);
                             ctx.apply_cursor_grab(true, &app_rt.window);
                         }
 
@@ -2061,38 +2046,31 @@ impl ApplicationHandler for App {
                         match death_action {
                             DeathAction::Respawn => {
                                 ctx.death_confirm = false;
-                                ctx.send_respawn();
+                                ctx.send_respawn(&connection);
                             }
                             DeathAction::TitleScreen => {
+                                // TODO(proper-disconnect)
 
-                                    // TODO(proper-disconnect)
+                                ctx.paused = false;
+                                ctx.dead = false;
+                                ctx.death_message = String::new();
+                                ctx.position_set = false;
+                                ctx.player_loaded_sent = false;
+                                ctx.chunk_store = ChunkStore::new(ctx.menu.render_distance);
+                                ctx.entity_store.clear();
+                                ctx.item_entity_store.clear();
 
-                                    ctx.packet_sender = None;
-                                    ctx.chat_sender = None;
-                                    ctx.net_events = None;
-                                    if let Some(task) = ctx.net_task.take() {
-                                        task.abort();
-                                    }
-                                    ctx.paused = false;
-                                    ctx.dead = false;
-                                    ctx.death_message = String::new();
-                                    ctx.position_set = false;
-                                    ctx.player_loaded_sent = false;
-                                    ctx.chunk_store = ChunkStore::new(ctx.menu.render_distance);
-                                    ctx.entity_store.clear();
-                                    ctx.item_entity_store.clear();
+                                app_rt.renderer.clear_chunk_meshes();
+                                ctx.mesh_dispatcher =
+                                    Some(app_rt.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
 
-                                    app_rt.renderer.clear_chunk_meshes();
-                                    ctx.mesh_dispatcher =
-                                        Some(app_rt.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
+                                if let Some(p) = &mut ctx.presence {
+                                    p.set_in_menu(&ctx.version);
+                                }
 
-                                    if let Some(p) = &mut ctx.presence {
-                                        p.set_in_menu(&ctx.version);
-                                    }
+                                ctx.apply_cursor_grab(false, &app_rt.window);
 
-                                    ctx.apply_cursor_grab(false, &app_rt.window);
-
-                                    return AppState::InMenu { runtime: app_rt };
+                                return AppState::InMenu { runtime: app_rt };
 
                             }
                             DeathAction::ShowConfirm => {
@@ -2116,12 +2094,6 @@ impl ApplicationHandler for App {
                             PauseAction::Disconnect => {
                                     // TODO(proper-disconnect)
 
-                                    ctx.packet_sender = None;
-                                    ctx.chat_sender = None;
-                                    ctx.net_events = None;
-                                    if let Some(task) = ctx.net_task.take() {
-                                        task.abort();
-                                    }
                                     ctx.paused = false;
                                     ctx.dead = false;
                                     ctx.death_message = String::new();
@@ -2160,7 +2132,7 @@ impl ApplicationHandler for App {
 
                         if ctx.options_from_game {
                             if ctx.menu.render_distance != ctx.last_render_distance {
-                                ctx.sync_render_distance();
+                                ctx.sync_render_distance(&connection);
                             }
                             if !ctx.menu.is_options_screen() {
                                 ctx.options_from_game = false;
@@ -2169,7 +2141,7 @@ impl ApplicationHandler for App {
                             }
                         }
 
-                        AppState::InGame { runtime: app_rt }
+                        AppState::InGame { runtime: app_rt, connection }
                     },
                 });
 
@@ -2365,15 +2337,22 @@ fn build_item_render_infos(
 }
 
 pub fn run(
-    connection: Option<crate::net::connection::ConnectionHandle>,
     version: String,
     data_dirs: DataDirs,
     tokio_rt: Arc<tokio::runtime::Runtime>,
     user: UserData,
-    presence: Option<crate::discord::DiscordPresence>,
+    presence: Option<DiscordPresence>,
+    quick_access_multiplayer: Option<String>,
 ) -> Result<(), WindowError> {
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(connection, version, data_dirs, tokio_rt, presence, user);
+    let mut app = App::new(
+        version,
+        data_dirs,
+        tokio_rt,
+        presence,
+        user,
+        quick_access_multiplayer,
+    );
 
     event_loop.run_app(&mut app)?;
     Ok(())

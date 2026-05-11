@@ -92,14 +92,12 @@ impl InteractionState {
         self.o_attack_anim + diff * partial_tick
     }
 
-    fn swing(&mut self, sender: Option<&PacketSender>) {
+    fn swing(&mut self, sender: &PacketSender) {
         if !self.swinging || self.swing_time >= SWING_DURATION / 2 || self.swing_time < 0 {
             self.swing_time = -1;
             self.swinging = true;
         }
-        if let Some(sender) = sender {
-            send_swing(sender);
-        }
+        send_swing(sender);
     }
 
     fn update_swing(&mut self) {
@@ -125,7 +123,7 @@ impl InteractionState {
         &mut self,
         input: &InputState,
         chunks: &ChunkStore,
-        sender: Option<&PacketSender>,
+        sender: &PacketSender,
         on_ground: bool,
         creative: bool,
     ) -> Vec<azalea_core::position::ChunkPos> {
@@ -165,7 +163,7 @@ impl InteractionState {
     fn start_attack(
         &mut self,
         chunks: &ChunkStore,
-        sender: Option<&PacketSender>,
+        sender: &PacketSender,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -194,7 +192,7 @@ impl InteractionState {
     fn continue_attack(
         &mut self,
         chunks: &ChunkStore,
-        sender: Option<&PacketSender>,
+        sender: &PacketSender,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -218,7 +216,7 @@ impl InteractionState {
         self.swing(sender);
     }
 
-    fn use_item_on(&mut self, sender: Option<&PacketSender>) {
+    fn use_item_on(&mut self, sender: &PacketSender) {
         if self.is_destroying {
             return;
         }
@@ -231,30 +229,29 @@ impl InteractionState {
 
         self.swing(sender);
         self.seq += 1;
-        if let Some(sender) = sender {
-            sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
-                hand: InteractionHand::MainHand,
-                block_hit: BlockHit {
-                    block_pos: hit.block_pos,
-                    direction: hit.face,
-                    location: azalea_core::position::Vec3 {
-                        x: hit.hit_point.x as f64,
-                        y: hit.hit_point.y as f64,
-                        z: hit.hit_point.z as f64,
-                    },
-                    inside: false,
-                    world_border: false,
+
+        sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
+            hand: InteractionHand::MainHand,
+            block_hit: BlockHit {
+                block_pos: hit.block_pos,
+                direction: hit.face,
+                location: azalea_core::position::Vec3 {
+                    x: hit.hit_point.x as f64,
+                    y: hit.hit_point.y as f64,
+                    z: hit.hit_point.z as f64,
                 },
-                seq: self.seq,
-            }));
-        }
+                inside: false,
+                world_border: false,
+            },
+            seq: self.seq,
+        }));
     }
 
     fn start_destroy_block(
         &mut self,
         hit: HitResult,
         chunks: &ChunkStore,
-        sender: Option<&PacketSender>,
+        sender: &PacketSender,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -333,7 +330,7 @@ impl InteractionState {
         &mut self,
         hit: HitResult,
         chunks: &ChunkStore,
-        sender: Option<&PacketSender>,
+        sender: &PacketSender,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -382,7 +379,7 @@ impl InteractionState {
         }
     }
 
-    fn stop_destroying(&mut self, sender: Option<&PacketSender>) {
+    fn stop_destroying(&mut self, sender: &PacketSender) {
         if self.is_destroying {
             send_action(
                 sender,
@@ -535,22 +532,20 @@ fn hit_face(origin: Vec3, dir: Vec3, pos: &BlockPos) -> Direction {
 }
 
 fn send_action(
-    sender: Option<&PacketSender>,
+    sender: &PacketSender,
     action: Action,
     pos: BlockPos,
     direction: Direction,
     seq: u32,
 ) {
-    if let Some(sender) = sender {
-        sender.send(ServerboundGamePacket::PlayerAction(
-            ServerboundPlayerAction {
-                action,
-                pos,
-                direction,
-                seq,
-            },
-        ));
-    }
+    sender.send(ServerboundGamePacket::PlayerAction(
+        ServerboundPlayerAction {
+            action,
+            pos,
+            direction,
+            seq,
+        },
+    ));
 }
 
 fn send_swing(sender: &PacketSender) {
