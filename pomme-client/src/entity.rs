@@ -454,11 +454,6 @@ impl ItemEntityStore {
             })
             .collect()
     }
-
-    pub fn clear(&mut self) {
-        self.items.clear();
-        self.pickups.clear();
-    }
 }
 
 pub struct EntityStore {
@@ -540,10 +535,6 @@ impl EntityStore {
                 &mut entity.prev_walk_anim_speed,
             );
         }
-    }
-
-    pub fn clear(&mut self) {
-        self.living.clear();
     }
 }
 

@@ -9,8 +9,8 @@ use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerA
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
 use glam::Vec3;
 
+use crate::app::input::InputState;
 use crate::net::sender::PacketSender;
-use crate::window::input::InputState;
 use crate::world::chunk::ChunkStore;
 
 const REACH: f32 = 4.5;

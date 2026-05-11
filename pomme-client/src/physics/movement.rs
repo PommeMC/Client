@@ -4,8 +4,8 @@ use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
 use super::collision::resolve_collision;
+use crate::app::input::InputState;
 use crate::player::LocalPlayer;
-use crate::window::input::InputState;
 use crate::world::chunk::ChunkStore;
 
 const GRAVITY: f32 = 0.08;

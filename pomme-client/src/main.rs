@@ -1,3 +1,4 @@
+mod app;
 mod args;
 mod assets;
 mod benchmark;
@@ -12,13 +13,12 @@ mod renderer;
 mod resource_pack;
 mod ui;
 mod user;
-mod window;
 mod world;
 
 use clap::Parser;
 use std::sync::Arc;
 
-use crate::user::UserData;
+use crate::{app::App, user::UserData};
 
 /// Maps all supported versions to their protocol version.
 /// Snapshots encode as `(1 << 30) | base_protocol`.
@@ -95,14 +95,16 @@ fn main() {
         .inspect_err(|e| tracing::warn!("Discord rich presence unavailable: {e}"))
         .ok();
 
-    if let Err(e) = window::run(
+    if let Err(e) = App::new(
         version.to_owned(),
         data_dirs,
         rt,
-        user,
         presence,
+        user,
         args.quick_access_multiplayer,
-    ) {
+    )
+    .run()
+    {
         tracing::error!("Fatal: {e}");
         std::process::exit(1);
     }

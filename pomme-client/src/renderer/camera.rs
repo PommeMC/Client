@@ -1,6 +1,6 @@
 use glam::{DVec3, Mat4, Vec3};
 
-use crate::window::input::InputState;
+use crate::app::input::InputState;
 
 const UP: Vec3 = Vec3::Y;
 pub const DEFAULT_FOV_DEGREES: f32 = 70.0;

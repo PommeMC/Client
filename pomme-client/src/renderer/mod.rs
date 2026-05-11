@@ -36,8 +36,8 @@ use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 use swapchain::SwapchainState;
 
+use crate::app::input::InputState;
 use crate::assets::AssetIndex;
-use crate::window::input::InputState;
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
