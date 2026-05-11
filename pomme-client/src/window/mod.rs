@@ -1,4 +1,5 @@
 pub mod app;
+pub mod game;
 pub mod input;
 pub mod state_slot;
 
@@ -36,11 +37,12 @@ use crate::ui::hud;
 use crate::ui::menu::{MainMenu, MenuAction, MenuInput, PanoramaTheme};
 use crate::ui::pause::{self, PauseAction};
 use crate::user::UserData;
-use crate::window::app::{AppState, ConnectingState, Runtime};
+use crate::window::app::{AppPhase, ConnectionPhase, Gfx, Panorama};
+use crate::window::game::GameState;
 use crate::window::state_slot::StateSlot;
 use crate::world::chunk::ChunkStore;
 
-pub struct AppCtx {
+pub struct AppCore {
     user: UserData,
     presence: Option<DiscordPresence>,
     display_mode: DisplayMode,
@@ -75,7 +77,6 @@ pub struct AppCtx {
     inventory_open: bool,
     chat: ChatState,
     tab_list: crate::player::tab_list::TabList,
-    panorama_scroll: f32,
     interaction: InteractionState,
     sky_state: crate::renderer::SkyState,
     show_debug: bool,
@@ -102,7 +103,7 @@ pub struct AppCtx {
     meshed_lod: std::collections::HashMap<azalea_core::position::ChunkPos, u32>,
 }
 
-impl AppCtx {
+impl AppCore {
     pub fn new(
         version: String,
         data_dirs: DataDirs,
@@ -154,7 +155,6 @@ impl AppCtx {
             inventory_open: false,
             chat: ChatState::new(),
             tab_list: crate::player::tab_list::TabList::new(),
-            panorama_scroll: 0.0,
             interaction: InteractionState::new(),
             sky_state: crate::renderer::SkyState::default_day(),
             show_debug: false,
@@ -275,7 +275,7 @@ impl AppCtx {
         connection: &ConnectionHandle,
         renderer: &mut Renderer,
         window: &Window,
-        mut connecting_state: Option<&mut ConnectingState>,
+        mut connecting_state: Option<&mut ConnectionPhase>,
     ) -> Option<String> {
         let rx = &connection.event_rx;
 
@@ -292,7 +292,7 @@ impl AppCtx {
                 NetworkEvent::Connected => {
                     if let Some(state) = connecting_state.as_deref_mut() {
                         tracing::info!("Connected to server");
-                        *state = ConnectingState::Loading;
+                        *state = ConnectionPhase::Loading;
                     } else {
                         tracing::warn!("Unexpected NetworkEvent::Connected, skipping");
                     }
@@ -903,8 +903,8 @@ impl DisplayMode {
 }
 
 struct App {
-    state: StateSlot<AppState>,
-    ctx: AppCtx,
+    phase: StateSlot<AppPhase>,
+    core: AppCore,
 }
 
 struct PackDownloadResult {
@@ -950,18 +950,18 @@ impl App {
         quick_access_multiplayer: Option<String>,
     ) -> Self {
         Self {
-            state: StateSlot::new(AppState::Setup {
+            phase: StateSlot::new(AppPhase::Setup {
                 quick_access_multiplayer,
             }),
-            ctx: AppCtx::new(version, data_dirs, tokio_rt, presence, user),
+            core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
         }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        self.state.transition(|app| match app {
-            AppState::Setup {
+        self.phase.transition(|app| match app {
+            AppPhase::Setup {
                 quick_access_multiplayer,
             } => {
                 let window_icon = {
@@ -984,7 +984,7 @@ impl ApplicationHandler for App {
                     Err(e) => {
                         tracing::error!("Failed to create window: {e}");
                         event_loop.exit();
-                        return AppState::Setup {
+                        return AppPhase::Setup {
                             quick_access_multiplayer,
                         };
                     }
@@ -992,34 +992,34 @@ impl ApplicationHandler for App {
 
                 let mut renderer = match Renderer::new(
                     Arc::clone(&window),
-                    &self.ctx.data_dirs.jar_assets_dir,
-                    &self.ctx.asset_index,
-                    &self.ctx.data_dirs.game_dir,
+                    &self.core.data_dirs.jar_assets_dir,
+                    &self.core.asset_index,
+                    &self.core.data_dirs.game_dir,
                 ) {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::error!("Failed to create renderer: {e}");
                         event_loop.exit();
-                        return AppState::Setup {
+                        return AppPhase::Setup {
                             quick_access_multiplayer,
                         };
                     }
                 };
 
-                if let Some(p) = &mut self.ctx.presence {
-                    p.set_in_menu(&self.ctx.version);
+                if let Some(p) = &mut self.core.presence {
+                    p.set_in_menu(&self.core.version);
                 }
 
-                self.ctx.mesh_dispatcher =
-                    Some(renderer.create_mesh_dispatcher(self.ctx.biome_climate.clone(), None));
-                if let Some(uuid) = self.ctx.pending_skin_uuid.take() {
-                    renderer.load_player_skin(&uuid, &self.ctx.tokio_rt);
+                self.core.mesh_dispatcher =
+                    Some(renderer.create_mesh_dispatcher(self.core.biome_climate.clone(), None));
+                if let Some(uuid) = self.core.pending_skin_uuid.take() {
+                    renderer.load_player_skin(&uuid, &self.core.tokio_rt);
                 }
 
-                self.ctx.apply_cursor_grab(false, &window);
+                self.core.apply_cursor_grab(false, &window);
 
-                let app_rt = Runtime {
-                    renderer: Box::new(renderer),
+                let gfx = Gfx {
+                    renderer,
                     window,
                     last_frame: Instant::now(),
                     fps_counter: FpsCounter::new(),
@@ -1027,23 +1027,27 @@ impl ApplicationHandler for App {
 
                 if let Some(server_ip) = quick_access_multiplayer {
                     let connection = spawn_connection(
-                        &self.ctx.tokio_rt,
+                        &self.core.tokio_rt,
                         ConnectArgs {
                             server: server_ip,
-                            username: self.ctx.user.username.clone(),
-                            uuid: self.ctx.user.uuid,
-                            access_token: self.ctx.user.access_token.clone(),
-                            view_distance: self.ctx.menu.render_distance as u8,
+                            username: self.core.user.username.clone(),
+                            uuid: self.core.user.uuid,
+                            access_token: self.core.user.access_token.clone(),
+                            view_distance: self.core.menu.render_distance as u8,
                         },
                     );
 
-                    AppState::Connecting {
-                        runtime: app_rt,
-                        connect_state: ConnectingState::Connecting,
+                    AppPhase::Connecting {
+                        gfx,
+                        panorama: Panorama::new(),
+                        connect_phase: ConnectionPhase::Connecting,
                         connection,
                     }
                 } else {
-                    AppState::InMenu { runtime: app_rt }
+                    AppPhase::InMenu {
+                        gfx,
+                        panorama: Panorama::new(),
+                    }
                 }
             }
             _ => app,
@@ -1061,36 +1065,37 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(new_size) => {
-                if let Some(app_rt) = self.state.rt_mut() {
+                if let Some(app_rt) = self.phase.gfx_mut() {
                     app_rt.renderer.resize(new_size);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                self.state.transition(|mut app| {
-                    if let Some(Runtime { window, .. }) = app.rt_mut()
+                self.phase.transition(|mut app| {
+                    if let Some(Gfx { window, .. }) = app.gfx_mut()
                         && event.state.is_pressed()
                         && let PhysicalKey::Code(KeyCode::F11) = event.physical_key
                     {
-                        self.ctx.display_mode = self.ctx.display_mode.cycle();
-                        self.ctx.menu.display_mode = self.ctx.display_mode;
-                        self.ctx.apply_display_mode(window);
+                        self.core.display_mode = self.core.display_mode.cycle();
+                        self.core.menu.display_mode = self.core.display_mode;
+                        self.core.apply_display_mode(window);
                     }
 
                     match app {
-                        AppState::Setup { .. } => app,
-                        AppState::InMenu { runtime } => {
-                            self.ctx.input.on_menu_key_event(&event);
-                            AppState::InMenu { runtime }
+                        AppPhase::Setup { .. } => app,
+                        AppPhase::InMenu { gfx, panorama } => {
+                            self.core.input.on_menu_key_event(&event);
+                            AppPhase::InMenu { gfx, panorama }
                         }
-                        AppState::Connecting {
-                            runtime: mut app_rt,
-                            connect_state,
+                        AppPhase::Connecting {
+                            mut gfx,
+                            panorama,
+                            connect_phase,
                             connection,
                         } => {
                             if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                             {
-                                let ctx = &mut self.ctx;
+                                let ctx = &mut self.core;
                                 // TODO(proper-disconnect)
 
                                 ctx.paused = false;
@@ -1102,10 +1107,9 @@ impl ApplicationHandler for App {
                                 ctx.entity_store.clear();
                                 ctx.item_entity_store.clear();
 
-                                app_rt.renderer.clear_chunk_meshes();
+                                gfx.renderer.clear_chunk_meshes();
                                 ctx.mesh_dispatcher = Some(
-                                    app_rt
-                                        .renderer
+                                    gfx.renderer
                                         .create_mesh_dispatcher(ctx.biome_climate.clone(), None),
                                 );
 
@@ -1113,99 +1117,105 @@ impl ApplicationHandler for App {
                                     p.set_in_menu(&ctx.version);
                                 }
 
-                                self.ctx.apply_cursor_grab(false, &app_rt.window);
+                                self.core.apply_cursor_grab(false, &gfx.window);
 
-                                AppState::InMenu { runtime: app_rt }
+                                AppPhase::InMenu {
+                                    gfx,
+                                    panorama: Panorama::new(),
+                                }
                             } else {
-                                AppState::Connecting {
-                                    runtime: app_rt,
-                                    connect_state,
+                                AppPhase::Connecting {
+                                    gfx,
+                                    panorama,
+                                    connect_phase,
                                     connection,
                                 }
                             }
                         }
-                        AppState::InGame {
-                            runtime: mut app_rt,
+                        AppPhase::InGame {
+                            mut gfx,
                             connection,
+                            game,
                         } => {
                             if event.state.is_pressed()
                                 && !event.repeat
                                 && let PhysicalKey::Code(code) = event.physical_key
                             {
-                                if self.ctx.chat.is_open() {
+                                if self.core.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
-                                            self.ctx.chat.close();
-                                            self.ctx.apply_cursor_grab(true, &app_rt.window);
+                                            self.core.chat.close();
+                                            self.core.apply_cursor_grab(true, &gfx.window);
                                         }
-                                        KeyCode::F3 => self.ctx.show_debug = !self.ctx.show_debug,
-                                        _ => self.ctx.input.on_menu_key_event(&event),
+                                        KeyCode::F3 => self.core.show_debug = !self.core.show_debug,
+                                        _ => self.core.input.on_menu_key_event(&event),
                                     }
                                 } else {
                                     match code {
                                         KeyCode::Escape
-                                            if self.ctx.death_confirm
+                                            if self.core.death_confirm
                                                 && self
-                                                    .ctx
+                                                    .core
                                                     .death_confirm_instant
                                                     .elapsed()
                                                     .as_secs_f32()
                                                     >= 1.0 =>
                                         {
-                                            self.ctx.death_confirm = false;
-                                            self.ctx.send_respawn(&connection);
+                                            self.core.death_confirm = false;
+                                            self.core.send_respawn(&connection);
                                         }
-                                        KeyCode::Escape if !self.ctx.dead => {
-                                            if self.ctx.inventory_open {
-                                                self.ctx.inventory_open = false;
+                                        KeyCode::Escape if !self.core.dead => {
+                                            if self.core.inventory_open {
+                                                self.core.inventory_open = false;
                                             } else {
-                                                self.ctx.paused = !self.ctx.paused;
+                                                self.core.paused = !self.core.paused;
                                             }
-                                            self.ctx.apply_cursor_grab(true, &app_rt.window);
+                                            self.core.apply_cursor_grab(true, &gfx.window);
                                         }
-                                        KeyCode::KeyE if !self.ctx.paused && !self.ctx.dead => {
-                                            self.ctx.inventory_open = !self.ctx.inventory_open;
-                                            self.ctx.apply_cursor_grab(true, &app_rt.window);
+                                        KeyCode::KeyE if !self.core.paused && !self.core.dead => {
+                                            self.core.inventory_open = !self.core.inventory_open;
+                                            self.core.apply_cursor_grab(true, &gfx.window);
                                         }
                                         KeyCode::KeyT
-                                            if !self.ctx.paused && !self.ctx.inventory_open =>
+                                            if !self.core.paused && !self.core.inventory_open =>
                                         {
-                                            self.ctx.chat.open();
-                                            self.ctx.apply_cursor_grab(true, &app_rt.window);
+                                            self.core.chat.open();
+                                            self.core.apply_cursor_grab(true, &gfx.window);
                                         }
                                         KeyCode::Slash
-                                            if !self.ctx.paused && !self.ctx.inventory_open =>
+                                            if !self.core.paused && !self.core.inventory_open =>
                                         {
-                                            self.ctx.chat.open_with_slash();
-                                            self.ctx.apply_cursor_grab(true, &app_rt.window);
+                                            self.core.chat.open_with_slash();
+                                            self.core.apply_cursor_grab(true, &gfx.window);
                                         }
                                         KeyCode::F3 => {
-                                            self.ctx.show_debug = !self.ctx.show_debug;
+                                            self.core.show_debug = !self.core.show_debug;
                                         }
                                         KeyCode::KeyG
-                                            if self.ctx.input.key_pressed(KeyCode::F3) =>
+                                            if self.core.input.key_pressed(KeyCode::F3) =>
                                         {
-                                            self.ctx.show_chunk_borders =
-                                                !self.ctx.show_chunk_borders;
+                                            self.core.show_chunk_borders =
+                                                !self.core.show_chunk_borders;
                                         }
                                         KeyCode::F5 => {
-                                            app_rt.renderer.cycle_camera_mode();
+                                            gfx.renderer.cycle_camera_mode();
                                         }
                                         _ => {}
                                     }
                                 }
                             }
 
-                            if !self.ctx.paused
-                                && !self.ctx.chat.is_open()
-                                && !self.ctx.inventory_open
+                            if !self.core.paused
+                                && !self.core.chat.is_open()
+                                && !self.core.inventory_open
                             {
-                                self.ctx.input.on_key_event(&event);
+                                self.core.input.on_key_event(&event);
                             }
 
-                            AppState::InGame {
-                                runtime: app_rt,
+                            AppPhase::InGame {
+                                gfx,
                                 connection,
+                                game,
                             }
                         }
                     }
@@ -1216,35 +1226,35 @@ impl ApplicationHandler for App {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
                 };
-                match self.state.get() {
-                    AppState::InMenu { .. } | AppState::Connecting { .. } => {
-                        self.ctx.input.on_menu_scroll(scroll);
+                match self.phase.get() {
+                    AppPhase::InMenu { .. } | AppPhase::Connecting { .. } => {
+                        self.core.input.on_menu_scroll(scroll);
                     }
-                    _ if !self.ctx.inventory_open => self.ctx.input.on_scroll(scroll),
+                    _ if !self.core.inventory_open => self.core.input.on_scroll(scroll),
                     _ => {}
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.ctx
+                self.core
                     .input
                     .on_cursor_moved(position.x as f32, position.y as f32);
             }
             WindowEvent::MouseInput { state, button, .. }
                 if matches!(
-                    self.state.get(),
-                    AppState::InMenu { .. } | AppState::Connecting { .. } | AppState::InGame { .. }
-                ) || self.ctx.paused
-                    || self.ctx.inventory_open
-                    || self.ctx.input.is_cursor_captured() =>
+                    self.phase.get(),
+                    AppPhase::InMenu { .. } | AppPhase::Connecting { .. } | AppPhase::InGame { .. }
+                ) || self.core.paused
+                    || self.core.inventory_open
+                    || self.core.input.is_cursor_captured() =>
             {
-                self.ctx.input.on_mouse_button(button, state);
+                self.core.input.on_mouse_button(button, state);
             }
             WindowEvent::RedrawRequested => {
-                if matches!(self.state.get(), AppState::Setup { .. }) {
+                if matches!(self.phase.get(), AppPhase::Setup { .. }) {
                     return;
                 }
 
-                let dt = if let Some(app_rt) = self.state.rt_mut() {
+                let dt = if let Some(app_rt) = self.phase.gfx_mut() {
                     let now = Instant::now();
                     let dt = now.duration_since(app_rt.last_frame).as_secs_f32().min(0.1);
 
@@ -1256,18 +1266,14 @@ impl ApplicationHandler for App {
                     0.0
                 };
 
-                let ctx = &mut self.ctx;
-                self.state.transition(|app| match app {
-                    AppState::Setup {..} => unreachable!(),
-                    AppState::InMenu { runtime: mut app_rt } => {
+                let ctx = &mut self.core;
+                self.phase.transition(|app| match app {
+                    AppPhase::Setup {..} => unreachable!(),
+                    AppPhase::InMenu { mut gfx, mut panorama } => {
+                        panorama.update(dt);
 
-                        ctx.panorama_scroll += dt * 0.00556;
-                        if ctx.panorama_scroll > 1.0 {
-                            ctx.panorama_scroll -= 1.0;
-                        }
-
-                        let sw = app_rt.renderer.screen_width() as f32;
-                        let sh = app_rt.renderer.screen_height() as f32;
+                        let sw = gfx.renderer.screen_width() as f32;
+                        let sh = gfx.renderer.screen_height() as f32;
 
                         let menu_input = MenuInput {
                             cursor: ctx.input.cursor_pos(),
@@ -1284,7 +1290,7 @@ impl ApplicationHandler for App {
 
                         let result = ctx
                             .menu
-                            .build(sw, sh, &menu_input, |t, s| app_rt.renderer.menu_text_width(t, s));
+                            .build(sw, sh, &menu_input, |t, s| gfx.renderer.menu_text_width(t, s));
                         let action = result.action;
 
                         let cursor_icon = if result.cursor_pointer {
@@ -1293,19 +1299,19 @@ impl ApplicationHandler for App {
                             winit::window::CursorIcon::Default
                         };
                         if ctx.input.cursor_moved_this_frame() {
-                            app_rt.window.set_cursor(cursor_icon);
+                            gfx.window.set_cursor(cursor_icon);
                         }
 
                         if ctx.menu.is_server_list_screen() && ctx.menu.favicons_changed() {
                             let favicons = ctx.menu.collect_favicons();
                             if !favicons.is_empty() {
-                                app_rt.renderer.update_favicon_atlas(&favicons);
+                                gfx.renderer.update_favicon_atlas(&favicons);
                             }
                         }
 
-                        if let Err(e) = app_rt.renderer.render_menu(
-                            &app_rt.window,
-                            ctx.panorama_scroll,
+                        if let Err(e) = gfx.renderer.render_menu(
+                            &gfx.window,
+                            panorama.scroll(),
                             result.blur,
                             result.elements,
                             ctx.input.cursor_pos(),
@@ -1318,7 +1324,7 @@ impl ApplicationHandler for App {
 
                         if ctx.menu.display_mode != ctx.display_mode {
                             ctx.display_mode = ctx.menu.display_mode;
-                            ctx.apply_display_mode(&app_rt.window);
+                            ctx.apply_display_mode(&gfx.window);
                         }
 
                         if ctx.menu.rescan_packs {
@@ -1342,10 +1348,10 @@ impl ApplicationHandler for App {
 
                         if ctx.menu.reload_assets {
                             ctx.menu.reload_assets = false;
-                            app_rt.renderer
+                            gfx.renderer
                                 .reload_assets(&ctx.data_dirs.game_dir, &ctx.resource_packs);
                             if let Some(ref mut dispatcher) = ctx.mesh_dispatcher {
-                                *dispatcher = app_rt.renderer.create_mesh_dispatcher(
+                                *dispatcher = gfx.renderer.create_mesh_dispatcher(
                                     ctx.biome_climate.clone(),
                                     Some(&ctx.resource_packs),
                                 );
@@ -1356,7 +1362,7 @@ impl ApplicationHandler for App {
                         }
 
                         if result.clicked_button {
-                            app_rt.renderer.trigger_skin_swing();
+                            gfx.renderer.trigger_skin_swing();
                         }
 
                         match action {
@@ -1374,11 +1380,12 @@ impl ApplicationHandler for App {
 
                                 let connection = spawn_connection(&ctx.tokio_rt, connect_args);
 
-                                ctx.apply_cursor_grab(false, &app_rt.window);
+                                ctx.apply_cursor_grab(false, &gfx.window);
 
-                                return AppState::Connecting {
-                                    runtime: app_rt,
-                                    connect_state: ConnectingState::Connecting,
+                                return AppPhase::Connecting {
+                                    gfx,
+                                    panorama,
+                                    connect_phase: ConnectionPhase::Connecting,
                                     connection,
                                 }
                             }
@@ -1391,24 +1398,25 @@ impl ApplicationHandler for App {
                                         ctx.data_dirs.pomme_assets_dir.join("panoramas")
                                     }
                                 };
-                                app_rt.renderer.reload_panorama(&panorama_dir, &ctx.asset_index);
+                                gfx.renderer.reload_panorama(&panorama_dir, &ctx.asset_index);
                                 ctx.menu.start_transition_open();
                             }
                             MenuAction::Quit => {
                                 event_loop.exit();
-                                return AppState::InMenu { runtime: app_rt };
+                                return AppPhase::InMenu { gfx, panorama };
                             }
                             MenuAction::None => {}
                         }
 
-                        AppState::InMenu { runtime: app_rt }
+                        AppPhase::InMenu { gfx, panorama }
                     }
-                    AppState::Connecting {
-                        runtime: mut app_rt,
-                        mut connect_state,
+                    AppPhase::Connecting {
+                        mut gfx,
+                        mut panorama,
+                        mut connect_phase,
                         connection,
                     } => {
-                        let disconnect_reason = ctx.drain_network_events(&connection, &mut app_rt.renderer, &app_rt.window, Some(&mut connect_state));
+                        let disconnect_reason = ctx.drain_network_events(&connection, &mut gfx.renderer, &gfx.window, Some(&mut connect_phase));
                         if let Some(reason) = disconnect_reason {
                             // TODO(proper-disconnect)
 
@@ -1421,32 +1429,32 @@ impl ApplicationHandler for App {
                             ctx.entity_store.clear();
                             ctx.item_entity_store.clear();
 
-                            app_rt.renderer.clear_chunk_meshes();
+                            gfx.renderer.clear_chunk_meshes();
                             ctx.mesh_dispatcher =
-                                Some(app_rt.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
+                                Some(gfx.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
 
                             ctx.menu.show_disconnect(reason);
                             if let Some(p) = &mut ctx.presence {
                                 p.set_in_menu(&ctx.version);
                             }
 
-                            ctx.apply_cursor_grab(false, &app_rt.window);
+                            ctx.apply_cursor_grab(false, &gfx.window);
 
-                            return AppState::InMenu { runtime: app_rt };
+                            return AppPhase::InMenu { gfx, panorama: Panorama::new() };
                         }
 
-                        if matches!(connect_state, ConnectingState::Loading) {
+                        if matches!(connect_phase, ConnectionPhase::Loading) {
                             if let Some(dispatcher) =
                                 &ctx.mesh_dispatcher
                             {
                                 for mesh in dispatcher.drain_results() {
-                                    app_rt.renderer.upload_chunk_mesh(&mesh);
+                                    gfx.renderer.upload_chunk_mesh(&mesh);
                                 }
                             }
 
                             let ready = ctx.position_set
                                 && (ctx.dead
-                                    || app_rt.renderer.loaded_chunk_count() > 0);
+                                    || gfx.renderer.loaded_chunk_count() > 0);
 
                             // Mirror vanilla's `notifyPlayerLoaded`; servers gate
                             // per-player entity tracking on it.
@@ -1463,26 +1471,23 @@ impl ApplicationHandler for App {
                                 if let Some(p) = &mut ctx.presence {
                                     p.playing_multiplayer(&ctx.version);
                                 }
-                                ctx.apply_cursor_grab(true, &app_rt.window);
+                                ctx.apply_cursor_grab(true, &gfx.window);
 
-                                return AppState::InGame { runtime: app_rt, connection };
+                                return AppPhase::InGame { gfx, connection, game: GameState{} };
                             }
                         }
 
-                        let status_text = match connect_state {
-                            ConnectingState::Loading => "Loading terrain...",
-                            ConnectingState::Connecting => "Connecting to the server...",
+                        let status_text = match connect_phase {
+                            ConnectionPhase::Loading => "Loading terrain...",
+                            ConnectionPhase::Connecting => "Connecting to the server...",
                         };
 
-                        ctx.panorama_scroll += dt * 0.00556;
-                        if ctx.panorama_scroll > 1.0 {
-                            ctx.panorama_scroll -= 1.0;
-                        }
+                        panorama.update(dt);
 
                         let mut cancel = false;
 
-                            let sw = app_rt.renderer.screen_width() as f32;
-                            let sh = app_rt.renderer.screen_height() as f32;
+                            let sw = gfx.renderer.screen_width() as f32;
+                            let sh = gfx.renderer.screen_height() as f32;
                             let gs = hud::gui_scale(sw, sh, ctx.menu.gui_scale_setting);
                             let fs = 11.0 * gs;
                             let btn_h = 30.0 * gs;
@@ -1523,9 +1528,9 @@ impl ApplicationHandler for App {
 
                             ctx.input.clear_click_events();
 
-                            if let Err(e) = app_rt.renderer.render_menu(
-                                &app_rt.window,
-                                ctx.panorama_scroll,
+                            if let Err(e) = gfx.renderer.render_menu(
+                                &gfx.window,
+                                panorama.scroll(),
                                 2.0,
                                 elements,
                                 ctx.input.cursor_pos(),
@@ -1547,23 +1552,23 @@ impl ApplicationHandler for App {
                             ctx.entity_store.clear();
                             ctx.item_entity_store.clear();
 
-                            app_rt.renderer.clear_chunk_meshes();
+                            gfx.renderer.clear_chunk_meshes();
                             ctx.mesh_dispatcher =
-                                Some(app_rt.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
+                                Some(gfx.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
 
                             if let Some(p) = &mut ctx.presence {
                                 p.set_in_menu(&ctx.version);
                             }
 
-                            ctx.apply_cursor_grab(false, &app_rt.window);
+                            ctx.apply_cursor_grab(false, &gfx.window);
 
-                            return AppState::InMenu { runtime: app_rt };
+                            return AppPhase::InMenu { gfx,panorama };
                         }
 
-                        AppState::Connecting { runtime: app_rt, connect_state, connection }
+                        AppPhase::Connecting { gfx, panorama, connect_phase, connection }
                     },
-                    AppState::InGame {  runtime: mut app_rt, connection } => {
-                        let disconnect_reason = ctx.drain_network_events(&connection,&mut app_rt.renderer, &app_rt.window, None);
+                    AppPhase::InGame {  mut gfx, connection, game } => {
+                        let disconnect_reason = ctx.drain_network_events(&connection, &mut gfx.renderer, &gfx.window, None);
                         if let Some(reason) = disconnect_reason {
                             // TODO(proper-disconnect)
 
@@ -1576,25 +1581,25 @@ impl ApplicationHandler for App {
                             ctx.entity_store.clear();
                             ctx.item_entity_store.clear();
 
-                            app_rt.renderer.clear_chunk_meshes();
+                            gfx.renderer.clear_chunk_meshes();
                             ctx.mesh_dispatcher =
-                                Some(app_rt.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
+                                Some(gfx.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
 
                             ctx.menu.show_disconnect(reason);
                             if let Some(p) = &mut ctx.presence {
                                 p.set_in_menu(&ctx.version);
                             }
 
-                            ctx.apply_cursor_grab(false, &app_rt.window);
+                            ctx.apply_cursor_grab(false, &gfx.window);
 
-                            return AppState::InMenu { runtime: app_rt };
+                            return AppPhase::InMenu { gfx, panorama: Panorama::new() };
                         }
 
                         if let Some(dispatcher) =
                             &ctx.mesh_dispatcher
                         {
                             for mesh in dispatcher.drain_results() {
-                                app_rt.renderer.upload_chunk_mesh(&mesh);
+                                gfx.renderer.upload_chunk_mesh(&mesh);
                             }
                         }
 
@@ -1608,11 +1613,11 @@ impl ApplicationHandler for App {
                         }
 
                         if !ctx.paused && !ctx.inventory_open && !ctx.chat.is_open() {
-                            app_rt.renderer.update_camera(&mut ctx.input);
+                            gfx.renderer.update_camera(&mut ctx.input);
 
                             ctx.tick_accumulator += dt;
                             while ctx.tick_accumulator >= TICK_RATE {
-                                ctx.tick_physics(&mut app_rt.renderer, &connection);
+                                ctx.tick_physics(&mut gfx.renderer, &connection);
                                 ctx.item_entity_store.tick(
                                     |bx, by, bz| {
                                         !ctx.chunk_store.get_block_state(bx, by, bz).is_air()
@@ -1637,8 +1642,8 @@ impl ApplicationHandler for App {
                         );
 
                         if !ctx.paused && !ctx.inventory_open && !ctx.chat.is_open() {
-                            let yaw = app_rt.renderer.camera_yaw();
-                            let pitch = app_rt.renderer.camera_pitch();
+                            let yaw = gfx.renderer.camera_yaw();
+                            let pitch = gfx.renderer.camera_pitch();
 
 
                             ctx.interaction.update_target(
@@ -1655,7 +1660,7 @@ impl ApplicationHandler for App {
                         if let Some(msg) = ctx.chat.handle_key_input(&typed, backspace, enter)
                         {
                             ctx.send_chat_message(&connection, msg);
-                            ctx.apply_cursor_grab(true, &app_rt.window);
+                            ctx.apply_cursor_grab(true, &gfx.window);
                         }
 
                         let mut close_inventory = false;
@@ -1663,15 +1668,15 @@ impl ApplicationHandler for App {
                         let mut death_action = DeathAction::None;
 
 
-                            app_rt.renderer.sync_camera_to_player(
+                            gfx.renderer.sync_camera_to_player(
                                 eye_pos_f64,
-                                app_rt.renderer.camera_yaw(),
-                                app_rt.renderer.camera_pitch(),
+                                gfx.renderer.camera_yaw(),
+                                gfx.renderer.camera_pitch(),
                             );
-                            app_rt.renderer.update_third_person_distance(eye_pos, &ctx.chunk_store);
+                            gfx.renderer.update_third_person_distance(eye_pos, &ctx.chunk_store);
 
-                            let sw = app_rt.renderer.screen_width() as f32;
-                            let sh = app_rt.renderer.screen_height() as f32;
+                            let sw = gfx.renderer.screen_width() as f32;
+                            let sh = gfx.renderer.screen_height() as f32;
                             let gs = hud::gui_scale(sw, sh, ctx.menu.gui_scale_setting);
 
                             let mut elements: Vec<MenuElement> = Vec::new();
@@ -1683,7 +1688,7 @@ impl ApplicationHandler for App {
 
                             let debug = if ctx.show_debug {
                                 Some(hud::DebugInfo {
-                                    fps: app_rt.fps_counter.display_fps,
+                                    fps: gfx.fps_counter.display_fps,
                                     position: ctx.player.position,
                                     yaw: ctx.player.yaw,
                                     pitch: ctx.player.pitch,
@@ -1697,18 +1702,18 @@ impl ApplicationHandler for App {
                                             state.into();
                                         (t.block_pos, t.face, block.id().to_string())
                                     }),
-                                    chunk_count: app_rt.renderer.loaded_chunk_count(),
-                                    gpu_name: app_rt.renderer.gpu_name(),
-                                    vulkan_version: app_rt.renderer.vulkan_version(),
-                                    screen_w: app_rt.renderer.screen_width(),
-                                    screen_h: app_rt.renderer.screen_height(),
+                                    chunk_count: gfx.renderer.loaded_chunk_count(),
+                                    gpu_name: gfx.renderer.gpu_name(),
+                                    vulkan_version: gfx.renderer.vulkan_version(),
+                                    screen_w: gfx.renderer.screen_width(),
+                                    screen_h: gfx.renderer.screen_height(),
                                     timings: Some(hud::FrameTimings {
-                                        frame_ms: app_rt.renderer.last_timings.frame_ms,
-                                        fence_ms: app_rt.renderer.last_timings.fence_ms,
-                                        acquire_ms: app_rt.renderer.last_timings.acquire_ms,
-                                        cull_ms: app_rt.renderer.last_timings.cull_ms,
-                                        draw_ms: app_rt.renderer.last_timings.draw_ms,
-                                        present_ms: app_rt.renderer.last_timings.present_ms,
+                                        frame_ms: gfx.renderer.last_timings.frame_ms,
+                                        fence_ms: gfx.renderer.last_timings.fence_ms,
+                                        acquire_ms: gfx.renderer.last_timings.acquire_ms,
+                                        cull_ms: gfx.renderer.last_timings.cull_ms,
+                                        draw_ms: gfx.renderer.last_timings.draw_ms,
+                                        present_ms: gfx.renderer.last_timings.present_ms,
                                     }),
                                 })
                             } else {
@@ -1728,7 +1733,7 @@ impl ApplicationHandler for App {
                                 ctx.player.experience_progress,
                                 ctx.player.game_mode,
                                 ctx.player.inventory.hotbar_slots(),
-                                app_rt.renderer.is_first_person(),
+                                gfx.renderer.is_first_person(),
                                 debug.as_ref(),
                                 ctx.menu.gui_scale_setting,
                             );
@@ -1739,7 +1744,7 @@ impl ApplicationHandler for App {
                                 && !ctx.chat.is_open()
                                 && !ctx.dead
                             {
-                                let r = &*app_rt.renderer;
+                                let r = &gfx.renderer;
                                 crate::ui::player_tab::build_player_tab_overlay(
                                     &mut elements,
                                     sw,
@@ -1753,8 +1758,8 @@ impl ApplicationHandler for App {
                                 let entity_count = ctx.entity_store.living.len() as u32;
                                 let done = bench.record_frame(
                                     dt * 1000.0,
-                                    &app_rt.renderer.last_timings,
-                                    app_rt.renderer.loaded_chunk_count(),
+                                    &gfx.renderer.last_timings,
+                                    gfx.renderer.loaded_chunk_count(),
                                     entity_count,
                                 );
                                 let progress = bench.progress();
@@ -1863,7 +1868,7 @@ impl ApplicationHandler for App {
                                     f5: ctx.input.f5_pressed(),
                                     scroll_delta: ctx.input.consume_menu_scroll(),
                                 };
-                                let r = &*app_rt.renderer;
+                                let r = &gfx.renderer;
                                 let result = ctx
                                     .menu
                                     .build(sw, sh, &menu_input, |t, s| r.menu_text_width(t, s));
@@ -1887,7 +1892,7 @@ impl ApplicationHandler for App {
                                 } else {
                                     let buttons_enabled = !ctx.respawn_sent
                                         && ctx.death_instant.elapsed().as_secs_f32() >= 1.0;
-                                    let r = &*app_rt.renderer;
+                                    let r = &gfx.renderer;
                                     death::build_death_screen(
                                         &mut elements,
                                         sw,
@@ -1932,7 +1937,7 @@ impl ApplicationHandler for App {
                             }
 
                             ctx.chat.build(&mut elements, sh, gs, &|t, s| {
-                                app_rt.renderer.menu_text_width(t, s)
+                                gfx.renderer.menu_text_width(t, s)
                             });
 
                             let swing_progress = ctx
@@ -1974,14 +1979,14 @@ impl ApplicationHandler for App {
                                 })
                                 .collect();
 
-                            if !app_rt.renderer.is_first_person() {
-                                let cam_yaw_deg = -app_rt.renderer.camera_yaw().to_degrees();
+                            if !gfx.renderer.is_first_person() {
+                                let cam_yaw_deg = -gfx.renderer.camera_yaw().to_degrees();
                                 entity_renders.push(EntityRenderInfo {
                                     x: interp_pos.x as f64,
                                     y: interp_pos.y as f64,
                                     z: interp_pos.z as f64,
                                     yaw: cam_yaw_deg,
-                                    pitch: app_rt.renderer.camera_pitch().to_degrees(),
+                                    pitch: gfx.renderer.camera_pitch().to_degrees(),
                                     head_yaw: cam_yaw_deg,
                                     is_baby: false,
                                     walk_anim_pos: ctx.player_walk_pos
@@ -2004,7 +2009,7 @@ impl ApplicationHandler for App {
                                 partial_tick: sky_partial_tick,
                             };
                             if ctx.show_chunk_borders {
-                                app_rt.renderer.update_chunk_borders(
+                                gfx.renderer.update_chunk_borders(
                                     ctx.chunk_store.min_y(),
                                     ctx.chunk_store.min_y() + ctx.chunk_store.height() as i32,
                                 );
@@ -2023,8 +2028,8 @@ impl ApplicationHandler for App {
                                 partial_tick,
                             );
 
-                            if let Err(e) = app_rt.renderer.render_world(
-                                &app_rt.window,
+                            if let Err(e) = gfx.renderer.render_world(
+                                &gfx.window,
                                 hide_cursor,
                                 elements,
                                 swing_progress,
@@ -2040,7 +2045,7 @@ impl ApplicationHandler for App {
 
                         if close_inventory {
                             ctx.inventory_open = false;
-                            ctx.apply_cursor_grab(true, &app_rt.window);
+                            ctx.apply_cursor_grab(true, &gfx.window);
                         }
 
                         match death_action {
@@ -2060,17 +2065,17 @@ impl ApplicationHandler for App {
                                 ctx.entity_store.clear();
                                 ctx.item_entity_store.clear();
 
-                                app_rt.renderer.clear_chunk_meshes();
+                                gfx.renderer.clear_chunk_meshes();
                                 ctx.mesh_dispatcher =
-                                    Some(app_rt.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
+                                    Some(gfx.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
 
                                 if let Some(p) = &mut ctx.presence {
                                     p.set_in_menu(&ctx.version);
                                 }
 
-                                ctx.apply_cursor_grab(false, &app_rt.window);
+                                ctx.apply_cursor_grab(false, &gfx.window);
 
-                                return AppState::InMenu { runtime: app_rt };
+                                return AppPhase::InMenu { gfx, panorama: Panorama::new() };
 
                             }
                             DeathAction::ShowConfirm => {
@@ -2083,13 +2088,13 @@ impl ApplicationHandler for App {
                         match pause_action {
                             PauseAction::Resume => {
                                 ctx.paused = false;
-                                ctx.apply_cursor_grab(true, &app_rt.window);
+                                ctx.apply_cursor_grab(true, &gfx.window);
                             }
                             PauseAction::Options => {
                                 ctx.menu.open_options();
                                 ctx.options_from_game = true;
                                 ctx.paused = false;
-                                ctx.apply_cursor_grab(true, &app_rt.window);
+                                ctx.apply_cursor_grab(true, &gfx.window);
                             }
                             PauseAction::Disconnect => {
                                     // TODO(proper-disconnect)
@@ -2103,29 +2108,29 @@ impl ApplicationHandler for App {
                                     ctx.entity_store.clear();
                                     ctx.item_entity_store.clear();
 
-                                    app_rt.renderer.clear_chunk_meshes();
+                                    gfx.renderer.clear_chunk_meshes();
                                     ctx.mesh_dispatcher =
-                                        Some(app_rt.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
+                                        Some(gfx.renderer.create_mesh_dispatcher(ctx.biome_climate.clone(), None));
 
                                     if let Some(p) = &mut ctx.presence {
                                         p.set_in_menu(&ctx.version);
                                     }
 
-                                    ctx.apply_cursor_grab(false, &app_rt.window);
+                                    ctx.apply_cursor_grab(false, &gfx.window);
 
-                                    return AppState::InMenu { runtime: app_rt };
+                                    return AppPhase::InMenu { gfx, panorama: Panorama::new() };
 
                             }
                             PauseAction::Benchmark => {
                                 ctx.benchmark = Some(Benchmark::new(
-                                    app_rt.renderer.gpu_name(),
-                                    app_rt.renderer.screen_width(),
-                                    app_rt.renderer.screen_height(),
+                                    gfx.renderer.gpu_name(),
+                                    gfx.renderer.screen_width(),
+                                    gfx.renderer.screen_height(),
                                     ctx.menu.render_distance,
                                 ));
                                 ctx.benchmark_result = None;
                                 ctx.paused = false;
-                                ctx.apply_cursor_grab(true, &app_rt.window);
+                                ctx.apply_cursor_grab(true, &gfx.window);
                             }
                             PauseAction::None => {}
                         }
@@ -2137,15 +2142,15 @@ impl ApplicationHandler for App {
                             if !ctx.menu.is_options_screen() {
                                 ctx.options_from_game = false;
                                 ctx.paused = true;
-                                ctx.apply_cursor_grab(true, &app_rt.window);
+                                ctx.apply_cursor_grab(true, &gfx.window);
                             }
                         }
 
-                        AppState::InGame { runtime: app_rt, connection }
+                        AppPhase::InGame { gfx, connection, game }
                     },
                 });
 
-                if let Some(app_rt) = &mut self.state.rt_mut() {
+                if let Some(app_rt) = &mut self.phase.gfx_mut() {
                     if !app_rt.window.is_visible().unwrap_or(true) {
                         app_rt.window.set_visible(true);
                     }
@@ -2163,13 +2168,13 @@ impl ApplicationHandler for App {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event
-            && self.ctx.input.is_cursor_captured()
-            && !self.ctx.paused
-            && !self.ctx.dead
-            && !self.ctx.inventory_open
-            && !self.ctx.chat.is_open()
+            && self.core.input.is_cursor_captured()
+            && !self.core.paused
+            && !self.core.dead
+            && !self.core.inventory_open
+            && !self.core.chat.is_open()
         {
-            self.ctx.input.on_mouse_motion(delta);
+            self.core.input.on_mouse_motion(delta);
         }
     }
 
