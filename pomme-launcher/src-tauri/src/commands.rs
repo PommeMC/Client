@@ -1,15 +1,16 @@
-use crate::installations::{Installation, InstallationDraft, InstallationError};
-use crate::settings::LauncherSettings;
-use crate::{AppState, installations, storage};
-
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
+
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_specta::Event;
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+use crate::installations::{Installation, InstallationDraft, InstallationError};
+use crate::settings::LauncherSettings;
+use crate::{AppState, installations, storage};
 
 #[derive(Deserialize)]
 struct MojangPatchNotes {

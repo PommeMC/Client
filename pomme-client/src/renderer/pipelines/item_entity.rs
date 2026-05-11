@@ -1,19 +1,16 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use ash::vk;
 use glam::Mat4;
 use gpu_allocator::vulkan::{Allocation, Allocator};
 
-use crate::renderer::camera::CameraUniform;
-use std::path::Path;
-
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::MAX_FRAMES_IN_FLIGHT;
+use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, TextureAtlas};
 use crate::renderer::chunk::mesher::ChunkVertex;
-use crate::renderer::shader;
-use crate::renderer::util;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 use crate::world::block::model::BakedModel;
 
 pub struct ItemRenderInfo {

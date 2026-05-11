@@ -1,13 +1,13 @@
 pub mod fs;
 pub mod registry;
 
-use rand::RngExt;
-use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::num::NonZeroU64;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use rand::RngExt;
+use serde::{Deserialize, Serialize};
 
 use crate::commands::fetch_versions;
 use crate::installations;

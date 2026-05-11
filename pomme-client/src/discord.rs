@@ -1,4 +1,5 @@
-use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity::*};
+use discord_rich_presence::activity::*;
+use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 
 const DISCORD_CLIENT_ID: &str = "1489624876909330452";
 

@@ -208,8 +208,9 @@ fn with_default_port(address: &str) -> String {
 }
 
 fn format_motd_spans(text: &azalea_chat::FormattedText) -> Vec<MotdSpan> {
-    use azalea_chat::style::Style;
     use std::cell::RefCell;
+
+    use azalea_chat::style::Style;
 
     let white: azalea_chat::style::TextColor = azalea_chat::style::ChatFormatting::White
         .try_into()

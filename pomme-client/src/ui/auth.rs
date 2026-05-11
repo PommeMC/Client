@@ -1,4 +1,5 @@
-// TODO: Move to launcher - authentication will be handled by mc-launcher when it exists.
+// TODO: Move to launcher - authentication will be handled by mc-launcher when
+// it exists.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

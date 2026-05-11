@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 const CLIENT_ID: &str = "b2dd2c0f-8a09-4549-9d76-ab43b8572695";
 const REDIRECT_URI: &str = "http://localhost:25585";

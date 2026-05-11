@@ -14,12 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ash::vk;
-use azalea_core::position::ChunkPos;
-use thiserror::Error;
-use winit::dpi::PhysicalSize;
-use winit::window::Window;
-
-use azalea_core::position::BlockPos;
+use azalea_core::position::{BlockPos, ChunkPos};
 use camera::{Camera, CameraUniform};
 use chunk::atlas::TextureAtlas;
 use chunk::buffer::ChunkBufferStore;
@@ -35,6 +30,9 @@ use pipelines::panorama::PanoramaPipeline;
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 use swapchain::SwapchainState;
+use thiserror::Error;
+use winit::dpi::PhysicalSize;
+use winit::window::Window;
 
 use crate::assets::AssetIndex;
 use crate::window::input::InputState;

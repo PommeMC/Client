@@ -6,9 +6,7 @@ use azalea_core::position::ChunkPos;
 use gpu_allocator::vulkan::{Allocation, Allocator};
 
 use super::mesher::{ChunkMeshData, ChunkVertex};
-use crate::renderer::MAX_FRAMES_IN_FLIGHT;
-use crate::renderer::shader;
-use crate::renderer::util;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
 const BUCKET_INDICES: u32 = 49152;
@@ -850,9 +848,9 @@ fn desc_write(
     buffer: vk::Buffer,
     range: u64,
 ) -> vk::WriteDescriptorSet<'static> {
-    // Safety: the DescriptorBufferInfo is stored inline in WriteDescriptorSet via the builder
-    // pattern, but ash's lifetime requirements need a reference. We use a leaked Box here
-    // because these writes only happen once at init time.
+    // Safety: the DescriptorBufferInfo is stored inline in WriteDescriptorSet via
+    // the builder pattern, but ash's lifetime requirements need a reference. We
+    // use a leaked Box here because these writes only happen once at init time.
     let info = Box::leak(Box::new([vk::DescriptorBufferInfo {
         buffer,
         offset: 0,

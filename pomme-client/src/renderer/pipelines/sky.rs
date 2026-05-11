@@ -7,10 +7,8 @@ use glam::Vec3;
 use gpu_allocator::vulkan::{Allocation, Allocator};
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::MAX_FRAMES_IN_FLIGHT;
 use crate::renderer::camera::Camera;
-use crate::renderer::shader;
-use crate::renderer::util;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const STAR_COUNT: u32 = 1500;
 const SUN_SIZE: f32 = 30.0;
@@ -588,8 +586,9 @@ impl JavaRandom {
     }
 }
 
-/// CSS-style cubic Bezier easing with P0=(0,0), P3=(1,1). Solves Bx(s)=x via 4 Newton-Raphson
-/// iterations (matches vanilla EasingType.CubicBezier) and returns By(s).
+/// CSS-style cubic Bezier easing with P0=(0,0), P3=(1,1). Solves Bx(s)=x via 4
+/// Newton-Raphson iterations (matches vanilla EasingType.CubicBezier) and
+/// returns By(s).
 fn cubic_bezier_ease(x: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
     let cx = 3.0 * x1;

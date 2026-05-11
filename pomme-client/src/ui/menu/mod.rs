@@ -9,15 +9,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
-
 use serde::{Deserialize, Serialize};
-
-use crate::window::DisplayMode;
 
 use crate::renderer::pipelines::menu_overlay::{
     ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_GEAR, ICON_GLOBE, ICON_LINK, ICON_PAINTBRUSH,
     ICON_USER, MenuElement, SpriteId,
 };
+use crate::window::DisplayMode;
 
 #[derive(Serialize, Deserialize)]
 struct Settings {
@@ -92,13 +90,13 @@ fn save_settings(game_dir: &Path, settings: &Settings) {
     }
 }
 
+use helpers::*;
+
 use super::auth::{self, AuthAccount, AuthStatus};
 use super::common::{self, WHITE};
 use super::server_list::{
     PingResults, PingState, ServerEntry, ServerList, is_valid_address, ping_all_servers,
 };
-
-use helpers::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PanoramaTheme {

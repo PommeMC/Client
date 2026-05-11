@@ -14,9 +14,10 @@ mod ui;
 mod window;
 mod world;
 
+use std::sync::Arc;
+
 use clap::Parser;
 use net::connection::ConnectArgs;
-use std::sync::Arc;
 
 /// Maps all supported versions to their protocol version.
 /// Snapshots encode as `(1 << 30) | base_protocol`.

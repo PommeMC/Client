@@ -5,8 +5,7 @@ use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::shader;
-use crate::renderer::util;
+use crate::renderer::{shader, util};
 
 // Minecraft panorama face order differs from Vulkan cubemap layer order
 const FACE_TO_LAYER: [u32; 6] = [4, 1, 5, 0, 2, 3];

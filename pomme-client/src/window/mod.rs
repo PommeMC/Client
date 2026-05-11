@@ -1,9 +1,10 @@
 pub mod input;
 
-use azalea_protocol::packets::game::ServerboundGamePacket;
-use input::InputState;
 use std::sync::Arc;
 use std::time::Instant;
+
+use azalea_protocol::packets::game::ServerboundGamePacket;
+use input::InputState;
 use thiserror::Error;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};

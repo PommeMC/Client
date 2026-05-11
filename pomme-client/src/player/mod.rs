@@ -3,7 +3,6 @@ pub mod inventory;
 pub mod tab_list;
 
 use glam::Vec3;
-
 use inventory::Inventory;
 
 pub const MAX_AIR_SUPPLY: i32 = 300;
