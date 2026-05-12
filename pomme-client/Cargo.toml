@@ -20,9 +20,9 @@ tokio = { workspace = true, features = ["tracing"] }
 reqwest = { workspace = true, features = ["blocking"] }
 
 pyronyx = { version = "0.2.4", features = ["rwh_06"] }
+winit = { version = "0.30", features = ["rwh_06"] }
 pyronyx-gpu-allocator = { path = "/home/arse09/Work/rust/gpu-allocator-pyronyx" }
 raw-window-handle = "0.6"
-winit = "0.30"
 glam = "0.32"
 clap = { version = "4", features = ["derive"] }
 parking_lot = "0.12"

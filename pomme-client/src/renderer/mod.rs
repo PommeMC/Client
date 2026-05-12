@@ -10,7 +10,7 @@ pub(crate) mod util;
 pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use azalea_core::position::ChunkPos;
@@ -37,6 +37,8 @@ pub use pipelines::sky::{SkyPipeline, SkyState};
 use swapchain::SwapchainState;
 
 use crate::assets::AssetIndex;
+use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
+use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::window::input::InputState;
 use crate::world::block::registry::BlockRegistry;
 
@@ -79,10 +81,12 @@ pub struct RenderTimings {
 }
 
 pub struct Renderer {
+    ctx: VulkanContext,
+
     swapchain: SwapchainState,
     camera: Camera,
     registry: BlockRegistry,
-    jar_assets_dir: std::path::PathBuf,
+    jar_assets_dir: PathBuf,
     asset_index: Option<AssetIndex>,
     atlas: TextureAtlas,
     chunk_pipeline: ChunkPipeline,
@@ -94,14 +98,13 @@ pub struct Renderer {
     blur_pipeline: BlurPipeline,
     skin_preview: SkinPreviewPipeline,
     entity_renderer: EntityRenderer,
-    chunk_border_pipeline: pipelines::chunk_borders::ChunkBorderPipeline,
-    item_entity_pipeline: pipelines::item_entity::ItemEntityPipeline,
+    chunk_border_pipeline: ChunkBorderPipeline,
+    item_entity_pipeline: ItemEntityPipeline,
     chunk_buffers: ChunkBufferStore,
     swapchain_dirty: bool,
     width: u32,
     height: u32,
     pub last_timings: RenderTimings,
-    ctx: VulkanContext,
 }
 
 impl Renderer {
