@@ -278,10 +278,9 @@ impl ChunkBufferStore {
         }
 
         let compute_desc_layout = create_cull_desc_layout(device);
-        let set_layouts = [compute_desc_layout];
         let layout_info = vk::PipelineLayoutCreateInfo {
-            set_layout_count: set_layouts.len() as u32,
-            set_layouts: set_layouts.as_ptr(),
+            set_layout_count: 1,
+            set_layouts: &compute_desc_layout,
             ..Default::default()
         };
         let compute_layout = device

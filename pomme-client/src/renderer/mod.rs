@@ -1092,7 +1092,6 @@ impl Renderer {
                         let swapchain_image = self.swapchain.images[image_index as usize];
                         let iterations = ((*blur * 3.0).ceil() as u32).clamp(1, 4);
                         self.blur_pipeline.execute(
-                            &self.ctx.device,
                             cmd,
                             swapchain_image,
                             self.swapchain.extent.width,
