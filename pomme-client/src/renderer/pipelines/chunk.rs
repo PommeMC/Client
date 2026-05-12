@@ -46,7 +46,8 @@ impl ChunkPipeline {
             set_layouts: layouts.as_ptr(),
             ..Default::default()
         };
-        let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        let pipeline_layout = device
+            .create_pipeline_layout(&layout_info, None)
             .expect("failed to create pipeline layout");
 
         let pipeline = create_pipeline(device, render_pass, pipeline_layout);
@@ -67,7 +68,8 @@ impl ChunkPipeline {
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
         };
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+        let descriptor_pool = device
+            .create_descriptor_pool(&pool_info, None)
             .expect("failed to create descriptor pool");
 
         let camera_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
@@ -78,7 +80,8 @@ impl ChunkPipeline {
             ..Default::default()
         };
         let mut camera_sets = vec![vk::DescriptorSet::null(); MAX_FRAMES_IN_FLIGHT];
-        unsafe { device.allocate_descriptor_sets(&camera_alloc_info, &mut camera_sets) }
+        device
+            .allocate_descriptor_sets(&camera_alloc_info, &mut camera_sets)
             .expect("failed to allocate camera descriptor sets");
 
         let atlas_layouts = [atlas_layout];
@@ -89,10 +92,9 @@ impl ChunkPipeline {
             ..Default::default()
         };
         let mut atlas_set = vk::DescriptorSet::null();
-        unsafe {
-            device.allocate_descriptor_sets(&atlas_alloc_info, slice::from_mut(&mut atlas_set))
-        }
-        .expect("failed to allocate atlas descriptor set");
+        device
+            .allocate_descriptor_sets(&atlas_alloc_info, slice::from_mut(&mut atlas_set))
+            .expect("failed to allocate atlas descriptor set");
 
         let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -118,7 +120,7 @@ impl ChunkPipeline {
                 buffer_info: &buffer_info,
                 ..Default::default()
             };
-            unsafe { device.update_descriptor_sets(&[write], &[]) };
+            device.update_descriptor_sets(&[write], &[]);
 
             camera_buffers.push(buf);
             camera_allocations.push(alloc);
@@ -137,7 +139,7 @@ impl ChunkPipeline {
             image_info: &image_info,
             ..Default::default()
         };
-        unsafe { device.update_descriptor_sets(&[atlas_write], &[]) };
+        device.update_descriptor_sets(&[atlas_write], &[]);
 
         Self {
             pipeline,
@@ -312,20 +314,18 @@ fn create_pipeline(
     }];
 
     let mut pipeline = vk::Pipeline::null();
-    unsafe {
-        device.create_graphics_pipelines(
+
+    device
+        .create_graphics_pipelines(
             vk::PipelineCache::null(),
             &pipeline_info,
             None,
             slice::from_mut(&mut pipeline),
         )
-    }
-    .expect("failed to create chunk pipeline");
+        .expect("failed to create chunk pipeline");
 
-    unsafe {
-        device.destroy_shader_module(vert_module, None);
-        device.destroy_shader_module(frag_module, None);
-    }
+    device.destroy_shader_module(vert_module, None);
+    device.destroy_shader_module(frag_module, None);
 
     pipeline
 }

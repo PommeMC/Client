@@ -452,7 +452,7 @@ impl MenuOverlayPipeline {
             1,
             1,
         );
-        unsafe { device.destroy_buffer(fav_staging, None) };
+        device.destroy_buffer(fav_staging, None);
         allocator.lock().unwrap().free(fav_staging_alloc).ok();
         let favicon_sampler = unsafe { util::create_nearest_sampler(device) };
 
@@ -1068,13 +1068,11 @@ impl MenuOverlayPipeline {
             regions.insert(addr.clone(), [u0, v0, u1, v1]);
         }
 
-        unsafe { queue.wait_idle().unwrap() };
+        queue.wait_idle().unwrap();
 
         if let Some(alloc) = self.favicon_allocation.take() {
-            unsafe {
-                device.destroy_image_view(self.favicon_view, None);
-                device.destroy_image(self.favicon_image, None);
-            }
+            device.destroy_image_view(self.favicon_view, None);
+            device.destroy_image(self.favicon_image, None);
             allocator.lock().unwrap().free(alloc).ok();
         }
 
@@ -1097,7 +1095,7 @@ impl MenuOverlayPipeline {
             atlas_w,
             atlas_h,
         );
-        unsafe { device.destroy_buffer(staging, None) };
+        device.destroy_buffer(staging, None);
         allocator.lock().unwrap().free(staging_alloc).ok();
 
         self.favicon_image = image;
@@ -2641,10 +2639,8 @@ fn create_pipeline(
         )
         .expect("failed to create menu overlay pipeline");
 
-    unsafe {
-        device.destroy_shader_module(vert_module, None);
-        device.destroy_shader_module(frag_module, None);
-    }
+    device.destroy_shader_module(vert_module, None);
+    device.destroy_shader_module(frag_module, None);
 
     pipeline
 }

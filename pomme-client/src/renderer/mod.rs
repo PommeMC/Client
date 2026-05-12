@@ -26,15 +26,16 @@ use chunk::atlas::TextureAtlas;
 use chunk::buffer::ChunkBufferStore;
 use chunk::mesher::{ChunkMeshData, MeshDispatcher};
 use context::VulkanContext;
-use pipelines::block_overlay::BlockOverlayPipeline;
-use pipelines::blur::BlurPipeline;
+
+// use pipelines::block_overlay::BlockOverlayPipeline;
+// use pipelines::blur::BlurPipeline;
 use pipelines::chunk::ChunkPipeline;
-use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
-use pipelines::hand::HandPipeline;
+// use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
+// use pipelines::hand::HandPipeline;
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
-use pipelines::panorama::PanoramaPipeline;
-use pipelines::skin_preview::SkinPreviewPipeline;
-pub use pipelines::sky::{SkyPipeline, SkyState};
+// use pipelines::panorama::PanoramaPipeline;
+// use pipelines::skin_preview::SkinPreviewPipeline;
+// pub use pipelines::sky::{SkyPipeline, SkyState};
 use swapchain::Swapchain;
 
 use crate::assets::AssetIndex;

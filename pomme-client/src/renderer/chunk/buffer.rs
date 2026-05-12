@@ -21,7 +21,7 @@ const MAX_BUCKETS: u32 = 2048;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
 
 fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
-    let mem_props = unsafe { physical_device.get_memory_properties() };
+    let mem_props = physical_device.get_memory_properties();
     let mut device_local_bytes: u64 = 0;
     for i in 0..mem_props.memory_type_count as usize {
         let mem_type = mem_props.memory_types[i];
@@ -136,7 +136,7 @@ impl ChunkBufferStore {
         let vertex_size = total_buckets as u64 * BUCKET_VERTICES as u64 * VERTEX_SIZE;
         let index_size = total_buckets as u64 * BUCKET_INDICES as u64 * INDEX_SIZE;
 
-        let dev_props = unsafe { physical_device.get_properties() };
+        let dev_props = physical_device.get_properties();
         let use_staging = dev_props.device_type == vk::PhysicalDeviceType::DiscreteGpu;
 
         let (vertex_buffer, vertex_alloc, index_buffer, index_alloc) = if use_staging {
@@ -188,7 +188,8 @@ impl ChunkBufferStore {
                 | vk::CommandPoolCreateFlags::ResetCommandBuffer,
             ..Default::default()
         };
-        let transfer_pool = unsafe { device.create_command_pool(&pool_info, None) }
+        let transfer_pool = device
+            .create_command_pool(&pool_info, None)
             .expect("failed to create transfer pool");
         let cmd_info = vk::CommandBufferAllocateInfo {
             command_pool: transfer_pool,
@@ -283,7 +284,8 @@ impl ChunkBufferStore {
             set_layouts: set_layouts.as_ptr(),
             ..Default::default()
         };
-        let compute_layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        let compute_layout = device
+            .create_pipeline_layout(&layout_info, None)
             .expect("failed to create compute pipeline layout");
 
         let comp_spv = shader::include_spirv!("cull.comp.spv");
@@ -300,16 +302,15 @@ impl ChunkBufferStore {
             ..Default::default()
         }];
         let mut compute_pipeline = vk::Pipeline::null();
-        unsafe {
-            device.create_compute_pipelines(
+        device
+            .create_compute_pipelines(
                 vk::PipelineCache::null(),
                 &pipe_info,
                 None,
                 std::slice::from_mut(&mut compute_pipeline),
             )
-        }
-        .expect("failed to create cull pipeline");
-        unsafe { device.destroy_shader_module(comp_module, None) };
+            .expect("failed to create cull pipeline");
+        device.destroy_shader_module(comp_module, None);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -327,7 +328,8 @@ impl ChunkBufferStore {
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
         };
-        let compute_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+        let compute_pool = device
+            .create_descriptor_pool(&pool_info, None)
             .expect("failed to create cull desc pool");
 
         let layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT)
@@ -340,7 +342,8 @@ impl ChunkBufferStore {
             ..Default::default()
         };
         let mut compute_sets = vec![vk::DescriptorSet::null(); MAX_FRAMES_IN_FLIGHT];
-        unsafe { device.allocate_descriptor_sets(&alloc_info, &mut compute_sets) }
+        device
+            .allocate_descriptor_sets(&alloc_info, &mut compute_sets)
             .expect("failed to allocate cull desc sets");
 
         for i in 0..MAX_FRAMES_IN_FLIGHT {
@@ -383,9 +386,7 @@ impl ChunkBufferStore {
 
             let writes = [meta_write, frustum_write, indirect_write, count_write];
 
-            unsafe {
-                device.update_descriptor_sets(&writes, &[]);
-            }
+            device.update_descriptor_sets(&writes, &[]);
         }
 
         Self {

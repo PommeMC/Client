@@ -229,7 +229,7 @@ fn create_depth_resources(
     };
 
     let image = device.create_image(&image_info, None)?;
-    let mem_reqs = unsafe { device.get_image_memory_requirements(image) };
+    let mem_reqs = device.get_image_memory_requirements(image);
 
     let allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
         name: "depth_image",
