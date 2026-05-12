@@ -128,16 +128,9 @@ impl Renderer {
         let ctx = VulkanContext::new(&window)?;
 
         let swapchain_state = SwapchainState::new(
-            &ctx.device,
-            &ctx.surface_loader,
-            &ctx.swapchain_loader,
-            ctx.physical_device,
-            ctx.surface,
+            &ctx,
             size.width.max(1),
             size.height.max(1),
-            ctx.graphics_family,
-            ctx.present_family,
-            &ctx.allocator,
             vk::SwapchainKHR::null(),
         )?;
 
