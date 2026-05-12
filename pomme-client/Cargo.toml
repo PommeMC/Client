@@ -19,9 +19,8 @@ zip = { workspace = true }
 tokio = { workspace = true, features = ["tracing"] }
 reqwest = { workspace = true, features = ["blocking"] }
 
-ash = "0.38"
-ash-window = "0.13"
-gpu-allocator = { version = "0.28", features = ["vulkan"] }
+pyronyx = { version = "0.2.4", features = ["rwh_06"] }
+pyronyx-gpu-allocator = { path = "/home/arse09/Work/rust/gpu-allocator-pyronyx" }
 raw-window-handle = "0.6"
 winit = "0.30"
 glam = "0.32"

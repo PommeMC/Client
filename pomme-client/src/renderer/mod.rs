@@ -13,8 +13,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use ash::vk;
 use azalea_core::position::ChunkPos;
+use pyronyx::vk;
 use thiserror::Error;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -46,7 +46,7 @@ pub enum RendererError {
     Context(#[from] context::ContextError),
 
     #[error("vulkan error: {0}")]
-    Vulkan(#[from] vk::Result),
+    Vulkan(#[from] vk::Error),
 }
 
 enum RenderMode<'a> {
@@ -379,8 +379,10 @@ impl Renderer {
             ctx.device
                 .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
 
-            let begin_info = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            let begin_info = vk::CommandBufferBeginInfo {
+                flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
+                ..Default::default()
+            };
             ctx.device.begin_command_buffer(cmd, &begin_info)?;
 
             let clear_values = [
@@ -397,17 +399,20 @@ impl Renderer {
                 },
             ];
 
-            let render_pass_info = vk::RenderPassBeginInfo::default()
-                .render_pass(swapchain.render_pass)
-                .framebuffer(swapchain.framebuffers[image_index as usize])
-                .render_area(vk::Rect2D {
+            let render_pass_info = vk::RenderPassBeginInfo {
+                render_pass: swapchain.render_pass,
+                framebuffer: swapchain.framebuffers[image_index as usize],
+                render_area: vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: swapchain.extent,
-                })
-                .clear_values(&clear_values);
+                },
+                clear_value_count: clear_values.len() as u32,
+                clear_values: clear_values.as_ptr(),
+                ..Default::default()
+            };
 
             ctx.device
-                .cmd_begin_render_pass(cmd, &render_pass_info, vk::SubpassContents::INLINE);
+                .cmd_begin_render_pass(cmd, &render_pass_info, vk::SubpassContents::Inline);
 
             let viewport = vk::Viewport {
                 x: 0.0,
@@ -431,25 +436,35 @@ impl Renderer {
             ctx.device.end_command_buffer(cmd)?;
 
             let wait_semaphores = [image_available];
-            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let wait_stages = [vk::PipelineStageFlags::ColorAttachmentOutput];
             let signal_semaphores = [render_finished];
             let cmd_buffers = [cmd];
 
-            let submit_info = vk::SubmitInfo::default()
-                .wait_semaphores(&wait_semaphores)
-                .wait_dst_stage_mask(&wait_stages)
-                .command_buffers(&cmd_buffers)
-                .signal_semaphores(&signal_semaphores);
+            let submit_info = vk::SubmitInfo {
+                wait_semaphore_count: 1,
+                wait_semaphores: &image_available,
+                wait_dst_stage_mask: &vk::PipelineStageFlags::ColorAttachmentOutput,
+                command_buffer_count: 1,
+                command_buffers: &cmd,
+                signal_semaphore_count: 1,
+                signal_semaphores: &render_finished,
+                ..Default::default()
+            };
 
             ctx.device
                 .queue_submit(ctx.graphics_queue, &[submit_info], fence)?;
 
             let swapchains = [swapchain.swapchain];
             let image_indices = [image_index];
-            let present_info = vk::PresentInfoKHR::default()
-                .wait_semaphores(&signal_semaphores)
-                .swapchains(&swapchains)
-                .image_indices(&image_indices);
+
+            let present_info = vk::PresentInfoKHR {
+                wait_semaphore_count: 1,
+                wait_semaphores: &render_finished,
+                swapchain_count: 1,
+                swapchains: &swapchain.swapchain,
+                image_indices: &image_index,
+                ..Default::default()
+            };
 
             let _ = ctx
                 .swapchain_loader
@@ -914,7 +929,7 @@ impl Renderer {
             )
         } {
             Ok((idx, _)) => idx,
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+            Err(vk::Error::OutOfDateKHR) => {
                 self.swapchain_dirty = true;
                 return Ok(());
             }
@@ -942,8 +957,10 @@ impl Renderer {
                 .device
                 .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
 
-            let begin_info = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            let begin_info = vk::CommandBufferBeginInfo {
+                flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
+                ..Default::default()
+            };
             self.ctx.device.begin_command_buffer(cmd, &begin_info)?;
 
             if matches!(&mode, RenderMode::World { .. }) {
@@ -985,19 +1002,22 @@ impl Renderer {
                 )
             };
 
-            let render_pass_info = vk::RenderPassBeginInfo::default()
-                .render_pass(rp)
-                .framebuffer(fb)
-                .render_area(vk::Rect2D {
+            let render_pass_info = vk::RenderPassBeginInfo {
+                render_pass: rp,
+                framebuffer: fb,
+                render_area: vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: self.swapchain.extent,
-                })
-                .clear_values(&clear_values);
+                },
+                clear_value_count: clear_values.len() as u32,
+                clear_values: clear_values.as_ptr(),
+                ..Default::default()
+            };
 
             self.ctx.device.cmd_begin_render_pass(
                 cmd,
                 &render_pass_info,
-                vk::SubpassContents::INLINE,
+                vk::SubpassContents::Inline,
             );
 
             let viewport = vk::Viewport {
@@ -1067,7 +1087,7 @@ impl Renderer {
                     }
 
                     let clear_attachment = vk::ClearAttachment {
-                        aspect_mask: vk::ImageAspectFlags::DEPTH,
+                        aspect_mask: vk::ImageAspectFlags::Depth,
                         color_attachment: 0,
                         clear_value: vk::ClearValue {
                             depth_stencil: vk::ClearDepthStencilValue {
@@ -1133,18 +1153,21 @@ impl Renderer {
                             self.blur_pipeline.blurred_sampler(),
                         );
 
-                        let load_rp_info = vk::RenderPassBeginInfo::default()
-                            .render_pass(self.swapchain.render_pass_load)
-                            .framebuffer(self.swapchain.framebuffers_load[image_index as usize])
-                            .render_area(vk::Rect2D {
+                        let load_rp_info = vk::RenderPassBeginInfo {
+                            render_pass: self.swapchain.render_pass_load,
+                            framebuffer: self.swapchain.framebuffers_load[image_index as usize],
+                            render_area: vk::Rect2D {
                                 offset: vk::Offset2D { x: 0, y: 0 },
                                 extent: self.swapchain.extent,
-                            })
-                            .clear_values(&clear_values);
+                            },
+                            clear_value_count: clear_values.len() as u32,
+                            clear_values: clear_values.as_ptr(),
+                            ..Default::default()
+                        };
                         self.ctx.device.cmd_begin_render_pass(
                             cmd,
                             &load_rp_info,
-                            vk::SubpassContents::INLINE,
+                            vk::SubpassContents::Inline,
                         );
                         self.ctx.device.cmd_set_viewport(cmd, 0, &[viewport]);
                         self.ctx.device.cmd_set_scissor(cmd, 0, &[scissor]);
@@ -1175,15 +1198,20 @@ impl Renderer {
             self.ctx.device.end_command_buffer(cmd)?;
 
             let wait_semaphores = [image_available];
-            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let wait_stages = [vk::PipelineStageFlags::ColorAttachmentOutput];
             let signal_semaphores = [render_finished];
             let cmd_buffers = [cmd];
 
-            let submit_info = vk::SubmitInfo::default()
-                .wait_semaphores(&wait_semaphores)
-                .wait_dst_stage_mask(&wait_stages)
-                .command_buffers(&cmd_buffers)
-                .signal_semaphores(&signal_semaphores);
+            let submit_info = vk::SubmitInfo {
+                wait_semaphore_count: 1,
+                wait_semaphores: &image_available,
+                wait_dst_stage_mask: &vk::PipelineStageFlags::ColorAttachmentOutput,
+                command_buffer_count: 1,
+                command_buffers: &cmd,
+                signal_semaphore_count: 1,
+                signal_semaphores: &render_finished,
+                ..Default::default()
+            };
 
             self.ctx
                 .device
@@ -1191,10 +1219,14 @@ impl Renderer {
 
             let swapchains = [self.swapchain.swapchain];
             let image_indices = [image_index];
-            let present_info = vk::PresentInfoKHR::default()
-                .wait_semaphores(&signal_semaphores)
-                .swapchains(&swapchains)
-                .image_indices(&image_indices);
+            let present_info = vk::PresentInfoKHR {
+                wait_semaphore_count: 1,
+                wait_semaphores: &render_finished,
+                swapchain_count: 1,
+                swapchains: &self.swapchain.swapchain,
+                image_indices: &image_index,
+                ..Default::default()
+            };
 
             let t_present = std::time::Instant::now();
             match self
@@ -1203,7 +1235,7 @@ impl Renderer {
                 .queue_present(self.ctx.present_queue, &present_info)
             {
                 Ok(false) => {}
-                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                Ok(true) | Err(vk::Error::OutOfDateKHR) => {
                     self.swapchain_dirty = true;
                 }
                 Err(e) => return Err(e.into()),
