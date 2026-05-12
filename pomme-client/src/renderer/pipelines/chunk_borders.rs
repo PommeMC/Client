@@ -210,7 +210,7 @@ impl ChunkBorderPipeline {
             set_layouts: layouts.as_ptr(),
             ..Default::default()
         };
-        let mut desc_sets = vec![vk::DescriptorSet::null(); MAX_FRAMES_IN_FLIGHT];
+        let mut desc_sets = vec![vk::DescriptorSet::null(); layouts.len()];
         device
             .allocate_descriptor_sets(&alloc_info, &mut desc_sets)
             .unwrap();

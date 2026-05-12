@@ -79,7 +79,7 @@ impl ChunkPipeline {
             set_layouts: camera_layouts.as_ptr(),
             ..Default::default()
         };
-        let mut camera_sets = vec![vk::DescriptorSet::null(); MAX_FRAMES_IN_FLIGHT];
+        let mut camera_sets = vec![vk::DescriptorSet::null(); camera_layouts.len()];
         device
             .allocate_descriptor_sets(&camera_alloc_info, &mut camera_sets)
             .expect("failed to allocate camera descriptor sets");

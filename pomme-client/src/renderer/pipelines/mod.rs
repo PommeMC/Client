@@ -1,4 +1,4 @@
-// pub mod block_overlay;
+pub mod block_overlay;
 // pub mod blur;
 pub mod chunk;
 pub mod chunk_borders;

@@ -1028,13 +1028,8 @@ impl Renderer {
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
                     if let Some((block_pos, stage)) = destroy_info {
-                        self.block_overlay_pipeline.draw(
-                            &self.ctx.device,
-                            cmd,
-                            frame,
-                            block_pos,
-                            *stage,
-                        );
+                        self.block_overlay_pipeline
+                            .draw(cmd, frame, block_pos, *stage);
                     }
 
                     self.entity_renderer
