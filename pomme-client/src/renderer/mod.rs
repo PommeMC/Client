@@ -261,7 +261,6 @@ impl Renderer {
 
         let chunk_buffers = ChunkBufferStore::new(
             &ctx.device,
-            &ctx.instance,
             ctx.physical_device,
             ctx.graphics_family,
             &ctx.allocator,
@@ -639,8 +638,7 @@ impl Renderer {
     }
 
     pub fn upload_chunk_mesh(&mut self, mesh: &ChunkMeshData) {
-        self.chunk_buffers
-            .upload(&self.ctx.device, self.ctx.graphics_queue, mesh);
+        self.chunk_buffers.upload(self.ctx.graphics_queue, mesh);
     }
 
     pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {
@@ -745,7 +743,7 @@ impl Renderer {
         game_dir: &Path,
         packs: &crate::resource_pack::ResourcePackManager,
     ) {
-        unsafe { self.ctx.device.wait_idle().unwrap() };
+        self.ctx.device.wait_idle().unwrap();
 
         let cache_path = game_dir.join(crate::world::block::registry::BLOCK_CACHE_FILE);
         let _ = std::fs::remove_file(&cache_path);
@@ -937,7 +935,7 @@ impl Renderer {
                     self.camera.position.z,
                 ];
                 self.chunk_buffers
-                    .dispatch_cull(&self.ctx.device, cmd, frame, &frustum, cam_pos);
+                    .dispatch_cull(cmd, frame, &frustum, cam_pos);
             }
 
             let clear_values = [
@@ -1022,9 +1020,8 @@ impl Renderer {
                     );
 
                     let t_cull = std::time::Instant::now();
-                    self.chunk_pipeline.bind(&self.ctx.device, cmd, frame);
-                    self.chunk_buffers
-                        .draw_indirect(&self.ctx.device, cmd, frame);
+                    self.chunk_pipeline.bind(cmd, frame);
+                    self.chunk_buffers.draw_indirect(cmd, frame);
                     let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
                     if let Some((block_pos, stage)) = destroy_info {
