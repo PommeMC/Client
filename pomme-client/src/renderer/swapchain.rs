@@ -14,8 +14,8 @@ use super::context::ContextError;
 use super::util;
 
 #[allow(dead_code)]
-pub struct SwapchainState {
-    pub swapchain: vk::SwapchainKHR,
+pub struct Swapchain {
+    pub handle: vk::SwapchainKHR,
     pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
     pub format: vk::SurfaceFormatKHR,
@@ -31,8 +31,7 @@ pub struct SwapchainState {
     pub framebuffers_load: Vec<vk::Framebuffer>,
 }
 
-impl SwapchainState {
-    #[allow(clippy::too_many_arguments)]
+impl Swapchain {
     pub fn new(
         ctx: &VulkanContext,
         width: u32,
@@ -148,7 +147,7 @@ impl SwapchainState {
         let framebuffers_load = make_fbs(render_pass_load)?;
 
         Ok(Self {
-            swapchain,
+            handle: swapchain,
             images,
             image_views,
             format,
@@ -198,7 +197,7 @@ impl SwapchainState {
         }
         self.image_views.clear();
 
-        device.destroy_swapchain(self.swapchain, None);
+        device.destroy_swapchain(self.handle, None);
     }
 
     pub fn aspect_ratio(&self) -> f32 {
