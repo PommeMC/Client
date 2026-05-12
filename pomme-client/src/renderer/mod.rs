@@ -27,15 +27,15 @@ use chunk::buffer::ChunkBufferStore;
 use chunk::mesher::{ChunkMeshData, MeshDispatcher};
 use context::VulkanContext;
 
-// use pipelines::block_overlay::BlockOverlayPipeline;
-// use pipelines::blur::BlurPipeline;
+use pipelines::block_overlay::BlockOverlayPipeline;
+use pipelines::blur::BlurPipeline;
 use pipelines::chunk::ChunkPipeline;
-// use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
-// use pipelines::hand::HandPipeline;
+use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
+use pipelines::hand::HandPipeline;
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
-// use pipelines::panorama::PanoramaPipeline;
-// use pipelines::skin_preview::SkinPreviewPipeline;
-// pub use pipelines::sky::{SkyPipeline, SkyState};
+use pipelines::panorama::PanoramaPipeline;
+use pipelines::skin_preview::SkinPreviewPipeline;
+pub use pipelines::sky::{SkyPipeline, SkyState};
 use swapchain::Swapchain;
 
 use crate::assets::AssetIndex;
@@ -84,13 +84,13 @@ pub struct RenderTimings {
 
 pub struct Renderer {
     ctx: VulkanContext,
-
     swapchain: Swapchain,
     camera: Camera,
+
     registry: BlockRegistry,
     jar_assets_dir: PathBuf,
     asset_index: Option<AssetIndex>,
-    atlas: TextureAtlas,
+
     chunk_pipeline: ChunkPipeline,
     hand_pipeline: HandPipeline,
     block_overlay_pipeline: BlockOverlayPipeline,
@@ -99,9 +99,11 @@ pub struct Renderer {
     menu_pipeline: MenuOverlayPipeline,
     blur_pipeline: BlurPipeline,
     skin_preview: SkinPreviewPipeline,
-    entity_renderer: EntityRenderer,
     chunk_border_pipeline: ChunkBorderPipeline,
     item_entity_pipeline: ItemEntityPipeline,
+
+    atlas: TextureAtlas,
+    entity_renderer: EntityRenderer,
     chunk_buffers: ChunkBufferStore,
     swapchain_dirty: bool,
     width: u32,
@@ -1042,8 +1044,7 @@ impl Renderer {
                         .draw(&self.ctx.device, cmd, frame, item_entities);
 
                     if *show_chunk_borders {
-                        self.chunk_border_pipeline
-                            .draw(&self.ctx.device, cmd, frame);
+                        self.chunk_border_pipeline.draw(cmd, frame);
                     }
 
                     let clear_attachment = vk::ClearAttachment {
