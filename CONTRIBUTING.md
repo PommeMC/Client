@@ -72,9 +72,9 @@ Pomme/
 pomme-client/
 └── src/
     ├── main.rs             # Entry point
+    ├── app/                # Winit event loop, input handling, state machine
     ├── args.rs             # CLI arguments
     ├── entity/             # Entity storage (item drops)
-    ├── window/             # winit event loop, input handling
     ├── renderer/           # Vulkan rendering, chunk meshing, texture atlas
     │   ├── pipelines/      # GPU pipelines (chunk, sky, hand, overlay, etc.)
     │   ├── shaders/        # GLSL shaders

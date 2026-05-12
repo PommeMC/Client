@@ -93,7 +93,7 @@ Running the standalone client requires minecraft assets, for which you have 2 op
 1. Run the launcher and install the latest supported release. Then you can do:
 
    ```bash
-   pnpm client:dev -- --username Steve --quick-access-server localhost
+   pnpm client:dev -- --username Steve --quick-access-multiplayer localhost
    ```
 
 2. If you're on linux, extract the vanilla 26.1.1 assets from `.minecraft/` to `reference/`:
@@ -110,7 +110,7 @@ Running the standalone client requires minecraft assets, for which you have 2 op
    cp ~/.minecraft/versions/26.1.1/26.1.1.jar reference/versions/26.1.1/
    unzip reference/versions/26.1.1/26.1.1.jar 'assets/*' -d reference/versions/26.1.1/extracted/
    
-   pnpm client:dev -- --username Steve --quick-access-server localhost \
+   pnpm client:dev -- --username Steve --quick-access-multiplayer localhost \
      --version 26.1.1 \
      --assets-dir $PWD/reference/assets \
      --versions-dir $PWD/reference/versions \
