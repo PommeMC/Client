@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { commands } from "../bindings";
 import {
   Friend,
@@ -9,6 +9,8 @@ import {
 
 const EMPTY: FriendsList = { friends: [], incomingRequests: [], outgoingRequests: [] };
 const PRESENCE_INTERVAL_MS = 30_000;
+
+export const isOffline = (p: PresenceEntry | undefined): boolean => !p || p.status === "OFFLINE";
 
 export const useFriends = (uuid: string | null) => {
   const [friendsList, setFriendsList] = useState<FriendsList>(EMPTY);
@@ -141,8 +143,23 @@ export const useFriends = (uuid: string | null) => {
 
   const clearFriendsError = useCallback(() => setFriendsError(null), []);
 
+  const friendsSorted = useMemo(() => {
+    const arr = friendsList.friends ?? [];
+    return [...arr].sort((a, b) => {
+      const pa = friendsPresence[a.profileId];
+      const pb = friendsPresence[b.profileId];
+      const aOffline = isOffline(pa);
+      const bOffline = isOffline(pb);
+      if (aOffline !== bOffline) return aOffline ? 1 : -1;
+      const ta = pa?.lastUpdated ? Date.parse(pa.lastUpdated) : 0;
+      const tb = pb?.lastUpdated ? Date.parse(pb.lastUpdated) : 0;
+      return tb - ta;
+    });
+  }, [friendsList.friends, friendsPresence]);
+
   return {
     friendsList,
+    friendsSorted,
     friendsLoaded,
     friendsError,
     friendsSkins,

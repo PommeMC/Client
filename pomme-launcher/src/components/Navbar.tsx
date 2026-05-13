@@ -25,7 +25,7 @@ const NAV_ITEMS: Array<NavItem> = [
   { id: "home", label: "HOME", icon: <HiHome /> },
   { id: "installations", label: "INSTALLATIONS", icon: <HiSquares2X2 /> },
   { id: "servers", label: "SERVERS", icon: <HiServer /> },
-  { id: "friends", label: "FRIENDS", icon: <HiUserGroup />, soon: true },
+  { id: "friends", label: "FRIENDS", icon: <HiUserGroup /> },
   { id: "mods", label: "MODS", icon: <HiPuzzlePiece />, soon: true },
   { id: "news", label: "NEWS & UPDATES", icon: <HiNewspaper /> },
 ];
@@ -54,7 +54,10 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
 
     activeIndex,
     authLoading,
+    friendsList,
   } = useAppStateContext();
+
+  const incomingCount = friendsList.incomingRequests?.length ?? 0;
 
   const { ref: accountDropdownRef } = accountDropdown;
 
@@ -81,6 +84,9 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
             <span className="nav-icon">{item.icon}</span>
             <span className="nav-text">{item.label}</span>
             {item.soon && <span className="nav-soon">SOON</span>}
+            {item.id === "friends" && incomingCount > 0 && (
+              <span className="nav-badge">{incomingCount}</span>
+            )}
           </button>
         ))}
       </div>

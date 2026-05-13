@@ -1,5 +1,5 @@
 import { HiArrowPath, HiCheck, HiCog6Tooth, HiPlay, HiPlus, HiXMark } from "react-icons/hi2";
-import { Friend, PresenceEntry } from "../lib/friends";
+import { Friend, isOffline, PresenceEntry } from "../lib/friends";
 import { useAppStateContext } from "../lib/state";
 import { handleLaunchType } from "../lib/types";
 
@@ -7,6 +7,7 @@ export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaun
   const {
     account,
     friendsList,
+    friendsSorted,
     friendsError,
     friendsSkins,
     friendsPresence,
@@ -27,7 +28,7 @@ export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaun
     );
   }
 
-  const friends = friendsList.friends ?? [];
+  const friends = friendsSorted;
   const incoming = friendsList.incomingRequests ?? [];
   const outgoing = friendsList.outgoingRequests ?? [];
 
@@ -189,7 +190,7 @@ function FriendRow({
   presence: PresenceEntry | undefined;
   children: React.ReactNode;
 }) {
-  const offline = !presence || presence.status === "OFFLINE";
+  const offline = isOffline(presence);
   return (
     <div className="mock-friend">
       <div
