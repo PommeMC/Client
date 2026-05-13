@@ -315,7 +315,7 @@ function App() {
 
           {page === "servers" && <ServersPage handleLaunch={handleLaunch} />}
 
-          {page === "friends" && <FriendsPage />}
+          {page === "friends" && <FriendsPage handleLaunch={handleLaunch} />}
 
           {page === "mods" && <ModsPage />}
 

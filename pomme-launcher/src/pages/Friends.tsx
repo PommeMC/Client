@@ -1,8 +1,9 @@
-import { HiArrowPath, HiCheck, HiCog6Tooth, HiPlus, HiXMark } from "react-icons/hi2";
+import { HiArrowPath, HiCheck, HiCog6Tooth, HiPlay, HiPlus, HiXMark } from "react-icons/hi2";
 import { Friend, PresenceEntry } from "../lib/friends";
 import { useAppStateContext } from "../lib/state";
+import { handleLaunchType } from "../lib/types";
 
-export default function FriendsPage() {
+export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaunchType }) {
   const {
     account,
     friendsList,
@@ -73,11 +74,29 @@ export default function FriendsPage() {
         skinUrls={friendsSkins}
         presence={friendsPresence}
         emptyMessage="You haven't added any friends yet."
-        renderActions={(uuid) => (
-          <button className="friends-btn" onClick={() => removeFriend(uuid)} title="Remove friend">
-            <HiXMark /> Remove
-          </button>
-        )}
+        renderActions={(uuid, p) => {
+          const joinAddress = p?.status === "PLAYING_SERVER" ? p.joinInfo?.value : undefined;
+          return (
+            <>
+              {joinAddress && (
+                <button
+                  className="friends-btn accept"
+                  onClick={() => handleLaunch({ serverIp: joinAddress })}
+                  title={`Join ${joinAddress}`}
+                >
+                  <HiPlay /> Join
+                </button>
+              )}
+              <button
+                className="friends-btn"
+                onClick={() => removeFriend(uuid)}
+                title="Remove friend"
+              >
+                <HiXMark /> Remove
+              </button>
+            </>
+          );
+        }}
       />
 
       <FriendsSection
@@ -133,7 +152,7 @@ function FriendsSection({
   presence: Record<string, PresenceEntry>;
   emptyMessage?: string;
   hideWhenEmpty?: boolean;
-  renderActions: (uuid: string) => React.ReactNode;
+  renderActions: (uuid: string, presence: PresenceEntry | undefined) => React.ReactNode;
 }) {
   if (hideWhenEmpty && friends.length === 0) return null;
 
@@ -151,7 +170,7 @@ function FriendsSection({
             skinUrl={skinUrls[f.profileId]}
             presence={presence[f.profileId]}
           >
-            {renderActions(f.profileId)}
+            {renderActions(f.profileId, presence[f.profileId])}
           </FriendRow>
         ))}
       </div>
