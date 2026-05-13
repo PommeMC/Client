@@ -22,7 +22,7 @@ use crate::{
     player::LocalPlayer,
     renderer::Renderer,
     resource_pack::ResourcePackManager,
-    ui::menu::MainMenu,
+    ui::menu::{MainMenu, MenuInput},
     user::UserData,
     world::chunk::ChunkStore,
 };
@@ -111,6 +111,25 @@ impl AppCore {
             asset_index,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
+        }
+    }
+
+    pub fn build_menu_input(&mut self) -> MenuInput {
+        MenuInput {
+            cursor: self.input.cursor_pos(),
+            clicked: self.input.left_just_pressed(),
+            mouse_held: self.input.left_held(),
+            typed_chars: self.input.drain_typed_chars(),
+            backspace: self.input.backspace_pressed(),
+            enter: self.input.enter_pressed(),
+            escape: self.input.escape_pressed(),
+            tab: self.input.tab_pressed(),
+            f5: self.input.f5_pressed(),
+            select_all: self.input.select_all_pressed(),
+            copy: self.input.copy_pressed(),
+            cut: self.input.cut_pressed(),
+            undo: self.input.undo_pressed(),
+            scroll_delta: self.input.consume_menu_scroll(),
         }
     }
 

@@ -1,9 +1,10 @@
 use std::collections::HashSet;
-use winit::event::{ElementState, MouseButton};
+use winit::event::{ElementState, Modifiers, MouseButton};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 pub struct InputState {
     pressed: HashSet<KeyCode>,
+    modifiers: Modifiers,
     mouse_delta: (f64, f64),
     cursor_captured: bool,
     selected_slot: u8,
@@ -18,6 +19,10 @@ pub struct InputState {
     escape_pressed: bool,
     tab_pressed: bool,
     f5_pressed: bool,
+    select_all_pressed: bool,
+    copy_pressed: bool,
+    cut_pressed: bool,
+    undo_pressed: bool,
 }
 
 #[derive(Default)]
@@ -31,6 +36,7 @@ impl InputState {
     pub fn new() -> Self {
         Self {
             pressed: HashSet::new(),
+            modifiers: Modifiers::default(),
             mouse_delta: (0.0, 0.0),
             cursor_captured: true,
             selected_slot: 0,
@@ -45,6 +51,10 @@ impl InputState {
             escape_pressed: false,
             tab_pressed: false,
             f5_pressed: false,
+            select_all_pressed: false,
+            copy_pressed: false,
+            cut_pressed: false,
+            undo_pressed: false,
         }
     }
 
@@ -68,6 +78,10 @@ impl InputState {
         }
     }
 
+    pub fn set_modifiers(&mut self, modifiers: Modifiers) {
+        self.modifiers = modifiers;
+    }
+
     pub fn on_menu_key_event(&mut self, event: &winit::event::KeyEvent) {
         if !event.state.is_pressed() {
             return;
@@ -80,6 +94,34 @@ impl InputState {
                 KeyCode::Escape => self.escape_pressed = true,
                 KeyCode::Tab => self.tab_pressed = true,
                 KeyCode::F5 => self.f5_pressed = true,
+                KeyCode::KeyV if self.modifiers.state().control_key() => {
+                    if let Ok(mut cb) = arboard::Clipboard::new()
+                        && let Ok(text) = cb.get_text()
+                    {
+                        for ch in text.chars() {
+                            if !ch.is_control() {
+                                self.typed_chars.push(ch);
+                            }
+                        }
+                    }
+                    return;
+                }
+                KeyCode::KeyA if self.modifiers.state().control_key() => {
+                    self.select_all_pressed = true;
+                    return;
+                }
+                KeyCode::KeyC if self.modifiers.state().control_key() => {
+                    self.copy_pressed = true;
+                    return;
+                }
+                KeyCode::KeyX if self.modifiers.state().control_key() => {
+                    self.cut_pressed = true;
+                    return;
+                }
+                KeyCode::KeyZ if self.modifiers.state().control_key() => {
+                    self.undo_pressed = true;
+                    return;
+                }
                 _ => {}
             }
         }
@@ -129,6 +171,22 @@ impl InputState {
 
     pub fn f5_pressed(&mut self) -> bool {
         std::mem::take(&mut self.f5_pressed)
+    }
+
+    pub fn select_all_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.select_all_pressed)
+    }
+
+    pub fn copy_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.copy_pressed)
+    }
+
+    pub fn cut_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.cut_pressed)
+    }
+
+    pub fn undo_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.undo_pressed)
     }
 
     pub fn selected_slot(&self) -> u8 {

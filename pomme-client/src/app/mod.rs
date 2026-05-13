@@ -192,6 +192,9 @@ impl ApplicationHandler for App {
                     app_rt.renderer.resize(new_size);
                 }
             }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.core.input.set_modifiers(mods);
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.phase.transition(|mut app| {
                     if let Some(Gfx { window, .. }) = app.gfx_mut()

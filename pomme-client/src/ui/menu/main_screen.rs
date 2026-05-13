@@ -227,7 +227,7 @@ impl MainMenu {
                     match def.id {
                         0 => {}
                         1 => {
-                            self.screen = Screen::ServerList;
+                            self.set_screen(Screen::ServerList);
                             self.scroll_offset = 0.0;
                             self.selected_server = None;
                         }

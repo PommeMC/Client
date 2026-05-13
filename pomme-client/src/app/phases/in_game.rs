@@ -24,7 +24,6 @@ use crate::{
         common,
         death::{self, DeathAction},
         hud,
-        menu::MenuInput,
         pause::{self, PauseAction},
     },
     world::chunk::ChunkStore,
@@ -408,18 +407,7 @@ pub fn update_game(
     }
 
     if game.options_from_game {
-        let menu_input = MenuInput {
-            cursor: core.input.cursor_pos(),
-            clicked: core.input.left_just_pressed(),
-            mouse_held: core.input.left_held(),
-            typed_chars: core.input.drain_typed_chars(),
-            backspace: core.input.backspace_pressed(),
-            enter: core.input.enter_pressed(),
-            escape: core.input.escape_pressed(),
-            tab: core.input.tab_pressed(),
-            f5: core.input.f5_pressed(),
-            scroll_delta: core.input.consume_menu_scroll(),
-        };
+        let menu_input = core.build_menu_input();
         let r = &gfx.renderer;
         let result = core
             .menu
