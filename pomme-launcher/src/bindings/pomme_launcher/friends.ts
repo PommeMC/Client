@@ -9,3 +9,15 @@ export type FriendsList = {
 	incomingRequests?: Friend[],
 	outgoingRequests?: Friend[],
 };
+
+export type PresenceEntry = {
+	profileId: string,
+	status: string,
+	joinInfo?: PresenceJoinInfo | null,
+	lastUpdated?: string | null,
+};
+
+export type PresenceJoinInfo = {
+	value: string,
+	invited: boolean,
+};

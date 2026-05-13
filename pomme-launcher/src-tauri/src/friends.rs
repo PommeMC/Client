@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 const FRIENDS_URL: &str = "https://api.minecraftservices.com/friends";
+const PRESENCE_URL: &str = "https://api.minecraftservices.com/presence";
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
 pub struct Friend {
@@ -108,6 +109,58 @@ async fn handle_response(resp: reqwest::Response) -> Result<FriendsList, String>
             .map_err(|e| format!("Friends response parse failed: {e}"));
     }
     Err(map_error(status.as_u16()))
+}
+
+#[derive(Serialize, Deserialize, Clone, specta::Type)]
+pub struct PresenceJoinInfo {
+    pub value: String,
+    pub invited: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, specta::Type)]
+pub struct PresenceEntry {
+    #[serde(rename = "profileId")]
+    pub profile_id: String,
+    pub status: String,
+    #[serde(default, rename = "joinInfo")]
+    pub join_info: Option<PresenceJoinInfo>,
+    #[serde(default, rename = "lastUpdated")]
+    pub last_updated: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct PresenceResponse {
+    #[serde(default)]
+    presence: Vec<PresenceEntry>,
+}
+
+#[derive(Serialize)]
+struct PresenceRequest {
+    status: &'static str,
+    #[serde(rename = "joinInfo")]
+    join_info: Option<()>,
+}
+
+pub async fn update_presence(access_token: &str) -> Result<Vec<PresenceEntry>, String> {
+    let resp = reqwest::Client::new()
+        .post(PRESENCE_URL)
+        .bearer_auth(access_token)
+        .json(&PresenceRequest {
+            status: "ONLINE",
+            join_info: None,
+        })
+        .send()
+        .await
+        .map_err(|e| format!("Presence post failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(map_error(status.as_u16()));
+    }
+    let parsed: PresenceResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Presence parse failed: {e}"))?;
+    Ok(parsed.presence)
 }
 
 fn map_error(status: u16) -> String {

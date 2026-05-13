@@ -309,6 +309,13 @@ pub async fn remove_friend(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn update_presence(uuid: String) -> Result<Vec<crate::friends::PresenceEntry>, String> {
+    let token = fresh_token(&uuid).await?;
+    crate::friends::update_presence(&token).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn ensure_assets(app: AppHandle, version: String) -> Result<(), String> {
     if crate::downloader::needs_download(&version) {
         crate::downloader::download(&app, &version).await?;

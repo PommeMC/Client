@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { commands } from "../bindings";
-import { Friend, FriendsList } from "../bindings/pomme_launcher/friends";
+import { Friend, FriendsList, PresenceEntry } from "../bindings/pomme_launcher/friends";
 
 const EMPTY: FriendsList = { friends: [], incomingRequests: [], outgoingRequests: [] };
+const PRESENCE_INTERVAL_MS = 30_000;
 
 export const useFriends = (uuid: string | null) => {
   const [friendsList, setFriendsList] = useState<FriendsList>(EMPTY);
   const [friendsLoaded, setFriendsLoaded] = useState(false);
   const [friendsError, setFriendsError] = useState<string | null>(null);
   const [friendsSkins, setFriendsSkins] = useState<Record<string, string>>({});
+  const [friendsPresence, setFriendsPresence] = useState<Record<string, PresenceEntry>>({});
 
   const loadSkinFor = useCallback((friendUuid: string) => {
     setFriendsSkins((prev) => {
@@ -51,6 +53,27 @@ export const useFriends = (uuid: string | null) => {
       cancelled = true;
     };
   }, [uuid, applyList]);
+
+  useEffect(() => {
+    if (!uuid) return;
+    let cancelled = false;
+    const tick = () => {
+      commands.updatePresence(uuid).then((res) => {
+        if (cancelled || !res.ok) return;
+        const byUuid: Record<string, PresenceEntry> = {};
+        for (const entry of res.value) {
+          byUuid[entry.profileId] = entry;
+        }
+        setFriendsPresence(byUuid);
+      });
+    };
+    tick();
+    const interval = setInterval(tick, PRESENCE_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [uuid]);
 
   const runMutation = useCallback(
     async (op: Promise<{ ok: true; value: FriendsList } | { ok: false; error: string }>) => {
@@ -96,6 +119,7 @@ export const useFriends = (uuid: string | null) => {
     friendsLoaded,
     friendsError,
     friendsSkins,
+    friendsPresence,
     sendFriendRequest,
     acceptFriendRequest,
     removeFriend,
@@ -103,4 +127,4 @@ export const useFriends = (uuid: string | null) => {
   };
 };
 
-export type { Friend };
+export type { Friend, PresenceEntry };

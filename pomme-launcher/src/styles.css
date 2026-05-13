@@ -371,6 +371,10 @@ body {
   background-color: #555;
 }
 
+.mc-head.off {
+  filter: grayscale(0.8) opacity(0.6);
+}
+
 .account-username {
   flex: 1;
   font-family: var(--font-display);

@@ -78,6 +78,7 @@ pub fn get_builder() -> tauri_specta::Builder {
             commands::send_friend_request,
             commands::accept_friend_request,
             commands::remove_friend,
+            commands::update_presence,
         ])
         .events(tauri_specta::collect_events![
             commands::ConsoleMessageEvent,
