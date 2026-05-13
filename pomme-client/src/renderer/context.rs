@@ -82,6 +82,7 @@ impl VulkanContext {
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
 
+        #[allow(unused_mut)]
         let mut extensions = get_required_extensions(display_handle)?.to_vec();
 
         #[cfg(target_os = "macos")]
