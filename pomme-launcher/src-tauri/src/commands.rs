@@ -263,6 +263,50 @@ pub async fn refresh_account(uuid: String) -> Result<crate::auth::AuthAccount, S
         .ok_or_else(|| "Failed to refresh account".to_string())
 }
 
+async fn fresh_token(uuid: &str) -> Result<String, String> {
+    crate::auth::try_restore_or_refresh(uuid)
+        .await
+        .map(|a| a.access_token)
+        .ok_or_else(|| "Account is not signed in".to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_friends(uuid: String) -> Result<crate::friends::FriendsList, String> {
+    let token = fresh_token(&uuid).await?;
+    crate::friends::get_friends(&token).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn send_friend_request(
+    uuid: String,
+    name: String,
+) -> Result<crate::friends::FriendsList, String> {
+    let token = fresh_token(&uuid).await?;
+    crate::friends::action_by_name(&token, &name, crate::friends::UpdateType::Add).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn accept_friend_request(
+    uuid: String,
+    friend_uuid: String,
+) -> Result<crate::friends::FriendsList, String> {
+    let token = fresh_token(&uuid).await?;
+    crate::friends::action_by_id(&token, &friend_uuid, crate::friends::UpdateType::Add).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn remove_friend(
+    uuid: String,
+    friend_uuid: String,
+) -> Result<crate::friends::FriendsList, String> {
+    let token = fresh_token(&uuid).await?;
+    crate::friends::action_by_id(&token, &friend_uuid, crate::friends::UpdateType::Remove).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn ensure_assets(app: AppHandle, version: String) -> Result<(), String> {

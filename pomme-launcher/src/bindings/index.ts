@@ -3,6 +3,7 @@
 import type * as pomme_launcher$auth from "./pomme_launcher/auth";
 import type * as pomme_launcher$commands from "./pomme_launcher/commands";
 import type * as pomme_launcher$downloader from "./pomme_launcher/downloader";
+import type * as pomme_launcher$friends from "./pomme_launcher/friends";
 import type * as pomme_launcher$installations from "./pomme_launcher/installations";
 import type * as pomme_launcher$ping from "./pomme_launcher/ping";
 import type * as pomme_launcher$settings from "./pomme_launcher/settings";
@@ -36,6 +37,10 @@ export const commands = {
 	duplicateInstallation: (oldId: string, payload: pomme_launcher$installations.InstallationDraft) => typedError<pomme_launcher$installations.Installation, pomme_launcher$installations.InstallationError>(__TAURI_INVOKE("duplicate_installation", { oldId, payload })),
 	editInstallation: (id: string, payload: pomme_launcher$installations.InstallationDraft) => typedError<pomme_launcher$installations.Installation, pomme_launcher$installations.InstallationError>(__TAURI_INVOKE("edit_installation", { id, payload })),
 	getDownloadedVersions: () => __TAURI_INVOKE<string[]>("get_downloaded_versions"),
+	getFriends: (uuid: string) => typedError<pomme_launcher$friends.FriendsList, string>(__TAURI_INVOKE("get_friends", { uuid })),
+	sendFriendRequest: (uuid: string, name: string) => typedError<pomme_launcher$friends.FriendsList, string>(__TAURI_INVOKE("send_friend_request", { uuid, name })),
+	acceptFriendRequest: (uuid: string, friendUuid: string) => typedError<pomme_launcher$friends.FriendsList, string>(__TAURI_INVOKE("accept_friend_request", { uuid, friendUuid })),
+	removeFriend: (uuid: string, friendUuid: string) => typedError<pomme_launcher$friends.FriendsList, string>(__TAURI_INVOKE("remove_friend", { uuid, friendUuid })),
 };
 
 /** Events */

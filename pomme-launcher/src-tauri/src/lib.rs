@@ -1,6 +1,7 @@
 mod auth;
 mod commands;
 mod downloader;
+mod friends;
 mod installations;
 mod ping;
 mod settings;
@@ -73,6 +74,10 @@ pub fn get_builder() -> tauri_specta::Builder {
             commands::duplicate_installation,
             commands::edit_installation,
             commands::get_downloaded_versions,
+            commands::get_friends,
+            commands::send_friend_request,
+            commands::accept_friend_request,
+            commands::remove_friend,
         ])
         .events(tauri_specta::collect_events![
             commands::ConsoleMessageEvent,
