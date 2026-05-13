@@ -12,8 +12,8 @@ use crate::renderer::util;
 
 const BUCKET_VERTICES: u32 = 32768;
 const BUCKET_INDICES: u32 = 49152;
-const VERTEX_SIZE: u64 = std::mem::size_of::<ChunkVertex>() as u64;
-const INDEX_SIZE: u64 = std::mem::size_of::<u32>() as u64;
+const VERTEX_SIZE: u64 = size_of::<ChunkVertex>() as u64;
+const INDEX_SIZE: u64 = size_of::<u32>() as u64;
 const BYTES_PER_BUCKET: u64 =
     BUCKET_VERTICES as u64 * VERTEX_SIZE + BUCKET_INDICES as u64 * INDEX_SIZE;
 const MIN_BUCKETS: u32 = 128;
@@ -221,10 +221,10 @@ impl ChunkBufferStore {
         }
 
         let max_meta = (total_buckets * 2) as u64;
-        let meta_size = max_meta * std::mem::size_of::<ChunkMeta>() as u64;
-        let indirect_size = max_meta * std::mem::size_of::<DrawCommand>() as u64;
+        let meta_size = max_meta * size_of::<ChunkMeta>() as u64;
+        let indirect_size = max_meta * size_of::<DrawCommand>() as u64;
         let count_size = 4u64;
-        let frustum_size = std::mem::size_of::<FrustumData>() as u64;
+        let frustum_size = size_of::<FrustumData>() as u64;
 
         let mut meta_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut meta_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -757,7 +757,7 @@ impl ChunkBufferStore {
                 self.indirect_buffers[frame],
                 0,
                 max_draws,
-                std::mem::size_of::<DrawCommand>() as u32,
+                size_of::<DrawCommand>() as u32,
             );
         } else {
             cmd.draw_indexed_indirect_count(
@@ -766,7 +766,7 @@ impl ChunkBufferStore {
                 self.count_buffers[frame],
                 0,
                 max_draws,
-                std::mem::size_of::<DrawCommand>() as u32,
+                size_of::<DrawCommand>() as u32,
             );
         }
     }

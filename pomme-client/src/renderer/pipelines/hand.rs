@@ -110,11 +110,10 @@ impl HandPipeline {
             .allocate_descriptor_sets(&mvp_alloc_info, &mut mvp_sets)
             .expect("failed to allocate hand mvp descriptor sets");
 
-        let skin_layouts = [skin_layout];
         let skin_alloc_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool,
             descriptor_set_count: 1,
-            set_layouts: skin_layouts.as_ptr(),
+            set_layouts: &skin_layout,
             ..Default::default()
         };
         let mut skin_set = vk::DescriptorSet::null();
@@ -129,21 +128,21 @@ impl HandPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<HandUniform>() as u64,
+                size_of::<HandUniform>() as u64,
                 "hand_uniform",
             );
 
-            let buffer_info = [vk::DescriptorBufferInfo {
+            let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<HandUniform>() as u64,
-            }];
+                range: size_of::<HandUniform>() as u64,
+            };
             let write = vk::WriteDescriptorSet {
                 dst_set: set,
                 dst_binding: 0,
                 descriptor_type: vk::DescriptorType::UniformBuffer,
                 descriptor_count: 1,
-                buffer_info: buffer_info.as_ptr(),
+                buffer_info: &buffer_info,
                 image_info: std::ptr::null(),
                 ..Default::default()
             };
@@ -503,18 +502,18 @@ fn update_skin_descriptor(
     view: vk::ImageView,
     sampler: vk::Sampler,
 ) {
-    let image_info = [vk::DescriptorImageInfo {
+    let image_info = vk::DescriptorImageInfo {
         sampler,
         image_view: view,
         image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-    }];
+    };
     let write = vk::WriteDescriptorSet {
         dst_set: set,
         dst_binding: 0,
         descriptor_type: vk::DescriptorType::CombinedImageSampler,
         descriptor_count: 1,
         buffer_info: std::ptr::null(),
-        image_info: image_info.as_ptr(),
+        image_info: &image_info,
         ..Default::default()
     };
     device.update_descriptor_sets(&[write], &[]);
@@ -558,7 +557,7 @@ fn create_pipeline(
 
     let binding_descs = [vk::VertexInputBindingDescription {
         binding: 0,
-        stride: std::mem::size_of::<HandVertex>() as u32,
+        stride: size_of::<HandVertex>() as u32,
         input_rate: vk::VertexInputRate::Vertex,
     }];
 

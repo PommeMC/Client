@@ -263,13 +263,13 @@ impl SkyPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<SkyUniform>() as u64,
+                size_of::<SkyUniform>() as u64,
                 "sky_uniform",
             );
             let buffer_info = [vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<SkyUniform>() as u64,
+                range: size_of::<SkyUniform>() as u64,
             }];
             let write = vk::WriteDescriptorSet::default()
                 .dst_set(set)
@@ -935,7 +935,7 @@ fn create_pipelines(
 
     let binding_descs = [vk::VertexInputBindingDescription {
         binding: 0,
-        stride: std::mem::size_of::<SkyVertex>() as u32,
+        stride: size_of::<SkyVertex>() as u32,
         input_rate: vk::VertexInputRate::VERTEX,
     }];
 

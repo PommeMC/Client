@@ -20,7 +20,7 @@ pub struct ChunkVertex {
 }
 
 impl ChunkVertex {
-    pub const STRIDE: u32 = std::mem::size_of::<Self>() as u32;
+    pub const STRIDE: u32 = size_of::<Self>() as u32;
 
     pub fn binding_description() -> vk::VertexInputBindingDescription {
         vk::VertexInputBindingDescription {

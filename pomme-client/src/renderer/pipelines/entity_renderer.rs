@@ -184,6 +184,7 @@ impl EntityRenderer {
         let camera_layouts_vec: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
         let camera_alloc_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool,
+            descriptor_set_count: camera_layouts_vec.len() as u32,
             set_layouts: camera_layouts_vec.as_ptr(),
             ..Default::default()
         };
@@ -199,19 +200,20 @@ impl EntityRenderer {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<CameraUniform>() as u64,
+                size_of::<CameraUniform>() as u64,
                 "entity_camera_uniform",
             );
 
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<CameraUniform>() as u64,
+                range: size_of::<CameraUniform>() as u64,
             };
             let write = vk::WriteDescriptorSet {
                 dst_set: set,
                 dst_binding: 0,
                 descriptor_type: vk::DescriptorType::UniformBuffer,
+                descriptor_count: 1,
                 buffer_info: &buffer_info,
                 ..Default::default()
             };

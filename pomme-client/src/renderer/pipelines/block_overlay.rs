@@ -123,20 +123,20 @@ impl BlockOverlayPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<CameraUniform>() as u64,
+                size_of::<CameraUniform>() as u64,
                 "block_overlay_camera",
             );
-            let buffer_info = [vk::DescriptorBufferInfo {
+            let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<CameraUniform>() as u64,
-            }];
+                range: size_of::<CameraUniform>() as u64,
+            };
             let write = vk::WriteDescriptorSet {
                 dst_set: set,
                 dst_binding: 0,
                 descriptor_type: vk::DescriptorType::UniformBuffer,
                 descriptor_count: 1,
-                buffer_info: buffer_info.as_ptr(),
+                buffer_info: &buffer_info,
                 image_info: std::ptr::null(),
                 ..Default::default()
             };

@@ -220,23 +220,23 @@ impl ChunkBorderPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<CameraUniform>() as u64,
+                size_of::<CameraUniform>() as u64,
                 "chunk_border_cam",
             );
-            let buf_info = [vk::DescriptorBufferInfo {
+            let buf_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<CameraUniform>() as u64,
-            }];
-            let write = [vk::WriteDescriptorSet {
+                range: size_of::<CameraUniform>() as u64,
+            };
+            let write = vk::WriteDescriptorSet {
                 dst_set: *desc_set,
                 dst_binding: 0,
-                descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::UniformBuffer,
-                buffer_info: buf_info.as_ptr(),
+                descriptor_count: 1,
+                buffer_info: &buf_info,
                 ..Default::default()
-            }];
-            device.update_descriptor_sets(&write, &[]);
+            };
+            device.update_descriptor_sets(&[write], &[]);
             camera_buffers.push(buf);
             camera_allocs.push(alloc);
         }
@@ -245,7 +245,7 @@ impl ChunkBorderPipeline {
         let (vertex_buffer, vertex_alloc) = util::create_host_buffer(
             device,
             allocator,
-            (max_verts * std::mem::size_of::<LineVertex>()) as u64,
+            (max_verts * size_of::<LineVertex>()) as u64,
             vk::BufferUsageFlags::VertexBuffer,
             "chunk_border_verts",
         );
@@ -266,7 +266,7 @@ impl ChunkBorderPipeline {
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         let data = self.camera_allocs[frame].mapped_slice_mut().unwrap();
-        data[..std::mem::size_of::<CameraUniform>()].copy_from_slice(bytemuck::bytes_of(uniform));
+        data[..size_of::<CameraUniform>()].copy_from_slice(bytemuck::bytes_of(uniform));
     }
 
     pub fn update_lines(&mut self, cam_x: f32, cam_y: f32, cam_z: f32, min_y: i32, max_y: i32) {

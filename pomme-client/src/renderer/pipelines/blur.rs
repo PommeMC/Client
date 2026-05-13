@@ -669,13 +669,13 @@ fn write_blur_descriptor(
         image_view: view,
         image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
     };
-    let write = [vk::WriteDescriptorSet {
+    let write = vk::WriteDescriptorSet {
         dst_set: set,
         dst_binding: 0,
         descriptor_type: vk::DescriptorType::CombinedImageSampler,
         descriptor_count: 1,
         image_info: &image_info,
         ..Default::default()
-    }];
-    device.update_descriptor_sets(&write, &[]);
+    };
+    device.update_descriptor_sets(&[write], &[]);
 }

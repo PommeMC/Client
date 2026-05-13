@@ -110,11 +110,10 @@ impl ItemEntityPipeline {
             .allocate_descriptor_sets(&camera_alloc_info, &mut camera_sets)
             .expect("failed to allocate item entity camera sets");
 
-        let atlas_layouts = [atlas_layout];
         let atlas_alloc_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool,
-            descriptor_set_count: atlas_layouts.len() as u32,
-            set_layouts: atlas_layouts.as_ptr(),
+            descriptor_set_count: 1,
+            set_layouts: &atlas_layout,
             ..Default::default()
         };
         let mut atlas_set = vk::DescriptorSet::null();
@@ -130,13 +129,13 @@ impl ItemEntityPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<CameraUniform>() as u64,
+                size_of::<CameraUniform>() as u64,
                 "item_entity_camera",
             );
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<CameraUniform>() as u64,
+                range: size_of::<CameraUniform>() as u64,
             };
             let write = vk::WriteDescriptorSet {
                 dst_set: set,

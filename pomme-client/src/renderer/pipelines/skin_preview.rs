@@ -110,10 +110,9 @@ impl SkinPreviewPipeline {
         let arm_mvp_sets = unsafe { device.allocate_descriptor_sets(&arm_mvp_alloc_info) }
             .expect("failed to allocate skin preview arm mvp sets");
 
-        let tex_layouts = [tex_layout];
         let tex_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
-            .set_layouts(&tex_layouts);
+            .set_layouts(std::slice::from_ref(&tex_layout));
         let tex_set = unsafe { device.allocate_descriptor_sets(&tex_alloc_info) }
             .expect("failed to allocate skin preview tex set")[0];
 
@@ -128,13 +127,13 @@ impl SkinPreviewPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<Uniform>() as u64,
+                size_of::<Uniform>() as u64,
                 "skin_body_mvp",
             );
             let buffer_info = [vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<Uniform>() as u64,
+                range: size_of::<Uniform>() as u64,
             }];
             let write = vk::WriteDescriptorSet::default()
                 .dst_set(mvp_sets[i])
@@ -148,13 +147,13 @@ impl SkinPreviewPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<Uniform>() as u64,
+                size_of::<Uniform>() as u64,
                 "skin_head_mvp",
             );
             let buffer_info = [vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<Uniform>() as u64,
+                range: size_of::<Uniform>() as u64,
             }];
             let write = vk::WriteDescriptorSet::default()
                 .dst_set(head_mvp_sets[i])
@@ -168,13 +167,13 @@ impl SkinPreviewPipeline {
             let (buf, alloc) = util::create_uniform_buffer(
                 device,
                 allocator,
-                std::mem::size_of::<Uniform>() as u64,
+                size_of::<Uniform>() as u64,
                 "skin_arm_mvp",
             );
             let buffer_info = [vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
-                range: std::mem::size_of::<Uniform>() as u64,
+                range: size_of::<Uniform>() as u64,
             }];
             let write = vk::WriteDescriptorSet::default()
                 .dst_set(arm_mvp_sets[i])
@@ -467,7 +466,7 @@ fn create_pipeline(
 
     let binding = [vk::VertexInputBindingDescription {
         binding: 0,
-        stride: std::mem::size_of::<Vertex>() as u32,
+        stride: size_of::<Vertex>() as u32,
         input_rate: vk::VertexInputRate::VERTEX,
     }];
     let attrs = [

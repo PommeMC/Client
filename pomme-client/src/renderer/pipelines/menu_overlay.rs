@@ -39,7 +39,7 @@ struct Vertex {
 }
 
 const MAX_VERTICES: usize = 16384;
-const VERTEX_SIZE: usize = std::mem::size_of::<Vertex>();
+const VERTEX_SIZE: usize = size_of::<Vertex>();
 
 struct GlyphEntry {
     u0: f32,
@@ -280,11 +280,10 @@ impl MenuOverlayPipeline {
             .create_descriptor_pool(&pool_info, None)
             .expect("failed to create menu overlay descriptor pool");
 
-        let globals_layouts = [globals_layout];
         let globals_alloc_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool,
-            descriptor_set_count: globals_layouts.len() as u32,
-            set_layouts: globals_layouts.as_ptr(),
+            descriptor_set_count: 1,
+            set_layouts: &globals_layout,
             ..Default::default()
         };
         let mut globals_set = vk::DescriptorSet::null();
@@ -292,11 +291,10 @@ impl MenuOverlayPipeline {
             .allocate_descriptor_sets(&globals_alloc_info, slice::from_mut(&mut globals_set))
             .expect("failed to allocate globals descriptor set");
 
-        let tex_layouts = [tex_layout];
         let tex_alloc_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool,
-            descriptor_set_count: tex_layouts.len() as u32,
-            set_layouts: tex_layouts.as_ptr(),
+            descriptor_set_count: 1,
+            set_layouts: &tex_layout,
             ..Default::default()
         };
         let mut tex_set = vk::DescriptorSet::null();
@@ -307,17 +305,17 @@ impl MenuOverlayPipeline {
         let (globals_buffer, globals_allocation) =
             util::create_uniform_buffer(device, allocator, 8, "menu_globals");
 
-        let buf_info = [vk::DescriptorBufferInfo {
+        let buf_info = vk::DescriptorBufferInfo {
             buffer: globals_buffer,
             offset: 0,
             range: 8,
-        }];
+        };
         let write = vk::WriteDescriptorSet {
             dst_set: globals_set,
             dst_binding: 0,
-            descriptor_count: buf_info.len() as u32,
+            descriptor_count: 1,
             descriptor_type: vk::DescriptorType::UniformBuffer,
-            buffer_info: buf_info.as_ptr(),
+            buffer_info: &buf_info,
             ..Default::default()
         };
         device.update_descriptor_sets(&[write], &[]);
@@ -408,26 +406,26 @@ impl MenuOverlayPipeline {
         };
         let mc_font_sampler = unsafe { util::create_nearest_sampler(device) };
 
-        let font_img_info = [vk::DescriptorImageInfo {
+        let font_img_info = vk::DescriptorImageInfo {
             sampler: font_sampler,
             image_view: font_view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        }];
-        let sprite_img_info = [vk::DescriptorImageInfo {
+        };
+        let sprite_img_info = vk::DescriptorImageInfo {
             sampler: sprite_sampler,
             image_view: sprite_view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        }];
-        let item_img_info = [vk::DescriptorImageInfo {
+        };
+        let item_img_info = vk::DescriptorImageInfo {
             sampler: item_sampler,
             image_view: item_view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        }];
-        let mc_font_img_info = [vk::DescriptorImageInfo {
+        };
+        let mc_font_img_info = vk::DescriptorImageInfo {
             sampler: mc_font_sampler,
             image_view: mc_font_view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        }];
+        };
 
         let (favicon_image, favicon_view, favicon_alloc) = util::create_gpu_image_with_format(
             device,
@@ -456,59 +454,59 @@ impl MenuOverlayPipeline {
         allocator.lock().unwrap().free(fav_staging_alloc).ok();
         let favicon_sampler = unsafe { util::create_nearest_sampler(device) };
 
-        let favicon_img_info = [vk::DescriptorImageInfo {
+        let favicon_img_info = vk::DescriptorImageInfo {
             sampler: favicon_sampler,
             image_view: favicon_view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        }];
+        };
 
         let writes = [
             vk::WriteDescriptorSet {
                 dst_set: tex_set,
                 dst_binding: 0,
-                descriptor_count: font_img_info.len() as u32,
+                descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: font_img_info.as_ptr(),
+                image_info: &font_img_info,
                 ..Default::default()
             },
             vk::WriteDescriptorSet {
                 dst_set: tex_set,
                 dst_binding: 1,
-                descriptor_count: sprite_img_info.len() as u32,
+                descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: sprite_img_info.as_ptr(),
+                image_info: &sprite_img_info,
                 ..Default::default()
             },
             vk::WriteDescriptorSet {
                 dst_set: tex_set,
                 dst_binding: 2,
-                descriptor_count: item_img_info.len() as u32,
+                descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: item_img_info.as_ptr(),
+                image_info: &item_img_info,
                 ..Default::default()
             },
             vk::WriteDescriptorSet {
                 dst_set: tex_set,
                 dst_binding: 3,
-                descriptor_count: mc_font_img_info.len() as u32,
+                descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: mc_font_img_info.as_ptr(),
+                image_info: &mc_font_img_info,
                 ..Default::default()
             },
             vk::WriteDescriptorSet {
                 dst_set: tex_set,
                 dst_binding: 4,
-                descriptor_count: font_img_info.len() as u32,
+                descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: font_img_info.as_ptr(),
+                image_info: &font_img_info,
                 ..Default::default()
             },
             vk::WriteDescriptorSet {
                 dst_set: tex_set,
                 dst_binding: 5,
-                descriptor_count: favicon_img_info.len() as u32,
+                descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: favicon_img_info.as_ptr(),
+                image_info: &favicon_img_info,
                 ..Default::default()
             },
         ];
@@ -1007,20 +1005,20 @@ impl MenuOverlayPipeline {
     }
 
     pub fn set_blur_texture(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
-        let info = [vk::DescriptorImageInfo {
+        let info = vk::DescriptorImageInfo {
             sampler,
             image_view: view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        }];
-        let write = [vk::WriteDescriptorSet {
+        };
+        let write = vk::WriteDescriptorSet {
             dst_set: self.tex_set,
             dst_binding: 4,
-            descriptor_count: info.len() as u32,
+            descriptor_count: 1,
             descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            image_info: info.as_ptr(),
+            image_info: &info,
             ..Default::default()
-        }];
-        device.update_descriptor_sets(&write, &[]);
+        };
+        device.update_descriptor_sets(&[write], &[]);
     }
 
     pub fn update_favicon_atlas(
@@ -1104,20 +1102,20 @@ impl MenuOverlayPipeline {
         self.favicon_regions = regions;
         self.favicon_atlas_size = atlas_w;
 
-        let info = [vk::DescriptorImageInfo {
+        let info = vk::DescriptorImageInfo {
             sampler: self.favicon_sampler,
             image_view: view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        }];
-        let write = [vk::WriteDescriptorSet {
+        };
+        let write = vk::WriteDescriptorSet {
             dst_set: self.tex_set,
             dst_binding: 5,
-            descriptor_count: info.len() as u32,
+            descriptor_count: 1,
             descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            image_info: info.as_ptr(),
+            image_info: &info,
             ..Default::default()
-        }];
-        device.update_descriptor_sets(&write, &[]);
+        };
+        device.update_descriptor_sets(&[write], &[]);
     }
 
     pub fn text_width(&self, text: &str, scale: f32) -> f32 {
