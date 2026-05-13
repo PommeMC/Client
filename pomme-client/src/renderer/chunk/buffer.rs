@@ -357,7 +357,7 @@ impl ChunkBufferStore {
             let (frustum_info, mut frustum_write) = desc_write(
                 compute_sets[i],
                 1,
-                vk::DescriptorType::StorageBuffer,
+                vk::DescriptorType::UniformBuffer,
                 frustum_buffers[i],
                 frustum_size,
             );

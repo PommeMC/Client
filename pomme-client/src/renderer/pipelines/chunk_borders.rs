@@ -54,6 +54,7 @@ impl ChunkBorderPipeline {
             .unwrap();
 
         let layout_info = vk::PipelineLayoutCreateInfo {
+            set_layout_count: 1,
             set_layouts: &desc_layout,
             ..Default::default()
         };

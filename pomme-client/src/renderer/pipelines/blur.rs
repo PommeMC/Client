@@ -91,6 +91,7 @@ impl BlurPipeline {
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: 1,
             set_layouts: &desc_layout,
+            push_constant_range_count: 1,
             push_constant_ranges: &push_range,
             ..Default::default()
         };
@@ -624,11 +625,11 @@ fn create_blur_graphics_pipeline(
             ..Default::default()
         },
         color_blend_state: &vk::PipelineColorBlendStateCreateInfo {
+            attachment_count: 1,
             attachments: &vk::PipelineColorBlendAttachmentState {
                 color_write_mask: vk::ColorComponentFlags::RGBA,
                 ..Default::default()
             },
-            attachment_count: 1,
             ..Default::default()
         },
         dynamic_state: &vk::PipelineDynamicStateCreateInfo {

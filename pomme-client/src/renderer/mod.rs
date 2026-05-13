@@ -105,10 +105,11 @@ pub struct Renderer {
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
     chunk_buffers: ChunkBufferStore,
+    render_finished_per_image: Vec<vk::Semaphore>,
     swapchain_dirty: bool,
     width: u32,
     height: u32,
-    pub last_timings: RenderTimings,
+    last_timings: RenderTimings,
 }
 
 impl Renderer {
@@ -245,6 +246,17 @@ impl Renderer {
             size.height.max(1),
             swapchain_state.format.format,
         );
+        menu_pipeline.set_blur_texture(
+            &ctx.device,
+            blur_pipeline.blurred_view(),
+            blur_pipeline.blurred_sampler(),
+        );
+
+        let sem_info = vk::SemaphoreCreateInfo::default();
+        let mut render_finished_per_image = Vec::with_capacity(swapchain_state.images.len());
+        for _ in 0..swapchain_state.images.len() {
+            render_finished_per_image.push(ctx.device.create_semaphore(&sem_info, None)?);
+        }
 
         let entity_renderer = EntityRenderer::new(
             &ctx.device,
@@ -296,6 +308,7 @@ impl Renderer {
             chunk_border_pipeline,
             item_entity_pipeline,
             chunk_buffers,
+            render_finished_per_image,
             swapchain_dirty: false,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -457,6 +470,7 @@ impl Renderer {
         };
 
         let _ = ctx.present_queue.present(&present_info);
+        let _ = ctx.present_queue.wait_idle();
 
         ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
 
@@ -476,6 +490,10 @@ impl Renderer {
 
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
         let _ = self.ctx.device.wait_idle();
+
+        for sem in self.render_finished_per_image.drain(..) {
+            self.ctx.device.destroy_semaphore(sem, None);
+        }
 
         self.chunk_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
@@ -514,6 +532,18 @@ impl Renderer {
             self.width,
             self.height,
         );
+        self.menu_pipeline.set_blur_texture(
+            &self.ctx.device,
+            self.blur_pipeline.blurred_view(),
+            self.blur_pipeline.blurred_sampler(),
+        );
+
+        let sem_info = vk::SemaphoreCreateInfo::default();
+        self.render_finished_per_image = Vec::with_capacity(self.swapchain.images.len());
+        for _ in 0..self.swapchain.images.len() {
+            self.render_finished_per_image
+                .push(self.ctx.device.create_semaphore(&sem_info, None)?);
+        }
 
         self.swapchain_dirty = false;
         Ok(())
@@ -525,6 +555,11 @@ impl Renderer {
 
     pub fn screen_height(&self) -> u32 {
         self.height
+    }
+
+    #[inline]
+    pub const fn last_timings(&self) -> &RenderTimings {
+        &self.last_timings
     }
 
     pub fn update_camera(&mut self, input: &mut InputState) {
@@ -877,7 +912,6 @@ impl Renderer {
         let frame = self.ctx.frame_index;
         let fence = self.ctx.in_flight_fences[frame];
         let image_available = self.ctx.image_available_semaphores[frame];
-        let render_finished = self.ctx.render_finished_semaphores[frame];
         let cmd = self.ctx.command_buffers[frame];
 
         let t_fence = std::time::Instant::now();
@@ -899,6 +933,8 @@ impl Renderer {
             Err(e) => return Err(e.into()),
         };
         let acquire_ms = t_acquire.elapsed().as_secs_f32() * 1000.0;
+
+        let render_finished = self.render_finished_per_image[image_index as usize];
 
         if let RenderMode::World { ref sky, .. } = mode {
             let fog = sky.fog_color();
@@ -1080,12 +1116,6 @@ impl Renderer {
                         iterations,
                     );
 
-                    self.menu_pipeline.set_blur_texture(
-                        &self.ctx.device,
-                        self.blur_pipeline.blurred_view(),
-                        self.blur_pipeline.blurred_sampler(),
-                    );
-
                     let load_rp_info = vk::RenderPassBeginInfo {
                         render_pass: self.swapchain.render_pass_load,
                         framebuffer: self.swapchain.framebuffers_load[image_index as usize],
@@ -1253,6 +1283,11 @@ impl Drop for Renderer {
         self.item_entity_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
+
+        for sem in self.render_finished_per_image.drain(..) {
+            self.ctx.device.destroy_semaphore(sem, None);
+        }
+
         self.swapchain
             .destroy(&self.ctx.device, &self.ctx.allocator);
     }

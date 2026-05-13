@@ -192,13 +192,19 @@ impl VulkanContext {
             ]
         };
 
+        let mut vk12_features = vk::PhysicalDeviceVulkan12Features {
+            draw_indirect_count: vk::TRUE,
+            ..Default::default()
+        };
+
         let device_info = vk::DeviceCreateInfo {
             queue_create_info_count: queue_create_infos.len() as u32,
             queue_create_infos: queue_create_infos.as_ptr(),
             enabled_extension_count: DEVICE_EXTENSIONS.len() as u32,
             enabled_extension_names: DEVICE_EXTENSIONS.as_ptr().cast(),
             ..Default::default()
-        };
+        }
+        .next(&mut vk12_features);
 
         let device = unsafe { physical_device.create_device(&device_info, None, &instance)? };
 

@@ -69,6 +69,7 @@ impl ItemEntityPipeline {
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
+            push_constant_range_count: 1,
             push_constant_ranges: &push_range,
             ..Default::default()
         };
@@ -598,6 +599,7 @@ fn create_pipeline(
         color_write_mask: vk::ColorComponentFlags::RGBA,
     };
     let color_blending = vk::PipelineColorBlendStateCreateInfo {
+        attachment_count: 1,
         attachments: &blend_attachment,
         ..Default::default()
     };
