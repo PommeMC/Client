@@ -10,14 +10,11 @@ export function FriendSettingsDialog(_props: FriendSettingsDialogProps) {
   const loading = friendsSettings === null;
   const settings = friendsSettings ?? { show_in_list: true, accept_invites: true };
 
-  const toggle = async (next: { show_in_list?: boolean; accept_invites?: boolean }) => {
+  const apply = async (show: boolean, accept: boolean) => {
     if (loading || pending) return;
     setPending(true);
     try {
-      await updateFriendSettings(
-        next.show_in_list ?? settings.show_in_list,
-        next.accept_invites ?? settings.accept_invites,
-      );
+      await updateFriendSettings(show, accept);
     } finally {
       setPending(false);
     }
@@ -28,44 +25,57 @@ export function FriendSettingsDialog(_props: FriendSettingsDialogProps) {
       <h2 className="dialog-title">Friend Settings</h2>
 
       <div className="dialog-fields">
-        <div className="settings-row">
-          <div className="settings-row-info">
-            <span className="settings-row-label">Show in Friends List</span>
-            <span className="settings-row-desc">
-              Other players can see you in their friends lists
-            </span>
-          </div>
-          <div className="settings-row-control">
-            <button
-              className={`settings-toggle ${settings.show_in_list ? "on" : ""}`}
-              disabled={loading || pending}
-              onClick={() => toggle({ show_in_list: !settings.show_in_list })}
-            >
-              <div className="settings-toggle-knob" />
-            </button>
-          </div>
-        </div>
-
-        <div className="settings-row">
-          <div className="settings-row-info">
-            <span className="settings-row-label">Allow Requests</span>
-            <span className="settings-row-desc">Other players can send you friend requests</span>
-          </div>
-          <div className="settings-row-control">
-            <button
-              className={`settings-toggle ${settings.accept_invites ? "on" : ""}`}
-              disabled={loading || pending}
-              onClick={() => toggle({ accept_invites: !settings.accept_invites })}
-            >
-              <div className="settings-toggle-knob" />
-            </button>
-          </div>
-        </div>
+        <SettingRow
+          label="Show in Friends List"
+          desc="Other players can see you in their friends lists"
+          value={settings.show_in_list}
+          disabled={loading || pending}
+          onToggle={() => apply(!settings.show_in_list, settings.accept_invites)}
+        />
+        <SettingRow
+          label="Allow Requests"
+          desc="Other players can send you friend requests"
+          value={settings.accept_invites}
+          disabled={loading || pending}
+          onToggle={() => apply(settings.show_in_list, !settings.accept_invites)}
+        />
       </div>
 
       <div className="dialog-actions">
         <button className="dialog-confirm" onClick={() => setOpenedDialog(null)}>
           Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SettingRow({
+  label,
+  desc,
+  value,
+  disabled,
+  onToggle,
+}: {
+  label: string;
+  desc: string;
+  value: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="settings-row">
+      <div className="settings-row-info">
+        <span className="settings-row-label">{label}</span>
+        <span className="settings-row-desc">{desc}</span>
+      </div>
+      <div className="settings-row-control">
+        <button
+          className={`settings-toggle ${value ? "on" : ""}`}
+          disabled={disabled}
+          onClick={onToggle}
+        >
+          <div className="settings-toggle-knob" />
         </button>
       </div>
     </div>

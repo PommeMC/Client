@@ -94,57 +94,54 @@ export const useFriends = (uuid: string | null) => {
   }, [uuid]);
 
   const runMutation = useCallback(
-    async (op: Promise<{ ok: true; value: FriendsList } | { ok: false; error: string }>) => {
+    async <T>(
+      op: Promise<{ ok: true; value: T } | { ok: false; error: string }>,
+      onSuccess: (value: T) => void,
+    ) => {
       const res = await op;
       if (res.ok) {
-        applyList(res.value);
+        onSuccess(res.value);
         setFriendsError(null);
       } else {
         setFriendsError(res.error);
       }
     },
-    [applyList],
+    [],
   );
 
   const sendFriendRequest = useCallback(
     async (name: string) => {
       if (!uuid) return;
-      await runMutation(commands.sendFriendRequest(uuid, name));
+      await runMutation(commands.sendFriendRequest(uuid, name), applyList);
     },
-    [uuid, runMutation],
+    [uuid, runMutation, applyList],
   );
 
   const acceptFriendRequest = useCallback(
     async (friendUuid: string) => {
       if (!uuid) return;
-      await runMutation(commands.acceptFriendRequest(uuid, friendUuid));
+      await runMutation(commands.acceptFriendRequest(uuid, friendUuid), applyList);
     },
-    [uuid, runMutation],
+    [uuid, runMutation, applyList],
   );
 
   const removeFriend = useCallback(
     async (friendUuid: string) => {
       if (!uuid) return;
-      await runMutation(commands.removeFriend(uuid, friendUuid));
+      await runMutation(commands.removeFriend(uuid, friendUuid), applyList);
+    },
+    [uuid, runMutation, applyList],
+  );
+
+  const updateFriendSettings = useCallback(
+    async (show: boolean, accept: boolean) => {
+      if (!uuid) return;
+      await runMutation(commands.updateFriendSettings(uuid, show, accept), setFriendsSettings);
     },
     [uuid, runMutation],
   );
 
   const clearFriendsError = useCallback(() => setFriendsError(null), []);
-
-  const updateFriendSettings = useCallback(
-    async (show: boolean, accept: boolean) => {
-      if (!uuid) return;
-      const res = await commands.updateFriendSettings(uuid, show, accept);
-      if (res.ok) {
-        setFriendsSettings(res.value);
-        setFriendsError(null);
-      } else {
-        setFriendsError(res.error);
-      }
-    },
-    [uuid],
-  );
 
   return {
     friendsList,

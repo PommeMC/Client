@@ -170,7 +170,7 @@ pub struct FriendSettings {
     pub accept_invites: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct FriendsPreferencesDto {
     #[serde(default)]
     friends: Option<String>,
@@ -201,15 +201,20 @@ fn toggle_str(value: bool) -> &'static str {
     if value { "ENABLED" } else { "DISABLED" }
 }
 
-fn extract_settings(dto: UserAttributesResponseDto) -> FriendSettings {
-    let prefs = dto.friends_preferences.unwrap_or(FriendsPreferencesDto {
-        friends: None,
-        accept_invites: None,
-    });
-    FriendSettings {
+async fn parse_attributes(resp: reqwest::Response) -> Result<FriendSettings, String> {
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(map_error(status.as_u16()));
+    }
+    let dto: UserAttributesResponseDto = resp
+        .json()
+        .await
+        .map_err(|e| format!("Settings parse failed: {e}"))?;
+    let prefs = dto.friends_preferences.unwrap_or_default();
+    Ok(FriendSettings {
         show_in_list: prefs.friends.as_deref() != Some("DISABLED"),
         accept_invites: prefs.accept_invites.as_deref() != Some("DISABLED"),
-    }
+    })
 }
 
 pub async fn get_friend_settings(access_token: &str) -> Result<FriendSettings, String> {
@@ -219,15 +224,7 @@ pub async fn get_friend_settings(access_token: &str) -> Result<FriendSettings, S
         .send()
         .await
         .map_err(|e| format!("Settings fetch failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(map_error(status.as_u16()));
-    }
-    let parsed: UserAttributesResponseDto = resp
-        .json()
-        .await
-        .map_err(|e| format!("Settings parse failed: {e}"))?;
-    Ok(extract_settings(parsed))
+    parse_attributes(resp).await
 }
 
 pub async fn update_friend_settings(
@@ -247,15 +244,7 @@ pub async fn update_friend_settings(
         .send()
         .await
         .map_err(|e| format!("Settings update failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(map_error(status.as_u16()));
-    }
-    let parsed: UserAttributesResponseDto = resp
-        .json()
-        .await
-        .map_err(|e| format!("Settings parse failed: {e}"))?;
-    Ok(extract_settings(parsed))
+    parse_attributes(resp).await
 }
 
 fn map_error(status: u16) -> String {
