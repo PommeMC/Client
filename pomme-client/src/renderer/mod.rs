@@ -1035,8 +1035,7 @@ impl Renderer {
                     self.entity_renderer
                         .draw(&self.ctx.device, cmd, frame, entities);
 
-                    self.item_entity_pipeline
-                        .draw(&self.ctx.device, cmd, frame, item_entities);
+                    self.item_entity_pipeline.draw(cmd, frame, item_entities);
 
                     if *show_chunk_borders {
                         self.chunk_border_pipeline.draw(cmd, frame);
