@@ -157,10 +157,14 @@ pub async fn update_presence(access_token: &str) -> Result<Vec<PresenceEntry>, S
     if !status.is_success() {
         return Err(map_error(status.as_u16()));
     }
-    let parsed: PresenceResponse = resp
+    let mut parsed: PresenceResponse = resp
         .json()
         .await
         .map_err(|e| format!("Presence parse failed: {e}"))?;
+    // Mojang's /presence returns dashed UUIDs; /friends returns undashed — normalize.
+    for entry in &mut parsed.presence {
+        entry.profile_id.retain(|c| c != '-');
+    }
     Ok(parsed.presence)
 }
 

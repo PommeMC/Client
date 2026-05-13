@@ -1,4 +1,4 @@
-import { HiCheck, HiCog6Tooth, HiPlus, HiXMark } from "react-icons/hi2";
+import { HiArrowPath, HiCheck, HiCog6Tooth, HiPlus, HiXMark } from "react-icons/hi2";
 import { Friend, PresenceEntry } from "../lib/friends";
 import { useAppStateContext } from "../lib/state";
 
@@ -12,6 +12,7 @@ export default function FriendsPage() {
     sendFriendRequest,
     acceptFriendRequest,
     removeFriend,
+    refreshPresence,
     clearFriendsError,
     setOpenedDialog,
   } = useAppStateContext();
@@ -40,6 +41,13 @@ export default function FriendsPage() {
       <div className="friends-header">
         <h2 className="page-heading">FRIENDS</h2>
         <div className="friends-header-actions">
+          <button
+            className="friends-settings-btn"
+            onClick={refreshPresence}
+            title="Refresh presence"
+          >
+            <HiArrowPath />
+          </button>
           <button
             className="friends-settings-btn"
             onClick={() => setOpenedDialog({ name: "friend_settings_dialog", props: {} })}

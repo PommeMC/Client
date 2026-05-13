@@ -60,26 +60,24 @@ export const useFriends = (uuid: string | null) => {
     };
   }, [uuid, applyList]);
 
+  const refreshPresence = useCallback(() => {
+    if (!uuid) return;
+    commands.updatePresence(uuid).then((res) => {
+      if (!res.ok) return;
+      const byUuid: Record<string, PresenceEntry> = {};
+      for (const entry of res.value) {
+        byUuid[entry.profileId] = entry;
+      }
+      setFriendsPresence(byUuid);
+    });
+  }, [uuid]);
+
   useEffect(() => {
     if (!uuid) return;
-    let cancelled = false;
-    const tick = () => {
-      commands.updatePresence(uuid).then((res) => {
-        if (cancelled || !res.ok) return;
-        const byUuid: Record<string, PresenceEntry> = {};
-        for (const entry of res.value) {
-          byUuid[entry.profileId] = entry;
-        }
-        setFriendsPresence(byUuid);
-      });
-    };
-    tick();
-    const interval = setInterval(tick, PRESENCE_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [uuid]);
+    refreshPresence();
+    const interval = setInterval(refreshPresence, PRESENCE_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [uuid, refreshPresence]);
 
   useEffect(() => {
     if (!uuid) return;
@@ -154,6 +152,7 @@ export const useFriends = (uuid: string | null) => {
     acceptFriendRequest,
     removeFriend,
     updateFriendSettings,
+    refreshPresence,
     clearFriendsError,
   };
 };
