@@ -1032,8 +1032,7 @@ impl Renderer {
                             .draw(cmd, frame, block_pos, *stage);
                     }
 
-                    self.entity_renderer
-                        .draw(&self.ctx.device, cmd, frame, entities);
+                    self.entity_renderer.draw(cmd, frame, entities);
 
                     self.item_entity_pipeline.draw(cmd, frame, item_entities);
 
