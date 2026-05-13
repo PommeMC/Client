@@ -4,6 +4,11 @@ export type Friend = {
 	name: string,
 };
 
+export type FriendSettings = {
+	show_in_list: boolean,
+	accept_invites: boolean,
+};
+
 export type FriendsList = {
 	friends?: Friend[],
 	incomingRequests?: Friend[],

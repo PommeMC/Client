@@ -316,6 +316,24 @@ pub async fn update_presence(uuid: String) -> Result<Vec<crate::friends::Presenc
 
 #[tauri::command]
 #[specta::specta]
+pub async fn get_friend_settings(uuid: String) -> Result<crate::friends::FriendSettings, String> {
+    let token = fresh_token(&uuid).await?;
+    crate::friends::get_friend_settings(&token).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_friend_settings(
+    uuid: String,
+    show_in_list: bool,
+    accept_invites: bool,
+) -> Result<crate::friends::FriendSettings, String> {
+    let token = fresh_token(&uuid).await?;
+    crate::friends::update_friend_settings(&token, show_in_list, accept_invites).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn ensure_assets(app: AppHandle, version: String) -> Result<(), String> {
     if crate::downloader::needs_download(&version) {
         crate::downloader::download(&app, &version).await?;

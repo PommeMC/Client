@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 const FRIENDS_URL: &str = "https://api.minecraftservices.com/friends";
 const PRESENCE_URL: &str = "https://api.minecraftservices.com/presence";
+const ATTRIBUTES_URL: &str = "https://api.minecraftservices.com/player/attributes";
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
 pub struct Friend {
@@ -161,6 +162,100 @@ pub async fn update_presence(access_token: &str) -> Result<Vec<PresenceEntry>, S
         .await
         .map_err(|e| format!("Presence parse failed: {e}"))?;
     Ok(parsed.presence)
+}
+
+#[derive(Serialize, Deserialize, Clone, specta::Type)]
+pub struct FriendSettings {
+    pub show_in_list: bool,
+    pub accept_invites: bool,
+}
+
+#[derive(Deserialize)]
+struct FriendsPreferencesDto {
+    #[serde(default)]
+    friends: Option<String>,
+    #[serde(default, rename = "acceptInvites")]
+    accept_invites: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct UserAttributesResponseDto {
+    #[serde(default, rename = "friendsPreferences")]
+    friends_preferences: Option<FriendsPreferencesDto>,
+}
+
+#[derive(Serialize)]
+struct FriendsPreferencesUpdate {
+    friends: &'static str,
+    #[serde(rename = "acceptInvites")]
+    accept_invites: &'static str,
+}
+
+#[derive(Serialize)]
+struct UserAttributesUpdate {
+    #[serde(rename = "friendsPreferences")]
+    friends_preferences: FriendsPreferencesUpdate,
+}
+
+fn toggle_str(value: bool) -> &'static str {
+    if value { "ENABLED" } else { "DISABLED" }
+}
+
+fn extract_settings(dto: UserAttributesResponseDto) -> FriendSettings {
+    let prefs = dto.friends_preferences.unwrap_or(FriendsPreferencesDto {
+        friends: None,
+        accept_invites: None,
+    });
+    FriendSettings {
+        show_in_list: prefs.friends.as_deref() != Some("DISABLED"),
+        accept_invites: prefs.accept_invites.as_deref() != Some("DISABLED"),
+    }
+}
+
+pub async fn get_friend_settings(access_token: &str) -> Result<FriendSettings, String> {
+    let resp = reqwest::Client::new()
+        .get(ATTRIBUTES_URL)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Settings fetch failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(map_error(status.as_u16()));
+    }
+    let parsed: UserAttributesResponseDto = resp
+        .json()
+        .await
+        .map_err(|e| format!("Settings parse failed: {e}"))?;
+    Ok(extract_settings(parsed))
+}
+
+pub async fn update_friend_settings(
+    access_token: &str,
+    show: bool,
+    accept: bool,
+) -> Result<FriendSettings, String> {
+    let resp = reqwest::Client::new()
+        .post(ATTRIBUTES_URL)
+        .bearer_auth(access_token)
+        .json(&UserAttributesUpdate {
+            friends_preferences: FriendsPreferencesUpdate {
+                friends: toggle_str(show),
+                accept_invites: toggle_str(accept),
+            },
+        })
+        .send()
+        .await
+        .map_err(|e| format!("Settings update failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(map_error(status.as_u16()));
+    }
+    let parsed: UserAttributesResponseDto = resp
+        .json()
+        .await
+        .map_err(|e| format!("Settings parse failed: {e}"))?;
+    Ok(extract_settings(parsed))
 }
 
 fn map_error(status: u16) -> String {

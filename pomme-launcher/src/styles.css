@@ -2806,6 +2806,11 @@ body {
   box-shadow: 0 0 8px var(--accent-glow);
 }
 
+.settings-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ═══ Stub Pages ═══ */
 
 .stub {
@@ -2967,6 +2972,31 @@ body {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 20px;
+}
+
+.friends-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.friends-settings-btn {
+  display: flex;
+  align-items: center;
+  padding: 8px;
+  background: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.friends-settings-btn:hover {
+  background: var(--glass-hover);
+  border-color: var(--border-light);
+  color: var(--text);
 }
 
 .friends-error {

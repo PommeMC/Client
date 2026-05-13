@@ -11,6 +11,7 @@ import Titlebar from "./components/Titlebar";
 import { AddFriendDialog } from "./components/dialogs/AddFriendDialog";
 import AlertDialog from "./components/dialogs/AlertDialog";
 import { ConfirmDialog } from "./components/dialogs/ConfirmDialog";
+import { FriendSettingsDialog } from "./components/dialogs/FriendSettingsDialog";
 import { InstallationDialog } from "./components/dialogs/InstallationDialog";
 import { ServerDialog } from "./components/dialogs/ServerDialog";
 
@@ -341,6 +342,9 @@ function App() {
           {openedDialog.name === "confirm_dialog" && <ConfirmDialog {...openedDialog.props} />}
           {openedDialog.name === "alert_dialog" && <AlertDialog {...openedDialog.props} />}
           {openedDialog.name === "add_friend_dialog" && <AddFriendDialog {...openedDialog.props} />}
+          {openedDialog.name === "friend_settings_dialog" && (
+            <FriendSettingsDialog {...openedDialog.props} />
+          )}
         </div>
       )}
     </div>

@@ -1,4 +1,4 @@
-import { HiCheck, HiPlus, HiXMark } from "react-icons/hi2";
+import { HiCheck, HiCog6Tooth, HiPlus, HiXMark } from "react-icons/hi2";
 import { Friend, PresenceEntry } from "../lib/friends";
 import { useAppStateContext } from "../lib/state";
 
@@ -39,9 +39,18 @@ export default function FriendsPage() {
     <div className="page friends-page">
       <div className="friends-header">
         <h2 className="page-heading">FRIENDS</h2>
-        <button className="servers-add-btn" onClick={openAddDialog}>
-          <HiPlus /> Add Friend
-        </button>
+        <div className="friends-header-actions">
+          <button
+            className="friends-settings-btn"
+            onClick={() => setOpenedDialog({ name: "friend_settings_dialog", props: {} })}
+            title="Friend settings"
+          >
+            <HiCog6Tooth />
+          </button>
+          <button className="servers-add-btn" onClick={openAddDialog}>
+            <HiPlus /> Add Friend
+          </button>
+        </div>
       </div>
 
       {friendsError && (

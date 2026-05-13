@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { commands } from "../bindings";
-import { Friend, FriendsList, PresenceEntry } from "../bindings/pomme_launcher/friends";
+import {
+  Friend,
+  FriendSettings,
+  FriendsList,
+  PresenceEntry,
+} from "../bindings/pomme_launcher/friends";
 
 const EMPTY: FriendsList = { friends: [], incomingRequests: [], outgoingRequests: [] };
 const PRESENCE_INTERVAL_MS = 30_000;
@@ -11,6 +16,7 @@ export const useFriends = (uuid: string | null) => {
   const [friendsError, setFriendsError] = useState<string | null>(null);
   const [friendsSkins, setFriendsSkins] = useState<Record<string, string>>({});
   const [friendsPresence, setFriendsPresence] = useState<Record<string, PresenceEntry>>({});
+  const [friendsSettings, setFriendsSettings] = useState<FriendSettings | null>(null);
 
   const loadSkinFor = useCallback((friendUuid: string) => {
     setFriendsSkins((prev) => {
@@ -75,6 +81,18 @@ export const useFriends = (uuid: string | null) => {
     };
   }, [uuid]);
 
+  useEffect(() => {
+    if (!uuid) return;
+    let cancelled = false;
+    commands.getFriendSettings(uuid).then((res) => {
+      if (cancelled || !res.ok) return;
+      setFriendsSettings(res.value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [uuid]);
+
   const runMutation = useCallback(
     async (op: Promise<{ ok: true; value: FriendsList } | { ok: false; error: string }>) => {
       const res = await op;
@@ -114,17 +132,33 @@ export const useFriends = (uuid: string | null) => {
 
   const clearFriendsError = useCallback(() => setFriendsError(null), []);
 
+  const updateFriendSettings = useCallback(
+    async (show: boolean, accept: boolean) => {
+      if (!uuid) return;
+      const res = await commands.updateFriendSettings(uuid, show, accept);
+      if (res.ok) {
+        setFriendsSettings(res.value);
+        setFriendsError(null);
+      } else {
+        setFriendsError(res.error);
+      }
+    },
+    [uuid],
+  );
+
   return {
     friendsList,
     friendsLoaded,
     friendsError,
     friendsSkins,
     friendsPresence,
+    friendsSettings,
     sendFriendRequest,
     acceptFriendRequest,
     removeFriend,
+    updateFriendSettings,
     clearFriendsError,
   };
 };
 
-export type { Friend, PresenceEntry };
+export type { Friend, FriendSettings, PresenceEntry };
