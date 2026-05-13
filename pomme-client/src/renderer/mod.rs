@@ -475,9 +475,7 @@ impl Renderer {
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
-        unsafe {
-            let _ = self.ctx.device.wait_idle();
-        }
+        let _ = self.ctx.device.wait_idle();
 
         self.chunk_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
@@ -1059,13 +1057,8 @@ impl Renderer {
 
                     if self.camera.mode == camera::CameraMode::FirstPerson {
                         let aspect = sw / sh.max(1.0);
-                        self.hand_pipeline.update_and_draw(
-                            &self.ctx.device,
-                            cmd,
-                            frame,
-                            aspect,
-                            *swing_progress,
-                        );
+                        self.hand_pipeline
+                            .update_and_draw(cmd, frame, aspect, *swing_progress);
                     }
 
                     self.menu_pipeline.draw(cmd, sw, sh, overlay);

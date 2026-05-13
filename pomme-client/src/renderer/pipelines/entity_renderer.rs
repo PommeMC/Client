@@ -143,6 +143,7 @@ impl EntityRenderer {
         let layouts = [camera_layout, texture_layout];
         let push_range = push_constant_range;
         let layout_info = vk::PipelineLayoutCreateInfo {
+            set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
             push_constant_range_count: 1,
             push_constant_ranges: &push_range,

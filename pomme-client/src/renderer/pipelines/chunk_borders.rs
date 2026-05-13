@@ -146,7 +146,6 @@ impl ChunkBorderPipeline {
             dst_alpha_blend_factor: vk::BlendFactor::Zero,
             alpha_blend_op: vk::BlendOp::Add,
             color_write_mask: vk::ColorComponentFlags::RGBA,
-            ..Default::default()
         };
         let color_blending = vk::PipelineColorBlendStateCreateInfo {
             attachment_count: 1,
@@ -361,25 +360,20 @@ impl ChunkBorderPipeline {
         let mut alloc = allocator.lock().unwrap();
         device.destroy_buffer(self.vertex_buffer, None);
 
-        unsafe {
-            alloc
-                .free(std::mem::replace(
-                    &mut self.vertex_alloc,
-                    std::mem::zeroed(),
-                ))
-                .ok();
-        }
+        alloc
+            .free(std::mem::replace(&mut self.vertex_alloc, unsafe {
+                std::mem::zeroed()
+            }))
+            .ok();
 
         for i in 0..MAX_FRAMES_IN_FLIGHT {
             device.destroy_buffer(self.camera_buffers[i], None);
-            unsafe {
-                alloc
-                    .free(std::mem::replace(
-                        &mut self.camera_allocs[i],
-                        std::mem::zeroed(),
-                    ))
-                    .ok();
-            }
+
+            alloc
+                .free(std::mem::replace(&mut self.camera_allocs[i], unsafe {
+                    std::mem::zeroed()
+                }))
+                .ok();
         }
         drop(alloc);
 
