@@ -7,5 +7,5 @@ pub mod hand;
 pub mod item_entity;
 pub mod menu_overlay;
 pub mod panorama;
-// pub mod skin_preview;
+pub mod skin_preview;
 // pub mod sky;
