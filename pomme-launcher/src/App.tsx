@@ -8,6 +8,7 @@ import { handleLaunchType } from "./lib/types";
 
 import Navbar from "./components/Navbar";
 import Titlebar from "./components/Titlebar";
+import { AddFriendDialog } from "./components/dialogs/AddFriendDialog";
 import AlertDialog from "./components/dialogs/AlertDialog";
 import { ConfirmDialog } from "./components/dialogs/ConfirmDialog";
 import { InstallationDialog } from "./components/dialogs/InstallationDialog";
@@ -339,6 +340,7 @@ function App() {
           {openedDialog.name === "server_dialog" && <ServerDialog {...openedDialog.props} />}
           {openedDialog.name === "confirm_dialog" && <ConfirmDialog {...openedDialog.props} />}
           {openedDialog.name === "alert_dialog" && <AlertDialog {...openedDialog.props} />}
+          {openedDialog.name === "add_friend_dialog" && <AddFriendDialog {...openedDialog.props} />}
         </div>
       )}
     </div>

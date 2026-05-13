@@ -3,6 +3,7 @@ import { commands } from "../bindings";
 import { AuthAccount } from "../bindings/pomme_launcher/auth";
 import { GameVersion, PatchNote } from "../bindings/pomme_launcher/commands";
 import { LauncherSettings } from "../bindings/pomme_launcher/settings";
+import { useFriends } from "./friends";
 import { useDropdown } from "./hooks";
 import { useInstallations } from "./installations";
 import { useServers } from "./servers";
@@ -124,6 +125,7 @@ const useAppState = () => {
     launcherSettings: useLauncherSettings(),
     ...useServers(),
     ...useInstallations(),
+    ...useFriends(account?.uuid ?? null),
   };
 };
 

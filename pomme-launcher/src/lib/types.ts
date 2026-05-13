@@ -1,4 +1,5 @@
 import { Installation } from "../bindings/pomme_launcher/installations";
+import { AddFriendDialogProps } from "../components/dialogs/AddFriendDialog";
 import { AlertDialogProps } from "../components/dialogs/AlertDialog";
 import { ConfirmDialogProps } from "../components/dialogs/ConfirmDialog";
 import { InstallationDialogProps } from "../components/dialogs/InstallationDialog";
@@ -14,6 +15,7 @@ type DialogMap = {
   server_dialog: ServerDialogProps;
   confirm_dialog: ConfirmDialogProps;
   alert_dialog: AlertDialogProps;
+  add_friend_dialog: AddFriendDialogProps;
 };
 
 export type OpenedDialog =
