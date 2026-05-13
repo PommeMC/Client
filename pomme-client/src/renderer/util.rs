@@ -1,11 +1,9 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use pomme_gpu_allocator::MemoryLocation;
+use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use pyronyx::vk;
-use pyronyx_gpu_allocator::MemoryLocation;
-use pyronyx_gpu_allocator::vulkan::{
-    Allocation, AllocationCreateDesc, AllocationScheme, Allocator,
-};
 
 pub fn create_gpu_image(
     device: &vk::Device,

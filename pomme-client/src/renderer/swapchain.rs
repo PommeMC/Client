@@ -1,12 +1,10 @@
 use std::sync::{Arc, Mutex};
 
+use pomme_gpu_allocator::MemoryLocation;
+use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use pyronyx::khr::surface::SurfacePhysicalDevice;
 use pyronyx::khr::swapchain::SwapchainDevice;
 use pyronyx::vk;
-use pyronyx_gpu_allocator::MemoryLocation;
-use pyronyx_gpu_allocator::vulkan::{
-    Allocation, AllocationCreateDesc, AllocationScheme, Allocator,
-};
 
 use crate::renderer::context::VulkanContext;
 

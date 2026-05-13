@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use azalea_core::position::ChunkPos;
+use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
-use pyronyx_gpu_allocator::vulkan::{Allocation, Allocator};
 
 use super::mesher::{ChunkMeshData, ChunkVertex};
 use crate::renderer::MAX_FRAMES_IN_FLIGHT;

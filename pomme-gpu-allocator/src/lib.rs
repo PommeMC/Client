@@ -3,7 +3,7 @@
 //! # Setting up the allocator
 //!
 //! ```no_run
-//! use pyronyx_gpu_allocator::vulkan::*;
+//! use pomme_gpu_allocator::vulkan::*;
 //!
 //! let mut allocator = Allocator::new(&AllocatorCreateDesc {
 //!     instance,
@@ -18,8 +18,8 @@
 //! # Simple allocation example
 //!
 //! ```no_run
-//! use pyronyx_gpu_allocator::vulkan::*;
-//! use pyronyx_gpu_allocator::MemoryLocation;
+//! use pomme_gpu_allocator::vulkan::*;
+//! use pomme_gpu_allocator::MemoryLocation;
 //! use pyronyx::vk;
 //!
 //! let buffer = unsafe { device.create_buffer(&vk::BufferCreateInfo {

@@ -2,8 +2,8 @@ use std::slice;
 use std::sync::{Arc, Mutex};
 
 use glam::{Mat4, Vec3};
+use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
-use pyronyx_gpu_allocator::vulkan::{Allocation, Allocator};
 
 use crate::renderer::MAX_FRAMES_IN_FLIGHT;
 use crate::renderer::shader;

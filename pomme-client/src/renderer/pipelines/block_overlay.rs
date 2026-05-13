@@ -3,8 +3,8 @@ use std::slice;
 use std::sync::{Arc, Mutex};
 
 use azalea_core::position::BlockPos;
+use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
-use pyronyx_gpu_allocator::vulkan::{Allocation, Allocator};
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::MAX_FRAMES_IN_FLIGHT;

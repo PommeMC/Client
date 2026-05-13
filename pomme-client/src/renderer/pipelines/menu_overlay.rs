@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::slice;
 use std::sync::{Arc, Mutex};
 
+use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
-use pyronyx_gpu_allocator::vulkan::{Allocation, Allocator};
 
 use std::path::Path;
 

@@ -3,8 +3,8 @@ use std::slice;
 use std::sync::{Arc, Mutex};
 
 use glam::Mat4;
+use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
-use pyronyx_gpu_allocator::vulkan::{Allocation, Allocator};
 
 use crate::renderer::camera::CameraUniform;
 use std::path::Path;

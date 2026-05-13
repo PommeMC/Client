@@ -4812,8 +4812,8 @@ dependencies = [
  "open",
  "parking_lot",
  "png 0.17.16",
+ "pomme-gpu-allocator",
  "pyronyx",
- "pyronyx-gpu-allocator",
  "raw-window-handle",
  "rayon",
  "reqwest",
@@ -5032,16 +5032,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9f298283cb3f43031ac8ef05c00ef51c40d112db5bbbe179d42c2f049cc3340"
 dependencies = [
  "raw-window-handle",
-]
-
-[[package]]
-name = "pyronyx-gpu-allocator"
-version = "0.1.0"
-dependencies = [
- "presser",
- "pyronyx",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]

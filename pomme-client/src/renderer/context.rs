@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
 
+use pomme_gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 #[cfg(debug_assertions)]
 use pyronyx::ext::{self, debug_utils::DebugUtilsInstance};
 use pyronyx::{
@@ -12,7 +13,6 @@ use pyronyx::{
     raw_window_handle::{create_surface, get_required_extensions},
     vk,
 };
-use pyronyx_gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use thiserror::Error;
 use winit::window::Window;
@@ -28,7 +28,7 @@ pub enum ContextError {
     NoSuitableGpu,
 
     #[error("allocator error: {0}")]
-    Allocator(#[from] pyronyx_gpu_allocator::AllocationError),
+    Allocator(#[from] pomme_gpu_allocator::AllocationError),
 
     #[error("surface error: {0}")]
     HandleError(#[from] raw_window_handle::HandleError),
