@@ -140,6 +140,10 @@ pub struct MenuInput {
     pub escape: bool,
     pub tab: bool,
     pub f5: bool,
+    pub select_all: bool,
+    pub copy: bool,
+    pub cut: bool,
+    pub undo: bool,
     pub scroll_delta: f32,
 }
 
@@ -241,6 +245,10 @@ pub struct MainMenu {
     transition: Option<ThemeTransition>,
     scroll_offset: f32,
     focused_field: Option<u8>,
+    field_all_selected: bool,
+    last_field_click_time: Instant,
+    last_field_click: Option<u8>,
+    field_undo_stack: Vec<(u8, String)>,
     cursor_blink: Instant,
     last_click_time: Instant,
     last_click_index: Option<usize>,
@@ -304,6 +312,10 @@ impl MainMenu {
             transition: None,
             scroll_offset: 0.0,
             focused_field: None,
+            field_all_selected: false,
+            last_field_click_time: Instant::now(),
+            last_field_click: None,
+            field_undo_stack: Vec::new(),
             cursor_blink: Instant::now(),
             last_click_time: Instant::now(),
             last_click_index: None,
@@ -340,6 +352,15 @@ impl MainMenu {
         }
     }
 
+    fn set_screen(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.focused_field = None;
+        self.field_all_selected = false;
+        self.last_field_click = None;
+        self.field_undo_stack.clear();
+        self.cursor_blink = Instant::now();
+    }
+
     fn save_settings(&self) {
         save_settings(
             &self.settings_dir,
@@ -363,7 +384,7 @@ impl MainMenu {
     }
 
     pub fn open_options(&mut self) {
-        self.screen = Screen::Options;
+        self.set_screen(Screen::Options);
     }
 
     pub fn is_options_screen(&self) -> bool {
@@ -449,7 +470,7 @@ impl MainMenu {
     }
 
     pub fn show_disconnect(&mut self, reason: String) {
-        self.screen = Screen::Disconnected(reason);
+        self.set_screen(Screen::Disconnected(reason));
     }
 
     pub fn build(

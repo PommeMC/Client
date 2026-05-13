@@ -227,7 +227,7 @@ impl MainMenu {
                     match def.id {
                         0 => {}
                         1 => {
-                            self.screen = Screen::ServerList;
+                            self.set_screen(Screen::ServerList);
                             self.scroll_offset = 0.0;
                             self.selected_server = None;
                         }
@@ -238,7 +238,7 @@ impl MainMenu {
                         0 => AuthPending::Singleplayer,
                         _ => AuthPending::Multiplayer,
                     };
-                    self.screen = Screen::AuthPrompt { pending };
+                    self.set_screen(Screen::AuthPrompt { pending });
                 }
             }
         }
@@ -287,9 +287,9 @@ impl MainMenu {
                 any_clicked = true;
                 match icon {
                     ICON_USER if self.auth_account.is_none() => {
-                        self.screen = Screen::AuthPrompt {
+                        self.set_screen(Screen::AuthPrompt {
                             pending: AuthPending::None,
-                        };
+                        });
                     }
                     ICON_LINK => {
                         self.links_open = !self.links_open;
