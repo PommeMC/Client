@@ -306,7 +306,7 @@ impl SkinPreviewPipeline {
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
-        _device: &vk::Device,
+        device: &vk::Device,
         cmd: vk::CommandBuffer,
         frame: usize,
         aspect: f32,
@@ -317,6 +317,7 @@ impl SkinPreviewPipeline {
         screen_w: f32,
         screen_h: f32,
     ) {
+        let _ = device;
         let center_px_x = screen_x * screen_w;
         let center_px_y = screen_y * screen_h;
         let body_yaw_raw = ((mouse_px_x - center_px_x) / 40.0).atan();
@@ -561,7 +562,6 @@ fn create_pipeline(
         dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
         alpha_blend_op: vk::BlendOp::Add,
         color_write_mask: vk::ColorComponentFlags::RGBA,
-        ..Default::default()
     };
     let color_blending = vk::PipelineColorBlendStateCreateInfo {
         attachment_count: 1,

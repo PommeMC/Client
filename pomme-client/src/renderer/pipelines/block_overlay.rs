@@ -407,7 +407,7 @@ fn create_pipeline(
     ];
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: 1 as u32,
+        vertex_binding_description_count: 1,
         vertex_binding_descriptions: &binding_desc,
         vertex_attribute_description_count: attr_descs.len() as u32,
         vertex_attribute_descriptions: attr_descs.as_ptr(),
@@ -457,7 +457,6 @@ fn create_pipeline(
         dst_alpha_blend_factor: vk::BlendFactor::Zero,
         alpha_blend_op: vk::BlendOp::Add,
         color_write_mask: vk::ColorComponentFlags::RGBA,
-        ..Default::default()
     };
 
     let color_blending = vk::PipelineColorBlendStateCreateInfo {

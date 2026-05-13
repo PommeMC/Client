@@ -650,89 +650,8 @@ pub unsafe fn create_nearest_sampler_mipmapped(
 // The code below is extracted from ash-rs/ash under the MIT license;
 // for the full license, see THIRD_PARTY_LICENSES.md
 
-use core::ffi::c_void;
-use core::iter::Iterator;
-use core::marker::PhantomData;
 use core::slice;
 use std::io;
-
-/// [`Align`] handles dynamic alignment. The is useful for dynamic uniform buffers where
-/// the alignment might be different. For example a 4x4 f32 matrix has a size of 64 bytes
-/// but the min alignment for a dynamic uniform buffer might be 256 bytes. A slice of `&[Mat4x4<f32>]`
-/// has a memory layout of `[[64 bytes], [64 bytes], [64 bytes]]`, but it might need to have a memory
-/// layout of `[[256 bytes], [256 bytes], [256 bytes]]`.
-/// [`Align::copy_from_slice`] will copy a slice of `&[T]` directly into the host memory without
-/// an additional allocation and with the correct alignment.
-#[derive(Debug, Clone)]
-pub struct Align<T> {
-    ptr: *mut c_void,
-    elem_size: vk::DeviceSize,
-    size: vk::DeviceSize,
-    _m: PhantomData<T>,
-}
-
-#[derive(Debug)]
-pub struct AlignIter<'a, T> {
-    align: &'a mut Align<T>,
-    current: vk::DeviceSize,
-}
-
-impl<T: Copy> Align<T> {
-    pub fn copy_from_slice(&mut self, slice: &[T]) {
-        if self.elem_size == size_of::<T>() as u64 {
-            unsafe {
-                let mapped_slice = slice::from_raw_parts_mut(self.ptr.cast(), slice.len());
-                mapped_slice.copy_from_slice(slice);
-            }
-        } else {
-            for (i, val) in self.iter_mut().enumerate().take(slice.len()) {
-                *val = slice[i];
-            }
-        }
-    }
-}
-
-fn calc_padding(adr: vk::DeviceSize, align: vk::DeviceSize) -> vk::DeviceSize {
-    (align - adr % align) % align
-}
-
-impl<T> Align<T> {
-    pub unsafe fn new(ptr: *mut c_void, alignment: vk::DeviceSize, size: vk::DeviceSize) -> Self {
-        let padding = calc_padding(size_of::<T>() as vk::DeviceSize, alignment);
-        let elem_size = size_of::<T>() as vk::DeviceSize + padding;
-        assert!(calc_padding(size, alignment) == 0, "size must be aligned");
-        Self {
-            ptr,
-            elem_size,
-            size,
-            _m: PhantomData,
-        }
-    }
-
-    pub fn iter_mut(&mut self) -> AlignIter<'_, T> {
-        AlignIter {
-            current: 0,
-            align: self,
-        }
-    }
-}
-
-impl<'a, T: Copy + 'a> Iterator for AlignIter<'a, T> {
-    type Item = &'a mut T;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.current == self.align.size {
-            return None;
-        }
-        unsafe {
-            // Need to cast to *mut u8 because () has size 0
-            let ptr = (self.align.ptr.cast::<u8>())
-                .offset(self.current as isize)
-                .cast();
-            self.current += self.align.elem_size;
-            Some(&mut *ptr)
-        }
-    }
-}
 
 /// Decode SPIR-V from bytes.
 ///

@@ -881,20 +881,16 @@ impl Renderer {
         let cmd = self.ctx.command_buffers[frame];
 
         let t_fence = std::time::Instant::now();
-        unsafe {
-            self.ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
-        }
+        self.ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
         let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
 
         let t_acquire = std::time::Instant::now();
-        let image_index = match unsafe {
-            self.ctx.device.acquire_next_image(
-                self.swapchain.handle,
-                u64::MAX,
-                image_available,
-                vk::Fence::null(),
-            )
-        } {
+        let image_index = match self.ctx.device.acquire_next_image(
+            self.swapchain.handle,
+            u64::MAX,
+            image_available,
+            vk::Fence::null(),
+        ) {
             Ok(idx) => idx,
             Err(vk::Error::OutOfDateKHR) => {
                 self.swapchain_dirty = true;
@@ -918,258 +914,251 @@ impl Renderer {
             window.set_cursor_visible(false);
         }
 
-        unsafe {
-            self.ctx.device.reset_fences(&[fence])?;
-            cmd.reset(vk::CommandBufferResetFlags::empty())?;
+        self.ctx.device.reset_fences(&[fence])?;
+        cmd.reset(vk::CommandBufferResetFlags::empty())?;
 
-            let begin_info = vk::CommandBufferBeginInfo {
-                flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
-                ..Default::default()
-            };
-            cmd.begin(&begin_info)?;
+        let begin_info = vk::CommandBufferBeginInfo {
+            flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
+            ..Default::default()
+        };
+        cmd.begin(&begin_info)?;
 
-            if matches!(&mode, RenderMode::World { .. }) {
-                let frustum = self.camera.frustum_planes();
-                let cam_pos = [
-                    self.camera.position.x,
-                    self.camera.position.y,
-                    self.camera.position.z,
-                ];
-                self.chunk_buffers
-                    .dispatch_cull(cmd, frame, &frustum, cam_pos);
-            }
-
-            let clear_values = [
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: clear_color,
-                    },
-                },
-                vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 1.0,
-                        stencil: 0,
-                    },
-                },
+        if matches!(&mode, RenderMode::World { .. }) {
+            let frustum = self.camera.frustum_planes();
+            let cam_pos = [
+                self.camera.position.x,
+                self.camera.position.y,
+                self.camera.position.z,
             ];
+            self.chunk_buffers
+                .dispatch_cull(cmd, frame, &frustum, cam_pos);
+        }
 
-            let use_blur = matches!(&mode, RenderMode::MainMenu { blur, .. } if *blur > 0.01);
-
-            let (rp, fb) = if use_blur {
-                (
-                    self.swapchain.render_pass_scene,
-                    self.swapchain.framebuffers_scene[image_index as usize],
-                )
-            } else {
-                (
-                    self.swapchain.render_pass,
-                    self.swapchain.framebuffers[image_index as usize],
-                )
-            };
-
-            let render_pass_info = vk::RenderPassBeginInfo {
-                render_pass: rp,
-                framebuffer: fb,
-                render_area: vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: self.swapchain.extent,
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: clear_color,
                 },
-                clear_value_count: clear_values.len() as u32,
-                clear_values: clear_values.as_ptr(),
-                ..Default::default()
-            };
+            },
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            },
+        ];
 
-            cmd.begin_render_pass(&render_pass_info, vk::SubpassContents::Inline);
+        let use_blur = matches!(&mode, RenderMode::MainMenu { blur, .. } if *blur > 0.01);
 
-            let viewport = vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: self.swapchain.extent.width as f32,
-                height: self.swapchain.extent.height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            cmd.set_viewport(0, &[viewport]);
+        let (rp, fb) = if use_blur {
+            (
+                self.swapchain.render_pass_scene,
+                self.swapchain.framebuffers_scene[image_index as usize],
+            )
+        } else {
+            (
+                self.swapchain.render_pass,
+                self.swapchain.framebuffers[image_index as usize],
+            )
+        };
 
-            let scissor = vk::Rect2D {
+        let render_pass_info = vk::RenderPassBeginInfo {
+            render_pass: rp,
+            framebuffer: fb,
+            render_area: vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: self.swapchain.extent,
-            };
-            cmd.set_scissor(0, &[scissor]);
+            },
+            clear_value_count: clear_values.len() as u32,
+            clear_values: clear_values.as_ptr(),
+            ..Default::default()
+        };
 
-            let sw = self.swapchain.extent.width as f32;
-            let sh = self.swapchain.extent.height as f32;
+        cmd.begin_render_pass(&render_pass_info, vk::SubpassContents::Inline);
 
-            let frame_start = std::time::Instant::now();
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: self.swapchain.extent.width as f32,
+            height: self.swapchain.extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        cmd.set_viewport(0, &[viewport]);
 
-            match &mode {
-                RenderMode::World {
-                    overlay,
-                    swing_progress,
-                    destroy_info,
-                    show_chunk_borders,
-                    sky,
-                    entities,
-                    item_entities,
-                } => {
-                    self.sky_pipeline.update_and_draw(
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: self.swapchain.extent,
+        };
+        cmd.set_scissor(0, &[scissor]);
+
+        let sw = self.swapchain.extent.width as f32;
+        let sh = self.swapchain.extent.height as f32;
+
+        let frame_start = std::time::Instant::now();
+
+        match &mode {
+            RenderMode::World {
+                overlay,
+                swing_progress,
+                destroy_info,
+                show_chunk_borders,
+                sky,
+                entities,
+                item_entities,
+            } => {
+                self.sky_pipeline
+                    .update_and_draw(&self.ctx.device, cmd, frame, &self.camera, sky);
+
+                let t_cull = std::time::Instant::now();
+                self.chunk_pipeline.bind(cmd, frame);
+                self.chunk_buffers.draw_indirect(cmd, frame);
+                let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
+
+                if let Some((block_pos, stage)) = destroy_info {
+                    self.block_overlay_pipeline
+                        .draw(cmd, frame, block_pos, *stage);
+                }
+
+                self.entity_renderer.draw(cmd, frame, entities);
+
+                self.item_entity_pipeline.draw(cmd, frame, item_entities);
+
+                if *show_chunk_borders {
+                    self.chunk_border_pipeline.draw(cmd, frame);
+                }
+
+                let clear_attachment = vk::ClearAttachment {
+                    aspect_mask: vk::ImageAspectFlags::Depth,
+                    color_attachment: 0,
+                    clear_value: vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue {
+                            depth: 1.0,
+                            stencil: 0,
+                        },
+                    },
+                };
+                let clear_rect = vk::ClearRect {
+                    rect: scissor,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                };
+                cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
+
+                if self.camera.mode == camera::CameraMode::FirstPerson {
+                    let aspect = sw / sh.max(1.0);
+                    self.hand_pipeline
+                        .update_and_draw(cmd, frame, aspect, *swing_progress);
+                }
+
+                self.menu_pipeline.draw(cmd, sw, sh, overlay);
+
+                self.last_timings.cull_ms = cull_ms;
+                self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+            }
+            RenderMode::MainMenu {
+                scroll,
+                blur,
+                elements,
+                cursor,
+                show_skin,
+            } => {
+                let aspect = sw / sh.max(1.0);
+                self.panorama_pipeline
+                    .draw(&self.ctx.device, cmd, *scroll, aspect, 0.0);
+
+                if *blur > 0.01 {
+                    cmd.end_render_pass();
+
+                    let swapchain_image = self.swapchain.images[image_index as usize];
+                    let iterations = ((*blur * 3.0).ceil() as u32).clamp(1, 4);
+                    self.blur_pipeline.execute(
+                        cmd,
+                        swapchain_image,
+                        self.swapchain.extent.width,
+                        self.swapchain.extent.height,
+                        iterations,
+                    );
+
+                    self.menu_pipeline.set_blur_texture(
+                        &self.ctx.device,
+                        self.blur_pipeline.blurred_view(),
+                        self.blur_pipeline.blurred_sampler(),
+                    );
+
+                    let load_rp_info = vk::RenderPassBeginInfo {
+                        render_pass: self.swapchain.render_pass_load,
+                        framebuffer: self.swapchain.framebuffers_load[image_index as usize],
+                        render_area: vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: self.swapchain.extent,
+                        },
+                        clear_value_count: clear_values.len() as u32,
+                        clear_values: clear_values.as_ptr(),
+                        ..Default::default()
+                    };
+                    cmd.begin_render_pass(&load_rp_info, vk::SubpassContents::Inline);
+                    cmd.set_viewport(0, &[viewport]);
+                    cmd.set_scissor(0, &[scissor]);
+                }
+
+                if *show_skin {
+                    self.skin_preview.draw(
                         &self.ctx.device,
                         cmd,
                         frame,
-                        &self.camera,
-                        sky,
+                        aspect,
+                        0.7,
+                        0.5,
+                        cursor.0,
+                        cursor.1,
+                        sw,
+                        sh,
                     );
-
-                    let t_cull = std::time::Instant::now();
-                    self.chunk_pipeline.bind(cmd, frame);
-                    self.chunk_buffers.draw_indirect(cmd, frame);
-                    let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
-
-                    if let Some((block_pos, stage)) = destroy_info {
-                        self.block_overlay_pipeline
-                            .draw(cmd, frame, block_pos, *stage);
-                    }
-
-                    self.entity_renderer.draw(cmd, frame, entities);
-
-                    self.item_entity_pipeline.draw(cmd, frame, item_entities);
-
-                    if *show_chunk_borders {
-                        self.chunk_border_pipeline.draw(cmd, frame);
-                    }
-
-                    let clear_attachment = vk::ClearAttachment {
-                        aspect_mask: vk::ImageAspectFlags::Depth,
-                        color_attachment: 0,
-                        clear_value: vk::ClearValue {
-                            depth_stencil: vk::ClearDepthStencilValue {
-                                depth: 1.0,
-                                stencil: 0,
-                            },
-                        },
-                    };
-                    let clear_rect = vk::ClearRect {
-                        rect: scissor,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    };
-                    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
-
-                    if self.camera.mode == camera::CameraMode::FirstPerson {
-                        let aspect = sw / sh.max(1.0);
-                        self.hand_pipeline
-                            .update_and_draw(cmd, frame, aspect, *swing_progress);
-                    }
-
-                    self.menu_pipeline.draw(cmd, sw, sh, overlay);
-
-                    self.last_timings.cull_ms = cull_ms;
-                    self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
                 }
-                RenderMode::MainMenu {
-                    scroll,
-                    blur,
-                    elements,
-                    cursor,
-                    show_skin,
-                } => {
-                    let aspect = sw / sh.max(1.0);
-                    self.panorama_pipeline
-                        .draw(&self.ctx.device, cmd, *scroll, aspect, 0.0);
 
-                    if *blur > 0.01 {
-                        cmd.end_render_pass();
-
-                        let swapchain_image = self.swapchain.images[image_index as usize];
-                        let iterations = ((*blur * 3.0).ceil() as u32).clamp(1, 4);
-                        self.blur_pipeline.execute(
-                            cmd,
-                            swapchain_image,
-                            self.swapchain.extent.width,
-                            self.swapchain.extent.height,
-                            iterations,
-                        );
-
-                        self.menu_pipeline.set_blur_texture(
-                            &self.ctx.device,
-                            self.blur_pipeline.blurred_view(),
-                            self.blur_pipeline.blurred_sampler(),
-                        );
-
-                        let load_rp_info = vk::RenderPassBeginInfo {
-                            render_pass: self.swapchain.render_pass_load,
-                            framebuffer: self.swapchain.framebuffers_load[image_index as usize],
-                            render_area: vk::Rect2D {
-                                offset: vk::Offset2D { x: 0, y: 0 },
-                                extent: self.swapchain.extent,
-                            },
-                            clear_value_count: clear_values.len() as u32,
-                            clear_values: clear_values.as_ptr(),
-                            ..Default::default()
-                        };
-                        cmd.begin_render_pass(&load_rp_info, vk::SubpassContents::Inline);
-                        cmd.set_viewport(0, &[viewport]);
-                        cmd.set_scissor(0, &[scissor]);
-                    }
-
-                    if *show_skin {
-                        self.skin_preview.draw(
-                            &self.ctx.device,
-                            cmd,
-                            frame,
-                            aspect,
-                            0.7,
-                            0.5,
-                            cursor.0,
-                            cursor.1,
-                            sw,
-                            sh,
-                        );
-                    }
-
-                    self.menu_pipeline.draw(cmd, sw, sh, elements);
-                }
+                self.menu_pipeline.draw(cmd, sw, sh, elements);
             }
-
-            cmd.end_render_pass();
-
-            cmd.end();
-
-            let submit_info = vk::SubmitInfo {
-                wait_semaphore_count: 1,
-                wait_semaphores: &image_available,
-                wait_dst_stage_mask: &vk::PipelineStageFlags::ColorAttachmentOutput,
-                command_buffer_count: 1,
-                command_buffers: &cmd.handle(),
-                signal_semaphore_count: 1,
-                signal_semaphores: &render_finished,
-                ..Default::default()
-            };
-
-            self.ctx.graphics_queue.submit(&[submit_info], fence);
-
-            let present_info = vk::PresentInfoKHR {
-                wait_semaphore_count: 1,
-                wait_semaphores: &render_finished,
-                swapchain_count: 1,
-                swapchains: &self.swapchain.handle,
-                image_indices: &image_index,
-                ..Default::default()
-            };
-
-            let t_present = std::time::Instant::now();
-            match self.ctx.present_queue.present(&present_info) {
-                Ok(()) => {}
-                Err(vk::Error::OutOfDateKHR) => {
-                    self.swapchain_dirty = true;
-                }
-                Err(e) => return Err(e.into()),
-            }
-            let present_ms = t_present.elapsed().as_secs_f32() * 1000.0;
-            self.last_timings.fence_ms = fence_ms;
-            self.last_timings.acquire_ms = acquire_ms;
-            self.last_timings.present_ms = present_ms;
         }
+
+        cmd.end_render_pass();
+
+        cmd.end()?;
+
+        let submit_info = vk::SubmitInfo {
+            wait_semaphore_count: 1,
+            wait_semaphores: &image_available,
+            wait_dst_stage_mask: &vk::PipelineStageFlags::ColorAttachmentOutput,
+            command_buffer_count: 1,
+            command_buffers: &cmd.handle(),
+            signal_semaphore_count: 1,
+            signal_semaphores: &render_finished,
+            ..Default::default()
+        };
+
+        self.ctx.graphics_queue.submit(&[submit_info], fence)?;
+
+        let present_info = vk::PresentInfoKHR {
+            wait_semaphore_count: 1,
+            wait_semaphores: &render_finished,
+            swapchain_count: 1,
+            swapchains: &self.swapchain.handle,
+            image_indices: &image_index,
+            ..Default::default()
+        };
+
+        let t_present = std::time::Instant::now();
+        match self.ctx.present_queue.present(&present_info) {
+            Ok(()) => {}
+            Err(vk::Error::OutOfDateKHR) => {
+                self.swapchain_dirty = true;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let present_ms = t_present.elapsed().as_secs_f32() * 1000.0;
+        self.last_timings.fence_ms = fence_ms;
+        self.last_timings.acquire_ms = acquire_ms;
+        self.last_timings.present_ms = present_ms;
 
         self.ctx.advance_frame();
         Ok(())

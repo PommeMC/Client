@@ -596,7 +596,6 @@ fn create_pipeline(
         dst_alpha_blend_factor: vk::BlendFactor::Zero,
         alpha_blend_op: vk::BlendOp::Add,
         color_write_mask: vk::ColorComponentFlags::RGBA,
-        ..Default::default()
     };
     let color_blending = vk::PipelineColorBlendStateCreateInfo {
         attachments: &blend_attachment,

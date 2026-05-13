@@ -180,12 +180,13 @@ impl PanoramaPipeline {
 
     pub fn draw(
         &mut self,
-        _device: &vk::Device,
+        device: &vk::Device,
         cmd: vk::CommandBuffer,
         scroll: f32,
         aspect: f32,
         blur: f32,
     ) {
+        let _ = device;
         if !self.has_cubemap {
             return;
         }
