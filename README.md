@@ -129,6 +129,9 @@ This project is licensed under the GNU General Public License v3.0 or later (GPL
 It is not affiliated with or endorsed by Mojang Studios or Microsoft.
 Minecraft is a trademark of Mojang Studios.
 
+The [allocator crate](./pomme-gpu-allocator) is licensed under the [MIT License](./pomme-gpu-allocator/LICENSE) and is a port 
+of the [wgpu-allocator crate](https://github.com/Traverse-Research/gpu-allocator) by Traverse Research.
+
 ## Community
 
 [![Discord](https://img.shields.io/discord/1483578136544280618?color=5865F2&label=Discord&logo=discord&logoColor=white)](https://discord.gg/ucBA55bHPR)
