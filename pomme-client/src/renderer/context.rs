@@ -1,4 +1,4 @@
-use std::ffi::CStr;
+use std::ffi::{CStr, c_char};
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
 
@@ -66,7 +66,6 @@ pub struct VulkanContext {
     pub command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT],
 
     pub image_available_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT],
-    pub render_finished_semaphores: Vec<vk::Semaphore>,
     pub in_flight_fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT],
     pub frame_index: usize,
 
@@ -109,6 +108,8 @@ impl VulkanContext {
         #[cfg(not(debug_assertions))]
         let layers: &[&CStr] = &[];
 
+        let layer_names: Vec<*const c_char> = layers.iter().map(|layer| layer.as_ptr()).collect();
+
         let app_info = vk::ApplicationInfo {
             application_name: VK_APP_NAME.as_ptr(),
             application_version: VK_APP_VERSION,
@@ -126,8 +127,8 @@ impl VulkanContext {
             #[cfg(target_os = "macos")]
             flags: vk::InstanceCreateFlags::EnumeratePortabilityKHR,
 
-            enabled_layer_count: layers.len() as u32,
-            enabled_layer_names: layers.as_ptr().cast(),
+            enabled_layer_count: layer_names.len() as u32,
+            enabled_layer_names: layer_names.as_ptr(),
             ..Default::default()
         };
 
@@ -198,11 +199,14 @@ impl VulkanContext {
             ..Default::default()
         };
 
+        let device_extension_names: Vec<*const c_char> =
+            DEVICE_EXTENSIONS.iter().map(|ext| ext.as_ptr()).collect();
+
         let device_info = vk::DeviceCreateInfo {
             queue_create_info_count: queue_create_infos.len() as u32,
             queue_create_infos: queue_create_infos.as_ptr(),
-            enabled_extension_count: DEVICE_EXTENSIONS.len() as u32,
-            enabled_extension_names: DEVICE_EXTENSIONS.as_ptr().cast(),
+            enabled_extension_count: device_extension_names.len() as u32,
+            enabled_extension_names: device_extension_names.as_ptr(),
             ..Default::default()
         }
         .next(&mut vk12_features);
@@ -246,11 +250,9 @@ impl VulkanContext {
 
         let mut image_available_semaphores = [vk::Semaphore::default(); MAX_FRAMES_IN_FLIGHT];
         let mut in_flight_fences = [vk::Fence::default(); MAX_FRAMES_IN_FLIGHT];
-        let mut render_finished_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for i in 0..MAX_FRAMES_IN_FLIGHT {
             image_available_semaphores[i] = device.create_semaphore(&sem_info, None)?;
-            render_finished_semaphores.push(device.create_semaphore(&sem_info, None)?);
             in_flight_fences[i] = device.create_fence(&fence_info, None)?;
         }
 
@@ -267,7 +269,6 @@ impl VulkanContext {
             command_pool,
             command_buffers,
             image_available_semaphores,
-            render_finished_semaphores,
             in_flight_fences,
             frame_index: 0,
             #[cfg(debug_assertions)]
@@ -289,9 +290,6 @@ impl Drop for VulkanContext {
 
             for &fence in &self.in_flight_fences {
                 self.device.destroy_fence(fence, None);
-            }
-            for &sem in &self.render_finished_semaphores {
-                self.device.destroy_semaphore(sem, None);
             }
             for &sem in &self.image_available_semaphores {
                 self.device.destroy_semaphore(sem, None);

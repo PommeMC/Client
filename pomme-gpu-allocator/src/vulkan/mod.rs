@@ -361,23 +361,17 @@ impl MemoryBlock {
         requires_personal_block: bool,
     ) -> Result<Self> {
         let device_memory = {
-            let alloc_info = vk::MemoryAllocateInfo {
+            let mut alloc_info = vk::MemoryAllocateInfo {
                 allocation_size: size,
                 memory_type_index: mem_type_index as u32,
                 ..Default::default()
             };
 
-            let allocation_flags = vk::MemoryAllocateFlags::DeviceAddress;
-            let mut flags_info = vk::MemoryAllocateFlagsInfo {
-                flags: allocation_flags,
-                ..Default::default()
-            };
-            // TODO(manon): Test this based on if the device has this feature enabled or not
-            let alloc_info = if buffer_device_address {
-                alloc_info.next(&mut flags_info)
-            } else {
-                alloc_info
-            };
+            let mut flags_info = vk::MemoryAllocateFlagsInfo::default();
+            if buffer_device_address {
+                flags_info.flags = vk::MemoryAllocateFlags::DeviceAddress;
+                alloc_info = alloc_info.next(&mut flags_info);
+            }
 
             // Flag the memory as dedicated if required.
             let mut dedicated_memory_info = vk::MemoryDedicatedAllocateInfo::default();

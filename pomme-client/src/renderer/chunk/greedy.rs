@@ -1,4 +1,5 @@
-// Vendored from https://github.com/Inspirateur/binary-greedy-meshing (MIT)
+// Vendored from Inspirateur/binary-greedy-meshing under the MIT License;
+// for the full license, see THIRD_PARTY_LICENSES.md
 // Modified to use AO as a merge criterion.
 
 use std::collections::BTreeSet;

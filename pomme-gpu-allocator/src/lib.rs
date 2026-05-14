@@ -132,7 +132,7 @@ impl Default for AllocatorDebugSettings {
 /// # Example
 ///
 /// ```
-/// use gpu_allocator::AllocationSizes;
+/// use pomme_gpu_allocator::AllocationSizes;
 /// const MB: u64 = 1024 * 1024;
 /// // This configuration uses fixed memory block sizes.
 /// let fixed = AllocationSizes::new(256 * MB, 64 * MB);

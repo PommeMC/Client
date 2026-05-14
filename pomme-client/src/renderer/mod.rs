@@ -327,7 +327,6 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         let fence = ctx.in_flight_fences[0];
         let image_available = ctx.image_available_semaphores[0];
-        let render_finished = ctx.render_finished_semaphores[0];
         let cmd = ctx.command_buffers[0];
 
         let gs = (sh / 400.0).max(1.0);
@@ -452,17 +451,14 @@ impl Renderer {
             command_buffer_count: 1,
             command_buffers: &cmd.handle(),
 
-            signal_semaphore_count: 1,
-            signal_semaphores: &render_finished,
-
             ..Default::default()
         };
 
         ctx.graphics_queue.submit(&[submit_info], fence)?;
 
+        ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
+
         let present_info = vk::PresentInfoKHR {
-            wait_semaphore_count: 1,
-            wait_semaphores: &render_finished,
             swapchain_count: 1,
             swapchains: &swapchain.handle,
             image_indices: &image_index,
@@ -471,8 +467,6 @@ impl Renderer {
 
         let _ = ctx.present_queue.present(&present_info);
         let _ = ctx.present_queue.wait_idle();
-
-        ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
 
         Ok(())
     }
