@@ -30,6 +30,15 @@ jobs:
           shared-key: client
           cache-on-failure: true
 
+      - name: Install Vulkan SDK (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: latest
+          install_runtime: false
+          cache: true
+          stripdown: true
+
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
