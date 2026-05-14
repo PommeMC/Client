@@ -41,7 +41,10 @@ export const commands = {
 	sendFriendRequest: (uuid: string, name: string) => typedError<pomme_launcher$friends.FriendsList, string>(__TAURI_INVOKE("send_friend_request", { uuid, name })),
 	acceptFriendRequest: (uuid: string, friendUuid: string) => typedError<pomme_launcher$friends.FriendsList, string>(__TAURI_INVOKE("accept_friend_request", { uuid, friendUuid })),
 	removeFriend: (uuid: string, friendUuid: string) => typedError<pomme_launcher$friends.FriendsList, string>(__TAURI_INVOKE("remove_friend", { uuid, friendUuid })),
-	updatePresence: (uuid: string) => typedError<pomme_launcher$friends.PresenceEntry[], string>(__TAURI_INVOKE("update_presence", { uuid })),
+	updatePresence: (uuid: string, status: string, joinInfo: {
+	value: string,
+	invited: boolean,
+} | null) => typedError<pomme_launcher$friends.PresenceEntry[], string>(__TAURI_INVOKE("update_presence", { uuid, status, joinInfo })),
 	getFriendSettings: (uuid: string) => typedError<pomme_launcher$friends.FriendSettings, string>(__TAURI_INVOKE("get_friend_settings", { uuid })),
 	updateFriendSettings: (uuid: string, showInList: boolean, acceptInvites: boolean) => typedError<pomme_launcher$friends.FriendSettings, string>(__TAURI_INVOKE("update_friend_settings", { uuid, showInList, acceptInvites })),
 };

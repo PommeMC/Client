@@ -136,20 +136,21 @@ struct PresenceResponse {
 }
 
 #[derive(Serialize)]
-struct PresenceRequest {
-    status: &'static str,
-    #[serde(rename = "joinInfo")]
-    join_info: Option<()>,
+struct PresenceRequest<'a> {
+    status: &'a str,
+    #[serde(rename = "joinInfo", skip_serializing_if = "Option::is_none")]
+    join_info: Option<&'a PresenceJoinInfo>,
 }
 
-pub async fn update_presence(access_token: &str) -> Result<Vec<PresenceEntry>, String> {
+pub async fn update_presence(
+    access_token: &str,
+    status: &str,
+    join_info: Option<&PresenceJoinInfo>,
+) -> Result<Vec<PresenceEntry>, String> {
     let resp = reqwest::Client::new()
         .post(PRESENCE_URL)
         .bearer_auth(access_token)
-        .json(&PresenceRequest {
-            status: "ONLINE",
-            join_info: None,
-        })
+        .json(&PresenceRequest { status, join_info })
         .send()
         .await
         .map_err(|e| format!("Presence post failed: {e}"))?;

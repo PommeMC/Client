@@ -5,10 +5,14 @@ import {
   FriendSettings,
   FriendsList,
   PresenceEntry,
+  PresenceJoinInfo,
 } from "../bindings/pomme_launcher/friends";
 
 const EMPTY: FriendsList = { friends: [], incomingRequests: [], outgoingRequests: [] };
 const PRESENCE_INTERVAL_MS = 30_000;
+
+export type Activity = { status: string; joinInfo: PresenceJoinInfo | null };
+export const ACTIVITY_IDLE: Activity = { status: "ONLINE", joinInfo: null };
 
 export const isOffline = (p: PresenceEntry | undefined): boolean => !p || p.status === "OFFLINE";
 
@@ -19,6 +23,7 @@ export const useFriends = (uuid: string | null) => {
   const [friendsSkins, setFriendsSkins] = useState<Record<string, string>>({});
   const [friendsPresence, setFriendsPresence] = useState<Record<string, PresenceEntry>>({});
   const [friendsSettings, setFriendsSettings] = useState<FriendSettings | null>(null);
+  const [currentActivity, setCurrentActivity] = useState<Activity>(ACTIVITY_IDLE);
 
   const loadSkinFor = useCallback((friendUuid: string) => {
     setFriendsSkins((prev) => {
@@ -64,7 +69,7 @@ export const useFriends = (uuid: string | null) => {
 
   const refreshPresence = useCallback(() => {
     if (!uuid) return;
-    commands.updatePresence(uuid).then((res) => {
+    commands.updatePresence(uuid, currentActivity.status, currentActivity.joinInfo).then((res) => {
       if (!res.ok) return;
       const byUuid: Record<string, PresenceEntry> = {};
       for (const entry of res.value) {
@@ -72,7 +77,7 @@ export const useFriends = (uuid: string | null) => {
       }
       setFriendsPresence(byUuid);
     });
-  }, [uuid]);
+  }, [uuid, currentActivity]);
 
   useEffect(() => {
     if (!uuid) return;
@@ -171,6 +176,7 @@ export const useFriends = (uuid: string | null) => {
     updateFriendSettings,
     refreshPresence,
     clearFriendsError,
+    setCurrentActivity,
   };
 };
 

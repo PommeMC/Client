@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef } from "react";
 
 import { commands, events } from "./bindings";
 import { PatchNote } from "./bindings/pomme_launcher/commands";
+import { ACTIVITY_IDLE } from "./lib/friends";
 import { useAppStateContext } from "./lib/state";
 import { handleLaunchType } from "./lib/types";
 
@@ -49,6 +50,7 @@ function App() {
     installations,
     setInstallations,
     setDownloadedVersions,
+    setCurrentActivity,
   } = useAppStateContext();
 
   const { setIsOpen: setAccountDropdownOpen } = accountDropdown;
@@ -215,6 +217,7 @@ function App() {
       }
 
       await events.gameExitedEvent.once((event) => {
+        setCurrentActivity(ACTIVITY_IDLE);
         const { code, signal, last_lines } = event.payload;
         if (code === 0) return;
         const SIGNAL_NAMES: Record<number, string> = {
@@ -252,6 +255,11 @@ function App() {
         launcherSettings.launchWithConsole ?? null,
       );
       if (res.ok) {
+        setCurrentActivity(
+          serverIp
+            ? { status: "PLAYING_SERVER", joinInfo: { value: serverIp, invited: false } }
+            : { status: "PLAYING_OFFLINE", joinInfo: null },
+        );
         setStatus(res.value);
       } else {
         setStatus(res.error);
@@ -269,6 +277,7 @@ function App() {
       setStatus,
       setDownloadProgress,
       setOpenedDialog,
+      setCurrentActivity,
       account?.uuid,
       launcherSettings.launchWithConsole,
     ],

@@ -309,9 +309,13 @@ pub async fn remove_friend(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn update_presence(uuid: String) -> Result<Vec<crate::friends::PresenceEntry>, String> {
+pub async fn update_presence(
+    uuid: String,
+    status: String,
+    join_info: Option<crate::friends::PresenceJoinInfo>,
+) -> Result<Vec<crate::friends::PresenceEntry>, String> {
     let token = fresh_token(&uuid).await?;
-    crate::friends::update_presence(&token).await
+    crate::friends::update_presence(&token, &status, join_info.as_ref()).await
 }
 
 #[tauri::command]
