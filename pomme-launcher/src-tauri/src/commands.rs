@@ -2,11 +2,13 @@ use std::collections::VecDeque;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_specta::Event;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::Mutex;
 
 use crate::installations::{Installation, InstallationDraft, InstallationError};
 use crate::settings::LauncherSettings;
@@ -263,7 +265,10 @@ pub async fn refresh_account(uuid: String) -> Result<crate::auth::AuthAccount, S
         .ok_or_else(|| "Failed to refresh account".to_string())
 }
 
+static TOKEN_REFRESH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 async fn fresh_token(uuid: &str) -> Result<String, String> {
+    let _guard = TOKEN_REFRESH_LOCK.lock().await;
     crate::auth::try_restore_or_refresh(uuid)
         .await
         .map(|a| a.access_token)

@@ -1,8 +1,22 @@
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 const FRIENDS_URL: &str = "https://api.minecraftservices.com/friends";
 const PRESENCE_URL: &str = "https://api.minecraftservices.com/presence";
 const ATTRIBUTES_URL: &str = "https://api.minecraftservices.com/player/attributes";
+
+#[derive(Clone, Copy)]
+enum FriendsApi {
+    FriendByName,
+    FriendById,
+    Presence,
+    Attributes,
+}
+
+fn http() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
 pub struct Friend {
@@ -46,13 +60,13 @@ struct FriendActionRequest<'a> {
 }
 
 pub async fn get_friends(access_token: &str) -> Result<FriendsList, String> {
-    let resp = reqwest::Client::new()
+    let resp = http()
         .get(FRIENDS_URL)
         .bearer_auth(access_token)
         .send()
         .await
         .map_err(|e| format!("Friends fetch failed: {e}"))?;
-    handle_response(resp).await
+    handle_response(resp, FriendsApi::FriendById).await
 }
 
 pub async fn action_by_id(
@@ -67,6 +81,7 @@ pub async fn action_by_id(
             profile_id: Some(profile_id),
             update_type: action.as_str(),
         },
+        FriendsApi::FriendById,
     )
     .await
 }
@@ -83,6 +98,7 @@ pub async fn action_by_name(
             profile_id: None,
             update_type: action.as_str(),
         },
+        FriendsApi::FriendByName,
     )
     .await
 }
@@ -90,18 +106,22 @@ pub async fn action_by_name(
 async fn put_action(
     access_token: &str,
     body: FriendActionRequest<'_>,
+    api: FriendsApi,
 ) -> Result<FriendsList, String> {
-    let resp = reqwest::Client::new()
+    let resp = http()
         .put(FRIENDS_URL)
         .bearer_auth(access_token)
         .json(&body)
         .send()
         .await
         .map_err(|e| format!("Friend action failed: {e}"))?;
-    handle_response(resp).await
+    handle_response(resp, api).await
 }
 
-async fn handle_response(resp: reqwest::Response) -> Result<FriendsList, String> {
+async fn handle_response(
+    resp: reqwest::Response,
+    api: FriendsApi,
+) -> Result<FriendsList, String> {
     let status = resp.status();
     if status.is_success() {
         return resp
@@ -109,7 +129,7 @@ async fn handle_response(resp: reqwest::Response) -> Result<FriendsList, String>
             .await
             .map_err(|e| format!("Friends response parse failed: {e}"));
     }
-    Err(map_error(status.as_u16()))
+    Err(map_error(api, status.as_u16()))
 }
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
@@ -147,7 +167,7 @@ pub async fn update_presence(
     status: &str,
     join_info: Option<&PresenceJoinInfo>,
 ) -> Result<Vec<PresenceEntry>, String> {
-    let resp = reqwest::Client::new()
+    let resp = http()
         .post(PRESENCE_URL)
         .bearer_auth(access_token)
         .json(&PresenceRequest { status, join_info })
@@ -156,13 +176,13 @@ pub async fn update_presence(
         .map_err(|e| format!("Presence post failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(map_error(status.as_u16()));
+        return Err(map_error(FriendsApi::Presence, status.as_u16()));
     }
     let mut parsed: PresenceResponse = resp
         .json()
         .await
         .map_err(|e| format!("Presence parse failed: {e}"))?;
-    // Mojang's /presence returns dashed UUIDs; /friends returns undashed — normalize.
+    // Mojang's /presence returns dashed UUIDs; /friends returns undashed. Normalize.
     for entry in &mut parsed.presence {
         entry.profile_id.retain(|c| c != '-');
     }
@@ -209,13 +229,14 @@ fn toggle_str(value: bool) -> &'static str {
 async fn parse_attributes(resp: reqwest::Response) -> Result<FriendSettings, String> {
     let status = resp.status();
     if !status.is_success() {
-        return Err(map_error(status.as_u16()));
+        return Err(map_error(FriendsApi::Attributes, status.as_u16()));
     }
     let dto: UserAttributesResponseDto = resp
         .json()
         .await
         .map_err(|e| format!("Settings parse failed: {e}"))?;
     let prefs = dto.friends_preferences.unwrap_or_default();
+    // Mojang omits the field when unset; treat anything other than explicit DISABLED as enabled.
     Ok(FriendSettings {
         show_in_list: prefs.friends.as_deref() != Some("DISABLED"),
         accept_invites: prefs.accept_invites.as_deref() != Some("DISABLED"),
@@ -223,7 +244,7 @@ async fn parse_attributes(resp: reqwest::Response) -> Result<FriendSettings, Str
 }
 
 pub async fn get_friend_settings(access_token: &str) -> Result<FriendSettings, String> {
-    let resp = reqwest::Client::new()
+    let resp = http()
         .get(ATTRIBUTES_URL)
         .bearer_auth(access_token)
         .send()
@@ -237,7 +258,7 @@ pub async fn update_friend_settings(
     show: bool,
     accept: bool,
 ) -> Result<FriendSettings, String> {
-    let resp = reqwest::Client::new()
+    let resp = http()
         .post(ATTRIBUTES_URL)
         .bearer_auth(access_token)
         .json(&UserAttributesUpdate {
@@ -252,12 +273,13 @@ pub async fn update_friend_settings(
     parse_attributes(resp).await
 }
 
-fn map_error(status: u16) -> String {
-    match status {
-        400 => "Unknown profile name".to_string(),
-        403 => "Account does not have an active Java profile".to_string(),
-        429 => "Rate limited — try again in a moment".to_string(),
-        s if s >= 500 => "Friends service unavailable — try again later".to_string(),
-        s => format!("Friends service returned HTTP {s}"),
+fn map_error(api: FriendsApi, status: u16) -> String {
+    match (api, status) {
+        (FriendsApi::FriendByName, 400) => "Unknown profile name".to_string(),
+        (_, 400) => "Invalid request".to_string(),
+        (_, 403) => "Account does not have an active Java profile".to_string(),
+        (_, 429) => "Rate limited, try again in a moment".to_string(),
+        (_, s) if s >= 500 => "Friends service unavailable, try again later".to_string(),
+        (_, s) => format!("Friends service returned HTTP {s}"),
     }
 }

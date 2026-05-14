@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { commands } from "../bindings";
 import {
   Friend,
@@ -11,19 +11,30 @@ import {
 const EMPTY: FriendsList = { friends: [], incomingRequests: [], outgoingRequests: [] };
 const PRESENCE_INTERVAL_MS = 30_000;
 
-export type Activity = { status: string; joinInfo: PresenceJoinInfo | null };
+export type ActivityStatus = "ONLINE" | "PLAYING_OFFLINE" | "PLAYING_SERVER";
+export type Activity = { status: ActivityStatus; joinInfo: PresenceJoinInfo | null };
 export const ACTIVITY_IDLE: Activity = { status: "ONLINE", joinInfo: null };
 
 export const isOffline = (p: PresenceEntry | undefined): boolean => !p || p.status === "OFFLINE";
 
 export const useFriends = (uuid: string | null) => {
   const [friendsList, setFriendsList] = useState<FriendsList>(EMPTY);
-  const [friendsLoaded, setFriendsLoaded] = useState(false);
   const [friendsError, setFriendsError] = useState<string | null>(null);
   const [friendsSkins, setFriendsSkins] = useState<Record<string, string>>({});
   const [friendsPresence, setFriendsPresence] = useState<Record<string, PresenceEntry>>({});
   const [friendsSettings, setFriendsSettings] = useState<FriendSettings | null>(null);
   const [currentActivity, setCurrentActivity] = useState<Activity>(ACTIVITY_IDLE);
+  const [prevUuid, setPrevUuid] = useState(uuid);
+  const presenceReqId = useRef(0);
+
+  if (uuid !== prevUuid) {
+    setPrevUuid(uuid);
+    setFriendsList(EMPTY);
+    setFriendsSkins({});
+    setFriendsPresence({});
+    setFriendsSettings(null);
+    setFriendsError(null);
+  }
 
   const loadSkinFor = useCallback((friendUuid: string) => {
     setFriendsSkins((prev) => {
@@ -60,7 +71,6 @@ export const useFriends = (uuid: string | null) => {
       } else {
         setFriendsError(res.error);
       }
-      setFriendsLoaded(true);
     });
     return () => {
       cancelled = true;
@@ -69,8 +79,9 @@ export const useFriends = (uuid: string | null) => {
 
   const refreshPresence = useCallback(() => {
     if (!uuid) return;
+    const reqId = ++presenceReqId.current;
     commands.updatePresence(uuid, currentActivity.status, currentActivity.joinInfo).then((res) => {
-      if (!res.ok) return;
+      if (reqId !== presenceReqId.current || !res.ok) return;
       const byUuid: Record<string, PresenceEntry> = {};
       for (const entry of res.value) {
         byUuid[entry.profileId] = entry;
@@ -165,7 +176,6 @@ export const useFriends = (uuid: string | null) => {
   return {
     friendsList,
     friendsSorted,
-    friendsLoaded,
     friendsError,
     friendsSkins,
     friendsPresence,

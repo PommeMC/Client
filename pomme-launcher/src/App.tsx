@@ -177,8 +177,16 @@ function App() {
     [setDownloadedVersions],
   );
 
+  const gameRunningRef = useRef(false);
+
   const handleLaunch: handleLaunchType = useCallback(
     async ({ serverIp, serverVersion, install } = {}) => {
+      if (gameRunningRef.current) {
+        setStatus("Game already running");
+        setTimeout(() => setStatus(""), 3000);
+        return;
+      }
+
       let currentInstall = install ?? activeInstall;
       if (serverVersion && serverIp) {
         const candidate =
@@ -217,6 +225,7 @@ function App() {
       }
 
       await events.gameExitedEvent.once((event) => {
+        gameRunningRef.current = false;
         setCurrentActivity(ACTIVITY_IDLE);
         const { code, signal, last_lines } = event.payload;
         if (code === 0) return;
@@ -255,6 +264,7 @@ function App() {
         launcherSettings.launchWithConsole ?? null,
       );
       if (res.ok) {
+        gameRunningRef.current = true;
         setCurrentActivity(
           serverIp
             ? { status: "PLAYING_SERVER", joinInfo: { value: serverIp, invited: false } }
@@ -262,6 +272,7 @@ function App() {
         );
         setStatus(res.value);
       } else {
+        setCurrentActivity(ACTIVITY_IDLE);
         setStatus(res.error);
       }
       setDownloadProgress(null);

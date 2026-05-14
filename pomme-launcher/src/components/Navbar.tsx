@@ -97,7 +97,7 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
             <button className="account-bar" onClick={accountDropdown.toggle}>
               <div
                 className="mc-head"
-                style={skinUrl ? { backgroundImage: `url(${skinUrl})` } : undefined}
+                style={skinUrl ? { backgroundImage: `url("${skinUrl}")` } : undefined}
               />
               <span className="account-username">{account.username}</span>
               <HiChevronDown className={`account-arrow ${accountDropdown.isOpen ? "open" : ""}`} />

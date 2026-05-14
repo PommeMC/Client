@@ -76,7 +76,9 @@ export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaun
         presence={friendsPresence}
         emptyMessage="You haven't added any friends yet."
         renderActions={(uuid, p) => {
-          const joinAddress = p?.status === "PLAYING_SERVER" ? p.joinInfo?.value : undefined;
+          const rawAddr = p?.status === "PLAYING_SERVER" ? p.joinInfo?.value : undefined;
+          const joinAddress =
+            rawAddr && /^[a-zA-Z0-9.\-:_[\]]+$/.test(rawAddr) ? rawAddr : undefined;
           return (
             <>
               {joinAddress && (
@@ -195,7 +197,7 @@ function FriendRow({
     <div className="mock-friend">
       <div
         className={`mc-head ${offline ? "off" : ""}`}
-        style={skinUrl ? { backgroundImage: `url(${skinUrl})` } : undefined}
+        style={skinUrl ? { backgroundImage: `url("${skinUrl}")` } : undefined}
       />
       <div className="mock-friend-info">
         <span className={`mock-friend-name ${offline ? "off" : ""}`}>{friend.name}</span>
