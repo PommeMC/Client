@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
+
+use serde::{Deserialize, Serialize};
 
 const FRIENDS_URL: &str = "https://api.minecraftservices.com/friends";
 const PRESENCE_URL: &str = "https://api.minecraftservices.com/presence";
@@ -179,7 +180,8 @@ pub async fn update_presence(
         .json()
         .await
         .map_err(|e| format!("Presence parse failed: {e}"))?;
-    // Mojang's /presence returns dashed UUIDs; /friends returns undashed. Normalize.
+    // Mojang's /presence returns dashed UUIDs; /friends returns undashed.
+    // Normalize.
     for entry in &mut parsed.presence {
         entry.profile_id.retain(|c| c != '-');
     }
@@ -233,7 +235,8 @@ async fn parse_attributes(resp: reqwest::Response) -> Result<FriendSettings, Str
         .await
         .map_err(|e| format!("Settings parse failed: {e}"))?;
     let prefs = dto.friends_preferences.unwrap_or_default();
-    // Mojang omits the field when unset; treat anything other than explicit DISABLED as enabled.
+    // Mojang omits the field when unset; treat anything other than explicit
+    // DISABLED as enabled.
     Ok(FriendSettings {
         show_in_list: prefs.friends.as_deref() != Some("DISABLED"),
         accept_invites: prefs.accept_invites.as_deref() != Some("DISABLED"),
