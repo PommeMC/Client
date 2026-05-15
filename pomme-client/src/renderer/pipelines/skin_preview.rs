@@ -1,8 +1,9 @@
+use std::slice;
 use std::sync::{Arc, Mutex};
 
-use ash::vk;
 use glam::{Mat4, Vec3};
-use gpu_allocator::vulkan::{Allocation, Allocator};
+use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
+use pyronyx::vk;
 
 use crate::renderer::MAX_FRAMES_IN_FLIGHT;
 use crate::renderer::shader;
@@ -51,7 +52,7 @@ pub struct SkinPreviewPipeline {
 
 impl SkinPreviewPipeline {
     pub fn new(
-        device: &ash::Device,
+        device: &vk::Device,
         render_pass: vk::RenderPass,
         allocator: &Arc<Mutex<Allocator>>,
         skin_view: vk::ImageView,
@@ -59,63 +60,92 @@ impl SkinPreviewPipeline {
     ) -> Self {
         let mvp_layout = util::create_descriptor_set_layout(
             device,
-            vk::DescriptorType::UNIFORM_BUFFER,
-            vk::ShaderStageFlags::VERTEX,
+            vk::DescriptorType::UniformBuffer,
+            vk::ShaderStageFlags::Vertex,
         );
         let tex_layout = util::create_descriptor_set_layout(
             device,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorType::CombinedImageSampler,
+            vk::ShaderStageFlags::Fragment,
         );
 
         let layouts = [mvp_layout, tex_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts);
-        let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        let layout_info = vk::PipelineLayoutCreateInfo {
+            set_layout_count: layouts.len() as u32,
+            set_layouts: layouts.as_ptr(),
+            ..Default::default()
+        };
+        let pipeline_layout = device
+            .create_pipeline_layout(&layout_info, None)
             .expect("failed to create skin preview pipeline layout");
 
         let pipeline = create_pipeline(device, render_pass, pipeline_layout);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                ty: vk::DescriptorType::UniformBuffer,
                 descriptor_count: MAX_FRAMES_IN_FLIGHT as u32 * 3,
             },
             vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                ty: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
             },
         ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets((MAX_FRAMES_IN_FLIGHT * 3 + 1) as u32)
-            .pool_sizes(&pool_sizes);
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+        let pool_info = vk::DescriptorPoolCreateInfo {
+            max_sets: (MAX_FRAMES_IN_FLIGHT * 3 + 1) as u32,
+            pool_size_count: pool_sizes.len() as u32,
+            pool_sizes: pool_sizes.as_ptr(),
+            ..Default::default()
+        };
+        let descriptor_pool = device
+            .create_descriptor_pool(&pool_info, None)
             .expect("failed to create skin preview descriptor pool");
 
         let mvp_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| mvp_layout).collect();
-        let mvp_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&mvp_layouts);
-        let mvp_sets = unsafe { device.allocate_descriptor_sets(&mvp_alloc_info) }
+
+        let mvp_alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: mvp_layouts.len() as u32,
+            set_layouts: mvp_layouts.as_ptr(),
+            ..Default::default()
+        };
+        let mut mvp_sets = vec![vk::DescriptorSet::null(); mvp_layouts.len()];
+        device
+            .allocate_descriptor_sets(&mvp_alloc_info, &mut mvp_sets)
             .expect("failed to allocate skin preview mvp sets");
 
-        let head_mvp_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&mvp_layouts);
-        let head_mvp_sets = unsafe { device.allocate_descriptor_sets(&head_mvp_alloc_info) }
+        let head_mvp_alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: mvp_layouts.len() as u32,
+            set_layouts: mvp_layouts.as_ptr(),
+            ..Default::default()
+        };
+        let mut head_mvp_sets = vec![vk::DescriptorSet::null(); mvp_layouts.len()];
+        device
+            .allocate_descriptor_sets(&head_mvp_alloc_info, &mut head_mvp_sets)
             .expect("failed to allocate skin preview head mvp sets");
 
-        let arm_mvp_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&mvp_layouts);
-        let arm_mvp_sets = unsafe { device.allocate_descriptor_sets(&arm_mvp_alloc_info) }
+        let arm_mvp_alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: mvp_layouts.len() as u32,
+            set_layouts: mvp_layouts.as_ptr(),
+            ..Default::default()
+        };
+        let mut arm_mvp_sets = vec![vk::DescriptorSet::null(); mvp_layouts.len()];
+        device
+            .allocate_descriptor_sets(&arm_mvp_alloc_info, &mut arm_mvp_sets)
             .expect("failed to allocate skin preview arm mvp sets");
 
-        let tex_layouts = [tex_layout];
-        let tex_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&tex_layouts);
-        let tex_set = unsafe { device.allocate_descriptor_sets(&tex_alloc_info) }
-            .expect("failed to allocate skin preview tex set")[0];
+        let tex_alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: 1,
+            set_layouts: &tex_layout,
+            ..Default::default()
+        };
+        let mut tex_set = vk::DescriptorSet::null();
+        device
+            .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut tex_set))
+            .expect("failed to allocate skin preview tex set");
 
         let mut mvp_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut mvp_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -131,17 +161,20 @@ impl SkinPreviewPipeline {
                 std::mem::size_of::<Uniform>() as u64,
                 "skin_body_mvp",
             );
-            let buffer_info = [vk::DescriptorBufferInfo {
+            let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
                 range: std::mem::size_of::<Uniform>() as u64,
-            }];
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(mvp_sets[i])
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buffer_info);
-            unsafe { device.update_descriptor_sets(&[write], &[]) };
+            };
+            let write = vk::WriteDescriptorSet {
+                dst_set: mvp_sets[i],
+                dst_binding: 0,
+                descriptor_type: vk::DescriptorType::UniformBuffer,
+                descriptor_count: 1,
+                buffer_info: &buffer_info,
+                ..Default::default()
+            };
+            device.update_descriptor_sets(&[write], &[]);
             mvp_buffers.push(buf);
             mvp_allocations.push(alloc);
 
@@ -151,17 +184,20 @@ impl SkinPreviewPipeline {
                 std::mem::size_of::<Uniform>() as u64,
                 "skin_head_mvp",
             );
-            let buffer_info = [vk::DescriptorBufferInfo {
+            let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
                 range: std::mem::size_of::<Uniform>() as u64,
-            }];
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(head_mvp_sets[i])
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buffer_info);
-            unsafe { device.update_descriptor_sets(&[write], &[]) };
+            };
+            let write = vk::WriteDescriptorSet {
+                dst_set: head_mvp_sets[i],
+                dst_binding: 0,
+                descriptor_type: vk::DescriptorType::UniformBuffer,
+                descriptor_count: 1,
+                buffer_info: &buffer_info,
+                ..Default::default()
+            };
+            device.update_descriptor_sets(&[write], &[]);
             head_mvp_buffers.push(buf);
             head_mvp_allocations.push(alloc);
 
@@ -171,32 +207,38 @@ impl SkinPreviewPipeline {
                 std::mem::size_of::<Uniform>() as u64,
                 "skin_arm_mvp",
             );
-            let buffer_info = [vk::DescriptorBufferInfo {
+            let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
                 range: std::mem::size_of::<Uniform>() as u64,
-            }];
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(arm_mvp_sets[i])
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buffer_info);
-            unsafe { device.update_descriptor_sets(&[write], &[]) };
+            };
+            let write = vk::WriteDescriptorSet {
+                dst_set: arm_mvp_sets[i],
+                dst_binding: 0,
+                descriptor_type: vk::DescriptorType::UniformBuffer,
+                descriptor_count: 1,
+                buffer_info: &buffer_info,
+                ..Default::default()
+            };
+            device.update_descriptor_sets(&[write], &[]);
             arm_mvp_buffers.push(buf);
             arm_mvp_allocations.push(alloc);
         }
 
-        let image_info = [vk::DescriptorImageInfo {
+        let image_info = vk::DescriptorImageInfo {
             sampler: skin_sampler,
             image_view: skin_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
-        let tex_write = vk::WriteDescriptorSet::default()
-            .dst_set(tex_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&image_info);
-        unsafe { device.update_descriptor_sets(&[tex_write], &[]) };
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let tex_write = vk::WriteDescriptorSet {
+            dst_set: tex_set,
+            dst_binding: 0,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            descriptor_count: 1,
+            image_info: &image_info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[tex_write], &[]);
 
         let body_verts = build_body_mesh();
         let body_bytes = bytemuck::cast_slice(&body_verts);
@@ -204,7 +246,7 @@ impl SkinPreviewPipeline {
             device,
             allocator,
             body_bytes,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::BufferUsageFlags::VertexBuffer,
             "skin_body",
         );
 
@@ -214,7 +256,7 @@ impl SkinPreviewPipeline {
             device,
             allocator,
             arm_bytes,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::BufferUsageFlags::VertexBuffer,
             "skin_arm",
         );
 
@@ -224,7 +266,7 @@ impl SkinPreviewPipeline {
             device,
             allocator,
             head_bytes,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::BufferUsageFlags::VertexBuffer,
             "skin_head",
         );
 
@@ -264,7 +306,7 @@ impl SkinPreviewPipeline {
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
-        device: &ash::Device,
+        device: &vk::Device,
         cmd: vk::CommandBuffer,
         frame: usize,
         aspect: f32,
@@ -275,6 +317,7 @@ impl SkinPreviewPipeline {
         screen_w: f32,
         screen_h: f32,
     ) {
+        let _ = device;
         let center_px_x = screen_x * screen_w;
         let center_px_y = screen_y * screen_h;
         let body_yaw_raw = ((mouse_px_x - center_px_x) / 40.0).atan();
@@ -328,61 +371,54 @@ impl SkinPreviewPipeline {
             * Mat4::from_translation(-shoulder);
         let arm_mvp = vp * body_rot_mat * arm_swing;
 
-        write_uniform(&self.mvp_allocations[frame], &body_mvp);
-        write_uniform(&self.head_mvp_allocations[frame], &head_mvp);
-        write_uniform(&self.arm_mvp_allocations[frame], &arm_mvp);
+        write_uniform(&mut self.mvp_allocations[frame], &body_mvp);
+        write_uniform(&mut self.head_mvp_allocations[frame], &head_mvp);
+        write_uniform(&mut self.arm_mvp_allocations[frame], &arm_mvp);
 
-        unsafe {
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
 
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &[self.mvp_sets[frame], self.tex_set],
-                &[],
-            );
-            device.cmd_bind_vertex_buffers(cmd, 0, &[self.body_buffer], &[0]);
-            device.cmd_draw(cmd, self.body_count, 1, 0, 0);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.mvp_sets[frame], self.tex_set],
+            &[],
+        );
+        cmd.bind_vertex_buffers(0, &[self.body_buffer], &[0]);
+        cmd.draw(self.body_count, 1, 0, 0);
 
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &[self.head_mvp_sets[frame], self.tex_set],
-                &[],
-            );
-            device.cmd_bind_vertex_buffers(cmd, 0, &[self.head_buffer], &[0]);
-            device.cmd_draw(cmd, self.head_count, 1, 0, 0);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.head_mvp_sets[frame], self.tex_set],
+            &[],
+        );
+        cmd.bind_vertex_buffers(0, &[self.head_buffer], &[0]);
+        cmd.draw(self.head_count, 1, 0, 0);
 
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &[self.arm_mvp_sets[frame], self.tex_set],
-                &[],
-            );
-            device.cmd_bind_vertex_buffers(cmd, 0, &[self.arm_buffer], &[0]);
-            device.cmd_draw(cmd, self.arm_count, 1, 0, 0);
-        }
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.arm_mvp_sets[frame], self.tex_set],
+            &[],
+        );
+        cmd.bind_vertex_buffers(0, &[self.arm_buffer], &[0]);
+        cmd.draw(self.arm_count, 1, 0, 0);
     }
 
-    pub fn recreate_pipeline(&mut self, device: &ash::Device, render_pass: vk::RenderPass) {
-        unsafe { device.destroy_pipeline(self.pipeline, None) };
+    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
+        device.destroy_pipeline(self.pipeline, None);
         self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
     }
 
-    pub fn destroy(&mut self, device: &ash::Device, allocator: &Arc<Mutex<Allocator>>) {
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
         for i in 0..MAX_FRAMES_IN_FLIGHT {
-            unsafe {
-                device.destroy_buffer(self.mvp_buffers[i], None);
-                device.destroy_buffer(self.head_mvp_buffers[i], None);
-                device.destroy_buffer(self.arm_mvp_buffers[i], None);
-            }
+            device.destroy_buffer(self.mvp_buffers[i], None);
+            device.destroy_buffer(self.head_mvp_buffers[i], None);
+            device.destroy_buffer(self.arm_mvp_buffers[i], None);
             alloc
                 .free(std::mem::replace(&mut self.mvp_allocations[i], unsafe {
                     std::mem::zeroed()
@@ -401,11 +437,11 @@ impl SkinPreviewPipeline {
                 ))
                 .ok();
         }
-        unsafe {
-            device.destroy_buffer(self.body_buffer, None);
-            device.destroy_buffer(self.head_buffer, None);
-            device.destroy_buffer(self.arm_buffer, None);
-        }
+
+        device.destroy_buffer(self.body_buffer, None);
+        device.destroy_buffer(self.head_buffer, None);
+        device.destroy_buffer(self.arm_buffer, None);
+
         alloc
             .free(std::mem::replace(&mut self.body_allocation, unsafe {
                 std::mem::zeroed()
@@ -423,29 +459,24 @@ impl SkinPreviewPipeline {
             .ok();
         drop(alloc);
 
-        unsafe {
-            device.destroy_pipeline(self.pipeline, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.descriptor_pool, None);
-            device.destroy_descriptor_set_layout(self.mvp_layout, None);
-            device.destroy_descriptor_set_layout(self.tex_layout, None);
-        }
+        device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline_layout(self.pipeline_layout, None);
+        device.destroy_descriptor_pool(self.descriptor_pool, None);
+        device.destroy_descriptor_set_layout(self.mvp_layout, None);
+        device.destroy_descriptor_set_layout(self.tex_layout, None);
     }
 }
 
-fn write_uniform(alloc: &Allocation, mvp: &Mat4) {
+fn write_uniform(alloc: &mut Allocation, mvp: &Mat4) {
     let uniform = Uniform {
         mvp: mvp.to_cols_array_2d(),
     };
     let bytes = bytemuck::bytes_of(&uniform);
-    unsafe {
-        let dst = alloc.mapped_ptr().unwrap().as_ptr() as *mut u8;
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
-    }
+    alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
 }
 
 fn create_pipeline(
-    device: &ash::Device,
+    device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
 ) -> vk::Pipeline {
@@ -455,93 +486,124 @@ fn create_pipeline(
     let frag_mod = shader::create_shader_module(device, frag_spv);
 
     let stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vert_mod)
-            .name(c"main"),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(frag_mod)
-            .name(c"main"),
+        vk::PipelineShaderStageCreateInfo {
+            stage: vk::ShaderStageFlags::Vertex,
+            module: vert_mod,
+            name: c"main".as_ptr(),
+            ..Default::default()
+        },
+        vk::PipelineShaderStageCreateInfo {
+            stage: vk::ShaderStageFlags::Fragment,
+            module: frag_mod,
+            name: c"main".as_ptr(),
+            ..Default::default()
+        },
     ];
 
-    let binding = [vk::VertexInputBindingDescription {
+    let binding = vk::VertexInputBindingDescription {
         binding: 0,
         stride: std::mem::size_of::<Vertex>() as u32,
-        input_rate: vk::VertexInputRate::VERTEX,
-    }];
+        input_rate: vk::VertexInputRate::Vertex,
+    };
     let attrs = [
         vk::VertexInputAttributeDescription {
             location: 0,
             binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
+            format: vk::Format::R32G32B32Sfloat,
             offset: 0,
         },
         vk::VertexInputAttributeDescription {
             location: 1,
             binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
+            format: vk::Format::R32G32Sfloat,
             offset: 12,
         },
     ];
 
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-        .vertex_binding_descriptions(&binding)
-        .vertex_attribute_descriptions(&attrs);
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-        .viewport_count(1)
-        .scissor_count(1);
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
-        .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::FRONT)
-        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-        .line_width(1.0);
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(true)
-        .depth_write_enable(true)
-        .depth_compare_op(vk::CompareOp::LESS);
-    let blend_attachment = [vk::PipelineColorBlendAttachmentState {
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
+        vertex_binding_description_count: 1,
+        vertex_binding_descriptions: &binding,
+        vertex_attribute_description_count: attrs.len() as u32,
+        vertex_attribute_descriptions: attrs.as_ptr(),
+        ..Default::default()
+    };
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
+        topology: vk::PrimitiveTopology::TriangleList,
+        ..Default::default()
+    };
+    let viewport_state = vk::PipelineViewportStateCreateInfo {
+        viewport_count: 1,
+        scissor_count: 1,
+        ..Default::default()
+    };
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
+        polygon_mode: vk::PolygonMode::Fill,
+        cull_mode: vk::CullModeFlags::Front,
+        front_face: vk::FrontFace::CounterClockwise,
+        line_width: 1.0,
+        ..Default::default()
+    };
+    let multisampling = vk::PipelineMultisampleStateCreateInfo {
+        rasterization_samples: vk::SampleCountFlags::Type1,
+        ..Default::default()
+    };
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
+        depth_test_enable: vk::TRUE,
+        depth_write_enable: vk::TRUE,
+        depth_compare_op: vk::CompareOp::Less,
+        ..Default::default()
+    };
+    let blend_attachment = vk::PipelineColorBlendAttachmentState {
         blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
-        dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-        color_blend_op: vk::BlendOp::ADD,
-        src_alpha_blend_factor: vk::BlendFactor::ONE,
-        dst_alpha_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-        alpha_blend_op: vk::BlendOp::ADD,
+        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
+        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        color_blend_op: vk::BlendOp::Add,
+        src_alpha_blend_factor: vk::BlendFactor::One,
+        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        alpha_blend_op: vk::BlendOp::Add,
         color_write_mask: vk::ColorComponentFlags::RGBA,
+    };
+    let color_blending = vk::PipelineColorBlendStateCreateInfo {
+        attachment_count: 1,
+        attachments: &blend_attachment,
+        ..Default::default()
+    };
+    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
+        dynamic_state_count: dynamic_states.len() as u32,
+        dynamic_states: dynamic_states.as_ptr(),
+        ..Default::default()
+    };
+
+    let info = [vk::GraphicsPipelineCreateInfo {
+        stage_count: stages.len() as u32,
+        stages: stages.as_ptr(),
+        vertex_input_state: &vertex_input,
+        input_assembly_state: &input_assembly,
+        viewport_state: &viewport_state,
+        rasterization_state: &rasterizer,
+        multisample_state: &multisampling,
+        depth_stencil_state: &depth_stencil,
+        color_blend_state: &color_blending,
+        dynamic_state: &dynamic_state,
+        layout,
+        render_pass,
+        subpass: 0,
+        ..Default::default()
     }];
-    let color_blending =
-        vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachment);
-    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic_state =
-        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-    let info = [vk::GraphicsPipelineCreateInfo::default()
-        .stages(&stages)
-        .vertex_input_state(&vertex_input)
-        .input_assembly_state(&input_assembly)
-        .viewport_state(&viewport_state)
-        .rasterization_state(&rasterizer)
-        .multisample_state(&multisampling)
-        .depth_stencil_state(&depth_stencil)
-        .color_blend_state(&color_blending)
-        .dynamic_state(&dynamic_state)
-        .layout(layout)
-        .render_pass(render_pass)
-        .subpass(0)];
+    let mut pipeline = vk::Pipeline::null();
+    device
+        .create_graphics_pipelines(
+            vk::PipelineCache::null(),
+            &info,
+            None,
+            slice::from_mut(&mut pipeline),
+        )
+        .expect("failed to create skin preview pipeline");
 
-    let pipeline =
-        unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &info, None) }
-            .expect("failed to create skin preview pipeline")[0];
-
-    unsafe {
-        device.destroy_shader_module(vert_mod, None);
-        device.destroy_shader_module(frag_mod, None);
-    }
+    device.destroy_shader_module(vert_mod, None);
+    device.destroy_shader_module(frag_mod, None);
     pipeline
 }
 

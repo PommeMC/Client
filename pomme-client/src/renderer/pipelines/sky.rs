@@ -2,9 +2,9 @@ use std::f32::consts::{PI, TAU};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use ash::vk;
 use glam::Vec3;
-use gpu_allocator::vulkan::{Allocation, Allocator};
+use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
+use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::MAX_FRAMES_IN_FLIGHT;
@@ -191,7 +191,7 @@ pub struct SkyPipeline {
 
 impl SkyPipeline {
     pub fn new(
-        device: &ash::Device,
+        device: &vk::Device,
         queue: vk::Queue,
         command_pool: vk::CommandPool,
         render_pass: vk::RenderPass,
@@ -201,57 +201,76 @@ impl SkyPipeline {
     ) -> Self {
         let ubo_layout = util::create_descriptor_set_layout(
             device,
-            vk::DescriptorType::UNIFORM_BUFFER,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorType::UniformBuffer,
+            vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
         );
         let tex_layout = util::create_descriptor_set_layout(
             device,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorType::CombinedImageSampler,
+            vk::ShaderStageFlags::Fragment,
         );
 
-        let push_range = [vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+        let push_range = vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
             offset: 0,
             size: 4,
-        }];
+        };
         let layouts = [ubo_layout, tex_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&layouts)
-            .push_constant_ranges(&push_range);
-        let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        let layout_info = vk::PipelineLayoutCreateInfo {
+            set_layout_count: layouts.len() as u32,
+            set_layouts: layouts.as_ptr(),
+            push_constant_range_count: 1,
+            push_constant_ranges: &push_range,
+            ..Default::default()
+        };
+        let pipeline_layout = device
+            .create_pipeline_layout(&layout_info, None)
             .expect("failed to create sky pipeline layout");
 
         let (pipeline, overlay_pipeline) = create_pipelines(device, render_pass, pipeline_layout);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                ty: vk::DescriptorType::UniformBuffer,
                 descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
             },
             vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                ty: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 9, // 1 sun + 8 moon phases
             },
         ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets((MAX_FRAMES_IN_FLIGHT + 9) as u32)
-            .pool_sizes(&pool_sizes);
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+        let pool_info = vk::DescriptorPoolCreateInfo {
+            max_sets: (MAX_FRAMES_IN_FLIGHT + 9) as u32,
+            pool_size_count: pool_sizes.len() as u32,
+            pool_sizes: pool_sizes.as_ptr(),
+            ..Default::default()
+        };
+        let descriptor_pool = device
+            .create_descriptor_pool(&pool_info, None)
             .expect("failed to create sky descriptor pool");
 
         let ubo_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| ubo_layout).collect();
-        let ubo_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&ubo_layouts);
-        let ubo_sets = unsafe { device.allocate_descriptor_sets(&ubo_alloc_info) }
+        let ubo_alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: ubo_layouts.len() as u32,
+            set_layouts: ubo_layouts.as_ptr(),
+            ..Default::default()
+        };
+        let mut ubo_sets = vec![vk::DescriptorSet::null(); ubo_layouts.len()];
+        device
+            .allocate_descriptor_sets(&ubo_alloc_info, &mut ubo_sets)
             .expect("failed to allocate sky ubo sets");
 
         let tex_layouts: Vec<_> = (0..9).map(|_| tex_layout).collect(); // 1 sun + 8 moon
-        let tex_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&tex_layouts);
-        let tex_sets = unsafe { device.allocate_descriptor_sets(&tex_alloc_info) }
+        let tex_alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: tex_layouts.len() as u32,
+            set_layouts: tex_layouts.as_ptr(),
+            ..Default::default()
+        };
+        let mut tex_sets = vec![vk::DescriptorSet::null(); tex_layouts.len()];
+        device
+            .allocate_descriptor_sets(&tex_alloc_info, &mut tex_sets)
             .expect("failed to allocate sky texture sets");
         let sun_set = tex_sets[0];
         let moon_sets: [vk::DescriptorSet; 8] = tex_sets[1..9].try_into().unwrap();
@@ -266,17 +285,20 @@ impl SkyPipeline {
                 std::mem::size_of::<SkyUniform>() as u64,
                 "sky_uniform",
             );
-            let buffer_info = [vk::DescriptorBufferInfo {
+            let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
                 range: std::mem::size_of::<SkyUniform>() as u64,
-            }];
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buffer_info);
-            unsafe { device.update_descriptor_sets(&[write], &[]) };
+            };
+            let write = vk::WriteDescriptorSet {
+                dst_set: set,
+                dst_binding: 0,
+                descriptor_type: vk::DescriptorType::UniformBuffer,
+                descriptor_count: 1,
+                buffer_info: &buffer_info,
+                ..Default::default()
+            };
+            device.update_descriptor_sets(&[write], &[]);
             ubo_buffers.push(buf);
             ubo_allocations.push(alloc);
         }
@@ -329,7 +351,7 @@ impl SkyPipeline {
             device,
             allocator,
             vertex_bytes,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::BufferUsageFlags::VertexBuffer,
             "sky_vertices",
         );
 
@@ -378,12 +400,13 @@ impl SkyPipeline {
 
     pub fn update_and_draw(
         &mut self,
-        device: &ash::Device,
+        device: &vk::Device,
         cmd: vk::CommandBuffer,
         frame: usize,
         camera: &Camera,
         sky: &SkyState,
     ) {
+        let _ = device;
         let day_tick = sky.day_tick();
 
         let t = (day_tick - 6000.0).rem_euclid(TICKS_PER_DAY) / TICKS_PER_DAY;
@@ -430,10 +453,9 @@ impl SkyPipeline {
         self.ubo_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
             .copy_from_slice(bytes);
 
-        let push_stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
-        let push_mode = |device: &ash::Device, mode: u32| unsafe {
-            device.cmd_push_constants(
-                cmd,
+        let push_stages = vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment;
+        let push_mode = |cmd: vk::CommandBuffer, mode: u32| {
+            cmd.push_constants(
                 self.pipeline_layout,
                 push_stages,
                 0,
@@ -441,72 +463,65 @@ impl SkyPipeline {
             );
         };
 
-        unsafe {
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &[self.ubo_sets[frame], self.sun_set],
-                &[],
-            );
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.ubo_sets[frame], self.sun_set],
+            &[],
+        );
 
-            push_mode(device, 0);
-            device.cmd_draw(cmd, self.top_disc_count, 1, self.top_disc_offset, 0);
+        push_mode(cmd, 0);
+        cmd.draw(self.top_disc_count, 1, self.top_disc_offset, 0);
 
-            if sunrise_argb[3] > 0.001 {
-                push_mode(device, 5);
-                device.cmd_draw(cmd, self.sunrise_count, 1, self.sunrise_offset, 0);
-            }
+        if sunrise_argb[3] > 0.001 {
+            push_mode(cmd, 5);
+            cmd.draw(self.sunrise_count, 1, self.sunrise_offset, 0);
+        }
 
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.overlay_pipeline);
-            device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &[self.ubo_sets[frame], self.sun_set],
-                &[],
-            );
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.overlay_pipeline);
+        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.ubo_sets[frame], self.sun_set],
+            &[],
+        );
 
-            push_mode(device, 2);
-            device.cmd_draw(cmd, 6, 1, self.sun_offset, 0);
+        push_mode(cmd, 2);
+        cmd.draw(6, 1, self.sun_offset, 0);
 
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                1,
-                &[self.moon_sets[moon_phase_idx]],
-                &[],
-            );
-            push_mode(device, 3);
-            device.cmd_draw(cmd, 6, 1, self.moon_offset, 0);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            1,
+            &[self.moon_sets[moon_phase_idx]],
+            &[],
+        );
+        push_mode(cmd, 3);
+        cmd.draw(6, 1, self.moon_offset, 0);
 
-            if star_brightness > 0.01 {
-                push_mode(device, 1);
-                device.cmd_draw(cmd, self.star_count, 1, self.star_offset, 0);
-            }
+        if star_brightness > 0.01 {
+            push_mode(cmd, 1);
+            cmd.draw(self.star_count, 1, self.star_offset, 0);
         }
     }
 
-    pub fn recreate_pipeline(&mut self, device: &ash::Device, render_pass: vk::RenderPass) {
-        unsafe {
-            device.destroy_pipeline(self.pipeline, None);
-            device.destroy_pipeline(self.overlay_pipeline, None);
-        }
+    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
+        device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.overlay_pipeline, None);
         let (p, o) = create_pipelines(device, render_pass, self.pipeline_layout);
         self.pipeline = p;
         self.overlay_pipeline = o;
     }
 
-    pub fn destroy(&mut self, device: &ash::Device, allocator: &Arc<Mutex<Allocator>>) {
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
         for i in 0..MAX_FRAMES_IN_FLIGHT {
-            unsafe { device.destroy_buffer(self.ubo_buffers[i], None) };
+            device.destroy_buffer(self.ubo_buffers[i], None);
             alloc
                 .free(std::mem::replace(&mut self.ubo_allocations[i], unsafe {
                     std::mem::zeroed()
@@ -514,7 +529,7 @@ impl SkyPipeline {
                 .ok();
         }
 
-        unsafe { device.destroy_buffer(self.vertex_buffer, None) };
+        device.destroy_buffer(self.vertex_buffer, None);
         alloc
             .free(std::mem::replace(&mut self.vertex_allocation, unsafe {
                 std::mem::zeroed()
@@ -523,23 +538,21 @@ impl SkyPipeline {
 
         let mut destroy_texture =
             |view: &mut vk::ImageView, image: &mut vk::Image, allocation: &mut Allocation| {
-                unsafe {
-                    device.destroy_image_view(*view, None);
-                }
+                device.destroy_image_view(*view, None);
                 alloc
                     .free(std::mem::replace(allocation, unsafe { std::mem::zeroed() }))
                     .ok();
-                unsafe { device.destroy_image(*image, None) };
+                device.destroy_image(*image, None);
             };
 
-        unsafe { device.destroy_sampler(self.sun_sampler, None) };
+        device.destroy_sampler(self.sun_sampler, None);
         destroy_texture(
             &mut self.sun_view,
             &mut self.sun_image,
             &mut self.sun_allocation,
         );
 
-        unsafe { device.destroy_sampler(self.moon_sampler, None) };
+        device.destroy_sampler(self.moon_sampler, None);
         for i in 0..8 {
             destroy_texture(
                 &mut self.moon_views[i],
@@ -550,14 +563,12 @@ impl SkyPipeline {
 
         drop(alloc);
 
-        unsafe {
-            device.destroy_pipeline(self.pipeline, None);
-            device.destroy_pipeline(self.overlay_pipeline, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.descriptor_pool, None);
-            device.destroy_descriptor_set_layout(self.ubo_layout, None);
-            device.destroy_descriptor_set_layout(self.tex_layout, None);
-        }
+        device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.overlay_pipeline, None);
+        device.destroy_pipeline_layout(self.pipeline_layout, None);
+        device.destroy_descriptor_pool(self.descriptor_pool, None);
+        device.destroy_descriptor_set_layout(self.ubo_layout, None);
+        device.destroy_descriptor_set_layout(self.tex_layout, None);
     }
 }
 
@@ -865,7 +876,7 @@ fn build_sunrise_fan(verts: &mut Vec<SkyVertex>) {
 }
 
 fn load_celestial_texture(
-    device: &ash::Device,
+    device: &vk::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
@@ -885,7 +896,7 @@ fn load_celestial_texture(
 
     util::upload_image(device, queue, command_pool, staging_buf, image, w, h);
 
-    unsafe { device.destroy_buffer(staging_buf, None) };
+    device.destroy_buffer(staging_buf, None);
     allocator.lock().unwrap().free(staging_alloc).ok();
 
     tracing::info!("Sky: loaded {key} ({w}x{h})");
@@ -893,26 +904,29 @@ fn load_celestial_texture(
 }
 
 fn bind_texture_set(
-    device: &ash::Device,
+    device: &vk::Device,
     set: vk::DescriptorSet,
     view: vk::ImageView,
     sampler: vk::Sampler,
 ) {
-    let image_info = [vk::DescriptorImageInfo {
+    let image_info = vk::DescriptorImageInfo {
         sampler,
         image_view: view,
-        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-    }];
-    let write = vk::WriteDescriptorSet::default()
-        .dst_set(set)
-        .dst_binding(0)
-        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .image_info(&image_info);
-    unsafe { device.update_descriptor_sets(&[write], &[]) };
+        image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+    };
+    let write = vk::WriteDescriptorSet {
+        dst_set: set,
+        dst_binding: 0,
+        descriptor_type: vk::DescriptorType::CombinedImageSampler,
+        descriptor_count: 1,
+        image_info: &image_info,
+        ..Default::default()
+    };
+    device.update_descriptor_sets(&[write], &[]);
 }
 
 fn create_pipelines(
-    device: &ash::Device,
+    device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
 ) -> (vk::Pipeline, vk::Pipeline) {
@@ -923,118 +937,161 @@ fn create_pipelines(
     let frag_module = shader::create_shader_module(device, frag_spv);
 
     let stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vert_module)
-            .name(c"main"),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(frag_module)
-            .name(c"main"),
+        vk::PipelineShaderStageCreateInfo {
+            stage: vk::ShaderStageFlags::Vertex,
+            module: vert_module,
+            name: c"main".as_ptr(),
+            ..Default::default()
+        },
+        vk::PipelineShaderStageCreateInfo {
+            stage: vk::ShaderStageFlags::Fragment,
+            module: frag_module,
+            name: c"main".as_ptr(),
+            ..Default::default()
+        },
     ];
 
     let binding_descs = [vk::VertexInputBindingDescription {
         binding: 0,
         stride: std::mem::size_of::<SkyVertex>() as u32,
-        input_rate: vk::VertexInputRate::VERTEX,
+        input_rate: vk::VertexInputRate::Vertex,
     }];
 
     let attr_descs = [
         vk::VertexInputAttributeDescription {
             location: 0,
             binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
+            format: vk::Format::R32G32B32Sfloat,
             offset: 0,
         },
         vk::VertexInputAttributeDescription {
             location: 1,
             binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
+            format: vk::Format::R32G32Sfloat,
             offset: 12,
         },
     ];
 
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-        .vertex_binding_descriptions(&binding_descs)
-        .vertex_attribute_descriptions(&attr_descs);
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
+        vertex_binding_description_count: binding_descs.len() as u32,
+        vertex_binding_descriptions: binding_descs.as_ptr(),
+        vertex_attribute_description_count: attr_descs.len() as u32,
+        vertex_attribute_descriptions: attr_descs.as_ptr(),
+        ..Default::default()
+    };
 
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
+        topology: vk::PrimitiveTopology::TriangleList,
+        ..Default::default()
+    };
 
-    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-        .viewport_count(1)
-        .scissor_count(1);
+    let viewport_state = vk::PipelineViewportStateCreateInfo {
+        viewport_count: 1,
+        scissor_count: 1,
+        ..Default::default()
+    };
 
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
-        .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
-        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-        .line_width(1.0);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
+        polygon_mode: vk::PolygonMode::Fill,
+        cull_mode: vk::CullModeFlags::None,
+        front_face: vk::FrontFace::CounterClockwise,
+        line_width: 1.0,
+        ..Default::default()
+    };
 
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let multisampling = vk::PipelineMultisampleStateCreateInfo {
+        rasterization_samples: vk::SampleCountFlags::Type1,
+        ..Default::default()
+    };
 
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(false)
-        .depth_write_enable(false);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
+        depth_test_enable: vk::FALSE,
+        depth_write_enable: vk::FALSE,
+        ..Default::default()
+    };
 
-    let translucent_blend = [vk::PipelineColorBlendAttachmentState {
+    let translucent_blend = vk::PipelineColorBlendAttachmentState {
         blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
-        dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-        color_blend_op: vk::BlendOp::ADD,
-        src_alpha_blend_factor: vk::BlendFactor::ONE,
-        dst_alpha_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-        alpha_blend_op: vk::BlendOp::ADD,
+        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
+        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        color_blend_op: vk::BlendOp::Add,
+        src_alpha_blend_factor: vk::BlendFactor::One,
+        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        alpha_blend_op: vk::BlendOp::Add,
         color_write_mask: vk::ColorComponentFlags::RGBA,
-    }];
+    };
 
-    let overlay_blend = [vk::PipelineColorBlendAttachmentState {
+    let overlay_blend = vk::PipelineColorBlendAttachmentState {
         blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
-        dst_color_blend_factor: vk::BlendFactor::ONE,
-        color_blend_op: vk::BlendOp::ADD,
-        src_alpha_blend_factor: vk::BlendFactor::ONE,
-        dst_alpha_blend_factor: vk::BlendFactor::ZERO,
-        alpha_blend_op: vk::BlendOp::ADD,
+        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
+        dst_color_blend_factor: vk::BlendFactor::One,
+        color_blend_op: vk::BlendOp::Add,
+        src_alpha_blend_factor: vk::BlendFactor::One,
+        dst_alpha_blend_factor: vk::BlendFactor::Zero,
+        alpha_blend_op: vk::BlendOp::Add,
         color_write_mask: vk::ColorComponentFlags::RGBA,
-    }];
+    };
 
-    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic_state =
-        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
+        dynamic_state_count: dynamic_states.len() as u32,
+        dynamic_states: dynamic_states.as_ptr(),
+        ..Default::default()
+    };
 
-    let translucent_blending =
-        vk::PipelineColorBlendStateCreateInfo::default().attachments(&translucent_blend);
-    let overlay_blending =
-        vk::PipelineColorBlendStateCreateInfo::default().attachments(&overlay_blend);
-
-    let base = vk::GraphicsPipelineCreateInfo::default()
-        .stages(&stages)
-        .vertex_input_state(&vertex_input)
-        .input_assembly_state(&input_assembly)
-        .viewport_state(&viewport_state)
-        .rasterization_state(&rasterizer)
-        .multisample_state(&multisampling)
-        .depth_stencil_state(&depth_stencil)
-        .dynamic_state(&dynamic_state)
-        .layout(layout)
-        .render_pass(render_pass)
-        .subpass(0);
+    let translucent_blending = vk::PipelineColorBlendStateCreateInfo {
+        attachment_count: 1,
+        attachments: &translucent_blend,
+        ..Default::default()
+    };
+    let overlay_blending = vk::PipelineColorBlendStateCreateInfo {
+        attachment_count: 1,
+        attachments: &overlay_blend,
+        ..Default::default()
+    };
 
     let infos = [
-        base.color_blend_state(&translucent_blending),
-        base.color_blend_state(&overlay_blending),
+        vk::GraphicsPipelineCreateInfo {
+            stage_count: stages.len() as u32,
+            stages: stages.as_ptr(),
+            vertex_input_state: &vertex_input,
+            input_assembly_state: &input_assembly,
+            viewport_state: &viewport_state,
+            rasterization_state: &rasterizer,
+            multisample_state: &multisampling,
+            depth_stencil_state: &depth_stencil,
+            color_blend_state: &translucent_blending,
+            dynamic_state: &dynamic_state,
+            layout,
+            render_pass,
+            subpass: 0,
+            ..Default::default()
+        },
+        vk::GraphicsPipelineCreateInfo {
+            stage_count: stages.len() as u32,
+            stages: stages.as_ptr(),
+            vertex_input_state: &vertex_input,
+            input_assembly_state: &input_assembly,
+            viewport_state: &viewport_state,
+            rasterization_state: &rasterizer,
+            multisample_state: &multisampling,
+            depth_stencil_state: &depth_stencil,
+            color_blend_state: &overlay_blending,
+            dynamic_state: &dynamic_state,
+            layout,
+            render_pass,
+            subpass: 0,
+            ..Default::default()
+        },
     ];
 
-    let pipelines =
-        unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &infos, None) }
-            .expect("failed to create sky pipelines");
+    let mut pipelines = [vk::Pipeline::null(), vk::Pipeline::null()];
+    device
+        .create_graphics_pipelines(vk::PipelineCache::null(), &infos, None, &mut pipelines)
+        .expect("failed to create sky pipelines");
 
-    unsafe {
-        device.destroy_shader_module(vert_module, None);
-        device.destroy_shader_module(frag_module, None);
-    }
+    device.destroy_shader_module(vert_module, None);
+    device.destroy_shader_module(frag_module, None);
 
     (pipelines[0], pipelines[1])
 }

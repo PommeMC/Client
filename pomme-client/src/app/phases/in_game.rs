@@ -268,12 +268,12 @@ pub fn update_game(
             screen_w: gfx.renderer.screen_width(),
             screen_h: gfx.renderer.screen_height(),
             timings: Some(hud::FrameTimings {
-                frame_ms: gfx.renderer.last_timings.frame_ms,
-                fence_ms: gfx.renderer.last_timings.fence_ms,
-                acquire_ms: gfx.renderer.last_timings.acquire_ms,
-                cull_ms: gfx.renderer.last_timings.cull_ms,
-                draw_ms: gfx.renderer.last_timings.draw_ms,
-                present_ms: gfx.renderer.last_timings.present_ms,
+                frame_ms: gfx.renderer.last_timings().frame_ms,
+                fence_ms: gfx.renderer.last_timings().fence_ms,
+                acquire_ms: gfx.renderer.last_timings().acquire_ms,
+                cull_ms: gfx.renderer.last_timings().cull_ms,
+                draw_ms: gfx.renderer.last_timings().draw_ms,
+                present_ms: gfx.renderer.last_timings().present_ms,
             }),
         })
     } else {
@@ -318,7 +318,7 @@ pub fn update_game(
         let entity_count = game.entity_store.living.len() as u32;
         let done = bench.record_frame(
             dt * 1000.0,
-            &gfx.renderer.last_timings,
+            gfx.renderer.last_timings(),
             gfx.renderer.loaded_chunk_count(),
             entity_count,
         );

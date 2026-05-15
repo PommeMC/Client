@@ -1,16 +1,19 @@
 use std::sync::{Arc, Mutex};
 
-use ash::khr::{surface, swapchain};
-use ash::vk;
-use gpu_allocator::MemoryLocation;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
+use pomme_gpu_allocator::MemoryLocation;
+use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
+use pyronyx::khr::surface::SurfacePhysicalDevice;
+use pyronyx::khr::swapchain::SwapchainDevice;
+use pyronyx::vk;
+
+use crate::renderer::context::VulkanContext;
 
 use super::context::ContextError;
 use super::util;
 
 #[allow(dead_code)]
-pub struct SwapchainState {
-    pub swapchain: vk::SwapchainKHR,
+pub struct Swapchain {
+    pub handle: vk::SwapchainKHR,
     pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
     pub format: vk::SurfaceFormatKHR,
@@ -26,46 +29,32 @@ pub struct SwapchainState {
     pub framebuffers_load: Vec<vk::Framebuffer>,
 }
 
-impl SwapchainState {
-    #[allow(clippy::too_many_arguments)]
+impl Swapchain {
     pub fn new(
-        device: &ash::Device,
-        surface_loader: &surface::Instance,
-        swapchain_loader: &swapchain::Device,
-        physical_device: vk::PhysicalDevice,
-        surface: vk::SurfaceKHR,
+        ctx: &VulkanContext,
         width: u32,
         height: u32,
-        graphics_family: u32,
-        present_family: u32,
-        allocator: &Arc<Mutex<Allocator>>,
         old_swapchain: vk::SwapchainKHR,
     ) -> Result<Self, ContextError> {
-        let caps = unsafe {
-            surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?
-        };
-        let formats = unsafe {
-            surface_loader.get_physical_device_surface_formats(physical_device, surface)?
-        };
-        let present_modes = unsafe {
-            surface_loader.get_physical_device_surface_present_modes(physical_device, surface)?
-        };
+        let caps = ctx.physical_device.get_surface_capabilities(ctx.surface)?;
+        let formats = ctx.physical_device.get_surface_formats(ctx.surface)?;
+        let present_modes = ctx.physical_device.get_surface_present_modes(ctx.surface)?;
 
         let format = formats
             .iter()
             .find(|f| {
-                f.format == vk::Format::B8G8R8A8_SRGB
-                    && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                f.format == vk::Format::B8G8R8A8Srgb
+                    && f.color_space == vk::ColorSpaceKHR::SrgbNonlinear
             })
             .copied()
             .unwrap_or(formats[0]);
 
-        let present_mode = if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
-            vk::PresentModeKHR::MAILBOX
-        } else if present_modes.contains(&vk::PresentModeKHR::IMMEDIATE) {
-            vk::PresentModeKHR::IMMEDIATE
+        let present_mode = if present_modes.contains(&vk::PresentModeKHR::Mailbox) {
+            vk::PresentModeKHR::Mailbox
+        } else if present_modes.contains(&vk::PresentModeKHR::Immediate) {
+            vk::PresentModeKHR::Immediate
         } else {
-            vk::PresentModeKHR::FIFO
+            vk::PresentModeKHR::Fifo
         };
 
         let extent = vk::Extent2D {
@@ -79,65 +68,74 @@ impl SwapchainState {
             caps.max_image_count
         });
 
-        let (sharing_mode, queue_families) = if graphics_family != present_family {
-            (
-                vk::SharingMode::CONCURRENT,
-                vec![graphics_family, present_family],
-            )
-        } else {
-            (vk::SharingMode::EXCLUSIVE, vec![])
+        let (sharing_mode, queue_families): (vk::SharingMode, Vec<u32>) =
+            if ctx.graphics_family != ctx.present_family {
+                (
+                    vk::SharingMode::Concurrent,
+                    vec![ctx.graphics_family, ctx.present_family],
+                )
+            } else {
+                (vk::SharingMode::Exclusive, vec![])
+            };
+
+        let swapchain_info = vk::SwapchainCreateInfoKHR {
+            surface: ctx.surface,
+            min_image_count: image_count,
+            image_format: format.format,
+            image_color_space: format.color_space,
+            image_extent: extent,
+            image_array_layers: 1,
+            image_usage: vk::ImageUsageFlags::ColorAttachment | vk::ImageUsageFlags::TransferSrc,
+            image_sharing_mode: sharing_mode,
+            queue_family_index_count: queue_families.len() as u32,
+            queue_family_indices: queue_families.as_ptr(),
+            pre_transform: caps.current_transform,
+            composite_alpha: vk::CompositeAlphaFlagsKHR::Opaque,
+            present_mode,
+            clipped: vk::TRUE,
+            old_swapchain,
+            ..Default::default()
         };
 
-        let swapchain_info = vk::SwapchainCreateInfoKHR::default()
-            .surface(surface)
-            .min_image_count(image_count)
-            .image_format(format.format)
-            .image_color_space(format.color_space)
-            .image_extent(extent)
-            .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
-            .image_sharing_mode(sharing_mode)
-            .queue_family_indices(&queue_families)
-            .pre_transform(caps.current_transform)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(present_mode)
-            .clipped(true)
-            .old_swapchain(old_swapchain);
+        let swapchain = ctx.device.create_swapchain(&swapchain_info, None)?;
+        let images = ctx.device.get_swapchain_images(swapchain)?;
 
-        let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_info, None)? };
-        let images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
-
-        let image_views: Vec<vk::ImageView> = images
+        let image_views = images
             .iter()
             .map(|&img| {
-                let view_info = vk::ImageViewCreateInfo::default()
-                    .image(img)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(format.format)
-                    .subresource_range(util::COLOR_SUBRESOURCE_RANGE);
-                unsafe { device.create_image_view(&view_info, None) }
+                let view_info = vk::ImageViewCreateInfo {
+                    image: img,
+                    view_type: vk::ImageViewType::Type2D,
+                    format: format.format,
+                    subresource_range: util::COLOR_SUBRESOURCE_RANGE,
+                    ..Default::default()
+                };
+                ctx.device.create_image_view(&view_info, None)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         let (depth_image, depth_view, depth_allocation) =
-            create_depth_resources(device, extent, allocator)?;
+            create_depth_resources(&ctx.device, extent, &ctx.allocator)?;
 
-        let render_pass = create_render_pass(device, format.format)?;
-        let render_pass_scene = create_render_pass_scene(device, format.format)?;
-        let render_pass_load = create_render_pass_load(device, format.format)?;
+        let render_pass = create_render_pass(&ctx.device, format.format)?;
+        let render_pass_scene = create_render_pass_scene(&ctx.device, format.format)?;
+        let render_pass_load = create_render_pass_load(&ctx.device, format.format)?;
 
-        let make_fbs = |rp: vk::RenderPass| -> Result<Vec<vk::Framebuffer>, vk::Result> {
+        let make_fbs = |rp: vk::RenderPass| -> Result<Vec<vk::Framebuffer>, vk::Error> {
             image_views
                 .iter()
                 .map(|&view| {
                     let attachments = [view, depth_view];
-                    let fb_info = vk::FramebufferCreateInfo::default()
-                        .render_pass(rp)
-                        .attachments(&attachments)
-                        .width(extent.width)
-                        .height(extent.height)
-                        .layers(1);
-                    unsafe { device.create_framebuffer(&fb_info, None) }
+                    let fb_info = vk::FramebufferCreateInfo {
+                        render_pass: rp,
+                        attachment_count: attachments.len() as u32,
+                        attachments: attachments.as_ptr(),
+                        width: extent.width,
+                        height: extent.height,
+                        layers: 1,
+                        ..Default::default()
+                    };
+                    ctx.device.create_framebuffer(&fb_info, None)
                 })
                 .collect()
         };
@@ -147,7 +145,7 @@ impl SwapchainState {
         let framebuffers_load = make_fbs(render_pass_load)?;
 
         Ok(Self {
-            swapchain,
+            handle: swapchain,
             images,
             image_views,
             format,
@@ -164,15 +162,8 @@ impl SwapchainState {
         })
     }
 
-    pub fn destroy(
-        &mut self,
-        device: &ash::Device,
-        swapchain_loader: &swapchain::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-    ) {
-        unsafe {
-            let _ = device.device_wait_idle();
-        }
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        let _ = device.wait_idle();
 
         for fbs in [
             &mut self.framebuffers,
@@ -180,7 +171,7 @@ impl SwapchainState {
             &mut self.framebuffers_load,
         ] {
             for &fb in fbs.iter() {
-                unsafe { device.destroy_framebuffer(fb, None) };
+                device.destroy_framebuffer(fb, None);
             }
             fbs.clear();
         }
@@ -190,21 +181,21 @@ impl SwapchainState {
             self.render_pass_scene,
             self.render_pass_load,
         ] {
-            unsafe { device.destroy_render_pass(rp, None) };
+            device.destroy_render_pass(rp, None);
         }
 
-        unsafe { device.destroy_image_view(self.depth_view, None) };
+        device.destroy_image_view(self.depth_view, None);
         if let Some(alloc) = self.depth_allocation.take() {
             allocator.lock().unwrap().free(alloc).ok();
         }
-        unsafe { device.destroy_image(self.depth_image, None) };
+        device.destroy_image(self.depth_image, None);
 
         for &view in &self.image_views {
-            unsafe { device.destroy_image_view(view, None) };
+            device.destroy_image_view(view, None);
         }
         self.image_views.clear();
 
-        unsafe { swapchain_loader.destroy_swapchain(self.swapchain, None) };
+        device.destroy_swapchain(self.handle, None);
     }
 
     pub fn aspect_ratio(&self) -> f32 {
@@ -213,28 +204,30 @@ impl SwapchainState {
 }
 
 fn create_depth_resources(
-    device: &ash::Device,
+    device: &vk::Device,
     extent: vk::Extent2D,
     allocator: &Arc<Mutex<Allocator>>,
 ) -> Result<(vk::Image, vk::ImageView, Allocation), ContextError> {
-    let depth_format = vk::Format::D32_SFLOAT;
+    let depth_format = vk::Format::D32Sfloat;
 
-    let image_info = vk::ImageCreateInfo::default()
-        .image_type(vk::ImageType::TYPE_2D)
-        .format(depth_format)
-        .extent(vk::Extent3D {
+    let image_info = vk::ImageCreateInfo {
+        image_type: vk::ImageType::Type2D,
+        format: depth_format,
+        extent: vk::Extent3D {
             width: extent.width,
             height: extent.height,
             depth: 1,
-        })
-        .mip_levels(1)
-        .array_layers(1)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT);
+        },
+        mip_levels: 1,
+        array_layers: 1,
+        samples: vk::SampleCountFlags::Type1,
+        tiling: vk::ImageTiling::Optimal,
+        usage: vk::ImageUsageFlags::DepthStencilAttachment,
+        ..Default::default()
+    };
 
-    let image = unsafe { device.create_image(&image_info, None)? };
-    let mem_reqs = unsafe { device.get_image_memory_requirements(image) };
+    let image = device.create_image(&image_info, None)?;
+    let mem_reqs = device.get_image_memory_requirements(image);
 
     let allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
         name: "depth_image",
@@ -246,170 +239,187 @@ fn create_depth_resources(
 
     unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset())? };
 
-    let view_info = vk::ImageViewCreateInfo::default()
-        .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
-        .format(depth_format)
-        .subresource_range(util::DEPTH_SUBRESOURCE_RANGE);
-    let view = unsafe { device.create_image_view(&view_info, None)? };
+    let view_info = vk::ImageViewCreateInfo {
+        image,
+        view_type: vk::ImageViewType::Type2D,
+        format: depth_format,
+        subresource_range: util::DEPTH_SUBRESOURCE_RANGE,
+        ..Default::default()
+    };
+    let view = device.create_image_view(&view_info, None)?;
 
     Ok((image, view, allocation))
 }
 
 fn create_render_pass(
-    device: &ash::Device,
+    device: &vk::Device,
     color_format: vk::Format,
-) -> Result<vk::RenderPass, vk::Result> {
+) -> Result<vk::RenderPass, vk::Error> {
     let attachments = [
-        vk::AttachmentDescription::default()
-            .format(color_format)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR),
-        vk::AttachmentDescription::default()
-            .format(vk::Format::D32_SFLOAT)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        vk::AttachmentDescription {
+            format: color_format,
+            samples: vk::SampleCountFlags::Type1,
+            load_op: vk::AttachmentLoadOp::Clear,
+            store_op: vk::AttachmentStoreOp::Store,
+            stencil_load_op: vk::AttachmentLoadOp::DontCare,
+            stencil_store_op: vk::AttachmentStoreOp::DontCare,
+            initial_layout: vk::ImageLayout::Undefined,
+            final_layout: vk::ImageLayout::PresentSrcKHR,
+            ..Default::default()
+        },
+        vk::AttachmentDescription {
+            format: vk::Format::D32Sfloat,
+            samples: vk::SampleCountFlags::Type1,
+            load_op: vk::AttachmentLoadOp::Clear,
+            store_op: vk::AttachmentStoreOp::DontCare,
+            stencil_load_op: vk::AttachmentLoadOp::DontCare,
+            stencil_store_op: vk::AttachmentStoreOp::DontCare,
+            initial_layout: vk::ImageLayout::Undefined,
+            final_layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
+            ..Default::default()
+        },
     ];
 
     let color_ref = [vk::AttachmentReference {
         attachment: 0,
-        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        layout: vk::ImageLayout::ColorAttachmentOptimal,
     }];
-
     let depth_ref = vk::AttachmentReference {
         attachment: 1,
-        layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
     };
 
-    let subpass = [vk::SubpassDescription::default()
-        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&color_ref)
-        .depth_stencil_attachment(&depth_ref)];
+    let subpass = [vk::SubpassDescription {
+        pipeline_bind_point: vk::PipelineBindPoint::Graphics,
+        color_attachment_count: color_ref.len() as u32,
+        color_attachments: color_ref.as_ptr(),
+        depth_stencil_attachment: &depth_ref,
+        ..Default::default()
+    }];
 
-    let dependency = [vk::SubpassDependency::default()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .dst_access_mask(
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        )];
+    let dependency = [vk::SubpassDependency {
+        src_subpass: vk::SUBPASS_EXTERNAL,
+        dst_subpass: 0,
+        src_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
+            | vk::PipelineStageFlags::EarlyFragmentTests,
+        src_access_mask: vk::AccessFlags::empty(),
+        dst_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
+            | vk::PipelineStageFlags::EarlyFragmentTests,
+        dst_access_mask: vk::AccessFlags::ColorAttachmentWrite
+            | vk::AccessFlags::DepthStencilAttachmentWrite,
+        ..Default::default()
+    }];
 
-    let render_pass_info = vk::RenderPassCreateInfo::default()
-        .attachments(&attachments)
-        .subpasses(&subpass)
-        .dependencies(&dependency);
+    let render_pass_info = vk::RenderPassCreateInfo {
+        attachment_count: attachments.len() as u32,
+        attachments: attachments.as_ptr(),
+        subpass_count: subpass.len() as u32,
+        subpasses: subpass.as_ptr(),
+        dependency_count: dependency.len() as u32,
+        dependencies: dependency.as_ptr(),
+        ..Default::default()
+    };
 
-    unsafe { device.create_render_pass(&render_pass_info, None) }
+    device.create_render_pass(&render_pass_info, None)
 }
 
 fn create_render_pass_scene(
-    device: &ash::Device,
+    device: &vk::Device,
     color_format: vk::Format,
-) -> Result<vk::RenderPass, vk::Result> {
+) -> Result<vk::RenderPass, vk::Error> {
     create_render_pass_variant(
         device,
         color_format,
-        vk::AttachmentLoadOp::CLEAR,
-        vk::ImageLayout::UNDEFINED,
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        vk::AttachmentLoadOp::Clear,
+        vk::ImageLayout::Undefined,
+        vk::ImageLayout::ColorAttachmentOptimal,
     )
 }
 
 fn create_render_pass_load(
-    device: &ash::Device,
+    device: &vk::Device,
     color_format: vk::Format,
-) -> Result<vk::RenderPass, vk::Result> {
+) -> Result<vk::RenderPass, vk::Error> {
     create_render_pass_variant(
         device,
         color_format,
-        vk::AttachmentLoadOp::LOAD,
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        vk::ImageLayout::PRESENT_SRC_KHR,
+        vk::AttachmentLoadOp::Load,
+        vk::ImageLayout::ColorAttachmentOptimal,
+        vk::ImageLayout::PresentSrcKHR,
     )
 }
 
 fn create_render_pass_variant(
-    device: &ash::Device,
+    device: &vk::Device,
     color_format: vk::Format,
     load_op: vk::AttachmentLoadOp,
     initial_layout: vk::ImageLayout,
     final_layout: vk::ImageLayout,
-) -> Result<vk::RenderPass, vk::Result> {
+) -> Result<vk::RenderPass, vk::Error> {
     let attachments = [
-        vk::AttachmentDescription::default()
-            .format(color_format)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(load_op)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(initial_layout)
-            .final_layout(final_layout),
-        vk::AttachmentDescription::default()
-            .format(vk::Format::D32_SFLOAT)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        vk::AttachmentDescription {
+            format: color_format,
+            samples: vk::SampleCountFlags::Type1,
+            load_op,
+            store_op: vk::AttachmentStoreOp::Store,
+            stencil_load_op: vk::AttachmentLoadOp::DontCare,
+            stencil_store_op: vk::AttachmentStoreOp::DontCare,
+            initial_layout,
+            final_layout,
+            ..Default::default()
+        },
+        vk::AttachmentDescription {
+            format: vk::Format::D32Sfloat,
+            samples: vk::SampleCountFlags::Type1,
+            load_op: vk::AttachmentLoadOp::Clear,
+            store_op: vk::AttachmentStoreOp::DontCare,
+            stencil_load_op: vk::AttachmentLoadOp::DontCare,
+            stencil_store_op: vk::AttachmentStoreOp::DontCare,
+            initial_layout: vk::ImageLayout::Undefined,
+            final_layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
+            ..Default::default()
+        },
     ];
 
     let color_ref = [vk::AttachmentReference {
         attachment: 0,
-        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        layout: vk::ImageLayout::ColorAttachmentOptimal,
     }];
     let depth_ref = vk::AttachmentReference {
         attachment: 1,
-        layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
     };
 
-    let subpass = [vk::SubpassDescription::default()
-        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&color_ref)
-        .depth_stencil_attachment(&depth_ref)];
+    let subpass = [vk::SubpassDescription {
+        pipeline_bind_point: vk::PipelineBindPoint::Graphics,
+        color_attachment_count: color_ref.len() as u32,
+        color_attachments: color_ref.as_ptr(),
+        depth_stencil_attachment: &depth_ref,
+        ..Default::default()
+    }];
 
-    let dependency = [vk::SubpassDependency::default()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .dst_access_mask(
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        )];
+    let dependency = [vk::SubpassDependency {
+        src_subpass: vk::SUBPASS_EXTERNAL,
+        dst_subpass: 0,
+        src_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
+            | vk::PipelineStageFlags::EarlyFragmentTests,
+        src_access_mask: vk::AccessFlags::empty(),
+        dst_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
+            | vk::PipelineStageFlags::EarlyFragmentTests,
+        dst_access_mask: vk::AccessFlags::ColorAttachmentWrite
+            | vk::AccessFlags::DepthStencilAttachmentWrite,
+        ..Default::default()
+    }];
 
-    let info = vk::RenderPassCreateInfo::default()
-        .attachments(&attachments)
-        .subpasses(&subpass)
-        .dependencies(&dependency);
+    let info = vk::RenderPassCreateInfo {
+        attachment_count: attachments.len() as u32,
+        attachments: attachments.as_ptr(),
+        subpass_count: subpass.len() as u32,
+        subpasses: subpass.as_ptr(),
+        dependency_count: dependency.len() as u32,
+        dependencies: dependency.as_ptr(),
+        ..Default::default()
+    };
 
-    unsafe { device.create_render_pass(&info, None) }
+    device.create_render_pass(&info, None)
 }

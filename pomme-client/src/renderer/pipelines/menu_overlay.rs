@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::slice;
 use std::sync::{Arc, Mutex};
 
-use ash::vk;
-use gpu_allocator::vulkan::{Allocation, Allocator};
+use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
+use pyronyx::vk;
 
 use std::path::Path;
 
@@ -38,7 +39,7 @@ struct Vertex {
 }
 
 const MAX_VERTICES: usize = 16384;
-const VERTEX_SIZE: usize = std::mem::size_of::<Vertex>();
+const VERTEX_SIZE: usize = size_of::<Vertex>();
 
 struct GlyphEntry {
     u0: f32,
@@ -178,7 +179,7 @@ pub struct MenuOverlayPipeline {
 
 impl MenuOverlayPipeline {
     pub fn new(
-        device: &ash::Device,
+        device: &vk::Device,
         queue: vk::Queue,
         command_pool: vk::CommandPool,
         render_pass: vk::RenderPass,
@@ -190,116 +191,141 @@ impl MenuOverlayPipeline {
 
         let globals_layout = util::create_descriptor_set_layout(
             device,
-            vk::DescriptorType::UNIFORM_BUFFER,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorType::UniformBuffer,
+            vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
         );
 
         let tex_bindings = [
             vk::DescriptorSetLayoutBinding {
                 binding: 0,
-                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                stage_flags: vk::ShaderStageFlags::Fragment,
                 ..Default::default()
             },
             vk::DescriptorSetLayoutBinding {
                 binding: 1,
-                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                stage_flags: vk::ShaderStageFlags::Fragment,
                 ..Default::default()
             },
             vk::DescriptorSetLayoutBinding {
                 binding: 2,
-                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                stage_flags: vk::ShaderStageFlags::Fragment,
                 ..Default::default()
             },
             vk::DescriptorSetLayoutBinding {
                 binding: 3,
-                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                stage_flags: vk::ShaderStageFlags::Fragment,
                 ..Default::default()
             },
             vk::DescriptorSetLayoutBinding {
                 binding: 4,
-                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                stage_flags: vk::ShaderStageFlags::Fragment,
                 ..Default::default()
             },
             vk::DescriptorSetLayoutBinding {
                 binding: 5,
-                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                stage_flags: vk::ShaderStageFlags::Fragment,
                 ..Default::default()
             },
         ];
-        let tex_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&tex_bindings);
-        let tex_layout = unsafe { device.create_descriptor_set_layout(&tex_layout_info, None) }
+        let tex_layout_info = vk::DescriptorSetLayoutCreateInfo {
+            binding_count: tex_bindings.len() as u32,
+            bindings: tex_bindings.as_ptr(),
+            ..Default::default()
+        };
+        let tex_layout = device
+            .create_descriptor_set_layout(&tex_layout_info, None)
             .expect("failed to create texture descriptor set layout");
 
         let layouts = [globals_layout, tex_layout];
-        let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts);
-        let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        let layout_info = vk::PipelineLayoutCreateInfo {
+            set_layout_count: layouts.len() as u32,
+            set_layouts: layouts.as_ptr(),
+            ..Default::default()
+        };
+        let pipeline_layout = device
+            .create_pipeline_layout(&layout_info, None)
             .expect("failed to create menu overlay pipeline layout");
 
         let pipeline = create_pipeline(device, render_pass, pipeline_layout);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                ty: vk::DescriptorType::UniformBuffer,
                 descriptor_count: 1,
             },
             vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                ty: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 6,
             },
         ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(2)
-            .pool_sizes(&pool_sizes);
-        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+        let pool_info = vk::DescriptorPoolCreateInfo {
+            max_sets: 2,
+            pool_size_count: pool_sizes.len() as u32,
+            pool_sizes: pool_sizes.as_ptr(),
+            ..Default::default()
+        };
+        let descriptor_pool = device
+            .create_descriptor_pool(&pool_info, None)
             .expect("failed to create menu overlay descriptor pool");
 
-        let globals_layouts = [globals_layout];
-        let globals_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&globals_layouts);
-        let globals_set = unsafe { device.allocate_descriptor_sets(&globals_alloc_info) }
-            .expect("failed to allocate globals descriptor set")[0];
+        let globals_alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: 1,
+            set_layouts: &globals_layout,
+            ..Default::default()
+        };
+        let mut globals_set = vk::DescriptorSet::null();
+        device
+            .allocate_descriptor_sets(&globals_alloc_info, slice::from_mut(&mut globals_set))
+            .expect("failed to allocate globals descriptor set");
 
-        let tex_layouts = [tex_layout];
-        let tex_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&tex_layouts);
-        let tex_set = unsafe { device.allocate_descriptor_sets(&tex_alloc_info) }
-            .expect("failed to allocate texture descriptor set")[0];
+        let tex_alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: 1,
+            set_layouts: &tex_layout,
+            ..Default::default()
+        };
+        let mut tex_set = vk::DescriptorSet::null();
+        device
+            .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut tex_set))
+            .expect("failed to allocate texture descriptor set");
 
         let (globals_buffer, globals_allocation) =
             util::create_uniform_buffer(device, allocator, 8, "menu_globals");
 
-        let buf_info = [vk::DescriptorBufferInfo {
+        let buf_info = vk::DescriptorBufferInfo {
             buffer: globals_buffer,
             offset: 0,
             range: 8,
-        }];
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(globals_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .buffer_info(&buf_info);
-        unsafe { device.update_descriptor_sets(&[write], &[]) };
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: globals_set,
+            dst_binding: 0,
+            descriptor_count: 1,
+            descriptor_type: vk::DescriptorType::UniformBuffer,
+            buffer_info: &buf_info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
 
         let (font_image, font_view, font_alloc) = util::create_gpu_image_with_format(
             device,
             allocator,
             ATLAS_SIZE,
             ATLAS_SIZE,
-            vk::Format::R8G8B8A8_UNORM,
+            vk::Format::R8G8B8A8Unorm,
             "menu_font_atlas",
         );
 
@@ -380,32 +406,33 @@ impl MenuOverlayPipeline {
         };
         let mc_font_sampler = unsafe { util::create_nearest_sampler(device) };
 
-        let font_img_info = [vk::DescriptorImageInfo {
+        let font_img_info = vk::DescriptorImageInfo {
             sampler: font_sampler,
             image_view: font_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
-        let sprite_img_info = [vk::DescriptorImageInfo {
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let sprite_img_info = vk::DescriptorImageInfo {
             sampler: sprite_sampler,
             image_view: sprite_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
-        let item_img_info = [vk::DescriptorImageInfo {
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let item_img_info = vk::DescriptorImageInfo {
             sampler: item_sampler,
             image_view: item_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
-        let mc_font_img_info = [vk::DescriptorImageInfo {
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let mc_font_img_info = vk::DescriptorImageInfo {
             sampler: mc_font_sampler,
             image_view: mc_font_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+
         let (favicon_image, favicon_view, favicon_alloc) = util::create_gpu_image_with_format(
             device,
             allocator,
             1,
             1,
-            vk::Format::R8G8B8A8_SRGB,
+            vk::Format::R8G8B8A8Srgb,
             "favicon_placeholder",
         );
         let (fav_staging, fav_staging_alloc) = util::create_staging_buffer(
@@ -423,54 +450,73 @@ impl MenuOverlayPipeline {
             1,
             1,
         );
-        unsafe { device.destroy_buffer(fav_staging, None) };
+        device.destroy_buffer(fav_staging, None);
         allocator.lock().unwrap().free(fav_staging_alloc).ok();
         let favicon_sampler = unsafe { util::create_nearest_sampler(device) };
 
-        let favicon_img_info = [vk::DescriptorImageInfo {
+        let favicon_img_info = vk::DescriptorImageInfo {
             sampler: favicon_sampler,
             image_view: favicon_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+
         let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(tex_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&font_img_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(tex_set)
-                .dst_binding(1)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&sprite_img_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(tex_set)
-                .dst_binding(2)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&item_img_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(tex_set)
-                .dst_binding(3)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&mc_font_img_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(tex_set)
-                .dst_binding(4)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&font_img_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(tex_set)
-                .dst_binding(5)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&favicon_img_info),
+            vk::WriteDescriptorSet {
+                dst_set: tex_set,
+                dst_binding: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: &font_img_info,
+                ..Default::default()
+            },
+            vk::WriteDescriptorSet {
+                dst_set: tex_set,
+                dst_binding: 1,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: &sprite_img_info,
+                ..Default::default()
+            },
+            vk::WriteDescriptorSet {
+                dst_set: tex_set,
+                dst_binding: 2,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: &item_img_info,
+                ..Default::default()
+            },
+            vk::WriteDescriptorSet {
+                dst_set: tex_set,
+                dst_binding: 3,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: &mc_font_img_info,
+                ..Default::default()
+            },
+            vk::WriteDescriptorSet {
+                dst_set: tex_set,
+                dst_binding: 4,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: &font_img_info,
+                ..Default::default()
+            },
+            vk::WriteDescriptorSet {
+                dst_set: tex_set,
+                dst_binding: 5,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: &favicon_img_info,
+                ..Default::default()
+            },
         ];
-        unsafe { device.update_descriptor_sets(&writes, &[]) };
+        device.update_descriptor_sets(&writes, &[]);
 
         let (vertex_buffer, vertex_allocation) = util::create_host_buffer(
             device,
             allocator,
             (MAX_VERTICES * VERTEX_SIZE) as u64,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::BufferUsageFlags::VertexBuffer,
             "menu_vertices",
         );
 
@@ -525,7 +571,6 @@ impl MenuOverlayPipeline {
 
     pub fn draw(
         &mut self,
-        device: &ash::Device,
         cmd: vk::CommandBuffer,
         screen_w: f32,
         screen_h: f32,
@@ -902,6 +947,7 @@ impl MenuOverlayPipeline {
                 }
             }
         }
+
         let final_count = vertices.len() as u32 - cmd_start;
         if final_count > 0 {
             draw_cmds.push((cmd_start, final_count, current_scissor));
@@ -928,64 +974,59 @@ impl MenuOverlayPipeline {
             },
         };
 
-        unsafe {
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &[self.globals_set, self.tex_set],
-                &[],
-            );
-            device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
-            for &(start, vert_count, ref scissor) in &draw_cmds {
-                let rect = if let Some(s) = scissor {
-                    vk::Rect2D {
-                        offset: vk::Offset2D {
-                            x: s[0] as i32,
-                            y: s[1] as i32,
-                        },
-                        extent: vk::Extent2D {
-                            width: s[2] as u32,
-                            height: s[3] as u32,
-                        },
-                    }
-                } else {
-                    default_scissor
-                };
-                device.cmd_set_scissor(cmd, 0, &[rect]);
-                device.cmd_draw(cmd, vert_count, 1, start, 0);
-            }
-            device.cmd_set_scissor(cmd, 0, &[default_scissor]);
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.globals_set, self.tex_set],
+            &[],
+        );
+        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+        for &(start, vert_count, ref scissor) in &draw_cmds {
+            let rect = if let Some(s) = scissor {
+                vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: s[0] as i32,
+                        y: s[1] as i32,
+                    },
+                    extent: vk::Extent2D {
+                        width: s[2] as u32,
+                        height: s[3] as u32,
+                    },
+                }
+            } else {
+                default_scissor
+            };
+            cmd.set_scissor(0, &[rect]);
+            cmd.draw(vert_count, 1, start, 0);
         }
+        cmd.set_scissor(0, &[default_scissor]);
     }
 
-    pub fn set_blur_texture(
-        &self,
-        device: &ash::Device,
-        view: vk::ImageView,
-        sampler: vk::Sampler,
-    ) {
-        let info = [vk::DescriptorImageInfo {
+    pub fn set_blur_texture(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
+        let info = vk::DescriptorImageInfo {
             sampler,
             image_view: view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
-        let write = [vk::WriteDescriptorSet::default()
-            .dst_set(self.tex_set)
-            .dst_binding(4)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&info)];
-        unsafe { device.update_descriptor_sets(&write, &[]) };
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: self.tex_set,
+            dst_binding: 4,
+            descriptor_count: 1,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            image_info: &info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
     }
 
     pub fn update_favicon_atlas(
         &mut self,
-        device: &ash::Device,
+        device: &vk::Device,
         queue: vk::Queue,
         command_pool: vk::CommandPool,
-        allocator: &std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
+        allocator: &Arc<Mutex<Allocator>>,
         favicons: &[(String, Vec<u8>, u32)],
     ) {
         if favicons.is_empty() {
@@ -1025,13 +1066,11 @@ impl MenuOverlayPipeline {
             regions.insert(addr.clone(), [u0, v0, u1, v1]);
         }
 
-        unsafe { device.queue_wait_idle(queue).unwrap() };
+        queue.wait_idle().unwrap();
 
         if let Some(alloc) = self.favicon_allocation.take() {
-            unsafe {
-                device.destroy_image_view(self.favicon_view, None);
-                device.destroy_image(self.favicon_image, None);
-            }
+            device.destroy_image_view(self.favicon_view, None);
+            device.destroy_image(self.favicon_image, None);
             allocator.lock().unwrap().free(alloc).ok();
         }
 
@@ -1040,7 +1079,7 @@ impl MenuOverlayPipeline {
             allocator,
             atlas_w,
             atlas_h,
-            vk::Format::R8G8B8A8_SRGB,
+            vk::Format::R8G8B8A8Srgb,
             "favicon_atlas",
         );
         let (staging, staging_alloc) =
@@ -1054,7 +1093,7 @@ impl MenuOverlayPipeline {
             atlas_w,
             atlas_h,
         );
-        unsafe { device.destroy_buffer(staging, None) };
+        device.destroy_buffer(staging, None);
         allocator.lock().unwrap().free(staging_alloc).ok();
 
         self.favicon_image = image;
@@ -1063,17 +1102,20 @@ impl MenuOverlayPipeline {
         self.favicon_regions = regions;
         self.favicon_atlas_size = atlas_w;
 
-        let info = [vk::DescriptorImageInfo {
+        let info = vk::DescriptorImageInfo {
             sampler: self.favicon_sampler,
             image_view: view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
-        let write = [vk::WriteDescriptorSet::default()
-            .dst_set(self.tex_set)
-            .dst_binding(5)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&info)];
-        unsafe { device.update_descriptor_sets(&write, &[]) };
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: self.tex_set,
+            dst_binding: 5,
+            descriptor_count: 1,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            image_info: &info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
     }
 
     pub fn text_width(&self, text: &str, scale: f32) -> f32 {
@@ -1095,20 +1137,20 @@ impl MenuOverlayPipeline {
         raw.ceil()
     }
 
-    pub fn recreate_pipeline(&mut self, device: &ash::Device, render_pass: vk::RenderPass) {
-        unsafe { device.destroy_pipeline(self.pipeline, None) };
+    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
+        device.destroy_pipeline(self.pipeline, None);
         self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
     }
 
-    pub fn destroy(&mut self, device: &ash::Device, allocator: &Arc<Mutex<Allocator>>) {
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
 
-        unsafe { device.destroy_buffer(self.globals_buffer, None) };
+        device.destroy_buffer(self.globals_buffer, None);
         if let Some(a) = self.globals_allocation.take() {
             alloc.free(a).ok();
         }
 
-        unsafe { device.destroy_buffer(self.vertex_buffer, None) };
+        device.destroy_buffer(self.vertex_buffer, None);
         if let Some(a) = self.vertex_allocation.take() {
             alloc.free(a).ok();
         }
@@ -1162,24 +1204,21 @@ impl MenuOverlayPipeline {
             },
         );
 
-        unsafe {
-            device.destroy_sampler(self.favicon_sampler, None);
-            device.destroy_image_view(self.favicon_view, None);
-            device.destroy_image(self.favicon_image, None);
-        }
+        device.destroy_sampler(self.favicon_sampler, None);
+        device.destroy_image_view(self.favicon_view, None);
+        device.destroy_image(self.favicon_image, None);
+
         if let Some(a) = self.favicon_allocation.take() {
             alloc.free(a).ok();
         }
 
         drop(alloc);
 
-        unsafe {
-            device.destroy_pipeline(self.pipeline, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.descriptor_pool, None);
-            device.destroy_descriptor_set_layout(self.globals_layout, None);
-            device.destroy_descriptor_set_layout(self.tex_layout, None);
-        }
+        device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline_layout(self.pipeline_layout, None);
+        device.destroy_descriptor_pool(self.descriptor_pool, None);
+        device.destroy_descriptor_set_layout(self.globals_layout, None);
+        device.destroy_descriptor_set_layout(self.tex_layout, None);
     }
 }
 
@@ -1372,7 +1411,7 @@ const INV_TEX_W: u32 = 176;
 const INV_TEX_H: u32 = 166;
 
 fn build_sprite_atlas(
-    device: &ash::Device,
+    device: &vk::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
@@ -1836,7 +1875,7 @@ const ITEM_TILE: u32 = 16;
 const ITEM_GRID: u32 = ITEM_ATLAS_SIZE / ITEM_TILE;
 
 fn build_item_atlas(
-    device: &ash::Device,
+    device: &vk::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
@@ -1976,22 +2015,21 @@ struct TextureResources {
 }
 
 fn destroy_texture_resources(
-    device: &ash::Device,
-    alloc: &mut gpu_allocator::vulkan::Allocator,
+    device: &vk::Device,
+    alloc: &mut Allocator,
     res: &mut TextureResources,
 ) {
-    unsafe {
-        device.destroy_sampler(res.sampler, None);
-        device.destroy_image_view(res.view, None);
-    }
+    device.destroy_sampler(res.sampler, None);
+    device.destroy_image_view(res.view, None);
+
     if let Some(a) = res.image_alloc.take() {
         alloc.free(a).ok();
     }
-    unsafe { device.destroy_image(res.image, None) };
+    device.destroy_image(res.image, None);
     if let Some(a) = res.staging_alloc.take() {
         alloc.free(a).ok();
     }
-    unsafe { device.destroy_buffer(res.staging_buffer, None) };
+    device.destroy_buffer(res.staging_buffer, None);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2441,7 +2479,7 @@ fn push_mc_glyph(
 }
 
 fn create_pipeline(
-    device: &ash::Device,
+    device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
 ) -> vk::Pipeline {
@@ -2452,124 +2490,155 @@ fn create_pipeline(
     let frag_module = shader::create_shader_module(device, frag_spv);
 
     let stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vert_module)
-            .name(c"main"),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(frag_module)
-            .name(c"main"),
+        vk::PipelineShaderStageCreateInfo {
+            stage: vk::ShaderStageFlags::Vertex,
+            module: vert_module,
+            name: c"main".as_ptr(),
+            ..Default::default()
+        },
+        vk::PipelineShaderStageCreateInfo {
+            stage: vk::ShaderStageFlags::Fragment,
+            module: frag_module,
+            name: c"main".as_ptr(),
+            ..Default::default()
+        },
     ];
 
     let binding_descs = [vk::VertexInputBindingDescription {
         binding: 0,
         stride: VERTEX_SIZE as u32,
-        input_rate: vk::VertexInputRate::VERTEX,
+        input_rate: vk::VertexInputRate::Vertex,
     }];
 
     let attr_descs = [
         vk::VertexInputAttributeDescription {
             location: 0,
             binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
+            format: vk::Format::R32G32Sfloat,
             offset: 0,
         },
         vk::VertexInputAttributeDescription {
             location: 1,
             binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
+            format: vk::Format::R32G32Sfloat,
             offset: 8,
         },
         vk::VertexInputAttributeDescription {
             location: 2,
             binding: 0,
-            format: vk::Format::R32G32B32A32_SFLOAT,
+            format: vk::Format::R32G32B32A32Sfloat,
             offset: 16,
         },
         vk::VertexInputAttributeDescription {
             location: 3,
             binding: 0,
-            format: vk::Format::R32_SFLOAT,
+            format: vk::Format::R32Sfloat,
             offset: 32,
         },
         vk::VertexInputAttributeDescription {
             location: 4,
             binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
+            format: vk::Format::R32G32Sfloat,
             offset: 36,
         },
         vk::VertexInputAttributeDescription {
             location: 5,
             binding: 0,
-            format: vk::Format::R32_SFLOAT,
+            format: vk::Format::R32Sfloat,
             offset: 44,
         },
     ];
 
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-        .vertex_binding_descriptions(&binding_descs)
-        .vertex_attribute_descriptions(&attr_descs);
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
+        vertex_binding_description_count: binding_descs.len() as u32,
+        vertex_binding_descriptions: binding_descs.as_ptr(),
+        vertex_attribute_description_count: attr_descs.len() as u32,
+        vertex_attribute_descriptions: attr_descs.as_ptr(),
+        ..Default::default()
+    };
 
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
+        topology: vk::PrimitiveTopology::TriangleList,
+        ..Default::default()
+    };
 
-    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-        .viewport_count(1)
-        .scissor_count(1);
+    let viewport_state = vk::PipelineViewportStateCreateInfo {
+        viewport_count: 1,
+        scissor_count: 1,
+        ..Default::default()
+    };
 
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
-        .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
-        .line_width(1.0);
+    let rasterizer = vk::PipelineRasterizationStateCreateInfo {
+        polygon_mode: vk::PolygonMode::Fill,
+        cull_mode: vk::CullModeFlags::None,
+        line_width: 1.0,
+        ..Default::default()
+    };
 
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let multisampling = vk::PipelineMultisampleStateCreateInfo {
+        rasterization_samples: vk::SampleCountFlags::Type1,
+        ..Default::default()
+    };
 
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(false)
-        .depth_write_enable(false);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
+        depth_test_enable: vk::FALSE,
+        depth_write_enable: vk::FALSE,
+        ..Default::default()
+    };
 
     let blend_attachment = [vk::PipelineColorBlendAttachmentState {
         blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::ONE,
-        dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-        color_blend_op: vk::BlendOp::ADD,
-        src_alpha_blend_factor: vk::BlendFactor::ONE,
-        dst_alpha_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-        alpha_blend_op: vk::BlendOp::ADD,
+        src_color_blend_factor: vk::BlendFactor::One,
+        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        color_blend_op: vk::BlendOp::Add,
+        src_alpha_blend_factor: vk::BlendFactor::One,
+        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        alpha_blend_op: vk::BlendOp::Add,
         color_write_mask: vk::ColorComponentFlags::RGBA,
     }];
-    let color_blending =
-        vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachment);
 
-    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic_state =
-        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let color_blending = vk::PipelineColorBlendStateCreateInfo {
+        attachment_count: blend_attachment.len() as u32,
+        attachments: blend_attachment.as_ptr(),
+        ..Default::default()
+    };
 
-    let pipeline_info = [vk::GraphicsPipelineCreateInfo::default()
-        .stages(&stages)
-        .vertex_input_state(&vertex_input)
-        .input_assembly_state(&input_assembly)
-        .viewport_state(&viewport_state)
-        .rasterization_state(&rasterizer)
-        .multisample_state(&multisampling)
-        .depth_stencil_state(&depth_stencil)
-        .color_blend_state(&color_blending)
-        .dynamic_state(&dynamic_state)
-        .layout(layout)
-        .render_pass(render_pass)
-        .subpass(0)];
+    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
+        dynamic_state_count: dynamic_states.len() as u32,
+        dynamic_states: dynamic_states.as_ptr(),
+        ..Default::default()
+    };
 
-    let pipeline = unsafe {
-        device.create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
-    }
-    .expect("failed to create menu overlay pipeline")[0];
+    let pipeline_info = [vk::GraphicsPipelineCreateInfo {
+        stage_count: stages.len() as u32,
+        stages: stages.as_ptr(),
+        vertex_input_state: &vertex_input,
+        input_assembly_state: &input_assembly,
+        viewport_state: &viewport_state,
+        rasterization_state: &rasterizer,
+        multisample_state: &multisampling,
+        depth_stencil_state: &depth_stencil,
+        color_blend_state: &color_blending,
+        dynamic_state: &dynamic_state,
+        layout,
+        render_pass,
+        subpass: 0,
+        ..Default::default()
+    }];
 
-    unsafe {
-        device.destroy_shader_module(vert_module, None);
-        device.destroy_shader_module(frag_module, None);
-    }
+    let mut pipeline = vk::Pipeline::null();
+    device
+        .create_graphics_pipelines(
+            vk::PipelineCache::null(),
+            &pipeline_info,
+            None,
+            slice::from_mut(&mut pipeline),
+        )
+        .expect("failed to create menu overlay pipeline");
+
+    device.destroy_shader_module(vert_module, None);
+    device.destroy_shader_module(frag_module, None);
 
     pipeline
 }

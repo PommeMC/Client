@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use ash::vk;
-use gpu_allocator::vulkan::{Allocation, Allocator};
+use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
+use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path_with_packs};
 use crate::renderer::util;
@@ -45,7 +45,7 @@ pub struct TextureAtlas {
 impl TextureAtlas {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
-        device: &ash::Device,
+        device: &vk::Device,
         queue: vk::Queue,
         command_pool: vk::CommandPool,
         allocator: &Arc<Mutex<Allocator>>,
@@ -53,7 +53,7 @@ impl TextureAtlas {
         asset_index: &Option<AssetIndex>,
         texture_names: &HashSet<&str>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
-    ) -> Result<Self, vk::Result> {
+    ) -> Result<Self, vk::Error> {
         let tile_size = 16u32;
         let grid_size = (texture_names.len() as f32 + 1.0).sqrt().ceil() as u32 + 1;
         let atlas_size = (grid_size * tile_size).next_power_of_two();
@@ -150,24 +150,21 @@ impl TextureAtlas {
         })
     }
 
-    pub fn destroy(&mut self, device: &ash::Device, allocator: &Arc<Mutex<Allocator>>) {
-        unsafe {
-            device.destroy_sampler(self.sampler, None);
-            device.destroy_image_view(self.view, None);
-        }
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        device.destroy_sampler(self.sampler, None);
+        device.destroy_image_view(self.view, None);
+
         if let Some(alloc) = self.allocation.take() {
             allocator.lock().unwrap().free(alloc).ok();
         }
-        unsafe {
-            device.destroy_image(self.image, None);
-        }
+
+        device.destroy_image(self.image, None);
 
         if let Some(alloc) = self.staging_allocation.take() {
             allocator.lock().unwrap().free(alloc).ok();
         }
-        unsafe {
-            device.destroy_buffer(self.staging_buffer, None);
-        }
+
+        device.destroy_buffer(self.staging_buffer, None);
     }
 }
 
