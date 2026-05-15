@@ -118,10 +118,7 @@ async fn put_action(
     handle_response(resp, api).await
 }
 
-async fn handle_response(
-    resp: reqwest::Response,
-    api: FriendsApi,
-) -> Result<FriendsList, String> {
+async fn handle_response(resp: reqwest::Response, api: FriendsApi) -> Result<FriendsList, String> {
     let status = resp.status();
     if status.is_success() {
         return resp
