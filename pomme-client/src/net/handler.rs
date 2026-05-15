@@ -51,30 +51,15 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z });
         }
         ClientboundGamePacket::PlayerPosition(p) => {
-            let _ = event_tx.try_send(NetworkEvent::PlayerPosition {
-                x: p.change.pos.x,
-                y: p.change.pos.y,
-                z: p.change.pos.z,
-                yaw: p.change.look_direction.y_rot(),
-                pitch: p.change.look_direction.x_rot(),
-            });
             sender.send(ServerboundGamePacket::AcceptTeleportation(
                 azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation {
                     id: p.id,
                 },
             ));
-            // Vanilla echoes the position after every teleport; servers gate
-            // per-player entity tracking on it.
-            sender.send(ServerboundGamePacket::MovePlayerPosRot(
-                azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
-                    pos: p.change.pos,
-                    look_direction: p.change.look_direction,
-                    flags: azalea_protocol::common::movements::MoveFlags {
-                        on_ground: true,
-                        horizontal_collision: false,
-                    },
-                },
-            ));
+            let _ = event_tx.try_send(NetworkEvent::PlayerPosition {
+                change: p.change.clone(),
+                relative: p.relative.clone(),
+            });
         }
         ClientboundGamePacket::KeepAlive(p) => {
             sender.send(ServerboundGamePacket::KeepAlive(

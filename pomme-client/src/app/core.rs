@@ -271,30 +271,98 @@ impl AppCore {
                     game.chunk_store
                         .set_center(azalea_core::position::ChunkPos::new(x, z));
                 }
-                NetworkEvent::PlayerPosition {
-                    x,
-                    y,
-                    z,
-                    yaw,
-                    pitch,
-                    ..
-                } => {
+                NetworkEvent::PlayerPosition { change, relative } => {
+                    let apply = |rel: bool, base: f64, c: f64| if rel { base + c } else { c };
+                    let apply_delta = |rel, base: f32, c: f64| apply(rel, base as f64, c) as f32;
+                    let apply_rot = |rel, base_rad: f32, c_deg: f32| {
+                        apply(rel, base_rad.to_degrees() as f64, c_deg as f64) as f32
+                    };
+                    let chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
+                    let to_az = |v: glam::Vec3| azalea_core::position::Vec3 {
+                        x: v.x as f64,
+                        y: v.y as f64,
+                        z: v.z as f64,
+                    };
+                    let to_glam = |v: azalea_core::position::Vec3| {
+                        glam::Vec3::new(v.x as f32, v.y as f32, v.z as f32)
+                    };
+
+                    let new_pos = azalea_core::position::Vec3 {
+                        x: apply(relative.x, game.player.position.x as f64, change.pos.x),
+                        y: apply(relative.y, game.player.position.y as f64, change.pos.y),
+                        z: apply(relative.z, game.player.position.z as f64, change.pos.z),
+                    };
+                    let new_look = azalea_entity::LookDirection::new(
+                        apply_rot(
+                            relative.y_rot,
+                            game.player.yaw,
+                            change.look_direction.y_rot(),
+                        ),
+                        apply_rot(
+                            relative.x_rot,
+                            game.player.pitch,
+                            change.look_direction.x_rot(),
+                        ),
+                    );
+                    let base_vel = if relative.rotate_delta {
+                        let y_rot_delta =
+                            (game.player.yaw.to_degrees() - new_look.y_rot()).to_radians();
+                        let x_rot_delta =
+                            (game.player.pitch.to_degrees() - new_look.x_rot()).to_radians();
+                        to_glam(
+                            to_az(game.player.velocity)
+                                .x_rot(x_rot_delta)
+                                .y_rot(y_rot_delta),
+                        )
+                    } else {
+                        game.player.velocity
+                    };
+                    let new_vel = glam::Vec3::new(
+                        apply_delta(relative.delta_x, base_vel.x, change.delta.x),
+                        apply_delta(relative.delta_y, base_vel.y, change.delta.y),
+                        apply_delta(relative.delta_z, base_vel.z, change.delta.z),
+                    );
+
+                    game.player.position = to_glam(new_pos);
+                    game.player.velocity = new_vel;
+                    game.player.yaw = new_look.y_rot().to_radians();
+                    game.player.pitch = new_look.x_rot().to_radians();
+                    game.prev_player_pos = game.player.position;
+
                     game.chunk_store
                         .set_center(azalea_core::position::ChunkPos::new(
-                            (x as i32).div_euclid(16),
-                            (z as i32).div_euclid(16),
+                            chunk_coord(new_pos.x),
+                            chunk_coord(new_pos.z),
                         ));
+
+                    renderer.set_camera_position(
+                        new_pos.x,
+                        new_pos.y,
+                        new_pos.z,
+                        new_look.y_rot(),
+                        new_look.x_rot(),
+                    );
+
                     if !game.position_set {
-                        game.player.position = glam::Vec3::new(x as f32, y as f32, z as f32);
-                        game.player.yaw = yaw.to_radians();
-                        game.player.pitch = pitch.to_radians();
-                        game.prev_player_pos = game.player.position;
-
-                        renderer.set_camera_position(x, y, z, yaw, pitch);
-
                         game.position_set = true;
-                        tracing::info!("Player position set to ({x:.1}, {y:.1}, {z:.1})");
+                        tracing::info!(
+                            "Player position set to ({:.1}, {:.1}, {:.1})",
+                            new_pos.x,
+                            new_pos.y,
+                            new_pos.z
+                        );
                     }
+
+                    connection.packet_tx.send(ServerboundGamePacket::MovePlayerPosRot(
+                        azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
+                            pos: new_pos,
+                            look_direction: new_look,
+                            flags: azalea_protocol::common::movements::MoveFlags {
+                                on_ground: false,
+                                horizontal_collision: false,
+                            },
+                        },
+                    ));
                 }
                 NetworkEvent::PlayerHealth {
                     health,
