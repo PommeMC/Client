@@ -4817,6 +4817,7 @@ dependencies = [
  "raw-window-handle",
  "rayon",
  "reqwest",
+ "scopeguard",
  "serde",
  "serde_json",
  "sha1_smol",

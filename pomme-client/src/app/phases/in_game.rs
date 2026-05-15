@@ -1,33 +1,29 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
 
 use azalea_core::position::ChunkPos;
 use azalea_protocol::packets::game::{ServerboundClientInformation, ServerboundGamePacket};
 
-use crate::{
-    app::{
-        DEFAULT_RENDER_DISTANCE, TICK_RATE,
-        core::{AppCore, PlayerInputState},
-        phases::Gfx,
-    },
-    benchmark::{Benchmark, BenchmarkResult},
-    entity::{EntityStore, ItemEntityStore},
-    net::connection::ConnectionHandle,
-    player::{LocalPlayer, interaction::InteractionState, tab_list::TabList},
-    renderer::{
-        Renderer, SkyState,
-        chunk::mesher::{BiomeClimate, MeshDispatcher},
-        pipelines::{entity_renderer::EntityRenderInfo, menu_overlay::MenuElement},
-    },
-    resource_pack::ResourcePackManager,
-    ui::{
-        chat::ChatState,
-        common,
-        death::{self, DeathAction},
-        hud,
-        pause::{self, PauseAction},
-    },
-    world::chunk::ChunkStore,
-};
+use crate::app::core::{AppCore, PlayerInputState};
+use crate::app::phases::Gfx;
+use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE};
+use crate::benchmark::{Benchmark, BenchmarkResult};
+use crate::entity::{EntityStore, ItemEntityStore};
+use crate::net::connection::ConnectionHandle;
+use crate::player::LocalPlayer;
+use crate::player::interaction::InteractionState;
+use crate::player::tab_list::TabList;
+use crate::renderer::chunk::mesher::{BiomeClimate, MeshDispatcher};
+use crate::renderer::pipelines::entity_renderer::EntityRenderInfo;
+use crate::renderer::pipelines::menu_overlay::MenuElement;
+use crate::renderer::{Renderer, SkyState};
+use crate::resource_pack::ResourcePackManager;
+use crate::ui::chat::ChatState;
+use crate::ui::death::{self, DeathAction};
+use crate::ui::pause::{self, PauseAction};
+use crate::ui::{common, hud};
+use crate::world::chunk::ChunkStore;
 
 pub struct GameState {
     pub chunk_store: ChunkStore,
@@ -230,11 +226,9 @@ pub fn update_game(
     let mut pause_action = PauseAction::None;
     let mut death_action = DeathAction::None;
 
-    gfx.renderer.sync_camera_to_player(
-        eye_pos_f64,
-        gfx.renderer.camera_yaw(),
-        gfx.renderer.camera_pitch(),
-    );
+    let yaw = gfx.renderer.camera_yaw();
+    let pitch = gfx.renderer.camera_pitch();
+    gfx.renderer.sync_camera_to_player(eye_pos_f64, yaw, pitch);
     gfx.renderer
         .update_third_person_distance(eye_pos, &game.chunk_store);
 

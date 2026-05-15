@@ -1,11 +1,7 @@
-use crate::{
-    app::{
-        core::AppCore,
-        phases::{Gfx, Panorama},
-    },
-    net::connection::ConnectArgs,
-    ui::menu::{MenuAction, PanoramaTheme},
-};
+use crate::app::core::AppCore;
+use crate::app::phases::{Gfx, Panorama};
+use crate::net::connection::ConnectArgs;
+use crate::ui::menu::{MenuAction, PanoramaTheme};
 
 pub enum MenuUpdateResult {
     None,

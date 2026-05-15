@@ -3,8 +3,10 @@ pub mod input;
 pub mod phases;
 pub mod state_slot;
 
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::time::Instant;
+
 use thiserror::Error;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
@@ -146,7 +148,7 @@ impl ApplicationHandler for App {
                     let game = GameState::new(&renderer, &self.core.resource_packs);
 
                     let gfx = Gfx {
-                        renderer,
+                        renderer: ManuallyDrop::new(renderer),
                         window,
                         last_frame: Instant::now(),
                         fps_counter: FpsCounter::new(),
@@ -161,7 +163,7 @@ impl ApplicationHandler for App {
                     }
                 } else {
                     let gfx = Gfx {
-                        renderer,
+                        renderer: ManuallyDrop::new(renderer),
                         window,
                         last_frame: Instant::now(),
                         fps_counter: FpsCounter::new(),

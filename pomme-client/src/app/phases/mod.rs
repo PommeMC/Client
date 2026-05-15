@@ -1,23 +1,37 @@
-use std::{sync::Arc, time::Instant};
+use std::mem::ManuallyDrop;
+use std::sync::Arc;
+use std::time::Instant;
 
 use winit::window::Window;
 
-use crate::{
-    app::{phases::in_game::GameState, state_slot::StateSlot},
-    net::connection::ConnectionHandle,
-    renderer::Renderer,
-};
+use crate::app::phases::in_game::GameState;
+use crate::app::state_slot::StateSlot;
+use crate::net::connection::ConnectionHandle;
+use crate::renderer::Renderer;
 
 pub mod connecting;
 pub mod in_game;
 pub mod in_menu;
 
 pub struct Gfx {
-    // Keep Renderer above Window, it must be dropped first
-    pub renderer: Renderer,
+    // Renderer must be dropped before window, as it holds Vulkan resources that require the window
+    // surface to still be alive during cleanup. We do that manually in the `Drop` impl of this
+    // struct.
+    pub renderer: ManuallyDrop<Renderer>,
+    // Window does not require `ManuallyDrop` because it is dropped normally after the renderer by
+    // the compiler.
     pub window: Arc<Window>,
     pub last_frame: Instant,
     pub fps_counter: FpsCounter,
+}
+
+impl Drop for Gfx {
+    fn drop(&mut self) {
+        // SAFETY: called inside `drop`, so no code can access `renderer` after this.
+        unsafe {
+            ManuallyDrop::drop(&mut self.renderer);
+        }
+    }
 }
 
 pub struct Panorama {
@@ -29,6 +43,7 @@ impl Panorama {
         Self { scroll: 0.0 }
     }
 
+    #[inline]
     pub const fn update(&mut self, dt: f32) {
         self.scroll += dt * 0.00556;
         if self.scroll > 1.0 {

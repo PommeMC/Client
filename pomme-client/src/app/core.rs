@@ -1,38 +1,37 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
+use std::time::Instant;
 
 use azalea_protocol::packets::game::{
     ServerboundClientCommand, ServerboundGamePacket, s_client_command,
 };
-use winit::{
-    keyboard::KeyCode,
-    window::{CursorGrabMode, Window},
-};
+use winit::keyboard::KeyCode;
+use winit::window::{CursorGrabMode, Window};
 
-use crate::{
-    app::{
-        POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ,
-        input::InputState,
-        phases::{ConnectionPhase, in_game::GameState},
-    },
-    assets::AssetIndex,
-    dirs::DataDirs,
-    discord::DiscordPresence,
-    net::{NetworkEvent, connection::ConnectionHandle},
-    physics::movement,
-    player::LocalPlayer,
-    renderer::Renderer,
-    resource_pack::ResourcePackManager,
-    ui::menu::{MainMenu, MenuInput},
-    user::UserData,
-    world::chunk::ChunkStore,
-};
+use crate::app::input::InputState;
+use crate::app::phases::ConnectionPhase;
+use crate::app::phases::in_game::GameState;
+use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
+use crate::assets::AssetIndex;
+use crate::dirs::DataDirs;
+use crate::discord::DiscordPresence;
+use crate::net::NetworkEvent;
+use crate::net::connection::ConnectionHandle;
+use crate::physics::movement;
+use crate::player::LocalPlayer;
+use crate::renderer::Renderer;
+use crate::resource_pack::ResourcePackManager;
+use crate::ui::menu::{MainMenu, MenuInput};
+use crate::user::UserData;
+use crate::world::chunk::ChunkStore;
 
-pub struct PackDownloadResult {
-    id: uuid::Uuid,
-    hash: String,
-    required: bool,
-    result: Result<std::path::PathBuf, crate::resource_pack::PackError>,
+pub struct PendingPackDownload {
+    pub id: uuid::Uuid,
+    pub required: bool,
+    pub hash: String,
+    pub handle: std::thread::JoinHandle<PackDownloadResult>,
 }
+
+pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::PackError>;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum DisplayMode {
@@ -72,7 +71,7 @@ pub struct AppCore {
     pub data_dirs: DataDirs,
     pub version: String,
     pub resource_packs: ResourcePackManager,
-    pub pending_pack_download: Option<std::thread::JoinHandle<PackDownloadResult>>,
+    pub pending_pack_download: Option<PendingPackDownload>,
     pub asset_index: Option<AssetIndex>,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
@@ -506,16 +505,14 @@ impl AppCore {
                 } => {
                     tracing::info!("Resource pack push: {id} url={url} required={required}");
                     let cache_dir = self.resource_packs.server_cache_dir().to_path_buf();
-                    self.pending_pack_download = Some(std::thread::spawn(move || {
-                        let result =
-                            ResourcePackManager::download_server_pack(&cache_dir, &url, &hash);
-                        PackDownloadResult {
-                            id,
-                            hash,
-                            required,
-                            result,
-                        }
-                    }));
+                    self.pending_pack_download = Some(PendingPackDownload {
+                        id,
+                        required,
+                        hash: hash.clone(),
+                        handle: std::thread::spawn(move || {
+                            ResourcePackManager::download_server_pack(&cache_dir, &url, &hash)
+                        }),
+                    });
                 }
                 NetworkEvent::ResourcePackPop { id } => {
                     if let Some(id) = id {
@@ -543,31 +540,47 @@ impl AppCore {
             }
         }
 
-        if let Some(handle) = &self.pending_pack_download
-            && handle.is_finished()
+        if let Some(pending) = &self.pending_pack_download
+            && pending.handle.is_finished()
         {
-            let handle = self.pending_pack_download.take().unwrap();
-            let dl = handle.join().expect("pack download thread panicked");
+            let pending = self.pending_pack_download.take().unwrap();
+            let result = pending.handle.join();
+
             use azalea_protocol::packets::game::s_resource_pack;
-            let action = match &dl.result {
-                Ok(_) => {
-                    self.resource_packs.apply_server_pack(dl.id, &dl.hash);
-                    tracing::info!("Resource pack {} loaded successfully", dl.id);
-                    self.menu.reload_assets = true;
-                    s_resource_pack::Action::SuccessfullyLoaded
+            let action = match result {
+                Err(_) => {
+                    tracing::error!("Resource pack {} thread panicked", pending.id);
+                    if pending.required {
+                        disconnect_reason = Some(
+                            "Required resource pack failed: thread panicked (internal error)"
+                                .into(),
+                        );
+                    }
+                    s_resource_pack::Action::FailedDownload
                 }
-                Err(e) => {
-                    tracing::error!("Resource pack {} failed: {e}", dl.id);
-                    if dl.required {
+                Ok(Err(e)) => {
+                    tracing::error!("Resource pack {} failed: {e}", pending.id);
+                    if pending.required {
                         disconnect_reason = Some(format!("Required resource pack failed: {e}"));
                     }
                     s_resource_pack::Action::FailedDownload
                 }
+                Ok(Ok(_path)) => {
+                    self.resource_packs
+                        .apply_server_pack(pending.id, &pending.hash);
+                    tracing::info!("Resource pack {} loaded successfully", pending.id);
+                    self.menu.reload_assets = true;
+                    s_resource_pack::Action::SuccessfullyLoaded
+                }
             };
+
             connection
                 .packet_tx
                 .send(ServerboundGamePacket::ResourcePack(
-                    s_resource_pack::ServerboundResourcePack { id: dl.id, action },
+                    s_resource_pack::ServerboundResourcePack {
+                        id: pending.id,
+                        action,
+                    },
                 ));
             self.menu.active_packs = self.resource_packs.active_pack_info();
         }

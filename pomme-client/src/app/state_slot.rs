@@ -1,3 +1,5 @@
+use scopeguard::defer_on_unwind;
+
 pub struct StateSlot<T>(Option<T>);
 
 impl<T> StateSlot<T> {
@@ -5,17 +7,22 @@ impl<T> StateSlot<T> {
         Self(Some(state))
     }
 
+    /// Transitions the state by applying `f` to the current state, and aborts
+    /// if `f` panics to avoid UB.
     pub fn transition(&mut self, f: impl FnOnce(T) -> T) {
         // SAFETY: `self.0` is `Some` on entry by the type invariant. The transient
-        // `None` during `f` is unobservable since we hold exclusive access via `&mut
-        // self`.
+        // `None` during `f` is unobservable since we hold exclusive access via
+        // `&mut self`.
         let state = unsafe { self.0.take().unwrap_unchecked() };
+
+        defer_on_unwind!(std::process::abort());
+
         self.0 = Some(f(state));
     }
 
     pub const fn get(&self) -> &T {
-        // SAFETY: all write paths (`new`, `set`, `transition`) restore `Some` before
-        // returning, and there is no safe constructor for the `None` variant.
+        // SAFETY: all write paths (`new`, `transition`) restore `Some` or abort
+        // before returning, and there is no safe constructor for the `None` variant.
         unsafe { self.0.as_ref().unwrap_unchecked() }
     }
 

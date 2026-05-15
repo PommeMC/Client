@@ -1,12 +1,11 @@
 use azalea_protocol::packets::game::ServerboundGamePacket;
 
+use crate::app::core::AppCore;
+use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama};
-use crate::{
-    app::{core::AppCore, phases::in_game::GameState},
-    net::connection::ConnectionHandle,
-    renderer::pipelines::menu_overlay::MenuElement,
-    ui::{common, hud},
-};
+use crate::net::connection::ConnectionHandle;
+use crate::renderer::pipelines::menu_overlay::MenuElement;
+use crate::ui::{common, hud};
 
 pub enum ConnectingUpdateResult {
     None,
