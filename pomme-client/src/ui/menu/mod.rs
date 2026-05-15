@@ -92,11 +92,12 @@ fn save_settings(game_dir: &Path, settings: &Settings) {
 
 use helpers::*;
 
-use super::auth::{self, AuthAccount, AuthStatus};
-use super::common::{self, WHITE};
+use super::auth::{AuthAccount, AuthStatus};
+use super::common::WHITE;
 use super::server_list::{
     PingResults, PingState, ServerEntry, ServerList, is_valid_address, ping_all_servers,
 };
+use super::{auth, common};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PanoramaTheme {

@@ -1,6 +1,8 @@
 edition = "2024"
 max_width = 100
 tab_spaces = 4
+
+# Nightly only
 imports_granularity = "Module"
 group_imports = "StdExternalCrate"
 wrap_comments = true

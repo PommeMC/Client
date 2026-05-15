@@ -4,11 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use pomme_gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 #[cfg(debug_assertions)]
-use pyronyx::ext::{self, debug_utils::DebugUtilsInstance};
+use pyronyx::ext::debug_utils::DebugUtilsInstance;
 use pyronyx::khr::surface::{SurfaceInstance, SurfacePhysicalDevice};
-use pyronyx::khr::{self};
 use pyronyx::raw_window_handle::{create_surface, get_required_extensions};
-use pyronyx::vk;
+use pyronyx::{khr, vk};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use thiserror::Error;
 use winit::window::Window;
@@ -88,6 +87,8 @@ impl VulkanContext {
 
         #[cfg(debug_assertions)]
         if validation_available {
+            use pyronyx::ext;
+
             extensions.push(ext::debug_utils::NAME.as_ptr());
         }
 
