@@ -96,22 +96,40 @@ Running the standalone client requires minecraft assets, for which you have 2 op
    pnpm client:dev -- --username Steve --quick-access-server localhost
    ```
 
+   or with cargo:
+
+   ```bash
+   cargo run -p pomme-client -- --username Steve --quick-access-server localhost
+   ```
+
 2. If you're on linux, extract the vanilla 26.1.1 assets from `.minecraft/` to `reference/`:
 
    ```bash
-   mkdir -p reference/assets/indexes 
+   mkdir -p reference/assets/indexes
    mkdir -p reference/assets/objects
    mkdir -p reference/versions/26.1.1/extracted
    mkdir -p reference/game-dir
-   
+
    # 30 is the asset index id for 26.1.1
    cp ~/.minecraft/assets/indexes/30.json reference/assets/indexes/26.1.1.json
    cp -r ~/.minecraft/assets/objects/. reference/assets/objects/
    cp ~/.minecraft/versions/26.1.1/26.1.1.jar reference/versions/26.1.1/
    unzip reference/versions/26.1.1/26.1.1.jar 'assets/*' -d reference/versions/26.1.1/extracted/
-   
-   pnpm client:dev -- --username Steve --quick-access-server localhost \
-     --version 26.1.1 \
+   ```
+
+   Then you can run the client with:
+
+   ```bash
+   pnpm client:dev -- --version 26.1.1 \
+     --assets-dir $PWD/reference/assets \
+     --versions-dir $PWD/reference/versions \
+     --game-dir $PWD/reference/game-dir
+   ```
+
+   or with cargo:
+
+   ```bash
+   cargo run -p pomme-client -- --version 26.1.1 \
      --assets-dir $PWD/reference/assets \
      --versions-dir $PWD/reference/versions \
      --game-dir $PWD/reference/game-dir
@@ -128,6 +146,14 @@ This project is licensed under the GNU General Public License v3.0 or later (GPL
 
 It is not affiliated with or endorsed by Mojang Studios or Microsoft.
 Minecraft is a trademark of Mojang Studios.
+
+The [allocator crate](./pomme-gpu-allocator) is licensed under the MIT License and is a port of the
+[gpu-allocator crate](https://github.com/Traverse-Research/gpu-allocator) by Traverse Research.
+
+## Third-Party Licenses
+
+Portions of this project include third-party code under separate licenses.
+See [THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md) for details.
 
 ## Community
 

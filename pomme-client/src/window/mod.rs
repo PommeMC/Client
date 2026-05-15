@@ -1610,12 +1610,12 @@ impl ApplicationHandler for App {
                                         screen_w: renderer.screen_width(),
                                         screen_h: renderer.screen_height(),
                                         timings: Some(hud::FrameTimings {
-                                            frame_ms: renderer.last_timings.frame_ms,
-                                            fence_ms: renderer.last_timings.fence_ms,
-                                            acquire_ms: renderer.last_timings.acquire_ms,
-                                            cull_ms: renderer.last_timings.cull_ms,
-                                            draw_ms: renderer.last_timings.draw_ms,
-                                            present_ms: renderer.last_timings.present_ms,
+                                            frame_ms: renderer.last_timings().frame_ms,
+                                            fence_ms: renderer.last_timings().fence_ms,
+                                            acquire_ms: renderer.last_timings().acquire_ms,
+                                            cull_ms: renderer.last_timings().cull_ms,
+                                            draw_ms: renderer.last_timings().draw_ms,
+                                            present_ms: renderer.last_timings().present_ms,
                                         }),
                                     })
                                 } else {
@@ -1660,7 +1660,7 @@ impl ApplicationHandler for App {
                                     let entity_count = self.entity_store.living.len() as u32;
                                     let done = bench.record_frame(
                                         dt * 1000.0,
-                                        &renderer.last_timings,
+                                        renderer.last_timings(),
                                         renderer.loaded_chunk_count(),
                                         entity_count,
                                     );

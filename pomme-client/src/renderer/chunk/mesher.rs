@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use azalea_block::BlockState;
 use azalea_core::position::ChunkPos;
+use pyronyx::vk;
 
 use super::greedy;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
@@ -19,34 +20,34 @@ pub struct ChunkVertex {
 }
 
 impl ChunkVertex {
-    pub const STRIDE: u32 = std::mem::size_of::<Self>() as u32;
+    pub const STRIDE: u32 = size_of::<Self>() as u32;
 
-    pub fn binding_description() -> ash::vk::VertexInputBindingDescription {
-        ash::vk::VertexInputBindingDescription {
+    pub fn binding_description() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription {
             binding: 0,
             stride: Self::STRIDE,
-            input_rate: ash::vk::VertexInputRate::VERTEX,
+            input_rate: vk::VertexInputRate::Vertex,
         }
     }
 
-    pub fn attribute_descriptions() -> [ash::vk::VertexInputAttributeDescription; 3] {
+    pub fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 3] {
         [
-            ash::vk::VertexInputAttributeDescription {
+            vk::VertexInputAttributeDescription {
                 location: 0,
                 binding: 0,
-                format: ash::vk::Format::R32G32B32_SFLOAT,
+                format: vk::Format::R32G32B32Sfloat,
                 offset: 0,
             },
-            ash::vk::VertexInputAttributeDescription {
+            vk::VertexInputAttributeDescription {
                 location: 1,
                 binding: 0,
-                format: ash::vk::Format::R16G16_UNORM,
+                format: vk::Format::R16G16Unorm,
                 offset: 12,
             },
-            ash::vk::VertexInputAttributeDescription {
+            vk::VertexInputAttributeDescription {
                 location: 2,
                 binding: 0,
-                format: ash::vk::Format::R8G8B8A8_UNORM,
+                format: vk::Format::R8G8B8A8Unorm,
                 offset: 16,
             },
         ]

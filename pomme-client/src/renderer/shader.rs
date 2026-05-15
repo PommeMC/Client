@@ -1,16 +1,20 @@
-use ash::vk;
+use pyronyx::vk;
 
-pub fn create_shader_module(device: &ash::Device, spirv: &[u8]) -> vk::ShaderModule {
-    let code = ash::util::read_spv(&mut std::io::Cursor::new(spirv))
-        .expect("failed to read SPIR-V bytecode");
+use crate::renderer::util;
 
-    let create_info = vk::ShaderModuleCreateInfo::default().code(&code);
+pub fn create_shader_module(device: &vk::Device, spirv: &[u8]) -> vk::ShaderModule {
+    let code =
+        util::read_spv(&mut std::io::Cursor::new(spirv)).expect("failed to read SPIR-V bytecode");
 
-    unsafe {
-        device
-            .create_shader_module(&create_info, None)
-            .expect("failed to create shader module")
-    }
+    let create_info = vk::ShaderModuleCreateInfo {
+        code_size: code.len() * 4,
+        code: code.as_ptr(),
+        ..Default::default()
+    };
+
+    device
+        .create_shader_module(&create_info, None)
+        .expect("failed to create shader module")
 }
 
 macro_rules! include_spirv {

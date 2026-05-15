@@ -18,19 +18,18 @@ base64 = { workspace = true }
 zip = { workspace = true }
 tokio = { workspace = true, features = ["tracing"] }
 reqwest = { workspace = true, features = ["blocking"] }
+pyronyx = { workspace = true, features = ["rwh_06"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
-ash = "0.38"
-ash-window = "0.13"
-gpu-allocator = { version = "0.28", features = ["vulkan"] }
+tracing-appender = "0.2"
+pomme-gpu-allocator = { path = "../pomme-gpu-allocator" }
+winit = { version = "0.30", features = ["rwh_06"] }
 raw-window-handle = "0.6"
-winit = "0.30"
 glam = "0.32"
 clap = { version = "4", features = ["derive"] }
 parking_lot = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 time = { version = "0.3", features = ["formatting", "macros"] }
 flate2 = "1"
 azalea-protocol = { version = "0.16", features = ["connecting"] }

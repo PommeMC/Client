@@ -30,6 +30,14 @@ jobs:
           shared-key: client
           cache-on-failure: true
 
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@06218f81a3cbd7dce502fdc666c8db2af725b442
+        with:
+          vulkan_version: 1.4.341.0
+          install_runtime: false
+          cache: true
+          stripdown: true
+
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |

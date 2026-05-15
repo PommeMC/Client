@@ -1,0 +1,32 @@
+[package]
+name = "pomme-gpu-allocator"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Port of gpu-allocator to pyronyx"
+
+[dependencies]
+tracing = { workspace = true }
+thiserror = { workspace = true }
+presser = { version = "0.3", default-features = false }
+pyronyx = { workspace = true }
+egui = { version = ">=0.24, <=0.27", optional = true, default-features = false }
+egui_extras = { version = ">=0.24, <=0.27", optional = true, default-features = false }
+
+
+[dev-dependencies]
+pyronyx = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[[example]]
+name = "vulkan-buffer"
+
+[features]
+visualizer = ["dep:egui", "dep:egui_extras"]
+default = []
+
+[lints.clippy]
+all = "deny"
+enum_glob_use = "deny"
+nursery = "deny"
+unwrap_used = "deny"
