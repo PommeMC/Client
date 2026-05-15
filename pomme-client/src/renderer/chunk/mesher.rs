@@ -9,7 +9,8 @@ use super::greedy;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::world::block::model::{BakedModel, Direction};
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
-use crate::world::chunk::{self, ChunkStore};
+use crate::world::chunk;
+use crate::world::chunk::ChunkStore;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]

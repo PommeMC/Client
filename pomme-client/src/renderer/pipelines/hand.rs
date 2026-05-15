@@ -7,9 +7,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::MAX_FRAMES_IN_FLIGHT;
-use crate::renderer::shader;
-use crate::renderer::util;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 const NEAR: f32 = 0.05;
 const FAR: f32 = 10.0;
 

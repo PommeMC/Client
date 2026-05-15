@@ -7,10 +7,8 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::MAX_FRAMES_IN_FLIGHT;
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::shader;
-use crate::renderer::util;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const STAGE_COUNT: u32 = 10;
 const EPSILON: f32 = 0.001;

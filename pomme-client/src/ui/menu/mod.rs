@@ -88,12 +88,13 @@ fn save_settings(game_dir: &Path, settings: &Settings) {
     }
 }
 
-use super::common::{self, WHITE};
+use helpers::*;
+
+use super::common;
+use super::common::WHITE;
 use super::server_list::{
     PingResults, PingState, ServerEntry, ServerList, is_valid_address, ping_all_servers,
 };
-
-use helpers::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PanoramaTheme {

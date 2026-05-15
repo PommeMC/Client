@@ -1,5 +1,8 @@
-use core::{fmt, marker::PhantomData};
-use std::{backtrace::Backtrace, boxed::Box, sync::Arc};
+use core::fmt;
+use core::marker::PhantomData;
+use std::backtrace::Backtrace;
+use std::boxed::Box;
+use std::sync::Arc;
 
 use pyronyx::vk;
 use tracing::{Level, debug};
@@ -9,23 +12,22 @@ mod visualizer;
 #[cfg(feature = "visualizer")]
 pub use visualizer::AllocatorVisualizer;
 
-use crate::{
-    AllocationError, AllocationSizes, AllocatorDebugSettings, MemoryLocation, Result,
-    allocator::{
-        AllocationType, AllocatorReport, DedicatedBlockAllocator, FreeListAllocator,
-        MemoryBlockReport, SubAllocator,
-    },
+use crate::allocator::{
+    AllocationType, AllocatorReport, DedicatedBlockAllocator, FreeListAllocator, MemoryBlockReport,
+    SubAllocator,
 };
+use crate::{AllocationError, AllocationSizes, AllocatorDebugSettings, MemoryLocation, Result};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AllocationScheme {
-    /// Perform a dedicated, driver-managed allocation for the given buffer, allowing
-    /// it to perform optimizations on this type of allocation.
+    /// Perform a dedicated, driver-managed allocation for the given buffer,
+    /// allowing it to perform optimizations on this type of allocation.
     DedicatedBuffer(vk::Buffer),
-    /// Perform a dedicated, driver-managed allocation for the given image, allowing
-    /// it to perform optimizations on this type of allocation.
+    /// Perform a dedicated, driver-managed allocation for the given image,
+    /// allowing it to perform optimizations on this type of allocation.
     DedicatedImage(vk::Image),
-    /// The memory for this resource will be allocated and managed by gpu-allocator.
+    /// The memory for this resource will be allocated and managed by
+    /// gpu-allocator.
     GpuAllocatorManaged,
 }
 
@@ -37,23 +39,25 @@ pub struct AllocationCreateDesc<'a> {
     pub requirements: vk::MemoryRequirements,
     /// Location where the memory allocation should be stored
     pub location: MemoryLocation,
-    /// If the resource is linear (buffer / linear texture) or a regular (tiled) texture.
+    /// If the resource is linear (buffer / linear texture) or a regular (tiled)
+    /// texture.
     pub linear: bool,
     /// Determines how this allocation should be managed.
     pub allocation_scheme: AllocationScheme,
 }
 
-/// Wrapper type to only mark a raw pointer [`Send`] + [`Sync`] without having to
-/// mark the entire [`Allocation`] as such, instead relying on the compiler to
-/// auto-implement this or fail if fields are added that violate this constraint
+/// Wrapper type to only mark a raw pointer [`Send`] + [`Sync`] without having
+/// to mark the entire [`Allocation`] as such, instead relying on the compiler
+/// to auto-implement this or fail if fields are added that violate this
+/// constraint
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SendSyncPtr(core::ptr::NonNull<core::ffi::c_void>);
-// SAFETY: The pointer is just an address into mapped device memory and does not carry
-// thread affinity. Marking the wrapper as `Send` is sound.
+// SAFETY: The pointer is just an address into mapped device memory and does not
+// carry thread affinity. Marking the wrapper as `Send` is sound.
 unsafe impl Send for SendSyncPtr {}
-// SAFETY: Sharing this pointer wrapper is sound because mutable access to the pointee is
-// never exposed from shared references to `Allocation`; any raw pointer dereference remains
-// the caller's unsafe responsibility.
+// SAFETY: Sharing this pointer wrapper is sound because mutable access to the
+// pointee is never exposed from shared references to `Allocation`; any raw
+// pointer dereference remains the caller's unsafe responsibility.
 unsafe impl Sync for SendSyncPtr {}
 
 pub struct AllocatorCreateDesc {
@@ -67,29 +71,36 @@ pub struct AllocatorCreateDesc {
 
 /// A piece of allocated memory.
 ///
-/// Could be contained in its own individual underlying memory object or as a sub-region
-/// of a larger allocation.
+/// Could be contained in its own individual underlying memory object or as a
+/// sub-region of a larger allocation.
 ///
 /// # Copying data into a CPU-mapped [`Allocation`]
 ///
-/// You'll very likely want to copy data into CPU-mapped [`Allocation`]s in order to send that data to the GPU.
-/// Doing this data transfer correctly without invoking undefined behavior can be quite fraught and non-obvious<sup>[\[1\]]</sup>.
+/// You'll very likely want to copy data into CPU-mapped [`Allocation`]s in
+/// order to send that data to the GPU. Doing this data transfer correctly
+/// without invoking undefined behavior can be quite fraught and
+/// non-obvious<sup>[\[1\]]</sup>.
 ///
-/// To help you do this correctly, [`Allocation`] implements [`presser::Slab`], which means you can directly
-/// pass it in to many of `presser`'s [helper functions] (for example, [`copy_from_slice_to_offset`]).
+/// To help you do this correctly, [`Allocation`] implements [`presser::Slab`],
+/// which means you can directly pass it in to many of `presser`'s [helper
+/// functions] (for example, [`copy_from_slice_to_offset`]).
 ///
-/// In most cases, this will work perfectly. However, note that if you try to use an [`Allocation`] as a
-/// [`Slab`] and it is not valid to do so (if it is not CPU-mapped or if its `size > isize::MAX`),
-/// you will cause a panic. If you aren't sure about these conditions, you may use [`Allocation::try_as_mapped_slab`].
+/// In most cases, this will work perfectly. However, note that if you try to
+/// use an [`Allocation`] as a [`Slab`] and it is not valid to do so (if it is
+/// not CPU-mapped or if its `size > isize::MAX`), you will cause a panic. If
+/// you aren't sure about these conditions, you may use
+/// [`Allocation::try_as_mapped_slab`].
 ///
 /// ## Example
 ///
-/// Say we've created an [`Allocation`] called `my_allocation`, which is CPU-mapped.
+/// Say we've created an [`Allocation`] called `my_allocation`, which is
+/// CPU-mapped.
 /// ```ignore
 /// let mut my_allocation: Allocation = my_allocator.allocate(...)?;
 /// ```
 ///
-/// And we want to fill it with some data in the form of a `my_gpu_data: Vec<MyGpuVector>`, defined as such:
+/// And we want to fill it with some data in the form of a `my_gpu_data:
+/// Vec<MyGpuVector>`, defined as such:
 ///
 /// ```ignore
 /// // note that this is size(12) but align(16), thus we have 4 padding bytes.
@@ -106,15 +117,16 @@ pub struct AllocatorCreateDesc {
 /// let my_gpu_data: Vec<MyGpuData> = make_vertex_data();
 /// ```
 ///
-/// Depending on how the data we're copying will be used, the Vulkan device may have a minimum
-/// alignment requirement for that data:
+/// Depending on how the data we're copying will be used, the Vulkan device may
+/// have a minimum alignment requirement for that data:
 ///
 /// ```ignore
 /// let min_gpu_align = my_vulkan_device_specifications.min_alignment_thing;
 /// ```
 ///
-/// Finally, we can use [`presser::copy_from_slice_to_offset_with_align`] to perform the copy,
-/// simply passing `&mut my_allocation` since [`Allocation`] implements [`Slab`].
+/// Finally, we can use [`presser::copy_from_slice_to_offset_with_align`] to
+/// perform the copy, simply passing `&mut my_allocation` since [`Allocation`]
+/// implements [`Slab`].
 ///
 /// ```ignore
 /// let copy_record = presser::copy_from_slice_to_offset_with_align(
@@ -125,10 +137,11 @@ pub struct AllocatorCreateDesc {
 /// )?;
 /// ```
 ///
-/// It's important to note that the data may not have actually been copied starting at the requested
-/// `start_offset` (0 in the example above) depending on the alignment of the underlying allocation
-/// as well as the alignment requirements of `MyGpuVector` and the `min_gpu_align` we passed in. Thus,
-/// we can query the `copy_record` for the actual starting offset:
+/// It's important to note that the data may not have actually been copied
+/// starting at the requested `start_offset` (0 in the example above) depending
+/// on the alignment of the underlying allocation as well as the alignment
+/// requirements of `MyGpuVector` and the `min_gpu_align` we passed in. Thus, we
+/// can query the `copy_record` for the actual starting offset:
 ///
 /// ```ignore
 /// let actual_data_start_offset = copy_record.copy_start_offset;
@@ -136,14 +149,17 @@ pub struct AllocatorCreateDesc {
 ///
 /// ## Safety
 ///
-/// It is technically not fully safe to use an [`Allocation`] as a [`presser::Slab`] because we can't validate that the
-/// GPU is not using the data in the buffer while `self` is borrowed. However, trying
-/// to validate this statically is really hard and the community has basically decided that
-/// requiring `unsafe` for functions like this creates too much "unsafe-noise", ultimately making it
-/// harder to debug more insidious unsafety that is unrelated to GPU-CPU sync issues.
+/// It is technically not fully safe to use an [`Allocation`] as a
+/// [`presser::Slab`] because we can't validate that the GPU is not using the
+/// data in the buffer while `self` is borrowed. However, trying to validate
+/// this statically is really hard and the community has basically decided that
+/// requiring `unsafe` for functions like this creates too much "unsafe-noise",
+/// ultimately making it harder to debug more insidious unsafety that is
+/// unrelated to GPU-CPU sync issues.
 ///
 /// So, as would always be the case, you must ensure the GPU
-/// is not using the data in `self` for the duration that you hold the returned [`MappedAllocationSlab`].
+/// is not using the data in `self` for the duration that you hold the returned
+/// [`MappedAllocationSlab`].
 ///
 /// [`Slab`]: presser::Slab
 /// [`copy_from_slice_to_offset`]: presser::copy_from_slice_to_offset
@@ -164,20 +180,25 @@ pub struct Allocation {
 }
 
 impl Allocation {
-    /// Tries to borrow the CPU-mapped memory that backs this allocation as a [`presser::Slab`], which you can then
-    /// use to safely copy data into the raw, potentially-uninitialized buffer.
-    /// See [the documentation of Allocation][Allocation#example] for an example of this.
+    /// Tries to borrow the CPU-mapped memory that backs this allocation as a
+    /// [`presser::Slab`], which you can then use to safely copy data into
+    /// the raw, potentially-uninitialized buffer. See [the documentation of
+    /// Allocation][Allocation#example] for an example of this.
     ///
-    /// Returns [`None`] if `self.mapped_ptr()` is `None`, or if `self.size()` is greater than `isize::MAX` because
-    /// this could lead to undefined behavior.
+    /// Returns [`None`] if `self.mapped_ptr()` is `None`, or if `self.size()`
+    /// is greater than `isize::MAX` because this could lead to undefined
+    /// behavior.
     ///
-    /// Note that [`Allocation`] implements [`Slab`] natively, so you can actually pass this allocation as a [`Slab`]
-    /// directly. However, if `self` is not actually a valid [`Slab`] (this function would return `None` as described above),
-    /// then trying to use it as a [`Slab`] will panic.
+    /// Note that [`Allocation`] implements [`Slab`] natively, so you can
+    /// actually pass this allocation as a [`Slab`] directly. However, if
+    /// `self` is not actually a valid [`Slab`] (this function would return
+    /// `None` as described above), then trying to use it as a [`Slab`] will
+    /// panic.
     ///
     /// # Safety
     ///
-    /// See the note about safety in [the documentation of Allocation][Allocation#safety]
+    /// See the note about safety in [the documentation of
+    /// Allocation][Allocation#safety]
     ///
     /// [`Slab`]: presser::Slab
     // best to be explicit where the lifetime is coming from since we're doing unsafe things
@@ -211,27 +232,31 @@ impl Allocation {
 
     /// Returns the [`vk::DeviceMemory`] object that is backing this allocation.
     ///
-    /// This memory object can be shared with multiple other allocations and shouldn't be freed or allocated from
-    /// without this library, because that will lead to undefined behavior.
+    /// This memory object can be shared with multiple other allocations and
+    /// shouldn't be freed or allocated from without this library, because
+    /// that will lead to undefined behavior.
     ///
     /// # Safety
-    /// The result of this function can safely be passed into [`vk::Device::bind_buffer_memory()`],
-    /// [`vk::Device::bind_image_memory()`] etc. It is exposed for this reason. Keep in mind to
-    /// also pass [`Self::offset()`] along to those.
+    /// The result of this function can safely be passed into
+    /// [`vk::Device::bind_buffer_memory()`],
+    /// [`vk::Device::bind_image_memory()`] etc. It is exposed for this reason.
+    /// Keep in mind to also pass [`Self::offset()`] along to those.
     ///
-    /// Also, this [`Allocation`] must not be [`Allocator::free()`]d while such a created resource
-    /// on this [`vk::DeviceMemory`] is still live.
+    /// Also, this [`Allocation`] must not be [`Allocator::free()`]d while such
+    /// a created resource on this [`vk::DeviceMemory`] is still live.
     pub const unsafe fn memory(&self) -> vk::DeviceMemory {
         self.device_memory
     }
 
-    /// Returns [`true`] if this allocation is using a dedicated underlying allocation.
+    /// Returns [`true`] if this allocation is using a dedicated underlying
+    /// allocation.
     pub const fn is_dedicated(&self) -> bool {
         self.dedicated_allocation
     }
 
     /// Returns the offset of the allocation on the [`vk::DeviceMemory`].
-    /// When binding the memory to a buffer or image, this offset needs to be supplied as well.
+    /// When binding the memory to a buffer or image, this offset needs to be
+    /// supplied as well.
     pub const fn offset(&self) -> u64 {
         self.offset
     }
@@ -241,28 +266,33 @@ impl Allocation {
         self.size
     }
 
-    /// Returns a valid mapped pointer if the memory is host visible, otherwise it will return None.
-    /// The pointer already points to the exact memory region of the suballocation, so no offset needs to be applied.
+    /// Returns a valid mapped pointer if the memory is host visible, otherwise
+    /// it will return None. The pointer already points to the exact memory
+    /// region of the suballocation, so no offset needs to be applied.
     pub fn mapped_ptr(&self) -> Option<core::ptr::NonNull<core::ffi::c_void>> {
         self.mapped_ptr.map(|SendSyncPtr(p)| p)
     }
 
-    /// Returns a valid mapped slice if the memory is host visible, otherwise it will return None.
-    /// The slice already references the exact memory region of the allocation, so no offset needs to be applied.
+    /// Returns a valid mapped slice if the memory is host visible, otherwise it
+    /// will return None. The slice already references the exact memory
+    /// region of the allocation, so no offset needs to be applied.
     pub fn mapped_slice(&self) -> Option<&[u8]> {
         self.mapped_ptr().map(|ptr| {
-            // SAFETY: `ptr` is returned by `mapped_ptr()`, which points to this allocation's
-            // mapped range. The slice length is exactly `self.size` bytes for this allocation.
+            // SAFETY: `ptr` is returned by `mapped_ptr()`, which points to this
+            // allocation's mapped range. The slice length is exactly
+            // `self.size` bytes for this allocation.
             unsafe { core::slice::from_raw_parts(ptr.cast().as_ptr(), self.size as usize) }
         })
     }
 
-    /// Returns a valid mapped mutable slice if the memory is host visible, otherwise it will return None.
-    /// The slice already references the exact memory region of the allocation, so no offset needs to be applied.
+    /// Returns a valid mapped mutable slice if the memory is host visible,
+    /// otherwise it will return None. The slice already references the
+    /// exact memory region of the allocation, so no offset needs to be applied.
     pub fn mapped_slice_mut(&mut self) -> Option<&mut [u8]> {
         self.mapped_ptr().map(|ptr| {
-            // SAFETY: `ptr` is returned by `mapped_ptr()`, which points to this allocation's
-            // mapped range. We have `&mut self`, so returning a unique mutable slice is sound.
+            // SAFETY: `ptr` is returned by `mapped_ptr()`, which points to this
+            // allocation's mapped range. We have `&mut self`, so returning a
+            // unique mutable slice is sound.
             unsafe { core::slice::from_raw_parts_mut(ptr.cast().as_ptr(), self.size as usize) }
         })
     }
@@ -289,7 +319,8 @@ impl Default for Allocation {
     }
 }
 
-/// A wrapper struct over a borrowed [`Allocation`] that infallibly implements [`presser::Slab`].
+/// A wrapper struct over a borrowed [`Allocation`] that infallibly implements
+/// [`presser::Slab`].
 ///
 /// This type should be acquired by calling [`Allocation::try_as_mapped_slab`].
 pub struct MappedAllocationSlab<'a> {
@@ -492,7 +523,8 @@ impl MemoryType {
         let dedicated_allocation = desc.allocation_scheme != AllocationScheme::GpuAllocatorManaged;
         let requires_personal_block = size > memblock_size;
 
-        // Create a dedicated block for large memory allocations or allocations that require dedicated memory allocations.
+        // Create a dedicated block for large memory allocations or allocations that
+        // require dedicated memory allocations.
         if dedicated_allocation || requires_personal_block {
             let mem_block = MemoryBlock::new(
                 device,
@@ -673,9 +705,10 @@ impl MemoryType {
 
         mem_block.sub_allocator.free(allocation.chunk_id)?;
 
-        // We only want to destroy this now-empty block if it is either a dedicated/personal
-        // allocation, or a block supporting sub-allocations that is not the last one (ensuring
-        // there's always at least one block/allocator readily available).
+        // We only want to destroy this now-empty block if it is either a
+        // dedicated/personal allocation, or a block supporting sub-allocations
+        // that is not the last one (ensuring there's always at least one
+        // block/allocator readily available).
         let is_dedicated_or_not_last_general_block =
             !mem_block.sub_allocator.supports_general_allocations()
                 || self.active_general_blocks > 1;
@@ -830,7 +863,8 @@ impl Allocator {
             None => return Err(AllocationError::NoCompatibleMemoryTypeFound),
         };
 
-        //Do not try to create a block if the heap is smaller than the required size (avoids validation warnings).
+        //Do not try to create a block if the heap is smaller than the required size
+        // (avoids validation warnings).
         let memory_type = &mut self.memory_types[memory_type_index];
         let allocation = if size > self.memory_heaps[memory_type.heap_index].size {
             Err(AllocationError::OutOfMemory)
@@ -963,7 +997,8 @@ impl Allocator {
         }
     }
 
-    /// Current total capacity of memory blocks allocated on the device, in bytes
+    /// Current total capacity of memory blocks allocated on the device, in
+    /// bytes
     pub fn capacity(&self) -> u64 {
         let mut total_capacity_bytes = 0;
 

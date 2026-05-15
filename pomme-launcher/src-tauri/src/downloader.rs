@@ -1,9 +1,10 @@
-use crate::storage;
+use std::path::Path;
 
 use serde::Deserialize;
-use std::path::Path;
 use tauri::AppHandle;
 use tauri_specta::Event;
+
+use crate::storage;
 
 const VERSION_MANIFEST_URL: &str =
     "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";

@@ -1,5 +1,6 @@
-use crate::renderer::util;
 use pyronyx::vk;
+
+use crate::renderer::util;
 
 pub fn create_shader_module(device: &vk::Device, spirv: &[u8]) -> vk::ShaderModule {
     let code =

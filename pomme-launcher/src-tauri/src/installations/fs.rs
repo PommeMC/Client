@@ -1,9 +1,7 @@
-use crate::{
-    installations::{Directory, Installation, InstallationError},
-    storage::data_dir,
-};
-
 use std::path::{Path, PathBuf};
+
+use crate::installations::{Directory, Installation, InstallationError};
+use crate::storage::data_dir;
 
 const MAX_COPY_DEPTH: u32 = 16;
 

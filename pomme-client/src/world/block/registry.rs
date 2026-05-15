@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 pub const BLOCK_CACHE_FILE: &str = "block_cache.json";
 
+use super::model;
+use super::model::BakedModel;
 use crate::assets::AssetIndex;
-
-use super::model::{self, BakedModel};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tint {

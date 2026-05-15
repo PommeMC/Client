@@ -6,10 +6,9 @@ use pyronyx::khr::surface::SurfacePhysicalDevice;
 use pyronyx::khr::swapchain::SwapchainDevice;
 use pyronyx::vk;
 
-use crate::renderer::context::VulkanContext;
-
 use super::context::ContextError;
 use super::util;
+use crate::renderer::context::VulkanContext;
 
 #[allow(dead_code)]
 pub struct Swapchain {

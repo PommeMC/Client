@@ -1,5 +1,7 @@
-use core::{fmt, ops::Range};
-use std::{backtrace::Backtrace, sync::Arc};
+use core::fmt;
+use core::ops::Range;
+use std::backtrace::Backtrace;
+use std::sync::Arc;
 
 use tracing::Level;
 
@@ -48,12 +50,13 @@ pub struct AllocationReport {
 pub struct MemoryBlockReport {
     /// The size in bytes of this memory block.
     pub size: u64,
-    /// The range of allocations in [`AllocatorReport::allocations`] that are associated
-    /// to this memory block.
+    /// The range of allocations in [`AllocatorReport::allocations`] that are
+    /// associated to this memory block.
     pub allocations: Range<usize>,
 }
 
-/// A report that can be generated for informational purposes using `Allocator::generate_report()`.
+/// A report that can be generated for informational purposes using
+/// `Allocator::generate_report()`.
 #[derive(Clone)]
 pub struct AllocatorReport {
     /// All live allocations, sub-allocated from memory blocks.
@@ -62,7 +65,8 @@ pub struct AllocatorReport {
     pub blocks: Vec<MemoryBlockReport>,
     /// Sum of the memory used by all allocations, in bytes.
     pub total_allocated_bytes: u64,
-    /// Sum of the memory capacity of all memory blocks including unallocated regions, in bytes.
+    /// Sum of the memory capacity of all memory blocks including unallocated
+    /// regions, in bytes.
     pub total_capacity_bytes: u64,
 }
 
@@ -134,14 +138,16 @@ pub trait SubAllocator: SubAllocatorBase + fmt::Debug + Sync + Send {
 
     fn report_allocations(&self) -> Vec<AllocationReport>;
 
-    /// Returns [`true`] if this allocator allows sub-allocating multiple allocations, [`false`] if
-    /// it is designed to only represent dedicated allocations.
+    /// Returns [`true`] if this allocator allows sub-allocating multiple
+    /// allocations, [`false`] if it is designed to only represent dedicated
+    /// allocations.
     #[must_use]
     fn supports_general_allocations(&self) -> bool;
     #[must_use]
     fn allocated(&self) -> u64;
 
-    /// Helper function: reports if the suballocator is empty (meaning, having no allocations).
+    /// Helper function: reports if the suballocator is empty (meaning, having
+    /// no allocations).
     #[must_use]
     fn is_empty(&self) -> bool {
         self.allocated() == 0

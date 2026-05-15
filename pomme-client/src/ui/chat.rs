@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use super::common::{self, WHITE};
+use super::common;
+use super::common::WHITE;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 
 const MAX_MESSAGES: usize = 100;

@@ -13,20 +13,12 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use azalea_core::position::ChunkPos;
-use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
-use pyronyx::vk;
-use thiserror::Error;
-use winit::dpi::PhysicalSize;
-use winit::window::Window;
-
-use azalea_core::position::BlockPos;
+use azalea_core::position::{BlockPos, ChunkPos};
 use camera::{Camera, CameraUniform};
 use chunk::atlas::TextureAtlas;
 use chunk::buffer::ChunkBufferStore;
 use chunk::mesher::{ChunkMeshData, MeshDispatcher};
 use context::VulkanContext;
-
 use pipelines::block_overlay::BlockOverlayPipeline;
 use pipelines::blur::BlurPipeline;
 use pipelines::chunk::ChunkPipeline;
@@ -36,7 +28,12 @@ use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
 use pipelines::panorama::PanoramaPipeline;
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
+use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
+use pyronyx::vk;
 use swapchain::Swapchain;
+use thiserror::Error;
+use winit::dpi::PhysicalSize;
+use winit::window::Window;
 
 use crate::app::input::InputState;
 use crate::assets::AssetIndex;

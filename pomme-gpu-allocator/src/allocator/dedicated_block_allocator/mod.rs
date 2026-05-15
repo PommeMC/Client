@@ -1,5 +1,6 @@
 #![deny(unsafe_code, clippy::unwrap_used)]
-use std::{backtrace::Backtrace, sync::Arc};
+use std::backtrace::Backtrace;
+use std::sync::Arc;
 
 use tracing::{Level, event};
 
@@ -13,7 +14,8 @@ use crate::{AllocationError, Result};
 pub struct DedicatedBlockAllocator {
     size: u64,
     allocated: u64,
-    /// Only used if [`crate::AllocatorDebugSettings::store_stack_traces`] is [`true`]
+    /// Only used if [`crate::AllocatorDebugSettings::store_stack_traces`] is
+    /// [`true`]
     name: Option<String>,
     backtrace: Arc<Backtrace>,
 }

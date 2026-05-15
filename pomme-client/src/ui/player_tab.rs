@@ -15,7 +15,8 @@ const BG_ROW: [f32; 4] = [1.0, 1.0, 1.0, 0x20 as f32 / 255.0]; // 0x20FFFFFF
 const COL_NAME: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const COL_SPECTATOR: [f32; 4] = [1.0, 1.0, 1.0, 0x90 as f32 / 255.0]; // 0x90FFFFFF
 
-/// `text_width(text, FONT_SIZE)` must return the width in pixels at 1x GUI scale.
+/// `text_width(text, FONT_SIZE)` must return the width in pixels at 1x GUI
+/// scale.
 pub fn build_player_tab_overlay(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,

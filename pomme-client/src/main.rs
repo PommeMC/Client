@@ -15,10 +15,12 @@ mod ui;
 mod user;
 mod world;
 
-use clap::Parser;
 use std::sync::Arc;
 
-use crate::{app::App, user::UserData};
+use clap::Parser;
+
+use crate::app::App;
+use crate::user::UserData;
 
 /// Maps all supported versions to their protocol version.
 /// Snapshots encode as `(1 << 30) | base_protocol`.

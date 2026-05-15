@@ -6,9 +6,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use super::mesher::{ChunkMeshData, ChunkVertex};
-use crate::renderer::MAX_FRAMES_IN_FLIGHT;
-use crate::renderer::shader;
-use crate::renderer::util;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
 const BUCKET_INDICES: u32 = 49152;

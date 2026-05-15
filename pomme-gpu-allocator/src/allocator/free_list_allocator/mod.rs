@@ -1,10 +1,9 @@
 #![deny(unsafe_code)]
 use core::num::NonZeroU64;
-use std::{
-    backtrace::Backtrace,
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::backtrace::Backtrace;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
 use tracing::{Level, event};
 
 #[cfg(feature = "visualizer")]
@@ -30,7 +29,8 @@ pub struct MemoryChunk {
     pub(crate) offset: u64,
     pub(crate) allocation_type: AllocationType,
     pub(crate) name: Option<String>,
-    /// Only used if [`crate::AllocatorDebugSettings::store_stack_traces`] is [`true`]
+    /// Only used if [`crate::AllocatorDebugSettings::store_stack_traces`] is
+    /// [`true`]
     pub(crate) backtrace: Arc<Backtrace>,
     next: Option<core::num::NonZeroU64>,
     prev: Option<core::num::NonZeroU64>,
@@ -90,8 +90,9 @@ impl FreeListAllocator {
         Self {
             size,
             allocated: 0,
-            // 0 is not allowed as a chunk ID, 1 is used by the initial chunk, next chunk is going to be 2.
-            // The system will take the counter as the ID, and then increment the counter.
+            // 0 is not allowed as a chunk ID, 1 is used by the initial chunk, next chunk is going
+            // to be 2. The system will take the counter as the ID, and then increment
+            // the counter.
             chunk_id_counter: 2,
             chunks,
             free_chunks,
@@ -111,11 +112,13 @@ impl FreeListAllocator {
             AllocationError::Internal("New chunk id was 0, which is not allowed.".into())
         })
     }
-    /// Finds the specified `chunk_id` in the list of free chunks and removes if from the list
+    /// Finds the specified `chunk_id` in the list of free chunks and removes if
+    /// from the list
     fn remove_id_from_free_list(&mut self, chunk_id: core::num::NonZeroU64) {
         self.free_chunks.remove(&chunk_id);
     }
-    /// Merges two adjacent chunks. Right chunk will be merged into the left chunk
+    /// Merges two adjacent chunks. Right chunk will be merged into the left
+    /// chunk
     fn merge_free_chunks(
         &mut self,
         chunk_left: core::num::NonZeroU64,

@@ -8,12 +8,10 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::MAX_FRAMES_IN_FLIGHT;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
-use crate::renderer::entity_model::{self, BakedEntityModel};
-use crate::renderer::shader;
-use crate::renderer::util;
+use crate::renderer::entity_model::BakedEntityModel;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
 
 pub struct EntityRenderInfo {
     pub x: f64,

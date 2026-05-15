@@ -1,4 +1,5 @@
-use super::common::{self, WHITE};
+use super::common;
+use super::common::WHITE;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 
 const FULL_W: f32 = 204.0;

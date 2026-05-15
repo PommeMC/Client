@@ -1,8 +1,8 @@
 #![allow(clippy::undocumented_unsafe_blocks, clippy::unwrap_used)]
 
-use pomme_gpu_allocator::{
-    MemoryLocation,
-    vulkan::{AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc},
+use pomme_gpu_allocator::MemoryLocation;
+use pomme_gpu_allocator::vulkan::{
+    AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc,
 };
 use pyronyx::vk;
 use tracing::info;

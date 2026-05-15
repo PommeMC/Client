@@ -1,15 +1,13 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
 
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
-use std::path::Path;
-
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::shader;
-use crate::renderer::util;
+use crate::renderer::{shader, util};
 use crate::ui::font::GlyphMap;
 use crate::ui::server_list::MotdSpan;
 

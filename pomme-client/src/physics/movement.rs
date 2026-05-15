@@ -1,4 +1,5 @@
-// TODO: fall damage - track fall distance, reset on water entry, apply damage on ground impact
+// TODO: fall damage - track fall distance, reset on water entry, apply damage
+// on ground impact
 
 use winit::keyboard::KeyCode;
 
@@ -18,7 +19,8 @@ const GROUND_ACCEL_FACTOR: f32 = 0.216;
 const MOVEMENT_SPEED: f32 = 0.1;
 const SPRINT_SPEED_MODIFIER: f32 = 0.3;
 const AIR_ACCELERATION: f32 = 0.02;
-// TODO: WATER_MOVEMENT_EFFICIENCY attribute - scales drag toward 0.546 and accel toward land speed
+// TODO: WATER_MOVEMENT_EFFICIENCY attribute - scales drag toward 0.546 and
+// accel toward land speed
 const WATER_ACCELERATION: f32 = 0.02;
 const WATER_HORIZONTAL_DRAG: f32 = 0.8;
 const WATER_HORIZONTAL_DRAG_SPRINT: f32 = 0.9;

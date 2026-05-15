@@ -7,7 +7,8 @@ impl<T> StateSlot<T> {
 
     pub fn transition(&mut self, f: impl FnOnce(T) -> T) {
         // SAFETY: `self.0` is `Some` on entry by the type invariant. The transient
-        // `None` during `f` is unobservable since we hold exclusive access via `&mut self`.
+        // `None` during `f` is unobservable since we hold exclusive access via `&mut
+        // self`.
         let state = unsafe { self.0.take().unwrap_unchecked() };
         self.0 = Some(f(state));
     }

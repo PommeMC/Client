@@ -5,9 +5,7 @@ use glam::{Mat4, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
-use crate::renderer::MAX_FRAMES_IN_FLIGHT;
-use crate::renderer::shader;
-use crate::renderer::util;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]

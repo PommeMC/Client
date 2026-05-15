@@ -1,6 +1,5 @@
-use crate::renderer::pipelines::menu_overlay::MenuElement;
-
 use super::common;
+use crate::renderer::pipelines::menu_overlay::MenuElement;
 
 const BTN_W: f32 = 200.0;
 

@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::assets::{AssetIndex, resolve_asset_path_with_packs};
-
 use super::registry::{FaceTextures, Tint};
+use crate::assets::{AssetIndex, resolve_asset_path_with_packs};
 
 #[derive(Deserialize)]
 struct BlockstateFile {
@@ -675,7 +674,8 @@ fn check_full_cube(quads: &[BakedQuad]) -> bool {
 }
 
 fn face_positions(dir: Direction, from: [f32; 3], to: [f32; 3]) -> [[f32; 3]; 4] {
-    // CCW winding when viewed from outside, matching chunk pipeline backface culling
+    // CCW winding when viewed from outside, matching chunk pipeline backface
+    // culling
     match dir {
         Direction::Up => [
             [from[0], to[1], to[2]],

@@ -1,6 +1,8 @@
 use std::path::Path;
+
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, fmt};
 
 pub fn init(log_dir: &Path) -> WorkerGuard {
     let file_appender = tracing_appender::rolling::never(log_dir, "latest.log");

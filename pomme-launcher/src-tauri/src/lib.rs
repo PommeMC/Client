@@ -6,7 +6,9 @@ mod ping;
 mod settings;
 pub mod storage;
 
-use std::{collections::VecDeque, path::PathBuf};
+use std::collections::VecDeque;
+use std::path::PathBuf;
+
 use tokio::sync::Mutex;
 
 #[derive(Default)]

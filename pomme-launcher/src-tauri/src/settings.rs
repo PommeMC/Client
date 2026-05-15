@@ -1,7 +1,9 @@
-use crate::storage;
-use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
+
+use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, RwLockReadGuard};
+
+use crate::storage;
 
 static LAUNCHER_SETTINGS: LazyLock<RwLock<LauncherSettings>> =
     LazyLock::new(|| RwLock::new(LauncherSettings::load()));

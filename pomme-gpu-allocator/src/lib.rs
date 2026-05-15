@@ -12,33 +12,46 @@
 //!     debug_settings: Default::default(),
 //!     buffer_device_address: true,
 //!     allocation_sizes: Default::default(),
-//! }).unwrap();
+//! })
+//! .unwrap();
 //! ```
 //!
 //! # Simple allocation example
 //!
 //! ```no_run
-//! use pomme_gpu_allocator::vulkan::*;
 //! use pomme_gpu_allocator::MemoryLocation;
+//! use pomme_gpu_allocator::vulkan::*;
 //! use pyronyx::vk;
 //!
-//! let buffer = unsafe { device.create_buffer(&vk::BufferCreateInfo {
-//!     size: 512,
-//!     usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-//!     ..Default::default()
-//! }, None) }.unwrap();
+//! let buffer = unsafe {
+//!     device.create_buffer(
+//!         &vk::BufferCreateInfo {
+//!             size: 512,
+//!             usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+//!             ..Default::default()
+//!         },
+//!         None,
+//!     )
+//! }
+//! .unwrap();
 //!
 //! let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 //!
-//! let allocation = allocator.allocate(&AllocationCreateDesc {
-//!     name: "Example allocation",
-//!     requirements,
-//!     location: MemoryLocation::CpuToGpu,
-//!     linear: true,
-//!     allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-//! }).unwrap();
+//! let allocation = allocator
+//!     .allocate(&AllocationCreateDesc {
+//!         name: "Example allocation",
+//!         requirements,
+//!         location: MemoryLocation::CpuToGpu,
+//!         linear: true,
+//!         allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+//!     })
+//!     .unwrap();
 //!
-//! unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()).unwrap() };
+//! unsafe {
+//!     device
+//!         .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
+//!         .unwrap()
+//! };
 //!
 //! allocator.free(allocation).unwrap();
 //! unsafe { device.destroy_buffer(buffer, None) };
@@ -58,12 +71,15 @@ pub mod vulkan;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MemoryLocation {
-    /// The allocated resource is stored at an unknown memory location; let the driver decide what's the best location
+    /// The allocated resource is stored at an unknown memory location; let the
+    /// driver decide what's the best location
     Unknown,
-    /// Store the allocation in GPU only accessible memory - typically this is the faster GPU resource and this should be
-    /// where most of the allocations live.
+    /// Store the allocation in GPU only accessible memory - typically this is
+    /// the faster GPU resource and this should be where most of the
+    /// allocations live.
     GpuOnly,
-    /// Memory useful for uploading data to the GPU and potentially for constant buffers
+    /// Memory useful for uploading data to the GPU and potentially for constant
+    /// buffers
     CpuToGpu,
     /// Memory useful for CPU readback of data
     GpuToCpu,
@@ -72,19 +88,24 @@ pub enum MemoryLocation {
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug)]
 pub struct AllocatorDebugSettings {
-    /// Logs out debugging information about the various heaps the current device has on startup
+    /// Logs out debugging information about the various heaps the current
+    /// device has on startup
     pub log_memory_information: bool,
     /// Logs out all memory leaks on shutdown with log level Warn
     pub log_leaks_on_shutdown: bool,
-    /// Stores a copy of the full backtrace for every allocation made, this makes it easier to debug leaks
-    /// or other memory allocations, but storing stack traces has a RAM overhead so should be disabled
+    /// Stores a copy of the full backtrace for every allocation made, this
+    /// makes it easier to debug leaks or other memory allocations, but
+    /// storing stack traces has a RAM overhead so should be disabled
     /// in shipping applications.
     pub store_stack_traces: bool,
-    /// Log out every allocation as it's being made with log level Debug, rather spammy so off by default
+    /// Log out every allocation as it's being made with log level Debug, rather
+    /// spammy so off by default
     pub log_allocations: bool,
-    /// Log out every free that is being called with log level Debug, rather spammy so off by default
+    /// Log out every free that is being called with log level Debug, rather
+    /// spammy so off by default
     pub log_frees: bool,
-    /// Log out stack traces when either `log_allocations` or `log_frees` is enabled.
+    /// Log out stack traces when either `log_allocations` or `log_frees` is
+    /// enabled.
     pub log_stack_traces: bool,
 }
 
@@ -103,22 +124,25 @@ impl Default for AllocatorDebugSettings {
 
 /// The sizes of the memory blocks that the allocator will create.
 ///
-/// Useful for tuning the allocator to your application's needs. For example most games will be fine with the default
-/// values, but eg. an app might want to use smaller block sizes to reduce the amount of memory used.
+/// Useful for tuning the allocator to your application's needs. For example
+/// most games will be fine with the default values, but eg. an app might want
+/// to use smaller block sizes to reduce the amount of memory used.
 ///
-/// Clamped between 4MB and 256MB, and rounds up to the nearest multiple of 4MB for alignment reasons.
+/// Clamped between 4MB and 256MB, and rounds up to the nearest multiple of 4MB
+/// for alignment reasons.
 ///
-/// Note that these limits only apply to shared memory blocks that can hold multiple allocations.
-/// If an allocation does not fit within the corresponding maximum block size, it will be placed
-/// in a dedicated memory block holding only this allocation, without limitations other than what
-/// the underlying hardware and driver are able to provide.
+/// Note that these limits only apply to shared memory blocks that can hold
+/// multiple allocations. If an allocation does not fit within the corresponding
+/// maximum block size, it will be placed in a dedicated memory block holding
+/// only this allocation, without limitations other than what the underlying
+/// hardware and driver are able to provide.
 ///
 /// # Fixed or growable block size
 ///
 /// This structure represents ranges of allowed sizes for shared memory blocks.
-/// By default, if the upper bounds are not extended using `with_max_*_memblock_size`,
-/// the allocator will be configured to use a fixed memory block size for shared
-/// allocations.
+/// By default, if the upper bounds are not extended using
+/// `with_max_*_memblock_size`, the allocator will be configured to use a fixed
+/// memory block size for shared allocations.
 ///
 /// Otherwise, the allocator will pick a memory block size within the specifed
 /// range, depending on the number of existing allocations for the memory
@@ -149,8 +173,8 @@ impl Default for AllocatorDebugSettings {
 pub struct AllocationSizes {
     /// The initial size for device memory blocks.
     ///
-    /// The size of new device memory blocks doubles each time a new block is needed, up to
-    /// [`AllocationSizes::max_device_memblock_size`].
+    /// The size of new device memory blocks doubles each time a new block is
+    /// needed, up to [`AllocationSizes::max_device_memblock_size`].
     ///
     /// Defaults to 256MB.
     min_device_memblock_size: u64,
@@ -160,8 +184,8 @@ pub struct AllocationSizes {
     max_device_memblock_size: u64,
     /// The initial size for host memory blocks.
     ///
-    /// The size of new host memory blocks doubles each time a new block is needed, up to
-    /// [`AllocationSizes::max_host_memblock_size`].
+    /// The size of new host memory blocks doubles each time a new block is
+    /// needed, up to [`AllocationSizes::max_host_memblock_size`].
     ///
     /// Defaults to 64MB.
     min_host_memblock_size: u64,
@@ -175,7 +199,8 @@ impl AllocationSizes {
     /// Sets the minimum device and host memory block sizes.
     ///
     /// The maximum block sizes are initialized to the minimum sizes and
-    /// can be increased using [`AllocationSizes::with_max_device_memblock_size`] and
+    /// can be increased using
+    /// [`AllocationSizes::with_max_device_memblock_size`] and
     /// [`AllocationSizes::with_max_host_memblock_size`].
     pub fn new(device_memblock_size: u64, host_memblock_size: u64) -> Self {
         let device_memblock_size = Self::adjust_memblock_size(device_memblock_size, "Device");

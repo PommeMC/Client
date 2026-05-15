@@ -653,8 +653,8 @@ use std::io;
 
 /// Decode SPIR-V from bytes.
 ///
-/// This function handles SPIR-V of arbitrary endianness gracefully, and returns correctly aligned
-/// storage.
+/// This function handles SPIR-V of arbitrary endianness gracefully, and returns
+/// correctly aligned storage.
 ///
 /// # Examples
 /// ```no_run
@@ -671,7 +671,8 @@ use std::io;
 /// let words = ash::util::read_spv(&mut std::io::Cursor::new(&SPIRV[..])).unwrap();
 /// ```
 pub fn read_spv<R: io::Read + io::Seek>(x: &mut R) -> io::Result<Vec<u32>> {
-    // TODO use stream_len() once it is stabilized and remove the subsequent rewind() call
+    // TODO use stream_len() once it is stabilized and remove the subsequent
+    // rewind() call
     let size = x.seek(io::SeekFrom::End(0))?;
     x.rewind()?;
     if size % 4 != 0 {
