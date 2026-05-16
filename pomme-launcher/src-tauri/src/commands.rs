@@ -277,7 +277,9 @@ async fn fresh_token(uuid: &str) -> Result<String, String> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_friends(uuid: String) -> Result<crate::friends::FriendsList, String> {
+pub async fn get_friends(
+    uuid: String,
+) -> Result<crate::friends::FriendsList, crate::friends::FriendsApiError> {
     let token = fresh_token(&uuid).await?;
     crate::friends::get_friends(&token).await
 }
@@ -287,7 +289,7 @@ pub async fn get_friends(uuid: String) -> Result<crate::friends::FriendsList, St
 pub async fn send_friend_request(
     uuid: String,
     name: String,
-) -> Result<crate::friends::FriendsList, String> {
+) -> Result<crate::friends::FriendsList, crate::friends::FriendsApiError> {
     let token = fresh_token(&uuid).await?;
     crate::friends::action_by_name(&token, &name, crate::friends::UpdateType::Add).await
 }
@@ -297,7 +299,7 @@ pub async fn send_friend_request(
 pub async fn accept_friend_request(
     uuid: String,
     friend_uuid: String,
-) -> Result<crate::friends::FriendsList, String> {
+) -> Result<crate::friends::FriendsList, crate::friends::FriendsApiError> {
     let token = fresh_token(&uuid).await?;
     crate::friends::action_by_id(&token, &friend_uuid, crate::friends::UpdateType::Add).await
 }
@@ -307,7 +309,7 @@ pub async fn accept_friend_request(
 pub async fn remove_friend(
     uuid: String,
     friend_uuid: String,
-) -> Result<crate::friends::FriendsList, String> {
+) -> Result<crate::friends::FriendsList, crate::friends::FriendsApiError> {
     let token = fresh_token(&uuid).await?;
     crate::friends::action_by_id(&token, &friend_uuid, crate::friends::UpdateType::Remove).await
 }
@@ -318,14 +320,16 @@ pub async fn update_presence(
     uuid: String,
     status: String,
     join_info: Option<crate::friends::PresenceJoinInfo>,
-) -> Result<Vec<crate::friends::PresenceEntry>, String> {
+) -> Result<Vec<crate::friends::PresenceEntry>, crate::friends::FriendsApiError> {
     let token = fresh_token(&uuid).await?;
     crate::friends::update_presence(&token, &status, join_info.as_ref()).await
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_friend_settings(uuid: String) -> Result<crate::friends::FriendSettings, String> {
+pub async fn get_friend_settings(
+    uuid: String,
+) -> Result<crate::friends::FriendSettings, crate::friends::FriendsApiError> {
     let token = fresh_token(&uuid).await?;
     crate::friends::get_friend_settings(&token).await
 }
@@ -336,7 +340,7 @@ pub async fn update_friend_settings(
     uuid: String,
     show_in_list: bool,
     accept_invites: bool,
-) -> Result<crate::friends::FriendSettings, String> {
+) -> Result<crate::friends::FriendSettings, crate::friends::FriendsApiError> {
     let token = fresh_token(&uuid).await?;
     crate::friends::update_friend_settings(&token, show_in_list, accept_invites).await
 }

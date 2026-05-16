@@ -3,6 +3,7 @@ import { commands } from "../bindings";
 import {
   Friend,
   FriendSettings,
+  FriendsApiError,
   FriendsList,
   PresenceEntry,
   PresenceJoinInfo,
@@ -17,6 +18,9 @@ export const ACTIVITY_IDLE: Activity = { status: "ONLINE", joinInfo: null };
 
 export const isOffline = (p: PresenceEntry | undefined): boolean => !p || p.status === "OFFLINE";
 
+const formatError = (err: FriendsApiError): string =>
+  err.kind === "rateLimited" ? `Rate limited, try again in ${err.retryAfterSecs}s` : err.message;
+
 export const useFriends = (uuid: string | null) => {
   const [friendsList, setFriendsList] = useState<FriendsList>(EMPTY);
   const [friendsError, setFriendsError] = useState<string | null>(null);
@@ -25,7 +29,9 @@ export const useFriends = (uuid: string | null) => {
   const [friendsSettings, setFriendsSettings] = useState<FriendSettings | null>(null);
   const [currentActivity, setCurrentActivity] = useState<Activity>(ACTIVITY_IDLE);
   const [prevUuid, setPrevUuid] = useState(uuid);
+  const [presenceRefresh, setPresenceRefresh] = useState(0);
   const presenceReqId = useRef(0);
+  const presenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   if (uuid !== prevUuid) {
     setPrevUuid(uuid);
@@ -69,7 +75,7 @@ export const useFriends = (uuid: string | null) => {
         applyList(res.value);
         setFriendsError(null);
       } else {
-        setFriendsError(res.error);
+        setFriendsError(formatError(res.error));
       }
     });
     return () => {
@@ -77,25 +83,41 @@ export const useFriends = (uuid: string | null) => {
     };
   }, [uuid, applyList]);
 
-  const refreshPresence = useCallback(() => {
-    if (!uuid) return;
-    const reqId = ++presenceReqId.current;
-    commands.updatePresence(uuid, currentActivity.status, currentActivity.joinInfo).then((res) => {
-      if (reqId !== presenceReqId.current || !res.ok) return;
-      const byUuid: Record<string, PresenceEntry> = {};
-      for (const entry of res.value) {
-        byUuid[entry.profileId] = entry;
-      }
-      setFriendsPresence(byUuid);
-    });
-  }, [uuid, currentActivity]);
-
   useEffect(() => {
     if (!uuid) return;
-    refreshPresence();
-    const interval = setInterval(refreshPresence, PRESENCE_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [uuid, refreshPresence]);
+    let cancelled = false;
+
+    const tick = async () => {
+      const reqId = ++presenceReqId.current;
+      const res = await commands.updatePresence(
+        uuid,
+        currentActivity.status,
+        currentActivity.joinInfo,
+      );
+      if (cancelled || reqId !== presenceReqId.current) return;
+      let nextDelay = PRESENCE_INTERVAL_MS;
+      if (res.ok) {
+        const byUuid: Record<string, PresenceEntry> = {};
+        for (const entry of res.value) byUuid[entry.profileId] = entry;
+        setFriendsPresence(byUuid);
+      } else if (res.error.kind === "rateLimited") {
+        nextDelay = Math.max(PRESENCE_INTERVAL_MS, res.error.retryAfterSecs * 1000);
+      }
+      presenceTimer.current = setTimeout(tick, nextDelay);
+    };
+
+    tick();
+
+    return () => {
+      cancelled = true;
+      if (presenceTimer.current) {
+        clearTimeout(presenceTimer.current);
+        presenceTimer.current = null;
+      }
+    };
+  }, [uuid, currentActivity, presenceRefresh]);
+
+  const refreshPresence = useCallback(() => setPresenceRefresh((c) => c + 1), []);
 
   useEffect(() => {
     if (!uuid) return;
@@ -111,7 +133,7 @@ export const useFriends = (uuid: string | null) => {
 
   const runMutation = useCallback(
     async <T>(
-      op: Promise<{ ok: true; value: T } | { ok: false; error: string }>,
+      op: Promise<{ ok: true; value: T } | { ok: false; error: FriendsApiError }>,
       onSuccess: (value: T) => void,
     ) => {
       const res = await op;
@@ -119,7 +141,7 @@ export const useFriends = (uuid: string | null) => {
         onSuccess(res.value);
         setFriendsError(null);
       } else {
-        setFriendsError(res.error);
+        setFriendsError(formatError(res.error));
       }
     },
     [],

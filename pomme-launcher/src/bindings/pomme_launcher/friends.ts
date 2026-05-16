@@ -9,6 +9,8 @@ export type FriendSettings = {
 	accept_invites: boolean,
 };
 
+export type FriendsApiError = { kind: "rateLimited"; retryAfterSecs: number } | { kind: "message"; message: string };
+
 export type FriendsList = {
 	friends?: Friend[],
 	incomingRequests?: Friend[],
