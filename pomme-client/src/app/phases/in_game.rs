@@ -495,6 +495,11 @@ pub fn update_game(
                     + (e.walk_anim_speed - e.prev_walk_anim_speed) * alpha)
                     .min(1.0),
                 entity_kind: e.entity_type,
+                overlay_tint: e
+                    .wool_color
+                    .map(crate::renderer::pipelines::entity_renderer::wool_color_tint)
+                    .unwrap_or([1.0, 1.0, 1.0, 1.0]),
+                draw_overlay: !e.is_sheared,
             }
         })
         .collect();
@@ -514,6 +519,8 @@ pub fn update_game(
                 + (game.player_walk_speed - game.player_prev_walk_speed) * alpha)
                 .min(1.0),
             entity_kind: azalea_registry::builtin::EntityKind::Player,
+            overlay_tint: [1.0, 1.0, 1.0, 1.0],
+            draw_overlay: true,
         });
     }
 

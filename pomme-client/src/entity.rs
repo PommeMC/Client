@@ -168,6 +168,8 @@ pub struct LivingEntity {
     pub prev_walk_anim_speed: f32,
     pub is_baby: bool,
     pub on_ground: bool,
+    pub wool_color: Option<u8>,
+    pub is_sheared: bool,
     interp_target: DVec3,
     interp_yaw: f32,
     interp_pitch: f32,
@@ -201,6 +203,8 @@ impl LivingEntity {
             prev_walk_anim_speed: 0.0,
             is_baby: false,
             on_ground: false,
+            wool_color: None,
+            is_sheared: false,
             interp_target: position,
             interp_yaw: yaw,
             interp_pitch: pitch,
@@ -499,6 +503,15 @@ impl EntityStore {
     pub fn set_baby(&mut self, id: i32, is_baby: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.is_baby = is_baby;
+        }
+    }
+
+    pub fn set_sheep_wool(&mut self, id: i32, color: u8, sheared: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Sheep
+        {
+            entity.wool_color = Some(color);
+            entity.is_sheared = sheared;
         }
     }
 

@@ -461,6 +461,9 @@ impl AppCore {
                 NetworkEvent::EntityBabyFlag { id, is_baby } => {
                     game.entity_store.set_baby(id, is_baby);
                 }
+                NetworkEvent::SheepWoolData { id, color, sheared } => {
+                    game.entity_store.set_sheep_wool(id, color, sheared);
+                }
                 NetworkEvent::ItemPickedUp {
                     item_id,
                     collector_id,

@@ -2,10 +2,34 @@ use glam::{Mat4, Vec3};
 
 use super::chunk::mesher::ChunkVertex;
 
+#[derive(Clone, Copy)]
 pub struct ModelCube {
     pub origin: Vec3,
     pub size: Vec3,
     pub tex_offset: (u32, u32),
+    pub deformation: f32,
+}
+
+fn quadruped_legs(
+    leg_x: f32,
+    leg_y: f32,
+    front_z: f32,
+    hind_z: f32,
+    cube: ModelCube,
+) -> [EntityPart; 4] {
+    let leg = |name: &str, x: f32, z: f32| EntityPart {
+        name: name.into(),
+        offset: Vec3::new(x, leg_y, z),
+        default_rotation: Vec3::ZERO,
+        cubes: vec![cube],
+        parent: None,
+    };
+    [
+        leg("right_hind_leg", -leg_x, hind_z),
+        leg("left_hind_leg", leg_x, hind_z),
+        leg("right_front_leg", -leg_x, front_z),
+        leg("left_front_leg", leg_x, front_z),
+    ]
 }
 
 pub struct EntityPart {
@@ -76,7 +100,7 @@ fn bake_model(parts: Vec<EntityPart>, tex_w: u32, tex_h: u32) -> BakedEntityMode
 }
 
 pub fn bake_pig_model() -> BakedEntityModel {
-    let parts = vec![
+    let mut parts = vec![
         EntityPart {
             name: "head".into(),
             offset: Vec3::new(0.0, 12.0, -6.0),
@@ -86,11 +110,13 @@ pub fn bake_pig_model() -> BakedEntityModel {
                     origin: Vec3::new(-4.0, -4.0, -8.0),
                     size: Vec3::new(8.0, 8.0, 8.0),
                     tex_offset: (0, 0),
+                    deformation: 0.0,
                 },
                 ModelCube {
                     origin: Vec3::new(-2.0, 0.0, -9.0),
                     size: Vec3::new(4.0, 3.0, 1.0),
                     tex_offset: (16, 16),
+                    deformation: 0.0,
                 },
             ],
             parent: None,
@@ -103,55 +129,23 @@ pub fn bake_pig_model() -> BakedEntityModel {
                 origin: Vec3::new(-5.0, -10.0, -7.0),
                 size: Vec3::new(10.0, 16.0, 8.0),
                 tex_offset: (28, 8),
-            }],
-            parent: None,
-        },
-        EntityPart {
-            name: "right_hind_leg".into(),
-            offset: Vec3::new(-3.0, 18.0, 7.0),
-            default_rotation: Vec3::ZERO,
-            cubes: vec![ModelCube {
-                origin: Vec3::new(-2.0, 0.0, -2.0),
-                size: Vec3::new(4.0, 6.0, 4.0),
-                tex_offset: (0, 16),
-            }],
-            parent: None,
-        },
-        EntityPart {
-            name: "left_hind_leg".into(),
-            offset: Vec3::new(3.0, 18.0, 7.0),
-            default_rotation: Vec3::ZERO,
-            cubes: vec![ModelCube {
-                origin: Vec3::new(-2.0, 0.0, -2.0),
-                size: Vec3::new(4.0, 6.0, 4.0),
-                tex_offset: (0, 16),
-            }],
-            parent: None,
-        },
-        EntityPart {
-            name: "right_front_leg".into(),
-            offset: Vec3::new(-3.0, 18.0, -5.0),
-            default_rotation: Vec3::ZERO,
-            cubes: vec![ModelCube {
-                origin: Vec3::new(-2.0, 0.0, -2.0),
-                size: Vec3::new(4.0, 6.0, 4.0),
-                tex_offset: (0, 16),
-            }],
-            parent: None,
-        },
-        EntityPart {
-            name: "left_front_leg".into(),
-            offset: Vec3::new(3.0, 18.0, -5.0),
-            default_rotation: Vec3::ZERO,
-            cubes: vec![ModelCube {
-                origin: Vec3::new(-2.0, 0.0, -2.0),
-                size: Vec3::new(4.0, 6.0, 4.0),
-                tex_offset: (0, 16),
+                deformation: 0.0,
             }],
             parent: None,
         },
     ];
-
+    parts.extend(quadruped_legs(
+        3.0,
+        18.0,
+        -5.0,
+        7.0,
+        ModelCube {
+            origin: Vec3::new(-2.0, 0.0, -2.0),
+            size: Vec3::new(4.0, 6.0, 4.0),
+            tex_offset: (0, 16),
+            deformation: 0.0,
+        },
+    ));
     bake_model(parts, 64, 64)
 }
 
@@ -166,11 +160,13 @@ pub fn bake_baby_pig_model() -> BakedEntityModel {
                     origin: Vec3::new(-3.5, -5.0, -5.0),
                     size: Vec3::new(7.0, 6.0, 6.0),
                     tex_offset: (0, 15),
+                    deformation: 0.0,
                 },
                 ModelCube {
                     origin: Vec3::new(-1.5, -1.975, -6.0),
                     size: Vec3::new(3.0, 2.0, 1.0),
                     tex_offset: (6, 27),
+                    deformation: 0.0,
                 },
             ],
             parent: None,
@@ -183,6 +179,7 @@ pub fn bake_baby_pig_model() -> BakedEntityModel {
                 origin: Vec3::new(-3.5, -3.0, -4.5),
                 size: Vec3::new(7.0, 6.0, 9.0),
                 tex_offset: (0, 0),
+                deformation: 0.0,
             }],
             parent: None,
         },
@@ -194,6 +191,7 @@ pub fn bake_baby_pig_model() -> BakedEntityModel {
                 origin: Vec3::new(-1.0, 0.0, -1.0),
                 size: Vec3::new(2.0, 2.0, 2.0),
                 tex_offset: (23, 4),
+                deformation: 0.0,
             }],
             parent: None,
         },
@@ -205,6 +203,7 @@ pub fn bake_baby_pig_model() -> BakedEntityModel {
                 origin: Vec3::new(-1.0, 0.0, -1.0),
                 size: Vec3::new(2.0, 2.0, 2.0),
                 tex_offset: (0, 4),
+                deformation: 0.0,
             }],
             parent: None,
         },
@@ -216,6 +215,7 @@ pub fn bake_baby_pig_model() -> BakedEntityModel {
                 origin: Vec3::new(-1.0, 0.0, -1.0),
                 size: Vec3::new(2.0, 2.0, 2.0),
                 tex_offset: (23, 0),
+                deformation: 0.0,
             }],
             parent: None,
         },
@@ -227,6 +227,7 @@ pub fn bake_baby_pig_model() -> BakedEntityModel {
                 origin: Vec3::new(-1.0, 0.0, -1.0),
                 size: Vec3::new(2.0, 2.0, 2.0),
                 tex_offset: (0, 0),
+                deformation: 0.0,
             }],
             parent: None,
         },
@@ -245,6 +246,7 @@ pub fn bake_player_model() -> BakedEntityModel {
                 origin: Vec3::new(-4.0, -8.0, -4.0),
                 size: Vec3::new(8.0, 8.0, 8.0),
                 tex_offset: (0, 0),
+                deformation: 0.0,
             }],
             parent: None,
         },
@@ -256,6 +258,7 @@ pub fn bake_player_model() -> BakedEntityModel {
                 origin: Vec3::new(-4.0, 0.0, -2.0),
                 size: Vec3::new(8.0, 12.0, 4.0),
                 tex_offset: (16, 16),
+                deformation: 0.0,
             }],
             parent: None,
         },
@@ -267,6 +270,7 @@ pub fn bake_player_model() -> BakedEntityModel {
                 origin: Vec3::new(-3.0, -2.0, -2.0),
                 size: Vec3::new(4.0, 12.0, 4.0),
                 tex_offset: (40, 16),
+                deformation: 0.0,
             }],
             parent: None,
         },
@@ -278,6 +282,7 @@ pub fn bake_player_model() -> BakedEntityModel {
                 origin: Vec3::new(-1.0, -2.0, -2.0),
                 size: Vec3::new(4.0, 12.0, 4.0),
                 tex_offset: (32, 48),
+                deformation: 0.0,
             }],
             parent: None,
         },
@@ -289,6 +294,7 @@ pub fn bake_player_model() -> BakedEntityModel {
                 origin: Vec3::new(-2.0, 0.0, -2.0),
                 size: Vec3::new(4.0, 12.0, 4.0),
                 tex_offset: (0, 16),
+                deformation: 0.0,
             }],
             parent: None,
         },
@@ -300,12 +306,345 @@ pub fn bake_player_model() -> BakedEntityModel {
                 origin: Vec3::new(-2.0, 0.0, -2.0),
                 size: Vec3::new(4.0, 12.0, 4.0),
                 tex_offset: (16, 48),
+                deformation: 0.0,
             }],
             parent: None,
         },
     ];
 
     bake_model(parts, 64, 64)
+}
+
+pub fn bake_cow_model() -> BakedEntityModel {
+    let mut parts = vec![
+        EntityPart {
+            name: "head".into(),
+            offset: Vec3::new(0.0, 4.0, -8.0),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![
+                ModelCube {
+                    origin: Vec3::new(-4.0, -4.0, -6.0),
+                    size: Vec3::new(8.0, 8.0, 6.0),
+                    tex_offset: (0, 0),
+                    deformation: 0.0,
+                },
+                ModelCube {
+                    origin: Vec3::new(-3.0, 1.0, -7.0),
+                    size: Vec3::new(6.0, 3.0, 1.0),
+                    tex_offset: (1, 33),
+                    deformation: 0.0,
+                },
+                ModelCube {
+                    origin: Vec3::new(-5.0, -5.0, -5.0),
+                    size: Vec3::new(1.0, 3.0, 1.0),
+                    tex_offset: (22, 0),
+                    deformation: 0.0,
+                },
+                ModelCube {
+                    origin: Vec3::new(4.0, -5.0, -5.0),
+                    size: Vec3::new(1.0, 3.0, 1.0),
+                    tex_offset: (22, 0),
+                    deformation: 0.0,
+                },
+            ],
+            parent: None,
+        },
+        EntityPart {
+            name: "body".into(),
+            offset: Vec3::new(0.0, 5.0, 2.0),
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+            cubes: vec![
+                ModelCube {
+                    origin: Vec3::new(-6.0, -10.0, -7.0),
+                    size: Vec3::new(12.0, 18.0, 10.0),
+                    tex_offset: (18, 4),
+                    deformation: 0.0,
+                },
+                ModelCube {
+                    origin: Vec3::new(-2.0, 2.0, -8.0),
+                    size: Vec3::new(4.0, 6.0, 1.0),
+                    tex_offset: (52, 0),
+                    deformation: 0.0,
+                },
+            ],
+            parent: None,
+        },
+    ];
+    parts.extend(quadruped_legs(
+        4.0,
+        12.0,
+        -5.0,
+        7.0,
+        ModelCube {
+            origin: Vec3::new(-2.0, 0.0, -2.0),
+            size: Vec3::new(4.0, 12.0, 4.0),
+            tex_offset: (0, 16),
+            deformation: 0.0,
+        },
+    ));
+    bake_model(parts, 64, 64)
+}
+
+pub fn bake_baby_cow_model() -> BakedEntityModel {
+    let parts = vec![
+        EntityPart {
+            name: "head".into(),
+            offset: Vec3::new(0.0, 13.569, -5.1667),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![
+                ModelCube {
+                    origin: Vec3::new(-3.0, -4.569, -4.8333),
+                    size: Vec3::new(6.0, 6.0, 5.0),
+                    tex_offset: (0, 18),
+                    deformation: 0.0,
+                },
+                ModelCube {
+                    origin: Vec3::new(3.0, -5.569, -3.8333),
+                    size: Vec3::new(1.0, 2.0, 1.0),
+                    tex_offset: (8, 29),
+                    deformation: 0.0,
+                },
+                ModelCube {
+                    origin: Vec3::new(-4.0, -5.569, -3.8333),
+                    size: Vec3::new(1.0, 2.0, 1.0),
+                    tex_offset: (4, 29),
+                    deformation: 0.0,
+                },
+                ModelCube {
+                    origin: Vec3::new(-2.0, -1.569, -5.8333),
+                    size: Vec3::new(4.0, 3.0, 1.0),
+                    tex_offset: (12, 29),
+                    deformation: 0.0,
+                },
+            ],
+            parent: None,
+        },
+        EntityPart {
+            name: "body".into(),
+            offset: Vec3::new(3.0, 19.0, -5.0),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-7.0, -7.0, -1.0),
+                size: Vec3::new(8.0, 6.0, 12.0),
+                tex_offset: (0, 0),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "right_front_leg".into(),
+            offset: Vec3::new(-2.5, 18.0, -3.5),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-1.5, 0.0, -1.5),
+                size: Vec3::new(3.0, 6.0, 3.0),
+                tex_offset: (22, 18),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "left_front_leg".into(),
+            offset: Vec3::new(2.5, 18.0, -3.5),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-1.5, 0.0, -1.5),
+                size: Vec3::new(3.0, 6.0, 3.0),
+                tex_offset: (34, 18),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "right_hind_leg".into(),
+            offset: Vec3::new(-2.5, 18.0, 3.5),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-1.5, 0.0, -1.5),
+                size: Vec3::new(3.0, 6.0, 3.0),
+                tex_offset: (22, 27),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "left_hind_leg".into(),
+            offset: Vec3::new(2.5, 18.0, 3.5),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-1.5, 0.0, -1.5),
+                size: Vec3::new(3.0, 6.0, 3.0),
+                tex_offset: (34, 27),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+    ];
+
+    bake_model(parts, 64, 64)
+}
+
+pub fn bake_sheep_model() -> BakedEntityModel {
+    let mut parts = vec![
+        EntityPart {
+            name: "head".into(),
+            offset: Vec3::new(0.0, 6.0, -8.0),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-3.0, -4.0, -6.0),
+                size: Vec3::new(6.0, 6.0, 8.0),
+                tex_offset: (0, 0),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "body".into(),
+            offset: Vec3::new(0.0, 5.0, 2.0),
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-4.0, -10.0, -7.0),
+                size: Vec3::new(8.0, 16.0, 6.0),
+                tex_offset: (28, 8),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+    ];
+    parts.extend(quadruped_legs(
+        3.0,
+        12.0,
+        -5.0,
+        7.0,
+        ModelCube {
+            origin: Vec3::new(-2.0, 0.0, -2.0),
+            size: Vec3::new(4.0, 12.0, 4.0),
+            tex_offset: (0, 16),
+            deformation: 0.0,
+        },
+    ));
+    bake_model(parts, 64, 32)
+}
+
+pub fn bake_baby_sheep_model() -> BakedEntityModel {
+    let parts = vec![
+        EntityPart {
+            name: "head".into(),
+            offset: Vec3::new(0.0, 15.5, -2.5),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-2.5, -4.5, -3.5),
+                size: Vec3::new(5.0, 5.0, 5.0),
+                tex_offset: (0, 0),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "body".into(),
+            offset: Vec3::new(0.0, 17.0, 0.5),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-3.0, -2.0, -4.5),
+                size: Vec3::new(6.0, 4.0, 9.0),
+                tex_offset: (0, 10),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "right_hind_leg".into(),
+            offset: Vec3::new(-2.0, 19.0, 3.0),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-1.0, 0.0, -1.0),
+                size: Vec3::new(2.0, 5.0, 2.0),
+                tex_offset: (0, 23),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "left_hind_leg".into(),
+            offset: Vec3::new(2.0, 19.0, 3.0),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-1.0, 0.0, -1.0),
+                size: Vec3::new(2.0, 5.0, 2.0),
+                tex_offset: (24, 12),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "right_front_leg".into(),
+            offset: Vec3::new(-2.0, 19.0, -2.0),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-1.0, 0.0, -1.0),
+                size: Vec3::new(2.0, 5.0, 2.0),
+                tex_offset: (8, 23),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "left_front_leg".into(),
+            offset: Vec3::new(2.0, 19.0, -2.0),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-1.0, 0.0, -1.0),
+                size: Vec3::new(2.0, 5.0, 2.0),
+                tex_offset: (24, 5),
+                deformation: 0.0,
+            }],
+            parent: None,
+        },
+    ];
+
+    bake_model(parts, 64, 32)
+}
+
+pub fn bake_sheep_wool_model() -> BakedEntityModel {
+    let mut parts = vec![
+        EntityPart {
+            name: "head".into(),
+            offset: Vec3::new(0.0, 6.0, -8.0),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-3.0, -4.0, -4.0),
+                size: Vec3::new(6.0, 6.0, 6.0),
+                tex_offset: (0, 0),
+                deformation: 0.6,
+            }],
+            parent: None,
+        },
+        EntityPart {
+            name: "body".into(),
+            offset: Vec3::new(0.0, 5.0, 2.0),
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-4.0, -10.0, -7.0),
+                size: Vec3::new(8.0, 16.0, 6.0),
+                tex_offset: (28, 8),
+                deformation: 1.75,
+            }],
+            parent: None,
+        },
+    ];
+    parts.extend(quadruped_legs(
+        3.0,
+        12.0,
+        -5.0,
+        7.0,
+        ModelCube {
+            origin: Vec3::new(-2.0, 0.0, -2.0),
+            size: Vec3::new(4.0, 6.0, 4.0),
+            tex_offset: (0, 16),
+            deformation: 0.5,
+        },
+    ));
+    bake_model(parts, 64, 32)
 }
 
 pub fn compute_humanoid_anim(
@@ -386,12 +725,13 @@ fn generate_cube_vertices(
     let h = cube.size.y;
     let d = cube.size.z;
 
-    let x0 = cube.origin.x / 16.0;
-    let y0 = cube.origin.y / 16.0;
-    let x1 = x0 + w / 16.0;
-    let y1 = y0 + h / 16.0;
-    let z0 = cube.origin.z / 16.0;
-    let z1 = z0 + d / 16.0;
+    let inf = cube.deformation;
+    let x0 = (cube.origin.x - inf) / 16.0;
+    let y0 = (cube.origin.y - inf) / 16.0;
+    let z0 = (cube.origin.z - inf) / 16.0;
+    let x1 = (cube.origin.x + w + inf) / 16.0;
+    let y1 = (cube.origin.y + h + inf) / 16.0;
+    let z1 = (cube.origin.z + d + inf) / 16.0;
 
     let yb = -y1;
     let yt = -y0;

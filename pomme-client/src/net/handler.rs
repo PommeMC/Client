@@ -303,6 +303,17 @@ pub fn handle_game_packet(
                         score: *score,
                     });
                 }
+                // Index 17 = sheep wool/sheared byte (low nibble = DyeColor, bit 4 = sheared).
+                // Emit unconditionally; consumer filters by entity type.
+                if item.index == 17
+                    && let azalea_entity::EntityDataValue::Byte(packed) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::SheepWoolData {
+                        id: p.id.0,
+                        color: *packed & 0x0F,
+                        sheared: (*packed & 0x10) != 0,
+                    });
+                }
             }
         }
         ClientboundGamePacket::TakeItemEntity(p) => {

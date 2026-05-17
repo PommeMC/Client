@@ -137,6 +137,11 @@ pub enum NetworkEvent {
         id: i32,
         is_baby: bool,
     },
+    SheepWoolData {
+        id: i32,
+        color: u8,
+        sheared: bool,
+    },
     ItemPickedUp {
         item_id: i32,
         collector_id: i32,

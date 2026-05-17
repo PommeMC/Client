@@ -8,6 +8,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
 
 layout(push_constant) uniform PushConstants {
     mat4 model;
+    vec4 tint;
 };
 
 layout(location = 0) in vec3 position;
@@ -15,9 +16,11 @@ layout(location = 1) in vec2 tex_coords;
 layout(location = 2) in vec4 light_tint;
 
 layout(location = 0) out vec2 v_tex_coords;
+layout(location = 1) out vec4 v_tint;
 
 void main() {
     vec4 world_pos = model * vec4(position, 1.0);
     gl_Position = view_proj * vec4(world_pos.xyz - camera_pos.xyz, 1.0);
     v_tex_coords = tex_coords;
+    v_tint = tint;
 }

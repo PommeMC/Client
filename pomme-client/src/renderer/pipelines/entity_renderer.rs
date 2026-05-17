@@ -24,6 +24,8 @@ pub struct EntityRenderInfo {
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
     pub entity_kind: EntityKind,
+    pub overlay_tint: [f32; 4],
+    pub draw_overlay: bool,
 }
 
 struct MobVariant {
@@ -39,6 +41,7 @@ struct MobVariant {
 struct MobEntry {
     adult: MobVariant,
     baby: Option<MobVariant>,
+    adult_overlay: Option<MobVariant>,
     anim: AnimationType,
 }
 
@@ -50,6 +53,38 @@ impl MobEntry {
             &self.adult
         }
     }
+}
+
+const WHITE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+const WOOL_COLOR_RGBA: [[f32; 4]; 16] = [
+    rgb(0xF0F0F0), // 0 white
+    rgb(0xEB8844), // 1 orange
+    rgb(0xC354CD), // 2 magenta
+    rgb(0x6689D3), // 3 light_blue
+    rgb(0xDECF2A), // 4 yellow
+    rgb(0x41CD34), // 5 lime
+    rgb(0xD88198), // 6 pink
+    rgb(0x434343), // 7 gray
+    rgb(0xABABAB), // 8 light_gray
+    rgb(0x287697), // 9 cyan
+    rgb(0x7B2FBE), // 10 purple
+    rgb(0x253192), // 11 blue
+    rgb(0x51301A), // 12 brown
+    rgb(0x3B511A), // 13 green
+    rgb(0xB3312C), // 14 red
+    rgb(0x1E1B1B), // 15 black
+];
+
+const fn rgb(hex: u32) -> [f32; 4] {
+    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
+    let b = (hex & 0xFF) as f32 / 255.0;
+    [r, g, b, 1.0]
+}
+
+pub fn wool_color_tint(color: u8) -> [f32; 4] {
+    WOOL_COLOR_RGBA[(color & 0x0F) as usize]
 }
 
 pub struct EntityRenderer {
@@ -71,15 +106,18 @@ enum AnimationType {
     Humanoid,
 }
 
+struct VariantDef {
+    model: BakedEntityModel,
+    tex_keys: &'static [&'static str],
+    tex_size: u32,
+}
+
 struct MobDef {
     kind: EntityKind,
     anim: AnimationType,
-    adult_model: BakedEntityModel,
-    adult_tex_keys: &'static [&'static str],
-    adult_tex_size: u32,
-    baby_model: Option<BakedEntityModel>,
-    baby_tex_keys: Option<&'static [&'static str]>,
-    baby_tex_size: u32,
+    adult: VariantDef,
+    baby: Option<VariantDef>,
+    overlay: Option<VariantDef>,
 }
 
 fn mob_definitions() -> Vec<MobDef> {
@@ -87,25 +125,68 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Pig,
             anim: AnimationType::Quadruped,
-            adult_model: entity_model::bake_pig_model(),
-            adult_tex_keys: &[
-                "minecraft/textures/entity/pig/pig_temperate.png",
-                "minecraft/textures/entity/pig/temperate_pig.png",
-            ],
-            adult_tex_size: 64,
-            baby_model: Some(entity_model::bake_baby_pig_model()),
-            baby_tex_keys: Some(&["minecraft/textures/entity/pig/pig_temperate_baby.png"]),
-            baby_tex_size: 32,
+            adult: VariantDef {
+                model: entity_model::bake_pig_model(),
+                tex_keys: &[
+                    "minecraft/textures/entity/pig/pig_temperate.png",
+                    "minecraft/textures/entity/pig/temperate_pig.png",
+                ],
+                tex_size: 64,
+            },
+            baby: Some(VariantDef {
+                model: entity_model::bake_baby_pig_model(),
+                tex_keys: &["minecraft/textures/entity/pig/pig_temperate_baby.png"],
+                tex_size: 32,
+            }),
+            overlay: None,
+        },
+        MobDef {
+            kind: EntityKind::Cow,
+            anim: AnimationType::Quadruped,
+            adult: VariantDef {
+                model: entity_model::bake_cow_model(),
+                tex_keys: &[
+                    "minecraft/textures/entity/cow/cow_temperate.png",
+                    "minecraft/textures/entity/cow/cow.png",
+                ],
+                tex_size: 64,
+            },
+            baby: Some(VariantDef {
+                model: entity_model::bake_baby_cow_model(),
+                tex_keys: &["minecraft/textures/entity/cow/cow_temperate_baby.png"],
+                tex_size: 64,
+            }),
+            overlay: None,
+        },
+        MobDef {
+            kind: EntityKind::Sheep,
+            anim: AnimationType::Quadruped,
+            adult: VariantDef {
+                model: entity_model::bake_sheep_model(),
+                tex_keys: &["minecraft/textures/entity/sheep/sheep.png"],
+                tex_size: 64,
+            },
+            baby: Some(VariantDef {
+                model: entity_model::bake_baby_sheep_model(),
+                tex_keys: &["minecraft/textures/entity/sheep/sheep_baby.png"],
+                tex_size: 64,
+            }),
+            overlay: Some(VariantDef {
+                model: entity_model::bake_sheep_wool_model(),
+                tex_keys: &["minecraft/textures/entity/sheep/sheep_wool.png"],
+                tex_size: 64,
+            }),
         },
         MobDef {
             kind: EntityKind::Player,
             anim: AnimationType::Humanoid,
-            adult_model: entity_model::bake_player_model(),
-            adult_tex_keys: &["minecraft/textures/entity/player/wide/steve.png"],
-            adult_tex_size: 64,
-            baby_model: None,
-            baby_tex_keys: None,
-            baby_tex_size: 64,
+            adult: VariantDef {
+                model: entity_model::bake_player_model(),
+                tex_keys: &["minecraft/textures/entity/player/wide/steve.png"],
+                tex_size: 64,
+            },
+            baby: None,
+            overlay: None,
         },
     ]
 }
@@ -135,7 +216,7 @@ impl EntityRenderer {
         let push_constant_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::Vertex,
             offset: 0,
-            size: 64,
+            size: 80,
         };
 
         let layouts = [camera_layout, texture_layout];
@@ -156,7 +237,7 @@ impl EntityRenderer {
         let defs = mob_definitions();
         let tex_count: u32 = defs
             .iter()
-            .map(|d| if d.baby_model.is_some() { 2 } else { 1 })
+            .map(|d| 1 + u32::from(d.baby.is_some()) + u32::from(d.overlay.is_some()))
             .sum();
 
         let pool_sizes = [
@@ -226,23 +307,8 @@ impl EntityRenderer {
         let mut mobs = HashMap::new();
 
         for def in defs {
-            let adult = create_mob_variant(
-                device,
-                queue,
-                command_pool,
-                allocator,
-                descriptor_pool,
-                texture_layout,
-                texture_sampler,
-                jar_assets_dir,
-                asset_index,
-                def.adult_model,
-                def.adult_tex_keys,
-                def.adult_tex_size,
-            );
-
-            let baby = match (def.baby_model, def.baby_tex_keys) {
-                (Some(model), Some(keys)) => Some(create_mob_variant(
+            let mut build = |v: VariantDef| {
+                create_mob_variant(
                     device,
                     queue,
                     command_pool,
@@ -252,18 +318,19 @@ impl EntityRenderer {
                     texture_sampler,
                     jar_assets_dir,
                     asset_index,
-                    model,
-                    keys,
-                    def.baby_tex_size,
-                )),
-                _ => None,
+                    v,
+                )
             };
+            let adult = build(def.adult);
+            let baby = def.baby.map(&mut build);
+            let adult_overlay = def.overlay.map(&mut build);
 
             mobs.insert(
                 def.kind,
                 MobEntry {
                     adult,
                     baby,
+                    adult_overlay,
                     anim: def.anim,
                 },
             );
@@ -303,19 +370,6 @@ impl EntityRenderer {
             };
             let variant = entry.variant(info.is_baby);
 
-            let variant_ptr: *const MobVariant = variant;
-            if last_variant != variant_ptr {
-                cmd.bind_descriptor_sets(
-                    vk::PipelineBindPoint::Graphics,
-                    self.pipeline_layout,
-                    0,
-                    &[self.camera_sets[frame], variant.texture_set],
-                    &[],
-                );
-                cmd.bind_vertex_buffers(0, &[variant.vertex_buffer], &[0]);
-                last_variant = variant_ptr;
-            }
-
             let entity_mat = glam::Mat4::from_translation(glam::Vec3::new(
                 info.x as f32,
                 info.y as f32,
@@ -339,26 +393,74 @@ impl EntityRenderer {
                 ),
             };
 
-            let part_transforms = variant.model.compute_part_transforms(&anim_rotations);
+            self.draw_variant(
+                cmd,
+                frame,
+                variant,
+                entity_mat,
+                &anim_rotations,
+                WHITE_TINT,
+                &mut last_variant,
+            );
 
-            for (i, (start, count)) in variant.model.part_ranges.iter().enumerate() {
-                if *count == 0 {
-                    continue;
-                }
-
-                let part_mat = entity_mat * part_transforms[i];
-
-                let mat_array = part_mat.to_cols_array();
-                let mat_bytes: &[u8] = bytemuck::cast_slice(&mat_array);
-                cmd.push_constants(
-                    self.pipeline_layout,
-                    vk::ShaderStageFlags::Vertex,
-                    0,
-                    mat_bytes,
+            if info.draw_overlay
+                && !info.is_baby
+                && let Some(overlay) = entry.adult_overlay.as_ref()
+            {
+                self.draw_variant(
+                    cmd,
+                    frame,
+                    overlay,
+                    entity_mat,
+                    &anim_rotations,
+                    info.overlay_tint,
+                    &mut last_variant,
                 );
-
-                cmd.draw(*count, 1, *start, 0);
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_variant(
+        &self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        variant: &MobVariant,
+        entity_mat: glam::Mat4,
+        anim_rotations: &[(usize, glam::Vec3)],
+        tint: [f32; 4],
+        last_variant: &mut *const MobVariant,
+    ) {
+        let ptr: *const MobVariant = variant;
+        if *last_variant != ptr {
+            cmd.bind_descriptor_sets(
+                vk::PipelineBindPoint::Graphics,
+                self.pipeline_layout,
+                0,
+                &[self.camera_sets[frame], variant.texture_set],
+                &[],
+            );
+            cmd.bind_vertex_buffers(0, &[variant.vertex_buffer], &[0]);
+            *last_variant = ptr;
+        }
+
+        let part_transforms = variant.model.compute_part_transforms(anim_rotations);
+        for (i, (start, count)) in variant.model.part_ranges.iter().enumerate() {
+            if *count == 0 {
+                continue;
+            }
+            let part_mat = entity_mat * part_transforms[i];
+            let mat_array = part_mat.to_cols_array();
+            let mut bytes = [0u8; 80];
+            bytes[..64].copy_from_slice(bytemuck::cast_slice(&mat_array));
+            bytes[64..].copy_from_slice(bytemuck::cast_slice(&tint));
+            cmd.push_constants(
+                self.pipeline_layout,
+                vk::ShaderStageFlags::Vertex,
+                0,
+                &bytes,
+            );
+            cmd.draw(*count, 1, *start, 0);
         }
     }
 
@@ -383,6 +485,7 @@ impl EntityRenderer {
         for entry in self.mobs.values_mut() {
             let variants: Vec<&mut MobVariant> = std::iter::once(&mut entry.adult)
                 .chain(entry.baby.iter_mut())
+                .chain(entry.adult_overlay.iter_mut())
                 .collect();
             for v in variants {
                 device.destroy_buffer(v.vertex_buffer, None);
@@ -422,10 +525,13 @@ fn create_mob_variant(
     texture_sampler: vk::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-    model: BakedEntityModel,
-    tex_keys: &[&str],
-    fallback_tex_size: u32,
+    variant: VariantDef,
 ) -> MobVariant {
+    let VariantDef {
+        model,
+        tex_keys,
+        tex_size,
+    } = variant;
     let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
     let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
         device,
@@ -443,7 +549,7 @@ fn create_mob_variant(
         jar_assets_dir,
         asset_index,
         tex_keys,
-        fallback_tex_size,
+        tex_size,
     );
 
     let tex_alloc_info = vk::DescriptorSetAllocateInfo {
