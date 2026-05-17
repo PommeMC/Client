@@ -321,7 +321,7 @@ pub fn handle_game_packet(
                     let name = opt.as_ref().map(|c| c.to_string());
                     let _ = event_tx.try_send(NetworkEvent::EntityCustomName { id: p.id.0, name });
                 }
-                // Index 18 on cows = CowVariant Holder. Resolve protocol ID to a known variant.
+                // Index 18 on cows = CowVariant Holder.
                 if item.index == 18
                     && let azalea_entity::EntityDataValue::CowVariant(variant) = &item.value
                 {
