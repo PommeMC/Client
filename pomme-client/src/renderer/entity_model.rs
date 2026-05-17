@@ -864,10 +864,9 @@ fn generate_cube_vertices(
         },
     ];
 
-    // Face indices 4 (-X / west) and 5 (+X / east). Vanilla's mirror swaps
-    // minX/maxX and reverses polygon winding; the visible result is that the
-    // two side faces exchange UV regions while every face also has its U
-    // flipped. Other faces just get the U flip.
+    // Indices 4 (-X) and 5 (+X) are the side faces. When mirror is set, vanilla's
+    // minX/maxX swap effectively exchanges their UV regions; every face also has
+    // its U flipped.
     for (idx, face) in faces.iter().enumerate() {
         let uv_source = match (cube.mirror, idx) {
             (true, 4) => &faces[5].uv,
