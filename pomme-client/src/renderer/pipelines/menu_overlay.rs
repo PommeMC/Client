@@ -1347,6 +1347,36 @@ pub enum SpriteId {
     InventoryBackground,
     CreativeItemsBackground,
     CreativeSearchBackground,
+    CreativeTabTopUnselected1,
+    CreativeTabTopUnselected2,
+    CreativeTabTopUnselected3,
+    CreativeTabTopUnselected4,
+    CreativeTabTopUnselected5,
+    CreativeTabTopUnselected6,
+    CreativeTabTopUnselected7,
+    CreativeTabTopSelected1,
+    CreativeTabTopSelected2,
+    CreativeTabTopSelected3,
+    CreativeTabTopSelected4,
+    CreativeTabTopSelected5,
+    CreativeTabTopSelected6,
+    CreativeTabTopSelected7,
+    CreativeTabBottomUnselected1,
+    CreativeTabBottomUnselected2,
+    CreativeTabBottomUnselected3,
+    CreativeTabBottomUnselected4,
+    CreativeTabBottomUnselected5,
+    CreativeTabBottomUnselected6,
+    CreativeTabBottomUnselected7,
+    CreativeTabBottomSelected1,
+    CreativeTabBottomSelected2,
+    CreativeTabBottomSelected3,
+    CreativeTabBottomSelected4,
+    CreativeTabBottomSelected5,
+    CreativeTabBottomSelected6,
+    CreativeTabBottomSelected7,
+    CreativeScroller,
+    CreativeScrollerDisabled,
     EmptyHelmet,
     EmptyChestplate,
     EmptyLeggings,
@@ -1388,6 +1418,49 @@ pub enum SpriteId {
     Unreachable,
     SteveHead,
 }
+
+pub const CREATIVE_TAB_SPRITES: [[[SpriteId; 7]; 2]; 2] = [
+    [
+        [
+            SpriteId::CreativeTabTopUnselected1,
+            SpriteId::CreativeTabTopUnselected2,
+            SpriteId::CreativeTabTopUnselected3,
+            SpriteId::CreativeTabTopUnselected4,
+            SpriteId::CreativeTabTopUnselected5,
+            SpriteId::CreativeTabTopUnselected6,
+            SpriteId::CreativeTabTopUnselected7,
+        ],
+        [
+            SpriteId::CreativeTabTopSelected1,
+            SpriteId::CreativeTabTopSelected2,
+            SpriteId::CreativeTabTopSelected3,
+            SpriteId::CreativeTabTopSelected4,
+            SpriteId::CreativeTabTopSelected5,
+            SpriteId::CreativeTabTopSelected6,
+            SpriteId::CreativeTabTopSelected7,
+        ],
+    ],
+    [
+        [
+            SpriteId::CreativeTabBottomUnselected1,
+            SpriteId::CreativeTabBottomUnselected2,
+            SpriteId::CreativeTabBottomUnselected3,
+            SpriteId::CreativeTabBottomUnselected4,
+            SpriteId::CreativeTabBottomUnselected5,
+            SpriteId::CreativeTabBottomUnselected6,
+            SpriteId::CreativeTabBottomUnselected7,
+        ],
+        [
+            SpriteId::CreativeTabBottomSelected1,
+            SpriteId::CreativeTabBottomSelected2,
+            SpriteId::CreativeTabBottomSelected3,
+            SpriteId::CreativeTabBottomSelected4,
+            SpriteId::CreativeTabBottomSelected5,
+            SpriteId::CreativeTabBottomSelected6,
+            SpriteId::CreativeTabBottomSelected7,
+        ],
+    ],
+];
 
 struct SpriteRegion {
     u0: f32,
@@ -1701,6 +1774,16 @@ fn build_sprite_atlas(
             "minecraft/textures/gui/sprites/server_list/unreachable.png",
             0.0,
         ),
+        (
+            SpriteId::CreativeScroller,
+            "minecraft/textures/gui/sprites/container/creative_inventory/scroller.png",
+            0.0,
+        ),
+        (
+            SpriteId::CreativeScrollerDisabled,
+            "minecraft/textures/gui/sprites/container/creative_inventory/scroller_disabled.png",
+            0.0,
+        ),
     ];
 
     let mut images: Vec<(SpriteId, Vec<u8>, u32, u32, f32)> = Vec::new();
@@ -1799,7 +1882,6 @@ fn build_sprite_atlas(
         }
     }
 
-    // Creative inventory backgrounds: top-left 195x136 region of a 256x256 PNG.
     for (id, path) in [
         (
             SpriteId::CreativeItemsBackground,
@@ -1834,7 +1916,31 @@ fn build_sprite_atlas(
         }
     }
 
-    let atlas_size = 512u32;
+    for (row_idx, row_name) in ["top", "bottom"].iter().enumerate() {
+        for (state_idx, state_name) in ["unselected", "selected"].iter().enumerate() {
+            for col in 1..=7u32 {
+                let id = CREATIVE_TAB_SPRITES[row_idx][state_idx][(col - 1) as usize];
+                let asset_key = format!(
+                    "minecraft/textures/gui/sprites/container/creative_inventory/tab_{row_name}_{state_name}_{col}.png"
+                );
+                let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
+                match crate::assets::load_image(&path) {
+                    Ok(img) => {
+                        let rgba = img.to_rgba8();
+                        let w = rgba.width();
+                        let h = rgba.height();
+                        images.push((id, rgba.into_raw(), w, h, 0.0));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load creative tab sprite {asset_key}: {e}");
+                        images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
+                    }
+                }
+            }
+        }
+    }
+
+    let atlas_size = 1024u32;
     let mut pixels = vec![0u8; (atlas_size * atlas_size * 4) as usize];
     let mut regions = HashMap::new();
     let mut cursor_x = 0u32;
