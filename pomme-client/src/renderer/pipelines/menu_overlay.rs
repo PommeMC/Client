@@ -1345,6 +1345,8 @@ pub enum SpriteId {
     ExperienceBarBackground,
     ExperienceBarProgress,
     InventoryBackground,
+    CreativeItemsBackground,
+    CreativeSearchBackground,
     EmptyHelmet,
     EmptyChestplate,
     EmptyLeggings,
@@ -1794,6 +1796,41 @@ fn build_sprite_atlas(
                 1,
                 0.0,
             ));
+        }
+    }
+
+    // Creative inventory backgrounds: top-left 195x136 region of a 256x256 PNG.
+    for (id, path) in [
+        (
+            SpriteId::CreativeItemsBackground,
+            "minecraft/textures/gui/container/creative_inventory/tab_items.png",
+        ),
+        (
+            SpriteId::CreativeSearchBackground,
+            "minecraft/textures/gui/container/creative_inventory/tab_item_search.png",
+        ),
+    ] {
+        let path = resolve_asset_path(jar_assets_dir, asset_index, path);
+        match crate::assets::load_image(&path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let full_w = rgba.width();
+                let crop_w = 195u32.min(full_w);
+                let crop_h = 136u32.min(rgba.height());
+                let mut cropped = vec![0u8; (crop_w * crop_h * 4) as usize];
+                for y in 0..crop_h {
+                    let src_off = (y * full_w * 4) as usize;
+                    let dst_off = (y * crop_w * 4) as usize;
+                    let row_bytes = (crop_w * 4) as usize;
+                    cropped[dst_off..dst_off + row_bytes]
+                        .copy_from_slice(&rgba.as_raw()[src_off..src_off + row_bytes]);
+                }
+                images.push((id, cropped, crop_w, crop_h, 0.0));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load creative background {id:?}: {e}");
+                images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
+            }
         }
     }
 

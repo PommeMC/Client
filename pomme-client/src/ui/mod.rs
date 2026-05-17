@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod common;
+pub mod creative_inventory;
 pub mod death;
 #[allow(dead_code)]
 pub mod font;

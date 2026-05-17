@@ -161,7 +161,7 @@ impl AppCore {
         let captured = game.is_some_and(|g| {
             !g.paused
                 && !g.dead
-                && !g.inventory_open
+                && !g.gui_open()
                 && !g.chat.is_open()
                 && self.input.is_cursor_captured()
         });
@@ -729,7 +729,7 @@ impl AppCore {
         self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
 
-        if !game.paused && !game.inventory_open && !game.chat.is_open() {
+        if !game.paused && !game.gui_open() && !game.chat.is_open() {
             let eye_pos = game.player.position + glam::Vec3::new(0.0, 1.62, 0.0);
             game.interaction.update_target(
                 eye_pos,

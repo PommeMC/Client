@@ -265,6 +265,16 @@ impl ApplicationHandler for App {
                                         KeyCode::F3 => game.show_debug = !game.show_debug,
                                         _ => self.core.input.on_menu_key_event(&event),
                                     }
+                                } else if game.creative_inventory_open {
+                                    match code {
+                                        KeyCode::Escape | KeyCode::KeyE => {
+                                            game.creative_inventory_open = false;
+                                            self.core
+                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
+                                        }
+                                        KeyCode::F3 => game.show_debug = !game.show_debug,
+                                        _ => self.core.input.on_menu_key_event(&event),
+                                    }
                                 } else {
                                     match code {
                                         KeyCode::Escape
@@ -288,16 +298,20 @@ impl ApplicationHandler for App {
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
                                         KeyCode::KeyE if !game.paused && !game.dead => {
-                                            game.inventory_open = !game.inventory_open;
+                                            if game.player.game_mode == 1 {
+                                                game.creative_inventory_open = true;
+                                            } else {
+                                                game.inventory_open = !game.inventory_open;
+                                            }
                                             self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
-                                        KeyCode::KeyT if !game.paused && !game.inventory_open => {
+                                        KeyCode::KeyT if !game.paused && !game.gui_open() => {
                                             game.chat.open();
                                             self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
-                                        KeyCode::Slash if !game.paused && !game.inventory_open => {
+                                        KeyCode::Slash if !game.paused && !game.gui_open() => {
                                             game.chat.open_with_slash();
                                             self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
@@ -318,7 +332,7 @@ impl ApplicationHandler for App {
                                 }
                             }
 
-                            if !game.paused && !game.chat.is_open() && !game.inventory_open {
+                            if !game.paused && !game.chat.is_open() && !game.gui_open() {
                                 self.core.input.on_key_event(&event);
                             }
 
@@ -340,8 +354,11 @@ impl ApplicationHandler for App {
                     AppPhase::InMenu { .. } | AppPhase::Connecting { .. } => {
                         self.core.input.on_menu_scroll(scroll);
                     }
-                    AppPhase::InGame { game, .. } if !game.inventory_open => {
+                    AppPhase::InGame { game, .. } if !game.gui_open() => {
                         self.core.input.on_scroll(scroll)
+                    }
+                    AppPhase::InGame { game, .. } if game.creative_inventory_open => {
+                        self.core.input.on_menu_scroll(scroll);
                     }
                     _ => {}
                 }
@@ -355,7 +372,7 @@ impl ApplicationHandler for App {
                 if matches!(
                     self.phase.get(),
                     AppPhase::InMenu { .. } | AppPhase::Connecting { .. }
-                ) || matches!(self.phase.get(), AppPhase::InGame { game, .. } if game.paused || game.inventory_open)
+                ) || matches!(self.phase.get(), AppPhase::InGame { game, .. } if game.paused || game.gui_open())
                     || self.core.input.is_cursor_captured() =>
             {
                 self.core.input.on_mouse_button(button, state);
@@ -534,7 +551,7 @@ impl ApplicationHandler for App {
     ) {
         if let DeviceEvent::MouseMotion { delta } = event
             && self.core.input.is_cursor_captured()
-            && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.inventory_open && !game.chat.is_open())
+            && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.gui_open() && !game.chat.is_open())
         {
             self.core.input.on_mouse_motion(delta);
         }
