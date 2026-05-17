@@ -188,7 +188,7 @@ impl BlurPipeline {
             },
             ..Default::default()
         };
-        let barrier_dst = vk::ImageMemoryBarrier {
+        let barrier_dst_a = vk::ImageMemoryBarrier {
             image: self.image_a,
             old_layout: vk::ImageLayout::Undefined,
             new_layout: vk::ImageLayout::TransferDstOptimal,
@@ -203,13 +203,28 @@ impl BlurPipeline {
             },
             ..Default::default()
         };
+        let barrier_dst_b = vk::ImageMemoryBarrier {
+            image: self.image_b,
+            old_layout: vk::ImageLayout::Undefined,
+            new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+            src_access_mask: vk::AccessFlags::empty(),
+            dst_access_mask: vk::AccessFlags::ShaderRead,
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::Color,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            ..Default::default()
+        };
         cmd.pipeline_barrier(
-            vk::PipelineStageFlags::ColorAttachmentOutput,
-            vk::PipelineStageFlags::Transfer,
+            vk::PipelineStageFlags::ColorAttachmentOutput | vk::PipelineStageFlags::TopOfPipe,
+            vk::PipelineStageFlags::Transfer | vk::PipelineStageFlags::FragmentShader,
             vk::DependencyFlags::empty(),
             &[],
             &[],
-            &[barrier_src, barrier_dst],
+            &[barrier_src, barrier_dst_a, barrier_dst_b],
         );
 
         let blit = vk::ImageBlit {
