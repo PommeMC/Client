@@ -471,14 +471,19 @@ pub fn update_game(
     let destroy_info = game.interaction.destroy_stage();
 
     let alpha = core.tick_accumulator / TICK_RATE;
+    let game_time = game.sky_state.game_time;
     let mut entity_renders: Vec<EntityRenderInfo> = game
         .entity_store
         .living
-        .values()
-        .map(|e| {
+        .iter()
+        .map(|(&entity_id, e)| {
             let pos = e.prev_position.lerp(e.position, alpha as f64);
             let body_yaw = e.prev_body_yaw + (e.body_yaw - e.prev_body_yaw) * alpha;
             let head_yaw = e.prev_head_yaw + (e.head_yaw - e.prev_head_yaw) * alpha;
+
+            let (overlay_tints, head_y_offset, head_x_rot_override, variant_index) =
+                build_sheep_cow_extras(entity_id, e, alpha, game_time);
+
             EntityRenderInfo {
                 x: pos.x,
                 y: pos.y,
@@ -495,11 +500,10 @@ pub fn update_game(
                     + (e.walk_anim_speed - e.prev_walk_anim_speed) * alpha)
                     .min(1.0),
                 entity_kind: e.entity_type,
-                overlay_tint: e
-                    .wool_color
-                    .map(crate::renderer::pipelines::entity_renderer::wool_color_tint)
-                    .unwrap_or([1.0, 1.0, 1.0, 1.0]),
-                draw_overlay: !e.is_sheared,
+                variant_index,
+                overlay_tints,
+                head_y_offset,
+                head_x_rot_override,
             }
         })
         .collect();
@@ -519,8 +523,10 @@ pub fn update_game(
                 + (game.player_walk_speed - game.player_prev_walk_speed) * alpha)
                 .min(1.0),
             entity_kind: azalea_registry::builtin::EntityKind::Player,
-            overlay_tint: [1.0, 1.0, 1.0, 1.0],
-            draw_overlay: true,
+            variant_index: 0,
+            overlay_tints: [None, None],
+            head_y_offset: 0.0,
+            head_x_rot_override: None,
         });
     }
 
@@ -754,4 +760,82 @@ fn build_item_render_infos(
     }
 
     infos
+}
+
+fn build_sheep_cow_extras(
+    entity_id: i32,
+    e: &crate::entity::LivingEntity,
+    alpha: f32,
+    game_time: u64,
+) -> ([Option<[f32; 4]>; 2], f32, Option<f32>, u32) {
+    use azalea_registry::builtin::EntityKind;
+
+    use crate::renderer::pipelines::entity_renderer::{
+        WHITE_TINT, jeb_sheep_tint, wool_color_tint,
+    };
+
+    if e.entity_type == EntityKind::Cow {
+        return ([None, None], 0.0, None, e.cow_variant as u32);
+    }
+    if e.entity_type != EntityKind::Sheep {
+        return ([None, None], 0.0, None, 0);
+    }
+
+    let is_jeb = e.custom_name.as_deref() == Some("jeb_");
+    let tint = if is_jeb {
+        jeb_sheep_tint(entity_id, game_time)
+    } else if let Some(c) = e.wool_color {
+        wool_color_tint(c)
+    } else {
+        WHITE_TINT
+    };
+
+    let overlay_tints = if e.is_sheared {
+        [None, None]
+    } else if e.is_baby {
+        [Some(tint), None]
+    } else {
+        let undercoat_visible = is_jeb || e.wool_color.is_some_and(|c| c != 0);
+        [
+            if undercoat_visible { Some(tint) } else { None },
+            Some(tint),
+        ]
+    };
+
+    let (pos_scale, angle_scale) = sheep_eat_scales(e.eat_anim_tick, e.prev_eat_anim_tick, alpha);
+    let age_scale = if e.is_baby { 0.5 } else { 1.0 };
+    let head_y_offset = pos_scale * 9.0 * age_scale;
+    let head_x_rot_override = if e.eat_anim_tick > 0 || e.prev_eat_anim_tick > 0 {
+        Some(angle_scale)
+    } else {
+        None
+    };
+
+    (overlay_tints, head_y_offset, head_x_rot_override, 0)
+}
+
+fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
+    // Linear-blend between previous and current tick using partial-tick alpha,
+    // then apply vanilla Sheep.java:127-149 piecewise functions.
+    let interp = prev_eat_tick as f32 + (eat_tick as f32 - prev_eat_tick as f32) * alpha;
+    let pos_scale = if interp <= 0.0 {
+        0.0
+    } else if (4.0..=36.0).contains(&interp) {
+        1.0
+    } else if interp < 4.0 {
+        interp / 4.0
+    } else {
+        -(interp - 40.0) / 4.0
+    };
+
+    let angle_scale = if (4.0..36.0).contains(&interp) {
+        let s = (interp - 4.0) / 32.0;
+        0.628_318_55 + 0.219_911_49 * (s * 28.7).sin()
+    } else if interp > 0.0 {
+        0.628_318_55
+    } else {
+        0.0
+    };
+
+    (pos_scale, angle_scale)
 }

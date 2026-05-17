@@ -142,6 +142,17 @@ pub enum NetworkEvent {
         color: u8,
         sheared: bool,
     },
+    SheepEatStart {
+        id: i32,
+    },
+    CowVariant {
+        id: i32,
+        variant: u8,
+    },
+    EntityCustomName {
+        id: i32,
+        name: Option<String>,
+    },
     ItemPickedUp {
         item_id: i32,
         collector_id: i32,

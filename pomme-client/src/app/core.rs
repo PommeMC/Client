@@ -464,6 +464,15 @@ impl AppCore {
                 NetworkEvent::SheepWoolData { id, color, sheared } => {
                     game.entity_store.set_sheep_wool(id, color, sheared);
                 }
+                NetworkEvent::SheepEatStart { id } => {
+                    game.entity_store.start_sheep_eat(id);
+                }
+                NetworkEvent::CowVariant { id, variant } => {
+                    game.entity_store.set_cow_variant(id, variant);
+                }
+                NetworkEvent::EntityCustomName { id, name } => {
+                    game.entity_store.set_custom_name(id, name);
+                }
                 NetworkEvent::ItemPickedUp {
                     item_id,
                     collector_id,

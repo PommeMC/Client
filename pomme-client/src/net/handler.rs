@@ -314,7 +314,40 @@ pub fn handle_game_packet(
                         sheared: (*packed & 0x10) != 0,
                     });
                 }
+                // Index 2 = custom name (Optional<Component>); needed for jeb_ sheep detection.
+                if item.index == 2
+                    && let azalea_entity::EntityDataValue::OptionalFormattedText(opt) = &item.value
+                {
+                    let name = opt.as_ref().map(|c| c.to_string());
+                    let _ = event_tx.try_send(NetworkEvent::EntityCustomName { id: p.id.0, name });
+                }
+                // Index 18 on cows = CowVariant Holder. Resolve protocol ID to a known variant.
+                if item.index == 18
+                    && let azalea_entity::EntityDataValue::CowVariant(variant) = &item.value
+                {
+                    use azalea_registry::DataRegistry;
+                    let resolved = registry_holder
+                        .protocol_id_to_identifier(
+                            azalea_registry::identifier::Identifier::new("minecraft:cow_variant"),
+                            variant.protocol_id(),
+                        )
+                        .map(|id| match id.path() {
+                            "temperate" => 0u8,
+                            "cold" => 1,
+                            "warm" => 2,
+                            _ => 0,
+                        })
+                        .unwrap_or(0);
+                    let _ = event_tx.try_send(NetworkEvent::CowVariant {
+                        id: p.id.0,
+                        variant: resolved,
+                    });
+                }
             }
+        }
+        // Event id 10 = sheep eat-grass animation start (40-tick head-dip).
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 10 => {
+            let _ = event_tx.try_send(NetworkEvent::SheepEatStart { id: p.entity_id.0 });
         }
         ClientboundGamePacket::TakeItemEntity(p) => {
             let _ = event_tx.try_send(NetworkEvent::ItemPickedUp {

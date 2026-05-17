@@ -170,6 +170,10 @@ pub struct LivingEntity {
     pub on_ground: bool,
     pub wool_color: Option<u8>,
     pub is_sheared: bool,
+    pub cow_variant: u8,
+    pub eat_anim_tick: u8,
+    pub prev_eat_anim_tick: u8,
+    pub custom_name: Option<String>,
     interp_target: DVec3,
     interp_yaw: f32,
     interp_pitch: f32,
@@ -205,6 +209,10 @@ impl LivingEntity {
             on_ground: false,
             wool_color: None,
             is_sheared: false,
+            cow_variant: 0,
+            eat_anim_tick: 0,
+            prev_eat_anim_tick: 0,
+            custom_name: None,
             interp_target: position,
             interp_yaw: yaw,
             interp_pitch: pitch,
@@ -515,6 +523,29 @@ impl EntityStore {
         }
     }
 
+    pub fn set_cow_variant(&mut self, id: i32, variant: u8) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Cow
+        {
+            entity.cow_variant = variant;
+        }
+    }
+
+    pub fn start_sheep_eat(&mut self, id: i32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Sheep
+        {
+            entity.eat_anim_tick = 40;
+            entity.prev_eat_anim_tick = 40;
+        }
+    }
+
+    pub fn set_custom_name(&mut self, id: i32, name: Option<String>) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.custom_name = name;
+        }
+    }
+
     pub fn update_living_rotation(&mut self, id: i32, yaw: f32, pitch: f32) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.interp_yaw = yaw;
@@ -547,6 +578,10 @@ impl EntityStore {
                 &mut entity.walk_anim_speed,
                 &mut entity.prev_walk_anim_speed,
             );
+            entity.prev_eat_anim_tick = entity.eat_anim_tick;
+            if entity.eat_anim_tick > 0 {
+                entity.eat_anim_tick -= 1;
+            }
         }
     }
 }
