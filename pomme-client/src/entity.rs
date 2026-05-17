@@ -173,6 +173,7 @@ pub struct LivingEntity {
     pub cow_variant: u8,
     pub eat_anim_tick: u8,
     pub prev_eat_anim_tick: u8,
+    pub age_in_ticks: u32,
     pub custom_name: Option<String>,
     interp_target: DVec3,
     interp_yaw: f32,
@@ -212,6 +213,7 @@ impl LivingEntity {
             cow_variant: 0,
             eat_anim_tick: 0,
             prev_eat_anim_tick: 0,
+            age_in_ticks: 0,
             custom_name: None,
             interp_target: position,
             interp_yaw: yaw,
@@ -582,6 +584,7 @@ impl EntityStore {
             if entity.eat_anim_tick > 0 {
                 entity.eat_anim_tick -= 1;
             }
+            entity.age_in_ticks = entity.age_in_ticks.wrapping_add(1);
         }
     }
 }

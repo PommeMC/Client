@@ -102,11 +102,11 @@ pub fn wool_color_tint(color: u8) -> [f32; 4] {
     WOOL_COLOR_RGBA[(color & 0x0F) as usize]
 }
 
-pub fn jeb_sheep_tint(entity_id: i32, game_time: u64) -> [f32; 4] {
-    let phase = (game_time / 25).wrapping_add(entity_id as u64);
-    let c1 = (phase % 16) as usize;
-    let c2 = ((phase + 1) % 16) as usize;
-    let t = (game_time % 25) as f32 / 25.0;
+pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
+    let base = (age_in_ticks / 25).wrapping_add(entity_id as u32);
+    let c1 = (base % 16) as usize;
+    let c2 = ((base + 1) % 16) as usize;
+    let t = (age_in_ticks % 25) as f32 / 25.0;
     let a = WOOL_COLOR_RGBA[c1];
     let b = WOOL_COLOR_RGBA[c2];
     [
@@ -412,6 +412,14 @@ impl EntityRenderer {
             let baby_overlays: Vec<MobVariant> =
                 def.baby_overlays.into_iter().flat_map(&mut build).collect();
 
+            // Anim part-name indices are computed against the base variant's model and
+            // reused for each overlay draw. Catch mismatched part order at construction
+            // time rather than rendering wrong limbs in production.
+            assert_part_order_matches(&adult_variants, &adult_overlays);
+            if let Some(baby) = &baby_variants {
+                assert_part_order_matches(baby, &baby_overlays);
+            }
+
             mobs.insert(
                 def.kind,
                 MobEntry {
@@ -604,6 +612,30 @@ impl EntityRenderer {
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
         device.destroy_descriptor_set_layout(self.texture_layout, None);
+    }
+}
+
+fn assert_part_order_matches(base: &[MobVariant], overlays: &[MobVariant]) {
+    let Some(base_first) = base.first() else {
+        return;
+    };
+    let base_names: Vec<&str> = base_first
+        .model
+        .parts
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    for overlay in overlays {
+        let overlay_names: Vec<&str> = overlay
+            .model
+            .parts
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(
+            base_names, overlay_names,
+            "overlay part order must match base; anim indices are shared across both"
+        );
     }
 }
 

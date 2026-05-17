@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use azalea_core::position::ChunkPos;
 use azalea_protocol::packets::game::{ServerboundClientInformation, ServerboundGamePacket};
+use azalea_registry::builtin::EntityKind;
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
@@ -15,7 +16,9 @@ use crate::player::LocalPlayer;
 use crate::player::interaction::InteractionState;
 use crate::player::tab_list::TabList;
 use crate::renderer::chunk::mesher::{BiomeClimate, MeshDispatcher};
-use crate::renderer::pipelines::entity_renderer::EntityRenderInfo;
+use crate::renderer::pipelines::entity_renderer::{
+    EntityRenderInfo, WHITE_TINT, jeb_sheep_tint, wool_color_tint,
+};
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
@@ -471,7 +474,6 @@ pub fn update_game(
     let destroy_info = game.interaction.destroy_stage();
 
     let alpha = core.tick_accumulator / TICK_RATE;
-    let game_time = game.sky_state.game_time;
     let mut entity_renders: Vec<EntityRenderInfo> = game
         .entity_store
         .living
@@ -480,9 +482,7 @@ pub fn update_game(
             let pos = e.prev_position.lerp(e.position, alpha as f64);
             let body_yaw = e.prev_body_yaw + (e.body_yaw - e.prev_body_yaw) * alpha;
             let head_yaw = e.prev_head_yaw + (e.head_yaw - e.prev_head_yaw) * alpha;
-
-            let (overlay_tints, head_y_offset, head_x_rot_override, variant_index) =
-                build_sheep_cow_extras(entity_id, e, alpha, game_time);
+            let extras = entity_extras(entity_id, e, alpha);
 
             EntityRenderInfo {
                 x: pos.x,
@@ -500,10 +500,10 @@ pub fn update_game(
                     + (e.walk_anim_speed - e.prev_walk_anim_speed) * alpha)
                     .min(1.0),
                 entity_kind: e.entity_type,
-                variant_index,
-                overlay_tints,
-                head_y_offset,
-                head_x_rot_override,
+                variant_index: extras.variant_index,
+                overlay_tints: extras.overlay_tints,
+                head_y_offset: extras.head_y_offset,
+                head_x_rot_override: extras.head_x_rot_override,
             }
         })
         .collect();
@@ -522,7 +522,7 @@ pub fn update_game(
             walk_anim_speed: (game.player_prev_walk_speed
                 + (game.player_walk_speed - game.player_prev_walk_speed) * alpha)
                 .min(1.0),
-            entity_kind: azalea_registry::builtin::EntityKind::Player,
+            entity_kind: EntityKind::Player,
             variant_index: 0,
             overlay_tints: [None, None],
             head_y_offset: 0.0,
@@ -762,28 +762,35 @@ fn build_item_render_infos(
     infos
 }
 
-fn build_sheep_cow_extras(
-    entity_id: i32,
-    e: &crate::entity::LivingEntity,
-    alpha: f32,
-    game_time: u64,
-) -> ([Option<[f32; 4]>; 2], f32, Option<f32>, u32) {
-    use azalea_registry::builtin::EntityKind;
+struct EntityExtras {
+    variant_index: u32,
+    overlay_tints: [Option<[f32; 4]>; 2],
+    head_y_offset: f32,
+    head_x_rot_override: Option<f32>,
+}
 
-    use crate::renderer::pipelines::entity_renderer::{
-        WHITE_TINT, jeb_sheep_tint, wool_color_tint,
-    };
+const EMPTY_EXTRAS: EntityExtras = EntityExtras {
+    variant_index: 0,
+    overlay_tints: [None, None],
+    head_y_offset: 0.0,
+    head_x_rot_override: None,
+};
 
-    if e.entity_type == EntityKind::Cow {
-        return ([None, None], 0.0, None, e.cow_variant as u32);
+fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    match e.entity_type {
+        EntityKind::Cow => EntityExtras {
+            variant_index: e.cow_variant as u32,
+            ..EMPTY_EXTRAS
+        },
+        EntityKind::Sheep => sheep_extras(entity_id, e, alpha),
+        _ => EMPTY_EXTRAS,
     }
-    if e.entity_type != EntityKind::Sheep {
-        return ([None, None], 0.0, None, 0);
-    }
+}
 
+fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
     let is_jeb = e.custom_name.as_deref() == Some("jeb_");
     let tint = if is_jeb {
-        jeb_sheep_tint(entity_id, game_time)
+        jeb_sheep_tint(entity_id, e.age_in_ticks)
     } else if let Some(c) = e.wool_color {
         wool_color_tint(c)
     } else {
@@ -811,12 +818,19 @@ fn build_sheep_cow_extras(
         None
     };
 
-    (overlay_tints, head_y_offset, head_x_rot_override, 0)
+    EntityExtras {
+        variant_index: 0,
+        overlay_tints,
+        head_y_offset,
+        head_x_rot_override,
+    }
 }
 
 fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
-    // Linear-blend between previous and current tick using partial-tick alpha,
-    // then apply vanilla Sheep.java:127-149 piecewise functions.
+    use std::f32::consts::PI;
+
+    // Mirrors vanilla Sheep.java:127-149. Linear-blend previous and current tick
+    // first so the head dip is smooth between server ticks.
     let interp = prev_eat_tick as f32 + (eat_tick as f32 - prev_eat_tick as f32) * alpha;
     let pos_scale = if interp <= 0.0 {
         0.0
@@ -830,9 +844,9 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
     let angle_scale = if (4.0..36.0).contains(&interp) {
         let s = (interp - 4.0) / 32.0;
-        0.628_318_55 + 0.219_911_49 * (s * 28.7).sin()
+        PI / 5.0 + (PI * 7.0 / 100.0) * (s * 28.7).sin()
     } else if interp > 0.0 {
-        0.628_318_55
+        PI / 5.0
     } else {
         0.0
     };
