@@ -19,32 +19,103 @@ pub struct BlockEntityRenderInfo {
     pub pos: BlockPos,
     pub kind: BlockEntityKind,
     pub yaw: f32,
+    pub variant: u32,
+}
+
+struct TextureSlot {
+    image: vk::Image,
+    view: vk::ImageView,
+    allocation: Allocation,
+    set: vk::DescriptorSet,
 }
 
 struct KindEntry {
     model: BakedEntityModel,
     vertex_buffer: vk::Buffer,
     vertex_allocation: Allocation,
-    texture_image: vk::Image,
-    texture_view: vk::ImageView,
-    texture_allocation: Allocation,
-    texture_set: vk::DescriptorSet,
+    textures: Vec<TextureSlot>,
 }
 
 struct KindDef {
     kind: BlockEntityKind,
     model: BakedEntityModel,
-    tex_keys: &'static [&'static str],
+    tex_variants: &'static [&'static [&'static str]],
     tex_size: u32,
 }
 
+/// 16 dye colors in vanilla `DyeColor` ordinal order. Used both to build
+/// texture-variant arrays and to map block names back to variant indices.
+const DYE_COLOR_NAMES: [&str; 16] = [
+    "white",
+    "orange",
+    "magenta",
+    "light_blue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "light_gray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black",
+];
+
+const SHULKER_TEXTURES: &[&[&str]] = &[
+    &["minecraft/textures/entity/shulker/shulker_white.png"],
+    &["minecraft/textures/entity/shulker/shulker_orange.png"],
+    &["minecraft/textures/entity/shulker/shulker_magenta.png"],
+    &["minecraft/textures/entity/shulker/shulker_light_blue.png"],
+    &["minecraft/textures/entity/shulker/shulker_yellow.png"],
+    &["minecraft/textures/entity/shulker/shulker_lime.png"],
+    &["minecraft/textures/entity/shulker/shulker_pink.png"],
+    &["minecraft/textures/entity/shulker/shulker_gray.png"],
+    &["minecraft/textures/entity/shulker/shulker_light_gray.png"],
+    &["minecraft/textures/entity/shulker/shulker_cyan.png"],
+    &["minecraft/textures/entity/shulker/shulker_purple.png"],
+    &["minecraft/textures/entity/shulker/shulker_blue.png"],
+    &["minecraft/textures/entity/shulker/shulker_brown.png"],
+    &["minecraft/textures/entity/shulker/shulker_green.png"],
+    &["minecraft/textures/entity/shulker/shulker_red.png"],
+    &["minecraft/textures/entity/shulker/shulker_black.png"],
+    &["minecraft/textures/entity/shulker/shulker.png"],
+];
+
+fn dye_index(name: &str) -> Option<u32> {
+    DYE_COLOR_NAMES
+        .iter()
+        .position(|&c| c == name)
+        .map(|i| i as u32)
+}
+
+pub fn variant_for_block(kind: BlockEntityKind, name: &str) -> u32 {
+    match kind {
+        BlockEntityKind::ShulkerBox => name
+            .strip_suffix("_shulker_box")
+            .and_then(dye_index)
+            .unwrap_or(16),
+        _ => 0,
+    }
+}
+
 fn kind_definitions() -> Vec<KindDef> {
-    vec![KindDef {
-        kind: BlockEntityKind::Chest,
-        model: block_entity_model::bake_chest_model(),
-        tex_keys: &["minecraft/textures/entity/chest/normal.png"],
-        tex_size: 64,
-    }]
+    vec![
+        KindDef {
+            kind: BlockEntityKind::Chest,
+            model: block_entity_model::bake_chest_model(),
+            tex_variants: &[&["minecraft/textures/entity/chest/normal.png"]],
+            tex_size: 64,
+        },
+        KindDef {
+            kind: BlockEntityKind::ShulkerBox,
+            model: block_entity_model::bake_shulker_box_model(),
+            tex_variants: SHULKER_TEXTURES,
+            tex_size: 64,
+        },
+    ]
 }
 
 pub struct BlockEntityPipeline {
@@ -102,7 +173,10 @@ impl BlockEntityPipeline {
         let pipeline = create_pipeline(device, render_pass, pipeline_layout);
 
         let defs = kind_definitions();
-        let tex_count = defs.iter().map(|d| d.tex_keys.len() as u32).sum::<u32>();
+        let tex_count = defs
+            .iter()
+            .map(|d| d.tex_variants.len() as u32)
+            .sum::<u32>();
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -178,7 +252,7 @@ impl BlockEntityPipeline {
                 jar_assets_dir,
                 asset_index,
                 def.model,
-                def.tex_keys,
+                def.tex_variants,
                 def.tex_size,
             );
             entries.insert(def.kind, entry);
@@ -211,25 +285,32 @@ impl BlockEntityPipeline {
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
 
-        let mut last_entry: *const KindEntry = std::ptr::null();
+        let mut bound_entry: *const KindEntry = std::ptr::null();
+        let mut bound_set: vk::DescriptorSet = vk::DescriptorSet::null();
         let anim = PartAnim::default();
 
         for info in items {
             let Some(entry) = self.entries.get(&info.kind) else {
                 continue;
             };
+            let variant_idx = (info.variant as usize).min(entry.textures.len().saturating_sub(1));
+            let slot = &entry.textures[variant_idx];
 
-            let ptr: *const KindEntry = entry;
-            if last_entry != ptr {
+            let entry_ptr: *const KindEntry = entry;
+            if bound_entry != entry_ptr {
+                cmd.bind_vertex_buffers(0, &[entry.vertex_buffer], &[0]);
+                bound_entry = entry_ptr;
+                bound_set = vk::DescriptorSet::null();
+            }
+            if bound_set != slot.set {
                 cmd.bind_descriptor_sets(
                     vk::PipelineBindPoint::Graphics,
                     self.pipeline_layout,
                     0,
-                    &[self.camera_sets[frame], entry.texture_set],
+                    &[self.camera_sets[frame], slot.set],
                     &[],
                 );
-                cmd.bind_vertex_buffers(0, &[entry.vertex_buffer], &[0]);
-                last_entry = ptr;
+                bound_set = slot.set;
             }
 
             let block_center = glam::Vec3::new(
@@ -284,13 +365,15 @@ impl BlockEntityPipeline {
                     std::mem::zeroed()
                 }))
                 .ok();
-            device.destroy_image_view(entry.texture_view, None);
-            alloc
-                .free(std::mem::replace(&mut entry.texture_allocation, unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-            device.destroy_image(entry.texture_image, None);
+            for slot in entry.textures.iter_mut() {
+                device.destroy_image_view(slot.view, None);
+                alloc
+                    .free(std::mem::replace(&mut slot.allocation, unsafe {
+                        std::mem::zeroed()
+                    }))
+                    .ok();
+                device.destroy_image(slot.image, None);
+            }
         }
         drop(alloc);
 
@@ -314,7 +397,7 @@ fn build_entry(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     model: BakedEntityModel,
-    tex_keys: &[&str],
+    tex_variants: &[&[&str]],
     fallback_tex_size: u32,
 ) -> KindEntry {
     let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
@@ -326,18 +409,59 @@ fn build_entry(
         "block_entity_vertices",
     );
 
-    let (pixels, width, height) = tex_keys
+    let textures = tex_variants
+        .iter()
+        .map(|keys| {
+            build_texture_slot(
+                device,
+                queue,
+                command_pool,
+                allocator,
+                descriptor_pool,
+                texture_layout,
+                texture_sampler,
+                jar_assets_dir,
+                asset_index,
+                keys,
+                fallback_tex_size,
+            )
+        })
+        .collect();
+
+    KindEntry {
+        model,
+        vertex_buffer,
+        vertex_allocation,
+        textures,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_texture_slot(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    descriptor_pool: vk::DescriptorPool,
+    texture_layout: vk::DescriptorSetLayout,
+    texture_sampler: vk::Sampler,
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    keys: &[&str],
+    fallback_tex_size: u32,
+) -> TextureSlot {
+    let (pixels, width, height) = keys
         .iter()
         .find_map(|key| {
             let path = resolve_asset_path(jar_assets_dir, asset_index, key);
             util::load_png(&path)
         })
         .unwrap_or_else(|| {
-            tracing::warn!("Failed to load BE texture {:?}, using fallback", tex_keys);
+            tracing::warn!("Failed to load BE texture {:?}, using fallback", keys);
             fallback_texture(fallback_tex_size)
         });
 
-    let (texture_image, texture_view, texture_allocation) =
+    let (image, view, allocation) =
         util::create_gpu_image(device, allocator, width, height, "block_entity_texture");
     let (staging_buf, staging_alloc) =
         util::create_staging_buffer(device, allocator, &pixels, "block_entity_texture_staging");
@@ -346,7 +470,7 @@ fn build_entry(
         queue,
         command_pool,
         staging_buf,
-        texture_image,
+        image,
         width,
         height,
     );
@@ -359,18 +483,18 @@ fn build_entry(
         set_layouts: &texture_layout,
         ..Default::default()
     };
-    let mut texture_set = vk::DescriptorSet::null();
+    let mut set = vk::DescriptorSet::null();
     device
-        .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut texture_set))
+        .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut set))
         .expect("failed to allocate BE texture descriptor set");
 
     let image_info = vk::DescriptorImageInfo {
         sampler: texture_sampler,
-        image_view: texture_view,
+        image_view: view,
         image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
     };
     let tex_write = vk::WriteDescriptorSet {
-        dst_set: texture_set,
+        dst_set: set,
         dst_binding: 0,
         descriptor_type: vk::DescriptorType::CombinedImageSampler,
         descriptor_count: 1,
@@ -379,13 +503,10 @@ fn build_entry(
     };
     device.update_descriptor_sets(&[tex_write], &[]);
 
-    KindEntry {
-        model,
-        vertex_buffer,
-        vertex_allocation,
-        texture_image,
-        texture_view,
-        texture_allocation,
-        texture_set,
+    TextureSlot {
+        image,
+        view,
+        allocation,
+        set,
     }
 }

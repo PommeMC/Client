@@ -617,10 +617,17 @@ pub fn update_game(
         .chunk_store
         .block_entities
         .iter()
-        .map(|(pos, be)| crate::renderer::BlockEntityRenderInfo {
-            pos: *pos,
-            kind: be.kind,
-            yaw: 0.0,
+        .map(|(pos, be)| {
+            let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+            let block: Box<dyn azalea_block::BlockTrait> = state.into();
+            let variant =
+                crate::renderer::pipelines::block_entity::variant_for_block(be.kind, block.id());
+            crate::renderer::BlockEntityRenderInfo {
+                pos: *pos,
+                kind: be.kind,
+                yaw: 0.0,
+                variant,
+            }
         })
         .collect();
 
