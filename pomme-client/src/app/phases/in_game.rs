@@ -56,6 +56,7 @@ pub struct GameState {
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
+    pub advanced_item_tooltips: bool,
     pub last_sent_input: PlayerInputState,
     pub last_sent_pos: glam::Vec3,
     pub last_sent_yaw: f32,
@@ -113,6 +114,7 @@ impl GameState {
             sky_state: SkyState::default_day(),
             show_debug: false,
             show_chunk_borders: false,
+            advanced_item_tooltips: false,
             last_sent_input: PlayerInputState::default(),
             last_sent_pos: glam::Vec3::ZERO,
             last_sent_yaw: 0.0,
@@ -492,6 +494,7 @@ pub fn update_game(
             &game.player.inventory,
             selected_hotbar,
             gs,
+            game.advanced_item_tooltips,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
         match action {

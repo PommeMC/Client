@@ -1,9 +1,11 @@
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use azalea_inventory::components::{Damage, Enchantments, MaxDamage, Rarity};
+use azalea_inventory::default_components::get_default_component;
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::Registry;
-use azalea_registry::builtin::ItemKind;
+use azalea_registry::builtin::{DataComponentKind, ItemKind};
 
 use super::common::{
     self, FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_slot,
@@ -13,8 +15,11 @@ use super::creative_tab_data::{
     FUNCTIONAL_BLOCKS_ITEMS, INGREDIENTS_ITEMS, NATURAL_BLOCKS_ITEMS, OP_BLOCKS_ITEMS,
     REDSTONE_BLOCKS_ITEMS, SPAWN_EGGS_ITEMS, TOOLS_AND_UTILITIES_ITEMS,
 };
+use crate::lang::item_display_name;
 use crate::player::inventory::{Inventory, item_resource_name};
-use crate::renderer::pipelines::menu_overlay::{CREATIVE_TAB_SPRITES, MenuElement, SpriteId};
+use crate::renderer::pipelines::menu_overlay::{
+    CREATIVE_TAB_SPRITES, MenuElement, SpriteId, TooltipLine,
+};
 
 const TEX_W: f32 = 195.0;
 const TEX_H: f32 = 136.0;
@@ -97,98 +102,98 @@ impl CreativeTab {
             CreativeTab::BuildingBlocks => TabMeta {
                 row: Row::Top,
                 col: 1,
-                icon: "minecraft:bricks",
+                icon: "bricks",
                 title: "Building Blocks",
                 items: ItemSource::Static(BUILDING_BLOCKS_ITEMS),
             },
             CreativeTab::ColoredBlocks => TabMeta {
                 row: Row::Top,
                 col: 2,
-                icon: "minecraft:cyan_wool",
+                icon: "cyan_wool",
                 title: "Colored Blocks",
                 items: ItemSource::Static(COLORED_BLOCKS_ITEMS),
             },
             CreativeTab::NaturalBlocks => TabMeta {
                 row: Row::Top,
                 col: 3,
-                icon: "minecraft:grass_block",
+                icon: "grass_block_side",
                 title: "Natural Blocks",
                 items: ItemSource::Static(NATURAL_BLOCKS_ITEMS),
             },
             CreativeTab::FunctionalBlocks => TabMeta {
                 row: Row::Top,
                 col: 4,
-                icon: "minecraft:oak_sign",
+                icon: "oak_sign",
                 title: "Functional Blocks",
                 items: ItemSource::Static(FUNCTIONAL_BLOCKS_ITEMS),
             },
             CreativeTab::RedstoneBlocks => TabMeta {
                 row: Row::Top,
                 col: 5,
-                icon: "minecraft:redstone",
+                icon: "redstone",
                 title: "Redstone Blocks",
                 items: ItemSource::Static(REDSTONE_BLOCKS_ITEMS),
             },
             CreativeTab::Hotbar => TabMeta {
                 row: Row::Top,
                 col: 6,
-                icon: "minecraft:bookshelf",
+                icon: "bookshelf",
                 title: "Saved Hotbars",
                 items: ItemSource::Empty,
             },
             CreativeTab::Search => TabMeta {
                 row: Row::Top,
                 col: 7,
-                icon: "minecraft:compass",
+                icon: "compass_16",
                 title: "Search",
                 items: ItemSource::Search,
             },
             CreativeTab::ToolsAndUtilities => TabMeta {
                 row: Row::Bottom,
                 col: 1,
-                icon: "minecraft:diamond_pickaxe",
+                icon: "diamond_pickaxe",
                 title: "Tools & Utilities",
                 items: ItemSource::Static(TOOLS_AND_UTILITIES_ITEMS),
             },
             CreativeTab::Combat => TabMeta {
                 row: Row::Bottom,
                 col: 2,
-                icon: "minecraft:netherite_sword",
+                icon: "netherite_sword",
                 title: "Combat",
                 items: ItemSource::Static(COMBAT_ITEMS),
             },
             CreativeTab::FoodAndDrinks => TabMeta {
                 row: Row::Bottom,
                 col: 3,
-                icon: "minecraft:golden_apple",
+                icon: "golden_apple",
                 title: "Food & Drinks",
                 items: ItemSource::Static(FOOD_AND_DRINKS_ITEMS),
             },
             CreativeTab::Ingredients => TabMeta {
                 row: Row::Bottom,
                 col: 4,
-                icon: "minecraft:iron_ingot",
+                icon: "iron_ingot",
                 title: "Ingredients",
                 items: ItemSource::Static(INGREDIENTS_ITEMS),
             },
             CreativeTab::SpawnEggs => TabMeta {
                 row: Row::Bottom,
                 col: 5,
-                icon: "minecraft:creeper_spawn_egg",
+                icon: "creeper_spawn_egg",
                 title: "Spawn Eggs",
                 items: ItemSource::Static(SPAWN_EGGS_ITEMS),
             },
             CreativeTab::OpBlocks => TabMeta {
                 row: Row::Bottom,
                 col: 6,
-                icon: "minecraft:command_block",
+                icon: "command_block_front",
                 title: "Operator Utilities",
                 items: ItemSource::Static(OP_BLOCKS_ITEMS),
             },
             CreativeTab::SurvivalInventory => TabMeta {
                 row: Row::Bottom,
                 col: 7,
-                icon: "minecraft:chest",
+                icon: "oak_planks",
                 title: "Survival Inventory",
                 items: ItemSource::Empty,
             },
@@ -287,6 +292,7 @@ pub fn build_creative_inventory(
     inventory: &Inventory,
     selected_hotbar: u8,
     gs: f32,
+    advanced_tooltips: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> CreativeAction {
     if state.tab.captures_typing() {
@@ -346,9 +352,16 @@ pub fn build_creative_inventory(
     }
 
     let size = SLOT_SIZE * scale;
+    let tt = TooltipCtx {
+        cursor,
+        screen_w,
+        screen_h,
+        gs,
+        advanced: advanced_tooltips,
+    };
 
     if state.tab.is_inventory_tab() {
-        draw_inventory_layout(elements, ox, oy, scale, cursor, inventory);
+        draw_inventory_layout(elements, ox, oy, scale, inventory, &tt);
     } else {
         let items = visible_items(state);
         let scrollable = state.tab.scrollable();
@@ -396,23 +409,27 @@ pub fn build_creative_inventory(
                 );
                 let hovered =
                     push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
-                if hovered
-                    && clicked
-                    && scrollable
-                    && let ItemStack::Present(data) = item
-                {
-                    let slot_num = 36 + selected_hotbar as u16;
-                    action = CreativeAction::Place(ItemStack::Present(data), slot_num);
+                if hovered {
+                    push_item_tooltip(elements, &item, &tt);
+                    if clicked
+                        && scrollable
+                        && let ItemStack::Present(data) = item
+                    {
+                        let slot_num = 36 + selected_hotbar as u16;
+                        action = CreativeAction::Place(ItemStack::Present(data), slot_num);
+                    }
                 }
             }
         }
 
-        draw_player_hotbar(elements, ox, oy, scale, cursor, inventory);
+        draw_player_hotbar(elements, ox, oy, scale, inventory, &tt);
 
         if scrollable {
             draw_scrollbar(elements, ox, oy, scale, state.scroll, max_scroll_rows == 0);
         }
     }
+
+    push_tab_tooltip(elements, ox, oy, scale, &tt);
 
     let outside = !hit_test(cursor, [ox, oy, inv_w, inv_h]);
     if clicked && outside && tab_hit.is_none() && matches!(action, CreativeAction::None) {
@@ -515,20 +532,245 @@ fn item_or_empty(slots: &[ItemStack], idx: usize) -> ItemStack {
     slots.get(idx).cloned().unwrap_or(ItemStack::Empty)
 }
 
+struct TooltipCtx {
+    cursor: (f32, f32),
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    advanced: bool,
+}
+
+const fn rgb(hex: u32) -> [f32; 4] {
+    [
+        ((hex >> 16) & 0xff) as f32 / 255.0,
+        ((hex >> 8) & 0xff) as f32 / 255.0,
+        (hex & 0xff) as f32 / 255.0,
+        1.0,
+    ]
+}
+
+const TOOLTIP_NAME_COLOR: [f32; 4] = rgb(0xFFFFFF);
+const TOOLTIP_TAB_COLOR: [f32; 4] = rgb(0x5555FF);
+const TOOLTIP_ADVANCED_COLOR: [f32; 4] = rgb(0x555555);
+const TOOLTIP_LORE_COLOR: [f32; 4] = rgb(0xAAAAAA);
+const RARITY_UNCOMMON: [f32; 4] = rgb(0xFFFF55);
+const RARITY_RARE: [f32; 4] = rgb(0x55FFFF);
+const RARITY_EPIC: [f32; 4] = rgb(0xFF55FF);
+
+fn rarity_color(kind: ItemKind) -> [f32; 4] {
+    match get_default_component::<Rarity>(kind) {
+        Some(Rarity::Uncommon) => RARITY_UNCOMMON,
+        Some(Rarity::Rare) => RARITY_RARE,
+        Some(Rarity::Epic) => RARITY_EPIC,
+        _ => TOOLTIP_NAME_COLOR,
+    }
+}
+
+fn total_component_count(data: &ItemStackData) -> usize {
+    let mut count = 0usize;
+    let mut id = 0u32;
+    while let Some(kind) = DataComponentKind::from_u32(id) {
+        if data.component_patch.has_kind(kind) || default_has_component(data.kind, kind) {
+            count += 1;
+        }
+        id += 1;
+    }
+    count
+}
+
+fn default_has_component(item: ItemKind, kind: DataComponentKind) -> bool {
+    macro_rules! check {
+        ($($ck:ident => $t:ty),* $(,)?) => {
+            match kind {
+                $( DataComponentKind::$ck => get_default_component::<$t>(item).is_some(), )*
+                _ => false,
+            }
+        };
+    }
+    check! {
+        MaxStackSize => azalea_inventory::components::MaxStackSize,
+        MaxDamage => MaxDamage,
+        Damage => Damage,
+        ItemName => azalea_inventory::components::ItemName,
+        ItemModel => azalea_inventory::components::ItemModel,
+        Lore => azalea_inventory::components::Lore,
+        Rarity => Rarity,
+        Enchantments => Enchantments,
+        AttributeModifiers => azalea_inventory::components::AttributeModifiers,
+        RepairCost => azalea_inventory::components::RepairCost,
+        EnchantmentGlintOverride => azalea_inventory::components::EnchantmentGlintOverride,
+        Food => azalea_inventory::components::Food,
+        Consumable => azalea_inventory::components::Consumable,
+        UseRemainder => azalea_inventory::components::UseRemainder,
+        UseCooldown => azalea_inventory::components::UseCooldown,
+        Tool => azalea_inventory::components::Tool,
+        Weapon => azalea_inventory::components::Weapon,
+        AttackRange => azalea_inventory::components::AttackRange,
+        Enchantable => azalea_inventory::components::Enchantable,
+        Equippable => azalea_inventory::components::Equippable,
+        Repairable => azalea_inventory::components::Repairable,
+        Glider => azalea_inventory::components::Glider,
+        BlocksAttacks => azalea_inventory::components::BlocksAttacks,
+        DamageResistant => azalea_inventory::components::DamageResistant,
+    }
+}
+
+fn lore_lines(data: &ItemStackData) -> Vec<TooltipLine> {
+    let mut lines = Vec::new();
+    if let Some(damage) = data.component_patch.get::<Damage>() {
+        let max = data
+            .component_patch
+            .get::<MaxDamage>()
+            .map(|m| m.amount)
+            .or_else(|| get_default_component::<MaxDamage>(data.kind).map(|m| m.amount))
+            .unwrap_or(0);
+        if max > 0 {
+            lines.push(TooltipLine {
+                text: format!("Durability: {} / {}", max - damage.amount, max),
+                color: TOOLTIP_LORE_COLOR,
+            });
+        }
+    }
+    if let Some(ench) = data.component_patch.get::<Enchantments>() {
+        for (enchantment, level) in &ench.levels {
+            lines.push(TooltipLine {
+                text: format!("{:?} {}", enchantment, roman(*level)),
+                color: TOOLTIP_LORE_COLOR,
+            });
+        }
+    }
+    lines
+}
+
+fn roman(n: i32) -> &'static str {
+    match n {
+        1 => "I",
+        2 => "II",
+        3 => "III",
+        4 => "IV",
+        5 => "V",
+        6 => "VI",
+        7 => "VII",
+        8 => "VIII",
+        9 => "IX",
+        10 => "X",
+        _ => "",
+    }
+}
+
+fn tabs_containing(kind: ItemKind) -> Vec<&'static str> {
+    TABS
+        .iter()
+        .filter_map(|tab| match tab.meta().items {
+            ItemSource::Static(list) if list.contains(&kind) => Some(tab.meta().title),
+            _ => None,
+        })
+        .collect()
+}
+
+fn build_item_tooltip_lines(data: &ItemStackData, advanced: bool) -> Vec<TooltipLine> {
+    let kind = data.kind;
+    let mut lines = Vec::new();
+    lines.push(TooltipLine {
+        text: item_display_name(kind),
+        color: rarity_color(kind),
+    });
+    lines.extend(lore_lines(data));
+    for title in tabs_containing(kind) {
+        lines.push(TooltipLine {
+            text: title.to_string(),
+            color: TOOLTIP_TAB_COLOR,
+        });
+    }
+    if advanced {
+        lines.push(TooltipLine {
+            text: format!("minecraft:{}", item_resource_name(kind)),
+            color: TOOLTIP_ADVANCED_COLOR,
+        });
+        lines.push(TooltipLine {
+            text: format!("{} component(s)", total_component_count(data)),
+            color: TOOLTIP_ADVANCED_COLOR,
+        });
+    }
+    lines
+}
+
+fn push_item_tooltip(elements: &mut Vec<MenuElement>, item: &ItemStack, tt: &TooltipCtx) {
+    if let ItemStack::Present(data) = item {
+        elements.push(MenuElement::TooltipLines {
+            x: tt.cursor.0,
+            y: tt.cursor.1,
+            lines: build_item_tooltip_lines(data, tt.advanced),
+            scale: FONT_SIZE * tt.gs,
+            screen_w: tt.screen_w,
+            screen_h: tt.screen_h,
+        });
+    }
+}
+
+fn push_tab_tooltip(
+    elements: &mut Vec<MenuElement>,
+    ox: f32,
+    oy: f32,
+    scale: f32,
+    tt: &TooltipCtx,
+) {
+    let inset_w = 21.0 * scale;
+    let inset_h = 27.0 * scale;
+    for &tab in TABS.iter() {
+        let meta = tab.meta();
+        let x = tab_x(meta.col, scale, ox);
+        let hit_y_off = match meta.row {
+            Row::Top => TAB_TOP_HIT_Y,
+            Row::Bottom => TAB_BOTTOM_HIT_Y,
+        };
+        let inset_x = x + 3.0 * scale;
+        let inset_y = oy + hit_y_off * scale + 3.0 * scale;
+        if hit_test(tt.cursor, [inset_x, inset_y, inset_w, inset_h]) {
+            common::push_tooltip(
+                elements,
+                tt.cursor,
+                tt.screen_w,
+                tt.screen_h,
+                tt.gs,
+                meta.title,
+            );
+            return;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn slot_with_tooltip(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    scale: f32,
+    item: &ItemStack,
+    empty_sprite: Option<SpriteId>,
+    tt: &TooltipCtx,
+) {
+    let hovered = push_slot(elements, x, y, size, scale, tt.cursor, item, empty_sprite);
+    if hovered {
+        push_item_tooltip(elements, item, tt);
+    }
+}
+
 fn draw_player_hotbar(
     elements: &mut Vec<MenuElement>,
     ox: f32,
     oy: f32,
     scale: f32,
-    cursor: (f32, f32),
     inventory: &Inventory,
+    tt: &TooltipCtx,
 ) {
     let size = SLOT_SIZE * scale;
     let hotbar = inventory.hotbar_slots();
     for col in 0..GRID_COLS {
         let (x, y) = slot_xy(ox, oy, scale, GRID_ORIGIN_X + col as f32 * SLOT_STRIDE, HOTBAR_Y);
         let item = item_or_empty(hotbar, col);
-        push_slot(elements, x, y, size, scale, cursor, &item, None);
+        slot_with_tooltip(elements, x, y, size, scale, &item, None, tt);
     }
 }
 
@@ -537,8 +779,8 @@ fn draw_inventory_layout(
     ox: f32,
     oy: f32,
     scale: f32,
-    cursor: (f32, f32),
     inventory: &Inventory,
+    tt: &TooltipCtx,
 ) {
     let size = SLOT_SIZE * scale;
 
@@ -554,11 +796,11 @@ fn draw_inventory_layout(
             INV_ARMOR_Y + row * INV_ARMOR_ROW_STRIDE,
         );
         let item = item_or_empty(armor, i);
-        push_slot(elements, x, y, size, scale, cursor, &item, None);
+        slot_with_tooltip(elements, x, y, size, scale, &item, None, tt);
     }
 
     let (x, y) = slot_xy(ox, oy, scale, INV_OFFHAND_X, INV_OFFHAND_Y);
-    push_slot(elements, x, y, size, scale, cursor, inventory.offhand(), None);
+    slot_with_tooltip(elements, x, y, size, scale, inventory.offhand(), None, tt);
 
     let main = inventory.main_slots();
     for row in 0..3usize {
@@ -572,11 +814,11 @@ fn draw_inventory_layout(
                 INV_MAIN_Y + row as f32 * SLOT_STRIDE,
             );
             let item = item_or_empty(main, idx);
-            push_slot(elements, x, y, size, scale, cursor, &item, None);
+            slot_with_tooltip(elements, x, y, size, scale, &item, None, tt);
         }
     }
 
-    draw_player_hotbar(elements, ox, oy, scale, cursor, inventory);
+    draw_player_hotbar(elements, ox, oy, scale, inventory, tt);
 
     let (trash_x, trash_y) = slot_xy(ox, oy, scale, INV_TRASH_X, INV_TRASH_Y);
     push_slot(
@@ -585,7 +827,7 @@ fn draw_inventory_layout(
         trash_y,
         size,
         scale,
-        cursor,
+        tt.cursor,
         &ItemStack::Empty,
         None,
     );
@@ -660,11 +902,12 @@ fn visible_items(state: &CreativeState) -> Vec<ItemStack> {
     match state.tab.meta().items {
         ItemSource::Static(list) => list.iter().map(|&kind| stack_of(kind)).collect(),
         ItemSource::Search => {
-            let needle = state.search.to_lowercase();
-            all_items_cached()
+            let raw = state.search.to_lowercase();
+            let needle = raw.strip_prefix('#').unwrap_or(&raw);
+            search_items_cached()
                 .iter()
                 .filter(|kind| {
-                    needle.is_empty() || item_resource_name(**kind).to_lowercase().contains(&needle)
+                    needle.is_empty() || item_resource_name(**kind).to_lowercase().contains(needle)
                 })
                 .map(|&kind| stack_of(kind))
                 .collect()
@@ -681,12 +924,20 @@ fn stack_of(kind: ItemKind) -> ItemStack {
     })
 }
 
-fn all_items_cached() -> &'static [ItemKind] {
+fn search_items_cached() -> &'static [ItemKind] {
     static CACHE: OnceLock<Vec<ItemKind>> = OnceLock::new();
     CACHE.get_or_init(|| {
-        (0u32..)
-            .map_while(ItemKind::from_u32)
-            .filter(|k| !matches!(k, ItemKind::Air))
-            .collect()
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for tab in TABS.iter() {
+            if let ItemSource::Static(list) = tab.meta().items {
+                for &kind in list {
+                    if seen.insert(kind) {
+                        out.push(kind);
+                    }
+                }
+            }
+        }
+        out
     })
 }

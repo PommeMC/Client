@@ -379,6 +379,7 @@ impl MenuOverlayPipeline {
         let item_sampler = unsafe { util::create_nearest_sampler(device) };
 
         let mc_glyph_map = GlyphMap::load(jar_assets_dir, asset_index);
+        crate::lang::load(jar_assets_dir);
         let (
             mc_font_image,
             mc_font_view,
@@ -589,7 +590,10 @@ impl MenuOverlayPipeline {
         let mut cmd_start: u32 = 0;
 
         for elem in elements {
-            if matches!(elem, MenuElement::Tooltip { .. }) {
+            if matches!(
+                elem,
+                MenuElement::Tooltip { .. } | MenuElement::TooltipLines { .. }
+            ) {
                 deferred_tooltips.push(elem);
                 continue;
             }
@@ -964,6 +968,80 @@ impl MenuOverlayPipeline {
                     );
                 }
             }
+            if let MenuElement::TooltipLines {
+                x,
+                y,
+                lines,
+                scale,
+                screen_w,
+                screen_h,
+            } = elem
+                && let Some(ref gm) = self.mc_glyph_map
+            {
+                let px = *scale / gm.cell_h as f32;
+                let padding = 3.0 * px;
+                let margin = 9.0 * px;
+                let line_h = *scale + 2.0 * px;
+
+                let content_w = lines
+                    .iter()
+                    .map(|l| (self.mc_text_width(&l.text, *scale) + px).ceil())
+                    .fold(0.0f32, f32::max);
+                let content_h = lines.len() as f32 * line_h - 2.0 * px;
+
+                let mut text_x = *x + 12.0;
+                let mut text_y = *y - 12.0;
+                if text_x + content_w > *screen_w {
+                    text_x = (*x - 24.0 - content_w).max(4.0);
+                }
+                if text_y + content_h + 3.0 > *screen_h {
+                    text_y = *screen_h - content_h - 3.0;
+                }
+
+                let bg_x = text_x - padding - margin - padding;
+                let bg_y = text_y - padding - margin - padding;
+                let bg_w = content_w + (padding + margin + padding) * 2.0;
+                let bg_h = content_h + (padding + margin + padding) * 2.0;
+                let bg_border = margin;
+                let frame_border = 10.0 * px;
+                let white = [1.0f32; 4];
+
+                if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
+                    push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, bg_border, white);
+                }
+                if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
+                    push_nine_slice(
+                        &mut vertices,
+                        bg_x,
+                        bg_y,
+                        bg_w,
+                        bg_h,
+                        frame,
+                        frame_border,
+                        white,
+                    );
+                }
+
+                for (i, line) in lines.iter().enumerate() {
+                    let span = MotdSpan {
+                        text: line.text.clone(),
+                        color: line.color,
+                        bold: false,
+                        italic: false,
+                        strikethrough: false,
+                        underline: false,
+                    };
+                    push_mc_text(
+                        &mut vertices,
+                        gm,
+                        text_x,
+                        text_y + i as f32 * line_h,
+                        &[span],
+                        *scale,
+                        true,
+                    );
+                }
+            }
         }
 
         let final_count = vertices.len() as u32 - cmd_start;
@@ -1240,6 +1318,11 @@ impl MenuOverlayPipeline {
     }
 }
 
+pub struct TooltipLine {
+    pub text: String,
+    pub color: [f32; 4],
+}
+
 #[allow(dead_code)]
 pub enum MenuElement {
     ScissorPush {
@@ -1333,6 +1416,14 @@ pub enum MenuElement {
         x: f32,
         y: f32,
         text: String,
+        scale: f32,
+        screen_w: f32,
+        screen_h: f32,
+    },
+    TooltipLines {
+        x: f32,
+        y: f32,
+        lines: Vec<TooltipLine>,
         scale: f32,
         screen_w: f32,
         screen_h: f32,
@@ -2066,9 +2157,8 @@ fn build_item_atlas(
     let mut regions = HashMap::new();
     let mut slot = 0u32;
 
-    let jar_base = jar_assets_dir.join("assets");
-    let item_parent = jar_base.join("minecraft/textures/item");
-    let block_parent = jar_base.join("minecraft/textures/block");
+    let item_parent = jar_assets_dir.join("minecraft/textures/item");
+    let block_parent = jar_assets_dir.join("minecraft/textures/block");
 
     let mut seen = std::collections::HashSet::new();
     let mut item_names: Vec<String> = Vec::new();

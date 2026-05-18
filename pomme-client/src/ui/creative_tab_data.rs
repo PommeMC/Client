@@ -1,7 +1,6 @@
 use azalea_registry::builtin::ItemKind;
 
 pub static BUILDING_BLOCKS_ITEMS: &[ItemKind] = &[
-    ItemKind::Bricks,
     ItemKind::OakLog,
     ItemKind::OakWood,
     ItemKind::StrippedOakLog,
@@ -240,6 +239,7 @@ pub static BUILDING_BLOCKS_ITEMS: &[ItemKind] = &[
     ItemKind::TuffBrickSlab,
     ItemKind::TuffBrickWall,
     ItemKind::ChiseledTuffBricks,
+    ItemKind::Bricks,
     ItemKind::BrickStairs,
     ItemKind::BrickSlab,
     ItemKind::BrickWall,
@@ -426,7 +426,6 @@ pub static BUILDING_BLOCKS_ITEMS: &[ItemKind] = &[
 ];
 
 pub static COLORED_BLOCKS_ITEMS: &[ItemKind] = &[
-    ItemKind::CyanWool,
     ItemKind::WhiteWool,
     ItemKind::LightGrayWool,
     ItemKind::GrayWool,
@@ -437,6 +436,7 @@ pub static COLORED_BLOCKS_ITEMS: &[ItemKind] = &[
     ItemKind::YellowWool,
     ItemKind::LimeWool,
     ItemKind::GreenWool,
+    ItemKind::CyanWool,
     ItemKind::LightBlueWool,
     ItemKind::BlueWool,
     ItemKind::PurpleWool,
@@ -873,16 +873,13 @@ pub static NATURAL_BLOCKS_ITEMS: &[ItemKind] = &[
 ];
 
 pub static FUNCTIONAL_BLOCKS_ITEMS: &[ItemKind] = &[
-    ItemKind::OakSign,
     ItemKind::Torch,
     ItemKind::SoulTorch,
     ItemKind::CopperTorch,
     ItemKind::RedstoneTorch,
     ItemKind::Lantern,
     ItemKind::SoulLantern,
-    ItemKind::CopperLantern,
     ItemKind::IronChain,
-    ItemKind::CopperChain,
     ItemKind::EndRod,
     ItemKind::SeaLantern,
     ItemKind::RedstoneLamp,
@@ -964,6 +961,7 @@ pub static FUNCTIONAL_BLOCKS_ITEMS: &[ItemKind] = &[
     ItemKind::WarpedShelf,
     ItemKind::Lectern,
     ItemKind::TintedGlass,
+    ItemKind::OakSign,
     ItemKind::OakHangingSign,
     ItemKind::SpruceSign,
     ItemKind::SpruceHangingSign,
@@ -1167,7 +1165,6 @@ pub static REDSTONE_BLOCKS_ITEMS: &[ItemKind] = &[
 ];
 
 pub static TOOLS_AND_UTILITIES_ITEMS: &[ItemKind] = &[
-    ItemKind::DiamondPickaxe,
     ItemKind::WoodenShovel,
     ItemKind::WoodenPickaxe,
     ItemKind::WoodenAxe,
@@ -1189,6 +1186,7 @@ pub static TOOLS_AND_UTILITIES_ITEMS: &[ItemKind] = &[
     ItemKind::GoldenAxe,
     ItemKind::GoldenHoe,
     ItemKind::DiamondShovel,
+    ItemKind::DiamondPickaxe,
     ItemKind::DiamondAxe,
     ItemKind::DiamondHoe,
     ItemKind::NetheriteShovel,
@@ -1289,7 +1287,6 @@ pub static TOOLS_AND_UTILITIES_ITEMS: &[ItemKind] = &[
     ItemKind::ChestMinecart,
     ItemKind::FurnaceMinecart,
     ItemKind::TntMinecart,
-    ItemKind::GoatHorn,
     ItemKind::MusicDisc13,
     ItemKind::MusicDiscCat,
     ItemKind::MusicDiscBlocks,
@@ -1314,13 +1311,13 @@ pub static TOOLS_AND_UTILITIES_ITEMS: &[ItemKind] = &[
 ];
 
 pub static COMBAT_ITEMS: &[ItemKind] = &[
-    ItemKind::NetheriteSword,
     ItemKind::WoodenSword,
     ItemKind::StoneSword,
     ItemKind::CopperSword,
     ItemKind::IronSword,
     ItemKind::GoldenSword,
     ItemKind::DiamondSword,
+    ItemKind::NetheriteSword,
     ItemKind::WoodenSpear,
     ItemKind::StoneSpear,
     ItemKind::CopperSpear,
@@ -1391,12 +1388,11 @@ pub static COMBAT_ITEMS: &[ItemKind] = &[
     ItemKind::Crossbow,
     ItemKind::Arrow,
     ItemKind::SpectralArrow,
-    ItemKind::TippedArrow,
 ];
 
 pub static FOOD_AND_DRINKS_ITEMS: &[ItemKind] = &[
-    ItemKind::GoldenApple,
     ItemKind::Apple,
+    ItemKind::GoldenApple,
     ItemKind::EnchantedGoldenApple,
     ItemKind::MelonSlice,
     ItemKind::SweetBerries,
@@ -1437,13 +1433,9 @@ pub static FOOD_AND_DRINKS_ITEMS: &[ItemKind] = &[
     ItemKind::RabbitStew,
     ItemKind::MilkBucket,
     ItemKind::HoneyBottle,
-    ItemKind::Potion,
-    ItemKind::SplashPotion,
-    ItemKind::LingeringPotion,
 ];
 
 pub static INGREDIENTS_ITEMS: &[ItemKind] = &[
-    ItemKind::IronIngot,
     ItemKind::Coal,
     ItemKind::Charcoal,
     ItemKind::RawCopper,
@@ -1459,6 +1451,7 @@ pub static INGREDIENTS_ITEMS: &[ItemKind] = &[
     ItemKind::IronNugget,
     ItemKind::GoldNugget,
     ItemKind::CopperIngot,
+    ItemKind::IronIngot,
     ItemKind::GoldIngot,
     ItemKind::NetheriteScrap,
     ItemKind::NetheriteIngot,
@@ -1597,7 +1590,6 @@ pub static INGREDIENTS_ITEMS: &[ItemKind] = &[
 ];
 
 pub static SPAWN_EGGS_ITEMS: &[ItemKind] = &[
-    ItemKind::CreeperSpawnEgg,
     ItemKind::Spawner,
     ItemKind::TrialSpawner,
     ItemKind::CreakingHeart,
@@ -1659,6 +1651,7 @@ pub static SPAWN_EGGS_ITEMS: &[ItemKind] = &[
     ItemKind::SpiderSpawnEgg,
     ItemKind::BreezeSpawnEgg,
     ItemKind::CreakingSpawnEgg,
+    ItemKind::CreeperSpawnEgg,
     ItemKind::ElderGuardianSpawnEgg,
     ItemKind::GuardianSpawnEgg,
     ItemKind::PhantomSpawnEgg,
@@ -1698,6 +1691,4 @@ pub static OP_BLOCKS_ITEMS: &[ItemKind] = &[
     ItemKind::Barrier,
     ItemKind::DebugStick,
     ItemKind::TestInstanceBlock,
-    ItemKind::TestBlock,
-    ItemKind::Light,
 ];

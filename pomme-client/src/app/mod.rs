@@ -324,6 +324,12 @@ impl ApplicationHandler for App {
                                         {
                                             game.show_chunk_borders = !game.show_chunk_borders;
                                         }
+                                        KeyCode::KeyH
+                                            if self.core.input.key_pressed(KeyCode::F3) =>
+                                        {
+                                            game.advanced_item_tooltips =
+                                                !game.advanced_item_tooltips;
+                                        }
                                         KeyCode::F5 => {
                                             gfx.renderer.cycle_camera_mode();
                                         }
