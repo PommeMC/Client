@@ -35,6 +35,39 @@ pub fn bake_shulker_box_model() -> BakedEntityModel {
     bake_model(vec![lid, base], 64, 64)
 }
 
+/// Standing sign, matching vanilla `SignRenderer`/`SignModel`: 24x12x2 board
+/// raised above ground, with a 2x14x2 post hanging from its center.
+/// Texture is 64x32 `entity/signs/<wood>.png`.
+pub fn bake_sign_model() -> BakedEntityModel {
+    let board = EntityPart {
+        name: "sign".into(),
+        offset: Vec3::new(0.0, 24.0, 0.0),
+        default_rotation: Vec3::ZERO,
+        cubes: vec![ModelCube {
+            origin: Vec3::new(-12.0, -14.0, -1.0),
+            size: Vec3::new(24.0, 12.0, 2.0),
+            tex_offset: (0, 0),
+            deformation: 0.0,
+            mirror: false,
+        }],
+        parent: None,
+    };
+    let stick = EntityPart {
+        name: "stick".into(),
+        offset: Vec3::new(0.0, 24.0, 0.0),
+        default_rotation: Vec3::ZERO,
+        cubes: vec![ModelCube {
+            origin: Vec3::new(-1.0, -2.0, -1.0),
+            size: Vec3::new(2.0, 14.0, 2.0),
+            tex_offset: (0, 14),
+            deformation: 0.0,
+            mirror: false,
+        }],
+        parent: None,
+    };
+    bake_model(vec![board, stick], 64, 32)
+}
+
 /// Single-chest model, matching vanilla `ChestRenderer` geometry.
 /// Texture is 64x64 `entity/chest/normal.png`. Closed (lid not rotated).
 pub fn bake_chest_model() -> BakedEntityModel {

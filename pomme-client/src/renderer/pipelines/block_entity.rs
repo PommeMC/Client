@@ -64,6 +64,28 @@ const DYE_COLOR_NAMES: [&str; 16] = [
     "black",
 ];
 
+/// Wood/material variants for sign textures, in the order they appear in
+/// `SIGN_TEXTURES`.
+const SIGN_WOOD_NAMES: [&str; 12] = [
+    "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak",
+    "bamboo", "crimson", "warped",
+];
+
+const SIGN_TEXTURES: &[&[&str]] = &[
+    &["minecraft/textures/entity/signs/oak.png"],
+    &["minecraft/textures/entity/signs/spruce.png"],
+    &["minecraft/textures/entity/signs/birch.png"],
+    &["minecraft/textures/entity/signs/jungle.png"],
+    &["minecraft/textures/entity/signs/acacia.png"],
+    &["minecraft/textures/entity/signs/dark_oak.png"],
+    &["minecraft/textures/entity/signs/mangrove.png"],
+    &["minecraft/textures/entity/signs/cherry.png"],
+    &["minecraft/textures/entity/signs/pale_oak.png"],
+    &["minecraft/textures/entity/signs/bamboo.png"],
+    &["minecraft/textures/entity/signs/crimson.png"],
+    &["minecraft/textures/entity/signs/warped.png"],
+];
+
 const SHULKER_TEXTURES: &[&[&str]] = &[
     &["minecraft/textures/entity/shulker/shulker_white.png"],
     &["minecraft/textures/entity/shulker/shulker_orange.png"],
@@ -84,19 +106,21 @@ const SHULKER_TEXTURES: &[&[&str]] = &[
     &["minecraft/textures/entity/shulker/shulker.png"],
 ];
 
-fn dye_index(name: &str) -> Option<u32> {
-    DYE_COLOR_NAMES
-        .iter()
-        .position(|&c| c == name)
-        .map(|i| i as u32)
+fn name_index(table: &[&str], name: &str) -> Option<u32> {
+    table.iter().position(|&n| n == name).map(|i| i as u32)
 }
 
 pub fn variant_for_block(kind: BlockEntityKind, name: &str) -> u32 {
     match kind {
         BlockEntityKind::ShulkerBox => name
             .strip_suffix("_shulker_box")
-            .and_then(dye_index)
+            .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
             .unwrap_or(16),
+        BlockEntityKind::Sign => name
+            .strip_suffix("_sign")
+            .or_else(|| name.strip_suffix("_wall_sign"))
+            .and_then(|s| name_index(&SIGN_WOOD_NAMES, s))
+            .unwrap_or(0),
         _ => 0,
     }
 }
@@ -113,6 +137,12 @@ fn kind_definitions() -> Vec<KindDef> {
             kind: BlockEntityKind::ShulkerBox,
             model: block_entity_model::bake_shulker_box_model(),
             tex_variants: SHULKER_TEXTURES,
+            tex_size: 64,
+        },
+        KindDef {
+            kind: BlockEntityKind::Sign,
+            model: block_entity_model::bake_sign_model(),
+            tex_variants: SIGN_TEXTURES,
             tex_size: 64,
         },
     ]
