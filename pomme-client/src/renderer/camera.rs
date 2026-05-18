@@ -188,4 +188,12 @@ impl CameraUniform {
             fog_color: [fog_color[0], fog_color[1], fog_color[2], 0.0],
         }
     }
+
+    pub fn with_view_proj(view_proj: Mat4) -> Self {
+        Self {
+            view_proj: view_proj.to_cols_array_2d(),
+            camera_pos: [0.0; 4],
+            fog_color: [0.0; 4],
+        }
+    }
 }

@@ -7,6 +7,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::pipelines::gui_item_atlas::GuiItemRegion;
 use crate::renderer::{shader, util};
 use crate::ui::font::GlyphMap;
 use crate::ui::server_list::MotdSpan;
@@ -150,13 +151,8 @@ pub struct MenuOverlayPipeline {
     sprite_staging_buffer: vk::Buffer,
     sprite_staging_allocation: Option<Allocation>,
     sprite_atlas: SpriteAtlas,
-    item_image: vk::Image,
-    item_view: vk::ImageView,
-    item_sampler: vk::Sampler,
-    item_allocation: Option<Allocation>,
-    item_staging_buffer: vk::Buffer,
-    item_staging_allocation: Option<Allocation>,
-    item_atlas: ItemAtlas,
+    item_placeholder: Option<TextureResources>,
+    gui_item_regions: HashMap<String, GuiItemRegion>,
     mc_font_image: vk::Image,
     mc_font_view: vk::ImageView,
     mc_font_sampler: vk::Sampler,
@@ -360,23 +356,32 @@ impl MenuOverlayPipeline {
 
         let sprite_sampler = unsafe { util::create_nearest_sampler(device) };
 
-        let (
-            item_atlas_data,
-            item_image,
-            item_view,
-            item_alloc,
-            item_staging_buffer,
-            item_staging_alloc,
-        ) = build_item_atlas(
+        let (item_image, item_view, item_alloc) =
+            util::create_gpu_image(device, allocator, 1, 1, "item_atlas_placeholder");
+        let (item_staging_buffer, item_staging_alloc) = util::create_staging_buffer(
+            device,
+            allocator,
+            &[0u8, 0, 0, 0],
+            "item_atlas_placeholder_staging",
+        );
+        util::upload_image(
             device,
             queue,
             command_pool,
-            allocator,
-            jar_assets_dir,
-            asset_index,
+            item_staging_buffer,
+            item_image,
+            1,
+            1,
         );
-
         let item_sampler = unsafe { util::create_nearest_sampler(device) };
+        let item_placeholder = Some(TextureResources {
+            sampler: item_sampler,
+            image: item_image,
+            view: item_view,
+            image_alloc: Some(item_alloc),
+            staging_buffer: item_staging_buffer,
+            staging_alloc: Some(item_staging_alloc),
+        });
 
         let mc_glyph_map = GlyphMap::load(jar_assets_dir, asset_index);
         crate::lang::load(jar_assets_dir);
@@ -542,13 +547,8 @@ impl MenuOverlayPipeline {
             sprite_staging_buffer,
             sprite_staging_allocation: sprite_staging_alloc,
             sprite_atlas: sprite_atlas_data,
-            item_image,
-            item_view,
-            item_sampler,
-            item_allocation: Some(item_alloc),
-            item_staging_buffer,
-            item_staging_allocation: item_staging_alloc,
-            item_atlas: item_atlas_data,
+            item_placeholder,
+            gui_item_regions: HashMap::new(),
             mc_font_image,
             mc_font_view,
             mc_font_sampler,
@@ -753,8 +753,22 @@ impl MenuOverlayPipeline {
                     item_name,
                     tint,
                 } => {
-                    if let Some(region) = self.item_atlas.regions.get(item_name.as_str()) {
-                        push_textured_quad(&mut vertices, *x, *y, *w, *h, region, *tint, 3.0);
+                    if let Some(region) = self.gui_item_regions.get(item_name.as_str()) {
+                        push_quad(
+                            &mut vertices,
+                            *x,
+                            *y,
+                            *w,
+                            *h,
+                            region.u0,
+                            region.v0,
+                            region.u1,
+                            region.v1,
+                            *tint,
+                            3.0,
+                            [0.0, 0.0],
+                            0.0,
+                        );
                     }
                 }
                 MenuElement::McText {
@@ -1100,6 +1114,37 @@ impl MenuOverlayPipeline {
         cmd.set_scissor(0, &[default_scissor]);
     }
 
+    pub fn set_gui_item_atlas(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+        regions: HashMap<String, GuiItemRegion>,
+    ) {
+        if let Some(mut res) = self.item_placeholder.take() {
+            let mut alloc = allocator.lock().unwrap();
+            destroy_texture_resources(device, &mut alloc, &mut res);
+        }
+
+        self.gui_item_regions = regions;
+
+        let info = vk::DescriptorImageInfo {
+            sampler,
+            image_view: view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: self.tex_set,
+            dst_binding: 2,
+            descriptor_count: 1,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            image_info: &info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
+    }
+
     pub fn set_blur_texture(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
         let info = vk::DescriptorImageInfo {
             sampler,
@@ -1275,18 +1320,9 @@ impl MenuOverlayPipeline {
                 staging_alloc: self.sprite_staging_allocation.take(),
             },
         );
-        destroy_texture_resources(
-            device,
-            &mut alloc,
-            &mut TextureResources {
-                sampler: self.item_sampler,
-                image: self.item_image,
-                view: self.item_view,
-                image_alloc: self.item_allocation.take(),
-                staging_buffer: self.item_staging_buffer,
-                staging_alloc: self.item_staging_allocation.take(),
-            },
-        );
+        if let Some(mut res) = self.item_placeholder.take() {
+            destroy_texture_resources(device, &mut alloc, &mut res);
+        }
         destroy_texture_resources(
             device,
             &mut alloc,
@@ -1593,10 +1629,6 @@ struct SpriteRegion {
 
 struct SpriteAtlas {
     regions: HashMap<SpriteId, SpriteRegion>,
-}
-
-struct ItemAtlas {
-    regions: HashMap<String, SpriteRegion>,
 }
 
 const INV_TEX_W: u32 = 176;
@@ -2126,226 +2158,6 @@ fn build_sprite_atlas(
 
     (
         SpriteAtlas { regions },
-        image,
-        view,
-        allocation,
-        staging_buffer,
-        Some(staging_allocation),
-    )
-}
-
-const ITEM_ATLAS_SIZE: u32 = 1024;
-const ITEM_TILE: u32 = 16;
-const ITEM_GRID: u32 = ITEM_ATLAS_SIZE / ITEM_TILE;
-
-const MODEL_PARENT_LIMIT: u32 = 16;
-const TEXTURE_REF_DEPTH: u32 = 8;
-const TEXTURE_KEY_PREFERENCE: &[&str] = &[
-    "layer0", "all", "side", "particle", "north", "front", "top", "end",
-];
-
-fn strip_mc_ns(s: &str) -> &str {
-    s.strip_prefix("minecraft:").unwrap_or(s)
-}
-
-fn read_json(path: &Path) -> Option<serde_json::Value> {
-    let s = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&s).ok()
-}
-
-fn find_first_model_string(json: &serde_json::Value) -> Option<String> {
-    match json {
-        serde_json::Value::Object(map) => {
-            if let Some(serde_json::Value::String(s)) = map.get("model") {
-                return Some(s.clone());
-            }
-            for v in map.values() {
-                if let Some(r) = find_first_model_string(v) {
-                    return Some(r);
-                }
-            }
-            None
-        }
-        serde_json::Value::Array(arr) => arr.iter().find_map(find_first_model_string),
-        _ => None,
-    }
-}
-
-fn resolve_texture_ref(value: &str, map: &HashMap<String, String>, depth: u32) -> String {
-    if depth == 0 {
-        return value.to_string();
-    }
-    if let Some(key) = value.strip_prefix('#')
-        && let Some(referent) = map.get(key)
-    {
-        return resolve_texture_ref(referent, map, depth - 1);
-    }
-    value.to_string()
-}
-
-fn resolve_model_textures(start_path: &str, models_dir: &Path) -> HashMap<String, String> {
-    let mut merged: HashMap<String, String> = HashMap::new();
-    let mut current = Some(start_path.to_string());
-    let mut depth = 0u32;
-    while let Some(path) = current.take() {
-        if depth >= MODEL_PARENT_LIMIT {
-            break;
-        }
-        depth += 1;
-
-        let file = models_dir.join(format!("{path}.json"));
-        let Some(json) = read_json(&file) else { break };
-
-        if let Some(textures) = json.get("textures").and_then(|t| t.as_object()) {
-            for (k, v) in textures {
-                if let Some(s) = v.as_str() {
-                    merged.entry(k.clone()).or_insert_with(|| s.to_string());
-                }
-            }
-        }
-
-        current = json
-            .get("parent")
-            .and_then(|p| p.as_str())
-            .map(|p| strip_mc_ns(p).to_string());
-    }
-
-    let resolved: HashMap<String, String> = merged
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.clone(),
-                resolve_texture_ref(v, &merged, TEXTURE_REF_DEPTH),
-            )
-        })
-        .collect();
-    resolved
-}
-
-fn resolve_item_texture(name: &str, items_dir: &Path, models_dir: &Path) -> Option<String> {
-    let item_json = read_json(&items_dir.join(format!("{name}.json")))?;
-    let model_path = find_first_model_string(&item_json)?;
-    let textures = resolve_model_textures(strip_mc_ns(&model_path), models_dir);
-
-    for key in TEXTURE_KEY_PREFERENCE {
-        if let Some(tex) = textures.get(*key) {
-            return Some(strip_mc_ns(tex).to_string());
-        }
-    }
-    textures.values().next().map(|t| strip_mc_ns(t).to_string())
-}
-
-fn build_item_atlas(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
-    jar_assets_dir: &Path,
-    _asset_index: &Option<AssetIndex>,
-) -> (
-    ItemAtlas,
-    vk::Image,
-    vk::ImageView,
-    Allocation,
-    vk::Buffer,
-    Option<Allocation>,
-) {
-    let mut pixels = vec![0u8; (ITEM_ATLAS_SIZE * ITEM_ATLAS_SIZE * 4) as usize];
-    let mut regions = HashMap::new();
-    let mut slot = 0u32;
-
-    let mc_base = jar_assets_dir.join("minecraft");
-    let items_dir = mc_base.join("items");
-    let models_dir = mc_base.join("models");
-    let textures_dir = mc_base.join("textures");
-
-    let mut item_names: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&items_dir) {
-        for entry in entries.flatten() {
-            let fname = entry.file_name().to_string_lossy().to_string();
-            if let Some(name) = fname.strip_suffix(".json") {
-                item_names.push(name.to_string());
-            }
-        }
-    }
-    item_names.sort();
-
-    let inv = 1.0 / ITEM_ATLAS_SIZE as f32;
-    for name in &item_names {
-        if slot >= ITEM_GRID * ITEM_GRID {
-            tracing::warn!("Item atlas full, skipping remaining items");
-            break;
-        }
-
-        let Some(tex_path) = resolve_item_texture(name, &items_dir, &models_dir) else {
-            continue;
-        };
-        let png_path = textures_dir.join(format!("{tex_path}.png"));
-        let img = match crate::assets::load_image(&png_path) {
-            Ok(img) => img.to_rgba8(),
-            Err(_) => continue,
-        };
-
-        let gx = (slot % ITEM_GRID) * ITEM_TILE;
-        let gy = (slot / ITEM_GRID) * ITEM_TILE;
-        let src_w = img.width().min(ITEM_TILE);
-        let src_h = img.height().min(ITEM_TILE);
-
-        blit_image(
-            &mut pixels,
-            ITEM_ATLAS_SIZE,
-            img.as_raw(),
-            img.width(),
-            gx,
-            gy,
-            src_w,
-            src_h,
-        );
-
-        regions.insert(
-            name.clone(),
-            SpriteRegion {
-                u0: gx as f32 * inv,
-                v0: gy as f32 * inv,
-                u1: (gx + ITEM_TILE) as f32 * inv,
-                v1: (gy + ITEM_TILE) as f32 * inv,
-                src_w: ITEM_TILE as f32,
-                src_h: ITEM_TILE as f32,
-                nine_slice_border: 0.0,
-            },
-        );
-
-        slot += 1;
-    }
-
-    tracing::info!(
-        "Item atlas: loaded {} textures into {}x{}",
-        regions.len(),
-        ITEM_ATLAS_SIZE,
-        ITEM_ATLAS_SIZE
-    );
-
-    let (image, view, allocation) = util::create_gpu_image(
-        device,
-        allocator,
-        ITEM_ATLAS_SIZE,
-        ITEM_ATLAS_SIZE,
-        "item_atlas",
-    );
-    let (staging_buffer, staging_allocation) =
-        util::create_staging_buffer(device, allocator, &pixels, "item_staging");
-    util::upload_image(
-        device,
-        queue,
-        command_pool,
-        staging_buffer,
-        image,
-        ITEM_ATLAS_SIZE,
-        ITEM_ATLAS_SIZE,
-    );
-
-    (
-        ItemAtlas { regions },
         image,
         view,
         allocation,

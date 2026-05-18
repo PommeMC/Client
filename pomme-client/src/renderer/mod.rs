@@ -102,6 +102,7 @@ pub struct Renderer {
     skin_preview: SkinPreviewPipeline,
     chunk_border_pipeline: ChunkBorderPipeline,
     item_entity_pipeline: ItemEntityPipeline,
+    gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
@@ -293,11 +294,34 @@ impl Renderer {
             &ctx.allocator,
         );
 
-        let item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
+        let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
             &ctx.allocator,
             &atlas,
+        );
+
+        splash(&mut menu_pipeline, 0.95, "Rendering item icons...");
+
+        let mut gui_item_atlas =
+            pipelines::gui_item_atlas::GuiItemAtlas::new(&ctx.device, &ctx.allocator, &atlas);
+        gui_item_atlas.populate(
+            &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            &ctx.allocator,
+            &mut item_entity_pipeline,
+            &atlas.uv_map,
+            &registry,
+            jar_assets_dir,
+            asset_index,
+        );
+        menu_pipeline.set_gui_item_atlas(
+            &ctx.device,
+            &ctx.allocator,
+            gui_item_atlas.view,
+            gui_item_atlas.sampler,
+            gui_item_atlas.regions.clone(),
         );
 
         Ok(Self {
@@ -320,6 +344,7 @@ impl Renderer {
             block_entity_pipeline,
             chunk_border_pipeline,
             item_entity_pipeline,
+            gui_item_atlas,
             chunk_buffers,
             render_finished_per_image,
             swapchain_dirty: false,
@@ -1298,6 +1323,8 @@ impl Drop for Renderer {
         self.chunk_border_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.item_entity_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.gui_item_atlas
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
 

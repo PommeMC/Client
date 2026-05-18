@@ -213,6 +213,10 @@ impl ItemEntityPipeline {
         self.meshes.contains_key(name)
     }
 
+    pub fn mesh_handle(&self, name: &str) -> Option<(vk::Buffer, u32)> {
+        self.meshes.get(name).map(|m| (m.buffer, m.vertex_count))
+    }
+
     pub fn ensure_mesh(
         &mut self,
         device: &vk::Device,
