@@ -3,12 +3,14 @@ use std::sync::Arc;
 
 use azalea_block::BlockState;
 use azalea_core::heightmap_kind::HeightmapKind;
-use azalea_core::position::ChunkPos;
+use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_world::chunk::Chunk;
 use azalea_world::chunk::partial::PartialChunkStorage;
 use azalea_world::chunk::storage::ChunkStorage;
 use parking_lot::RwLock;
 use thiserror::Error;
+
+use super::block_entity::StoredBlockEntity;
 
 const OVERWORLD_HEIGHT: u32 = 384;
 const OVERWORLD_MIN_Y: i32 = -64;
@@ -60,6 +62,7 @@ pub struct ChunkStore {
     pub chunk_storage: ChunkStorage,
     pub partial_storage: PartialChunkStorage,
     pub light_data: std::collections::HashMap<(i32, i32), ChunkLightData>,
+    pub block_entities: std::collections::HashMap<BlockPos, StoredBlockEntity>,
 }
 
 impl ChunkStore {
@@ -72,6 +75,7 @@ impl ChunkStore {
             chunk_storage: ChunkStorage::new(height, min_y),
             partial_storage: PartialChunkStorage::new(view_distance.max(64)),
             light_data: std::collections::HashMap::new(),
+            block_entities: std::collections::HashMap::new(),
         }
     }
 
@@ -163,6 +167,10 @@ impl ChunkStore {
     pub fn unload_chunk(&mut self, pos: &ChunkPos) {
         self.light_data.remove(&(pos.x, pos.z));
         self.partial_storage.limited_set(pos, None);
+        let cx = pos.x;
+        let cz = pos.z;
+        self.block_entities
+            .retain(|bp, _| bp.x.div_euclid(16) != cx || bp.z.div_euclid(16) != cz);
     }
 
     pub fn set_center(&mut self, pos: ChunkPos) {

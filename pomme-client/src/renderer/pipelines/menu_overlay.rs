@@ -2138,6 +2138,103 @@ const ITEM_ATLAS_SIZE: u32 = 1024;
 const ITEM_TILE: u32 = 16;
 const ITEM_GRID: u32 = ITEM_ATLAS_SIZE / ITEM_TILE;
 
+const MODEL_PARENT_LIMIT: u32 = 16;
+const TEXTURE_REF_DEPTH: u32 = 8;
+const TEXTURE_KEY_PREFERENCE: &[&str] = &[
+    "layer0", "all", "side", "particle", "north", "front", "top", "end",
+];
+
+fn strip_mc_ns(s: &str) -> &str {
+    s.strip_prefix("minecraft:").unwrap_or(s)
+}
+
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    let s = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+fn find_first_model_string(json: &serde_json::Value) -> Option<String> {
+    match json {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(s)) = map.get("model") {
+                return Some(s.clone());
+            }
+            for v in map.values() {
+                if let Some(r) = find_first_model_string(v) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(arr) => arr.iter().find_map(find_first_model_string),
+        _ => None,
+    }
+}
+
+fn resolve_texture_ref(value: &str, map: &HashMap<String, String>, depth: u32) -> String {
+    if depth == 0 {
+        return value.to_string();
+    }
+    if let Some(key) = value.strip_prefix('#')
+        && let Some(referent) = map.get(key)
+    {
+        return resolve_texture_ref(referent, map, depth - 1);
+    }
+    value.to_string()
+}
+
+fn resolve_model_textures(start_path: &str, models_dir: &Path) -> HashMap<String, String> {
+    let mut merged: HashMap<String, String> = HashMap::new();
+    let mut current = Some(start_path.to_string());
+    let mut depth = 0u32;
+    while let Some(path) = current.take() {
+        if depth >= MODEL_PARENT_LIMIT {
+            break;
+        }
+        depth += 1;
+
+        let file = models_dir.join(format!("{path}.json"));
+        let Some(json) = read_json(&file) else { break };
+
+        if let Some(textures) = json.get("textures").and_then(|t| t.as_object()) {
+            for (k, v) in textures {
+                if let Some(s) = v.as_str() {
+                    merged.entry(k.clone()).or_insert_with(|| s.to_string());
+                }
+            }
+        }
+
+        current = json
+            .get("parent")
+            .and_then(|p| p.as_str())
+            .map(|p| strip_mc_ns(p).to_string());
+    }
+
+    let resolved: HashMap<String, String> = merged
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                resolve_texture_ref(v, &merged, TEXTURE_REF_DEPTH),
+            )
+        })
+        .collect();
+    resolved
+}
+
+fn resolve_item_texture(name: &str, items_dir: &Path, models_dir: &Path) -> Option<String> {
+    let item_json = read_json(&items_dir.join(format!("{name}.json")))?;
+    let model_path = find_first_model_string(&item_json)?;
+    let textures = resolve_model_textures(strip_mc_ns(&model_path), models_dir);
+
+    for key in TEXTURE_KEY_PREFERENCE {
+        if let Some(tex) = textures.get(*key) {
+            return Some(strip_mc_ns(tex).to_string());
+        }
+    }
+    textures.values().next().map(|t| strip_mc_ns(t).to_string())
+}
+
 fn build_item_atlas(
     device: &vk::Device,
     queue: vk::Queue,
@@ -2157,57 +2254,47 @@ fn build_item_atlas(
     let mut regions = HashMap::new();
     let mut slot = 0u32;
 
-    let item_parent = jar_assets_dir.join("minecraft/textures/item");
-    let block_parent = jar_assets_dir.join("minecraft/textures/block");
+    let mc_base = jar_assets_dir.join("minecraft");
+    let items_dir = mc_base.join("items");
+    let models_dir = mc_base.join("models");
+    let textures_dir = mc_base.join("textures");
 
-    let mut seen = std::collections::HashSet::new();
     let mut item_names: Vec<String> = Vec::new();
-
-    for dir in [&item_parent, &block_parent] {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let fname = entry.file_name().to_string_lossy().to_string();
-                if let Some(name) = fname.strip_suffix(".png")
-                    && seen.insert(name.to_string())
-                {
-                    item_names.push(name.to_string());
-                }
+    if let Ok(entries) = std::fs::read_dir(&items_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if let Some(name) = fname.strip_suffix(".json") {
+                item_names.push(name.to_string());
             }
         }
     }
-
     item_names.sort();
 
+    let inv = 1.0 / ITEM_ATLAS_SIZE as f32;
     for name in &item_names {
         if slot >= ITEM_GRID * ITEM_GRID {
             tracing::warn!("Item atlas full, skipping remaining items");
             break;
         }
 
-        let item_path = item_parent.join(format!("{name}.png"));
-        let block_path = block_parent.join(format!("{name}.png"));
-        let path = if item_path.exists() {
-            &item_path
-        } else {
-            &block_path
+        let Some(tex_path) = resolve_item_texture(name, &items_dir, &models_dir) else {
+            continue;
         };
-
-        let img = match crate::assets::load_image(path) {
+        let png_path = textures_dir.join(format!("{tex_path}.png"));
+        let img = match crate::assets::load_image(&png_path) {
             Ok(img) => img.to_rgba8(),
             Err(_) => continue,
         };
 
         let gx = (slot % ITEM_GRID) * ITEM_TILE;
         let gy = (slot / ITEM_GRID) * ITEM_TILE;
-
         let src_w = img.width().min(ITEM_TILE);
         let src_h = img.height().min(ITEM_TILE);
-        let raw = img.as_raw();
 
         blit_image(
             &mut pixels,
             ITEM_ATLAS_SIZE,
-            raw,
+            img.as_raw(),
             img.width(),
             gx,
             gy,
@@ -2215,7 +2302,6 @@ fn build_item_atlas(
             src_h,
         );
 
-        let inv = 1.0 / ITEM_ATLAS_SIZE as f32;
         regions.insert(
             name.clone(),
             SpriteRegion {

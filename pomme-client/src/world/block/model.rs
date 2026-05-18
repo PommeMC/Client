@@ -65,10 +65,27 @@ struct ModelRef {
 #[derive(Deserialize, Default, Clone)]
 struct ModelFile {
     parent: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_texture_map")]
     textures: HashMap<String, String>,
     #[serde(default)]
     elements: Vec<ElementDef>,
+}
+
+fn deserialize_texture_map<'de, D>(de: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let raw: HashMap<String, serde_json::Value> = HashMap::deserialize(de)?;
+    let mut out = HashMap::new();
+    for (k, v) in raw {
+        if let Some(s) = v.as_str() {
+            out.insert(k, s.to_string());
+        } else if let Some(sprite) = v.get("sprite").and_then(serde_json::Value::as_str) {
+            out.insert(k, sprite.to_string());
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Deserialize, Clone)]
@@ -327,7 +344,12 @@ pub fn bake_all_models(
 
     let mut missing_names: Vec<String> = Vec::new();
     for_each_blockstate(jar_assets_dir, asset_index, packs, |block_name, _| {
-        if !results.contains_key(block_name) && !multipart_results.contains_key(block_name) {
+        if !results.contains_key(block_name)
+            && !multipart_results.contains_key(block_name)
+            && !crate::world::block_entity::is_block_entity_block(block_name)
+            && !crate::world::block_entity::is_fluid_block(block_name)
+            && !crate::world::block_entity::is_invisible_block(block_name)
+        {
             missing_names.push(block_name.to_string());
         }
         Some(())
@@ -335,13 +357,13 @@ pub fn bake_all_models(
     missing_names.sort();
     let baked_count = results.len() + multipart_results.len();
     tracing::info!(
-        "Baked models for {}/{} blocks ({} missing)",
+        "Baked models for {}/{} blocks ({} unhandled)",
         baked_count,
         total,
         missing_names.len()
     );
     if !missing_names.is_empty() {
-        tracing::warn!("Missing baked models: {}", missing_names.join(", "));
+        tracing::warn!("Unhandled baked models: {}", missing_names.join(", "));
     }
     (results, multipart_results)
 }

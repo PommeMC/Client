@@ -495,6 +495,7 @@ pub fn update_game(
             selected_hotbar,
             gs,
             game.advanced_item_tooltips,
+            core.input.left_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
         match action {

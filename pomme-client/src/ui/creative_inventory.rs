@@ -32,6 +32,7 @@ const SCROLLBAR_TRACK_Y: f32 = 18.0;
 const SCROLLBAR_TRACK_H: f32 = 112.0;
 const SCROLLBAR_HANDLE_W: f32 = 12.0;
 const SCROLLBAR_HANDLE_H: f32 = 15.0;
+const SCROLLBAR_HIT_W: f32 = 14.0;
 const SEARCH_BOX_X: f32 = 82.0;
 const SEARCH_BOX_Y: f32 = 6.0;
 const SEARCH_BOX_H: f32 = 9.0;
@@ -116,7 +117,7 @@ impl CreativeTab {
             CreativeTab::NaturalBlocks => TabMeta {
                 row: Row::Top,
                 col: 3,
-                icon: "grass_block_side",
+                icon: "grass_block",
                 title: "Natural Blocks",
                 items: ItemSource::Static(NATURAL_BLOCKS_ITEMS),
             },
@@ -144,7 +145,7 @@ impl CreativeTab {
             CreativeTab::Search => TabMeta {
                 row: Row::Top,
                 col: 7,
-                icon: "compass_16",
+                icon: "compass",
                 title: "Search",
                 items: ItemSource::Search,
             },
@@ -186,14 +187,14 @@ impl CreativeTab {
             CreativeTab::OpBlocks => TabMeta {
                 row: Row::Bottom,
                 col: 6,
-                icon: "command_block_front",
+                icon: "command_block",
                 title: "Operator Utilities",
                 items: ItemSource::Static(OP_BLOCKS_ITEMS),
             },
             CreativeTab::SurvivalInventory => TabMeta {
                 row: Row::Bottom,
                 col: 7,
-                icon: "oak_planks",
+                icon: "chest",
                 title: "Survival Inventory",
                 items: ItemSource::Empty,
             },
@@ -249,6 +250,7 @@ pub struct CreativeState {
     pub scroll: f32,
     pub search: String,
     cursor_blink: Instant,
+    scroll_dragging: bool,
 }
 
 impl CreativeState {
@@ -258,6 +260,7 @@ impl CreativeState {
             scroll: 0.0,
             search: String::new(),
             cursor_blink: Instant::now(),
+            scroll_dragging: false,
         }
     }
 
@@ -293,6 +296,7 @@ pub fn build_creative_inventory(
     selected_hotbar: u8,
     gs: f32,
     advanced_tooltips: bool,
+    mouse_held: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> CreativeAction {
     if state.tab.captures_typing() {
@@ -377,8 +381,10 @@ pub fn build_creative_inventory(
                 let step = 1.0 / max_scroll_rows as f32;
                 state.scroll = (state.scroll - scroll_delta.signum() * step).clamp(0.0, 1.0);
             }
+            update_scroll_drag(state, ox, oy, scale, cursor, clicked, mouse_held);
         } else {
             state.scroll = 0.0;
+            state.scroll_dragging = false;
         }
 
         let scroll_row_offset = (state.scroll * max_scroll_rows as f32).round() as usize;
@@ -407,8 +413,7 @@ pub fn build_creative_inventory(
                     GRID_ORIGIN_X + col as f32 * SLOT_STRIDE,
                     GRID_ORIGIN_Y + row as f32 * SLOT_STRIDE,
                 );
-                let hovered =
-                    push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
+                let hovered = push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
                 if hovered {
                     push_item_tooltip(elements, &item, &tt);
                     if clicked
@@ -659,8 +664,7 @@ fn roman(n: i32) -> &'static str {
 }
 
 fn tabs_containing(kind: ItemKind) -> Vec<&'static str> {
-    TABS
-        .iter()
+    TABS.iter()
         .filter_map(|tab| match tab.meta().items {
             ItemSource::Static(list) if list.contains(&kind) => Some(tab.meta().title),
             _ => None,
@@ -768,7 +772,13 @@ fn draw_player_hotbar(
     let size = SLOT_SIZE * scale;
     let hotbar = inventory.hotbar_slots();
     for col in 0..GRID_COLS {
-        let (x, y) = slot_xy(ox, oy, scale, GRID_ORIGIN_X + col as f32 * SLOT_STRIDE, HOTBAR_Y);
+        let (x, y) = slot_xy(
+            ox,
+            oy,
+            scale,
+            GRID_ORIGIN_X + col as f32 * SLOT_STRIDE,
+            HOTBAR_Y,
+        );
         let item = item_or_empty(hotbar, col);
         slot_with_tooltip(elements, x, y, size, scale, &item, None, tt);
     }
@@ -866,6 +876,33 @@ fn draw_search_box(
             color: WHITE,
             centered: false,
         });
+    }
+}
+
+fn update_scroll_drag(
+    state: &mut CreativeState,
+    ox: f32,
+    oy: f32,
+    scale: f32,
+    cursor: (f32, f32),
+    clicked: bool,
+    mouse_held: bool,
+) {
+    let hit_x = ox + SCROLLBAR_X * scale;
+    let hit_y = oy + SCROLLBAR_TRACK_Y * scale;
+    let hit_w = SCROLLBAR_HIT_W * scale;
+    let hit_h = SCROLLBAR_TRACK_H * scale;
+    if clicked && hit_test(cursor, [hit_x, hit_y, hit_w, hit_h]) {
+        state.scroll_dragging = true;
+    }
+    if !mouse_held {
+        state.scroll_dragging = false;
+    }
+    if state.scroll_dragging {
+        let track_y = oy + SCROLLBAR_TRACK_Y * scale;
+        let half_handle = SCROLLBAR_HANDLE_H * scale / 2.0;
+        let usable = (SCROLLBAR_TRACK_H - SCROLLBAR_HANDLE_H) * scale;
+        state.scroll = ((cursor.1 - track_y - half_handle) / usable).clamp(0.0, 1.0);
     }
 }
 

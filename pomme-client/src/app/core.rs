@@ -427,6 +427,37 @@ impl AppCore {
                         }
                     }
                 }
+                NetworkEvent::BlockEntitySync { chunk_pos, entries } => {
+                    for (pos, kind, nbt) in entries {
+                        game.chunk_store.block_entities.insert(
+                            pos,
+                            crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                        );
+                    }
+                    if !chunks_to_mesh.contains(&chunk_pos) {
+                        chunks_to_mesh.push(chunk_pos);
+                    }
+                }
+                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => {
+                    match nbt {
+                        Some(nbt) => {
+                            game.chunk_store.block_entities.insert(
+                                pos,
+                                crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                            );
+                        }
+                        None => {
+                            game.chunk_store.block_entities.remove(&pos);
+                        }
+                    }
+                    let chunk_pos = azalea_core::position::ChunkPos::new(
+                        pos.x.div_euclid(16),
+                        pos.z.div_euclid(16),
+                    );
+                    if !chunks_to_mesh.contains(&chunk_pos) {
+                        chunks_to_mesh.push(chunk_pos);
+                    }
+                }
                 NetworkEvent::GameModeChanged { game_mode } => {
                     tracing::info!("Game mode changed to {game_mode}");
                     game.player.game_mode = game_mode;
