@@ -1,3 +1,4 @@
+pub mod block_entity;
 pub mod block_overlay;
 pub mod blur;
 pub mod chunk;

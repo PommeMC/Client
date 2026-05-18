@@ -613,6 +613,17 @@ pub fn update_game(
         partial_tick,
     );
 
+    let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = game
+        .chunk_store
+        .block_entities
+        .iter()
+        .map(|(pos, be)| crate::renderer::BlockEntityRenderInfo {
+            pos: *pos,
+            kind: be.kind,
+            yaw: 0.0,
+        })
+        .collect();
+
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
@@ -623,6 +634,7 @@ pub fn update_game(
         sky,
         &entity_renders,
         &item_renders,
+        &block_entity_renders,
     ) {
         tracing::error!("Render error: {e}");
     }

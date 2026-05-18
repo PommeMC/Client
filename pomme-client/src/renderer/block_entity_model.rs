@@ -1,0 +1,44 @@
+use glam::Vec3;
+
+use super::entity_model::{BakedEntityModel, EntityPart, ModelCube, bake_model};
+
+/// Single-chest model, matching vanilla `ChestRenderer` geometry.
+/// Texture is 64x64 `entity/chest/normal.png`. Closed (lid not rotated).
+pub fn bake_chest_model() -> BakedEntityModel {
+    let lid = EntityPart {
+        name: "lid".into(),
+        offset: Vec3::new(0.0, 9.0, 1.0),
+        default_rotation: Vec3::ZERO,
+        cubes: vec![
+            ModelCube {
+                origin: Vec3::new(-7.0, 0.0, -15.0),
+                size: Vec3::new(14.0, 5.0, 14.0),
+                tex_offset: (0, 0),
+                deformation: 0.0,
+                mirror: false,
+            },
+            ModelCube {
+                origin: Vec3::new(-1.0, -2.0, -16.0),
+                size: Vec3::new(2.0, 4.0, 1.0),
+                tex_offset: (0, 0),
+                deformation: 0.0,
+                mirror: false,
+            },
+        ],
+        parent: None,
+    };
+    let bottom = EntityPart {
+        name: "bottom".into(),
+        offset: Vec3::new(0.0, 0.0, 0.0),
+        default_rotation: Vec3::ZERO,
+        cubes: vec![ModelCube {
+            origin: Vec3::new(-7.0, 0.0, -7.0),
+            size: Vec3::new(14.0, 10.0, 14.0),
+            tex_offset: (0, 19),
+            deformation: 0.0,
+            mirror: false,
+        }],
+        parent: None,
+    };
+    bake_model(vec![lid, bottom], 64, 64)
+}

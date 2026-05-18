@@ -1,3 +1,4 @@
+pub mod block_entity_model;
 pub mod camera;
 pub mod chunk;
 mod context;
@@ -19,6 +20,8 @@ use chunk::atlas::TextureAtlas;
 use chunk::buffer::ChunkBufferStore;
 use chunk::mesher::{ChunkMeshData, MeshDispatcher};
 use context::VulkanContext;
+use pipelines::block_entity::BlockEntityPipeline;
+pub use pipelines::block_entity::BlockEntityRenderInfo;
 use pipelines::block_overlay::BlockOverlayPipeline;
 use pipelines::blur::BlurPipeline;
 use pipelines::chunk::ChunkPipeline;
@@ -59,6 +62,7 @@ enum RenderMode<'a> {
         sky: SkyState,
         entities: &'a [EntityRenderInfo],
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
+        block_entities: &'a [BlockEntityRenderInfo],
     },
     MainMenu {
         scroll: f32,
@@ -101,6 +105,7 @@ pub struct Renderer {
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
+    block_entity_pipeline: BlockEntityPipeline,
     chunk_buffers: ChunkBufferStore,
     render_finished_per_image: Vec<vk::Semaphore>,
     swapchain_dirty: bool,
@@ -265,6 +270,16 @@ impl Renderer {
             asset_index,
         );
 
+        let block_entity_pipeline = BlockEntityPipeline::new(
+            &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            jar_assets_dir,
+            asset_index,
+        );
+
         let chunk_border_pipeline = pipelines::chunk_borders::ChunkBorderPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
@@ -302,6 +317,7 @@ impl Renderer {
             blur_pipeline,
             skin_preview,
             entity_renderer,
+            block_entity_pipeline,
             chunk_border_pipeline,
             item_entity_pipeline,
             chunk_buffers,
@@ -515,6 +531,8 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.entity_renderer
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.block_entity_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.item_entity_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.blur_pipeline.resize(
@@ -724,6 +742,7 @@ impl Renderer {
         sky: SkyState,
         entities: &[EntityRenderInfo],
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
+        block_entities: &[BlockEntityRenderInfo],
     ) -> Result<(), RendererError> {
         let sky_col = sky.sky_color();
         self.render_frame(
@@ -738,6 +757,7 @@ impl Renderer {
                 sky,
                 entities,
                 item_entities,
+                block_entities,
             },
         )
     }
@@ -933,6 +953,7 @@ impl Renderer {
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
+            self.block_entity_pipeline.update_camera(frame, &uniform);
             self.chunk_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
         }
@@ -1033,6 +1054,7 @@ impl Renderer {
                 sky,
                 entities,
                 item_entities,
+                block_entities,
             } => {
                 self.sky_pipeline
                     .update_and_draw(&self.ctx.device, cmd, frame, &self.camera, sky);
@@ -1048,6 +1070,8 @@ impl Renderer {
                 }
 
                 self.entity_renderer.draw(cmd, frame, entities);
+
+                self.block_entity_pipeline.draw(cmd, frame, block_entities);
 
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
 
@@ -1268,6 +1292,8 @@ impl Drop for Renderer {
         self.skin_preview
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.entity_renderer
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.block_entity_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_border_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
