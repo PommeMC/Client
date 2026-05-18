@@ -262,6 +262,7 @@ impl AppCore {
                 }
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.chunk_store.unload_chunk(&pos);
+                    game.block_entity_anim.drop_chunk(pos.x, pos.z);
                     game.meshed_lod.remove(&pos);
 
                     renderer.remove_chunk_mesh(&pos);
@@ -456,6 +457,16 @@ impl AppCore {
                     );
                     if !chunks_to_mesh.contains(&chunk_pos) {
                         chunks_to_mesh.push(chunk_pos);
+                    }
+                }
+                NetworkEvent::BlockEvent {
+                    pos,
+                    action_id,
+                    action_parameter,
+                } => {
+                    // Action 1 for chest/shulker = open-viewer count.
+                    if action_id == 1 {
+                        game.block_entity_anim.set_open_count(pos, action_parameter);
                     }
                 }
                 NetworkEvent::GameModeChanged { game_mode } => {

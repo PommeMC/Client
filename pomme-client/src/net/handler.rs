@@ -67,6 +67,13 @@ pub fn handle_game_packet(
                 let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
             }
         }
+        ClientboundGamePacket::BlockEvent(p) => {
+            let _ = event_tx.try_send(NetworkEvent::BlockEvent {
+                pos: p.pos,
+                action_id: p.action_id,
+                action_parameter: p.action_parameter,
+            });
+        }
         ClientboundGamePacket::BlockEntityData(p) => {
             let nbt = match &p.tag {
                 simdnbt::owned::Nbt::Some(base) => Some(base.clone().as_compound()),

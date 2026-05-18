@@ -26,6 +26,7 @@ use crate::ui::chat::ChatState;
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction};
 use crate::ui::{common, hud};
+use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
 pub struct GameState {
@@ -70,6 +71,7 @@ pub struct GameState {
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
+    pub block_entity_anim: BlockEntityAnimStore,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
     pub last_player_chunk: ChunkPos,
@@ -91,6 +93,7 @@ impl GameState {
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
+            block_entity_anim: BlockEntityAnimStore::default(),
             player: LocalPlayer::new(),
             prev_player_pos: glam::Vec3::ZERO,
             biome_climate: Arc::new(HashMap::new()),
@@ -210,6 +213,7 @@ pub fn update_game(
                 |bx, by, bz| !game.chunk_store.get_block_state(bx, by, bz).is_air(),
                 |bx, by, bz| block_friction(game.chunk_store.get_block_state(bx, by, bz)),
             );
+            game.block_entity_anim.tick();
             core.tick_accumulator -= TICK_RATE;
         }
     }
@@ -622,11 +626,17 @@ pub fn update_game(
             let block: Box<dyn azalea_block::BlockTrait> = state.into();
             let variant =
                 crate::renderer::pipelines::block_entity::variant_for_block(be.kind, block.id());
+            let lid_open = game
+                .block_entity_anim
+                .container(pos)
+                .map(|a| a.openness)
+                .unwrap_or(0.0);
             crate::renderer::BlockEntityRenderInfo {
                 pos: *pos,
                 kind: be.kind,
                 yaw: 0.0,
                 variant,
+                lid_open,
             }
         })
         .collect();

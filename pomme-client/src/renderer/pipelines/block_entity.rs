@@ -20,6 +20,9 @@ pub struct BlockEntityRenderInfo {
     pub kind: BlockEntityKind,
     pub yaw: f32,
     pub variant: u32,
+    /// Lid openness for chest/shulker, 0.0=closed to 1.0=open. Raw (un-eased);
+    /// the pipeline applies a cubic ease at draw time.
+    pub lid_open: f32,
 }
 
 struct TextureSlot {
@@ -108,6 +111,33 @@ const SHULKER_TEXTURES: &[&[&str]] = &[
 
 fn name_index(table: &[&str], name: &str) -> Option<u32> {
     table.iter().position(|&n| n == name).map(|i| i as u32)
+}
+
+/// Build a [`PartAnim`] applying chest/shulker lid motion to part index 0.
+/// `openness` is the raw [0, 1] value; vanilla applies cubic easing so the lid
+/// decelerates as it approaches the open or closed extreme.
+fn lid_anim(kind: BlockEntityKind, openness: f32) -> PartAnim {
+    if openness <= 0.0 {
+        return PartAnim::default();
+    }
+    let inv = 1.0 - openness;
+    let eased = 1.0 - inv * inv * inv;
+    match kind {
+        BlockEntityKind::Chest | BlockEntityKind::TrappedChest | BlockEntityKind::EnderChest => {
+            PartAnim {
+                rotation: vec![(
+                    0,
+                    glam::Vec3::new(-eased * std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+                )],
+                ..Default::default()
+            }
+        }
+        BlockEntityKind::ShulkerBox => PartAnim {
+            rotation: vec![(0, glam::Vec3::new(0.0, eased * 270.0f32.to_radians(), 0.0))],
+            translation: vec![(0, glam::Vec3::new(0.0, -eased * 8.0, 0.0))],
+        },
+        _ => PartAnim::default(),
+    }
 }
 
 pub fn variant_for_block(kind: BlockEntityKind, name: &str) -> u32 {
@@ -317,7 +347,6 @@ impl BlockEntityPipeline {
 
         let mut bound_entry: *const KindEntry = std::ptr::null();
         let mut bound_set: vk::DescriptorSet = vk::DescriptorSet::null();
-        let anim = PartAnim::default();
 
         for info in items {
             let Some(entry) = self.entries.get(&info.kind) else {
@@ -351,6 +380,7 @@ impl BlockEntityPipeline {
             let model_mat = glam::Mat4::from_translation(block_center)
                 * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians());
 
+            let anim = lid_anim(info.kind, info.lid_open);
             let part_transforms = entry.model.compute_part_transforms(&anim);
             for (i, (start, count)) in entry.model.part_ranges.iter().enumerate() {
                 if *count == 0 {

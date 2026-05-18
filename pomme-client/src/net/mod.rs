@@ -82,6 +82,11 @@ pub enum NetworkEvent {
         kind: BlockEntityKind,
         nbt: Option<NbtCompound>,
     },
+    BlockEvent {
+        pos: BlockPos,
+        action_id: u8,
+        action_parameter: u8,
+    },
     TimeUpdate {
         game_time: u64,
         day_time: Option<u64>,
