@@ -642,7 +642,26 @@ impl MenuOverlayPipeline {
                             strikethrough: false,
                             underline: false,
                         };
-                        push_mc_text(&mut vertices, gm, start_x, *y, &[span], *scale);
+                        push_mc_text(&mut vertices, gm, start_x, *y, &[span], *scale, true);
+                    }
+                }
+                MenuElement::TextFlat {
+                    x,
+                    y,
+                    text,
+                    scale,
+                    color,
+                } => {
+                    if let Some(ref gm) = self.mc_glyph_map {
+                        let span = MotdSpan {
+                            text: text.clone(),
+                            color: *color,
+                            bold: false,
+                            italic: false,
+                            strikethrough: false,
+                            underline: false,
+                        };
+                        push_mc_text(&mut vertices, gm, *x, *y, &[span], *scale, false);
                     }
                 }
                 MenuElement::Icon {
@@ -751,7 +770,7 @@ impl MenuOverlayPipeline {
                         } else {
                             *x
                         };
-                        push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale);
+                        push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale, true);
                     }
                 }
                 MenuElement::GradientRect {
@@ -941,6 +960,7 @@ impl MenuOverlayPipeline {
                         text_y + i as f32 * line_h,
                         &[span],
                         *scale,
+                        true,
                     );
                 }
             }
@@ -1245,6 +1265,13 @@ pub enum MenuElement {
         color: [f32; 4],
         centered: bool,
     },
+    TextFlat {
+        x: f32,
+        y: f32,
+        text: String,
+        scale: f32,
+        color: [f32; 4],
+    },
     Icon {
         x: f32,
         y: f32,
@@ -1347,6 +1374,7 @@ pub enum SpriteId {
     InventoryBackground,
     CreativeItemsBackground,
     CreativeSearchBackground,
+    CreativeInventoryBackground,
     CreativeTabTopUnselected1,
     CreativeTabTopUnselected2,
     CreativeTabTopUnselected3,
@@ -1891,6 +1919,10 @@ fn build_sprite_atlas(
             SpriteId::CreativeSearchBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_item_search.png",
         ),
+        (
+            SpriteId::CreativeInventoryBackground,
+            "minecraft/textures/gui/container/creative_inventory/tab_inventory.png",
+        ),
     ] {
         let path = resolve_asset_path(jar_assets_dir, asset_index, path);
         match crate::assets::load_image(&path) {
@@ -2428,6 +2460,7 @@ fn push_mc_text(
     y: f32,
     spans: &[MotdSpan],
     scale: f32,
+    drop_shadow: bool,
 ) {
     let (tex_w, tex_h) = gm.dimensions();
     let inv_w = 1.0 / tex_w as f32;
@@ -2476,23 +2509,10 @@ fn push_mc_text(
             let sx = cx.round();
             let sy = (cy + glyph_y_off).round();
 
-            push_mc_glyph(
-                verts,
-                sx + px_scale,
-                sy + px_scale,
-                glyph_w.round(),
-                glyph_draw_h.round(),
-                u0,
-                v0,
-                u1,
-                v1,
-                shadow_color,
-                italic_offset,
-            );
-            if span.bold {
+            if drop_shadow {
                 push_mc_glyph(
                     verts,
-                    sx + 2.0 * px_scale,
+                    sx + px_scale,
                     sy + px_scale,
                     glyph_w.round(),
                     glyph_draw_h.round(),
@@ -2503,6 +2523,21 @@ fn push_mc_text(
                     shadow_color,
                     italic_offset,
                 );
+                if span.bold {
+                    push_mc_glyph(
+                        verts,
+                        sx + 2.0 * px_scale,
+                        sy + px_scale,
+                        glyph_w.round(),
+                        glyph_draw_h.round(),
+                        u0,
+                        v0,
+                        u1,
+                        v1,
+                        shadow_color,
+                        italic_offset,
+                    );
+                }
             }
 
             push_mc_glyph(

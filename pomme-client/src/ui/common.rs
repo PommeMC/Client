@@ -55,7 +55,7 @@ pub fn push_item_count(
     let text = count.to_string();
     let char_w = DIGIT_WIDTH * gs;
     let text_w = text.len() as f32 * char_w;
-    let fs = DIGIT_WIDTH * gs;
+    let fs = FONT_SIZE * gs;
     elements.push(MenuElement::Text {
         x: x + size + gs - text_w,
         y: y + size - fs,

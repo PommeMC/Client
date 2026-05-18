@@ -1,7 +1,7 @@
 use azalea_inventory::ItemStack;
 
 use super::common;
-use super::common::{SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, push_slot};
+use super::common::{FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, push_slot};
 use crate::player::inventory::Inventory;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
@@ -46,23 +46,21 @@ pub fn build_inventory(
         tint: WHITE,
     });
 
-    let fs = 6.0 * scale;
+    let fs = FONT_SIZE * scale;
 
-    elements.push(MenuElement::Text {
+    elements.push(MenuElement::TextFlat {
         x: ox + 97.0 * scale,
         y: oy + 6.0 * scale,
         text: "Crafting".into(),
         scale: fs,
         color: SLOT_LABEL_COLOR,
-        centered: false,
     });
-    elements.push(MenuElement::Text {
+    elements.push(MenuElement::TextFlat {
         x: ox + 8.0 * scale,
         y: oy + 72.0 * scale,
         text: "Inventory".into(),
         scale: fs,
         color: SLOT_LABEL_COLOR,
-        centered: false,
     });
 
     let hotbar = inventory.hotbar_slots();

@@ -1,10 +1,13 @@
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::Registry;
 use azalea_registry::builtin::ItemKind;
 
-use super::common::{self, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_slot};
+use super::common::{
+    self, FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_slot,
+};
 use super::creative_tab_data::{
     BUILDING_BLOCKS_ITEMS, COLORED_BLOCKS_ITEMS, COMBAT_ITEMS, FOOD_AND_DRINKS_ITEMS,
     FUNCTIONAL_BLOCKS_ITEMS, INGREDIENTS_ITEMS, NATURAL_BLOCKS_ITEMS, OP_BLOCKS_ITEMS,
@@ -30,13 +33,24 @@ const SEARCH_BOX_H: f32 = 9.0;
 const TAB_W: f32 = 26.0;
 const TAB_H: f32 = 32.0;
 const TAB_STRIDE: f32 = 27.0;
-const TAB_TOP_Y_OFFSET: f32 = -32.0;
-const TAB_BOTTOM_Y_OFFSET: f32 = 136.0;
+const TAB_TOP_HIT_Y: f32 = -32.0;
+const TAB_BOTTOM_HIT_Y: f32 = 136.0;
+const TAB_TOP_RENDER_Y: f32 = -28.0;
+const TAB_BOTTOM_RENDER_Y: f32 = 132.0;
 const TAB_ICON_SIZE: f32 = 16.0;
 const TITLE_X: f32 = 8.0;
 const TITLE_Y: f32 = 6.0;
 
-const SEARCH_CARET: [f32; 4] = [0.85, 0.85, 0.85, 1.0];
+const HOTBAR_Y: f32 = 112.0;
+const INV_MAIN_Y: f32 = 54.0;
+const INV_ARMOR_X: f32 = 54.0;
+const INV_ARMOR_Y: f32 = 6.0;
+const INV_ARMOR_COL_STRIDE: f32 = 54.0;
+const INV_ARMOR_ROW_STRIDE: f32 = 27.0;
+const INV_OFFHAND_X: f32 = 35.0;
+const INV_OFFHAND_Y: f32 = 20.0;
+const INV_TRASH_X: f32 = 173.0;
+const INV_TRASH_Y: f32 = 112.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CreativeTab {
@@ -52,6 +66,7 @@ pub enum CreativeTab {
     FoodAndDrinks,
     Ingredients,
     SpawnEggs,
+    #[allow(dead_code)]
     OpBlocks,
     SurvivalInventory,
 }
@@ -65,7 +80,6 @@ enum Row {
 enum ItemSource {
     Static(&'static [ItemKind]),
     Search,
-    PlayerInventory,
     Empty,
 }
 
@@ -119,14 +133,14 @@ impl CreativeTab {
                 row: Row::Top,
                 col: 6,
                 icon: "minecraft:bookshelf",
-                title: "Hotbar",
+                title: "Saved Hotbars",
                 items: ItemSource::Empty,
             },
             CreativeTab::Search => TabMeta {
                 row: Row::Top,
                 col: 7,
                 icon: "minecraft:compass",
-                title: "Search Items",
+                title: "Search",
                 items: ItemSource::Search,
             },
             CreativeTab::ToolsAndUtilities => TabMeta {
@@ -175,8 +189,8 @@ impl CreativeTab {
                 row: Row::Bottom,
                 col: 7,
                 icon: "minecraft:chest",
-                title: "Inventory",
-                items: ItemSource::PlayerInventory,
+                title: "Survival Inventory",
+                items: ItemSource::Empty,
             },
         }
     }
@@ -188,12 +202,20 @@ impl CreativeTab {
         )
     }
 
-    fn shows_title(self) -> bool {
-        !matches!(self, CreativeTab::Search | CreativeTab::SurvivalInventory)
+    fn is_inventory_tab(self) -> bool {
+        matches!(self, CreativeTab::SurvivalInventory)
     }
 
-    fn uses_search_background(self) -> bool {
-        matches!(self, CreativeTab::Search)
+    fn shows_title(self) -> bool {
+        !self.is_inventory_tab()
+    }
+
+    fn background_sprite(self) -> SpriteId {
+        match self {
+            CreativeTab::Search => SpriteId::CreativeSearchBackground,
+            CreativeTab::SurvivalInventory => SpriteId::CreativeInventoryBackground,
+            _ => SpriteId::CreativeItemsBackground,
+        }
     }
 
     fn captures_typing(self) -> bool {
@@ -201,7 +223,7 @@ impl CreativeTab {
     }
 }
 
-const TABS: [CreativeTab; 14] = [
+const TABS: [CreativeTab; 13] = [
     CreativeTab::BuildingBlocks,
     CreativeTab::ColoredBlocks,
     CreativeTab::NaturalBlocks,
@@ -214,7 +236,6 @@ const TABS: [CreativeTab; 14] = [
     CreativeTab::FoodAndDrinks,
     CreativeTab::Ingredients,
     CreativeTab::SpawnEggs,
-    CreativeTab::OpBlocks,
     CreativeTab::SurvivalInventory,
 ];
 
@@ -222,6 +243,7 @@ pub struct CreativeState {
     pub tab: CreativeTab,
     pub scroll: f32,
     pub search: String,
+    cursor_blink: Instant,
 }
 
 impl CreativeState {
@@ -230,7 +252,12 @@ impl CreativeState {
             tab: CreativeTab::Search,
             scroll: 0.0,
             search: String::new(),
+            cursor_blink: Instant::now(),
         }
+    }
+
+    fn reset_blink(&mut self) {
+        self.cursor_blink = Instant::now();
     }
 }
 
@@ -260,14 +287,17 @@ pub fn build_creative_inventory(
     inventory: &Inventory,
     selected_hotbar: u8,
     gs: f32,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> CreativeAction {
     if state.tab.captures_typing() {
         if backspace {
             state.search.pop();
+            state.reset_blink();
         }
         for &ch in typed_chars {
             if state.search.len() < 50 && !ch.is_control() {
                 state.search.push(ch);
+                state.reset_blink();
             }
         }
     }
@@ -280,96 +310,112 @@ pub fn build_creative_inventory(
 
     common::push_overlay(elements, screen_w, screen_h, 0.5);
 
-    let bg_sprite = if state.tab.uses_search_background() {
-        SpriteId::CreativeSearchBackground
-    } else {
-        SpriteId::CreativeItemsBackground
-    };
+    draw_tabs(elements, state, ox, oy, scale, false);
+
     elements.push(MenuElement::Image {
         x: ox,
         y: oy,
         w: inv_w,
         h: inv_h,
-        sprite: bg_sprite,
+        sprite: state.tab.background_sprite(),
         tint: WHITE,
     });
 
     let mut action = CreativeAction::None;
 
-    if let Some(new_tab) = draw_tabs(elements, state, ox, oy, scale, cursor, clicked)
+    let tab_hit = tab_hit_test(ox, oy, scale, cursor, clicked);
+    if let Some(new_tab) = tab_hit
         && new_tab != state.tab
     {
         state.tab = new_tab;
         state.scroll = 0.0;
         state.search.clear();
+        state.reset_blink();
     }
 
+    draw_tabs(elements, state, ox, oy, scale, true);
+
     if state.tab.shows_title() {
-        elements.push(MenuElement::Text {
+        elements.push(MenuElement::TextFlat {
             x: ox + TITLE_X * scale,
             y: oy + TITLE_Y * scale,
             text: state.tab.meta().title.into(),
-            scale: 6.0 * scale,
+            scale: FONT_SIZE * scale,
             color: SLOT_LABEL_COLOR,
-            centered: false,
         });
     }
 
-    let items = visible_items(state, inventory);
-    let scrollable = state.tab.scrollable();
-    let max_scroll_rows = if scrollable {
-        items.len().div_ceil(GRID_COLS).saturating_sub(GRID_ROWS)
-    } else {
-        0
-    };
-
-    if scrollable && max_scroll_rows > 0 {
-        let inside =
-            cursor.1 >= oy && cursor.1 <= oy + inv_h && cursor.0 >= ox && cursor.0 <= ox + inv_w;
-        if inside && scroll_delta != 0.0 {
-            let step = 1.0 / max_scroll_rows as f32;
-            state.scroll = (state.scroll - scroll_delta.signum() * step).clamp(0.0, 1.0);
-        }
-    } else {
-        state.scroll = 0.0;
-    }
-
-    let scroll_row_offset = (state.scroll * max_scroll_rows as f32).round() as usize;
-    let item_offset = scroll_row_offset * GRID_COLS;
-
-    if state.tab.uses_search_background() {
-        draw_search_box(elements, &state.search, ox, oy, scale);
-    }
-
     let size = SLOT_SIZE * scale;
-    let placement_enabled = matches!(
-        state.tab.meta().items,
-        ItemSource::Static(_) | ItemSource::Search
-    );
-    for row in 0..GRID_ROWS {
-        for col in 0..GRID_COLS {
-            let global_idx = item_offset + row * GRID_COLS + col;
-            let item = items.get(global_idx).cloned().unwrap_or(ItemStack::Empty);
-            let slot_x = ox + (GRID_ORIGIN_X + col as f32 * SLOT_STRIDE) * scale;
-            let slot_y = oy + (GRID_ORIGIN_Y + row as f32 * SLOT_STRIDE) * scale;
-            let hovered = push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
-            if hovered
-                && clicked
-                && placement_enabled
-                && let ItemStack::Present(data) = item
-            {
-                let slot_num = 36 + selected_hotbar as u16;
-                action = CreativeAction::Place(ItemStack::Present(data), slot_num);
+
+    if state.tab.is_inventory_tab() {
+        draw_inventory_layout(elements, ox, oy, scale, cursor, inventory);
+    } else {
+        let items = visible_items(state);
+        let scrollable = state.tab.scrollable();
+        let max_scroll_rows = if scrollable {
+            items.len().div_ceil(GRID_COLS).saturating_sub(GRID_ROWS)
+        } else {
+            0
+        };
+
+        if scrollable && max_scroll_rows > 0 {
+            let inside = hit_test(cursor, [ox, oy, inv_w, inv_h]);
+            if inside && scroll_delta != 0.0 {
+                let step = 1.0 / max_scroll_rows as f32;
+                state.scroll = (state.scroll - scroll_delta.signum() * step).clamp(0.0, 1.0);
+            }
+        } else {
+            state.scroll = 0.0;
+        }
+
+        let scroll_row_offset = (state.scroll * max_scroll_rows as f32).round() as usize;
+        let item_offset = scroll_row_offset * GRID_COLS;
+
+        if matches!(state.tab, CreativeTab::Search) {
+            draw_search_box(
+                elements,
+                &state.search,
+                &state.cursor_blink,
+                ox,
+                oy,
+                scale,
+                text_width_fn,
+            );
+        }
+
+        for row in 0..GRID_ROWS {
+            for col in 0..GRID_COLS {
+                let global_idx = item_offset + row * GRID_COLS + col;
+                let item = items.get(global_idx).cloned().unwrap_or(ItemStack::Empty);
+                let (slot_x, slot_y) = slot_xy(
+                    ox,
+                    oy,
+                    scale,
+                    GRID_ORIGIN_X + col as f32 * SLOT_STRIDE,
+                    GRID_ORIGIN_Y + row as f32 * SLOT_STRIDE,
+                );
+                let hovered =
+                    push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
+                if hovered
+                    && clicked
+                    && scrollable
+                    && let ItemStack::Present(data) = item
+                {
+                    let slot_num = 36 + selected_hotbar as u16;
+                    action = CreativeAction::Place(ItemStack::Present(data), slot_num);
+                }
             }
         }
-    }
 
-    if scrollable {
-        draw_scrollbar(elements, ox, oy, scale, state.scroll, max_scroll_rows == 0);
+        draw_player_hotbar(elements, ox, oy, scale, cursor, inventory);
+
+        if scrollable {
+            draw_scrollbar(elements, ox, oy, scale, state.scroll, max_scroll_rows == 0);
+        }
     }
 
     let outside = !hit_test(cursor, [ox, oy, inv_w, inv_h]);
-    if clicked && outside && matches!(action, CreativeAction::None) {
+    if clicked && outside && tab_hit.is_none() && matches!(action, CreativeAction::None) {
         action = CreativeAction::Close;
     }
 
@@ -398,72 +444,187 @@ fn draw_tabs(
     ox: f32,
     oy: f32,
     scale: f32,
-    cursor: (f32, f32),
-    clicked: bool,
-) -> Option<CreativeTab> {
-    let mut hit: Option<CreativeTab> = None;
+    selected_pass: bool,
+) {
     let tab_w = TAB_W * scale;
     let tab_h = TAB_H * scale;
     let icon_size = TAB_ICON_SIZE * scale;
     for &tab in TABS.iter() {
+        let selected = state.tab == tab;
+        if selected != selected_pass {
+            continue;
+        }
         let meta = tab.meta();
         let x = tab_x(meta.col, scale, ox);
-        let y_offset = match meta.row {
-            Row::Top => TAB_TOP_Y_OFFSET,
-            Row::Bottom => TAB_BOTTOM_Y_OFFSET,
+        let (render_y_off, icon_y_off) = match meta.row {
+            Row::Top => (TAB_TOP_RENDER_Y, 9.0),
+            Row::Bottom => (TAB_BOTTOM_RENDER_Y, 7.0),
         };
-        let y = oy + y_offset * scale;
-        let selected = state.tab == tab;
+        let render_y = oy + render_y_off * scale;
         elements.push(MenuElement::Image {
             x,
-            y,
+            y: render_y,
             w: tab_w,
             h: tab_h,
             sprite: tab_sprite(meta.row, meta.col, selected),
             tint: WHITE,
         });
-        let icon_y_offset = match meta.row {
-            Row::Top => 9.0,
-            Row::Bottom => 7.0,
-        };
         elements.push(MenuElement::ItemIcon {
             x: x + (tab_w - icon_size) / 2.0,
-            y: y + icon_y_offset * scale,
+            y: render_y + icon_y_off * scale,
             w: icon_size,
             h: icon_size,
             item_name: meta.icon.into(),
             tint: WHITE,
         });
-        if hit_test(cursor, [x, y, tab_w, tab_h]) && clicked {
-            hit = Some(tab);
-        }
     }
-    hit
 }
 
-fn draw_search_box(elements: &mut Vec<MenuElement>, text: &str, ox: f32, oy: f32, scale: f32) {
+fn tab_hit_test(
+    ox: f32,
+    oy: f32,
+    scale: f32,
+    cursor: (f32, f32),
+    clicked: bool,
+) -> Option<CreativeTab> {
+    if !clicked {
+        return None;
+    }
+    let tab_w = TAB_W * scale;
+    let tab_h = TAB_H * scale;
+    for &tab in TABS.iter() {
+        let meta = tab.meta();
+        let x = tab_x(meta.col, scale, ox);
+        let hit_y_off = match meta.row {
+            Row::Top => TAB_TOP_HIT_Y,
+            Row::Bottom => TAB_BOTTOM_HIT_Y,
+        };
+        let hit_y = oy + hit_y_off * scale;
+        if hit_test(cursor, [x, hit_y, tab_w, tab_h]) {
+            return Some(tab);
+        }
+    }
+    None
+}
+
+fn slot_xy(ox: f32, oy: f32, scale: f32, sx: f32, sy: f32) -> (f32, f32) {
+    (ox + sx * scale, oy + sy * scale)
+}
+
+fn item_or_empty(slots: &[ItemStack], idx: usize) -> ItemStack {
+    slots.get(idx).cloned().unwrap_or(ItemStack::Empty)
+}
+
+fn draw_player_hotbar(
+    elements: &mut Vec<MenuElement>,
+    ox: f32,
+    oy: f32,
+    scale: f32,
+    cursor: (f32, f32),
+    inventory: &Inventory,
+) {
+    let size = SLOT_SIZE * scale;
+    let hotbar = inventory.hotbar_slots();
+    for col in 0..GRID_COLS {
+        let (x, y) = slot_xy(ox, oy, scale, GRID_ORIGIN_X + col as f32 * SLOT_STRIDE, HOTBAR_Y);
+        let item = item_or_empty(hotbar, col);
+        push_slot(elements, x, y, size, scale, cursor, &item, None);
+    }
+}
+
+fn draw_inventory_layout(
+    elements: &mut Vec<MenuElement>,
+    ox: f32,
+    oy: f32,
+    scale: f32,
+    cursor: (f32, f32),
+    inventory: &Inventory,
+) {
+    let size = SLOT_SIZE * scale;
+
+    let armor = inventory.armor_slots();
+    for i in 0..4 {
+        let col = (i / 2) as f32;
+        let row = (i % 2) as f32;
+        let (x, y) = slot_xy(
+            ox,
+            oy,
+            scale,
+            INV_ARMOR_X + col * INV_ARMOR_COL_STRIDE,
+            INV_ARMOR_Y + row * INV_ARMOR_ROW_STRIDE,
+        );
+        let item = item_or_empty(armor, i);
+        push_slot(elements, x, y, size, scale, cursor, &item, None);
+    }
+
+    let (x, y) = slot_xy(ox, oy, scale, INV_OFFHAND_X, INV_OFFHAND_Y);
+    push_slot(elements, x, y, size, scale, cursor, inventory.offhand(), None);
+
+    let main = inventory.main_slots();
+    for row in 0..3usize {
+        for col in 0..GRID_COLS {
+            let idx = row * GRID_COLS + col;
+            let (x, y) = slot_xy(
+                ox,
+                oy,
+                scale,
+                GRID_ORIGIN_X + col as f32 * SLOT_STRIDE,
+                INV_MAIN_Y + row as f32 * SLOT_STRIDE,
+            );
+            let item = item_or_empty(main, idx);
+            push_slot(elements, x, y, size, scale, cursor, &item, None);
+        }
+    }
+
+    draw_player_hotbar(elements, ox, oy, scale, cursor, inventory);
+
+    let (trash_x, trash_y) = slot_xy(ox, oy, scale, INV_TRASH_X, INV_TRASH_Y);
+    push_slot(
+        elements,
+        trash_x,
+        trash_y,
+        size,
+        scale,
+        cursor,
+        &ItemStack::Empty,
+        None,
+    );
+}
+
+fn draw_search_box(
+    elements: &mut Vec<MenuElement>,
+    text: &str,
+    cursor_blink: &Instant,
+    ox: f32,
+    oy: f32,
+    scale: f32,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
+) {
     let x = ox + SEARCH_BOX_X * scale;
     let y = oy + SEARCH_BOX_Y * scale;
     let h = SEARCH_BOX_H * scale;
     let pad = 1.0 * scale;
-    let fs = 6.0 * scale;
+    let fs = FONT_SIZE * scale;
+    let text_y = y + (h - fs) / 2.0;
     elements.push(MenuElement::Text {
         x: x + pad,
-        y: y + (h - fs) / 2.0,
+        y: text_y,
         text: text.into(),
         scale: fs,
         color: WHITE,
         centered: false,
     });
-    let caret_x = x + pad + text.len() as f32 * fs * 0.6;
-    elements.push(MenuElement::Rect {
-        x: caret_x,
-        y: y + 1.5 * scale,
-        w: 0.75 * scale,
-        h: h - 3.0 * scale,
-        corner_radius: 0.0,
-        color: SEARCH_CARET,
-    });
+    if cursor_blink.elapsed().as_millis() % 1000 < 500 {
+        let caret_x = x + pad + text_width_fn(text, fs);
+        elements.push(MenuElement::Text {
+            x: caret_x,
+            y: text_y,
+            text: "_".into(),
+            scale: fs,
+            color: WHITE,
+            centered: false,
+        });
+    }
 }
 
 fn draw_scrollbar(
@@ -495,7 +656,7 @@ fn draw_scrollbar(
     });
 }
 
-fn visible_items(state: &CreativeState, inventory: &Inventory) -> Vec<ItemStack> {
+fn visible_items(state: &CreativeState) -> Vec<ItemStack> {
     match state.tab.meta().items {
         ItemSource::Static(list) => list.iter().map(|&kind| stack_of(kind)).collect(),
         ItemSource::Search => {
@@ -507,12 +668,6 @@ fn visible_items(state: &CreativeState, inventory: &Inventory) -> Vec<ItemStack>
                 })
                 .map(|&kind| stack_of(kind))
                 .collect()
-        }
-        ItemSource::PlayerInventory => {
-            let mut v = Vec::with_capacity(36);
-            v.extend(inventory.main_slots().iter().cloned());
-            v.extend(inventory.hotbar_slots().iter().cloned());
-            v
         }
         ItemSource::Empty => Vec::new(),
     }

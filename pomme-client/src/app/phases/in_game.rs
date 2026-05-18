@@ -492,6 +492,7 @@ pub fn update_game(
             &game.player.inventory,
             selected_hotbar,
             gs,
+            &|t, s| gfx.renderer.menu_text_width(t, s),
         );
         match action {
             crate::ui::creative_inventory::CreativeAction::Close => {
