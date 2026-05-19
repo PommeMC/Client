@@ -929,10 +929,16 @@ impl Renderer {
             );
             true
         } else {
+            let texture_key = self
+                .registry
+                .get_flat_item_texture_key(name)
+                .map(String::from)
+                .unwrap_or_else(|| format!("item/{name}"));
             self.item_entity_pipeline.ensure_flat_mesh(
                 &self.ctx.device,
                 &self.ctx.allocator,
                 name,
+                &texture_key,
                 &self.atlas.uv_map,
                 &self.jar_assets_dir,
                 &self.asset_index,
@@ -1302,10 +1308,15 @@ fn warm_item_meshes(
         if let Some(model) = registry.get_item_model(name) {
             item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
         } else {
+            let texture_key = registry
+                .get_flat_item_texture_key(name)
+                .map(String::from)
+                .unwrap_or_else(|| format!("item/{name}"));
             item_entity_pipeline.ensure_flat_mesh(
                 device,
                 allocator,
                 name,
+                &texture_key,
                 uv_map,
                 jar_assets_dir,
                 asset_index,

@@ -65,6 +65,7 @@ pub struct BlockRegistry {
     multipart: HashMap<String, Vec<model::MultipartEntry>>,
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
+    flat_item_texture_keys: HashMap<String, String>,
 }
 
 impl BlockRegistry {
@@ -106,7 +107,7 @@ impl BlockRegistry {
         });
 
         let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
-        let (item_models, flat_item_textures) =
+        let (item_models, flat_item_textures, flat_item_texture_keys) =
             model::bake_item_models(jar_assets_dir, asset_index, packs);
 
         Self {
@@ -115,6 +116,7 @@ impl BlockRegistry {
             multipart,
             item_models,
             flat_item_textures,
+            flat_item_texture_keys,
         }
     }
 
@@ -124,6 +126,10 @@ impl BlockRegistry {
 
     pub fn flat_item_textures(&self) -> impl Iterator<Item = &str> + '_ {
         self.flat_item_textures.iter().map(String::as_str)
+    }
+
+    pub fn get_flat_item_texture_key(&self, name: &str) -> Option<&str> {
+        self.flat_item_texture_keys.get(name).map(String::as_str)
     }
 
     pub fn get_textures(&self, state: BlockState) -> Option<&FaceTextures> {

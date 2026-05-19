@@ -192,8 +192,8 @@ impl Direction {
         match self {
             Direction::Up => 1.0,
             Direction::Down => 0.5,
-            Direction::North | Direction::South => 0.7,
-            Direction::East | Direction::West => 0.8,
+            Direction::North | Direction::South => 0.8,
+            Direction::East | Direction::West => 0.6,
         }
     }
 }
@@ -372,15 +372,20 @@ pub fn bake_item_models(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> (HashMap<String, BakedModel>, HashSet<String>) {
+) -> (
+    HashMap<String, BakedModel>,
+    HashSet<String>,
+    HashMap<String, String>,
+) {
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
     let mut item_textures: HashSet<String> = HashSet::new();
+    let mut flat_keys: HashMap<String, String> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
     let items_dir = jar_assets_dir.join("minecraft").join("items");
     let entries = match std::fs::read_dir(&items_dir) {
         Ok(e) => e,
-        Err(_) => return (item_models, item_textures),
+        Err(_) => return (item_models, item_textures, flat_keys),
     };
 
     for entry in entries.flatten() {
@@ -394,28 +399,36 @@ pub fn bake_item_models(
         let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&contents) else {
             continue;
         };
-        let Some(model_path) = find_first_model_string(&json) else {
-            continue;
-        };
-        let model_path = model_path
+
+        let raw_path =
+            find_first_model_string(&json).or_else(|| find_first_string_for_key(&json, "base"));
+        let Some(raw_path) = raw_path else { continue };
+        let path = raw_path
             .strip_prefix("minecraft:")
-            .unwrap_or(&model_path)
+            .unwrap_or(&raw_path)
             .to_string();
 
-        let resolved = resolve_model(
-            &model_path,
-            jar_assets_dir,
-            asset_index,
-            &mut model_cache,
-            packs,
-        );
+        let resolved = resolve_model(&path, jar_assets_dir, asset_index, &mut model_cache, packs);
 
         if resolved.elements.is_empty() {
-            for value in resolved.textures.values() {
+            let layer0 = resolved.textures.get("layer0").or_else(|| {
+                resolved
+                    .textures
+                    .values()
+                    .find(|v| {
+                        let s = v.strip_prefix("minecraft:").unwrap_or(v);
+                        s.starts_with("block/") || s.starts_with("item/")
+                    })
+            });
+            if let Some(value) = layer0 {
                 let stripped = value.strip_prefix("minecraft:").unwrap_or(value);
-                if stripped.starts_with("item/") {
+                let key = if let Some(rest) = stripped.strip_prefix("block/") {
+                    rest.to_string()
+                } else {
                     item_textures.insert(stripped.to_string());
-                }
+                    stripped.to_string()
+                };
+                flat_keys.insert(item_name.to_string(), key);
             }
             continue;
         }
@@ -427,27 +440,32 @@ pub fn bake_item_models(
     }
 
     tracing::info!(
-        "Baked {} item models and registered {} item textures",
+        "Baked {} item models, {} flat items, and registered {} item textures",
         item_models.len(),
+        flat_keys.len(),
         item_textures.len()
     );
-    (item_models, item_textures)
+    (item_models, item_textures, flat_keys)
 }
 
 pub fn find_first_model_string(json: &serde_json::Value) -> Option<String> {
+    find_first_string_for_key(json, "model")
+}
+
+fn find_first_string_for_key(json: &serde_json::Value, key: &str) -> Option<String> {
     match json {
         serde_json::Value::Object(map) => {
-            if let Some(serde_json::Value::String(s)) = map.get("model") {
+            if let Some(serde_json::Value::String(s)) = map.get(key) {
                 return Some(s.clone());
             }
             for v in map.values() {
-                if let Some(r) = find_first_model_string(v) {
+                if let Some(r) = find_first_string_for_key(v, key) {
                     return Some(r);
                 }
             }
             None
         }
-        serde_json::Value::Array(arr) => arr.iter().find_map(find_first_model_string),
+        serde_json::Value::Array(arr) => arr.iter().find_map(|v| find_first_string_for_key(v, key)),
         _ => None,
     }
 }

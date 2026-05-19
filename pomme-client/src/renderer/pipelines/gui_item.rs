@@ -50,6 +50,7 @@ pub struct GuiItemPipeline {
     atlas_set: vk::DescriptorSet,
     camera_buffer: vk::Buffer,
     camera_alloc: Option<Allocation>,
+    sampler: vk::Sampler,
     display_cache: RefCell<HashMap<String, DisplayTransform>>,
     items_dir: PathBuf,
     models_dir: PathBuf,
@@ -155,8 +156,23 @@ impl GuiItemPipeline {
             ..Default::default()
         };
 
+        let sampler_info = vk::SamplerCreateInfo {
+            mag_filter: vk::Filter::Nearest,
+            min_filter: vk::Filter::Nearest,
+            mipmap_mode: vk::SamplerMipmapMode::Nearest,
+            address_mode_u: vk::SamplerAddressMode::ClampToEdge,
+            address_mode_v: vk::SamplerAddressMode::ClampToEdge,
+            address_mode_w: vk::SamplerAddressMode::ClampToEdge,
+            min_lod: 0.0,
+            max_lod: 0.0,
+            ..Default::default()
+        };
+        let sampler = device
+            .create_sampler(&sampler_info, None)
+            .expect("failed to create gui_item sampler");
+
         let atlas_img_info = vk::DescriptorImageInfo {
-            sampler: atlas.sampler,
+            sampler,
             image_view: atlas.view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
         };
@@ -181,6 +197,7 @@ impl GuiItemPipeline {
             atlas_set,
             camera_buffer,
             camera_alloc: Some(camera_alloc),
+            sampler,
             display_cache: RefCell::new(HashMap::new()),
             items_dir: mc_base.join("items"),
             models_dir: mc_base.join("models"),
@@ -198,7 +215,7 @@ impl GuiItemPipeline {
 
     pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
         let img_info = vk::DescriptorImageInfo {
-            sampler: atlas.sampler,
+            sampler: self.sampler,
             image_view: atlas.view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
         };
@@ -313,6 +330,7 @@ impl GuiItemPipeline {
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
         device.destroy_descriptor_set_layout(self.atlas_layout, None);
+        device.destroy_sampler(self.sampler, None);
         device.destroy_buffer(self.camera_buffer, None);
         if let Some(a) = self.camera_alloc.take() {
             allocator.lock().unwrap().free(a).ok();

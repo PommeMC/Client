@@ -9,7 +9,7 @@ use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, TextureAtlas};
+use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, TextureAtlas, atlas_asset_path};
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 use crate::world::block::model::BakedModel;
@@ -240,6 +240,7 @@ impl ItemEntityPipeline {
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
         name: &str,
+        texture_key: &str,
         uv_map: &AtlasUVMap,
         assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
@@ -247,12 +248,11 @@ impl ItemEntityPipeline {
         if self.meshes.contains_key(name) {
             return;
         }
-        let tex_key = format!("item/{name}");
-        if !uv_map.has_region(&tex_key) {
+        if !uv_map.has_region(texture_key) {
             return;
         }
-        let region = uv_map.get_region(&tex_key);
-        let asset_path = format!("minecraft/textures/item/{name}.png");
+        let region = uv_map.get_region(texture_key);
+        let asset_path = atlas_asset_path(texture_key);
         let path = resolve_asset_path(assets_dir, asset_index, &asset_path);
         let vertices = match crate::assets::load_image(&path) {
             Ok(img) => {
