@@ -169,7 +169,10 @@ impl Renderer {
 
         splash(&mut menu_pipeline, 0.2, "Building texture atlas...");
 
-        let texture_names: HashSet<&str> = registry.texture_names().collect();
+        let texture_names: HashSet<&str> = registry
+            .texture_names()
+            .chain(registry.flat_item_textures())
+            .collect();
         let atlas = TextureAtlas::build(
             &ctx.device,
             ctx.graphics_queue,
@@ -914,9 +917,9 @@ impl Renderer {
 
     pub fn ensure_item_mesh(&mut self, name: &str) -> bool {
         if self.item_entity_pipeline.has_mesh(name) {
-            return self.registry.get_baked_model_by_name(name).is_some();
+            return self.registry.get_item_model(name).is_some();
         }
-        if let Some(model) = self.registry.get_baked_model_by_name(name) {
+        if let Some(model) = self.registry.get_item_model(name) {
             self.item_entity_pipeline.ensure_mesh(
                 &self.ctx.device,
                 &self.ctx.allocator,
@@ -1139,7 +1142,7 @@ impl Renderer {
                     ..
                 } = &mut *self;
                 menu_pipeline.draw(cmd, sw, sh, overlay, |cmd, x, y, w, h, name| {
-                    let is_block = registry.get_baked_model_by_name(name).is_some();
+                    let is_block = registry.get_item_model(name).is_some();
                     gui_item_pipeline.draw_one(
                         cmd,
                         item_entity_pipeline,
@@ -1218,7 +1221,7 @@ impl Renderer {
                     ..
                 } = &mut *self;
                 menu_pipeline.draw(cmd, sw, sh, elements, |cmd, x, y, w, h, name| {
-                    let is_block = registry.get_baked_model_by_name(name).is_some();
+                    let is_block = registry.get_item_model(name).is_some();
                     gui_item_pipeline.draw_one(
                         cmd,
                         item_entity_pipeline,
@@ -1296,7 +1299,7 @@ fn warm_item_meshes(
         let Some(name) = fname.strip_suffix(".json") else {
             continue;
         };
-        if let Some(model) = registry.get_baked_model_by_name(name) {
+        if let Some(model) = registry.get_item_model(name) {
             item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
         } else {
             item_entity_pipeline.ensure_flat_mesh(

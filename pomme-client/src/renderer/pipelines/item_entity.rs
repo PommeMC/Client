@@ -247,7 +247,7 @@ impl ItemEntityPipeline {
         if self.meshes.contains_key(name) {
             return;
         }
-        let tex_key = format!("minecraft:textures/item/{name}.png");
+        let tex_key = format!("item/{name}");
         if !uv_map.has_region(&tex_key) {
             return;
         }
@@ -352,7 +352,7 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ChunkVertex> 
                     region.u_min + quad.uvs[i][0] * u_span,
                     region.v_min + quad.uvs[i][1] * v_span,
                 ),
-                light_tint: crate::renderer::chunk::mesher::pack_light_tint(1.0, tint),
+                light_tint: crate::renderer::chunk::mesher::pack_light_tint(quad.shade_light, tint),
             });
         }
     }
@@ -574,7 +574,7 @@ pub(super) fn create_pipeline(
     };
     let rasterizer = vk::PipelineRasterizationStateCreateInfo {
         polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::None,
+        cull_mode: vk::CullModeFlags::Back,
         front_face: vk::FrontFace::CounterClockwise,
         line_width: 1.0,
         ..Default::default()

@@ -12,6 +12,7 @@ use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline};
 use crate::renderer::util;
+use crate::world::block::model::find_first_model_string;
 
 const MODEL_PARENT_LIMIT: u32 = 16;
 
@@ -31,9 +32,9 @@ impl DisplayTransform {
 
     fn to_matrix(self) -> Mat4 {
         let t = Mat4::from_translation(self.translation);
-        let r = Mat4::from_rotation_z(self.rotation.z.to_radians())
+        let r = Mat4::from_rotation_x(self.rotation.x.to_radians())
             * Mat4::from_rotation_y(self.rotation.y.to_radians())
-            * Mat4::from_rotation_x(self.rotation.x.to_radians());
+            * Mat4::from_rotation_z(self.rotation.z.to_radians());
         let s = Mat4::from_scale(self.scale);
         t * r * s
     }
@@ -343,24 +344,6 @@ fn default_display(is_block: bool) -> DisplayTransform {
 fn read_json(path: &Path) -> Option<serde_json::Value> {
     let s = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&s).ok()
-}
-
-fn find_first_model_string(json: &serde_json::Value) -> Option<String> {
-    match json {
-        serde_json::Value::Object(map) => {
-            if let Some(serde_json::Value::String(s)) = map.get("model") {
-                return Some(s.clone());
-            }
-            for v in map.values() {
-                if let Some(r) = find_first_model_string(v) {
-                    return Some(r);
-                }
-            }
-            None
-        }
-        serde_json::Value::Array(arr) => arr.iter().find_map(find_first_model_string),
-        _ => None,
-    }
 }
 
 fn strip_mc_ns(s: &str) -> &str {

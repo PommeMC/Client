@@ -63,6 +63,8 @@ pub struct BlockRegistry {
     textures: HashMap<String, FaceTextures>,
     baked: HashMap<String, HashMap<String, BakedModel>>,
     multipart: HashMap<String, Vec<model::MultipartEntry>>,
+    item_models: HashMap<String, BakedModel>,
+    flat_item_textures: std::collections::HashSet<String>,
 }
 
 impl BlockRegistry {
@@ -104,25 +106,29 @@ impl BlockRegistry {
         });
 
         let (baked, multipart) = model::bake_all_models(jar_assets_dir, asset_index, packs);
+        let (item_models, flat_item_textures) =
+            model::bake_item_models(jar_assets_dir, asset_index, packs);
 
         Self {
             textures,
             baked,
             multipart,
+            item_models,
+            flat_item_textures,
         }
+    }
+
+    pub fn get_item_model(&self, name: &str) -> Option<&BakedModel> {
+        self.item_models.get(name)
+    }
+
+    pub fn flat_item_textures(&self) -> impl Iterator<Item = &str> + '_ {
+        self.flat_item_textures.iter().map(String::as_str)
     }
 
     pub fn get_textures(&self, state: BlockState) -> Option<&FaceTextures> {
         let block: Box<dyn azalea_block::BlockTrait> = state.into();
         self.textures.get(block.id())
-    }
-
-    pub fn get_baked_model_by_name(&self, name: &str) -> Option<&BakedModel> {
-        let variants = self.baked.get(name)?;
-        if variants.len() == 1 {
-            return variants.values().next();
-        }
-        variants.get("").or_else(|| variants.values().next())
     }
 
     pub fn get_baked_model(&self, state: BlockState) -> Option<&BakedModel> {

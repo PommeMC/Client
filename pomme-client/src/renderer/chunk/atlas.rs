@@ -80,7 +80,11 @@ impl TextureAtlas {
         let mut slot = 1u32;
 
         for &name in texture_names {
-            let asset_key = format!("minecraft/textures/block/{name}.png");
+            let asset_key = if name.starts_with("item/") {
+                format!("minecraft/textures/{name}.png")
+            } else {
+                format!("minecraft/textures/block/{name}.png")
+            };
             let file_path =
                 resolve_asset_path_with_packs(jar_assets_dir, asset_index, &asset_key, packs);
             let (data, img_w, img_h) = match util::load_png(&file_path) {

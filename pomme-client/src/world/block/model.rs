@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -366,6 +366,90 @@ pub fn bake_all_models(
         tracing::warn!("Unhandled baked models: {}", missing_names.join(", "));
     }
     (results, multipart_results)
+}
+
+pub fn bake_item_models(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    packs: Option<&crate::resource_pack::ResourcePackManager>,
+) -> (HashMap<String, BakedModel>, HashSet<String>) {
+    let mut item_models: HashMap<String, BakedModel> = HashMap::new();
+    let mut item_textures: HashSet<String> = HashSet::new();
+    let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
+
+    let items_dir = jar_assets_dir.join("minecraft").join("items");
+    let entries = match std::fs::read_dir(&items_dir) {
+        Ok(e) => e,
+        Err(_) => return (item_models, item_textures),
+    };
+
+    for entry in entries.flatten() {
+        let fname = entry.file_name().to_string_lossy().to_string();
+        let Some(item_name) = fname.strip_suffix(".json") else {
+            continue;
+        };
+        let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&contents) else {
+            continue;
+        };
+        let Some(model_path) = find_first_model_string(&json) else {
+            continue;
+        };
+        let model_path = model_path
+            .strip_prefix("minecraft:")
+            .unwrap_or(&model_path)
+            .to_string();
+
+        let resolved = resolve_model(
+            &model_path,
+            jar_assets_dir,
+            asset_index,
+            &mut model_cache,
+            packs,
+        );
+
+        if resolved.elements.is_empty() {
+            for value in resolved.textures.values() {
+                let stripped = value.strip_prefix("minecraft:").unwrap_or(value);
+                if stripped.starts_with("item/") {
+                    item_textures.insert(stripped.to_string());
+                }
+            }
+            continue;
+        }
+
+        let tint = determine_tint(item_name);
+        if let Some(baked) = bake_resolved_model(&resolved, 0, 0, tint) {
+            item_models.insert(item_name.to_string(), baked);
+        }
+    }
+
+    tracing::info!(
+        "Baked {} item models and registered {} item textures",
+        item_models.len(),
+        item_textures.len()
+    );
+    (item_models, item_textures)
+}
+
+pub fn find_first_model_string(json: &serde_json::Value) -> Option<String> {
+    match json {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(s)) = map.get("model") {
+                return Some(s.clone());
+            }
+            for v in map.values() {
+                if let Some(r) = find_first_model_string(v) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(arr) => arr.iter().find_map(find_first_model_string),
+        _ => None,
+    }
 }
 
 fn parse_when_condition(when: &Option<serde_json::Value>) -> HashMap<String, String> {
