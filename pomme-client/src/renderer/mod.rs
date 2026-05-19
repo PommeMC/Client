@@ -102,7 +102,7 @@ pub struct Renderer {
     skin_preview: SkinPreviewPipeline,
     chunk_border_pipeline: ChunkBorderPipeline,
     item_entity_pipeline: ItemEntityPipeline,
-    gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
+    gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
@@ -301,27 +301,25 @@ impl Renderer {
             &atlas,
         );
 
-        splash(&mut menu_pipeline, 0.95, "Rendering item icons...");
+        splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
 
-        let mut gui_item_atlas =
-            pipelines::gui_item_atlas::GuiItemAtlas::new(&ctx.device, &ctx.allocator, &atlas);
-        gui_item_atlas.populate(
+        let mut gui_item_pipeline = pipelines::gui_item::GuiItemPipeline::new(
             &ctx.device,
-            ctx.graphics_queue,
-            ctx.command_pool,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            &atlas,
+            jar_assets_dir,
+        );
+        gui_item_pipeline.update_camera(sw, sh);
+
+        warm_item_meshes(
+            &ctx.device,
             &ctx.allocator,
             &mut item_entity_pipeline,
             &atlas.uv_map,
             &registry,
             jar_assets_dir,
             asset_index,
-        );
-        menu_pipeline.set_gui_item_atlas(
-            &ctx.device,
-            &ctx.allocator,
-            gui_item_atlas.view,
-            gui_item_atlas.sampler,
-            gui_item_atlas.regions.clone(),
         );
 
         Ok(Self {
@@ -344,7 +342,7 @@ impl Renderer {
             block_entity_pipeline,
             chunk_border_pipeline,
             item_entity_pipeline,
-            gui_item_atlas,
+            gui_item_pipeline,
             chunk_buffers,
             render_finished_per_image,
             swapchain_dirty: false,
@@ -476,7 +474,7 @@ impl Renderer {
         };
         cmd.set_scissor(0, &[scissor]);
 
-        menu.draw(cmd, sw, sh, &elements);
+        menu.draw(cmd, sw, sh, &elements, |_, _, _, _, _, _| {});
 
         cmd.end_render_pass();
         cmd.end()?;
@@ -560,6 +558,10 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.item_entity_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.gui_item_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.gui_item_pipeline
+            .update_camera(self.width as f32, self.height as f32);
         self.blur_pipeline.resize(
             &self.ctx.device,
             &self.ctx.allocator,
@@ -845,6 +847,8 @@ impl Renderer {
 
         self.chunk_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        self.gui_item_pipeline
+            .rebind_atlas(&self.ctx.device, &self.atlas);
 
         tracing::info!("Assets reloaded");
     }
@@ -1127,7 +1131,26 @@ impl Renderer {
                         .update_and_draw(cmd, frame, aspect, *swing_progress);
                 }
 
-                self.menu_pipeline.draw(cmd, sw, sh, overlay);
+                let Renderer {
+                    menu_pipeline,
+                    gui_item_pipeline,
+                    item_entity_pipeline,
+                    registry,
+                    ..
+                } = &mut *self;
+                menu_pipeline.draw(cmd, sw, sh, overlay, |cmd, x, y, w, h, name| {
+                    let is_block = registry.get_baked_model_by_name(name).is_some();
+                    gui_item_pipeline.draw_one(
+                        cmd,
+                        item_entity_pipeline,
+                        x,
+                        y,
+                        w,
+                        h,
+                        name,
+                        is_block,
+                    );
+                });
 
                 self.last_timings.cull_ms = cull_ms;
                 self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -1187,7 +1210,26 @@ impl Renderer {
                     );
                 }
 
-                self.menu_pipeline.draw(cmd, sw, sh, elements);
+                let Renderer {
+                    menu_pipeline,
+                    gui_item_pipeline,
+                    item_entity_pipeline,
+                    registry,
+                    ..
+                } = &mut *self;
+                menu_pipeline.draw(cmd, sw, sh, elements, |cmd, x, y, w, h, name| {
+                    let is_block = registry.get_baked_model_by_name(name).is_some();
+                    gui_item_pipeline.draw_one(
+                        cmd,
+                        item_entity_pipeline,
+                        x,
+                        y,
+                        w,
+                        h,
+                        name,
+                        is_block,
+                    );
+                });
             }
         }
 
@@ -1232,6 +1274,40 @@ impl Renderer {
 
         self.ctx.advance_frame();
         Ok(())
+    }
+}
+
+fn warm_item_meshes(
+    device: &vk::Device,
+    allocator: &Arc<std::sync::Mutex<pomme_gpu_allocator::vulkan::Allocator>>,
+    item_entity_pipeline: &mut ItemEntityPipeline,
+    uv_map: &chunk::atlas::AtlasUVMap,
+    registry: &BlockRegistry,
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+) {
+    let items_dir = jar_assets_dir.join("minecraft").join("items");
+    let entries = match std::fs::read_dir(&items_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let fname = entry.file_name().to_string_lossy().to_string();
+        let Some(name) = fname.strip_suffix(".json") else {
+            continue;
+        };
+        if let Some(model) = registry.get_baked_model_by_name(name) {
+            item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
+        } else {
+            item_entity_pipeline.ensure_flat_mesh(
+                device,
+                allocator,
+                name,
+                uv_map,
+                jar_assets_dir,
+                asset_index,
+            );
+        }
     }
 }
 
@@ -1324,7 +1400,7 @@ impl Drop for Renderer {
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.item_entity_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.gui_item_atlas
+        self.gui_item_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
 

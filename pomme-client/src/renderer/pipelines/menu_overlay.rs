@@ -7,7 +7,6 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::pipelines::gui_item_atlas::GuiItemRegion;
 use crate::renderer::{shader, util};
 use crate::ui::font::GlyphMap;
 use crate::ui::server_list::MotdSpan;
@@ -39,6 +38,21 @@ struct Vertex {
 
 const MAX_VERTICES: usize = 16384;
 const VERTEX_SIZE: usize = size_of::<Vertex>();
+
+enum DrawOp {
+    Quads {
+        start: u32,
+        count: u32,
+        scissor: Option<[f32; 4]>,
+    },
+    Item {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        item_name: String,
+    },
+}
 
 struct GlyphEntry {
     u0: f32,
@@ -152,7 +166,6 @@ pub struct MenuOverlayPipeline {
     sprite_staging_allocation: Option<Allocation>,
     sprite_atlas: SpriteAtlas,
     item_placeholder: Option<TextureResources>,
-    gui_item_regions: HashMap<String, GuiItemRegion>,
     mc_font_image: vk::Image,
     mc_font_view: vk::ImageView,
     mc_font_sampler: vk::Sampler,
@@ -548,7 +561,6 @@ impl MenuOverlayPipeline {
             sprite_staging_allocation: sprite_staging_alloc,
             sprite_atlas: sprite_atlas_data,
             item_placeholder,
-            gui_item_regions: HashMap::new(),
             mc_font_image,
             mc_font_view,
             mc_font_sampler,
@@ -574,6 +586,7 @@ impl MenuOverlayPipeline {
         screen_w: f32,
         screen_h: f32,
         elements: &[MenuElement],
+        mut draw_item: impl FnMut(vk::CommandBuffer, f32, f32, f32, f32, &str),
     ) {
         let globals: [f32; 2] = [screen_w, screen_h];
         self.globals_allocation
@@ -585,7 +598,7 @@ impl MenuOverlayPipeline {
 
         let mut vertices: Vec<Vertex> = Vec::with_capacity(elements.len() * 24);
         let mut deferred_tooltips: Vec<&MenuElement> = Vec::new();
-        let mut draw_cmds: Vec<(u32, u32, Option<[f32; 4]>)> = Vec::new();
+        let mut draw_ops: Vec<DrawOp> = Vec::new();
         let mut current_scissor: Option<[f32; 4]> = None;
         let mut cmd_start: u32 = 0;
 
@@ -603,7 +616,11 @@ impl MenuOverlayPipeline {
             ) {
                 let count = vertices.len() as u32 - cmd_start;
                 if count > 0 {
-                    draw_cmds.push((cmd_start, count, current_scissor));
+                    draw_ops.push(DrawOp::Quads {
+                        start: cmd_start,
+                        count,
+                        scissor: current_scissor,
+                    });
                 }
                 cmd_start = vertices.len() as u32;
                 current_scissor = if let MenuElement::ScissorPush { x, y, w, h } = elem {
@@ -751,25 +768,24 @@ impl MenuOverlayPipeline {
                     w,
                     h,
                     item_name,
-                    tint,
+                    tint: _,
                 } => {
-                    if let Some(region) = self.gui_item_regions.get(item_name.as_str()) {
-                        push_quad(
-                            &mut vertices,
-                            *x,
-                            *y,
-                            *w,
-                            *h,
-                            region.u0,
-                            region.v0,
-                            region.u1,
-                            region.v1,
-                            *tint,
-                            3.0,
-                            [0.0, 0.0],
-                            0.0,
-                        );
+                    let count = vertices.len() as u32 - cmd_start;
+                    if count > 0 {
+                        draw_ops.push(DrawOp::Quads {
+                            start: cmd_start,
+                            count,
+                            scissor: current_scissor,
+                        });
                     }
+                    cmd_start = vertices.len() as u32;
+                    draw_ops.push(DrawOp::Item {
+                        x: *x,
+                        y: *y,
+                        w: *w,
+                        h: *h,
+                        item_name: item_name.clone(),
+                    });
                 }
                 MenuElement::McText {
                     x,
@@ -1060,21 +1076,27 @@ impl MenuOverlayPipeline {
 
         let final_count = vertices.len() as u32 - cmd_start;
         if final_count > 0 {
-            draw_cmds.push((cmd_start, final_count, current_scissor));
+            draw_ops.push(DrawOp::Quads {
+                start: cmd_start,
+                count: final_count,
+                scissor: current_scissor,
+            });
         }
 
-        if vertices.is_empty() {
+        if draw_ops.is_empty() {
             return;
         }
 
-        let count = vertices.len().min(MAX_VERTICES);
-        let byte_data = bytemuck::cast_slice(&vertices[..count]);
-        self.vertex_allocation
-            .as_mut()
-            .unwrap()
-            .mapped_slice_mut()
-            .unwrap()[..byte_data.len()]
-            .copy_from_slice(byte_data);
+        if !vertices.is_empty() {
+            let count = vertices.len().min(MAX_VERTICES);
+            let byte_data = bytemuck::cast_slice(&vertices[..count]);
+            self.vertex_allocation
+                .as_mut()
+                .unwrap()
+                .mapped_slice_mut()
+                .unwrap()[..byte_data.len()]
+                .copy_from_slice(byte_data);
+        }
 
         let default_scissor = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
@@ -1084,65 +1106,56 @@ impl MenuOverlayPipeline {
             },
         };
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.globals_set, self.tex_set],
-            &[],
-        );
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-        for &(start, vert_count, ref scissor) in &draw_cmds {
-            let rect = if let Some(s) = scissor {
-                vk::Rect2D {
-                    offset: vk::Offset2D {
-                        x: s[0] as i32,
-                        y: s[1] as i32,
-                    },
-                    extent: vk::Extent2D {
-                        width: s[2] as u32,
-                        height: s[3] as u32,
-                    },
+        let mut needs_bind = true;
+        for op in &draw_ops {
+            match op {
+                DrawOp::Quads {
+                    start,
+                    count,
+                    scissor,
+                } => {
+                    if needs_bind {
+                        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+                        cmd.bind_descriptor_sets(
+                            vk::PipelineBindPoint::Graphics,
+                            self.pipeline_layout,
+                            0,
+                            &[self.globals_set, self.tex_set],
+                            &[],
+                        );
+                        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+                        needs_bind = false;
+                    }
+                    let rect = if let Some(s) = scissor {
+                        vk::Rect2D {
+                            offset: vk::Offset2D {
+                                x: s[0] as i32,
+                                y: s[1] as i32,
+                            },
+                            extent: vk::Extent2D {
+                                width: s[2] as u32,
+                                height: s[3] as u32,
+                            },
+                        }
+                    } else {
+                        default_scissor
+                    };
+                    cmd.set_scissor(0, &[rect]);
+                    cmd.draw(*count, 1, *start, 0);
                 }
-            } else {
-                default_scissor
-            };
-            cmd.set_scissor(0, &[rect]);
-            cmd.draw(vert_count, 1, start, 0);
+                DrawOp::Item {
+                    x,
+                    y,
+                    w,
+                    h,
+                    item_name,
+                } => {
+                    draw_item(cmd, *x, *y, *w, *h, item_name);
+                    needs_bind = true;
+                }
+            }
         }
         cmd.set_scissor(0, &[default_scissor]);
-    }
-
-    pub fn set_gui_item_atlas(
-        &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        view: vk::ImageView,
-        sampler: vk::Sampler,
-        regions: HashMap<String, GuiItemRegion>,
-    ) {
-        if let Some(mut res) = self.item_placeholder.take() {
-            let mut alloc = allocator.lock().unwrap();
-            destroy_texture_resources(device, &mut alloc, &mut res);
-        }
-
-        self.gui_item_regions = regions;
-
-        let info = vk::DescriptorImageInfo {
-            sampler,
-            image_view: view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let write = vk::WriteDescriptorSet {
-            dst_set: self.tex_set,
-            dst_binding: 2,
-            descriptor_count: 1,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            image_info: &info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
     }
 
     pub fn set_blur_texture(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {

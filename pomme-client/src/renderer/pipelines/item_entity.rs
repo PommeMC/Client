@@ -528,7 +528,7 @@ fn build_flat_quad(region: AtlasRegion) -> Vec<ChunkVertex> {
         .collect()
 }
 
-fn create_pipeline(
+pub(super) fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,

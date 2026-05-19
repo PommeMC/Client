@@ -4,7 +4,7 @@ pub mod blur;
 pub mod chunk;
 pub mod chunk_borders;
 pub mod entity_renderer;
-pub mod gui_item_atlas;
+pub mod gui_item;
 pub mod hand;
 pub mod item_entity;
 pub mod menu_overlay;
