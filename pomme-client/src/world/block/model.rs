@@ -564,16 +564,8 @@ fn apply_gui_lambert(quads: &mut [BakedQuad], rotation_deg: [f32; 3]) {
     let (l0, l1) = items_3d_lights();
     for quad in quads {
         let p = &quad.positions;
-        let e1 = [
-            p[1][0] - p[0][0],
-            p[1][1] - p[0][1],
-            p[1][2] - p[0][2],
-        ];
-        let e2 = [
-            p[2][0] - p[0][0],
-            p[2][1] - p[0][1],
-            p[2][2] - p[0][2],
-        ];
+        let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+        let e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
         let nx = e1[1] * e2[2] - e1[2] * e2[1];
         let ny = e1[2] * e2[0] - e1[0] * e2[2];
         let nz = e1[0] * e2[1] - e1[1] * e2[0];

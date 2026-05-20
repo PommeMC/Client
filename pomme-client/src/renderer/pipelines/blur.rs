@@ -47,8 +47,18 @@ impl BlurPipeline {
             create_blur_image(device, allocator, blur_w, blur_h, format, "blur_a");
         let (image_b, view_b, alloc_b) =
             create_blur_image(device, allocator, blur_w, blur_h, format, "blur_b");
-        crate::renderer::util::transition_image_to_shader_read(device, queue, command_pool, image_a);
-        crate::renderer::util::transition_image_to_shader_read(device, queue, command_pool, image_b);
+        crate::renderer::util::transition_image_to_shader_read(
+            device,
+            queue,
+            command_pool,
+            image_a,
+        );
+        crate::renderer::util::transition_image_to_shader_read(
+            device,
+            queue,
+            command_pool,
+            image_b,
+        );
 
         let sampler = device
             .create_sampler(
