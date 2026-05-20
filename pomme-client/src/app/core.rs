@@ -472,6 +472,10 @@ impl AppCore {
                 NetworkEvent::GameModeChanged { game_mode } => {
                     tracing::info!("Game mode changed to {game_mode}");
                     game.player.game_mode = game_mode;
+                    if game.inventory_open || game.creative_inventory_open {
+                        game.inventory_open = game_mode != 1;
+                        game.creative_inventory_open = game_mode == 1;
+                    }
                 }
                 NetworkEvent::ServerViewDistance { distance } => {
                     tracing::info!("Server view distance: {distance}");
