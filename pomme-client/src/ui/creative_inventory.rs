@@ -32,6 +32,7 @@ const SCROLLBAR_TRACK_Y: f32 = 18.0;
 const SCROLLBAR_TRACK_H: f32 = 112.0;
 const SCROLLBAR_HANDLE_W: f32 = 12.0;
 const SCROLLBAR_HANDLE_H: f32 = 15.0;
+const SCROLLBAR_HANDLE_PAD: f32 = 2.0;
 const SCROLLBAR_HIT_W: f32 = 14.0;
 const SEARCH_BOX_X: f32 = 82.0;
 const SEARCH_BOX_Y: f32 = 6.0;
@@ -919,7 +920,7 @@ fn draw_scrollbar(
     let track_h = SCROLLBAR_TRACK_H * scale;
     let handle_w = SCROLLBAR_HANDLE_W * scale;
     let handle_h = SCROLLBAR_HANDLE_H * scale;
-    let handle_y = track_y + scroll * (track_h - handle_h);
+    let handle_y = track_y + scroll * (track_h - handle_h - SCROLLBAR_HANDLE_PAD * scale);
     let sprite = if disabled {
         SpriteId::CreativeScrollerDisabled
     } else {

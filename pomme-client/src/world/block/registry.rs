@@ -203,9 +203,15 @@ impl BlockRegistry {
                 .flat_map(|e| e.quads.iter().map(|q| q.texture.as_str()))
         });
 
+        let item_model_textures = self
+            .item_models
+            .values()
+            .flat_map(|model| model.quads.iter().map(|q| q.texture.as_str()));
+
         face_textures
             .chain(baked_textures)
             .chain(multipart_textures)
+            .chain(item_model_textures)
     }
 }
 

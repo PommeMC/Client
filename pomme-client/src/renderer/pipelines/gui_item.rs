@@ -12,7 +12,7 @@ use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::pipelines::item_entity::{self, ItemEntityPipeline};
 use crate::renderer::util;
-use crate::world::block::model::find_first_model_string;
+use crate::world::block::model::{find_first_model_string, find_first_string_for_key};
 
 const MODEL_PARENT_LIMIT: u32 = 16;
 
@@ -370,7 +370,8 @@ fn strip_mc_ns(s: &str) -> &str {
 
 fn resolve_item_model_path(name: &str, items_dir: &Path) -> Option<String> {
     let item_json = read_json(&items_dir.join(format!("{name}.json")))?;
-    let model_path = find_first_model_string(&item_json)?;
+    let model_path = find_first_model_string(&item_json)
+        .or_else(|| find_first_string_for_key(&item_json, "base"))?;
     Some(strip_mc_ns(&model_path).to_string())
 }
 
