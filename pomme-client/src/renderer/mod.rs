@@ -247,6 +247,8 @@ impl Renderer {
 
         let blur_pipeline = BlurPipeline::new(
             &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
             &ctx.allocator,
             size.width.max(1),
             size.height.max(1),
@@ -567,6 +569,8 @@ impl Renderer {
             .update_camera(self.width as f32, self.height as f32);
         self.blur_pipeline.resize(
             &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
             &self.ctx.allocator,
             self.width,
             self.height,

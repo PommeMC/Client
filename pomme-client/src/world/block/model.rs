@@ -425,7 +425,8 @@ pub fn bake_item_models(
         }
 
         let tint = determine_tint(item_name);
-        if let Some(baked) = bake_resolved_model(&resolved, 0, 0, tint) {
+        if let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) {
+            apply_gui_lambert(&mut baked.quads, BLOCK_GUI_ROTATION_DEG);
             item_models.insert(item_name.to_string(), baked);
         }
     }
@@ -501,10 +502,49 @@ pub fn bake_chest_item_model() -> BakedModel {
 }
 
 const CHEST_GUI_ROTATION_DEG: [f32; 3] = [30.0, 45.0, 0.0];
+const BLOCK_GUI_ROTATION_DEG: [f32; 3] = [30.0, 225.0, 0.0];
+
+fn rotate_y(v: [f32; 3], angle: f32) -> [f32; 3] {
+    let (s, c) = angle.sin_cos();
+    [c * v[0] + s * v[2], v[1], -s * v[0] + c * v[2]]
+}
+
+fn rotate_x(v: [f32; 3], angle: f32) -> [f32; 3] {
+    let (s, c) = angle.sin_cos();
+    [v[0], c * v[1] - s * v[2], s * v[1] + c * v[2]]
+}
+
+fn items_3d_lights() -> ([f32; 3], [f32; 3]) {
+    let base = |x: f32, y: f32, z: f32| {
+        let len = (x * x + y * y + z * z).sqrt();
+        [x / len, y / len, z / len]
+    };
+    let transform = |v: [f32; 3]| {
+        let v = rotate_y(v, -std::f32::consts::PI / 8.0);
+        let v = rotate_x(v, 2.3561945);
+        let v = rotate_y(v, 1.0821041);
+        let v = rotate_x(v, 3.2375858);
+        [v[0], -v[1], v[2]]
+    };
+    (
+        transform(base(0.2, 1.0, -0.7)),
+        transform(base(-0.2, 1.0, 0.7)),
+    )
+}
+
+fn lambert_shade(world_normal: [f32; 3], l0: [f32; 3], l1: [f32; 3]) -> f32 {
+    let d0 = (l0[0] * world_normal[0] + l0[1] * world_normal[1] + l0[2] * world_normal[2]).max(0.0);
+    let d1 = (l1[0] * world_normal[0] + l1[1] * world_normal[1] + l1[2] * world_normal[2]).max(0.0);
+    ((d0 + d1) * 0.6 + 0.4).min(1.0)
+}
+
+fn rotate_mesh_normal(n_mesh: [f32; 3], rotation_deg: [f32; 3]) -> [f32; 3] {
+    let after_y = rotate_y(n_mesh, rotation_deg[1].to_radians());
+    rotate_x(after_y, rotation_deg[0].to_radians())
+}
 
 fn vanilla_gui_face_shades(rotation_deg: [f32; 3]) -> [f32; 6] {
-    let l0 = [0.16195, 0.80975, -0.5668];
-    let l1 = [-0.16195, 0.80975, 0.5668];
+    let (l0, l1) = items_3d_lights();
     let normals = [
         [0.0, 1.0, 0.0],
         [0.0, -1.0, 0.0],
@@ -513,22 +553,38 @@ fn vanilla_gui_face_shades(rotation_deg: [f32; 3]) -> [f32; 6] {
         [-1.0, 0.0, 0.0],
         [1.0, 0.0, 0.0],
     ];
-    let (sx, cx) = rotation_deg[0].to_radians().sin_cos();
-    let (sy, cy) = rotation_deg[1].to_radians().sin_cos();
     let mut shades = [0.0; 6];
-    for (i, &n_mesh) in normals.iter().enumerate() {
-        let [nx0, ny0, nz0] = n_mesh;
-        let nx1 = cy * nx0 + sy * nz0;
-        let ny1 = ny0;
-        let nz1 = -sy * nx0 + cy * nz0;
-        let nx = nx1;
-        let ny = cx * ny1 - sx * nz1;
-        let nz = sx * ny1 + cx * nz1;
-        let d0 = (l0[0] * nx + l0[1] * ny + l0[2] * nz).max(0.0);
-        let d1 = (l1[0] * nx + l1[1] * ny + l1[2] * nz).max(0.0);
-        shades[i] = ((d0 + d1) * 0.6 + 0.4).min(1.0);
+    for (i, &n) in normals.iter().enumerate() {
+        shades[i] = lambert_shade(rotate_mesh_normal(n, rotation_deg), l0, l1);
     }
     shades
+}
+
+fn apply_gui_lambert(quads: &mut [BakedQuad], rotation_deg: [f32; 3]) {
+    let (l0, l1) = items_3d_lights();
+    for quad in quads {
+        let p = &quad.positions;
+        let e1 = [
+            p[1][0] - p[0][0],
+            p[1][1] - p[0][1],
+            p[1][2] - p[0][2],
+        ];
+        let e2 = [
+            p[2][0] - p[0][0],
+            p[2][1] - p[0][1],
+            p[2][2] - p[0][2],
+        ];
+        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        if len < 1e-6 {
+            continue;
+        }
+        let n_mesh = [nx / len, ny / len, nz / len];
+        let n_world = rotate_mesh_normal(n_mesh, rotation_deg);
+        quad.shade_light *= lambert_shade(n_world, l0, l1);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
