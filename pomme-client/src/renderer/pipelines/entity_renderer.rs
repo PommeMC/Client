@@ -763,7 +763,7 @@ fn load_entity_texture(
     (image, view, allocation)
 }
 
-fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
+pub(super) fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
     let mut pixels = vec![0u8; (size * size * 4) as usize];
     for pixel in pixels.chunks_exact_mut(4) {
         pixel.copy_from_slice(&[219, 148, 148, 255]);
@@ -771,7 +771,7 @@ fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
     (pixels, size, size)
 }
 
-fn create_pipeline(
+pub(super) fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,

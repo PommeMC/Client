@@ -1,3 +1,4 @@
+pub mod block_entity_model;
 pub mod camera;
 pub mod chunk;
 mod context;
@@ -19,6 +20,8 @@ use chunk::atlas::TextureAtlas;
 use chunk::buffer::ChunkBufferStore;
 use chunk::mesher::{ChunkMeshData, MeshDispatcher};
 use context::VulkanContext;
+use pipelines::block_entity::BlockEntityPipeline;
+pub use pipelines::block_entity::BlockEntityRenderInfo;
 use pipelines::block_overlay::BlockOverlayPipeline;
 use pipelines::blur::BlurPipeline;
 use pipelines::chunk::ChunkPipeline;
@@ -59,6 +62,7 @@ enum RenderMode<'a> {
         sky: SkyState,
         entities: &'a [EntityRenderInfo],
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
+        block_entities: &'a [BlockEntityRenderInfo],
     },
     MainMenu {
         scroll: f32,
@@ -98,9 +102,11 @@ pub struct Renderer {
     skin_preview: SkinPreviewPipeline,
     chunk_border_pipeline: ChunkBorderPipeline,
     item_entity_pipeline: ItemEntityPipeline,
+    gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
+    block_entity_pipeline: BlockEntityPipeline,
     chunk_buffers: ChunkBufferStore,
     render_finished_per_image: Vec<vk::Semaphore>,
     swapchain_dirty: bool,
@@ -163,7 +169,10 @@ impl Renderer {
 
         splash(&mut menu_pipeline, 0.2, "Building texture atlas...");
 
-        let texture_names: HashSet<&str> = registry.texture_names().collect();
+        let texture_names: HashSet<&str> = registry
+            .texture_names()
+            .chain(registry.flat_item_textures())
+            .collect();
         let atlas = TextureAtlas::build(
             &ctx.device,
             ctx.graphics_queue,
@@ -238,6 +247,8 @@ impl Renderer {
 
         let blur_pipeline = BlurPipeline::new(
             &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
             &ctx.allocator,
             size.width.max(1),
             size.height.max(1),
@@ -265,6 +276,16 @@ impl Renderer {
             asset_index,
         );
 
+        let block_entity_pipeline = BlockEntityPipeline::new(
+            &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            jar_assets_dir,
+            asset_index,
+        );
+
         let chunk_border_pipeline = pipelines::chunk_borders::ChunkBorderPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
@@ -278,11 +299,32 @@ impl Renderer {
             &ctx.allocator,
         );
 
-        let item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
+        let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
             &ctx.allocator,
             &atlas,
+        );
+
+        splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
+
+        let mut gui_item_pipeline = pipelines::gui_item::GuiItemPipeline::new(
+            &ctx.device,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            &atlas,
+            jar_assets_dir,
+        );
+        gui_item_pipeline.update_camera(sw, sh);
+
+        warm_item_meshes(
+            &ctx.device,
+            &ctx.allocator,
+            &mut item_entity_pipeline,
+            &atlas.uv_map,
+            &registry,
+            jar_assets_dir,
+            asset_index,
         );
 
         Ok(Self {
@@ -302,8 +344,10 @@ impl Renderer {
             blur_pipeline,
             skin_preview,
             entity_renderer,
+            block_entity_pipeline,
             chunk_border_pipeline,
             item_entity_pipeline,
+            gui_item_pipeline,
             chunk_buffers,
             render_finished_per_image,
             swapchain_dirty: false,
@@ -435,7 +479,7 @@ impl Renderer {
         };
         cmd.set_scissor(0, &[scissor]);
 
-        menu.draw(cmd, sw, sh, &elements);
+        menu.draw(cmd, sw, sh, &elements, |_, _, _, _, _, _| {});
 
         cmd.end_render_pass();
         cmd.end()?;
@@ -515,10 +559,18 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.entity_renderer
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.block_entity_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.item_entity_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.gui_item_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.gui_item_pipeline
+            .update_camera(self.width as f32, self.height as f32);
         self.blur_pipeline.resize(
             &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
             &self.ctx.allocator,
             self.width,
             self.height,
@@ -724,6 +776,7 @@ impl Renderer {
         sky: SkyState,
         entities: &[EntityRenderInfo],
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
+        block_entities: &[BlockEntityRenderInfo],
     ) -> Result<(), RendererError> {
         let sky_col = sky.sky_color();
         self.render_frame(
@@ -738,6 +791,7 @@ impl Renderer {
                 sky,
                 entities,
                 item_entities,
+                block_entities,
             },
         )
     }
@@ -799,6 +853,8 @@ impl Renderer {
         .expect("failed to rebuild atlas");
 
         self.chunk_pipeline
+            .rebind_atlas(&self.ctx.device, &self.atlas);
+        self.gui_item_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
 
         tracing::info!("Assets reloaded");
@@ -865,9 +921,9 @@ impl Renderer {
 
     pub fn ensure_item_mesh(&mut self, name: &str) -> bool {
         if self.item_entity_pipeline.has_mesh(name) {
-            return self.registry.get_baked_model_by_name(name).is_some();
+            return self.registry.get_item_model(name).is_some();
         }
-        if let Some(model) = self.registry.get_baked_model_by_name(name) {
+        if let Some(model) = self.registry.get_item_model(name) {
             self.item_entity_pipeline.ensure_mesh(
                 &self.ctx.device,
                 &self.ctx.allocator,
@@ -877,10 +933,16 @@ impl Renderer {
             );
             true
         } else {
+            let texture_key = self
+                .registry
+                .get_flat_item_texture_key(name)
+                .map(String::from)
+                .unwrap_or_else(|| format!("item/{name}"));
             self.item_entity_pipeline.ensure_flat_mesh(
                 &self.ctx.device,
                 &self.ctx.allocator,
                 name,
+                &texture_key,
                 &self.atlas.uv_map,
                 &self.jar_assets_dir,
                 &self.asset_index,
@@ -933,6 +995,7 @@ impl Renderer {
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
+            self.block_entity_pipeline.update_camera(frame, &uniform);
             self.chunk_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
         }
@@ -1033,6 +1096,7 @@ impl Renderer {
                 sky,
                 entities,
                 item_entities,
+                block_entities,
             } => {
                 self.sky_pipeline
                     .update_and_draw(&self.ctx.device, cmd, frame, &self.camera, sky);
@@ -1048,6 +1112,8 @@ impl Renderer {
                 }
 
                 self.entity_renderer.draw(cmd, frame, entities);
+
+                self.block_entity_pipeline.draw(cmd, frame, block_entities);
 
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
 
@@ -1078,7 +1144,26 @@ impl Renderer {
                         .update_and_draw(cmd, frame, aspect, *swing_progress);
                 }
 
-                self.menu_pipeline.draw(cmd, sw, sh, overlay);
+                let Renderer {
+                    menu_pipeline,
+                    gui_item_pipeline,
+                    item_entity_pipeline,
+                    registry,
+                    ..
+                } = &mut *self;
+                menu_pipeline.draw(cmd, sw, sh, overlay, |cmd, x, y, w, h, name| {
+                    let is_block = registry.get_item_model(name).is_some();
+                    gui_item_pipeline.draw_one(
+                        cmd,
+                        item_entity_pipeline,
+                        x,
+                        y,
+                        w,
+                        h,
+                        name,
+                        is_block,
+                    );
+                });
 
                 self.last_timings.cull_ms = cull_ms;
                 self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -1138,7 +1223,26 @@ impl Renderer {
                     );
                 }
 
-                self.menu_pipeline.draw(cmd, sw, sh, elements);
+                let Renderer {
+                    menu_pipeline,
+                    gui_item_pipeline,
+                    item_entity_pipeline,
+                    registry,
+                    ..
+                } = &mut *self;
+                menu_pipeline.draw(cmd, sw, sh, elements, |cmd, x, y, w, h, name| {
+                    let is_block = registry.get_item_model(name).is_some();
+                    gui_item_pipeline.draw_one(
+                        cmd,
+                        item_entity_pipeline,
+                        x,
+                        y,
+                        w,
+                        h,
+                        name,
+                        is_block,
+                    );
+                });
             }
         }
 
@@ -1183,6 +1287,45 @@ impl Renderer {
 
         self.ctx.advance_frame();
         Ok(())
+    }
+}
+
+fn warm_item_meshes(
+    device: &vk::Device,
+    allocator: &Arc<std::sync::Mutex<pomme_gpu_allocator::vulkan::Allocator>>,
+    item_entity_pipeline: &mut ItemEntityPipeline,
+    uv_map: &chunk::atlas::AtlasUVMap,
+    registry: &BlockRegistry,
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+) {
+    let items_dir = jar_assets_dir.join("minecraft").join("items");
+    let entries = match std::fs::read_dir(&items_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let fname = entry.file_name().to_string_lossy().to_string();
+        let Some(name) = fname.strip_suffix(".json") else {
+            continue;
+        };
+        if let Some(model) = registry.get_item_model(name) {
+            item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
+        } else {
+            let texture_key = registry
+                .get_flat_item_texture_key(name)
+                .map(String::from)
+                .unwrap_or_else(|| format!("item/{name}"));
+            item_entity_pipeline.ensure_flat_mesh(
+                device,
+                allocator,
+                name,
+                &texture_key,
+                uv_map,
+                jar_assets_dir,
+                asset_index,
+            );
+        }
     }
 }
 
@@ -1269,9 +1412,13 @@ impl Drop for Renderer {
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.entity_renderer
             .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.block_entity_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_border_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.item_entity_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.gui_item_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
 

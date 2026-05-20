@@ -26,6 +26,7 @@ use crate::ui::chat::ChatState;
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction};
 use crate::ui::{common, hud};
+use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
 pub struct GameState {
@@ -48,12 +49,15 @@ pub struct GameState {
     pub death_confirm_instant: Instant,
     pub respawn_sent: bool,
     pub inventory_open: bool,
+    pub creative_inventory_open: bool,
+    pub creative_state: crate::ui::creative_inventory::CreativeState,
     pub chat: ChatState,
     pub tab_list: TabList,
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
+    pub advanced_item_tooltips: bool,
     pub last_sent_input: PlayerInputState,
     pub last_sent_pos: glam::Vec3,
     pub last_sent_yaw: f32,
@@ -67,6 +71,7 @@ pub struct GameState {
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
+    pub block_entity_anim: BlockEntityAnimStore,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
     pub last_player_chunk: ChunkPos,
@@ -88,6 +93,7 @@ impl GameState {
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
+            block_entity_anim: BlockEntityAnimStore::default(),
             player: LocalPlayer::new(),
             prev_player_pos: glam::Vec3::ZERO,
             biome_climate: Arc::new(HashMap::new()),
@@ -103,12 +109,15 @@ impl GameState {
             death_confirm_instant: Instant::now(),
             respawn_sent: false,
             inventory_open: false,
+            creative_inventory_open: false,
+            creative_state: crate::ui::creative_inventory::CreativeState::new(),
             chat: ChatState::new(),
             tab_list: TabList::new(),
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
             show_debug: false,
             show_chunk_borders: false,
+            advanced_item_tooltips: false,
             last_sent_input: PlayerInputState::default(),
             last_sent_pos: glam::Vec3::ZERO,
             last_sent_yaw: 0.0,
@@ -122,6 +131,10 @@ impl GameState {
             last_player_chunk: ChunkPos::new(0, 0),
             meshed_lod: HashMap::new(),
         }
+    }
+
+    pub fn gui_open(&self) -> bool {
+        self.inventory_open || self.creative_inventory_open
     }
 
     pub fn sync_render_distance(&mut self, connection: &ConnectionHandle, render_distance: u32) {
@@ -190,7 +203,7 @@ pub fn update_game(
         core.time_tick_accumulator -= TICK_RATE;
     }
 
-    if !game.paused && !game.inventory_open && !game.chat.is_open() {
+    if !game.paused && !game.gui_open() && !game.chat.is_open() {
         gfx.renderer.update_camera(&mut core.input);
 
         core.tick_accumulator += dt;
@@ -200,6 +213,7 @@ pub fn update_game(
                 |bx, by, bz| !game.chunk_store.get_block_state(bx, by, bz).is_air(),
                 |bx, by, bz| block_friction(game.chunk_store.get_block_state(bx, by, bz)),
             );
+            game.block_entity_anim.tick();
             core.tick_accumulator -= TICK_RATE;
         }
     }
@@ -209,7 +223,7 @@ pub fn update_game(
     let eye_pos = interp_pos + glam::Vec3::new(0.0, 1.62, 0.0);
     let eye_pos_f64 = glam::DVec3::new(eye_pos.x as f64, eye_pos.y as f64, eye_pos.z as f64);
 
-    if !game.paused && !game.inventory_open && !game.chat.is_open() {
+    if !game.paused && !game.gui_open() && !game.chat.is_open() {
         let yaw = gfx.renderer.camera_yaw();
         let pitch = gfx.renderer.camera_pitch();
 
@@ -242,7 +256,7 @@ pub fn update_game(
     let mut elements: Vec<MenuElement> = Vec::new();
     let hide_cursor = !game.paused
         && !game.dead
-        && !game.inventory_open
+        && !game.gui_open()
         && !game.chat.is_open()
         && core.input.is_cursor_captured();
 
@@ -297,7 +311,7 @@ pub fn update_game(
 
     if core.input.tab_held()
         && !game.paused
-        && !game.inventory_open
+        && !game.gui_open()
         && !game.chat.is_open()
         && !game.dead
     {
@@ -464,6 +478,52 @@ pub fn update_game(
         core.input.clear_click_events();
     }
 
+    if game.creative_inventory_open {
+        let cursor = core.input.cursor_pos();
+        let clicked = core.input.left_just_pressed();
+        let scroll_delta = core.input.consume_menu_scroll();
+        let typed = core.input.drain_typed_chars();
+        let backspace = core.input.backspace_pressed();
+        let selected_hotbar = core.input.selected_slot();
+        let action = crate::ui::creative_inventory::build_creative_inventory(
+            &mut elements,
+            &mut game.creative_state,
+            sw,
+            sh,
+            cursor,
+            clicked,
+            scroll_delta,
+            &typed,
+            backspace,
+            &game.player.inventory,
+            selected_hotbar,
+            gs,
+            game.advanced_item_tooltips,
+            core.input.left_held(),
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+        );
+        match action {
+            crate::ui::creative_inventory::CreativeAction::Close => {
+                close_inventory = true;
+            }
+            crate::ui::creative_inventory::CreativeAction::Place(item, slot_num) => {
+                use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+                if game.player.game_mode == 1 {
+                    connection
+                        .packet_tx
+                        .send(ServerboundGamePacket::SetCreativeModeSlot(
+                            ServerboundSetCreativeModeSlot {
+                                slot_num,
+                                item_stack: item,
+                            },
+                        ));
+                }
+            }
+            crate::ui::creative_inventory::CreativeAction::None => {}
+        }
+        core.input.clear_click_events();
+    }
+
     game.chat.build(&mut elements, sh, gs, &|t, s| {
         gfx.renderer.menu_text_width(t, s)
     });
@@ -557,6 +617,30 @@ pub fn update_game(
         partial_tick,
     );
 
+    let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = game
+        .chunk_store
+        .block_entities
+        .iter()
+        .map(|(pos, be)| {
+            let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+            let block: Box<dyn azalea_block::BlockTrait> = state.into();
+            let variant =
+                crate::renderer::pipelines::block_entity::variant_for_block(be.kind, block.id());
+            let lid_open = game
+                .block_entity_anim
+                .container(pos)
+                .map(|a| a.openness)
+                .unwrap_or(0.0);
+            crate::renderer::BlockEntityRenderInfo {
+                pos: *pos,
+                kind: be.kind,
+                yaw: 0.0,
+                variant,
+                lid_open,
+            }
+        })
+        .collect();
+
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
@@ -567,12 +651,14 @@ pub fn update_game(
         sky,
         &entity_renders,
         &item_renders,
+        &block_entity_renders,
     ) {
         tracing::error!("Render error: {e}");
     }
 
     if close_inventory {
         game.inventory_open = false;
+        game.creative_inventory_open = false;
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 

@@ -8,7 +8,8 @@ use azalea_block::BlockState;
 use azalea_core::heightmap_kind::HeightmapKind;
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_inventory::ItemStack;
-use azalea_registry::builtin::EntityKind;
+use azalea_registry::builtin::{BlockEntityKind, EntityKind};
+use simdnbt::owned::NbtCompound;
 
 pub enum NetworkEvent {
     Connected,
@@ -71,6 +72,20 @@ pub enum NetworkEvent {
     },
     SectionBlocksUpdate {
         updates: Vec<(BlockPos, BlockState)>,
+    },
+    BlockEntitySync {
+        chunk_pos: ChunkPos,
+        entries: Vec<(BlockPos, BlockEntityKind, NbtCompound)>,
+    },
+    BlockEntityUpdate {
+        pos: BlockPos,
+        kind: BlockEntityKind,
+        nbt: Option<NbtCompound>,
+    },
+    BlockEvent {
+        pos: BlockPos,
+        action_id: u8,
+        action_parameter: u8,
     },
     TimeUpdate {
         game_time: u64,
