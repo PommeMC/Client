@@ -26,7 +26,7 @@ tracing-appender = "0.2"
 pomme-gpu-allocator = { path = "../pomme-gpu-allocator" }
 winit = { version = "0.30", features = ["rwh_06"] }
 raw-window-handle = "0.6"
-glam = "0.32"
+glam = "0.33"
 clap = { version = "4", features = ["derive"] }
 parking_lot = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
