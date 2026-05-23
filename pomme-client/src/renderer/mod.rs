@@ -917,7 +917,7 @@ impl Renderer {
             vk::Fence::null(),
         ) {
             Ok(idx) => idx,
-            Err(vk::Error::OutOfDateKHR) => {
+            Err(vk::Error::OutOfDateKHR | vk::Error::SuboptimalKHR) => {
                 self.swapchain_dirty = true;
                 return Ok(());
             }
@@ -1171,7 +1171,7 @@ impl Renderer {
         let t_present = std::time::Instant::now();
         match self.ctx.present_queue.present(&present_info) {
             Ok(()) => {}
-            Err(vk::Error::OutOfDateKHR) => {
+            Err(vk::Error::OutOfDateKHR | vk::Error::SuboptimalKHR) => {
                 self.swapchain_dirty = true;
             }
             Err(e) => return Err(e.into()),
