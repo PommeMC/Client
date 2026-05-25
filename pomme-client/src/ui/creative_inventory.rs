@@ -1,10 +1,10 @@
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use azalea_inventory::components::{Damage, Enchantments, MaxDamage, Rarity};
 use azalea_inventory::default_components::get_default_component;
 use azalea_inventory::{ItemStack, ItemStackData};
-use azalea_registry::Registry;
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
 
 use super::common::{
@@ -66,6 +66,7 @@ pub enum CreativeTab {
     NaturalBlocks,
     FunctionalBlocks,
     RedstoneBlocks,
+    #[allow(dead_code)]
     Hotbar,
     Search,
     ToolsAndUtilities,
@@ -230,13 +231,13 @@ impl CreativeTab {
     }
 }
 
-const TABS: [CreativeTab; 13] = [
+// `Hotbar` is kept as a variant for when saved hotbars ship.
+const TABS: [CreativeTab; 12] = [
     CreativeTab::BuildingBlocks,
     CreativeTab::ColoredBlocks,
     CreativeTab::NaturalBlocks,
     CreativeTab::FunctionalBlocks,
     CreativeTab::RedstoneBlocks,
-    CreativeTab::Hotbar,
     CreativeTab::Search,
     CreativeTab::ToolsAndUtilities,
     CreativeTab::Combat,
@@ -257,7 +258,7 @@ pub struct CreativeState {
 impl CreativeState {
     pub fn new() -> Self {
         Self {
-            tab: CreativeTab::Search,
+            tab: CreativeTab::BuildingBlocks,
             scroll: 0.0,
             search: String::new(),
             cursor_blink: Instant::now(),
@@ -340,7 +341,6 @@ pub fn build_creative_inventory(
     {
         state.tab = new_tab;
         state.scroll = 0.0;
-        state.search.clear();
         state.reset_blink();
     }
 
@@ -363,10 +363,13 @@ pub fn build_creative_inventory(
         screen_h,
         gs,
         advanced: advanced_tooltips,
+        clicked,
     };
 
     if state.tab.is_inventory_tab() {
-        draw_inventory_layout(elements, ox, oy, scale, inventory, &tt);
+        if let Some(slot) = draw_inventory_layout(elements, ox, oy, scale, inventory, &tt) {
+            action = CreativeAction::Place(ItemStack::Empty, slot);
+        }
     } else {
         let items = visible_items(state);
         let scrollable = state.tab.scrollable();
@@ -376,13 +379,16 @@ pub fn build_creative_inventory(
             0
         };
 
+        let mut grid_clicked = clicked;
         if scrollable && max_scroll_rows > 0 {
             let inside = hit_test(cursor, [ox, oy, inv_w, inv_h]);
             if inside && scroll_delta != 0.0 {
                 let step = 1.0 / max_scroll_rows as f32;
                 state.scroll = (state.scroll - scroll_delta.signum() * step).clamp(0.0, 1.0);
             }
-            update_scroll_drag(state, ox, oy, scale, cursor, clicked, mouse_held);
+            if update_scroll_drag(state, ox, oy, scale, cursor, clicked, mouse_held) {
+                grid_clicked = false;
+            }
         } else {
             state.scroll = 0.0;
             state.scroll_dragging = false;
@@ -417,7 +423,7 @@ pub fn build_creative_inventory(
                 let hovered = push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
                 if hovered {
                     push_item_tooltip(elements, &item, &tt);
-                    if clicked
+                    if grid_clicked
                         && scrollable
                         && let ItemStack::Present(data) = item
                     {
@@ -428,7 +434,11 @@ pub fn build_creative_inventory(
             }
         }
 
-        draw_player_hotbar(elements, ox, oy, scale, inventory, &tt);
+        if let Some(slot) = draw_player_hotbar(elements, ox, oy, scale, inventory, &tt)
+            && matches!(action, CreativeAction::None)
+        {
+            action = CreativeAction::Place(ItemStack::Empty, slot);
+        }
 
         if scrollable {
             draw_scrollbar(elements, ox, oy, scale, state.scroll, max_scroll_rows == 0);
@@ -544,6 +554,7 @@ struct TooltipCtx {
     screen_h: f32,
     gs: f32,
     advanced: bool,
+    clicked: bool,
 }
 
 const fn rgb(hex: u32) -> [f32; 4] {
@@ -572,16 +583,42 @@ fn rarity_color(kind: ItemKind) -> [f32; 4] {
     }
 }
 
+// Fixed list rather than `from_u32(0..)` so registry-ID shifts between MC
+// versions don't silently change counts.
+const TRACKED_COMPONENT_KINDS: &[DataComponentKind] = &[
+    DataComponentKind::MaxStackSize,
+    DataComponentKind::MaxDamage,
+    DataComponentKind::Damage,
+    DataComponentKind::ItemName,
+    DataComponentKind::ItemModel,
+    DataComponentKind::Lore,
+    DataComponentKind::Rarity,
+    DataComponentKind::Enchantments,
+    DataComponentKind::AttributeModifiers,
+    DataComponentKind::RepairCost,
+    DataComponentKind::EnchantmentGlintOverride,
+    DataComponentKind::Food,
+    DataComponentKind::Consumable,
+    DataComponentKind::UseRemainder,
+    DataComponentKind::UseCooldown,
+    DataComponentKind::Tool,
+    DataComponentKind::Weapon,
+    DataComponentKind::AttackRange,
+    DataComponentKind::Enchantable,
+    DataComponentKind::Equippable,
+    DataComponentKind::Repairable,
+    DataComponentKind::Glider,
+    DataComponentKind::BlocksAttacks,
+    DataComponentKind::DamageResistant,
+];
+
 fn total_component_count(data: &ItemStackData) -> usize {
-    let mut count = 0usize;
-    let mut id = 0u32;
-    while let Some(kind) = DataComponentKind::from_u32(id) {
-        if data.component_patch.has_kind(kind) || default_has_component(data.kind, kind) {
-            count += 1;
-        }
-        id += 1;
-    }
-    count
+    TRACKED_COMPONENT_KINDS
+        .iter()
+        .filter(|&&kind| {
+            data.component_patch.has_kind(kind) || default_has_component(data.kind, kind)
+        })
+        .count()
 }
 
 fn default_has_component(item: ItemKind, kind: DataComponentKind) -> bool {
@@ -664,13 +701,25 @@ fn roman(n: i32) -> &'static str {
     }
 }
 
-fn tabs_containing(kind: ItemKind) -> Vec<&'static str> {
-    TABS.iter()
-        .filter_map(|tab| match tab.meta().items {
-            ItemSource::Static(list) if list.contains(&kind) => Some(tab.meta().title),
-            _ => None,
+fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
+    static INDEX: OnceLock<HashMap<ItemKind, Vec<&'static str>>> = OnceLock::new();
+    static EMPTY: &[&str] = &[];
+    INDEX
+        .get_or_init(|| {
+            let mut map: HashMap<ItemKind, Vec<&'static str>> = HashMap::new();
+            for tab in TABS.iter() {
+                let meta = tab.meta();
+                if let ItemSource::Static(list) = meta.items {
+                    for &k in list {
+                        map.entry(k).or_default().push(meta.title);
+                    }
+                }
+            }
+            map
         })
-        .collect()
+        .get(&kind)
+        .map(Vec::as_slice)
+        .unwrap_or(EMPTY)
 }
 
 fn build_item_tooltip_lines(data: &ItemStackData, advanced: bool) -> Vec<TooltipLine> {
@@ -681,7 +730,7 @@ fn build_item_tooltip_lines(data: &ItemStackData, advanced: bool) -> Vec<Tooltip
         color: rarity_color(kind),
     });
     lines.extend(lore_lines(data));
-    for title in tabs_containing(kind) {
+    for &title in tabs_containing(kind) {
         lines.push(TooltipLine {
             text: title.to_string(),
             color: TOOLTIP_TAB_COLOR,
@@ -745,6 +794,7 @@ fn push_tab_tooltip(
     }
 }
 
+/// Returns the slot number when a present item is clicked.
 #[allow(clippy::too_many_arguments)]
 fn slot_with_tooltip(
     elements: &mut Vec<MenuElement>,
@@ -755,12 +805,26 @@ fn slot_with_tooltip(
     item: &ItemStack,
     empty_sprite: Option<SpriteId>,
     tt: &TooltipCtx,
-) {
+    slot_num: Option<u16>,
+) -> Option<u16> {
     let hovered = push_slot(elements, x, y, size, scale, tt.cursor, item, empty_sprite);
     if hovered {
         push_item_tooltip(elements, item, tt);
+        if tt.clicked
+            && matches!(item, ItemStack::Present(_))
+            && let Some(slot) = slot_num
+        {
+            return Some(slot);
+        }
     }
+    None
 }
+
+// Vanilla `PlayerInventory` slot indices.
+const SLOT_ARMOR_BASE: u16 = 5;
+const SLOT_MAIN_BASE: u16 = 9;
+const SLOT_HOTBAR_BASE: u16 = 36;
+const SLOT_OFFHAND: u16 = 45;
 
 fn draw_player_hotbar(
     elements: &mut Vec<MenuElement>,
@@ -769,9 +833,10 @@ fn draw_player_hotbar(
     scale: f32,
     inventory: &Inventory,
     tt: &TooltipCtx,
-) {
+) -> Option<u16> {
     let size = SLOT_SIZE * scale;
     let hotbar = inventory.hotbar_slots();
+    let mut clicked_slot = None;
     for col in 0..GRID_COLS {
         let (x, y) = slot_xy(
             ox,
@@ -781,8 +846,19 @@ fn draw_player_hotbar(
             HOTBAR_Y,
         );
         let item = item_or_empty(hotbar, col);
-        slot_with_tooltip(elements, x, y, size, scale, &item, None, tt);
+        clicked_slot = clicked_slot.or(slot_with_tooltip(
+            elements,
+            x,
+            y,
+            size,
+            scale,
+            &item,
+            None,
+            tt,
+            Some(SLOT_HOTBAR_BASE + col as u16),
+        ));
     }
+    clicked_slot
 }
 
 fn draw_inventory_layout(
@@ -792,8 +868,9 @@ fn draw_inventory_layout(
     scale: f32,
     inventory: &Inventory,
     tt: &TooltipCtx,
-) {
+) -> Option<u16> {
     let size = SLOT_SIZE * scale;
+    let mut clicked_slot = None;
 
     let armor = inventory.armor_slots();
     for i in 0..4 {
@@ -807,11 +884,31 @@ fn draw_inventory_layout(
             INV_ARMOR_Y + row * INV_ARMOR_ROW_STRIDE,
         );
         let item = item_or_empty(armor, i);
-        slot_with_tooltip(elements, x, y, size, scale, &item, None, tt);
+        clicked_slot = clicked_slot.or(slot_with_tooltip(
+            elements,
+            x,
+            y,
+            size,
+            scale,
+            &item,
+            None,
+            tt,
+            Some(SLOT_ARMOR_BASE + i as u16),
+        ));
     }
 
     let (x, y) = slot_xy(ox, oy, scale, INV_OFFHAND_X, INV_OFFHAND_Y);
-    slot_with_tooltip(elements, x, y, size, scale, inventory.offhand(), None, tt);
+    clicked_slot = clicked_slot.or(slot_with_tooltip(
+        elements,
+        x,
+        y,
+        size,
+        scale,
+        inventory.offhand(),
+        None,
+        tt,
+        Some(SLOT_OFFHAND),
+    ));
 
     let main = inventory.main_slots();
     for row in 0..3usize {
@@ -825,11 +922,21 @@ fn draw_inventory_layout(
                 INV_MAIN_Y + row as f32 * SLOT_STRIDE,
             );
             let item = item_or_empty(main, idx);
-            slot_with_tooltip(elements, x, y, size, scale, &item, None, tt);
+            clicked_slot = clicked_slot.or(slot_with_tooltip(
+                elements,
+                x,
+                y,
+                size,
+                scale,
+                &item,
+                None,
+                tt,
+                Some(SLOT_MAIN_BASE + idx as u16),
+            ));
         }
     }
 
-    draw_player_hotbar(elements, ox, oy, scale, inventory, tt);
+    clicked_slot = clicked_slot.or(draw_player_hotbar(elements, ox, oy, scale, inventory, tt));
 
     let (trash_x, trash_y) = slot_xy(ox, oy, scale, INV_TRASH_X, INV_TRASH_Y);
     push_slot(
@@ -842,6 +949,8 @@ fn draw_inventory_layout(
         &ItemStack::Empty,
         None,
     );
+
+    clicked_slot
 }
 
 fn draw_search_box(
@@ -880,6 +989,7 @@ fn draw_search_box(
     }
 }
 
+/// Returns `true` if the click was consumed by the scrollbar.
 fn update_scroll_drag(
     state: &mut CreativeState,
     ox: f32,
@@ -888,13 +998,15 @@ fn update_scroll_drag(
     cursor: (f32, f32),
     clicked: bool,
     mouse_held: bool,
-) {
+) -> bool {
     let hit_x = ox + SCROLLBAR_X * scale;
     let hit_y = oy + SCROLLBAR_TRACK_Y * scale;
     let hit_w = SCROLLBAR_HIT_W * scale;
     let hit_h = SCROLLBAR_TRACK_H * scale;
+    let mut consumed = false;
     if clicked && hit_test(cursor, [hit_x, hit_y, hit_w, hit_h]) {
         state.scroll_dragging = true;
+        consumed = true;
     }
     if !mouse_held {
         state.scroll_dragging = false;
@@ -905,6 +1017,7 @@ fn update_scroll_drag(
         let usable = (SCROLLBAR_TRACK_H - SCROLLBAR_HANDLE_H) * scale;
         state.scroll = ((cursor.1 - track_y - half_handle) / usable).clamp(0.0, 1.0);
     }
+    consumed
 }
 
 fn draw_scrollbar(

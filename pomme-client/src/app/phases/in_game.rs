@@ -624,8 +624,10 @@ pub fn update_game(
         .map(|(pos, be)| {
             let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
             let block: Box<dyn azalea_block::BlockTrait> = state.into();
+            let props = block.property_map();
             let variant =
                 crate::renderer::pipelines::block_entity::variant_for_block(be.kind, block.id());
+            let yaw = crate::renderer::pipelines::block_entity::yaw_for_block(be.kind, &props);
             let lid_open = game
                 .block_entity_anim
                 .container(pos)
@@ -634,7 +636,7 @@ pub fn update_game(
             crate::renderer::BlockEntityRenderInfo {
                 pos: *pos,
                 kind: be.kind,
-                yaw: 0.0,
+                yaw,
                 variant,
                 lid_open,
             }

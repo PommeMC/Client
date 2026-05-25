@@ -92,7 +92,12 @@ impl GuiItemPipeline {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create gui_item pipeline layout");
 
-        let pipeline = item_entity::create_pipeline(device, render_pass, pipeline_layout);
+        let pipeline = item_entity::create_pipeline_with_front_face(
+            device,
+            render_pass,
+            pipeline_layout,
+            vk::FrontFace::Clockwise,
+        );
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -321,7 +326,12 @@ impl GuiItemPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = item_entity::create_pipeline(device, render_pass, self.pipeline_layout);
+        self.pipeline = item_entity::create_pipeline_with_front_face(
+            device,
+            render_pass,
+            self.pipeline_layout,
+            vk::FrontFace::Clockwise,
+        );
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -339,12 +349,14 @@ impl GuiItemPipeline {
 }
 
 fn slot_model_matrix(x: f32, y: f32, w: f32, h: f32, display: DisplayTransform) -> Mat4 {
-    let cx = x + w * 0.5;
-    let cy = y + h * 0.5;
     let depth_scale = w.max(h);
-    Mat4::from_translation(Vec3::new(cx, cy, 0.0))
+    // The negative-Y scale flips winding; the GUI pipeline uses
+    // `FrontFace::Clockwise` to keep `CullMode::Back` correct.
+    Mat4::from_translation(Vec3::new(x, y + h, 0.0))
         * Mat4::from_scale(Vec3::new(w, -h, depth_scale))
+        * Mat4::from_translation(Vec3::splat(0.5))
         * display.to_matrix()
+        * Mat4::from_translation(Vec3::splat(-0.5))
 }
 
 fn default_display(is_block: bool) -> DisplayTransform {

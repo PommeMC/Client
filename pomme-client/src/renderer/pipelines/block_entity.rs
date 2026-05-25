@@ -155,6 +155,29 @@ pub fn variant_for_block(kind: BlockEntityKind, name: &str) -> u32 {
     }
 }
 
+/// Values mirror vanilla's `direction.asRotation()` offset, since the draw
+/// code applies `from_rotation_y((180 - yaw).to_radians())`.
+pub fn yaw_for_block(kind: BlockEntityKind, props: &HashMap<&str, &str>) -> f32 {
+    match kind {
+        BlockEntityKind::Chest
+        | BlockEntityKind::TrappedChest
+        | BlockEntityKind::EnderChest
+        | BlockEntityKind::ShulkerBox => match props.get("facing").copied() {
+            Some("south") => 0.0,
+            Some("west") => 90.0,
+            Some("north") => 180.0,
+            Some("east") => 270.0,
+            _ => 0.0,
+        },
+        BlockEntityKind::Sign => props
+            .get("rotation")
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(|r| r * 22.5)
+            .unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
 fn kind_definitions() -> Vec<KindDef> {
     vec![
         KindDef {
@@ -300,11 +323,11 @@ impl BlockEntityPipeline {
         let texture_sampler = unsafe { util::create_nearest_sampler(device) };
 
         let mut entries = HashMap::new();
+        let mut pending_uploads: Vec<util::PendingImageUpload> = Vec::new();
+        let mut staging_to_free: Vec<(vk::Buffer, Allocation)> = Vec::new();
         for def in defs {
             let entry = build_entry(
                 device,
-                queue,
-                command_pool,
                 allocator,
                 descriptor_pool,
                 texture_layout,
@@ -314,8 +337,20 @@ impl BlockEntityPipeline {
                 def.model,
                 def.tex_variants,
                 def.tex_size,
+                &mut pending_uploads,
+                &mut staging_to_free,
             );
             entries.insert(def.kind, entry);
+        }
+
+        util::upload_images_batched(device, queue, command_pool, &pending_uploads);
+
+        {
+            let mut alloc = allocator.lock().unwrap();
+            for (buf, a) in staging_to_free {
+                device.destroy_buffer(buf, None);
+                alloc.free(a).ok();
+            }
         }
 
         Self {
@@ -448,8 +483,6 @@ impl BlockEntityPipeline {
 #[allow(clippy::too_many_arguments)]
 fn build_entry(
     device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
     descriptor_pool: vk::DescriptorPool,
     texture_layout: vk::DescriptorSetLayout,
@@ -459,6 +492,8 @@ fn build_entry(
     model: BakedEntityModel,
     tex_variants: &[&[&str]],
     fallback_tex_size: u32,
+    pending_uploads: &mut Vec<util::PendingImageUpload>,
+    staging_to_free: &mut Vec<(vk::Buffer, Allocation)>,
 ) -> KindEntry {
     let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
     let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
@@ -474,8 +509,6 @@ fn build_entry(
         .map(|keys| {
             build_texture_slot(
                 device,
-                queue,
-                command_pool,
                 allocator,
                 descriptor_pool,
                 texture_layout,
@@ -484,6 +517,8 @@ fn build_entry(
                 asset_index,
                 keys,
                 fallback_tex_size,
+                pending_uploads,
+                staging_to_free,
             )
         })
         .collect();
@@ -499,8 +534,6 @@ fn build_entry(
 #[allow(clippy::too_many_arguments)]
 fn build_texture_slot(
     device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
     descriptor_pool: vk::DescriptorPool,
     texture_layout: vk::DescriptorSetLayout,
@@ -509,6 +542,8 @@ fn build_texture_slot(
     asset_index: &Option<AssetIndex>,
     keys: &[&str],
     fallback_tex_size: u32,
+    pending_uploads: &mut Vec<util::PendingImageUpload>,
+    staging_to_free: &mut Vec<(vk::Buffer, Allocation)>,
 ) -> TextureSlot {
     let (pixels, width, height) = keys
         .iter()
@@ -525,17 +560,14 @@ fn build_texture_slot(
         util::create_gpu_image(device, allocator, width, height, "block_entity_texture");
     let (staging_buf, staging_alloc) =
         util::create_staging_buffer(device, allocator, &pixels, "block_entity_texture_staging");
-    util::upload_image(
-        device,
-        queue,
-        command_pool,
-        staging_buf,
+    pending_uploads.push(util::PendingImageUpload {
+        staging_buffer: staging_buf,
         image,
         width,
         height,
-    );
-    device.destroy_buffer(staging_buf, None);
-    allocator.lock().unwrap().free(staging_alloc).ok();
+        mip_levels: 1,
+    });
+    staging_to_free.push((staging_buf, staging_alloc));
 
     let tex_alloc_info = vk::DescriptorSetAllocateInfo {
         descriptor_pool,

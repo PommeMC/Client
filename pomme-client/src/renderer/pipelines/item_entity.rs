@@ -533,6 +533,15 @@ pub(super) fn create_pipeline(
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
 ) -> vk::Pipeline {
+    create_pipeline_with_front_face(device, render_pass, layout, vk::FrontFace::CounterClockwise)
+}
+
+pub(super) fn create_pipeline_with_front_face(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+    front_face: vk::FrontFace,
+) -> vk::Pipeline {
     let vert_spv = shader::include_spirv!("item_entity.vert.spv");
     let frag_spv = shader::include_spirv!("item_entity.frag.spv");
     let vert_mod = shader::create_shader_module(device, vert_spv);
@@ -575,7 +584,7 @@ pub(super) fn create_pipeline(
     let rasterizer = vk::PipelineRasterizationStateCreateInfo {
         polygon_mode: vk::PolygonMode::Fill,
         cull_mode: vk::CullModeFlags::Back,
-        front_face: vk::FrontFace::CounterClockwise,
+        front_face,
         line_width: 1.0,
         ..Default::default()
     };

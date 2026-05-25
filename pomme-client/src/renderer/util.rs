@@ -489,6 +489,37 @@ pub fn upload_image_mipmapped(
     });
 }
 
+pub struct PendingImageUpload {
+    pub staging_buffer: vk::Buffer,
+    pub image: vk::Image,
+    pub width: u32,
+    pub height: u32,
+    pub mip_levels: u32,
+}
+
+pub fn upload_images_batched(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    uploads: &[PendingImageUpload],
+) {
+    if uploads.is_empty() {
+        return;
+    }
+    submit_one_time(device, queue, command_pool, |cmd| {
+        for u in uploads {
+            record_image_upload(
+                cmd,
+                u.staging_buffer,
+                u.image,
+                u.width,
+                u.height,
+                u.mip_levels,
+            );
+        }
+    });
+}
+
 fn record_image_upload(
     cmd: &vk::CommandBuffer,
     staging_buffer: vk::Buffer,

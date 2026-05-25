@@ -101,10 +101,23 @@ impl TextureAtlas {
 
         sources.sort_by_key(|s| std::cmp::Reverse(s.h.max(MISSING_TILE)));
 
-        let atlas_size = (((total_area as f64) * 1.4).sqrt().ceil() as u32).next_power_of_two();
-        let mut atlas_pixels = vec![0u8; (atlas_size * atlas_size * 4) as usize];
-        let mut regions = HashMap::new();
+        const MAX_ATLAS_SIZE: u32 = 8192;
+        let mut atlas_size = (((total_area as f64) * 1.4).sqrt().ceil() as u32).next_power_of_two();
 
+        let (placements, missing_region) = loop {
+            let (result, all_fit) = pack(&sources, atlas_size);
+            if all_fit || atlas_size >= MAX_ATLAS_SIZE {
+                if !all_fit {
+                    tracing::warn!(
+                        "Atlas at {MAX_ATLAS_SIZE} cap; oversize sources fall back to missing tile"
+                    );
+                }
+                break result;
+            }
+            atlas_size *= 2;
+        };
+
+        let mut atlas_pixels = vec![0u8; (atlas_size * atlas_size * 4) as usize];
         for py in 0..MISSING_TILE {
             for px in 0..MISSING_TILE {
                 let is_check = ((px / 8) + (py / 8)) % 2 == 0;
@@ -117,42 +130,25 @@ impl TextureAtlas {
                 atlas_pixels[idx..idx + 4].copy_from_slice(&color);
             }
         }
-        let missing_region = pixel_region(0, 0, MISSING_TILE, MISSING_TILE, atlas_size);
 
-        let mut cursor_x: u32 = MISSING_TILE;
-        let mut cursor_y: u32 = 0;
-        let mut shelf_h: u32 = MISSING_TILE;
-
-        for src in sources {
-            if src.data.is_empty() {
-                regions.insert(src.name, missing_region);
-                continue;
-            }
-            if cursor_x + src.w > atlas_size {
-                cursor_y += shelf_h;
-                cursor_x = 0;
-                shelf_h = 0;
-            }
-            assert!(
-                cursor_y + src.h <= atlas_size,
-                "atlas overflow: {}x{} needed at ({},{}) in {}",
-                src.w,
-                src.h,
-                cursor_x,
-                cursor_y,
-                atlas_size
-            );
-            let region = pixel_region(cursor_x, cursor_y, src.w, src.h, atlas_size);
-            for py in 0..src.h {
-                for px in 0..src.w {
-                    let s = ((py * src.w + px) * 4) as usize;
-                    let d = (((cursor_y + py) * atlas_size + cursor_x + px) * 4) as usize;
-                    atlas_pixels[d..d + 4].copy_from_slice(&src.data[s..s + 4]);
+        let mut regions = HashMap::new();
+        for src in &sources {
+            match placements.get(src.name.as_str()) {
+                Some(Some((cx, cy))) => {
+                    let region = pixel_region(*cx, *cy, src.w, src.h, atlas_size);
+                    for py in 0..src.h {
+                        for px in 0..src.w {
+                            let s = ((py * src.w + px) * 4) as usize;
+                            let d = (((cy + py) * atlas_size + cx + px) * 4) as usize;
+                            atlas_pixels[d..d + 4].copy_from_slice(&src.data[s..s + 4]);
+                        }
+                    }
+                    regions.insert(src.name.clone(), region);
+                }
+                _ => {
+                    regions.insert(src.name.clone(), missing_region);
                 }
             }
-            regions.insert(src.name, region);
-            cursor_x += src.w;
-            shelf_h = shelf_h.max(src.h);
         }
 
         let uv_map = AtlasUVMap {
@@ -225,4 +221,35 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion 
         u_max: (x + w) as f32 / s,
         v_max: (y + h) as f32 / s,
     }
+}
+
+type PackResult = (HashMap<String, Option<(u32, u32)>>, AtlasRegion);
+
+fn pack(sources: &[Source], atlas_size: u32) -> (PackResult, bool) {
+    let mut placements: HashMap<String, Option<(u32, u32)>> = HashMap::new();
+    let missing_region = pixel_region(0, 0, MISSING_TILE, MISSING_TILE, atlas_size);
+    let mut cursor_x = MISSING_TILE;
+    let mut cursor_y = 0;
+    let mut shelf_h = MISSING_TILE;
+    let mut all_fit = true;
+    for src in sources {
+        if src.data.is_empty() {
+            placements.insert(src.name.clone(), None);
+            continue;
+        }
+        if cursor_x + src.w > atlas_size {
+            cursor_y += shelf_h;
+            cursor_x = 0;
+            shelf_h = 0;
+        }
+        if cursor_y + src.h > atlas_size {
+            all_fit = false;
+            placements.insert(src.name.clone(), None);
+            continue;
+        }
+        placements.insert(src.name.clone(), Some((cursor_x, cursor_y)));
+        cursor_x += src.w;
+        shelf_h = shelf_h.max(src.h);
+    }
+    ((placements, missing_region), all_fit)
 }

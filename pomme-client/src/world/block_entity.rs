@@ -16,9 +16,6 @@ pub fn is_block_entity_block(name: &str) -> bool {
         name,
         // Chests / containers
         "chest" | "trapped_chest" | "ender_chest"
-        | "copper_chest" | "exposed_copper_chest" | "weathered_copper_chest" | "oxidized_copper_chest"
-        | "waxed_copper_chest" | "waxed_exposed_copper_chest"
-        | "waxed_weathered_copper_chest" | "waxed_oxidized_copper_chest"
         | "shulker_box"
         | "white_shulker_box" | "orange_shulker_box" | "magenta_shulker_box" | "light_blue_shulker_box"
         | "yellow_shulker_box" | "lime_shulker_box" | "pink_shulker_box" | "gray_shulker_box"
@@ -66,11 +63,8 @@ pub fn is_block_entity_block(name: &str) -> bool {
         | "conduit" | "decorated_pot" | "end_portal" | "end_gateway"
         | "beacon" | "spawner" | "trial_spawner" | "vault"
         | "brewing_stand" | "lectern" | "campfire" | "soul_campfire"
-        | "beehive" | "bee_nest" | "bell" | "shelf" | "suspicious_sand" | "suspicious_gravel"
-        | "crafter" | "copper_golem_statue" | "exposed_copper_golem_statue"
-        | "weathered_copper_golem_statue" | "oxidized_copper_golem_statue"
-        | "waxed_copper_golem_statue" | "waxed_exposed_copper_golem_statue"
-        | "waxed_weathered_copper_golem_statue" | "waxed_oxidized_copper_golem_statue"
+        | "beehive" | "bee_nest" | "bell" | "suspicious_sand" | "suspicious_gravel"
+        | "crafter"
     )
 }
 

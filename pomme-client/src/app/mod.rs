@@ -255,7 +255,10 @@ impl ApplicationHandler for App {
                                 && !event.repeat
                                 && let PhysicalKey::Code(code) = event.physical_key
                             {
-                                if game.chat.is_open() {
+                                if code == KeyCode::KeyH && self.core.input.key_pressed(KeyCode::F3)
+                                {
+                                    game.advanced_item_tooltips = !game.advanced_item_tooltips;
+                                } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
                                             game.chat.close();
@@ -323,12 +326,6 @@ impl ApplicationHandler for App {
                                             if self.core.input.key_pressed(KeyCode::F3) =>
                                         {
                                             game.show_chunk_borders = !game.show_chunk_borders;
-                                        }
-                                        KeyCode::KeyH
-                                            if self.core.input.key_pressed(KeyCode::F3) =>
-                                        {
-                                            game.advanced_item_tooltips =
-                                                !game.advanced_item_tooltips;
                                         }
                                         KeyCode::F5 => {
                                             gfx.renderer.cycle_camera_mode();
