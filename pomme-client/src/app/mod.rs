@@ -300,7 +300,11 @@ impl ApplicationHandler for App {
                                             self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
-                                        KeyCode::KeyE if !game.paused && !game.dead => {
+                                        KeyCode::KeyE
+                                            if !game.paused
+                                                && !game.dead
+                                                && game.player.game_mode != 3 =>
+                                        {
                                             if game.player.game_mode == 1 {
                                                 game.creative_inventory_open = true;
                                             } else {

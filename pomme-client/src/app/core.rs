@@ -439,30 +439,18 @@ impl AppCore {
                             crate::world::block_entity::StoredBlockEntity { kind, nbt },
                         );
                     }
-                    if !chunks_to_mesh.contains(&chunk_pos) {
-                        chunks_to_mesh.push(chunk_pos);
-                    }
                 }
-                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => {
-                    match nbt {
-                        Some(nbt) => {
-                            game.chunk_store.block_entities.insert(
-                                pos,
-                                crate::world::block_entity::StoredBlockEntity { kind, nbt },
-                            );
-                        }
-                        None => {
-                            game.chunk_store.block_entities.remove(&pos);
-                        }
+                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => match nbt {
+                    Some(nbt) => {
+                        game.chunk_store.block_entities.insert(
+                            pos,
+                            crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                        );
                     }
-                    let chunk_pos = azalea_core::position::ChunkPos::new(
-                        pos.x.div_euclid(16),
-                        pos.z.div_euclid(16),
-                    );
-                    if !chunks_to_mesh.contains(&chunk_pos) {
-                        chunks_to_mesh.push(chunk_pos);
+                    None => {
+                        game.chunk_store.block_entities.remove(&pos);
                     }
-                }
+                },
                 NetworkEvent::BlockEvent {
                     pos,
                     action_id,
@@ -477,8 +465,21 @@ impl AppCore {
                     tracing::info!("Game mode changed to {game_mode}");
                     game.player.game_mode = game_mode;
                     if game.inventory_open || game.creative_inventory_open {
-                        game.inventory_open = game_mode != 1;
-                        game.creative_inventory_open = game_mode == 1;
+                        match game_mode {
+                            1 => {
+                                game.inventory_open = false;
+                                game.creative_inventory_open = true;
+                            }
+                            3 => {
+                                game.inventory_open = false;
+                                game.creative_inventory_open = false;
+                                self.apply_cursor_grab(window, Some(game));
+                            }
+                            _ => {
+                                game.inventory_open = true;
+                                game.creative_inventory_open = false;
+                            }
+                        }
                     }
                 }
                 NetworkEvent::ServerViewDistance { distance } => {
