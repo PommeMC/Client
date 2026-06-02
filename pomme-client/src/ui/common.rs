@@ -68,9 +68,9 @@ pub fn push_item_count(
 
 pub fn hit_test(cursor: (f32, f32), rect: [f32; 4]) -> bool {
     cursor.0 >= rect[0]
-        && cursor.0 <= rect[0] + rect[2]
+        && cursor.0 < rect[0] + rect[2]
         && cursor.1 >= rect[1]
-        && cursor.1 <= rect[1] + rect[3]
+        && cursor.1 < rect[1] + rect[3]
 }
 
 #[allow(clippy::too_many_arguments)]

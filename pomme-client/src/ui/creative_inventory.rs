@@ -1014,7 +1014,7 @@ fn update_scroll_drag(
     if state.scroll_dragging {
         let track_y = oy + SCROLLBAR_TRACK_Y * scale;
         let half_handle = SCROLLBAR_HANDLE_H * scale / 2.0;
-        let usable = (SCROLLBAR_TRACK_H - SCROLLBAR_HANDLE_H) * scale;
+        let usable = (SCROLLBAR_TRACK_H - SCROLLBAR_HANDLE_H - SCROLLBAR_HANDLE_PAD) * scale;
         state.scroll = ((cursor.1 - track_y - half_handle) / usable).clamp(0.0, 1.0);
     }
     consumed

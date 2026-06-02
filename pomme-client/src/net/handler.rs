@@ -63,9 +63,7 @@ pub fn handle_game_packet(
                     (block_pos, be.kind, compound)
                 })
                 .collect();
-            if !entries.is_empty() {
-                let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
-            }
+            let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
         }
         ClientboundGamePacket::BlockEvent(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockEvent {
