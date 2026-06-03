@@ -1,6 +1,7 @@
 mod app;
 mod args;
 mod assets;
+mod audio;
 mod benchmark;
 mod dirs;
 mod discord;

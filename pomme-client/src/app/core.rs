@@ -73,6 +73,7 @@ pub struct AppCore {
     pub resource_packs: ResourcePackManager,
     pub pending_pack_download: Option<PendingPackDownload>,
     pub asset_index: Option<AssetIndex>,
+    pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
 }
@@ -96,6 +97,13 @@ impl AppCore {
         let asset_index =
             AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, &version);
 
+        let audio = crate::audio::AudioEngine::new(
+            &data_dirs.jar_assets_dir,
+            asset_index.clone(),
+            menu.master_volume,
+            menu.music_volume,
+        );
+
         Self {
             user,
             presence,
@@ -108,6 +116,7 @@ impl AppCore {
             resource_packs,
             pending_pack_download: None,
             asset_index,
+            audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
         }
