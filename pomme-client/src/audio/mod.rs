@@ -77,24 +77,29 @@ impl AudioEngine {
         }
     }
 
-    /// Updates the master/music volumes (0.0..=1.0) and applies them live to any
-    /// currently playing menu track.
+    /// Combined `master * music * per-track` volume for the active menu track.
+    fn current_music_volume(&self) -> f32 {
+        self.master * self.music * self.music_track_volume
+    }
+
+    /// Sets the master/music volumes (0.0..=1.0), applied live to any playing track.
     pub fn set_volumes(&mut self, master: f32, music: f32) {
         self.master = master;
         self.music = music;
         if let Some(sink) = self.music_sink.as_ref() {
-            sink.set_volume(self.master * self.music * self.music_track_volume);
+            sink.set_volume(self.current_music_volume());
         }
     }
 
-    /// Plays the vanilla button click. Uses the MASTER category at the fixed UI
-    /// volume, matching `SimpleSoundInstance.forUI`.
+    /// Plays the vanilla button click: MASTER category at the fixed `forUI` volume.
     pub fn play_ui_click(&self) {
-        self.play_oneshot(UI_CLICK_EVENT, UI_CLICK_VOLUME);
+        if let Some((sink, entry_volume)) = self.make_sink(UI_CLICK_EVENT) {
+            sink.set_volume(self.master * UI_CLICK_VOLUME * entry_volume);
+            sink.detach();
+        }
     }
 
-    /// Begins menu music playback. Idempotent: calling it while music is already
-    /// active does nothing, so it is safe to call every frame.
+    /// Begins menu music. Idempotent, so it is safe to call every frame.
     pub fn start_menu_music(&mut self) {
         if !self.menu_music_active {
             self.menu_music_active = true;
@@ -102,7 +107,6 @@ impl AudioEngine {
         }
     }
 
-    /// Stops menu music and resets its scheduling state.
     pub fn stop_menu_music(&mut self) {
         self.menu_music_active = false;
         self.gap_remaining = 0.0;
@@ -111,24 +115,22 @@ impl AudioEngine {
         }
     }
 
-    /// Advances menu music: keeps the live volume in sync, schedules a random
-    /// gap after each track, and starts the next track when the gap elapses.
+    /// Advances menu music: syncs the live volume, schedules a random gap after
+    /// each finished track, and starts the next track once the gap elapses.
     pub fn update_menu_music(&mut self, dt: f32) {
         if !self.menu_music_active {
             return;
         }
-
-        // If a track is playing, sync its volume and bail until it finishes.
         if let Some(sink) = self.music_sink.as_ref() {
-            sink.set_volume(self.master * self.music * self.music_track_volume);
+            sink.set_volume(self.current_music_volume());
             if !sink.empty() {
                 return;
             }
         }
-        // A track just finished: drop it and schedule the next after a gap.
+        // A finished track falls through to here; drop it and start the gap.
         if self.music_sink.take().is_some() {
-            self.gap_remaining = MENU_MUSIC_MIN_GAP
-                + fastrand::f32() * (MENU_MUSIC_MAX_GAP - MENU_MUSIC_MIN_GAP);
+            self.gap_remaining =
+                MENU_MUSIC_MIN_GAP + fastrand::f32() * (MENU_MUSIC_MAX_GAP - MENU_MUSIC_MIN_GAP);
             return;
         }
         if self.gap_remaining > 0.0 {
@@ -139,33 +141,21 @@ impl AudioEngine {
     }
 
     fn play_menu_track(&mut self) {
-        let Some(output) = self.output.as_ref() else {
-            return;
-        };
-        let Some((source, track_volume)) = self.decode_event(MENU_MUSIC_EVENT) else {
-            return;
-        };
-        if let Ok(sink) = Sink::try_new(&output.handle) {
-            sink.set_volume(self.master * self.music * track_volume);
-            sink.append(source);
-            self.music_sink = Some(sink);
+        if let Some((sink, track_volume)) = self.make_sink(MENU_MUSIC_EVENT) {
             self.music_track_volume = track_volume;
+            sink.set_volume(self.current_music_volume());
+            self.music_sink = Some(sink);
         }
     }
 
-    /// Plays a one-shot sound, mixed at `master * extra_volume * entry_volume`.
-    fn play_oneshot(&self, event: &str, extra_volume: f32) {
-        let Some(output) = self.output.as_ref() else {
-            return;
-        };
-        let Some((source, entry_volume)) = self.decode_event(event) else {
-            return;
-        };
-        if let Ok(sink) = Sink::try_new(&output.handle) {
-            sink.set_volume(self.master * extra_volume * entry_volume);
-            sink.append(source);
-            sink.detach();
-        }
+    /// Decodes a weighted-random variant of `event` into a queued sink, returned
+    /// with the variant's per-entry volume for the caller to apply.
+    fn make_sink(&self, event: &str) -> Option<(Sink, f32)> {
+        let output = self.output.as_ref()?;
+        let (source, volume) = self.decode_event(event)?;
+        let sink = Sink::try_new(&output.handle).ok()?;
+        sink.append(source);
+        Some((sink, volume))
     }
 
     /// Picks a weighted-random variant for `event`, decodes its `.ogg`, and
