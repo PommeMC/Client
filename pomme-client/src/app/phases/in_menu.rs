@@ -28,8 +28,7 @@ pub fn update_menu(
     let result = core.menu.build(sw, sh, &menu_input, |t, s| {
         gfx.renderer.menu_text_width(t, s)
     });
-    core.audio
-        .set_volumes(core.menu.master_volume, core.menu.music_volume);
+    core.audio.set_volumes(core.menu.category_volumes());
     let action = result.action;
 
     let cursor_icon = if result.cursor_pointer {

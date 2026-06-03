@@ -395,6 +395,24 @@ impl MainMenu {
         self.cursor_blink = Instant::now();
     }
 
+    /// Per-category volumes in `SoundCategory` order
+    /// (master, music, records, weather, blocks, hostile, neutral, players,
+    /// ambient, voice) for the audio engine.
+    pub fn category_volumes(&self) -> [f32; 10] {
+        [
+            self.master_volume,
+            self.music_volume,
+            self.jukebox_volume,
+            self.weather_volume,
+            self.blocks_volume,
+            self.hostile_volume,
+            self.friendly_volume,
+            self.players_volume,
+            self.ambient_volume,
+            self.voice_volume,
+        ]
+    }
+
     fn save_settings(&self) {
         save_settings(
             &self.settings_dir,
