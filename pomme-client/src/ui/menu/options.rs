@@ -645,7 +645,9 @@ impl MainMenu {
             let v = *value;
             match *prefix {
                 "Render Distance:" => self.render_distance = (2.0 + v * 30.0).round() as u32,
-                "Simulation Distance:" => self.simulation_distance = (5.0 + v * 27.0).round() as u32,
+                "Simulation Distance:" => {
+                    self.simulation_distance = (5.0 + v * 27.0).round() as u32
+                }
                 "FOV:" => self.fov = (30.0 + v * 80.0).round() as u32,
                 "Master Volume:" => self.master_volume = v,
                 "Music:" => self.music_volume = v,

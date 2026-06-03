@@ -82,7 +82,8 @@ impl AudioEngine {
         self.master * self.music * self.music_track_volume
     }
 
-    /// Sets the master/music volumes (0.0..=1.0), applied live to any playing track.
+    /// Sets the master/music volumes (0.0..=1.0), applied live to any playing
+    /// track.
     pub fn set_volumes(&mut self, master: f32, music: f32) {
         self.master = master;
         self.music = music;
@@ -91,7 +92,8 @@ impl AudioEngine {
         }
     }
 
-    /// Plays the vanilla button click: MASTER category at the fixed `forUI` volume.
+    /// Plays the vanilla button click: MASTER category at the fixed `forUI`
+    /// volume.
     pub fn play_ui_click(&self) {
         if let Some((sink, entry_volume)) = self.make_sink(UI_CLICK_EVENT) {
             sink.set_volume(self.master * UI_CLICK_VOLUME * entry_volume);
@@ -148,8 +150,9 @@ impl AudioEngine {
         }
     }
 
-    /// Decodes a weighted-random variant of `event` into a queued sink, returned
-    /// with the variant's per-entry volume for the caller to apply.
+    /// Decodes a weighted-random variant of `event` into a queued sink,
+    /// returned with the variant's per-entry volume for the caller to
+    /// apply.
     fn make_sink(&self, event: &str) -> Option<(Sink, f32)> {
         let output = self.output.as_ref()?;
         let (source, volume) = self.decode_event(event)?;

@@ -12,14 +12,15 @@ pub struct SoundVariant {
     pub volume: f32,
 }
 
-/// Parsed `sounds.json`: a map from event name (e.g. `music.menu`) to its variants.
+/// Parsed `sounds.json`: a map from event name (e.g. `music.menu`) to its
+/// variants.
 pub struct SoundsIndex {
     events: HashMap<String, Vec<SoundVariant>>,
 }
 
 impl SoundsIndex {
-    /// Loads and parses `minecraft/sounds.json` from the asset index / jar assets.
-    /// Returns an empty index if the file is missing or malformed.
+    /// Loads and parses `minecraft/sounds.json` from the asset index / jar
+    /// assets. Returns an empty index if the file is missing or malformed.
     pub fn load(jar_assets_dir: &Path, asset_index: &Option<AssetIndex>) -> Self {
         let path = resolve_asset_path(jar_assets_dir, asset_index, "minecraft/sounds.json");
         let mut events = HashMap::new();
@@ -63,10 +64,8 @@ impl SoundsIndex {
                                 .and_then(|w| w.as_u64())
                                 .unwrap_or(1)
                                 .max(1) as u32;
-                            let volume = map
-                                .get("volume")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(1.0) as f32;
+                            let volume =
+                                map.get("volume").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
                             variants.push(SoundVariant {
                                 name: name.to_string(),
                                 weight,
