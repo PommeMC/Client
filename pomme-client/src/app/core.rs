@@ -276,23 +276,23 @@ impl AppCore {
                         .set_center(azalea_core::position::ChunkPos::new(x, z));
                 }
                 NetworkEvent::PlayerPosition { change, relative } => {
-                    fn apply_change<T: Add<Output = T>>(base: T, condition: bool, change: T) -> T {
-                        if condition { base + change } else { change }
+                    fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
+                        if is_relative { base + value } else { value }
                     }
 
                     let new_position = Position::new(
-                        apply_change(game.player.position.x, relative.x, change.pos.x),
-                        apply_change(game.player.position.y, relative.y, change.pos.y),
-                        apply_change(game.player.position.z, relative.z, change.pos.z),
+                        resolve(game.player.position.x, relative.x, change.pos.x),
+                        resolve(game.player.position.y, relative.y, change.pos.y),
+                        resolve(game.player.position.z, relative.z, change.pos.z),
                     );
 
                     let new_look_dir = LookDirection::new(
-                        apply_change(
+                        resolve(
                             game.player.look_dir.y_rot_deg(),
                             relative.y_rot,
                             change.look_direction.y_rot(),
                         ),
-                        apply_change(
+                        resolve(
                             game.player.look_dir.x_rot_deg(),
                             relative.x_rot,
                             change.look_direction.x_rot(),
@@ -312,9 +312,9 @@ impl AppCore {
                                 .y_rot(y_rot_delta.to_radians() as f64);
                         }
                         Velocity::new(
-                            apply_change(new_velocity.x, relative.delta_x, change.delta.x),
-                            apply_change(new_velocity.y, relative.delta_y, change.delta.y),
-                            apply_change(new_velocity.z, relative.delta_z, change.delta.z),
+                            resolve(new_velocity.x, relative.delta_x, change.delta.x),
+                            resolve(new_velocity.y, relative.delta_y, change.delta.y),
+                            resolve(new_velocity.z, relative.delta_z, change.delta.z),
                         )
                     };
 
