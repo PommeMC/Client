@@ -206,29 +206,48 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
     ) -> MainMenuResult {
+        let pct = |v: f32| -> String {
+            let p = (v * 100.0).round() as u32;
+            if p == 0 {
+                "OFF".to_string()
+            } else {
+                format!("{p}%")
+            }
+        };
+        let master = format!("Master Volume: {}", pct(self.master_volume));
+        let music = format!("Music: {}", pct(self.music_volume));
+        let jukebox = format!("Jukebox/Note Blocks: {}", pct(self.jukebox_volume));
+        let weather = format!("Weather: {}", pct(self.weather_volume));
+        let blocks = format!("Blocks: {}", pct(self.blocks_volume));
+        let hostile = format!("Hostile Creatures: {}", pct(self.hostile_volume));
+        let friendly = format!("Friendly Creatures: {}", pct(self.friendly_volume));
+        let players = format!("Players: {}", pct(self.players_volume));
+        let ambient = format!("Ambient/Environment: {}", pct(self.ambient_volume));
+        let voice = format!("Voice/Speech: {}", pct(self.voice_volume));
+        let ui = format!("UI: {}", pct(self.ui_volume));
         let rows: Vec<[&str; 2]> = vec![
-            ["Master Volume: 100%", ""],
-            ["Music: 100%", "Jukebox/Note Blocks: 100%"],
-            ["Weather: 100%", "Blocks: 100%"],
-            ["Hostile Creatures: 100%", "Friendly Creatures: 100%"],
-            ["Players: 100%", "Ambient/Environment: 100%"],
-            ["Voice/Speech: 100%", "UI: 100%"],
+            [&master, ""],
+            [&music, &jukebox],
+            [&weather, &blocks],
+            [&hostile, &friendly],
+            [&players, &ambient],
+            [&voice, &ui],
             ["Device: Default", ""],
             ["Show Subtitles: OFF", "Directional Audio: OFF"],
             ["Music Frequency: Normal", "Music Toast: ON"],
         ];
         let sliders: &[(&str, f32)] = &[
-            ("Master Volume:", 1.0),
-            ("Music:", 1.0),
-            ("Jukebox/Note Blocks:", 1.0),
-            ("Weather:", 1.0),
-            ("Blocks:", 1.0),
-            ("Hostile Creatures:", 1.0),
-            ("Friendly Creatures:", 1.0),
-            ("Players:", 1.0),
-            ("Ambient/Environment:", 1.0),
-            ("Voice/Speech:", 1.0),
-            ("UI:", 1.0),
+            ("Master Volume:", self.master_volume),
+            ("Music:", self.music_volume),
+            ("Jukebox/Note Blocks:", self.jukebox_volume),
+            ("Weather:", self.weather_volume),
+            ("Blocks:", self.blocks_volume),
+            ("Hostile Creatures:", self.hostile_volume),
+            ("Friendly Creatures:", self.friendly_volume),
+            ("Players:", self.players_volume),
+            ("Ambient/Environment:", self.ambient_volume),
+            ("Voice/Speech:", self.voice_volume),
+            ("UI:", self.ui_volume),
         ];
         self.build_options_grid(
             sw,
@@ -389,6 +408,7 @@ impl MainMenu {
 
         let mut elements = Vec::new();
         let mut any_hovered = false;
+        let mut any_clicked = false;
 
         let (content_top, content_bottom, done_y);
 
@@ -559,6 +579,7 @@ impl MainMenu {
                     common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
                 }
                 if clicked && h {
+                    any_clicked = true;
                     if let Some((_, target)) = nav.iter().find(|(l, _)| *l == *label) {
                         if matches!(target, Screen::OptionsResourcePacks) {
                             self.rescan_packs = true;
@@ -621,18 +642,27 @@ impl MainMenu {
         }
 
         for (prefix, value) in &slider_results {
-            if *prefix == "Render Distance:" {
-                self.render_distance = (2.0 + value * 30.0).round() as u32;
-                self.save_settings();
+            let v = *value;
+            match *prefix {
+                "Render Distance:" => self.render_distance = (2.0 + v * 30.0).round() as u32,
+                "Simulation Distance:" => {
+                    self.simulation_distance = (5.0 + v * 27.0).round() as u32
+                }
+                "FOV:" => self.fov = (30.0 + v * 80.0).round() as u32,
+                "Master Volume:" => self.master_volume = v,
+                "Music:" => self.music_volume = v,
+                "Jukebox/Note Blocks:" => self.jukebox_volume = v,
+                "Weather:" => self.weather_volume = v,
+                "Blocks:" => self.blocks_volume = v,
+                "Hostile Creatures:" => self.hostile_volume = v,
+                "Friendly Creatures:" => self.friendly_volume = v,
+                "Players:" => self.players_volume = v,
+                "Ambient/Environment:" => self.ambient_volume = v,
+                "Voice/Speech:" => self.voice_volume = v,
+                "UI:" => self.ui_volume = v,
+                _ => continue,
             }
-            if *prefix == "Simulation Distance:" {
-                self.simulation_distance = (5.0 + value * 27.0).round() as u32;
-                self.save_settings();
-            }
-            if *prefix == "FOV:" {
-                self.fov = (30.0 + value * 80.0).round() as u32;
-                self.save_settings();
-            }
+            self.save_settings();
         }
 
         elements.push(MenuElement::ScissorPop);
@@ -679,6 +709,7 @@ impl MainMenu {
         );
         any_hovered |= h;
         if clicked && h {
+            any_clicked = true;
             self.set_screen(back);
         }
 
@@ -687,7 +718,7 @@ impl MainMenu {
             action: MenuAction::None,
             cursor_pointer: any_hovered,
             blur: 2.0,
-            clicked_button: false,
+            clicked_button: any_clicked,
         }
     }
 

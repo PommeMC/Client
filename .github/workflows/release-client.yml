@@ -38,7 +38,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@06218f81a3cbd7dce502fdc666c8db2af725b442
+        uses: jakoch/install-vulkan-sdk-action@b394a1abed9cb019d8e637eeadac93d73e0853da
         with:
           vulkan_version: 1.4.341.0
           install_runtime: false
@@ -49,7 +49,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libvulkan-dev cmake
+          sudo apt-get install -y libvulkan-dev cmake libasound2-dev
 
       - name: Build
         run: cargo build -p pomme-client --release --target ${{ matrix.target }}

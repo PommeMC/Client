@@ -17,6 +17,9 @@ pub fn update_menu(
 ) -> MenuUpdateResult {
     panorama.update(dt);
 
+    core.audio.start_menu_music();
+    core.audio.update_menu_music(dt);
+
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
 
@@ -25,6 +28,7 @@ pub fn update_menu(
     let result = core.menu.build(sw, sh, &menu_input, |t, s| {
         gfx.renderer.menu_text_width(t, s)
     });
+    core.audio.set_volumes(core.menu.category_volumes());
     let action = result.action;
 
     let cursor_icon = if result.cursor_pointer {
@@ -86,10 +90,12 @@ pub fn update_menu(
 
     if result.clicked_button {
         gfx.renderer.trigger_skin_swing();
+        core.audio.play_ui_click();
     }
 
     match action {
         MenuAction::Connect { server, username } => {
+            core.audio.stop_menu_music();
             let connect_args = ConnectArgs {
                 server,
                 username,

@@ -8,6 +8,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::entity::components::Position;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
@@ -16,12 +17,10 @@ use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
 pub const MAX_OVERLAYS: usize = 2;
 
 pub struct EntityRenderInfo {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-    pub yaw: f32,
-    pub pitch: f32,
-    pub head_yaw: f32,
+    pub position: Position,
+    pub head_x_rot_deg: f32,
+    pub head_y_rot_deg: f32,
+    pub body_y_rot_deg: f32,
     pub is_baby: bool,
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
@@ -29,7 +28,7 @@ pub struct EntityRenderInfo {
     pub variant_index: u32,
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
     pub head_y_offset: f32,
-    pub head_x_rot_override: Option<f32>,
+    pub head_x_rot_deg_override: Option<f32>,
 }
 
 struct MobVariant {
@@ -466,26 +465,23 @@ impl EntityRenderer {
             };
             let variant = entry.base_variant(info.is_baby, info.variant_index);
 
-            let entity_mat = glam::Mat4::from_translation(glam::Vec3::new(
-                info.x as f32,
-                info.y as f32,
-                info.z as f32,
-            )) * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians());
+            let entity_mat = glam::Mat4::from_translation(info.position.as_vec3())
+                * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians());
 
             let anim = match entry.anim {
                 AnimationType::Quadruped => entity_model::compute_quadruped_anim(
                     &variant.model,
-                    info.pitch,
-                    info.head_yaw - info.yaw,
+                    info.head_x_rot_deg,
+                    info.head_y_rot_deg - info.body_y_rot_deg,
                     info.walk_anim_pos,
                     info.walk_anim_speed,
                     info.head_y_offset,
-                    info.head_x_rot_override,
+                    info.head_x_rot_deg_override,
                 ),
                 AnimationType::Humanoid => entity_model::compute_humanoid_anim(
                     &variant.model,
-                    info.pitch,
-                    info.head_yaw - info.yaw,
+                    info.head_x_rot_deg,
+                    info.head_y_rot_deg - info.body_y_rot_deg,
                     info.walk_anim_pos,
                     info.walk_anim_speed,
                 ),
@@ -763,7 +759,7 @@ fn load_entity_texture(
     (image, view, allocation)
 }
 
-fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
+pub(super) fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
     let mut pixels = vec![0u8; (size * size * 4) as usize];
     for pixel in pixels.chunks_exact_mut(4) {
         pixel.copy_from_slice(&[219, 148, 148, 255]);
@@ -771,7 +767,7 @@ fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
     (pixels, size, size)
 }
 
-fn create_pipeline(
+pub(super) fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,

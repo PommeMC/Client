@@ -471,7 +471,7 @@ impl MainMenu {
             action,
             cursor_pointer: any_hovered,
             blur: 2.0,
-            clicked_button: false,
+            clicked_button: input.clicked && any_hovered,
         }
     }
 
@@ -569,7 +569,7 @@ impl MainMenu {
             action: MenuAction::None,
             cursor_pointer: any_hovered,
             blur: 2.0,
-            clicked_button: false,
+            clicked_button: input.clicked && any_hovered,
         }
     }
 
@@ -689,7 +689,7 @@ impl MainMenu {
             action,
             cursor_pointer: any_hovered,
             blur: 2.0,
-            clicked_button: false,
+            clicked_button: input.clicked && any_hovered,
         }
     }
 
@@ -853,7 +853,7 @@ impl MainMenu {
             action: MenuAction::None,
             cursor_pointer: any_hovered,
             blur: 2.0,
-            clicked_button: false,
+            clicked_button: input.clicked && any_hovered,
         }
     }
 
@@ -1012,7 +1012,7 @@ impl MainMenu {
             action: MenuAction::None,
             cursor_pointer: any_hovered,
             blur: 2.0,
-            clicked_button: false,
+            clicked_button: input.clicked && any_hovered,
         }
     }
 }

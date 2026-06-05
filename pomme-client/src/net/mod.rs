@@ -8,7 +8,10 @@ use azalea_block::BlockState;
 use azalea_core::heightmap_kind::HeightmapKind;
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_inventory::ItemStack;
-use azalea_registry::builtin::EntityKind;
+use azalea_registry::builtin::{BlockEntityKind, EntityKind};
+use simdnbt::owned::NbtCompound;
+
+use crate::entity::components::{Position, Velocity};
 
 pub enum NetworkEvent {
     Connected,
@@ -72,6 +75,38 @@ pub enum NetworkEvent {
     SectionBlocksUpdate {
         updates: Vec<(BlockPos, BlockState)>,
     },
+    BlockEntitySync {
+        chunk_pos: ChunkPos,
+        entries: Vec<(BlockPos, BlockEntityKind, NbtCompound)>,
+    },
+    BlockEntityUpdate {
+        pos: BlockPos,
+        kind: BlockEntityKind,
+        nbt: Option<NbtCompound>,
+    },
+    BlockEvent {
+        pos: BlockPos,
+        action_id: u8,
+        action_parameter: u8,
+    },
+    PlaySound {
+        sound: crate::audio::SoundRef,
+        category: u8,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+        seed: u64,
+    },
+    PlayEntitySound {
+        sound: crate::audio::SoundRef,
+        category: u8,
+        entity_id: i32,
+        volume: f32,
+        pitch: f32,
+        seed: u64,
+    },
     TimeUpdate {
         game_time: u64,
         day_time: Option<u64>,
@@ -88,13 +123,11 @@ pub enum NetworkEvent {
     EntitySpawned {
         id: i32,
         entity_type: EntityKind,
-        x: f64,
-        y: f64,
-        z: f64,
-        yaw: f32,
-        pitch: f32,
-        head_yaw: f32,
-        velocity: [f64; 3],
+        position: Position,
+        velocity: Velocity,
+        y_rot_deg: f32,
+        x_rot_deg: f32,
+        head_y_rot_deg: f32,
     },
     EntityMoved {
         id: i32,
@@ -107,16 +140,14 @@ pub enum NetworkEvent {
         dx: f64,
         dy: f64,
         dz: f64,
-        yaw: f32,
-        pitch: f32,
+        y_rot_deg: f32,
+        x_rot_deg: f32,
     },
     EntityTeleported {
         id: i32,
-        x: f64,
-        y: f64,
-        z: f64,
-        yaw: f32,
-        pitch: f32,
+        position: Position,
+        y_rot_deg: f32,
+        x_rot_deg: f32,
     },
     EntitiesRemoved {
         ids: Vec<i32>,
@@ -128,7 +159,7 @@ pub enum NetworkEvent {
     },
     EntityHeadRotation {
         id: i32,
-        head_yaw: f32,
+        head_y_rot_deg: f32,
     },
     EntityBabyFlag {
         id: i32,

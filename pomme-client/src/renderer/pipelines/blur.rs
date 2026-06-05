@@ -30,8 +30,11 @@ pub struct BlurPipeline {
 }
 
 impl BlurPipeline {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &vk::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
         allocator: &Arc<Mutex<Allocator>>,
         width: u32,
         height: u32,
@@ -44,6 +47,18 @@ impl BlurPipeline {
             create_blur_image(device, allocator, blur_w, blur_h, format, "blur_a");
         let (image_b, view_b, alloc_b) =
             create_blur_image(device, allocator, blur_w, blur_h, format, "blur_b");
+        crate::renderer::util::transition_image_to_shader_read(
+            device,
+            queue,
+            command_pool,
+            image_a,
+        );
+        crate::renderer::util::transition_image_to_shader_read(
+            device,
+            queue,
+            command_pool,
+            image_b,
+        );
 
         let sampler = device
             .create_sampler(
@@ -388,6 +403,8 @@ impl BlurPipeline {
     pub fn resize(
         &mut self,
         device: &vk::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
         allocator: &Arc<Mutex<Allocator>>,
         width: u32,
         height: u32,
@@ -404,6 +421,8 @@ impl BlurPipeline {
 
         let (ia, va, aa) = create_blur_image(device, allocator, bw, bh, self.format, "blur_a");
         let (ib, vb, ab) = create_blur_image(device, allocator, bw, bh, self.format, "blur_b");
+        crate::renderer::util::transition_image_to_shader_read(device, queue, command_pool, ia);
+        crate::renderer::util::transition_image_to_shader_read(device, queue, command_pool, ib);
 
         self.image_a = ia;
         self.view_a = va;

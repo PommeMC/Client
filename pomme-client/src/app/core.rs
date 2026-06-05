@@ -1,9 +1,11 @@
+use std::ops::Add;
 use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_protocol::packets::game::{
     ServerboundClientCommand, ServerboundGamePacket, s_client_command,
 };
+use glam::dvec3;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
 
@@ -14,6 +16,7 @@ use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
 use crate::assets::AssetIndex;
 use crate::dirs::DataDirs;
 use crate::discord::DiscordPresence;
+use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::net::NetworkEvent;
 use crate::net::connection::ConnectionHandle;
 use crate::physics::movement;
@@ -73,6 +76,7 @@ pub struct AppCore {
     pub resource_packs: ResourcePackManager,
     pub pending_pack_download: Option<PendingPackDownload>,
     pub asset_index: Option<AssetIndex>,
+    pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
 }
@@ -96,6 +100,12 @@ impl AppCore {
         let asset_index =
             AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, &version);
 
+        let audio = crate::audio::AudioEngine::new(
+            &data_dirs.jar_assets_dir,
+            asset_index.clone(),
+            menu.category_volumes(),
+        );
+
         Self {
             user,
             presence,
@@ -108,6 +118,7 @@ impl AppCore {
             resource_packs,
             pending_pack_download: None,
             asset_index,
+            audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
         }
@@ -161,7 +172,7 @@ impl AppCore {
         let captured = game.is_some_and(|g| {
             !g.paused
                 && !g.dead
-                && !g.inventory_open
+                && !g.gui_open()
                 && !g.chat.is_open()
                 && self.input.is_cursor_captured()
         });
@@ -262,6 +273,7 @@ impl AppCore {
                 }
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.chunk_store.unload_chunk(&pos);
+                    game.block_entity_anim.drop_chunk(pos.x, pos.z);
                     game.meshed_lod.remove(&pos);
 
                     renderer.remove_chunk_mesh(&pos);
@@ -272,91 +284,77 @@ impl AppCore {
                         .set_center(azalea_core::position::ChunkPos::new(x, z));
                 }
                 NetworkEvent::PlayerPosition { change, relative } => {
-                    let apply = |rel: bool, base: f64, c: f64| if rel { base + c } else { c };
-                    let apply_delta = |rel, base: f32, c: f64| apply(rel, base as f64, c) as f32;
-                    let apply_rot = |rel, base_rad: f32, c_deg: f32| {
-                        apply(rel, base_rad.to_degrees() as f64, c_deg as f64) as f32
-                    };
-                    let chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
-                    let to_az = |v: glam::Vec3| azalea_core::position::Vec3 {
-                        x: v.x as f64,
-                        y: v.y as f64,
-                        z: v.z as f64,
-                    };
-                    let to_glam = |v: azalea_core::position::Vec3| {
-                        glam::Vec3::new(v.x as f32, v.y as f32, v.z as f32)
-                    };
+                    fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
+                        if is_relative { base + value } else { value }
+                    }
 
-                    let new_pos = azalea_core::position::Vec3 {
-                        x: apply(relative.x, game.player.position.x as f64, change.pos.x),
-                        y: apply(relative.y, game.player.position.y as f64, change.pos.y),
-                        z: apply(relative.z, game.player.position.z as f64, change.pos.z),
-                    };
-                    let new_look = azalea_entity::LookDirection::new(
-                        apply_rot(
+                    let new_position = Position::new(
+                        resolve(game.player.position.x, relative.x, change.pos.x),
+                        resolve(game.player.position.y, relative.y, change.pos.y),
+                        resolve(game.player.position.z, relative.z, change.pos.z),
+                    );
+
+                    let new_look_dir = LookDirection::new(
+                        resolve(
+                            game.player.look_dir.y_rot_deg(),
                             relative.y_rot,
-                            game.player.yaw,
                             change.look_direction.y_rot(),
                         ),
-                        apply_rot(
+                        resolve(
+                            game.player.look_dir.x_rot_deg(),
                             relative.x_rot,
-                            game.player.pitch,
                             change.look_direction.x_rot(),
                         ),
                     );
-                    let base_vel = if relative.rotate_delta {
-                        let y_rot_delta =
-                            (game.player.yaw.to_degrees() - new_look.y_rot()).to_radians();
-                        let x_rot_delta =
-                            (game.player.pitch.to_degrees() - new_look.x_rot()).to_radians();
-                        to_glam(
-                            to_az(game.player.velocity)
-                                .x_rot(x_rot_delta)
-                                .y_rot(y_rot_delta),
+
+                    let new_velocity = {
+                        let mut new_velocity = game.player.velocity;
+                        if relative.rotate_delta {
+                            let x_rot_delta =
+                                game.player.look_dir.x_rot_deg() - new_look_dir.x_rot_deg();
+                            let y_rot_delta =
+                                game.player.look_dir.y_rot_deg() - new_look_dir.y_rot_deg();
+
+                            new_velocity = new_velocity
+                                .x_rot(x_rot_delta.to_radians() as f64)
+                                .y_rot(y_rot_delta.to_radians() as f64);
+                        }
+                        Velocity::new(
+                            resolve(new_velocity.x, relative.delta_x, change.delta.x),
+                            resolve(new_velocity.y, relative.delta_y, change.delta.y),
+                            resolve(new_velocity.z, relative.delta_z, change.delta.z),
                         )
-                    } else {
-                        game.player.velocity
                     };
-                    let new_vel = glam::Vec3::new(
-                        apply_delta(relative.delta_x, base_vel.x, change.delta.x),
-                        apply_delta(relative.delta_y, base_vel.y, change.delta.y),
-                        apply_delta(relative.delta_z, base_vel.z, change.delta.z),
-                    );
 
-                    game.player.position = to_glam(new_pos);
-                    game.player.velocity = new_vel;
-                    game.player.yaw = new_look.y_rot().to_radians();
-                    game.player.pitch = new_look.x_rot().to_radians();
-                    game.prev_player_pos = game.player.position;
+                    game.player.position = new_position;
+                    game.player.prev_position = game.player.position;
+                    game.player.velocity = new_velocity;
+                    game.player.look_dir = new_look_dir;
+                    game.player.prev_look_dir = game.player.look_dir;
 
+                    let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
                     game.chunk_store
                         .set_center(azalea_core::position::ChunkPos::new(
-                            chunk_coord(new_pos.x),
-                            chunk_coord(new_pos.z),
+                            to_chunk_coord(new_position.x),
+                            to_chunk_coord(new_position.z),
                         ));
 
-                    renderer.set_camera_position(
-                        new_pos.x,
-                        new_pos.y,
-                        new_pos.z,
-                        new_look.y_rot(),
-                        new_look.x_rot(),
-                    );
+                    renderer.reset_camera(new_position, new_look_dir);
 
                     if !game.position_set {
                         game.position_set = true;
                         tracing::info!(
                             "Player position set to ({:.1}, {:.1}, {:.1})",
-                            new_pos.x,
-                            new_pos.y,
-                            new_pos.z
+                            new_position.x,
+                            new_position.y,
+                            new_position.z
                         );
                     }
 
                     connection.packet_tx.send(ServerboundGamePacket::MovePlayerPosRot(
                         azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
-                            pos: new_pos,
-                            look_direction: new_look,
+                            pos: new_position.into(),
+                            look_direction: new_look_dir.into(),
                             flags: azalea_protocol::common::movements::MoveFlags {
                                 on_ground: false,
                                 horizontal_collision: false,
@@ -427,9 +425,109 @@ impl AppCore {
                         }
                     }
                 }
+                NetworkEvent::BlockEntitySync { chunk_pos, entries } => {
+                    game.chunk_store.block_entities.retain(|p, _| {
+                        p.x.div_euclid(16) != chunk_pos.x || p.z.div_euclid(16) != chunk_pos.z
+                    });
+                    game.block_entity_anim.drop_chunk(chunk_pos.x, chunk_pos.z);
+                    for (pos, kind, nbt) in entries {
+                        game.chunk_store.block_entities.insert(
+                            pos,
+                            crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                        );
+                    }
+                }
+                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => match nbt {
+                    Some(nbt) => {
+                        let chunk_pos = azalea_core::position::ChunkPos::new(
+                            pos.x.div_euclid(16),
+                            pos.z.div_euclid(16),
+                        );
+                        if game.chunk_store.get_chunk(&chunk_pos).is_some() {
+                            game.chunk_store.block_entities.insert(
+                                pos,
+                                crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                            );
+                        }
+                    }
+                    None => {
+                        game.chunk_store.block_entities.remove(&pos);
+                    }
+                },
+                NetworkEvent::BlockEvent {
+                    pos,
+                    action_id,
+                    action_parameter,
+                } => {
+                    // Action 1 for chest/shulker = open-viewer count.
+                    if action_id == 1 {
+                        game.block_entity_anim.set_open_count(pos, action_parameter);
+                    }
+                }
+                NetworkEvent::PlaySound {
+                    sound,
+                    category,
+                    x,
+                    y,
+                    z,
+                    volume,
+                    pitch,
+                    seed,
+                } => {
+                    self.audio.play_world_sound(
+                        &sound,
+                        category,
+                        [x as f32, y as f32, z as f32],
+                        volume,
+                        pitch,
+                        seed,
+                    );
+                }
+                NetworkEvent::PlayEntitySound {
+                    sound,
+                    category,
+                    entity_id,
+                    volume,
+                    pitch,
+                    seed,
+                } => {
+                    let pos = if entity_id == game.player.entity_id {
+                        let p = game.player.position;
+                        Some([p.x, p.y + 1.0, p.z])
+                    } else {
+                        game.entity_store.living.get(&entity_id).map(|e| {
+                            [
+                                e.position.x as f32,
+                                e.position.y as f32,
+                                e.position.z as f32,
+                            ]
+                        })
+                    };
+                    if let Some(pos) = pos {
+                        self.audio
+                            .play_world_sound(&sound, category, pos, volume, pitch, seed);
+                    }
+                }
                 NetworkEvent::GameModeChanged { game_mode } => {
                     tracing::info!("Game mode changed to {game_mode}");
                     game.player.game_mode = game_mode;
+                    if game.inventory_open || game.creative_inventory_open {
+                        match game_mode {
+                            1 => {
+                                game.inventory_open = false;
+                                game.creative_inventory_open = true;
+                            }
+                            3 => {
+                                game.inventory_open = false;
+                                game.creative_inventory_open = false;
+                                self.apply_cursor_grab(window, Some(game));
+                            }
+                            _ => {
+                                game.inventory_open = true;
+                                game.creative_inventory_open = false;
+                            }
+                        }
+                    }
                 }
                 NetworkEvent::ServerViewDistance { distance } => {
                     tracing::info!("Server view distance: {distance}");
@@ -454,28 +552,24 @@ impl AppCore {
                 NetworkEvent::EntitySpawned {
                     id,
                     entity_type,
-                    x,
-                    y,
-                    z,
-                    yaw,
-                    pitch,
-                    head_yaw,
+                    position,
                     velocity,
+                    y_rot_deg,
+                    x_rot_deg,
+                    head_y_rot_deg,
                 } => {
                     if crate::entity::is_living_mob(&entity_type) {
                         game.entity_store.spawn_living(
                             id,
                             entity_type,
-                            glam::DVec3::new(x, y, z),
-                            yaw,
-                            pitch,
-                            head_yaw,
+                            position,
+                            LookDirection::new(head_y_rot_deg, x_rot_deg),
+                            y_rot_deg,
+                            head_y_rot_deg,
                         );
                     }
                     if entity_type == azalea_registry::builtin::EntityKind::Item {
-                        let pos = glam::DVec3::new(x, y, z);
-                        let vel = glam::DVec3::new(velocity[0], velocity[1], velocity[2]);
-                        game.item_entity_store.spawn_item(id, pos, vel);
+                        game.item_entity_store.spawn_item(id, position, velocity);
                     }
                 }
                 NetworkEvent::EntityMoved { id, dx, dy, dz } => {
@@ -487,25 +581,24 @@ impl AppCore {
                     dx,
                     dy,
                     dz,
-                    yaw,
-                    pitch,
+                    y_rot_deg,
+                    x_rot_deg,
                 } => {
                     game.entity_store.move_living_delta(id, dx, dy, dz);
-                    game.entity_store.update_living_rotation(id, yaw, pitch);
+                    game.entity_store
+                        .update_living_rotation(id, y_rot_deg, x_rot_deg);
                     game.item_entity_store.move_delta(id, dx, dy, dz);
                 }
                 NetworkEvent::EntityTeleported {
                     id,
-                    x,
-                    y,
-                    z,
-                    yaw,
-                    pitch,
+                    position,
+                    y_rot_deg,
+                    x_rot_deg,
                 } => {
-                    game.entity_store.teleport_living(id, x, y, z);
-                    game.entity_store.update_living_rotation(id, yaw, pitch);
-                    game.item_entity_store
-                        .teleport(id, glam::DVec3::new(x, y, z));
+                    game.entity_store.teleport_living(id, position);
+                    game.entity_store
+                        .update_living_rotation(id, y_rot_deg, x_rot_deg);
+                    game.item_entity_store.teleport(id, position);
                 }
                 NetworkEvent::EntitiesRemoved { ids } => {
                     for id in &ids {
@@ -513,8 +606,11 @@ impl AppCore {
                     }
                     game.item_entity_store.remove(&ids);
                 }
-                NetworkEvent::EntityHeadRotation { id, head_yaw } => {
-                    game.entity_store.update_head_rotation(id, head_yaw);
+                NetworkEvent::EntityHeadRotation {
+                    id,
+                    head_y_rot_deg: head_y_rot,
+                } => {
+                    game.entity_store.update_head_rotation(id, head_y_rot);
                 }
                 NetworkEvent::EntityItemData {
                     id,
@@ -549,12 +645,12 @@ impl AppCore {
                         .entity_store
                         .living
                         .get(&collector_id)
-                        .map(|e| e.position + glam::DVec3::new(0.0, 0.81, 0.0))
+                        .map(|e| e.position + dvec3(0.0, 0.81, 0.0))
                         .unwrap_or_else(|| {
-                            glam::DVec3::new(
-                                game.player.position.x as f64,
-                                game.player.position.y as f64 + 0.81,
-                                game.player.position.z as f64,
+                            Position::new(
+                                game.player.position.x,
+                                game.player.position.y + 0.81,
+                                game.player.position.z,
                             )
                         });
                     game.item_entity_store.pickup(item_id, target_pos);
@@ -701,19 +797,15 @@ impl AppCore {
             return;
         }
 
-        game.player.yaw = if renderer.is_first_person() {
-            renderer.camera_yaw()
-        } else {
-            renderer.camera_yaw() + std::f32::consts::PI
-        };
-        game.player.pitch = renderer.camera_pitch();
+        game.player.prev_look_dir = game.player.look_dir;
+        game.player.look_dir = renderer.camera_look_dir();
 
-        game.prev_player_pos = game.player.position;
+        game.player.prev_position = game.player.position;
         movement::tick(&mut game.player, &self.input, &game.chunk_store);
         game.entity_store.tick_living();
 
-        let dx = (game.player.position.x - game.prev_player_pos.x) as f64;
-        let dz = (game.player.position.z - game.prev_player_pos.z) as f64;
+        let dx = game.player.position.x - game.player.prev_position.x;
+        let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
             dx,
             dz,
@@ -723,20 +815,16 @@ impl AppCore {
         );
 
         renderer.set_base_fov(self.menu.fov as f32);
-        renderer.update_fov(compute_fov_modifier(&game.player));
+        renderer.update_fov_mod(compute_fov_modifier(&game.player));
 
         self.send_input_packet(connection, game);
         self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
 
-        if !game.paused && !game.inventory_open && !game.chat.is_open() {
-            let eye_pos = game.player.position + glam::Vec3::new(0.0, 1.62, 0.0);
-            game.interaction.update_target(
-                eye_pos,
-                game.player.yaw,
-                game.player.pitch,
-                &game.chunk_store,
-            );
+        if !game.paused && !game.gui_open() && !game.chat.is_open() {
+            let eye_pos = game.player.eye_pos();
+            game.interaction
+                .update_target(eye_pos, game.player.look_dir, &game.chunk_store);
 
             let dirty = game.interaction.tick(
                 &self.input,
@@ -807,49 +895,41 @@ impl AppCore {
         use azalea_protocol::packets::game::*;
 
         let pos = game.player.position;
-        let yaw = game.player.yaw.to_degrees();
-        let pitch = game.player.pitch.to_degrees();
+        let look_dir = game.player.look_dir;
 
-        let dx = (pos.x - game.last_sent_pos.x) as f64;
-        let dy = (pos.y - game.last_sent_pos.y) as f64;
-        let dz = (pos.z - game.last_sent_pos.z) as f64;
+        let dx = pos.x - game.last_sent_pos.x;
+        let dy = pos.y - game.last_sent_pos.y;
+        let dz = pos.z - game.last_sent_pos.z;
         game.position_send_counter += 1;
         let pos_changed = dx * dx + dy * dy + dz * dz > POSITION_THRESHOLD_SQ
             || game.position_send_counter >= POSITION_SEND_INTERVAL;
-        let rot_changed =
-            (yaw - game.last_sent_yaw) != 0.0 || (pitch - game.last_sent_pitch) != 0.0;
+        let rot_changed = (look_dir.y_rot_deg() - game.last_sent_look_dir.y_rot_deg()) != 0.0
+            || (look_dir.x_rot_deg() - game.last_sent_look_dir.x_rot_deg()) != 0.0;
 
         let flags = MoveFlags {
             on_ground: game.player.on_ground,
             horizontal_collision: game.player.horizontal_collision,
         };
 
-        let net_pos = azalea_core::position::Vec3 {
-            x: pos.x as f64,
-            y: pos.y as f64,
-            z: pos.z as f64,
-        };
-        let look = azalea_entity::LookDirection::new(yaw, pitch);
-
         if pos_changed && rot_changed {
             sender.send(ServerboundGamePacket::MovePlayerPosRot(
                 ServerboundMovePlayerPosRot {
-                    pos: net_pos,
-                    look_direction: look,
+                    pos: pos.into(),
+                    look_direction: look_dir.into(),
                     flags,
                 },
             ));
         } else if pos_changed {
             sender.send(ServerboundGamePacket::MovePlayerPos(
                 ServerboundMovePlayerPos {
-                    pos: net_pos,
+                    pos: pos.into(),
                     flags,
                 },
             ));
         } else if rot_changed {
             sender.send(ServerboundGamePacket::MovePlayerRot(
                 ServerboundMovePlayerRot {
-                    look_direction: look,
+                    look_direction: look_dir.into(),
                     flags,
                 },
             ));
@@ -866,8 +946,7 @@ impl AppCore {
             game.position_send_counter = 0;
         }
         if rot_changed {
-            game.last_sent_yaw = yaw;
-            game.last_sent_pitch = pitch;
+            game.last_sent_look_dir = look_dir;
         }
         game.last_sent_on_ground = game.player.on_ground;
         game.last_sent_horizontal_collision = game.player.horizontal_collision;

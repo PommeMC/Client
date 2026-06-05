@@ -1,15 +1,19 @@
+pub mod components;
+
 use std::collections::HashMap;
 
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
+use crate::entity::components::{LookDirection, Position, Velocity};
+
 fn item_move(
-    pos: &mut DVec3,
-    vel: DVec3,
+    pos: &mut Position,
+    vel: Velocity,
     half_w: f64,
     height: f64,
     is_solid: &impl Fn(i32, i32, i32) -> bool,
-) -> DVec3 {
+) -> Velocity {
     let mut remaining = vel;
 
     if remaining.y != 0.0 {
@@ -35,7 +39,7 @@ fn item_move(
 }
 
 fn sweep_axis_y(
-    pos: &mut DVec3,
+    pos: &mut Position,
     dy: f64,
     half_w: f64,
     height: f64,
@@ -79,7 +83,7 @@ fn sweep_axis_y(
 }
 
 fn sweep_axis_x(
-    pos: &mut DVec3,
+    pos: &mut Position,
     dx: f64,
     half_w: f64,
     height: f64,
@@ -114,7 +118,7 @@ fn sweep_axis_x(
 }
 
 fn sweep_axis_z(
-    pos: &mut DVec3,
+    pos: &mut Position,
     dz: f64,
     half_w: f64,
     height: f64,
@@ -152,16 +156,14 @@ const INTERPOLATION_STEPS: i32 = 3;
 
 #[allow(dead_code)]
 pub struct LivingEntity {
-    pub position: DVec3,
-    pub prev_position: DVec3,
-    pub yaw: f32,
-    pub prev_yaw: f32,
-    pub pitch: f32,
-    pub prev_pitch: f32,
-    pub body_yaw: f32,
-    pub prev_body_yaw: f32,
-    pub head_yaw: f32,
-    pub prev_head_yaw: f32,
+    pub position: Position,
+    pub prev_position: Position,
+    pub look_dir: LookDirection,
+    pub prev_look_dir: LookDirection,
+    pub head_y_rot_deg: f32,
+    pub prev_head_y_rot_deg: f32,
+    pub body_y_rot_deg: f32,
+    pub prev_body_y_rot_deg: f32,
     pub entity_type: EntityKind,
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
@@ -175,33 +177,30 @@ pub struct LivingEntity {
     pub prev_eat_anim_tick: u8,
     pub age_in_ticks: u32,
     pub custom_name: Option<String>,
-    interp_target: DVec3,
-    interp_yaw: f32,
-    interp_pitch: f32,
+    interp_target: Position,
+    interp_look_dir: LookDirection,
     interp_steps: i32,
-    interp_head_yaw: f32,
-    interp_head_steps: i32,
+    interp_head_y_rot_deg: f32,
+    interp_head_y_rot_steps: i32,
 }
 
 impl LivingEntity {
     pub fn new(
         entity_type: EntityKind,
-        position: DVec3,
-        yaw: f32,
-        pitch: f32,
-        head_yaw: f32,
+        position: Position,
+        look_dir: LookDirection,
+        head_y_rot_deg: f32,
+        body_y_rot_deg: f32,
     ) -> Self {
         Self {
             position,
             prev_position: position,
-            yaw,
-            prev_yaw: yaw,
-            pitch,
-            prev_pitch: pitch,
-            body_yaw: yaw,
-            prev_body_yaw: yaw,
-            head_yaw,
-            prev_head_yaw: head_yaw,
+            look_dir,
+            prev_look_dir: look_dir,
+            head_y_rot_deg,
+            prev_head_y_rot_deg: head_y_rot_deg,
+            body_y_rot_deg,
+            prev_body_y_rot_deg: body_y_rot_deg,
             entity_type,
             walk_anim_pos: 0.0,
             walk_anim_speed: 0.0,
@@ -216,70 +215,78 @@ impl LivingEntity {
             age_in_ticks: 0,
             custom_name: None,
             interp_target: position,
-            interp_yaw: yaw,
-            interp_pitch: pitch,
+            interp_look_dir: look_dir,
             interp_steps: 0,
-            interp_head_yaw: head_yaw,
-            interp_head_steps: 0,
+            interp_head_y_rot_deg: head_y_rot_deg,
+            interp_head_y_rot_steps: 0,
         }
     }
 
-    fn interpolate_to_pos(&mut self, pos: DVec3) {
+    fn interpolate_to_pos(&mut self, pos: Position) {
         self.interp_target = pos;
         self.interp_steps = INTERPOLATION_STEPS;
     }
 
     pub fn tick_interpolation(&mut self) {
         self.prev_position = self.position;
-        self.prev_yaw = self.yaw;
-        self.prev_pitch = self.pitch;
+        self.prev_look_dir = self.look_dir;
 
         if self.interp_steps > 0 {
             let alpha = 1.0 / self.interp_steps as f64;
             self.position = self.position.lerp(self.interp_target, alpha);
-            self.yaw = lerp_angle(self.yaw, self.interp_yaw, 1.0 / self.interp_steps as f32);
-            self.pitch += (self.interp_pitch - self.pitch) / self.interp_steps as f32;
+            let y_rot = lerp_angle(
+                self.look_dir.y_rot_deg(),
+                self.interp_look_dir.y_rot_deg(),
+                1.0 / self.interp_steps as f32,
+            );
+            let x_rot = self.look_dir.x_rot_deg()
+                + (self.interp_look_dir.x_rot_deg() - self.look_dir.x_rot_deg())
+                    / self.interp_steps as f32;
+            self.look_dir = LookDirection::new(y_rot, x_rot);
             self.interp_steps -= 1;
         }
 
-        self.prev_head_yaw = self.head_yaw;
-        if self.interp_head_steps > 0 {
-            self.head_yaw = lerp_angle(
-                self.head_yaw,
-                self.interp_head_yaw,
-                1.0 / self.interp_head_steps as f32,
+        self.prev_head_y_rot_deg = self.head_y_rot_deg;
+        if self.interp_head_y_rot_steps > 0 {
+            self.head_y_rot_deg = lerp_angle(
+                self.head_y_rot_deg,
+                self.interp_head_y_rot_deg,
+                1.0 / self.interp_head_y_rot_steps as f32,
             );
-            self.interp_head_steps -= 1;
+            self.interp_head_y_rot_steps -= 1;
         }
+
+        self.prev_body_y_rot_deg = self.body_y_rot_deg;
     }
 
     pub fn tick_body_rotation(&mut self) {
-        self.prev_body_yaw = self.body_yaw;
-
         let dx = self.position.x - self.prev_position.x;
         let dz = self.position.z - self.prev_position.z;
         let dist_sq = (dx * dx + dz * dz) as f32;
 
-        let body_target = if dist_sq > 0.0025 {
-            -(dx as f32).atan2(dz as f32).to_degrees()
-        } else {
-            self.yaw
-        };
+        if dist_sq > 0.0025 {
+            let walk_dir = -(dx as f32).atan2(dz as f32).to_degrees();
+            let diff_from_look = wrap_degrees(self.look_dir.y_rot_deg() - walk_dir).abs();
+            let body_target = if diff_from_look > 95.0 && diff_from_look < 265.0 {
+                walk_dir - 180.0
+            } else {
+                walk_dir
+            };
+            let diff = wrap_degrees(body_target - self.body_y_rot_deg);
+            self.body_y_rot_deg += diff * 0.3;
+        }
 
-        let diff = wrap_degrees(body_target - self.body_yaw);
-        self.body_yaw += diff * 0.3;
-
-        let head_diff = wrap_degrees(self.yaw - self.body_yaw);
+        let head_diff = wrap_degrees(self.head_y_rot_deg - self.body_y_rot_deg);
         if head_diff.abs() > 50.0 {
-            self.body_yaw += head_diff - head_diff.signum() * 50.0;
+            self.body_y_rot_deg += head_diff - head_diff.signum() * 50.0;
         }
     }
 }
 
 pub struct ItemEntity {
-    pub position: DVec3,
-    pub prev_position: DVec3,
-    pub velocity: DVec3,
+    pub position: Position,
+    pub prev_position: Position,
+    pub velocity: Velocity,
     pub on_ground: bool,
     pub item_name: String,
     pub count: i32,
@@ -290,8 +297,8 @@ pub struct ItemEntity {
 
 struct PickupAnimation {
     item_name: String,
-    start_pos: DVec3,
-    target_pos: DVec3,
+    start_pos: Position,
+    target_pos: Position,
     bob_offset: f32,
     age: u32,
     life: u32,
@@ -300,7 +307,7 @@ struct PickupAnimation {
 
 pub struct PickupRenderInfo {
     pub item_name: String,
-    pub position: DVec3,
+    pub position: Position,
     pub bob_offset: f32,
     pub age: u32,
     pub is_block_model: bool,
@@ -321,7 +328,7 @@ impl ItemEntityStore {
         }
     }
 
-    pub fn spawn_item(&mut self, id: i32, position: DVec3, velocity: DVec3) {
+    pub fn spawn_item(&mut self, id: i32, position: Position, velocity: Velocity) {
         let bob_offset =
             ((id as u32).wrapping_mul(2654435761)) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
         self.items.insert(
@@ -357,14 +364,14 @@ impl ItemEntityStore {
         }
     }
 
-    pub fn teleport(&mut self, id: i32, position: DVec3) {
+    pub fn teleport(&mut self, id: i32, position: Position) {
         if let Some(entity) = self.items.get_mut(&id) {
             entity.prev_position = entity.position;
             entity.position = position;
         }
     }
 
-    pub fn pickup(&mut self, item_id: i32, target_pos: DVec3) {
+    pub fn pickup(&mut self, item_id: i32, target_pos: Position) {
         if let Some(entity) = self.items.remove(&item_id)
             && !entity.item_name.is_empty()
         {
@@ -485,14 +492,20 @@ impl EntityStore {
         &mut self,
         id: i32,
         entity_type: EntityKind,
-        position: DVec3,
-        yaw: f32,
-        pitch: f32,
-        head_yaw: f32,
+        position: Position,
+        look_dir: LookDirection,
+        body_y_rot_deg: f32,
+        head_y_rot_deg: f32,
     ) {
         self.living.insert(
             id,
-            LivingEntity::new(entity_type, position, yaw, pitch, head_yaw),
+            LivingEntity::new(
+                entity_type,
+                position,
+                look_dir,
+                head_y_rot_deg,
+                body_y_rot_deg,
+            ),
         );
     }
 
@@ -503,10 +516,9 @@ impl EntityStore {
         }
     }
 
-    pub fn teleport_living(&mut self, id: i32, x: f64, y: f64, z: f64) {
+    pub fn teleport_living(&mut self, id: i32, position: Position) {
         if let Some(entity) = self.living.get_mut(&id) {
-            let pos = DVec3::new(x, y, z);
-            entity.interpolate_to_pos(pos);
+            entity.interpolate_to_pos(position);
         }
     }
 
@@ -548,18 +560,17 @@ impl EntityStore {
         }
     }
 
-    pub fn update_living_rotation(&mut self, id: i32, yaw: f32, pitch: f32) {
+    pub fn update_living_rotation(&mut self, id: i32, y_rot_deg: f32, x_rot_deg: f32) {
         if let Some(entity) = self.living.get_mut(&id) {
-            entity.interp_yaw = yaw;
-            entity.interp_pitch = pitch;
+            entity.interp_look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
             entity.interp_steps = entity.interp_steps.max(INTERPOLATION_STEPS);
         }
     }
 
-    pub fn update_head_rotation(&mut self, id: i32, head_yaw: f32) {
+    pub fn update_head_rotation(&mut self, id: i32, head_y_rot_deg: f32) {
         if let Some(entity) = self.living.get_mut(&id) {
-            entity.interp_head_yaw = head_yaw;
-            entity.interp_head_steps = INTERPOLATION_STEPS;
+            entity.interp_head_y_rot_deg = head_y_rot_deg;
+            entity.interp_head_y_rot_steps = INTERPOLATION_STEPS;
         }
     }
 
@@ -614,7 +625,7 @@ pub fn wrap_degrees(deg: f32) -> f32 {
     d
 }
 
-fn lerp_angle(from: f32, to: f32, alpha: f32) -> f32 {
+pub fn lerp_angle(from: f32, to: f32, alpha: f32) -> f32 {
     from + wrap_degrees(to - from) * alpha
 }
 

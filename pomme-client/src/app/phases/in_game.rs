@@ -5,12 +5,14 @@ use std::time::Instant;
 use azalea_core::position::ChunkPos;
 use azalea_protocol::packets::game::{ServerboundClientInformation, ServerboundGamePacket};
 use azalea_registry::builtin::EntityKind;
+use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
 use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE};
 use crate::benchmark::{Benchmark, BenchmarkResult};
-use crate::entity::{EntityStore, ItemEntityStore};
+use crate::entity::components::{LookDirection, Position};
+use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::player::LocalPlayer;
 use crate::player::interaction::InteractionState;
@@ -26,6 +28,7 @@ use crate::ui::chat::ChatState;
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction};
 use crate::ui::{common, hud};
+use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
 pub struct GameState {
@@ -34,7 +37,6 @@ pub struct GameState {
     pub position_set: bool,
     pub player_loaded_sent: bool,
     pub player: LocalPlayer,
-    pub prev_player_pos: glam::Vec3,
     pub biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     pub player_walk_pos: f32,
     pub player_walk_speed: f32,
@@ -48,16 +50,18 @@ pub struct GameState {
     pub death_confirm_instant: Instant,
     pub respawn_sent: bool,
     pub inventory_open: bool,
+    pub creative_inventory_open: bool,
+    pub creative_state: crate::ui::creative_inventory::CreativeState,
     pub chat: ChatState,
     pub tab_list: TabList,
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
+    pub advanced_item_tooltips: bool,
     pub last_sent_input: PlayerInputState,
-    pub last_sent_pos: glam::Vec3,
-    pub last_sent_yaw: f32,
-    pub last_sent_pitch: f32,
+    pub last_sent_pos: Position,
+    pub last_sent_look_dir: LookDirection,
     pub last_sent_on_ground: bool,
     pub last_sent_horizontal_collision: bool,
     pub was_sprinting: bool,
@@ -67,6 +71,7 @@ pub struct GameState {
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
+    pub block_entity_anim: BlockEntityAnimStore,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
     pub last_player_chunk: ChunkPos,
@@ -88,8 +93,8 @@ impl GameState {
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
+            block_entity_anim: BlockEntityAnimStore::default(),
             player: LocalPlayer::new(),
-            prev_player_pos: glam::Vec3::ZERO,
             biome_climate: Arc::new(HashMap::new()),
             player_walk_pos: 0.0,
             player_walk_speed: 0.0,
@@ -103,16 +108,18 @@ impl GameState {
             death_confirm_instant: Instant::now(),
             respawn_sent: false,
             inventory_open: false,
+            creative_inventory_open: false,
+            creative_state: crate::ui::creative_inventory::CreativeState::new(),
             chat: ChatState::new(),
             tab_list: TabList::new(),
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
             show_debug: false,
             show_chunk_borders: false,
+            advanced_item_tooltips: false,
             last_sent_input: PlayerInputState::default(),
-            last_sent_pos: glam::Vec3::ZERO,
-            last_sent_yaw: 0.0,
-            last_sent_pitch: 0.0,
+            last_sent_pos: Position::default(),
+            last_sent_look_dir: LookDirection::default(),
             last_sent_on_ground: false,
             last_sent_horizontal_collision: false,
             was_sprinting: false,
@@ -122,6 +129,10 @@ impl GameState {
             last_player_chunk: ChunkPos::new(0, 0),
             meshed_lod: HashMap::new(),
         }
+    }
+
+    pub fn gui_open(&self) -> bool {
+        self.inventory_open || self.creative_inventory_open
     }
 
     pub fn sync_render_distance(&mut self, connection: &ConnectionHandle, render_distance: u32) {
@@ -171,6 +182,15 @@ pub fn update_game(
     connection: &ConnectionHandle,
     game: &mut GameState,
 ) -> GameUpdateResult {
+    // Position the audio listener at the player's head and push current
+    // volumes before draining sound packets this frame.
+    let listener_pos = game.player.position;
+    core.audio.set_listener(
+        [listener_pos.x, listener_pos.y + 1.62, listener_pos.z],
+        game.player.yaw,
+    );
+    core.audio.set_volumes(core.menu.category_volumes());
+
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
     if let Some(reason) = disconnect_reason {
@@ -190,7 +210,7 @@ pub fn update_game(
         core.time_tick_accumulator -= TICK_RATE;
     }
 
-    if !game.paused && !game.inventory_open && !game.chat.is_open() {
+    if !game.paused && !game.gui_open() && !game.chat.is_open() {
         gfx.renderer.update_camera(&mut core.input);
 
         core.tick_accumulator += dt;
@@ -200,21 +220,19 @@ pub fn update_game(
                 |bx, by, bz| !game.chunk_store.get_block_state(bx, by, bz).is_air(),
                 |bx, by, bz| block_friction(game.chunk_store.get_block_state(bx, by, bz)),
             );
+            game.block_entity_anim.tick();
             core.tick_accumulator -= TICK_RATE;
         }
     }
 
-    let alpha = core.tick_accumulator / TICK_RATE;
-    let interp_pos = game.prev_player_pos.lerp(game.player.position, alpha);
-    let eye_pos = interp_pos + glam::Vec3::new(0.0, 1.62, 0.0);
-    let eye_pos_f64 = glam::DVec3::new(eye_pos.x as f64, eye_pos.y as f64, eye_pos.z as f64);
+    let partial_tick = core.tick_accumulator / TICK_RATE;
 
-    if !game.paused && !game.inventory_open && !game.chat.is_open() {
-        let yaw = gfx.renderer.camera_yaw();
-        let pitch = gfx.renderer.camera_pitch();
-
-        game.interaction
-            .update_target(eye_pos, yaw, pitch, &game.chunk_store);
+    if !game.paused && !game.gui_open() && !game.chat.is_open() {
+        game.interaction.update_target(
+            game.player.eye_pos(),
+            gfx.renderer.camera_look_dir(),
+            &game.chunk_store,
+        );
     }
 
     let typed = core.input.drain_typed_chars();
@@ -229,11 +247,17 @@ pub fn update_game(
     let mut pause_action = PauseAction::None;
     let mut death_action = DeathAction::None;
 
-    let yaw = gfx.renderer.camera_yaw();
-    let pitch = gfx.renderer.camera_pitch();
-    gfx.renderer.sync_camera_to_player(eye_pos_f64, yaw, pitch);
-    gfx.renderer
-        .update_third_person_distance(eye_pos, &game.chunk_store);
+    gfx.renderer.sync_camera_pos(
+        game.player
+            .prev_eye_pos()
+            .lerp(game.player.eye_pos(), partial_tick as f64),
+    );
+    gfx.renderer.update_third_person_distance(
+        game.player
+            .prev_eye_pos()
+            .lerp(game.player.eye_pos(), partial_tick as f64),
+        &game.chunk_store,
+    );
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
@@ -242,16 +266,16 @@ pub fn update_game(
     let mut elements: Vec<MenuElement> = Vec::new();
     let hide_cursor = !game.paused
         && !game.dead
-        && !game.inventory_open
+        && !game.gui_open()
         && !game.chat.is_open()
         && core.input.is_cursor_captured();
 
     let debug = if game.show_debug {
         Some(hud::DebugInfo {
             fps: gfx.fps_counter.display_fps(),
-            position: game.player.position,
-            yaw: game.player.yaw,
-            pitch: game.player.pitch,
+            position: *game.player.position,
+            y_rot_deg: gfx.renderer.camera_look_dir().y_rot_deg(),
+            x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
             target_block: game.interaction.target.map(|t| {
                 let state =
                     game.chunk_store
@@ -297,7 +321,7 @@ pub fn update_game(
 
     if core.input.tab_held()
         && !game.paused
-        && !game.inventory_open
+        && !game.gui_open()
         && !game.chat.is_open()
         && !game.dead
     {
@@ -464,69 +488,119 @@ pub fn update_game(
         core.input.clear_click_events();
     }
 
+    if game.creative_inventory_open {
+        let cursor = core.input.cursor_pos();
+        let clicked = core.input.left_just_pressed();
+        let scroll_delta = core.input.consume_menu_scroll();
+        let typed = core.input.drain_typed_chars();
+        let backspace = core.input.backspace_pressed();
+        let selected_hotbar = core.input.selected_slot();
+        let action = crate::ui::creative_inventory::build_creative_inventory(
+            &mut elements,
+            &mut game.creative_state,
+            sw,
+            sh,
+            cursor,
+            clicked,
+            scroll_delta,
+            &typed,
+            backspace,
+            &game.player.inventory,
+            selected_hotbar,
+            gs,
+            game.advanced_item_tooltips,
+            core.input.left_held(),
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+        );
+        match action {
+            crate::ui::creative_inventory::CreativeAction::Close => {
+                close_inventory = true;
+            }
+            crate::ui::creative_inventory::CreativeAction::Place(item, slot_num) => {
+                use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+                if game.player.game_mode == 1 {
+                    connection
+                        .packet_tx
+                        .send(ServerboundGamePacket::SetCreativeModeSlot(
+                            ServerboundSetCreativeModeSlot {
+                                slot_num,
+                                item_stack: item,
+                            },
+                        ));
+                }
+            }
+            crate::ui::creative_inventory::CreativeAction::None => {}
+        }
+        core.input.clear_click_events();
+    }
+
     game.chat.build(&mut elements, sh, gs, &|t, s| {
         gfx.renderer.menu_text_width(t, s)
     });
 
-    let swing_progress = game
-        .interaction
-        .get_swing_progress(core.tick_accumulator / TICK_RATE);
+    let swing_progress = game.interaction.get_swing_progress(partial_tick);
     let destroy_info = game.interaction.destroy_stage();
 
-    let alpha = core.tick_accumulator / TICK_RATE;
     let mut entity_renders: Vec<EntityRenderInfo> = game
         .entity_store
         .living
         .iter()
         .map(|(&entity_id, e)| {
-            let pos = e.prev_position.lerp(e.position, alpha as f64);
-            let body_yaw = e.prev_body_yaw + (e.body_yaw - e.prev_body_yaw) * alpha;
-            let head_yaw = e.prev_head_yaw + (e.head_yaw - e.prev_head_yaw) * alpha;
-            let extras = entity_extras(entity_id, e, alpha);
+            let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
+            let extras = entity_extras(entity_id, e, partial_tick);
 
             EntityRenderInfo {
-                x: pos.x,
-                y: pos.y,
-                z: pos.z,
-                yaw: body_yaw,
-                pitch: e.prev_pitch + (e.pitch - e.prev_pitch) * alpha,
-                head_yaw,
+                position: interp_pos,
+                head_y_rot_deg: lerp_angle(e.prev_head_y_rot_deg, e.head_y_rot_deg, partial_tick),
+                head_x_rot_deg: e
+                    .prev_look_dir
+                    .x_rot_deg()
+                    .lerp(e.look_dir.x_rot_deg(), partial_tick),
+                body_y_rot_deg: lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick),
                 is_baby: e.is_baby,
                 walk_anim_pos: {
                     let scale = if e.is_baby { 3.0 } else { 1.0 };
-                    (e.walk_anim_pos - e.walk_anim_speed * (1.0 - alpha)) * scale
+                    (e.walk_anim_pos - e.walk_anim_speed * (1.0 - partial_tick)) * scale
                 },
                 walk_anim_speed: (e.prev_walk_anim_speed
-                    + (e.walk_anim_speed - e.prev_walk_anim_speed) * alpha)
+                    + (e.walk_anim_speed - e.prev_walk_anim_speed) * partial_tick)
                     .min(1.0),
                 entity_kind: e.entity_type,
                 variant_index: extras.variant_index,
                 overlay_tints: extras.overlay_tints,
                 head_y_offset: extras.head_y_offset,
-                head_x_rot_override: extras.head_x_rot_override,
+                head_x_rot_deg_override: extras.head_x_rot_deg_override,
             }
         })
         .collect();
 
     if !gfx.renderer.is_first_person() {
-        let cam_yaw_deg = -gfx.renderer.camera_yaw().to_degrees();
+        let interp_pos = game
+            .player
+            .prev_position
+            .lerp(game.player.position, partial_tick as f64);
+
+        let interp_y_rot_deg = lerp_angle(
+            game.player.prev_look_dir.y_rot_deg(),
+            game.player.look_dir.y_rot_deg(),
+            partial_tick,
+        );
+
         entity_renders.push(EntityRenderInfo {
-            x: interp_pos.x as f64,
-            y: interp_pos.y as f64,
-            z: interp_pos.z as f64,
-            yaw: cam_yaw_deg,
-            pitch: gfx.renderer.camera_pitch().to_degrees(),
-            head_yaw: cam_yaw_deg,
+            position: interp_pos,
+            head_y_rot_deg: interp_y_rot_deg,
+            head_x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
+            body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
             is_baby: false,
-            walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - alpha),
+            walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
-                + (game.player_walk_speed - game.player_prev_walk_speed) * alpha)
+                + (game.player_walk_speed - game.player_prev_walk_speed) * partial_tick)
                 .min(1.0),
             entity_kind: EntityKind::Player,
             variant_index: 0,
             overlay_tints: [None, None],
             head_y_offset: 0.0,
-            head_x_rot_override: None,
+            head_x_rot_deg_override: None,
         });
     }
 
@@ -544,18 +618,38 @@ pub fn update_game(
         );
     }
 
-    let cam_pos = glam::DVec3::new(
-        game.player.position.x as f64,
-        game.player.position.y as f64,
-        game.player.position.z as f64,
-    );
-    let partial_tick = core.tick_accumulator / TICK_RATE;
     let item_renders = build_item_render_infos(
         &game.item_entity_store,
         &game.chunk_store,
-        cam_pos,
+        *gfx.renderer.camera_pivot_position(),
         partial_tick,
     );
+
+    let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = game
+        .chunk_store
+        .block_entities
+        .iter()
+        .map(|(pos, be)| {
+            let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+            let block: Box<dyn azalea_block::BlockTrait> = state.into();
+            let props = block.property_map();
+            let variant =
+                crate::renderer::pipelines::block_entity::variant_for_block(be.kind, block.id());
+            let yaw = crate::renderer::pipelines::block_entity::yaw_for_block(be.kind, &props);
+            let lid_open = game
+                .block_entity_anim
+                .container(pos)
+                .map(|a| a.openness)
+                .unwrap_or(0.0);
+            crate::renderer::BlockEntityRenderInfo {
+                pos: *pos,
+                kind: be.kind,
+                yaw,
+                variant,
+                lid_open,
+            }
+        })
+        .collect();
 
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
@@ -567,12 +661,14 @@ pub fn update_game(
         sky,
         &entity_renders,
         &item_renders,
+        &block_entity_renders,
     ) {
         tracing::error!("Render error: {e}");
     }
 
     if close_inventory {
         game.inventory_open = false;
+        game.creative_inventory_open = false;
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
@@ -662,7 +758,7 @@ fn seeded_rand(state: &mut u32) -> f32 {
     ((*state >> 16) & 0x7FFF) as f32 / 0x7FFF as f32
 }
 
-fn get_entity_light(chunk_store: &ChunkStore, pos: glam::DVec3) -> f32 {
+fn get_entity_light(chunk_store: &ChunkStore, pos: Position) -> f32 {
     use crate::renderer::chunk::mesher::LIGHT_TABLE;
     let bx = pos.x.floor() as i32;
     let by = pos.y.floor() as i32;
@@ -766,14 +862,14 @@ struct EntityExtras {
     variant_index: u32,
     overlay_tints: [Option<[f32; 4]>; 2],
     head_y_offset: f32,
-    head_x_rot_override: Option<f32>,
+    head_x_rot_deg_override: Option<f32>,
 }
 
 const EMPTY_EXTRAS: EntityExtras = EntityExtras {
     variant_index: 0,
     overlay_tints: [None, None],
     head_y_offset: 0.0,
-    head_x_rot_override: None,
+    head_x_rot_deg_override: None,
 };
 
 fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
@@ -812,7 +908,7 @@ fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> 
     let (pos_scale, angle_scale) = sheep_eat_scales(e.eat_anim_tick, e.prev_eat_anim_tick, alpha);
     let age_scale = if e.is_baby { 0.5 } else { 1.0 };
     let head_y_offset = pos_scale * 9.0 * age_scale;
-    let head_x_rot_override = if e.eat_anim_tick > 0 || e.prev_eat_anim_tick > 0 {
+    let head_x_rot_deg_override = if e.eat_anim_tick > 0 || e.prev_eat_anim_tick > 0 {
         Some(angle_scale)
     } else {
         None
@@ -822,7 +918,7 @@ fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> 
         variant_index: 0,
         overlay_tints,
         head_y_offset,
-        head_x_rot_override,
+        head_x_rot_deg_override,
     }
 }
 

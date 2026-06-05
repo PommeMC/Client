@@ -1,16 +1,12 @@
 use azalea_inventory::ItemStack;
 
 use super::common;
-use super::common::{WHITE, push_item_count};
-use crate::player::inventory::{Inventory, item_resource_name};
+use super::common::{FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, push_slot};
+use crate::player::inventory::Inventory;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
 const INV_TEX_W: f32 = 176.0;
 const INV_TEX_H: f32 = 166.0;
-const SLOT_STRIDE: f32 = 18.0;
-const SLOT_SIZE: f32 = 16.0;
-const LABEL_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
-const HIGHLIGHT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.5];
 
 struct SlotPos {
     x: f32,
@@ -50,23 +46,21 @@ pub fn build_inventory(
         tint: WHITE,
     });
 
-    let fs = 6.0 * scale;
+    let fs = FONT_SIZE * scale;
 
-    elements.push(MenuElement::Text {
+    elements.push(MenuElement::TextFlat {
         x: ox + 97.0 * scale,
         y: oy + 6.0 * scale,
         text: "Crafting".into(),
         scale: fs,
-        color: LABEL_COLOR,
-        centered: false,
+        color: SLOT_LABEL_COLOR,
     });
-    elements.push(MenuElement::Text {
+    elements.push(MenuElement::TextFlat {
         x: ox + 8.0 * scale,
         y: oy + 72.0 * scale,
         text: "Inventory".into(),
         scale: fs,
-        color: LABEL_COLOR,
-        centered: false,
+        color: SLOT_LABEL_COLOR,
     });
 
     let hotbar = inventory.hotbar_slots();
@@ -190,47 +184,5 @@ fn build_slot(
     let x = ox + slot.x * scale;
     let y = oy + slot.y * scale;
     let size = SLOT_SIZE * scale;
-
-    let hovered = cursor.0 >= x && cursor.0 < x + size && cursor.1 >= y && cursor.1 < y + size;
-
-    if hovered {
-        elements.push(MenuElement::Rect {
-            x,
-            y,
-            w: size,
-            h: size,
-            corner_radius: 0.0,
-            color: HIGHLIGHT_COLOR,
-        });
-    }
-
-    match item {
-        ItemStack::Empty => {
-            if let Some(sprite) = empty_sprite {
-                elements.push(MenuElement::Image {
-                    x,
-                    y,
-                    w: size,
-                    h: size,
-                    sprite,
-                    tint: WHITE,
-                });
-            }
-        }
-        ItemStack::Present(data) => {
-            let name = item_resource_name(data.kind);
-            elements.push(MenuElement::ItemIcon {
-                x,
-                y,
-                w: size,
-                h: size,
-                item_name: name,
-                tint: WHITE,
-            });
-
-            if data.count > 1 {
-                push_item_count(elements, x, y, size, scale, data.count);
-            }
-        }
-    }
+    push_slot(elements, x, y, size, scale, cursor, item, empty_sprite);
 }

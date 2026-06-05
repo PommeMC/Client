@@ -318,14 +318,14 @@ impl SkinPreviewPipeline {
         let _ = device;
         let center_px_x = screen_x * screen_w;
         let center_px_y = screen_y * screen_h;
-        let body_yaw_raw = ((mouse_px_x - center_px_x) / 40.0).atan();
-        let head_pitch_raw = ((mouse_px_y - center_px_y) / 40.0).atan();
+        let body_y_rot_raw = ((mouse_px_x - center_px_x) / 40.0).atan();
+        let head_x_rot_raw = ((mouse_px_y - center_px_y) / 40.0).atan();
 
-        let head_yaw_deg = body_yaw_raw * 40.0;
-        let body_yaw_deg = head_yaw_deg * 0.3;
-        let body_rot = std::f32::consts::PI + body_yaw_deg.to_radians();
-        let head_yaw = head_yaw_deg.to_radians();
-        let head_pitch = head_pitch_raw * 20.0f32.to_radians();
+        let head_y_rot_deg = body_y_rot_raw * 40.0;
+        let body_y_rot_deg = head_y_rot_deg * 0.3;
+        let body_rot_rad = std::f32::consts::PI + body_y_rot_deg.to_radians();
+        let head_y_rot_rad = head_y_rot_deg.to_radians();
+        let head_x_rot_rad = head_x_rot_raw * 20.0f32.to_radians();
 
         let fov = 0.6f32;
         let mut proj = Mat4::perspective_rh(fov, aspect, 0.1, 100.0);
@@ -339,12 +339,12 @@ impl SkinPreviewPipeline {
         let target = Vec3::ZERO;
         let view = Mat4::look_at_rh(eye, target, Vec3::Y);
 
-        let body_rot_mat = Mat4::from_rotation_y(body_rot);
+        let body_rot_mat = Mat4::from_rotation_y(body_rot_rad);
 
         let vp = clip_offset * proj * view;
         let body_mvp = vp * body_rot_mat;
-        let head_rot_mat =
-            Mat4::from_rotation_y(body_rot + head_yaw) * Mat4::from_rotation_x(head_pitch);
+        let head_rot_mat = Mat4::from_rotation_y(body_rot_rad + head_y_rot_rad)
+            * Mat4::from_rotation_x(head_x_rot_rad);
         let head_mvp = vp * head_rot_mat;
 
         // Right arm swing animation

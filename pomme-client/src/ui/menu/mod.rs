@@ -42,6 +42,28 @@ struct Settings {
     skin_hat: bool,
     #[serde(default = "default_true")]
     skin_main_hand_right: bool,
+    #[serde(default = "default_volume")]
+    master_volume: f32,
+    #[serde(default = "default_volume")]
+    music_volume: f32,
+    #[serde(default = "default_volume")]
+    jukebox_volume: f32,
+    #[serde(default = "default_volume")]
+    weather_volume: f32,
+    #[serde(default = "default_volume")]
+    blocks_volume: f32,
+    #[serde(default = "default_volume")]
+    hostile_volume: f32,
+    #[serde(default = "default_volume")]
+    friendly_volume: f32,
+    #[serde(default = "default_volume")]
+    players_volume: f32,
+    #[serde(default = "default_volume")]
+    ambient_volume: f32,
+    #[serde(default = "default_volume")]
+    voice_volume: f32,
+    #[serde(default = "default_volume")]
+    ui_volume: f32,
 }
 
 fn default_fov() -> u32 {
@@ -50,6 +72,10 @@ fn default_fov() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_volume() -> f32 {
+    1.0
 }
 
 impl Default for Settings {
@@ -69,6 +95,17 @@ impl Default for Settings {
             skin_right_pants: true,
             skin_hat: true,
             skin_main_hand_right: true,
+            master_volume: 1.0,
+            music_volume: 1.0,
+            jukebox_volume: 1.0,
+            weather_volume: 1.0,
+            blocks_volume: 1.0,
+            hostile_volume: 1.0,
+            friendly_volume: 1.0,
+            players_volume: 1.0,
+            ambient_volume: 1.0,
+            voice_volume: 1.0,
+            ui_volume: 1.0,
         }
     }
 }
@@ -245,6 +282,17 @@ pub struct MainMenu {
     pub fov: u32,
     pub show_online_status: bool,
     pub show_current_server: bool,
+    pub master_volume: f32,
+    pub music_volume: f32,
+    pub jukebox_volume: f32,
+    pub weather_volume: f32,
+    pub blocks_volume: f32,
+    pub hostile_volume: f32,
+    pub friendly_volume: f32,
+    pub players_volume: f32,
+    pub ambient_volume: f32,
+    pub voice_volume: f32,
+    pub ui_volume: f32,
     skin_cape: bool,
     skin_jacket: bool,
     skin_left_sleeve: bool,
@@ -303,6 +351,17 @@ impl MainMenu {
             fov: settings.fov,
             show_online_status: settings.show_online_status,
             show_current_server: settings.show_current_server,
+            master_volume: settings.master_volume,
+            music_volume: settings.music_volume,
+            jukebox_volume: settings.jukebox_volume,
+            weather_volume: settings.weather_volume,
+            blocks_volume: settings.blocks_volume,
+            hostile_volume: settings.hostile_volume,
+            friendly_volume: settings.friendly_volume,
+            players_volume: settings.players_volume,
+            ambient_volume: settings.ambient_volume,
+            voice_volume: settings.voice_volume,
+            ui_volume: settings.ui_volume,
             skin_cape: settings.skin_cape,
             skin_jacket: settings.skin_jacket,
             skin_left_sleeve: settings.skin_left_sleeve,
@@ -336,6 +395,24 @@ impl MainMenu {
         self.cursor_blink = Instant::now();
     }
 
+    /// Per-category volumes in `SoundCategory` order
+    /// (master, music, records, weather, blocks, hostile, neutral, players,
+    /// ambient, voice) for the audio engine.
+    pub fn category_volumes(&self) -> [f32; 10] {
+        [
+            self.master_volume,
+            self.music_volume,
+            self.jukebox_volume,
+            self.weather_volume,
+            self.blocks_volume,
+            self.hostile_volume,
+            self.friendly_volume,
+            self.players_volume,
+            self.ambient_volume,
+            self.voice_volume,
+        ]
+    }
+
     fn save_settings(&self) {
         save_settings(
             &self.settings_dir,
@@ -346,6 +423,17 @@ impl MainMenu {
                 fov: self.fov,
                 show_online_status: self.show_online_status,
                 show_current_server: self.show_current_server,
+                master_volume: self.master_volume,
+                music_volume: self.music_volume,
+                jukebox_volume: self.jukebox_volume,
+                weather_volume: self.weather_volume,
+                blocks_volume: self.blocks_volume,
+                hostile_volume: self.hostile_volume,
+                friendly_volume: self.friendly_volume,
+                players_volume: self.players_volume,
+                ambient_volume: self.ambient_volume,
+                voice_volume: self.voice_volume,
+                ui_volume: self.ui_volume,
                 skin_cape: self.skin_cape,
                 skin_jacket: self.skin_jacket,
                 skin_left_sleeve: self.skin_left_sleeve,
