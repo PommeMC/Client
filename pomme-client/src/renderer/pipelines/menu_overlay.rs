@@ -39,6 +39,21 @@ struct Vertex {
 const MAX_VERTICES: usize = 16384;
 const VERTEX_SIZE: usize = size_of::<Vertex>();
 
+enum DrawOp {
+    Quads {
+        start: u32,
+        count: u32,
+        scissor: Option<[f32; 4]>,
+    },
+    Item {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        item_name: String,
+    },
+}
+
 struct GlyphEntry {
     u0: f32,
     v0: f32,
@@ -150,13 +165,7 @@ pub struct MenuOverlayPipeline {
     sprite_staging_buffer: vk::Buffer,
     sprite_staging_allocation: Option<Allocation>,
     sprite_atlas: SpriteAtlas,
-    item_image: vk::Image,
-    item_view: vk::ImageView,
-    item_sampler: vk::Sampler,
-    item_allocation: Option<Allocation>,
-    item_staging_buffer: vk::Buffer,
-    item_staging_allocation: Option<Allocation>,
-    item_atlas: ItemAtlas,
+    item_placeholder: Option<TextureResources>,
     mc_font_image: vk::Image,
     mc_font_view: vk::ImageView,
     mc_font_sampler: vk::Sampler,
@@ -360,25 +369,35 @@ impl MenuOverlayPipeline {
 
         let sprite_sampler = unsafe { util::create_nearest_sampler(device) };
 
-        let (
-            item_atlas_data,
-            item_image,
-            item_view,
-            item_alloc,
-            item_staging_buffer,
-            item_staging_alloc,
-        ) = build_item_atlas(
+        let (item_image, item_view, item_alloc) =
+            util::create_gpu_image(device, allocator, 1, 1, "item_atlas_placeholder");
+        let (item_staging_buffer, item_staging_alloc) = util::create_staging_buffer(
+            device,
+            allocator,
+            &[0u8, 0, 0, 0],
+            "item_atlas_placeholder_staging",
+        );
+        util::upload_image(
             device,
             queue,
             command_pool,
-            allocator,
-            jar_assets_dir,
-            asset_index,
+            item_staging_buffer,
+            item_image,
+            1,
+            1,
         );
-
         let item_sampler = unsafe { util::create_nearest_sampler(device) };
+        let item_placeholder = Some(TextureResources {
+            sampler: item_sampler,
+            image: item_image,
+            view: item_view,
+            image_alloc: Some(item_alloc),
+            staging_buffer: item_staging_buffer,
+            staging_alloc: Some(item_staging_alloc),
+        });
 
         let mc_glyph_map = GlyphMap::load(jar_assets_dir, asset_index);
+        crate::lang::load(jar_assets_dir);
         let (
             mc_font_image,
             mc_font_view,
@@ -541,13 +560,7 @@ impl MenuOverlayPipeline {
             sprite_staging_buffer,
             sprite_staging_allocation: sprite_staging_alloc,
             sprite_atlas: sprite_atlas_data,
-            item_image,
-            item_view,
-            item_sampler,
-            item_allocation: Some(item_alloc),
-            item_staging_buffer,
-            item_staging_allocation: item_staging_alloc,
-            item_atlas: item_atlas_data,
+            item_placeholder,
             mc_font_image,
             mc_font_view,
             mc_font_sampler,
@@ -573,6 +586,7 @@ impl MenuOverlayPipeline {
         screen_w: f32,
         screen_h: f32,
         elements: &[MenuElement],
+        mut draw_item: impl FnMut(vk::CommandBuffer, f32, f32, f32, f32, &str),
     ) {
         let globals: [f32; 2] = [screen_w, screen_h];
         self.globals_allocation
@@ -584,12 +598,15 @@ impl MenuOverlayPipeline {
 
         let mut vertices: Vec<Vertex> = Vec::with_capacity(elements.len() * 24);
         let mut deferred_tooltips: Vec<&MenuElement> = Vec::new();
-        let mut draw_cmds: Vec<(u32, u32, Option<[f32; 4]>)> = Vec::new();
+        let mut draw_ops: Vec<DrawOp> = Vec::new();
         let mut current_scissor: Option<[f32; 4]> = None;
         let mut cmd_start: u32 = 0;
 
         for elem in elements {
-            if matches!(elem, MenuElement::Tooltip { .. }) {
+            if matches!(
+                elem,
+                MenuElement::Tooltip { .. } | MenuElement::TooltipLines { .. }
+            ) {
                 deferred_tooltips.push(elem);
                 continue;
             }
@@ -599,7 +616,11 @@ impl MenuOverlayPipeline {
             ) {
                 let count = vertices.len() as u32 - cmd_start;
                 if count > 0 {
-                    draw_cmds.push((cmd_start, count, current_scissor));
+                    draw_ops.push(DrawOp::Quads {
+                        start: cmd_start,
+                        count,
+                        scissor: current_scissor,
+                    });
                 }
                 cmd_start = vertices.len() as u32;
                 current_scissor = if let MenuElement::ScissorPush { x, y, w, h } = elem {
@@ -642,7 +663,26 @@ impl MenuOverlayPipeline {
                             strikethrough: false,
                             underline: false,
                         };
-                        push_mc_text(&mut vertices, gm, start_x, *y, &[span], *scale);
+                        push_mc_text(&mut vertices, gm, start_x, *y, &[span], *scale, true);
+                    }
+                }
+                MenuElement::TextFlat {
+                    x,
+                    y,
+                    text,
+                    scale,
+                    color,
+                } => {
+                    if let Some(ref gm) = self.mc_glyph_map {
+                        let span = MotdSpan {
+                            text: text.clone(),
+                            color: *color,
+                            bold: false,
+                            italic: false,
+                            strikethrough: false,
+                            underline: false,
+                        };
+                        push_mc_text(&mut vertices, gm, *x, *y, &[span], *scale, false);
                     }
                 }
                 MenuElement::Icon {
@@ -728,11 +768,24 @@ impl MenuOverlayPipeline {
                     w,
                     h,
                     item_name,
-                    tint,
+                    tint: _,
                 } => {
-                    if let Some(region) = self.item_atlas.regions.get(item_name.as_str()) {
-                        push_textured_quad(&mut vertices, *x, *y, *w, *h, region, *tint, 3.0);
+                    let count = vertices.len() as u32 - cmd_start;
+                    if count > 0 {
+                        draw_ops.push(DrawOp::Quads {
+                            start: cmd_start,
+                            count,
+                            scissor: current_scissor,
+                        });
                     }
+                    cmd_start = vertices.len() as u32;
+                    draw_ops.push(DrawOp::Item {
+                        x: *x,
+                        y: *y,
+                        w: *w,
+                        h: *h,
+                        item_name: item_name.clone(),
+                    });
                 }
                 MenuElement::McText {
                     x,
@@ -751,7 +804,7 @@ impl MenuOverlayPipeline {
                         } else {
                             *x
                         };
-                        push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale);
+                        push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale, true);
                     }
                 }
                 MenuElement::GradientRect {
@@ -941,6 +994,81 @@ impl MenuOverlayPipeline {
                         text_y + i as f32 * line_h,
                         &[span],
                         *scale,
+                        true,
+                    );
+                }
+            }
+            if let MenuElement::TooltipLines {
+                x,
+                y,
+                lines,
+                scale,
+                screen_w,
+                screen_h,
+            } = elem
+                && let Some(ref gm) = self.mc_glyph_map
+            {
+                let px = *scale / gm.cell_h as f32;
+                let padding = 3.0 * px;
+                let margin = 9.0 * px;
+                let line_h = *scale + 2.0 * px;
+
+                let content_w = lines
+                    .iter()
+                    .map(|l| (self.mc_text_width(&l.text, *scale) + px).ceil())
+                    .fold(0.0f32, f32::max);
+                let content_h = lines.len() as f32 * line_h - 2.0 * px;
+
+                let mut text_x = *x + 12.0;
+                let mut text_y = *y - 12.0;
+                if text_x + content_w > *screen_w {
+                    text_x = (*x - 24.0 - content_w).max(4.0);
+                }
+                if text_y + content_h + 3.0 > *screen_h {
+                    text_y = *screen_h - content_h - 3.0;
+                }
+
+                let bg_x = text_x - padding - margin - padding;
+                let bg_y = text_y - padding - margin - padding;
+                let bg_w = content_w + (padding + margin + padding) * 2.0;
+                let bg_h = content_h + (padding + margin + padding) * 2.0;
+                let bg_border = margin;
+                let frame_border = 10.0 * px;
+                let white = [1.0f32; 4];
+
+                if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
+                    push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, bg_border, white);
+                }
+                if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
+                    push_nine_slice(
+                        &mut vertices,
+                        bg_x,
+                        bg_y,
+                        bg_w,
+                        bg_h,
+                        frame,
+                        frame_border,
+                        white,
+                    );
+                }
+
+                for (i, line) in lines.iter().enumerate() {
+                    let span = MotdSpan {
+                        text: line.text.clone(),
+                        color: line.color,
+                        bold: false,
+                        italic: false,
+                        strikethrough: false,
+                        underline: false,
+                    };
+                    push_mc_text(
+                        &mut vertices,
+                        gm,
+                        text_x,
+                        text_y + i as f32 * line_h,
+                        &[span],
+                        *scale,
+                        true,
                     );
                 }
             }
@@ -948,21 +1076,27 @@ impl MenuOverlayPipeline {
 
         let final_count = vertices.len() as u32 - cmd_start;
         if final_count > 0 {
-            draw_cmds.push((cmd_start, final_count, current_scissor));
+            draw_ops.push(DrawOp::Quads {
+                start: cmd_start,
+                count: final_count,
+                scissor: current_scissor,
+            });
         }
 
-        if vertices.is_empty() {
+        if draw_ops.is_empty() {
             return;
         }
 
-        let count = vertices.len().min(MAX_VERTICES);
-        let byte_data = bytemuck::cast_slice(&vertices[..count]);
-        self.vertex_allocation
-            .as_mut()
-            .unwrap()
-            .mapped_slice_mut()
-            .unwrap()[..byte_data.len()]
-            .copy_from_slice(byte_data);
+        if !vertices.is_empty() {
+            let count = vertices.len().min(MAX_VERTICES);
+            let byte_data = bytemuck::cast_slice(&vertices[..count]);
+            self.vertex_allocation
+                .as_mut()
+                .unwrap()
+                .mapped_slice_mut()
+                .unwrap()[..byte_data.len()]
+                .copy_from_slice(byte_data);
+        }
 
         let default_scissor = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
@@ -972,32 +1106,54 @@ impl MenuOverlayPipeline {
             },
         };
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.globals_set, self.tex_set],
-            &[],
-        );
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-        for &(start, vert_count, ref scissor) in &draw_cmds {
-            let rect = if let Some(s) = scissor {
-                vk::Rect2D {
-                    offset: vk::Offset2D {
-                        x: s[0] as i32,
-                        y: s[1] as i32,
-                    },
-                    extent: vk::Extent2D {
-                        width: s[2] as u32,
-                        height: s[3] as u32,
-                    },
+        let mut needs_bind = true;
+        for op in &draw_ops {
+            match op {
+                DrawOp::Quads {
+                    start,
+                    count,
+                    scissor,
+                } => {
+                    if needs_bind {
+                        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+                        cmd.bind_descriptor_sets(
+                            vk::PipelineBindPoint::Graphics,
+                            self.pipeline_layout,
+                            0,
+                            &[self.globals_set, self.tex_set],
+                            &[],
+                        );
+                        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+                        needs_bind = false;
+                    }
+                    let rect = if let Some(s) = scissor {
+                        vk::Rect2D {
+                            offset: vk::Offset2D {
+                                x: s[0] as i32,
+                                y: s[1] as i32,
+                            },
+                            extent: vk::Extent2D {
+                                width: s[2] as u32,
+                                height: s[3] as u32,
+                            },
+                        }
+                    } else {
+                        default_scissor
+                    };
+                    cmd.set_scissor(0, &[rect]);
+                    cmd.draw(*count, 1, *start, 0);
                 }
-            } else {
-                default_scissor
-            };
-            cmd.set_scissor(0, &[rect]);
-            cmd.draw(vert_count, 1, start, 0);
+                DrawOp::Item {
+                    x,
+                    y,
+                    w,
+                    h,
+                    item_name,
+                } => {
+                    draw_item(cmd, *x, *y, *w, *h, item_name);
+                    needs_bind = true;
+                }
+            }
         }
         cmd.set_scissor(0, &[default_scissor]);
     }
@@ -1177,18 +1333,9 @@ impl MenuOverlayPipeline {
                 staging_alloc: self.sprite_staging_allocation.take(),
             },
         );
-        destroy_texture_resources(
-            device,
-            &mut alloc,
-            &mut TextureResources {
-                sampler: self.item_sampler,
-                image: self.item_image,
-                view: self.item_view,
-                image_alloc: self.item_allocation.take(),
-                staging_buffer: self.item_staging_buffer,
-                staging_alloc: self.item_staging_allocation.take(),
-            },
-        );
+        if let Some(mut res) = self.item_placeholder.take() {
+            destroy_texture_resources(device, &mut alloc, &mut res);
+        }
         destroy_texture_resources(
             device,
             &mut alloc,
@@ -1220,6 +1367,11 @@ impl MenuOverlayPipeline {
     }
 }
 
+pub struct TooltipLine {
+    pub text: String,
+    pub color: [f32; 4],
+}
+
 #[allow(dead_code)]
 pub enum MenuElement {
     ScissorPush {
@@ -1244,6 +1396,13 @@ pub enum MenuElement {
         scale: f32,
         color: [f32; 4],
         centered: bool,
+    },
+    TextFlat {
+        x: f32,
+        y: f32,
+        text: String,
+        scale: f32,
+        color: [f32; 4],
     },
     Icon {
         x: f32,
@@ -1310,6 +1469,14 @@ pub enum MenuElement {
         screen_w: f32,
         screen_h: f32,
     },
+    TooltipLines {
+        x: f32,
+        y: f32,
+        lines: Vec<TooltipLine>,
+        scale: f32,
+        screen_w: f32,
+        screen_h: f32,
+    },
     FrostedRect {
         x: f32,
         y: f32,
@@ -1345,6 +1512,39 @@ pub enum SpriteId {
     ExperienceBarBackground,
     ExperienceBarProgress,
     InventoryBackground,
+    CreativeItemsBackground,
+    CreativeSearchBackground,
+    CreativeInventoryBackground,
+    CreativeTabTopUnselected1,
+    CreativeTabTopUnselected2,
+    CreativeTabTopUnselected3,
+    CreativeTabTopUnselected4,
+    CreativeTabTopUnselected5,
+    CreativeTabTopUnselected6,
+    CreativeTabTopUnselected7,
+    CreativeTabTopSelected1,
+    CreativeTabTopSelected2,
+    CreativeTabTopSelected3,
+    CreativeTabTopSelected4,
+    CreativeTabTopSelected5,
+    CreativeTabTopSelected6,
+    CreativeTabTopSelected7,
+    CreativeTabBottomUnselected1,
+    CreativeTabBottomUnselected2,
+    CreativeTabBottomUnselected3,
+    CreativeTabBottomUnselected4,
+    CreativeTabBottomUnselected5,
+    CreativeTabBottomUnselected6,
+    CreativeTabBottomUnselected7,
+    CreativeTabBottomSelected1,
+    CreativeTabBottomSelected2,
+    CreativeTabBottomSelected3,
+    CreativeTabBottomSelected4,
+    CreativeTabBottomSelected5,
+    CreativeTabBottomSelected6,
+    CreativeTabBottomSelected7,
+    CreativeScroller,
+    CreativeScrollerDisabled,
     EmptyHelmet,
     EmptyChestplate,
     EmptyLeggings,
@@ -1387,6 +1587,49 @@ pub enum SpriteId {
     SteveHead,
 }
 
+pub const CREATIVE_TAB_SPRITES: [[[SpriteId; 7]; 2]; 2] = [
+    [
+        [
+            SpriteId::CreativeTabTopUnselected1,
+            SpriteId::CreativeTabTopUnselected2,
+            SpriteId::CreativeTabTopUnselected3,
+            SpriteId::CreativeTabTopUnselected4,
+            SpriteId::CreativeTabTopUnselected5,
+            SpriteId::CreativeTabTopUnselected6,
+            SpriteId::CreativeTabTopUnselected7,
+        ],
+        [
+            SpriteId::CreativeTabTopSelected1,
+            SpriteId::CreativeTabTopSelected2,
+            SpriteId::CreativeTabTopSelected3,
+            SpriteId::CreativeTabTopSelected4,
+            SpriteId::CreativeTabTopSelected5,
+            SpriteId::CreativeTabTopSelected6,
+            SpriteId::CreativeTabTopSelected7,
+        ],
+    ],
+    [
+        [
+            SpriteId::CreativeTabBottomUnselected1,
+            SpriteId::CreativeTabBottomUnselected2,
+            SpriteId::CreativeTabBottomUnselected3,
+            SpriteId::CreativeTabBottomUnselected4,
+            SpriteId::CreativeTabBottomUnselected5,
+            SpriteId::CreativeTabBottomUnselected6,
+            SpriteId::CreativeTabBottomUnselected7,
+        ],
+        [
+            SpriteId::CreativeTabBottomSelected1,
+            SpriteId::CreativeTabBottomSelected2,
+            SpriteId::CreativeTabBottomSelected3,
+            SpriteId::CreativeTabBottomSelected4,
+            SpriteId::CreativeTabBottomSelected5,
+            SpriteId::CreativeTabBottomSelected6,
+            SpriteId::CreativeTabBottomSelected7,
+        ],
+    ],
+];
+
 struct SpriteRegion {
     u0: f32,
     v0: f32,
@@ -1399,10 +1642,6 @@ struct SpriteRegion {
 
 struct SpriteAtlas {
     regions: HashMap<SpriteId, SpriteRegion>,
-}
-
-struct ItemAtlas {
-    regions: HashMap<String, SpriteRegion>,
 }
 
 const INV_TEX_W: u32 = 176;
@@ -1699,6 +1938,16 @@ fn build_sprite_atlas(
             "minecraft/textures/gui/sprites/server_list/unreachable.png",
             0.0,
         ),
+        (
+            SpriteId::CreativeScroller,
+            "minecraft/textures/gui/sprites/container/creative_inventory/scroller.png",
+            0.0,
+        ),
+        (
+            SpriteId::CreativeScrollerDisabled,
+            "minecraft/textures/gui/sprites/container/creative_inventory/scroller_disabled.png",
+            0.0,
+        ),
     ];
 
     let mut images: Vec<(SpriteId, Vec<u8>, u32, u32, f32)> = Vec::new();
@@ -1797,7 +2046,69 @@ fn build_sprite_atlas(
         }
     }
 
-    let atlas_size = 512u32;
+    for (id, path) in [
+        (
+            SpriteId::CreativeItemsBackground,
+            "minecraft/textures/gui/container/creative_inventory/tab_items.png",
+        ),
+        (
+            SpriteId::CreativeSearchBackground,
+            "minecraft/textures/gui/container/creative_inventory/tab_item_search.png",
+        ),
+        (
+            SpriteId::CreativeInventoryBackground,
+            "minecraft/textures/gui/container/creative_inventory/tab_inventory.png",
+        ),
+    ] {
+        let path = resolve_asset_path(jar_assets_dir, asset_index, path);
+        match crate::assets::load_image(&path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let full_w = rgba.width();
+                let crop_w = 195u32.min(full_w);
+                let crop_h = 136u32.min(rgba.height());
+                let mut cropped = vec![0u8; (crop_w * crop_h * 4) as usize];
+                for y in 0..crop_h {
+                    let src_off = (y * full_w * 4) as usize;
+                    let dst_off = (y * crop_w * 4) as usize;
+                    let row_bytes = (crop_w * 4) as usize;
+                    cropped[dst_off..dst_off + row_bytes]
+                        .copy_from_slice(&rgba.as_raw()[src_off..src_off + row_bytes]);
+                }
+                images.push((id, cropped, crop_w, crop_h, 0.0));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load creative background {id:?}: {e}");
+                images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
+            }
+        }
+    }
+
+    for (row_idx, row_name) in ["top", "bottom"].iter().enumerate() {
+        for (state_idx, state_name) in ["unselected", "selected"].iter().enumerate() {
+            for col in 1..=7u32 {
+                let id = CREATIVE_TAB_SPRITES[row_idx][state_idx][(col - 1) as usize];
+                let asset_key = format!(
+                    "minecraft/textures/gui/sprites/container/creative_inventory/tab_{row_name}_{state_name}_{col}.png"
+                );
+                let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
+                match crate::assets::load_image(&path) {
+                    Ok(img) => {
+                        let rgba = img.to_rgba8();
+                        let w = rgba.width();
+                        let h = rgba.height();
+                        images.push((id, rgba.into_raw(), w, h, 0.0));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load creative tab sprite {asset_key}: {e}");
+                        images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
+                    }
+                }
+            }
+        }
+    }
+
+    let atlas_size = 1024u32;
     let mut pixels = vec![0u8; (atlas_size * atlas_size * 4) as usize];
     let mut regions = HashMap::new();
     let mut cursor_x = 0u32;
@@ -1860,141 +2171,6 @@ fn build_sprite_atlas(
 
     (
         SpriteAtlas { regions },
-        image,
-        view,
-        allocation,
-        staging_buffer,
-        Some(staging_allocation),
-    )
-}
-
-const ITEM_ATLAS_SIZE: u32 = 1024;
-const ITEM_TILE: u32 = 16;
-const ITEM_GRID: u32 = ITEM_ATLAS_SIZE / ITEM_TILE;
-
-fn build_item_atlas(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    allocator: &Arc<Mutex<Allocator>>,
-    jar_assets_dir: &Path,
-    _asset_index: &Option<AssetIndex>,
-) -> (
-    ItemAtlas,
-    vk::Image,
-    vk::ImageView,
-    Allocation,
-    vk::Buffer,
-    Option<Allocation>,
-) {
-    let mut pixels = vec![0u8; (ITEM_ATLAS_SIZE * ITEM_ATLAS_SIZE * 4) as usize];
-    let mut regions = HashMap::new();
-    let mut slot = 0u32;
-
-    let jar_base = jar_assets_dir.join("assets");
-    let item_parent = jar_base.join("minecraft/textures/item");
-    let block_parent = jar_base.join("minecraft/textures/block");
-
-    let mut seen = std::collections::HashSet::new();
-    let mut item_names: Vec<String> = Vec::new();
-
-    for dir in [&item_parent, &block_parent] {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let fname = entry.file_name().to_string_lossy().to_string();
-                if let Some(name) = fname.strip_suffix(".png")
-                    && seen.insert(name.to_string())
-                {
-                    item_names.push(name.to_string());
-                }
-            }
-        }
-    }
-
-    item_names.sort();
-
-    for name in &item_names {
-        if slot >= ITEM_GRID * ITEM_GRID {
-            tracing::warn!("Item atlas full, skipping remaining items");
-            break;
-        }
-
-        let item_path = item_parent.join(format!("{name}.png"));
-        let block_path = block_parent.join(format!("{name}.png"));
-        let path = if item_path.exists() {
-            &item_path
-        } else {
-            &block_path
-        };
-
-        let img = match crate::assets::load_image(path) {
-            Ok(img) => img.to_rgba8(),
-            Err(_) => continue,
-        };
-
-        let gx = (slot % ITEM_GRID) * ITEM_TILE;
-        let gy = (slot / ITEM_GRID) * ITEM_TILE;
-
-        let src_w = img.width().min(ITEM_TILE);
-        let src_h = img.height().min(ITEM_TILE);
-        let raw = img.as_raw();
-
-        blit_image(
-            &mut pixels,
-            ITEM_ATLAS_SIZE,
-            raw,
-            img.width(),
-            gx,
-            gy,
-            src_w,
-            src_h,
-        );
-
-        let inv = 1.0 / ITEM_ATLAS_SIZE as f32;
-        regions.insert(
-            name.clone(),
-            SpriteRegion {
-                u0: gx as f32 * inv,
-                v0: gy as f32 * inv,
-                u1: (gx + ITEM_TILE) as f32 * inv,
-                v1: (gy + ITEM_TILE) as f32 * inv,
-                src_w: ITEM_TILE as f32,
-                src_h: ITEM_TILE as f32,
-                nine_slice_border: 0.0,
-            },
-        );
-
-        slot += 1;
-    }
-
-    tracing::info!(
-        "Item atlas: loaded {} textures into {}x{}",
-        regions.len(),
-        ITEM_ATLAS_SIZE,
-        ITEM_ATLAS_SIZE
-    );
-
-    let (image, view, allocation) = util::create_gpu_image(
-        device,
-        allocator,
-        ITEM_ATLAS_SIZE,
-        ITEM_ATLAS_SIZE,
-        "item_atlas",
-    );
-    let (staging_buffer, staging_allocation) =
-        util::create_staging_buffer(device, allocator, &pixels, "item_staging");
-    util::upload_image(
-        device,
-        queue,
-        command_pool,
-        staging_buffer,
-        image,
-        ITEM_ATLAS_SIZE,
-        ITEM_ATLAS_SIZE,
-    );
-
-    (
-        ItemAtlas { regions },
         image,
         view,
         allocation,
@@ -2285,6 +2461,7 @@ fn push_mc_text(
     y: f32,
     spans: &[MotdSpan],
     scale: f32,
+    drop_shadow: bool,
 ) {
     let (tex_w, tex_h) = gm.dimensions();
     let inv_w = 1.0 / tex_w as f32;
@@ -2333,23 +2510,10 @@ fn push_mc_text(
             let sx = cx.round();
             let sy = (cy + glyph_y_off).round();
 
-            push_mc_glyph(
-                verts,
-                sx + px_scale,
-                sy + px_scale,
-                glyph_w.round(),
-                glyph_draw_h.round(),
-                u0,
-                v0,
-                u1,
-                v1,
-                shadow_color,
-                italic_offset,
-            );
-            if span.bold {
+            if drop_shadow {
                 push_mc_glyph(
                     verts,
-                    sx + 2.0 * px_scale,
+                    sx + px_scale,
                     sy + px_scale,
                     glyph_w.round(),
                     glyph_draw_h.round(),
@@ -2360,6 +2524,21 @@ fn push_mc_text(
                     shadow_color,
                     italic_offset,
                 );
+                if span.bold {
+                    push_mc_glyph(
+                        verts,
+                        sx + 2.0 * px_scale,
+                        sy + px_scale,
+                        glyph_w.round(),
+                        glyph_draw_h.round(),
+                        u0,
+                        v0,
+                        u1,
+                        v1,
+                        shadow_color,
+                        italic_offset,
+                    );
+                }
             }
 
             push_mc_glyph(

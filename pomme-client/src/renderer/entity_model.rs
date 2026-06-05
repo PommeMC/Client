@@ -99,7 +99,7 @@ impl BakedEntityModel {
     }
 }
 
-fn bake_model(parts: Vec<EntityPart>, tex_w: u32, tex_h: u32) -> BakedEntityModel {
+pub fn bake_model(parts: Vec<EntityPart>, tex_w: u32, tex_h: u32) -> BakedEntityModel {
     let mut vertices = Vec::new();
     let mut part_ranges = Vec::new();
 

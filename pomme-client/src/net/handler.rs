@@ -43,6 +43,45 @@ pub fn handle_game_packet(
                 sky_y_mask: p.light_data.sky_y_mask.clone(),
                 block_y_mask: p.light_data.block_y_mask.clone(),
             });
+            let chunk_pos = ChunkPos::new(p.x, p.z);
+            let entries: Vec<_> = p
+                .chunk_data
+                .block_entities
+                .iter()
+                .map(|be| {
+                    let local_x = ((be.packed_xz >> 4) & 0x0F) as i32;
+                    let local_z = (be.packed_xz & 0x0F) as i32;
+                    let block_pos = azalea_core::position::BlockPos {
+                        x: chunk_pos.x * 16 + local_x,
+                        y: be.y as i16 as i32,
+                        z: chunk_pos.z * 16 + local_z,
+                    };
+                    let compound = match &be.data {
+                        simdnbt::owned::Nbt::Some(base) => base.clone().as_compound(),
+                        simdnbt::owned::Nbt::None => simdnbt::owned::NbtCompound::default(),
+                    };
+                    (block_pos, be.kind, compound)
+                })
+                .collect();
+            let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
+        }
+        ClientboundGamePacket::BlockEvent(p) => {
+            let _ = event_tx.try_send(NetworkEvent::BlockEvent {
+                pos: p.pos,
+                action_id: p.action_id,
+                action_parameter: p.action_parameter,
+            });
+        }
+        ClientboundGamePacket::BlockEntityData(p) => {
+            let nbt = match &p.tag {
+                simdnbt::owned::Nbt::Some(base) => Some(base.clone().as_compound()),
+                simdnbt::owned::Nbt::None => None,
+            };
+            let _ = event_tx.try_send(NetworkEvent::BlockEntityUpdate {
+                pos: p.pos,
+                kind: p.block_entity_type,
+                nbt,
+            });
         }
         ClientboundGamePacket::ForgetLevelChunk(p) => {
             let _ = event_tx.try_send(NetworkEvent::ChunkUnloaded { pos: p.pos });

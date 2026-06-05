@@ -9,7 +9,7 @@ use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, TextureAtlas};
+use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, TextureAtlas, atlas_asset_path};
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 use crate::world::block::model::BakedModel;
@@ -213,6 +213,10 @@ impl ItemEntityPipeline {
         self.meshes.contains_key(name)
     }
 
+    pub fn mesh_handle(&self, name: &str) -> Option<(vk::Buffer, u32)> {
+        self.meshes.get(name).map(|m| (m.buffer, m.vertex_count))
+    }
+
     pub fn ensure_mesh(
         &mut self,
         device: &vk::Device,
@@ -236,6 +240,7 @@ impl ItemEntityPipeline {
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
         name: &str,
+        texture_key: &str,
         uv_map: &AtlasUVMap,
         assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
@@ -243,12 +248,11 @@ impl ItemEntityPipeline {
         if self.meshes.contains_key(name) {
             return;
         }
-        let tex_key = format!("minecraft:textures/item/{name}.png");
-        if !uv_map.has_region(&tex_key) {
+        if !uv_map.has_region(texture_key) {
             return;
         }
-        let region = uv_map.get_region(&tex_key);
-        let asset_path = format!("minecraft/textures/item/{name}.png");
+        let region = uv_map.get_region(texture_key);
+        let asset_path = atlas_asset_path(texture_key);
         let path = resolve_asset_path(assets_dir, asset_index, &asset_path);
         let vertices = match crate::assets::load_image(&path) {
             Ok(img) => {
@@ -348,7 +352,7 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ChunkVertex> 
                     region.u_min + quad.uvs[i][0] * u_span,
                     region.v_min + quad.uvs[i][1] * v_span,
                 ),
-                light_tint: crate::renderer::chunk::mesher::pack_light_tint(1.0, tint),
+                light_tint: crate::renderer::chunk::mesher::pack_light_tint(quad.shade_light, tint),
             });
         }
     }
@@ -524,10 +528,19 @@ fn build_flat_quad(region: AtlasRegion) -> Vec<ChunkVertex> {
         .collect()
 }
 
-fn create_pipeline(
+pub(super) fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
+) -> vk::Pipeline {
+    create_pipeline_with_front_face(device, render_pass, layout, vk::FrontFace::CounterClockwise)
+}
+
+pub(super) fn create_pipeline_with_front_face(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+    front_face: vk::FrontFace,
 ) -> vk::Pipeline {
     let vert_spv = shader::include_spirv!("item_entity.vert.spv");
     let frag_spv = shader::include_spirv!("item_entity.frag.spv");
@@ -570,8 +583,8 @@ fn create_pipeline(
     };
     let rasterizer = vk::PipelineRasterizationStateCreateInfo {
         polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::None,
-        front_face: vk::FrontFace::CounterClockwise,
+        cull_mode: vk::CullModeFlags::Back,
+        front_face,
         line_width: 1.0,
         ..Default::default()
     };

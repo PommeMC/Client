@@ -15,8 +15,6 @@ layout(location = 0) out vec4 out_color;
 void main() {
     vec4 color = texture(atlas_texture, v_tex_coords);
     if (color.a < 0.5) discard;
-    vec3 linear_tint = pow(v_tint, vec3(2.2));
-    float linear_light = pow(world_light * v_light, 2.2);
-    vec3 tinted = color.rgb * linear_tint * linear_light;
+    vec3 tinted = color.rgb * v_tint * (world_light * v_light);
     out_color = vec4(tinted, color.a);
 }

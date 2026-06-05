@@ -32,6 +32,14 @@ impl AtlasUVMap {
     }
 }
 
+pub fn atlas_asset_path(key: &str) -> String {
+    if key.starts_with("item/") || key.starts_with("entity/") {
+        format!("minecraft/textures/{key}.png")
+    } else {
+        format!("minecraft/textures/block/{key}.png")
+    }
+}
+
 pub struct TextureAtlas {
     pub image: vk::Image,
     pub view: vk::ImageView,
@@ -40,6 +48,15 @@ pub struct TextureAtlas {
     allocation: Option<Allocation>,
     staging_buffer: vk::Buffer,
     staging_allocation: Option<Allocation>,
+}
+
+const MISSING_TILE: u32 = 16;
+
+struct Source {
+    name: String,
+    data: Vec<u8>,
+    w: u32,
+    h: u32,
 }
 
 impl TextureAtlas {
@@ -54,18 +71,55 @@ impl TextureAtlas {
         texture_names: &HashSet<&str>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Result<Self, vk::Error> {
-        let tile_size = 16u32;
-        let grid_size = (texture_names.len() as f32 + 1.0).sqrt().ceil() as u32 + 1;
-        let atlas_size = (grid_size * tile_size).next_power_of_two();
+        let mut sources: Vec<Source> = Vec::with_capacity(texture_names.len());
+        let mut total_area: u64 = (MISSING_TILE * MISSING_TILE) as u64;
+        for &name in texture_names {
+            let asset_key = atlas_asset_path(name);
+            let file_path =
+                resolve_asset_path_with_packs(jar_assets_dir, asset_index, &asset_key, packs);
+            match util::load_png(&file_path) {
+                Some((data, w, h)) => {
+                    total_area += (w as u64) * (h as u64);
+                    sources.push(Source {
+                        name: name.to_string(),
+                        data,
+                        w,
+                        h,
+                    });
+                }
+                None => {
+                    tracing::warn!("Missing texture: {name}");
+                    sources.push(Source {
+                        name: name.to_string(),
+                        data: Vec::new(),
+                        w: 0,
+                        h: 0,
+                    });
+                }
+            }
+        }
+
+        sources.sort_by_key(|s| std::cmp::Reverse(s.h.max(MISSING_TILE)));
+
+        const MAX_ATLAS_SIZE: u32 = 8192;
+        let mut atlas_size = (((total_area as f64) * 1.4).sqrt().ceil() as u32).next_power_of_two();
+
+        let (placements, missing_region) = loop {
+            let (result, all_fit) = pack(&sources, atlas_size);
+            if all_fit || atlas_size >= MAX_ATLAS_SIZE {
+                if !all_fit {
+                    tracing::warn!(
+                        "Atlas at {MAX_ATLAS_SIZE} cap; oversize sources fall back to missing tile"
+                    );
+                }
+                break result;
+            }
+            atlas_size *= 2;
+        };
 
         let mut atlas_pixels = vec![0u8; (atlas_size * atlas_size * 4) as usize];
-        let mut regions = HashMap::new();
-
-        let missing_region =
-            tile_region(tile_origin(0, grid_size, tile_size), tile_size, atlas_size);
-
-        for py in 0..tile_size {
-            for px in 0..tile_size {
+        for py in 0..MISSING_TILE {
+            for px in 0..MISSING_TILE {
                 let is_check = ((px / 8) + (py / 8)) % 2 == 0;
                 let color: [u8; 4] = if is_check {
                     [255, 0, 255, 255]
@@ -77,36 +131,24 @@ impl TextureAtlas {
             }
         }
 
-        let mut slot = 1u32;
-
-        for &name in texture_names {
-            let asset_key = format!("minecraft/textures/block/{name}.png");
-            let file_path =
-                resolve_asset_path_with_packs(jar_assets_dir, asset_index, &asset_key, packs);
-            let (data, img_w, img_h) = match util::load_png(&file_path) {
-                Some(p) => p,
-                None => {
-                    tracing::warn!("Missing texture: {name}");
-                    regions.insert(name.to_string(), missing_region);
-                    continue;
+        let mut regions = HashMap::new();
+        for src in &sources {
+            match placements.get(src.name.as_str()) {
+                Some(Some((cx, cy))) => {
+                    let region = pixel_region(*cx, *cy, src.w, src.h, atlas_size);
+                    for py in 0..src.h {
+                        for px in 0..src.w {
+                            let s = ((py * src.w + px) * 4) as usize;
+                            let d = (((cy + py) * atlas_size + cx + px) * 4) as usize;
+                            atlas_pixels[d..d + 4].copy_from_slice(&src.data[s..s + 4]);
+                        }
+                    }
+                    regions.insert(src.name.clone(), region);
                 }
-            };
-
-            let origin = tile_origin(slot, grid_size, tile_size);
-            let region = tile_region(origin, tile_size, atlas_size);
-
-            let img_width = img_w.min(tile_size);
-            let img_height = img_h.min(tile_size);
-            for py in 0..img_height {
-                for px in 0..img_width {
-                    let src = ((py * img_w + px) * 4) as usize;
-                    let dst = (((origin.1 + py) * atlas_size + origin.0 + px) * 4) as usize;
-                    atlas_pixels[dst..dst + 4].copy_from_slice(&data[src..src + 4]);
+                _ => {
+                    regions.insert(src.name.clone(), missing_region);
                 }
             }
-
-            regions.insert(name.to_string(), region);
-            slot += 1;
         }
 
         let uv_map = AtlasUVMap {
@@ -137,7 +179,10 @@ impl TextureAtlas {
 
         let sampler = unsafe { util::create_nearest_sampler_mipmapped(device, mip_levels) };
 
-        tracing::info!("Atlas built: {atlas_size}x{atlas_size}, {slot} textures");
+        tracing::info!(
+            "Atlas built: {atlas_size}x{atlas_size}, {} regions",
+            uv_map.regions.len()
+        );
 
         Ok(Self {
             image,
@@ -168,19 +213,43 @@ impl TextureAtlas {
     }
 }
 
-fn tile_origin(slot: u32, grid_size: u32, tile_size: u32) -> (u32, u32) {
-    (
-        (slot % grid_size) * tile_size,
-        (slot / grid_size) * tile_size,
-    )
-}
-
-fn tile_region(origin: (u32, u32), tile_size: u32, atlas_size: u32) -> AtlasRegion {
+fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion {
     let s = atlas_size as f32;
     AtlasRegion {
-        u_min: origin.0 as f32 / s,
-        v_min: origin.1 as f32 / s,
-        u_max: (origin.0 + tile_size) as f32 / s,
-        v_max: (origin.1 + tile_size) as f32 / s,
+        u_min: x as f32 / s,
+        v_min: y as f32 / s,
+        u_max: (x + w) as f32 / s,
+        v_max: (y + h) as f32 / s,
     }
+}
+
+type PackResult = (HashMap<String, Option<(u32, u32)>>, AtlasRegion);
+
+fn pack(sources: &[Source], atlas_size: u32) -> (PackResult, bool) {
+    let mut placements: HashMap<String, Option<(u32, u32)>> = HashMap::new();
+    let missing_region = pixel_region(0, 0, MISSING_TILE, MISSING_TILE, atlas_size);
+    let mut cursor_x = MISSING_TILE;
+    let mut cursor_y = 0;
+    let mut shelf_h = MISSING_TILE;
+    let mut all_fit = true;
+    for src in sources {
+        if src.data.is_empty() {
+            placements.insert(src.name.clone(), None);
+            continue;
+        }
+        if cursor_x + src.w > atlas_size {
+            cursor_y += shelf_h;
+            cursor_x = 0;
+            shelf_h = 0;
+        }
+        if cursor_y + src.h > atlas_size {
+            all_fit = false;
+            placements.insert(src.name.clone(), None);
+            continue;
+        }
+        placements.insert(src.name.clone(), Some((cursor_x, cursor_y)));
+        cursor_x += src.w;
+        shelf_h = shelf_h.max(src.h);
+    }
+    ((placements, missing_region), all_fit)
 }

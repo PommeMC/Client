@@ -1,9 +1,16 @@
+use azalea_inventory::ItemStack;
+
+use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
 pub const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 pub const FONT_SIZE: f32 = 8.0;
 pub const BTN_H: f32 = 20.0;
 pub const COL_DISABLED: [f32; 4] = [0.35, 0.36, 0.45, 1.0];
+pub const SLOT_SIZE: f32 = 16.0;
+pub const SLOT_STRIDE: f32 = 18.0;
+pub const SLOT_HIGHLIGHT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.5];
+pub const SLOT_LABEL_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 const BTN_BORDER: f32 = 3.0;
 
 pub fn push_tooltip(
@@ -48,7 +55,7 @@ pub fn push_item_count(
     let text = count.to_string();
     let char_w = DIGIT_WIDTH * gs;
     let text_w = text.len() as f32 * char_w;
-    let fs = DIGIT_WIDTH * gs;
+    let fs = FONT_SIZE * gs;
     elements.push(MenuElement::Text {
         x: x + size + gs - text_w,
         y: y + size - fs,
@@ -61,9 +68,61 @@ pub fn push_item_count(
 
 pub fn hit_test(cursor: (f32, f32), rect: [f32; 4]) -> bool {
     cursor.0 >= rect[0]
-        && cursor.0 <= rect[0] + rect[2]
+        && cursor.0 < rect[0] + rect[2]
         && cursor.1 >= rect[1]
-        && cursor.1 <= rect[1] + rect[3]
+        && cursor.1 < rect[1] + rect[3]
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn push_slot(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    scale: f32,
+    cursor: (f32, f32),
+    item: &ItemStack,
+    empty_sprite: Option<SpriteId>,
+) -> bool {
+    let hovered = hit_test(cursor, [x, y, size, size]);
+    if hovered {
+        elements.push(MenuElement::Rect {
+            x,
+            y,
+            w: size,
+            h: size,
+            corner_radius: 0.0,
+            color: SLOT_HIGHLIGHT_COLOR,
+        });
+    }
+    match item {
+        ItemStack::Empty => {
+            if let Some(sprite) = empty_sprite {
+                elements.push(MenuElement::Image {
+                    x,
+                    y,
+                    w: size,
+                    h: size,
+                    sprite,
+                    tint: WHITE,
+                });
+            }
+        }
+        ItemStack::Present(data) => {
+            elements.push(MenuElement::ItemIcon {
+                x,
+                y,
+                w: size,
+                h: size,
+                item_name: item_resource_name(data.kind),
+                tint: WHITE,
+            });
+            if data.count > 1 {
+                push_item_count(elements, x, y, size, scale, data.count);
+            }
+        }
+    }
+    hovered
 }
 
 #[allow(clippy::too_many_arguments)]

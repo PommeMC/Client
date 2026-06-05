@@ -276,6 +276,80 @@ pub fn upload_image(
     );
 }
 
+pub fn submit_one_time<F: FnOnce(&vk::CommandBuffer)>(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    record: F,
+) {
+    let alloc_info = vk::CommandBufferAllocateInfo {
+        command_pool,
+        level: vk::CommandBufferLevel::Primary,
+        command_buffer_count: 1,
+        ..Default::default()
+    };
+    let mut cmd = vk::CommandBuffer::null();
+    unsafe { device.allocate_command_buffers(&alloc_info, std::slice::from_mut(&mut cmd)) }
+        .expect("failed to allocate one-time command buffer");
+
+    let begin_info = vk::CommandBufferBeginInfo {
+        flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
+        ..Default::default()
+    };
+    cmd.begin(&begin_info)
+        .expect("failed to begin command buffer");
+
+    record(&cmd);
+
+    cmd.end().expect("failed to end command buffer");
+
+    let submit_info = vk::SubmitInfo {
+        command_buffer_count: 1,
+        command_buffers: &cmd.handle(),
+        ..Default::default()
+    };
+    queue
+        .submit(&[submit_info], vk::Fence::null())
+        .expect("failed to submit one-time command buffer");
+    queue
+        .wait_idle()
+        .expect("failed to wait for one-time command buffer");
+    device.free_command_buffers(command_pool, &[cmd.handle()]);
+}
+
+pub fn transition_image_to_shader_read(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    image: vk::Image,
+) {
+    submit_one_time(device, queue, command_pool, |cmd| {
+        let barrier = vk::ImageMemoryBarrier {
+            image,
+            old_layout: vk::ImageLayout::Undefined,
+            new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+            src_access_mask: vk::AccessFlags::empty(),
+            dst_access_mask: vk::AccessFlags::ShaderRead,
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::Color,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            ..Default::default()
+        };
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::TopOfPipe,
+            vk::PipelineStageFlags::FragmentShader,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+    });
+}
+
 pub fn create_descriptor_set_layout(
     device: &vk::Device,
     descriptor_type: vk::DescriptorType,
@@ -410,24 +484,50 @@ pub fn upload_image_mipmapped(
     height: u32,
     mip_levels: u32,
 ) {
-    let alloc_info = vk::CommandBufferAllocateInfo {
-        command_pool,
-        level: vk::CommandBufferLevel::Primary,
-        command_buffer_count: 1,
-        ..Default::default()
-    };
+    submit_one_time(device, queue, command_pool, |cmd| {
+        record_image_upload(cmd, staging_buffer, image, width, height, mip_levels);
+    });
+}
 
-    let mut cmd = vk::CommandBuffer::null();
-    unsafe { device.allocate_command_buffers(&alloc_info, std::slice::from_mut(&mut cmd)) }
-        .expect("failed to allocate upload command buffer");
+pub struct PendingImageUpload {
+    pub staging_buffer: vk::Buffer,
+    pub image: vk::Image,
+    pub width: u32,
+    pub height: u32,
+    pub mip_levels: u32,
+}
 
-    let begin_info = vk::CommandBufferBeginInfo {
-        flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
-        ..Default::default()
-    };
-    cmd.begin(&begin_info)
-        .expect("failed to begin command buffer");
+pub fn upload_images_batched(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    uploads: &[PendingImageUpload],
+) {
+    if uploads.is_empty() {
+        return;
+    }
+    submit_one_time(device, queue, command_pool, |cmd| {
+        for u in uploads {
+            record_image_upload(
+                cmd,
+                u.staging_buffer,
+                u.image,
+                u.width,
+                u.height,
+                u.mip_levels,
+            );
+        }
+    });
+}
 
+fn record_image_upload(
+    cmd: &vk::CommandBuffer,
+    staging_buffer: vk::Buffer,
+    image: vk::Image,
+    width: u32,
+    height: u32,
+    mip_levels: u32,
+) {
     let barrier_all = vk::ImageMemoryBarrier {
         image,
         old_layout: vk::ImageLayout::Undefined,
@@ -602,20 +702,6 @@ pub fn upload_image_mipmapped(
         &[],
         &[barrier],
     );
-
-    cmd.end().expect("failed to end command buffer");
-
-    let submit_info = vk::SubmitInfo {
-        command_buffer_count: 1,
-        command_buffers: &cmd.handle(),
-        ..Default::default()
-    };
-
-    queue
-        .submit(&[submit_info], vk::Fence::null())
-        .expect("failed to submit upload");
-    queue.wait_idle().expect("failed to wait for upload");
-    device.free_command_buffers(command_pool, &[cmd.handle()]);
 }
 
 pub unsafe fn create_nearest_sampler_mipmapped(

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -65,10 +65,27 @@ struct ModelRef {
 #[derive(Deserialize, Default, Clone)]
 struct ModelFile {
     parent: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_texture_map")]
     textures: HashMap<String, String>,
     #[serde(default)]
     elements: Vec<ElementDef>,
+}
+
+fn deserialize_texture_map<'de, D>(de: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let raw: HashMap<String, serde_json::Value> = HashMap::deserialize(de)?;
+    let mut out = HashMap::new();
+    for (k, v) in raw {
+        if let Some(s) = v.as_str() {
+            out.insert(k, s.to_string());
+        } else if let Some(sprite) = v.get("sprite").and_then(serde_json::Value::as_str) {
+            out.insert(k, sprite.to_string());
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Deserialize, Clone)]
@@ -175,8 +192,8 @@ impl Direction {
         match self {
             Direction::Up => 1.0,
             Direction::Down => 0.5,
-            Direction::North | Direction::South => 0.7,
-            Direction::East | Direction::West => 0.8,
+            Direction::North | Direction::South => 0.8,
+            Direction::East | Direction::West => 0.6,
         }
     }
 }
@@ -327,7 +344,12 @@ pub fn bake_all_models(
 
     let mut missing_names: Vec<String> = Vec::new();
     for_each_blockstate(jar_assets_dir, asset_index, packs, |block_name, _| {
-        if !results.contains_key(block_name) && !multipart_results.contains_key(block_name) {
+        if !results.contains_key(block_name)
+            && !multipart_results.contains_key(block_name)
+            && !crate::world::block_entity::is_block_entity_block(block_name)
+            && !crate::world::block_entity::is_fluid_block(block_name)
+            && !crate::world::block_entity::is_invisible_block(block_name)
+        {
             missing_names.push(block_name.to_string());
         }
         Some(())
@@ -335,15 +357,341 @@ pub fn bake_all_models(
     missing_names.sort();
     let baked_count = results.len() + multipart_results.len();
     tracing::info!(
-        "Baked models for {}/{} blocks ({} missing)",
+        "Baked models for {}/{} blocks ({} unhandled)",
         baked_count,
         total,
         missing_names.len()
     );
     if !missing_names.is_empty() {
-        tracing::warn!("Missing baked models: {}", missing_names.join(", "));
+        tracing::warn!("Unhandled baked models: {}", missing_names.join(", "));
     }
     (results, multipart_results)
+}
+
+pub fn bake_item_models(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    packs: Option<&crate::resource_pack::ResourcePackManager>,
+) -> (
+    HashMap<String, BakedModel>,
+    HashSet<String>,
+    HashMap<String, String>,
+) {
+    let mut item_models: HashMap<String, BakedModel> = HashMap::new();
+    let mut item_textures: HashSet<String> = HashSet::new();
+    let mut flat_keys: HashMap<String, String> = HashMap::new();
+    let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
+
+    let items_dir = jar_assets_dir.join("minecraft").join("items");
+    let entries = match std::fs::read_dir(&items_dir) {
+        Ok(e) => e,
+        Err(_) => return (item_models, item_textures, flat_keys),
+    };
+
+    for entry in entries.flatten() {
+        let fname = entry.file_name().to_string_lossy().to_string();
+        let Some(item_name) = fname.strip_suffix(".json") else {
+            continue;
+        };
+        let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&contents) else {
+            continue;
+        };
+
+        let raw_path =
+            find_first_model_string(&json).or_else(|| find_first_string_for_key(&json, "base"));
+        let Some(raw_path) = raw_path else { continue };
+        let path = raw_path
+            .strip_prefix("minecraft:")
+            .unwrap_or(&raw_path)
+            .to_string();
+
+        let resolved = resolve_model(&path, jar_assets_dir, asset_index, &mut model_cache, packs);
+
+        if resolved.elements.is_empty() {
+            if let Some(value) = resolved.textures.get("layer0") {
+                let stripped = value.strip_prefix("minecraft:").unwrap_or(value);
+                let key = if let Some(rest) = stripped.strip_prefix("block/") {
+                    rest.to_string()
+                } else {
+                    item_textures.insert(stripped.to_string());
+                    stripped.to_string()
+                };
+                flat_keys.insert(item_name.to_string(), key);
+            }
+            continue;
+        }
+
+        let tint = determine_tint(item_name);
+        if let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) {
+            apply_gui_lambert(&mut baked.quads, BLOCK_GUI_ROTATION_DEG);
+            item_models.insert(item_name.to_string(), baked);
+        }
+    }
+
+    item_models.insert("chest".to_string(), bake_chest_item_model());
+    flat_keys.remove("chest");
+
+    tracing::info!(
+        "Baked {} item models, {} flat items, and registered {} item textures",
+        item_models.len(),
+        flat_keys.len(),
+        item_textures.len()
+    );
+    (item_models, item_textures, flat_keys)
+}
+
+pub fn bake_chest_item_model() -> BakedModel {
+    let tex = "entity/chest/normal";
+    let mut quads = Vec::new();
+    let shades = vanilla_gui_face_shades(CHEST_GUI_ROTATION_DEG);
+    add_chest_cube(
+        &mut quads,
+        1.0 / 16.0,
+        0.0,
+        1.0 / 16.0,
+        15.0 / 16.0,
+        10.0 / 16.0,
+        15.0 / 16.0,
+        0.0,
+        19.0,
+        14.0,
+        10.0,
+        14.0,
+        tex,
+        shades,
+    );
+    add_chest_cube(
+        &mut quads,
+        1.0 / 16.0,
+        10.0 / 16.0,
+        1.0 / 16.0,
+        15.0 / 16.0,
+        15.0 / 16.0,
+        15.0 / 16.0,
+        0.0,
+        0.0,
+        14.0,
+        5.0,
+        14.0,
+        tex,
+        shades,
+    );
+    add_chest_cube(
+        &mut quads,
+        7.0 / 16.0,
+        9.0 / 16.0,
+        1.0,
+        9.0 / 16.0,
+        13.0 / 16.0,
+        17.0 / 16.0,
+        0.0,
+        0.0,
+        2.0,
+        4.0,
+        1.0,
+        tex,
+        shades,
+    );
+    BakedModel {
+        quads,
+        is_full_cube: false,
+    }
+}
+
+const CHEST_GUI_ROTATION_DEG: [f32; 3] = [30.0, 45.0, 0.0];
+const BLOCK_GUI_ROTATION_DEG: [f32; 3] = [30.0, 225.0, 0.0];
+
+fn rotate_y(v: [f32; 3], angle: f32) -> [f32; 3] {
+    let (s, c) = angle.sin_cos();
+    [c * v[0] + s * v[2], v[1], -s * v[0] + c * v[2]]
+}
+
+fn rotate_x(v: [f32; 3], angle: f32) -> [f32; 3] {
+    let (s, c) = angle.sin_cos();
+    [v[0], c * v[1] - s * v[2], s * v[1] + c * v[2]]
+}
+
+fn items_3d_lights() -> ([f32; 3], [f32; 3]) {
+    let base = |x: f32, y: f32, z: f32| {
+        let len = (x * x + y * y + z * z).sqrt();
+        [x / len, y / len, z / len]
+    };
+    let transform = |v: [f32; 3]| {
+        let v = rotate_y(v, -std::f32::consts::PI / 8.0);
+        let v = rotate_x(v, 2.3561945);
+        let v = rotate_y(v, 1.0821041);
+        let v = rotate_x(v, 3.2375858);
+        [v[0], -v[1], v[2]]
+    };
+    (
+        transform(base(0.2, 1.0, -0.7)),
+        transform(base(-0.2, 1.0, 0.7)),
+    )
+}
+
+fn lambert_shade(world_normal: [f32; 3], l0: [f32; 3], l1: [f32; 3]) -> f32 {
+    let d0 = (l0[0] * world_normal[0] + l0[1] * world_normal[1] + l0[2] * world_normal[2]).max(0.0);
+    let d1 = (l1[0] * world_normal[0] + l1[1] * world_normal[1] + l1[2] * world_normal[2]).max(0.0);
+    ((d0 + d1) * 0.6 + 0.4).min(1.0)
+}
+
+fn rotate_mesh_normal(n_mesh: [f32; 3], rotation_deg: [f32; 3]) -> [f32; 3] {
+    let after_y = rotate_y(n_mesh, rotation_deg[1].to_radians());
+    rotate_x(after_y, rotation_deg[0].to_radians())
+}
+
+fn vanilla_gui_face_shades(rotation_deg: [f32; 3]) -> [f32; 6] {
+    let (l0, l1) = items_3d_lights();
+    let normals = [
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [0.0, 0.0, 1.0],
+        [-1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ];
+    let mut shades = [0.0; 6];
+    for (i, &n) in normals.iter().enumerate() {
+        shades[i] = lambert_shade(rotate_mesh_normal(n, rotation_deg), l0, l1);
+    }
+    shades
+}
+
+fn apply_gui_lambert(quads: &mut [BakedQuad], rotation_deg: [f32; 3]) {
+    let (l0, l1) = items_3d_lights();
+    for quad in quads {
+        let p = &quad.positions;
+        let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+        let e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        if len < 1e-6 {
+            continue;
+        }
+        let n_mesh = [nx / len, ny / len, nz / len];
+        let n_world = rotate_mesh_normal(n_mesh, rotation_deg);
+        quad.shade_light *= lambert_shade(n_world, l0, l1);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_chest_cube(
+    quads: &mut Vec<BakedQuad>,
+    x0: f32,
+    y0: f32,
+    z0: f32,
+    x1: f32,
+    y1: f32,
+    z1: f32,
+    u: f32,
+    v: f32,
+    w: f32,
+    h: f32,
+    d: f32,
+    texture: &str,
+    shades: [f32; 6],
+) {
+    const TEX_SIZE: f32 = 64.0;
+    let face_specs: [FaceSpec; 6] = [
+        FaceSpec {
+            positions: [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]],
+            uv_pixels: (u + d, v, u + d + w, v + d),
+            uv_pattern: UvPattern::Up,
+            shade: shades[0],
+        },
+        FaceSpec {
+            positions: [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
+            uv_pixels: (u + d + w, v, u + d + w + w, v + d),
+            uv_pattern: UvPattern::Down,
+            shade: shades[1],
+        },
+        FaceSpec {
+            positions: [[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]],
+            uv_pixels: (u + d, v + d, u + d + w, v + d + h),
+            uv_pattern: UvPattern::North,
+            shade: shades[2],
+        },
+        FaceSpec {
+            positions: [[x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [x0, y0, z1]],
+            uv_pixels: (u + d + w + d, v + d, u + d + w + d + w, v + d + h),
+            uv_pattern: UvPattern::SouthWestEast,
+            shade: shades[3],
+        },
+        FaceSpec {
+            positions: [[x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0]],
+            uv_pixels: (u, v + d, u + d, v + d + h),
+            uv_pattern: UvPattern::SouthWestEast,
+            shade: shades[4],
+        },
+        FaceSpec {
+            positions: [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]],
+            uv_pixels: (u + d + w, v + d, u + d + w + d, v + d + h),
+            uv_pattern: UvPattern::SouthWestEast,
+            shade: shades[5],
+        },
+    ];
+    for spec in face_specs {
+        let (u_min_px, v_min_px, u_max_px, v_max_px) = spec.uv_pixels;
+        let u1 = (u_min_px + 0.5) / TEX_SIZE;
+        let v1 = (v_min_px + 0.5) / TEX_SIZE;
+        let u2 = (u_max_px - 0.5) / TEX_SIZE;
+        let v2 = (v_max_px - 0.5) / TEX_SIZE;
+        let uvs = match spec.uv_pattern {
+            UvPattern::Up => [[u1, v2], [u2, v2], [u2, v1], [u1, v1]],
+            UvPattern::Down => [[u1, v1], [u2, v1], [u2, v2], [u1, v2]],
+            UvPattern::North => [[u1, v2], [u1, v1], [u2, v1], [u2, v2]],
+            UvPattern::SouthWestEast => [[u2, v2], [u2, v1], [u1, v1], [u1, v2]],
+        };
+        quads.push(BakedQuad {
+            positions: spec.positions,
+            uvs,
+            texture: texture.to_string(),
+            cullface: None,
+            tint: super::registry::Tint::None,
+            shade_light: spec.shade,
+        });
+    }
+}
+
+struct FaceSpec {
+    positions: [[f32; 3]; 4],
+    uv_pixels: (f32, f32, f32, f32),
+    uv_pattern: UvPattern,
+    shade: f32,
+}
+
+enum UvPattern {
+    Up,
+    Down,
+    North,
+    SouthWestEast,
+}
+
+pub fn find_first_model_string(json: &serde_json::Value) -> Option<String> {
+    find_first_string_for_key(json, "model")
+}
+
+pub fn find_first_string_for_key(json: &serde_json::Value, key: &str) -> Option<String> {
+    match json {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(s)) = map.get(key) {
+                return Some(s.clone());
+            }
+            for v in map.values() {
+                if let Some(r) = find_first_string_for_key(v, key) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(arr) => arr.iter().find_map(|v| find_first_string_for_key(v, key)),
+        _ => None,
+    }
 }
 
 fn parse_when_condition(when: &Option<serde_json::Value>) -> HashMap<String, String> {
