@@ -45,13 +45,6 @@ enum DrawOp {
         count: u32,
         scissor: Option<[f32; 4]>,
     },
-    Item {
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        item_name: String,
-    },
 }
 
 struct GlyphEntry {
@@ -586,7 +579,7 @@ impl MenuOverlayPipeline {
         screen_w: f32,
         screen_h: f32,
         elements: &[MenuElement],
-        mut draw_item: impl FnMut(vk::CommandBuffer, f32, f32, f32, f32, &str),
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
     ) {
         let globals: [f32; 2] = [screen_w, screen_h];
         self.globals_allocation
@@ -768,24 +761,25 @@ impl MenuOverlayPipeline {
                     w,
                     h,
                     item_name,
-                    tint: _,
+                    tint,
                 } => {
-                    let count = vertices.len() as u32 - cmd_start;
-                    if count > 0 {
-                        draw_ops.push(DrawOp::Quads {
-                            start: cmd_start,
-                            count,
-                            scissor: current_scissor,
-                        });
+                    if let Some(uv) = item_atlas_uvs.get(item_name) {
+                        push_quad(
+                            &mut vertices,
+                            *x,
+                            *y,
+                            *w,
+                            *h,
+                            uv[0],
+                            uv[1],
+                            uv[2],
+                            uv[3],
+                            *tint,
+                            3.0,
+                            [0.0, 0.0],
+                            0.0,
+                        );
                     }
-                    cmd_start = vertices.len() as u32;
-                    draw_ops.push(DrawOp::Item {
-                        x: *x,
-                        y: *y,
-                        w: *w,
-                        h: *h,
-                        item_name: item_name.clone(),
-                    });
                 }
                 MenuElement::McText {
                     x,
@@ -1143,19 +1137,13 @@ impl MenuOverlayPipeline {
                     cmd.set_scissor(0, &[rect]);
                     cmd.draw(*count, 1, *start, 0);
                 }
-                DrawOp::Item {
-                    x,
-                    y,
-                    w,
-                    h,
-                    item_name,
-                } => {
-                    draw_item(cmd, *x, *y, *w, *h, item_name);
-                    needs_bind = true;
-                }
             }
         }
         cmd.set_scissor(0, &[default_scissor]);
+    }
+
+    pub fn tex_descriptor_set(&self) -> vk::DescriptorSet {
+        self.tex_set
     }
 
     pub fn set_blur_texture(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
