@@ -7,14 +7,14 @@ use azalea_protocol::packets::game::ServerboundGamePacket;
 use azalea_protocol::packets::game::s_interact::InteractionHand;
 use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerAction};
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use glam::Vec3;
+use glam::{DVec3, Vec3, dvec3};
 
 use crate::app::input::InputState;
+use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
 use crate::world::chunk::ChunkStore;
 
 const REACH: f32 = 4.5;
-const STEP: f32 = 0.01;
 const DESTROY_COOLDOWN: u32 = 5;
 const MISS_COOLDOWN: u32 = 10;
 const RIGHT_CLICK_DELAY: u32 = 4;
@@ -24,7 +24,7 @@ const SWING_DURATION: i32 = 6;
 pub struct HitResult {
     pub block_pos: BlockPos,
     pub face: Direction,
-    pub hit_point: Vec3,
+    pub hit_point: DVec3,
 }
 
 pub struct InteractionState {
@@ -114,9 +114,13 @@ impl InteractionState {
         self.attack_anim = self.swing_time as f32 / SWING_DURATION as f32;
     }
 
-    pub fn update_target(&mut self, eye: Vec3, yaw: f32, pitch: f32, chunks: &ChunkStore) {
-        let dir = look_direction(yaw, pitch);
-        self.target = raycast(eye, dir, REACH, chunks);
+    pub fn update_target(
+        &mut self,
+        eye_pos: Position,
+        look_dir: LookDirection,
+        chunks: &ChunkStore,
+    ) {
+        self.target = raycast(eye_pos.into(), look_dir.as_vec(), REACH, chunks);
     }
 
     pub fn tick(
@@ -236,9 +240,9 @@ impl InteractionState {
                 block_pos: hit.block_pos,
                 direction: hit.face,
                 location: azalea_core::position::Vec3 {
-                    x: hit.hit_point.x as f64,
-                    y: hit.hit_point.y as f64,
-                    z: hit.hit_point.z as f64,
+                    x: hit.hit_point.x,
+                    y: hit.hit_point.y,
+                    z: hit.hit_point.z,
                 },
                 inside: false,
                 world_border: false,
@@ -447,59 +451,91 @@ fn mark_dirty(pos: &BlockPos, dirty: &mut Vec<azalea_core::position::ChunkPos>) 
     }
 }
 
-fn look_direction(yaw: f32, pitch: f32) -> Vec3 {
-    Vec3::new(
-        -yaw.sin() * pitch.cos(),
-        pitch.sin(),
-        -yaw.cos() * pitch.cos(),
-    )
-}
+pub fn raycast(origin: DVec3, dir: Vec3, max_dist: f32, chunks: &ChunkStore) -> Option<HitResult> {
+    let dir = dir.as_dvec3();
+    let mut bx = origin.x.floor() as i32;
+    let mut by = origin.y.floor() as i32;
+    let mut bz = origin.z.floor() as i32;
 
-fn raycast(origin: Vec3, dir: Vec3, max_dist: f32, chunks: &ChunkStore) -> Option<HitResult> {
-    let mut t = 0.0;
-    let mut prev_block = BlockPos {
-        x: i32::MAX,
-        y: i32::MAX,
-        z: i32::MAX,
+    let step_x = if dir.x > 0.0 { 1 } else { -1 };
+    let step_y = if dir.y > 0.0 { 1 } else { -1 };
+    let step_z = if dir.z > 0.0 { 1 } else { -1 };
+
+    let t_delta_x = if dir.x != 0.0 {
+        (1.0 / dir.x).abs()
+    } else {
+        f64::INFINITY
+    };
+    let t_delta_y = if dir.y != 0.0 {
+        (1.0 / dir.y).abs()
+    } else {
+        f64::INFINITY
+    };
+    let t_delta_z = if dir.z != 0.0 {
+        (1.0 / dir.z).abs()
+    } else {
+        f64::INFINITY
     };
 
-    while t <= max_dist {
-        let point = origin + dir * t;
-        let bx = point.x.floor() as i32;
-        let by = point.y.floor() as i32;
-        let bz = point.z.floor() as i32;
-        let block_pos = BlockPos {
-            x: bx,
-            y: by,
-            z: bz,
-        };
+    let mut t_max_x = if dir.x > 0.0 {
+        (bx as f64 + 1.0 - origin.x) * t_delta_x
+    } else {
+        (origin.x - bx as f64) * t_delta_x
+    };
+    let mut t_max_y = if dir.y > 0.0 {
+        (by as f64 + 1.0 - origin.y) * t_delta_y
+    } else {
+        (origin.y - by as f64) * t_delta_y
+    };
+    let mut t_max_z = if dir.z > 0.0 {
+        (bz as f64 + 1.0 - origin.z) * t_delta_z
+    } else {
+        (origin.z - bz as f64) * t_delta_z
+    };
 
-        if block_pos != prev_block {
-            let state = chunks.get_block_state(bx, by, bz);
-            if !state.is_air() {
-                let face = hit_face(origin, dir, &block_pos);
-                return Some(HitResult {
-                    block_pos,
-                    face,
-                    hit_point: point,
-                });
-            }
-            prev_block = block_pos;
+    let mut t = 0.0_f64;
+    while t <= max_dist as f64 {
+        let state = chunks.get_block_state(bx, by, bz);
+        if !state.is_air() {
+            let block_pos = BlockPos {
+                x: bx,
+                y: by,
+                z: bz,
+            };
+            let hit_point = origin + dir * t;
+            let face = hit_face(origin, dir.as_vec3(), &block_pos);
+            return Some(HitResult {
+                block_pos,
+                face,
+                hit_point,
+            });
         }
-
-        t += STEP;
+        if t_max_x < t_max_y && t_max_x < t_max_z {
+            t = t_max_x;
+            t_max_x += t_delta_x;
+            bx += step_x;
+        } else if t_max_y < t_max_z {
+            t = t_max_y;
+            t_max_y += t_delta_y;
+            by += step_y;
+        } else {
+            t = t_max_z;
+            t_max_z += t_delta_z;
+            bz += step_z;
+        }
     }
     None
 }
 
-fn hit_face(origin: Vec3, dir: Vec3, pos: &BlockPos) -> Direction {
-    let min = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
-    let max = min + Vec3::ONE;
+fn hit_face(origin: DVec3, dir: Vec3, pos: &BlockPos) -> Direction {
+    let dir = dir.as_dvec3();
+    let min = dvec3(pos.x as f64, pos.y as f64, pos.z as f64);
+    let max = min + DVec3::ONE;
 
-    let mut best_t = f32::MAX;
+    let mut best_t = f64::MAX;
     let mut best_face = Direction::Up;
 
-    let faces: [(f32, f32, f32, Direction); 6] = [
+    let faces = [
         (min.x, dir.x, origin.x, Direction::West),
         (max.x, dir.x, origin.x, Direction::East),
         (min.y, dir.y, origin.y, Direction::Down),

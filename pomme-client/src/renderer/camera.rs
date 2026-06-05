@@ -1,6 +1,7 @@
-use glam::{DVec3, Mat4, Vec3};
+use glam::{FloatExt, Mat4, Vec3};
 
 use crate::app::input::InputState;
+use crate::entity::components::{LookDirection, Position};
 
 const UP: Vec3 = Vec3::Y;
 pub const DEFAULT_FOV_DEGREES: f32 = 70.0;
@@ -10,8 +11,7 @@ pub const MIN_FOV_DEGREES: f32 = 30.0;
 pub const MAX_FOV_DEGREES: f32 = 110.0;
 const NEAR: f32 = 0.1;
 const FAR: f32 = 1000.0;
-const SENSITIVITY: f32 = 0.003;
-const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
+const SENSITIVITY: f32 = 0.15;
 pub const THIRD_PERSON_DISTANCE: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -32,10 +32,8 @@ impl CameraMode {
 }
 
 pub struct Camera {
-    pub position: Vec3,
-    pub position_f64: DVec3,
-    pub yaw: f32,
-    pub pitch: f32,
+    pub position: Position,
+    pub look_dir: LookDirection,
     pub mode: CameraMode,
     pub third_person_dist: f32,
     aspect_ratio: f32,
@@ -47,10 +45,8 @@ pub struct Camera {
 impl Camera {
     pub fn new(aspect_ratio: f32) -> Self {
         Self {
-            position: Vec3::new(0.0, 2.0, 5.0),
-            position_f64: DVec3::new(0.0, 2.0, 5.0),
-            yaw: 0.0,
-            pitch: 0.0,
+            position: Position::default(),
+            look_dir: LookDirection::default(),
             mode: CameraMode::FirstPerson,
             third_person_dist: THIRD_PERSON_DISTANCE,
             aspect_ratio,
@@ -63,8 +59,11 @@ impl Camera {
     pub fn update_look(&mut self, input: &mut InputState) {
         if input.is_cursor_captured() {
             let (dx, dy) = input.consume_mouse_delta();
-            self.yaw -= dx as f32 * SENSITIVITY;
-            self.pitch = (self.pitch - dy as f32 * SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+            let y_rot_deg = ((self.look_dir.y_rot_deg() + dx as f32 * SENSITIVITY) + 180.0)
+                .rem_euclid(360.0)
+                - 180.0;
+            let x_rot_deg = self.look_dir.x_rot_deg() + dy as f32 * SENSITIVITY;
+            self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
         }
     }
 
@@ -72,21 +71,18 @@ impl Camera {
         self.aspect_ratio = aspect;
     }
 
-    pub fn set_position(&mut self, position: Vec3, yaw_degrees: f32, pitch_degrees: f32) {
+    pub fn reset(&mut self, position: Position, look_dir: LookDirection) {
         self.position = position;
-        self.position_f64 = DVec3::new(position.x as f64, position.y as f64, position.z as f64);
-        self.yaw = yaw_degrees.to_radians();
-        self.pitch = pitch_degrees.to_radians();
+        self.look_dir = look_dir;
     }
 
-    pub fn set_position_f64(&mut self, pos: DVec3) {
-        self.position_f64 = pos;
-        self.position = pos.as_vec3();
+    pub fn sync_pos(&mut self, position: Position) {
+        self.position = position
     }
 
-    #[allow(dead_code)]
-    pub fn camera_relative_f32(&self, world_pos: DVec3) -> Vec3 {
-        (world_pos - self.position_f64).as_vec3()
+    #[allow(dead_code)] // TODO: camera relative rendering
+    pub fn camera_relative_f32(&self, world_pos: Position) -> Vec3 {
+        (world_pos - self.position).as_vec3()
     }
 
     pub fn update_fov_modifier(&mut self, target: f32) {
@@ -96,8 +92,7 @@ impl Camera {
     }
 
     pub fn fov_radians(&self, partial_tick: f32) -> f32 {
-        let modifier =
-            self.old_fov_modifier + (self.fov_modifier - self.old_fov_modifier) * partial_tick;
+        let modifier = self.old_fov_modifier.lerp(self.fov_modifier, partial_tick);
         (self.base_fov_degrees * modifier).to_radians()
     }
 
@@ -121,16 +116,8 @@ impl Camera {
         planes
     }
 
-    pub fn forward_vec(&self) -> Vec3 {
-        Vec3::new(
-            -self.yaw.sin() * self.pitch.cos(),
-            self.pitch.sin(),
-            -self.yaw.cos() * self.pitch.cos(),
-        )
-    }
-
     pub fn third_person_offset(&self) -> Vec3 {
-        let fwd = self.forward_vec();
+        let fwd = self.look_dir.as_vec();
         match self.mode {
             CameraMode::FirstPerson => Vec3::ZERO,
             CameraMode::ThirdPersonBack => -fwd * self.third_person_dist,
@@ -143,29 +130,31 @@ impl Camera {
     }
 
     pub fn sky_view_projection(&self) -> Mat4 {
-        let forward = self.forward_vec();
-        let look_dir = if self.mode == CameraMode::ThirdPersonFront {
-            -forward
+        let look_dir = self.look_dir.as_vec();
+        let forward = if self.mode == CameraMode::ThirdPersonFront {
+            -look_dir
         } else {
-            forward
+            look_dir
         };
-        let view = Mat4::look_to_rh(Vec3::ZERO, look_dir, UP);
+
+        let view = Mat4::look_to_rh(Vec3::ZERO, forward, UP);
         let mut proj = Mat4::perspective_rh(self.fov_radians(1.0), self.aspect_ratio, NEAR, FAR);
-        proj.y_axis.y *= -1.0;
+        proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
     }
 
     pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
-        let forward = self.forward_vec();
         let offset = self.third_person_offset();
-        let look_dir = if self.mode == CameraMode::ThirdPersonFront {
-            -forward
+        let look_dir = self.look_dir.as_vec();
+        let forward = if self.mode == CameraMode::ThirdPersonFront {
+            -look_dir
         } else {
-            forward
+            look_dir
         };
-        let view = Mat4::look_to_rh(offset, look_dir, UP);
+
+        let view = Mat4::look_to_rh(offset, forward, UP);
         let mut proj = Mat4::perspective_rh(fov, self.aspect_ratio, NEAR, FAR);
-        proj.y_axis.y *= -1.0;
+        proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
     }
 }
@@ -181,7 +170,7 @@ pub struct CameraUniform {
 impl CameraUniform {
     pub fn new(camera: &Camera, fog_color: [f32; 3]) -> Self {
         let offset = camera.third_person_offset();
-        let pos = camera.position + offset;
+        let pos = camera.position.as_vec3() + offset;
         Self {
             view_proj: camera.view_projection().to_cols_array_2d(),
             camera_pos: [pos.x, pos.y, pos.z, 0.0],

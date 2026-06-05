@@ -1,20 +1,20 @@
-use glam::Vec3;
+use glam::{DVec3, dvec3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Aabb {
-    pub min: Vec3,
-    pub max: Vec3,
+    pub min: DVec3,
+    pub max: DVec3,
 }
 
 impl Aabb {
-    pub fn new(min: Vec3, max: Vec3) -> Self {
+    pub fn new(min: DVec3, max: DVec3) -> Self {
         Self { min, max }
     }
 
-    pub fn from_center(center: Vec3, half_width: f32, half_height: f32) -> Self {
+    pub fn from_center(center: DVec3, half_width: f64, half_height: f64) -> Self {
         Self {
-            min: Vec3::new(center.x - half_width, center.y, center.z - half_width),
-            max: Vec3::new(
+            min: dvec3(center.x - half_width, center.y, center.z - half_width),
+            max: dvec3(
                 center.x + half_width,
                 center.y + half_height * 2.0,
                 center.z + half_width,
@@ -22,14 +22,14 @@ impl Aabb {
         }
     }
 
-    pub fn offset(self, offset: Vec3) -> Self {
+    pub fn offset(self, offset: DVec3) -> Self {
         Self {
             min: self.min + offset,
             max: self.max + offset,
         }
     }
 
-    pub fn expand(self, delta: Vec3) -> Self {
+    pub fn expand(self, delta: DVec3) -> Self {
         let mut min = self.min;
         let mut max = self.max;
 
@@ -52,35 +52,39 @@ impl Aabb {
         Self { min, max }
     }
 
-    pub fn clip_x_collide(&self, other: &Aabb, dx: f32) -> f32 {
+    pub fn clip_x_collide(&self, other: &Aabb, dx: f64) -> f64 {
         self.clip_axis(other, dx, Axis::X)
     }
 
-    pub fn clip_y_collide(&self, other: &Aabb, dy: f32) -> f32 {
+    pub fn clip_y_collide(&self, other: &Aabb, dy: f64) -> f64 {
         self.clip_axis(other, dy, Axis::Y)
     }
 
-    pub fn clip_z_collide(&self, other: &Aabb, dz: f32) -> f32 {
+    pub fn clip_z_collide(&self, other: &Aabb, dz: f64) -> f64 {
         self.clip_axis(other, dz, Axis::Z)
     }
 
-    fn clip_axis(&self, other: &Aabb, mut delta: f32, axis: Axis) -> f32 {
+    fn clip_axis(&self, other: &Aabb, mut delta: f64, axis: Axis) -> f64 {
         let (c1, c2) = axis.cross_axes();
 
-        if get(other.max, c1) <= get(self.min, c1) || get(other.min, c1) >= get(self.max, c1) {
+        if component(other.max, c1) <= component(self.min, c1)
+            || component(other.min, c1) >= component(self.max, c1)
+        {
             return delta;
         }
-        if get(other.max, c2) <= get(self.min, c2) || get(other.min, c2) >= get(self.max, c2) {
+        if component(other.max, c2) <= component(self.min, c2)
+            || component(other.min, c2) >= component(self.max, c2)
+        {
             return delta;
         }
 
-        if delta > 0.0 && get(other.max, axis) <= get(self.min, axis) {
-            let clip = get(self.min, axis) - get(other.max, axis);
+        if delta > 0.0 && component(other.max, axis) <= component(self.min, axis) {
+            let clip = component(self.min, axis) - component(other.max, axis);
             if clip < delta {
                 delta = clip;
             }
-        } else if delta < 0.0 && get(other.min, axis) >= get(self.max, axis) {
-            let clip = get(self.max, axis) - get(other.min, axis);
+        } else if delta < 0.0 && component(other.min, axis) >= component(self.max, axis) {
+            let clip = component(self.max, axis) - component(other.min, axis);
             if clip > delta {
                 delta = clip;
             }
@@ -107,7 +111,7 @@ impl Axis {
     }
 }
 
-fn get(v: Vec3, axis: Axis) -> f32 {
+fn component(v: DVec3, axis: Axis) -> f64 {
     match axis {
         Axis::X => v.x,
         Axis::Y => v.y,

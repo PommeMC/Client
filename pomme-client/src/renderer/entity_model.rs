@@ -1,4 +1,4 @@
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 
 use super::chunk::mesher::ChunkVertex;
 
@@ -735,8 +735,8 @@ pub fn bake_baby_sheep_wool_model() -> BakedEntityModel {
 
 pub fn compute_humanoid_anim(
     model: &BakedEntityModel,
-    head_pitch: f32,
-    head_yaw: f32,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
     walk_pos: f32,
     walk_speed: f32,
 ) -> PartAnim {
@@ -744,7 +744,12 @@ pub fn compute_humanoid_anim(
 
     for (i, part) in model.parts.iter().enumerate() {
         let rot = match part.name.as_str() {
-            "head" => Vec3::new(head_pitch.to_radians(), head_yaw.to_radians(), 0.0),
+            "head" => {
+                let rot = Quat::from_rotation_y(local_head_y_rot_deg.to_radians())
+                    * Quat::from_rotation_x(head_x_rot_deg.to_radians());
+                let (x, y, z) = rot.to_euler(glam::EulerRot::XYZ);
+                Vec3::new(x, y, z)
+            }
             "right_arm" => Vec3::new(
                 (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 2.0 * walk_speed * 0.5,
                 0.0,
@@ -767,22 +772,27 @@ pub fn compute_humanoid_anim(
 
 pub fn compute_quadruped_anim(
     model: &BakedEntityModel,
-    head_pitch: f32,
-    head_yaw: f32,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
     walk_pos: f32,
     walk_speed: f32,
     head_y_offset: f32,
-    head_x_rot_override: Option<f32>,
+    head_x_rot_deg_override: Option<f32>,
 ) -> PartAnim {
     let mut anim = PartAnim::default();
 
     for (i, part) in model.parts.iter().enumerate() {
         let rot = match part.name.as_str() {
-            "head" => Vec3::new(
-                head_x_rot_override.unwrap_or_else(|| head_pitch.to_radians()),
-                head_yaw.to_radians(),
-                0.0,
-            ),
+            "head" => {
+                let rot = Quat::from_rotation_y(local_head_y_rot_deg.to_radians())
+                    * Quat::from_rotation_x(
+                        head_x_rot_deg_override
+                            .unwrap_or(head_x_rot_deg)
+                            .to_radians(),
+                    );
+                let (x, y, z) = rot.to_euler(glam::EulerRot::XYZ);
+                Vec3::new(x, y, z)
+            }
             "right_hind_leg" => Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.0, 0.0),
             "left_hind_leg" => Vec3::new(
                 (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 1.4 * walk_speed,

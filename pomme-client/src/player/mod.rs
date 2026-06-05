@@ -2,8 +2,10 @@ pub mod interaction;
 pub mod inventory;
 pub mod tab_list;
 
-use glam::Vec3;
+use glam::dvec3;
 use inventory::Inventory;
+
+use crate::entity::components::{LookDirection, Position, Velocity};
 
 pub const MAX_AIR_SUPPLY: i32 = 300;
 const DROWN_DAMAGE_THRESHOLD: i32 = -20;
@@ -26,10 +28,11 @@ fn is_water_block(state: azalea_block::BlockState) -> bool {
 }
 
 pub struct LocalPlayer {
-    pub position: Vec3,
-    pub velocity: Vec3,
-    pub yaw: f32,
-    pub pitch: f32,
+    pub position: Position,
+    pub prev_position: Position,
+    pub velocity: Velocity,
+    pub look_dir: LookDirection,
+    pub prev_look_dir: LookDirection,
     pub on_ground: bool,
     pub health: f32,
     pub food: u32,
@@ -54,10 +57,11 @@ pub struct LocalPlayer {
 impl LocalPlayer {
     pub fn new() -> Self {
         Self {
-            position: Vec3::ZERO,
-            velocity: Vec3::ZERO,
-            yaw: 0.0,
-            pitch: 0.0,
+            position: Position::default(),
+            prev_position: Position::default(),
+            velocity: Velocity::default(),
+            look_dir: LookDirection::default(),
+            prev_look_dir: LookDirection::default(),
             on_ground: false,
             health: 20.0,
             food: 20,
@@ -80,6 +84,14 @@ impl LocalPlayer {
         }
     }
 
+    pub fn prev_eye_pos(&self) -> Position {
+        self.prev_position + dvec3(0.0, 1.62, 0.0)
+    }
+
+    pub fn eye_pos(&self) -> Position {
+        self.position + dvec3(0.0, 1.62, 0.0)
+    }
+
     // TODO: OXYGEN_BONUS attribute - chance to skip air loss per tick
     pub fn tick_air_supply(&mut self) {
         if self.eyes_in_water {
@@ -94,9 +106,9 @@ impl LocalPlayer {
     }
 
     pub fn update_water_state(&mut self, chunks: &crate::world::chunk::ChunkStore) {
-        let half_w = 0.3f32;
-        let height = 1.8f32;
-        let eye_height = 1.62f32;
+        let half_w = 0.3;
+        let height = 1.8;
+        let eye_height = 1.62;
 
         let min_x = (self.position.x - half_w).floor() as i32;
         let max_x = (self.position.x + half_w).floor() as i32;

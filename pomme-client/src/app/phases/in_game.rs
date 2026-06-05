@@ -5,12 +5,14 @@ use std::time::Instant;
 use azalea_core::position::ChunkPos;
 use azalea_protocol::packets::game::{ServerboundClientInformation, ServerboundGamePacket};
 use azalea_registry::builtin::EntityKind;
+use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
 use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE};
 use crate::benchmark::{Benchmark, BenchmarkResult};
-use crate::entity::{EntityStore, ItemEntityStore};
+use crate::entity::components::{LookDirection, Position};
+use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::player::LocalPlayer;
 use crate::player::interaction::InteractionState;
@@ -35,7 +37,6 @@ pub struct GameState {
     pub position_set: bool,
     pub player_loaded_sent: bool,
     pub player: LocalPlayer,
-    pub prev_player_pos: glam::Vec3,
     pub biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     pub player_walk_pos: f32,
     pub player_walk_speed: f32,
@@ -59,9 +60,8 @@ pub struct GameState {
     pub show_chunk_borders: bool,
     pub advanced_item_tooltips: bool,
     pub last_sent_input: PlayerInputState,
-    pub last_sent_pos: glam::Vec3,
-    pub last_sent_yaw: f32,
-    pub last_sent_pitch: f32,
+    pub last_sent_pos: Position,
+    pub last_sent_look_dir: LookDirection,
     pub last_sent_on_ground: bool,
     pub last_sent_horizontal_collision: bool,
     pub was_sprinting: bool,
@@ -95,7 +95,6 @@ impl GameState {
             item_entity_store: ItemEntityStore::new(),
             block_entity_anim: BlockEntityAnimStore::default(),
             player: LocalPlayer::new(),
-            prev_player_pos: glam::Vec3::ZERO,
             biome_climate: Arc::new(HashMap::new()),
             player_walk_pos: 0.0,
             player_walk_speed: 0.0,
@@ -119,9 +118,8 @@ impl GameState {
             show_chunk_borders: false,
             advanced_item_tooltips: false,
             last_sent_input: PlayerInputState::default(),
-            last_sent_pos: glam::Vec3::ZERO,
-            last_sent_yaw: 0.0,
-            last_sent_pitch: 0.0,
+            last_sent_pos: Position::default(),
+            last_sent_look_dir: LookDirection::default(),
             last_sent_on_ground: false,
             last_sent_horizontal_collision: false,
             was_sprinting: false,
@@ -218,17 +216,14 @@ pub fn update_game(
         }
     }
 
-    let alpha = core.tick_accumulator / TICK_RATE;
-    let interp_pos = game.prev_player_pos.lerp(game.player.position, alpha);
-    let eye_pos = interp_pos + glam::Vec3::new(0.0, 1.62, 0.0);
-    let eye_pos_f64 = glam::DVec3::new(eye_pos.x as f64, eye_pos.y as f64, eye_pos.z as f64);
+    let partial_tick = core.tick_accumulator / TICK_RATE;
 
     if !game.paused && !game.gui_open() && !game.chat.is_open() {
-        let yaw = gfx.renderer.camera_yaw();
-        let pitch = gfx.renderer.camera_pitch();
-
-        game.interaction
-            .update_target(eye_pos, yaw, pitch, &game.chunk_store);
+        game.interaction.update_target(
+            game.player.eye_pos(),
+            gfx.renderer.camera_look_dir(),
+            &game.chunk_store,
+        );
     }
 
     let typed = core.input.drain_typed_chars();
@@ -243,11 +238,17 @@ pub fn update_game(
     let mut pause_action = PauseAction::None;
     let mut death_action = DeathAction::None;
 
-    let yaw = gfx.renderer.camera_yaw();
-    let pitch = gfx.renderer.camera_pitch();
-    gfx.renderer.sync_camera_to_player(eye_pos_f64, yaw, pitch);
-    gfx.renderer
-        .update_third_person_distance(eye_pos, &game.chunk_store);
+    gfx.renderer.sync_camera_pos(
+        game.player
+            .prev_eye_pos()
+            .lerp(game.player.eye_pos(), partial_tick as f64),
+    );
+    gfx.renderer.update_third_person_distance(
+        game.player
+            .prev_eye_pos()
+            .lerp(game.player.eye_pos(), partial_tick as f64),
+        &game.chunk_store,
+    );
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
@@ -263,9 +264,9 @@ pub fn update_game(
     let debug = if game.show_debug {
         Some(hud::DebugInfo {
             fps: gfx.fps_counter.display_fps(),
-            position: game.player.position,
-            yaw: game.player.yaw,
-            pitch: game.player.pitch,
+            position: *game.player.position,
+            y_rot_deg: gfx.renderer.camera_look_dir().y_rot_deg(),
+            x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
             target_block: game.interaction.target.map(|t| {
                 let state =
                     game.chunk_store
@@ -528,65 +529,69 @@ pub fn update_game(
         gfx.renderer.menu_text_width(t, s)
     });
 
-    let swing_progress = game
-        .interaction
-        .get_swing_progress(core.tick_accumulator / TICK_RATE);
+    let swing_progress = game.interaction.get_swing_progress(partial_tick);
     let destroy_info = game.interaction.destroy_stage();
 
-    let alpha = core.tick_accumulator / TICK_RATE;
     let mut entity_renders: Vec<EntityRenderInfo> = game
         .entity_store
         .living
         .iter()
         .map(|(&entity_id, e)| {
-            let pos = e.prev_position.lerp(e.position, alpha as f64);
-            let body_yaw = e.prev_body_yaw + (e.body_yaw - e.prev_body_yaw) * alpha;
-            let head_yaw = e.prev_head_yaw + (e.head_yaw - e.prev_head_yaw) * alpha;
-            let extras = entity_extras(entity_id, e, alpha);
+            let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
+            let extras = entity_extras(entity_id, e, partial_tick);
 
             EntityRenderInfo {
-                x: pos.x,
-                y: pos.y,
-                z: pos.z,
-                yaw: body_yaw,
-                pitch: e.prev_pitch + (e.pitch - e.prev_pitch) * alpha,
-                head_yaw,
+                position: interp_pos,
+                head_y_rot_deg: lerp_angle(e.prev_head_y_rot_deg, e.head_y_rot_deg, partial_tick),
+                head_x_rot_deg: e
+                    .prev_look_dir
+                    .x_rot_deg()
+                    .lerp(e.look_dir.x_rot_deg(), partial_tick),
+                body_y_rot_deg: lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick),
                 is_baby: e.is_baby,
                 walk_anim_pos: {
                     let scale = if e.is_baby { 3.0 } else { 1.0 };
-                    (e.walk_anim_pos - e.walk_anim_speed * (1.0 - alpha)) * scale
+                    (e.walk_anim_pos - e.walk_anim_speed * (1.0 - partial_tick)) * scale
                 },
                 walk_anim_speed: (e.prev_walk_anim_speed
-                    + (e.walk_anim_speed - e.prev_walk_anim_speed) * alpha)
+                    + (e.walk_anim_speed - e.prev_walk_anim_speed) * partial_tick)
                     .min(1.0),
                 entity_kind: e.entity_type,
                 variant_index: extras.variant_index,
                 overlay_tints: extras.overlay_tints,
                 head_y_offset: extras.head_y_offset,
-                head_x_rot_override: extras.head_x_rot_override,
+                head_x_rot_deg_override: extras.head_x_rot_deg_override,
             }
         })
         .collect();
 
     if !gfx.renderer.is_first_person() {
-        let cam_yaw_deg = -gfx.renderer.camera_yaw().to_degrees();
+        let interp_pos = game
+            .player
+            .prev_position
+            .lerp(game.player.position, partial_tick as f64);
+
+        let interp_y_rot_deg = lerp_angle(
+            game.player.prev_look_dir.y_rot_deg(),
+            game.player.look_dir.y_rot_deg(),
+            partial_tick,
+        );
+
         entity_renders.push(EntityRenderInfo {
-            x: interp_pos.x as f64,
-            y: interp_pos.y as f64,
-            z: interp_pos.z as f64,
-            yaw: cam_yaw_deg,
-            pitch: gfx.renderer.camera_pitch().to_degrees(),
-            head_yaw: cam_yaw_deg,
+            position: interp_pos,
+            head_y_rot_deg: interp_y_rot_deg,
+            head_x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
+            body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
             is_baby: false,
-            walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - alpha),
+            walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
-                + (game.player_walk_speed - game.player_prev_walk_speed) * alpha)
+                + (game.player_walk_speed - game.player_prev_walk_speed) * partial_tick)
                 .min(1.0),
             entity_kind: EntityKind::Player,
             variant_index: 0,
             overlay_tints: [None, None],
             head_y_offset: 0.0,
-            head_x_rot_override: None,
+            head_x_rot_deg_override: None,
         });
     }
 
@@ -604,16 +609,10 @@ pub fn update_game(
         );
     }
 
-    let cam_pos = glam::DVec3::new(
-        game.player.position.x as f64,
-        game.player.position.y as f64,
-        game.player.position.z as f64,
-    );
-    let partial_tick = core.tick_accumulator / TICK_RATE;
     let item_renders = build_item_render_infos(
         &game.item_entity_store,
         &game.chunk_store,
-        cam_pos,
+        *gfx.renderer.camera_pivot_position(),
         partial_tick,
     );
 
@@ -750,7 +749,7 @@ fn seeded_rand(state: &mut u32) -> f32 {
     ((*state >> 16) & 0x7FFF) as f32 / 0x7FFF as f32
 }
 
-fn get_entity_light(chunk_store: &ChunkStore, pos: glam::DVec3) -> f32 {
+fn get_entity_light(chunk_store: &ChunkStore, pos: Position) -> f32 {
     use crate::renderer::chunk::mesher::LIGHT_TABLE;
     let bx = pos.x.floor() as i32;
     let by = pos.y.floor() as i32;
@@ -854,14 +853,14 @@ struct EntityExtras {
     variant_index: u32,
     overlay_tints: [Option<[f32; 4]>; 2],
     head_y_offset: f32,
-    head_x_rot_override: Option<f32>,
+    head_x_rot_deg_override: Option<f32>,
 }
 
 const EMPTY_EXTRAS: EntityExtras = EntityExtras {
     variant_index: 0,
     overlay_tints: [None, None],
     head_y_offset: 0.0,
-    head_x_rot_override: None,
+    head_x_rot_deg_override: None,
 };
 
 fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
@@ -900,7 +899,7 @@ fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> 
     let (pos_scale, angle_scale) = sheep_eat_scales(e.eat_anim_tick, e.prev_eat_anim_tick, alpha);
     let age_scale = if e.is_baby { 0.5 } else { 1.0 };
     let head_y_offset = pos_scale * 9.0 * age_scale;
-    let head_x_rot_override = if e.eat_anim_tick > 0 || e.prev_eat_anim_tick > 0 {
+    let head_x_rot_deg_override = if e.eat_anim_tick > 0 || e.prev_eat_anim_tick > 0 {
         Some(angle_scale)
     } else {
         None
@@ -910,7 +909,7 @@ fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> 
         variant_index: 0,
         overlay_tints,
         head_y_offset,
-        head_x_rot_override,
+        head_x_rot_deg_override,
     }
 }
 

@@ -2,9 +2,10 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use azalea_registry::builtin::BlockKind;
-use glam::Vec3;
+use glam::{DVec3, dvec3};
 
 use super::aabb::Aabb;
+use crate::entity::components::Velocity;
 use crate::world::chunk::ChunkStore;
 
 static NO_COLLISION: LazyLock<HashSet<BlockKind>> = LazyLock::new(|| {
@@ -272,8 +273,8 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
                 let state = chunk_store.get_block_state(bx, by, bz);
                 if has_collision(state) {
                     aabbs.push(Aabb::new(
-                        Vec3::new(bx as f32, by as f32, bz as f32),
-                        Vec3::new((bx + 1) as f32, (by + 1) as f32, (bz + 1) as f32),
+                        dvec3(bx as f64, by as f64, bz as f64),
+                        dvec3((bx + 1) as f64, (by + 1) as f64, (bz + 1) as f64),
                     ));
                 }
             }
@@ -282,13 +283,18 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
 
     aabbs
 }
-fn collide_along_axes(block_aabbs: &[Aabb], player_aabb: Aabb, mut velocity: Vec3) -> (Vec3, bool) {
+
+fn collide_along_axes(
+    block_aabbs: &[Aabb],
+    player_aabb: Aabb,
+    mut velocity: Velocity,
+) -> (DVec3, bool) {
     let original_y = velocity.y;
 
     for block in block_aabbs {
         velocity.y = block.clip_y_collide(&player_aabb, velocity.y);
     }
-    let mut resolved = player_aabb.offset(Vec3::new(0.0, velocity.y, 0.0));
+    let mut resolved = player_aabb.offset(dvec3(0.0, velocity.y, 0.0));
 
     let x_first = velocity.x.abs() >= velocity.z.abs();
 
@@ -296,7 +302,7 @@ fn collide_along_axes(block_aabbs: &[Aabb], player_aabb: Aabb, mut velocity: Vec
         for block in block_aabbs {
             velocity.x = block.clip_x_collide(&resolved, velocity.x);
         }
-        resolved = resolved.offset(Vec3::new(velocity.x, 0.0, 0.0));
+        resolved = resolved.offset(dvec3(velocity.x, 0.0, 0.0));
 
         for block in block_aabbs {
             velocity.z = block.clip_z_collide(&resolved, velocity.z);
@@ -305,7 +311,7 @@ fn collide_along_axes(block_aabbs: &[Aabb], player_aabb: Aabb, mut velocity: Vec
         for block in block_aabbs {
             velocity.z = block.clip_z_collide(&resolved, velocity.z);
         }
-        resolved = resolved.offset(Vec3::new(0.0, 0.0, velocity.z));
+        resolved = resolved.offset(dvec3(0.0, 0.0, velocity.z));
 
         for block in block_aabbs {
             velocity.x = block.clip_x_collide(&resolved, velocity.x);
@@ -314,44 +320,47 @@ fn collide_along_axes(block_aabbs: &[Aabb], player_aabb: Aabb, mut velocity: Vec
 
     let on_ground = original_y < 0.0 && velocity.y != original_y;
 
-    (velocity, on_ground)
+    (*velocity, on_ground)
 }
 
 pub fn resolve_collision(
     chunk_store: &ChunkStore,
     player_aabb: Aabb,
-    velocity: Vec3,
-    step_height: f32,
-) -> (Vec3, bool) {
-    let expanded = player_aabb.expand(velocity);
+    velocity: Velocity,
+    step_height: f64,
+) -> (DVec3, bool) {
+    let expanded = player_aabb.expand(*velocity);
     let block_aabbs = collect_block_aabbs(chunk_store, &expanded);
 
     let (resolved, on_ground) = collide_along_axes(&block_aabbs, player_aabb, velocity);
 
     let horizontal_blocked = resolved.x != velocity.x || resolved.z != velocity.z;
     if step_height > 0.0 && on_ground && horizontal_blocked {
-        let step_up = Vec3::new(velocity.x, step_height, velocity.z);
+        let step_up = dvec3(velocity.x, step_height, velocity.z);
         let step_expanded = player_aabb
             .expand(step_up)
-            .expand(Vec3::new(0.0, -step_height, 0.0));
+            .expand(dvec3(0.0, -step_height, 0.0));
         let step_aabbs = collect_block_aabbs(chunk_store, &step_expanded);
 
         let mut up_vel = step_height;
         for block in &step_aabbs {
             up_vel = block.clip_y_collide(&player_aabb, up_vel);
         }
-        let raised = player_aabb.offset(Vec3::new(0.0, up_vel, 0.0));
+        let raised = player_aabb.offset(dvec3(0.0, up_vel, 0.0));
 
-        let (step_resolved, _) =
-            collide_along_axes(&step_aabbs, raised, Vec3::new(velocity.x, 0.0, velocity.z));
+        let (step_resolved, _) = collide_along_axes(
+            &step_aabbs,
+            raised,
+            Velocity::new(velocity.x, 0.0, velocity.z),
+        );
 
-        let after_move = raised.offset(Vec3::new(step_resolved.x, 0.0, step_resolved.z));
+        let after_move = raised.offset(dvec3(step_resolved.x, 0.0, step_resolved.z));
         let mut down_vel = -(up_vel - velocity.y);
         for block in &step_aabbs {
             down_vel = block.clip_y_collide(&after_move, down_vel);
         }
 
-        let step_total = Vec3::new(step_resolved.x, up_vel + down_vel, step_resolved.z);
+        let step_total = dvec3(step_resolved.x, up_vel + down_vel, step_resolved.z);
 
         let step_h_dist = step_total.x * step_total.x + step_total.z * step_total.z;
         let orig_h_dist = resolved.x * resolved.x + resolved.z * resolved.z;

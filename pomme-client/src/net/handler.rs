@@ -233,27 +233,25 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::AddEntity(p) => {
-            let yaw = (p.y_rot as f32) * 360.0 / 256.0;
-            let pitch = (p.x_rot as f32) * 360.0 / 256.0;
-            let head_yaw = (p.y_head_rot as f32) * 360.0 / 256.0;
-            let vel = p.movement.to_vec3();
+            let y_rot_deg = (p.y_rot as f32) * 360.0 / 256.0;
+            let x_rot_deg = (p.x_rot as f32) * 360.0 / 256.0;
+            let head_y_rot_deg = (p.y_head_rot as f32) * 360.0 / 256.0;
+            let velocity = p.movement.to_vec3();
             let _ = event_tx.try_send(NetworkEvent::EntitySpawned {
                 id: p.id.0,
                 entity_type: p.entity_type,
-                x: p.position.x,
-                y: p.position.y,
-                z: p.position.z,
-                yaw,
-                pitch,
-                head_yaw,
-                velocity: [vel.x, vel.y, vel.z],
+                position: p.position.into(),
+                velocity: velocity.into(),
+                y_rot_deg,
+                x_rot_deg,
+                head_y_rot_deg,
             });
         }
         ClientboundGamePacket::RotateHead(p) => {
-            let head_yaw = (p.y_head_rot as f32) * 360.0 / 256.0;
+            let head_y_rot_deg = (p.y_head_rot as f32) * 360.0 / 256.0;
             let _ = event_tx.try_send(NetworkEvent::EntityHeadRotation {
                 id: p.entity_id.0,
-                head_yaw,
+                head_y_rot_deg,
             });
         }
         ClientboundGamePacket::MoveEntityPos(p) => {
@@ -267,28 +265,24 @@ pub fn handle_game_packet(
                 dx: p.delta.x(),
                 dy: p.delta.y(),
                 dz: p.delta.z(),
-                yaw: look.y_rot(),
-                pitch: look.x_rot(),
+                y_rot_deg: look.y_rot(),
+                x_rot_deg: look.x_rot(),
             });
         }
         ClientboundGamePacket::TeleportEntity(p) => {
             let _ = event_tx.try_send(NetworkEvent::EntityTeleported {
                 id: p.id.0,
-                x: p.change.pos.x,
-                y: p.change.pos.y,
-                z: p.change.pos.z,
-                yaw: p.change.look_direction.y_rot(),
-                pitch: p.change.look_direction.x_rot(),
+                position: p.change.pos.into(),
+                y_rot_deg: p.change.look_direction.y_rot(),
+                x_rot_deg: p.change.look_direction.x_rot(),
             });
         }
         ClientboundGamePacket::EntityPositionSync(p) => {
             let _ = event_tx.try_send(NetworkEvent::EntityTeleported {
                 id: p.id.0,
-                x: p.values.pos.x,
-                y: p.values.pos.y,
-                z: p.values.pos.z,
-                yaw: p.values.look_direction.y_rot(),
-                pitch: p.values.look_direction.x_rot(),
+                position: p.values.pos.into(),
+                y_rot_deg: p.values.look_direction.y_rot(),
+                x_rot_deg: p.values.look_direction.x_rot(),
             });
         }
         ClientboundGamePacket::RemoveEntities(p) => {

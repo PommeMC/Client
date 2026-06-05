@@ -11,6 +11,8 @@ use azalea_inventory::ItemStack;
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use simdnbt::owned::NbtCompound;
 
+use crate::entity::components::{Position, Velocity};
+
 pub enum NetworkEvent {
     Connected,
     BiomeColors {
@@ -103,13 +105,11 @@ pub enum NetworkEvent {
     EntitySpawned {
         id: i32,
         entity_type: EntityKind,
-        x: f64,
-        y: f64,
-        z: f64,
-        yaw: f32,
-        pitch: f32,
-        head_yaw: f32,
-        velocity: [f64; 3],
+        position: Position,
+        velocity: Velocity,
+        y_rot_deg: f32,
+        x_rot_deg: f32,
+        head_y_rot_deg: f32,
     },
     EntityMoved {
         id: i32,
@@ -122,16 +122,14 @@ pub enum NetworkEvent {
         dx: f64,
         dy: f64,
         dz: f64,
-        yaw: f32,
-        pitch: f32,
+        y_rot_deg: f32,
+        x_rot_deg: f32,
     },
     EntityTeleported {
         id: i32,
-        x: f64,
-        y: f64,
-        z: f64,
-        yaw: f32,
-        pitch: f32,
+        position: Position,
+        y_rot_deg: f32,
+        x_rot_deg: f32,
     },
     EntitiesRemoved {
         ids: Vec<i32>,
@@ -143,7 +141,7 @@ pub enum NetworkEvent {
     },
     EntityHeadRotation {
         id: i32,
-        head_yaw: f32,
+        head_y_rot_deg: f32,
     },
     EntityBabyFlag {
         id: i32,

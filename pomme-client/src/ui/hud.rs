@@ -1,5 +1,6 @@
 use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
+use glam::DVec3;
 
 use super::common::{FONT_SIZE, WHITE, push_item_count};
 use crate::player::inventory::item_resource_name;
@@ -16,9 +17,9 @@ pub struct FrameTimings {
 
 pub struct DebugInfo<'a> {
     pub fps: u32,
-    pub position: glam::Vec3,
-    pub yaw: f32,
-    pub pitch: f32,
+    pub position: DVec3,
+    pub y_rot_deg: f32,
+    pub x_rot_deg: f32,
     pub target_block: Option<(BlockPos, azalea_core::direction::Direction, String)>,
     pub chunk_count: u32,
     pub gpu_name: &'a str,
@@ -365,9 +366,9 @@ fn build_debug_overlay(elements: &mut Vec<MenuElement>, info: &DebugInfo<'_>, gs
     let bz = pos.z.floor() as i32;
     let cx = bx.div_euclid(16);
     let cz = bz.div_euclid(16);
-    let facing = facing_name(info.yaw);
-    let yaw_deg = info.yaw.to_degrees();
-    let pitch_deg = info.pitch.to_degrees();
+    let facing = facing_name(info.y_rot_deg);
+    let y_rot_deg = info.y_rot_deg;
+    let x_rot_deg = info.x_rot_deg;
 
     let mut left_lines: Vec<String> = vec![
         format!("Pomme ({}fps)", info.fps),
@@ -381,7 +382,7 @@ fn build_debug_overlay(elements: &mut Vec<MenuElement>, info: &DebugInfo<'_>, gs
             cx,
             cz
         ),
-        format!("Facing: {} ({:.1} / {:.1})", facing, yaw_deg, pitch_deg),
+        format!("Facing: {} ({:.1} / {:.1})", facing, y_rot_deg, x_rot_deg),
         String::new(),
         format!("Chunks: {} loaded", info.chunk_count),
     ];
@@ -447,10 +448,10 @@ fn push_debug_lines(
     }
 }
 
-fn facing_name(yaw: f32) -> &'static str {
-    let deg = yaw.to_degrees().rem_euclid(360.0);
-    match deg as u32 {
-        315..=360 | 0..=44 => "South (+Z)",
+fn facing_name(y_rot_deg: f32) -> &'static str {
+    let deg = y_rot_deg.rem_euclid(360.0) as u32;
+    match deg {
+        315..=359 | 0..=44 => "South (+Z)",
         45..=134 => "West (-X)",
         135..=224 => "North (-Z)",
         225..=314 => "East (+X)",
