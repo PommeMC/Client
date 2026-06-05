@@ -137,8 +137,12 @@ impl AudioEngine {
     }
 
     /// Sets all per-category volumes (0.0..=1.0), applied live to any playing
-    /// menu track.
+    /// menu track. No-op when the volumes are unchanged, so callers can invoke
+    /// it every frame cheaply.
     pub fn set_volumes(&mut self, volumes: [f32; 10]) {
+        if volumes == self.volumes {
+            return;
+        }
         self.volumes = volumes;
         if let Some(sink) = self.music_sink.as_ref() {
             sink.set_volume(self.current_music_volume());
