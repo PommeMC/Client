@@ -549,7 +549,6 @@ pub fn update_game(
         );
     }
 
-    let partial_tick = core.tick_accumulator / TICK_RATE;
     let item_renders = build_item_render_infos(
         &game.item_entity_store,
         &game.chunk_store,

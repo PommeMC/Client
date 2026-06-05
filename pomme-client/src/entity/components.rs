@@ -107,8 +107,8 @@ impl Velocity {
         Self(dvec3(x, y, z))
     }
 
-    pub fn x_rot(self, radians: f32) -> Self {
-        let (sin, cos) = (radians as f64).sin_cos();
+    pub fn x_rot(self, radians: f64) -> Self {
+        let (sin, cos) = radians.sin_cos();
         Self::new(
             self.x,
             self.y * cos - self.z * sin,
@@ -116,8 +116,8 @@ impl Velocity {
         )
     }
 
-    pub fn y_rot(self, radians: f32) -> Self {
-        let (sin, cos) = (radians as f64).sin_cos();
+    pub fn y_rot(self, radians: f64) -> Self {
+        let (sin, cos) = radians.sin_cos();
         Self::new(
             self.x * cos + self.z * sin,
             self.y,
