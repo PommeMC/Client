@@ -1353,8 +1353,13 @@ fn build_gui_item_atlas(
     menu_tex_set: vk::DescriptorSet,
     slot_px: u32,
 ) -> pipelines::gui_item_atlas::GuiItemAtlas {
-    let atlas =
-        pipelines::gui_item_atlas::GuiItemAtlas::new(device, allocator, queue, command_pool, slot_px);
+    let atlas = pipelines::gui_item_atlas::GuiItemAtlas::new(
+        device,
+        allocator,
+        queue,
+        command_pool,
+        slot_px,
+    );
     atlas.bind_into_menu_tex_set(device, menu_tex_set);
     atlas
 }
