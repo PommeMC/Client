@@ -467,21 +467,13 @@ impl AppCore {
                 NetworkEvent::PlaySound {
                     sound,
                     category,
-                    x,
-                    y,
-                    z,
+                    pos,
                     volume,
                     pitch,
                     seed,
                 } => {
-                    self.audio.play_world_sound(
-                        &sound,
-                        category,
-                        [x as f32, y as f32, z as f32],
-                        volume,
-                        pitch,
-                        seed,
-                    );
+                    self.audio
+                        .play_world_sound(&sound, category, pos, volume, pitch, seed);
                 }
                 NetworkEvent::PlayEntitySound {
                     sound,
@@ -491,18 +483,10 @@ impl AppCore {
                     pitch,
                     seed,
                 } => {
-                    let pos = if entity_id == game.player.entity_id {
-                        let p = game.player.position;
-                        Some([p.x, p.y + 1.0, p.z])
-                    } else {
-                        game.entity_store.living.get(&entity_id).map(|e| {
-                            [
-                                e.position.x as f32,
-                                e.position.y as f32,
-                                e.position.z as f32,
-                            ]
-                        })
-                    };
+                    let pos = (entity_id == game.player.entity_id)
+                        .then_some(game.player.position)
+                        .or_else(|| game.entity_store.living.get(&entity_id).map(|e| e.position));
+
                     if let Some(pos) = pos {
                         self.audio
                             .play_world_sound(&sound, category, pos, volume, pitch, seed);

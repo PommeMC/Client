@@ -5,6 +5,7 @@ use crossbeam_channel::Sender;
 
 use super::NetworkEvent;
 use super::sender::PacketSender;
+use crate::entity::components::Position;
 
 pub fn handle_game_packet(
     packet: &ClientboundGamePacket,
@@ -77,9 +78,7 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::PlaySound {
                 sound: resolve_sound(&p.sound),
                 category: p.source as u8,
-                x: p.x as f64 / 8.0,
-                y: p.y as f64 / 8.0,
-                z: p.z as f64 / 8.0,
+                pos: Position::new(p.x as f64 / 8.0, p.y as f64 / 8.0, p.z as f64 / 8.0),
                 volume: p.volume,
                 pitch: p.pitch,
                 seed: p.seed,

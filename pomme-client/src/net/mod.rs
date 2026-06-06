@@ -92,9 +92,7 @@ pub enum NetworkEvent {
     PlaySound {
         sound: crate::audio::SoundRef,
         category: u8,
-        x: f64,
-        y: f64,
-        z: f64,
+        pos: Position,
         volume: f32,
         pitch: f32,
         seed: u64,

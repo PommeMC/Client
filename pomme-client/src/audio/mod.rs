@@ -8,6 +8,7 @@ use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, SpatialSink};
 
 use self::sounds::{SoundsIndex, sound_asset_key};
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::entity::components::Position;
 
 const MENU_MUSIC_EVENT: &str = "music.menu";
 const UI_CLICK_EVENT: &str = "ui.button.click";
@@ -150,12 +151,13 @@ impl AudioEngine {
     }
 
     /// Updates the listener (camera) position and facing for positional audio.
-    /// `yaw` is the Minecraft yaw in radians (0 = +Z).
-    pub fn set_listener(&mut self, pos: [f32; 3], yaw: f32) {
-        let rx = -yaw.cos() * LISTENER_EAR_OFFSET;
-        let rz = -yaw.sin() * LISTENER_EAR_OFFSET;
-        self.listener_left = [pos[0] - rx, pos[1], pos[2] - rz];
-        self.listener_right = [pos[0] + rx, pos[1], pos[2] + rz];
+    pub fn set_listener(&mut self, pos: Position, y_rot_deg: f32) {
+        let y_rot = y_rot_deg.to_radians();
+        let rx = -y_rot.cos() * LISTENER_EAR_OFFSET;
+        let rz = -y_rot.sin() * LISTENER_EAR_OFFSET;
+
+        self.listener_left = [pos.x as f32 - rx, pos.y as f32, pos.z as f32 - rz];
+        self.listener_right = [pos.x as f32 + rx, pos.y as f32, pos.z as f32 + rz];
     }
 
     /// Plays the vanilla button click: MASTER category at the fixed `forUI`
@@ -175,7 +177,7 @@ impl AudioEngine {
         &self,
         sound: &SoundRef,
         category: u8,
-        pos: [f32; 3],
+        pos: Position,
         volume: f32,
         pitch: f32,
         seed: u64,
@@ -186,9 +188,12 @@ impl AudioEngine {
         let Some((source, entry_volume)) = self.decode_sound(sound, seed) else {
             return;
         };
-        let Ok(sink) =
-            SpatialSink::try_new(&output.handle, pos, self.listener_left, self.listener_right)
-        else {
+        let Ok(sink) = SpatialSink::try_new(
+            &output.handle,
+            pos.as_vec3().into(),
+            self.listener_left,
+            self.listener_right,
+        ) else {
             return;
         };
         let gain = self.category_gain(SoundCategory::from_index(category));
