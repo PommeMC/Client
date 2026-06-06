@@ -11,6 +11,7 @@ use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::CameraUniform;
+use crate::renderer::chunk::mesher::{CUBE_FACE_DIRS, cube_face_geometry};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 use crate::world::block::model::{BakedQuad, Direction};
 use crate::world::block::registry::BlockRegistry;
@@ -312,7 +313,8 @@ fn build_overlay_vertices(
         }
     } else if registry.get_textures(state).is_some() {
         // Blocks rendered as a plain opaque cube (no baked model): crack a unit cube.
-        for (positions, dir) in UNIT_CUBE_FACES {
+        for dir in CUBE_FACE_DIRS {
+            let (positions, _, _) = cube_face_geometry(dir);
             push_face(&mut verts, origin, &positions, dir, stage);
         }
     }
@@ -419,65 +421,6 @@ fn nearest_direction(positions: &[[f32; 3]; 4]) -> Direction {
         Direction::North
     }
 }
-
-/// The six faces of a unit cube in block-local coords, paired with their
-/// facing, for blocks that render as a plain opaque cube with no baked model.
-const UNIT_CUBE_FACES: [([[f32; 3]; 4], Direction); 6] = [
-    (
-        [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [1.0, 0.0, 1.0],
-            [0.0, 0.0, 1.0],
-        ],
-        Direction::Down,
-    ),
-    (
-        [
-            [0.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0],
-            [1.0, 1.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ],
-        Direction::Up,
-    ),
-    (
-        [
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [1.0, 1.0, 0.0],
-        ],
-        Direction::North,
-    ),
-    (
-        [
-            [0.0, 0.0, 1.0],
-            [1.0, 0.0, 1.0],
-            [1.0, 1.0, 1.0],
-            [0.0, 1.0, 1.0],
-        ],
-        Direction::South,
-    ),
-    (
-        [
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 1.0, 1.0],
-        ],
-        Direction::West,
-    ),
-    (
-        [
-            [1.0, 0.0, 0.0],
-            [1.0, 0.0, 1.0],
-            [1.0, 1.0, 1.0],
-            [1.0, 1.0, 0.0],
-        ],
-        Direction::East,
-    ),
-];
 
 fn load_destroy_atlas(
     device: &vk::Device,
@@ -696,7 +639,8 @@ mod tests {
             let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             max - min
         };
-        for (positions, dir) in UNIT_CUBE_FACES {
+        for dir in CUBE_FACE_DIRS {
+            let (positions, _, _) = cube_face_geometry(dir);
             let uv: [[f32; 2]; 4] =
                 std::array::from_fn(|i| project_crack_uv(Vec3::from_array(positions[i]), dir));
             let us = std::array::from_fn(|i| uv[i][0]);

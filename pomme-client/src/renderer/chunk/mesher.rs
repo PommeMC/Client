@@ -1261,7 +1261,7 @@ fn emit_missing_cube(
     }
 }
 
-const CUBE_FACE_DIRS: [Direction; 6] = [
+pub(crate) const CUBE_FACE_DIRS: [Direction; 6] = [
     Direction::Up,
     Direction::Down,
     Direction::North,
@@ -1472,7 +1472,7 @@ fn avg4(a: f32, b: f32, c: f32, d: f32) -> f32 {
     (a + b + c + d) * 0.25
 }
 
-fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4], f32) {
+pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4], f32) {
     match dir {
         Direction::Up => (
             [
