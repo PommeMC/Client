@@ -318,7 +318,7 @@ impl Renderer {
             &ctx.allocator,
             ctx.graphics_queue,
             ctx.command_pool,
-            menu_pipeline.tex_descriptor_set(),
+            &menu_pipeline,
             initial_slot_px,
         );
 
@@ -1062,9 +1062,11 @@ impl Renderer {
                 &self.ctx.allocator,
                 self.ctx.graphics_queue,
                 self.ctx.command_pool,
-                self.menu_pipeline.tex_descriptor_set(),
+                &self.menu_pipeline,
                 target_slot_px,
             );
+            self.gui_item_pipeline
+                .recreate_pipeline(&self.ctx.device, self.gui_item_atlas.render_pass());
             self.gui_item_pipeline
                 .set_atlas_px(self.gui_item_atlas.atlas_px());
         }
@@ -1350,7 +1352,7 @@ fn build_gui_item_atlas(
     allocator: &Arc<std::sync::Mutex<pomme_gpu_allocator::vulkan::Allocator>>,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
-    menu_tex_set: vk::DescriptorSet,
+    menu: &pipelines::menu_overlay::MenuOverlayPipeline,
     slot_px: u32,
 ) -> pipelines::gui_item_atlas::GuiItemAtlas {
     let atlas = pipelines::gui_item_atlas::GuiItemAtlas::new(
@@ -1360,7 +1362,7 @@ fn build_gui_item_atlas(
         command_pool,
         slot_px,
     );
-    atlas.bind_into_menu_tex_set(device, menu_tex_set);
+    menu.set_item_atlas(device, atlas.color_view(), atlas.sampler());
     atlas
 }
 

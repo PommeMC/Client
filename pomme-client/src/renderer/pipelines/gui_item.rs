@@ -219,6 +219,16 @@ impl GuiItemPipeline {
         self.write_atlas_ortho(atlas_px as f32);
     }
 
+    pub fn recreate_pipeline(&mut self, device: &vk::Device, atlas_render_pass: vk::RenderPass) {
+        device.destroy_pipeline(self.pipeline, None);
+        self.pipeline = item_entity::create_pipeline_with_front_face(
+            device,
+            atlas_render_pass,
+            self.pipeline_layout,
+            vk::FrontFace::Clockwise,
+        );
+    }
+
     fn write_atlas_ortho(&mut self, atlas_px: f32) {
         // Bottom/top swapped to Y-invert the projection (matches vanilla's
         // `invertY=true`).

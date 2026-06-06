@@ -9,7 +9,8 @@ use crate::renderer::util;
 
 // Target capacity per atlas page in slots. The atlas is sized to fit this many
 // at the active slot size, clamped to MIN_ATLAS_PX so very small slots still
-// hit the device's framebuffer minimums.
+// hit the device's framebuffer minimums. MAX_ATLAS_PX is a conservative cap;
+// vanilla queries `RenderSystem.getDevice().limits().maxTextureSizeForFormat`.
 const TARGET_SLOT_CAPACITY: u32 = 256;
 const MIN_ATLAS_PX: u32 = 512;
 const MAX_ATLAS_PX: u32 = 4096;
@@ -45,8 +46,8 @@ pub enum SlotState {
 
 #[derive(Clone, Copy)]
 pub struct Slot {
-    pub x: u32,
-    pub y: u32,
+    x: u32,
+    y: u32,
 }
 
 struct SlotInternal {
@@ -271,7 +272,8 @@ impl GuiItemAtlas {
         self.allocator.end_frame();
     }
 
-    /// Top-origin slot rect — feed to the pose translate in `bake_to_slot`.
+    /// Top-origin slot rect, consumed by `slot_model_matrix` in `gui_item.rs`
+    /// to position the baked mesh in atlas space.
     pub fn slot_rect_pixels(&self, slot: &Slot) -> (i32, i32, u32, u32) {
         (
             (slot.x * self.slot_px) as i32,
@@ -293,7 +295,8 @@ impl GuiItemAtlas {
     }
 
     pub fn slot_uv(&self, slot: &Slot) -> [f32; 4] {
-        // V is decreasing because slot storage is bottom-origin in the atlas image.
+        // V decreases because the bake projection Y-flips the mesh into the
+        // atlas image, so the slot's top-of-mesh lands at the higher V row.
         let step = self.slot_px as f32 / self.atlas_px as f32;
         let u0 = slot.x as f32 * step;
         let v0 = 1.0 - slot.y as f32 * step;
@@ -360,21 +363,12 @@ impl GuiItemAtlas {
         cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
     }
 
-    pub fn bind_into_menu_tex_set(&self, device: &vk::Device, menu_tex_set: vk::DescriptorSet) {
-        let img_info = vk::DescriptorImageInfo {
-            sampler: self.sampler,
-            image_view: self.color_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let write = vk::WriteDescriptorSet {
-            dst_set: menu_tex_set,
-            dst_binding: 2,
-            descriptor_count: 1,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            image_info: &img_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[write], &[]);
+    pub fn color_view(&self) -> vk::ImageView {
+        self.color_view
+    }
+
+    pub fn sampler(&self) -> vk::Sampler {
+        self.sampler
     }
 
     pub fn destroy(&mut self, device: &vk::Device, gpu_alloc: &Arc<Mutex<Allocator>>) {
@@ -619,7 +613,8 @@ fn create_render_pass(device: &vk::Device) -> vk::RenderPass {
             src_access_mask: vk::AccessFlags::ShaderRead,
             dst_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
                 | vk::PipelineStageFlags::EarlyFragmentTests,
-            dst_access_mask: vk::AccessFlags::ColorAttachmentWrite
+            dst_access_mask: vk::AccessFlags::ColorAttachmentRead
+                | vk::AccessFlags::ColorAttachmentWrite
                 | vk::AccessFlags::DepthStencilAttachmentWrite,
             ..Default::default()
         },

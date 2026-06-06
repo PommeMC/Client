@@ -1130,8 +1130,21 @@ impl MenuOverlayPipeline {
         cmd.set_scissor(0, &[default_scissor]);
     }
 
-    pub fn tex_descriptor_set(&self) -> vk::DescriptorSet {
-        self.tex_set
+    pub fn set_item_atlas(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
+        let info = vk::DescriptorImageInfo {
+            sampler,
+            image_view: view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: self.tex_set,
+            dst_binding: 2,
+            descriptor_count: 1,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            image_info: &info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
     }
 
     pub fn set_blur_texture(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
