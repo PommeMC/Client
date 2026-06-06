@@ -814,6 +814,7 @@ impl AppCore {
                 &self.input,
                 &game.chunk_store,
                 &connection.packet_tx,
+                &self.audio,
                 game.player.on_ground,
                 game.player.game_mode == 1,
             );

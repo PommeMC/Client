@@ -41,6 +41,10 @@ enum SoundCategory {
     Voice = 9,
 }
 
+/// `SoundSource::BLOCKS` index, for emitting block sounds (e.g. mining)
+/// directly.
+pub const CATEGORY_BLOCKS: u8 = SoundCategory::Blocks as u8;
+
 impl SoundCategory {
     fn from_index(index: u8) -> Self {
         match index {
