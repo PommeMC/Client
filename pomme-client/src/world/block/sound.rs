@@ -3,8 +3,8 @@
 //! Vanilla plays a block's `SoundType` hit sound while it is being mined
 //! (`MultiPlayerGameMode.continueDestroyBlock`) and its break sound when the
 //! block is destroyed (level event 2001). `azalea-block` does not expose sound
-//! type, so the block id -> sounds table is generated from the decompiled
-//! vanilla `Blocks.java` by `tools/gen_block_sounds.py` and embedded here as
+//! type, so the block id -> sounds table was extracted from the decompiled
+//! vanilla `Blocks.java` / `SoundType.java` and is embedded here as
 //! `block_sounds.json`.
 
 use std::collections::HashMap;
