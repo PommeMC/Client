@@ -484,7 +484,7 @@ impl AppCore {
                     seed,
                 } => {
                     let pos = (entity_id == game.player.entity_id)
-                        .then_some(game.player.position)
+                        .then_some(game.player.position + dvec3(0.0, 1.0, 0.0))
                         .or_else(|| game.entity_store.living.get(&entity_id).map(|e| e.position));
 
                     if let Some(pos) = pos {
