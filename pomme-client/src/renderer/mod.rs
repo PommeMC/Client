@@ -1054,6 +1054,9 @@ impl Renderer {
                 0,
             ));
         if target_slot_px != self.gui_item_atlas.slot_px() {
+            // Mid-cmd-recording wait_idle: this cmd buffer is unsubmitted so
+            // holds no in-flight references, and `submit_one_time` inside the
+            // rebuild uses a separate primary cmd from the same pool.
             self.ctx.device.wait_idle().ok();
             self.gui_item_atlas
                 .destroy(&self.ctx.device, &self.ctx.allocator);
@@ -1077,8 +1080,13 @@ impl Renderer {
                 unique_names.insert(item_name.clone());
             }
         }
-        if !self.gui_item_atlas.has_space_for_all(&unique_names) {
-            self.gui_item_atlas.reclaim_space_for(&unique_names);
+        if !self.gui_item_atlas.has_space_for_all(&unique_names)
+            && !self.gui_item_atlas.reclaim_space_for(&unique_names)
+        {
+            tracing::warn!(
+                "gui_item_atlas: out of slots for {} unique items; some icons will not render",
+                unique_names.len()
+            );
         }
         let mut item_atlas_uvs: HashMap<String, [f32; 4]> = HashMap::new();
         struct BakeJob {
@@ -1110,13 +1118,13 @@ impl Renderer {
                     self.gui_item_atlas.clear_slot_color(cmd, &job.slot);
                 }
                 cmd.set_scissor(0, &[self.gui_item_atlas.scissor_rect(&job.slot)]);
-                let (sx, sy, sw_slot, _) = self.gui_item_atlas.slot_rect_pixels(&job.slot);
+                let (sx, sy) = self.gui_item_atlas.slot_origin_pixels(&job.slot);
                 self.gui_item_pipeline.bake_to_slot(
                     cmd,
                     &self.item_entity_pipeline,
-                    sx as u32,
-                    sy as u32,
-                    sw_slot,
+                    sx,
+                    sy,
+                    self.gui_item_atlas.slot_px(),
                     &job.name,
                     job.is_block,
                 );

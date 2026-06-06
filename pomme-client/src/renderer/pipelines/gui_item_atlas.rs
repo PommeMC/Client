@@ -272,15 +272,10 @@ impl GuiItemAtlas {
         self.allocator.end_frame();
     }
 
-    /// Top-origin slot rect, consumed by `slot_model_matrix` in `gui_item.rs`
-    /// to position the baked mesh in atlas space.
-    pub fn slot_rect_pixels(&self, slot: &Slot) -> (i32, i32, u32, u32) {
-        (
-            (slot.x * self.slot_px) as i32,
-            (slot.y * self.slot_px) as i32,
-            self.slot_px,
-            self.slot_px,
-        )
+    /// Top-origin pixel coordinates of the slot's upper-left corner; pair with
+    /// `slot_px()` for the size.
+    pub fn slot_origin_pixels(&self, slot: &Slot) -> (u32, u32) {
+        (slot.x * self.slot_px, slot.y * self.slot_px)
     }
 
     /// Bottom-origin framebuffer rect for the bake-pass scissor and slot clear.
