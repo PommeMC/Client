@@ -39,12 +39,10 @@ struct Vertex {
 const MAX_VERTICES: usize = 16384;
 const VERTEX_SIZE: usize = size_of::<Vertex>();
 
-enum DrawOp {
-    Quads {
-        start: u32,
-        count: u32,
-        scissor: Option<[f32; 4]>,
-    },
+struct DrawOp {
+    start: u32,
+    count: u32,
+    scissor: Option<[f32; 4]>,
 }
 
 struct GlyphEntry {
@@ -609,7 +607,7 @@ impl MenuOverlayPipeline {
             ) {
                 let count = vertices.len() as u32 - cmd_start;
                 if count > 0 {
-                    draw_ops.push(DrawOp::Quads {
+                    draw_ops.push(DrawOp {
                         start: cmd_start,
                         count,
                         scissor: current_scissor,
@@ -1070,7 +1068,7 @@ impl MenuOverlayPipeline {
 
         let final_count = vertices.len() as u32 - cmd_start;
         if final_count > 0 {
-            draw_ops.push(DrawOp::Quads {
+            draw_ops.push(DrawOp {
                 start: cmd_start,
                 count: final_count,
                 scissor: current_scissor,
@@ -1100,44 +1098,34 @@ impl MenuOverlayPipeline {
             },
         };
 
-        let mut needs_bind = true;
+        if !draw_ops.is_empty() {
+            cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+            cmd.bind_descriptor_sets(
+                vk::PipelineBindPoint::Graphics,
+                self.pipeline_layout,
+                0,
+                &[self.globals_set, self.tex_set],
+                &[],
+            );
+            cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+        }
         for op in &draw_ops {
-            match op {
-                DrawOp::Quads {
-                    start,
-                    count,
-                    scissor,
-                } => {
-                    if needs_bind {
-                        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-                        cmd.bind_descriptor_sets(
-                            vk::PipelineBindPoint::Graphics,
-                            self.pipeline_layout,
-                            0,
-                            &[self.globals_set, self.tex_set],
-                            &[],
-                        );
-                        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-                        needs_bind = false;
-                    }
-                    let rect = if let Some(s) = scissor {
-                        vk::Rect2D {
-                            offset: vk::Offset2D {
-                                x: s[0] as i32,
-                                y: s[1] as i32,
-                            },
-                            extent: vk::Extent2D {
-                                width: s[2] as u32,
-                                height: s[3] as u32,
-                            },
-                        }
-                    } else {
-                        default_scissor
-                    };
-                    cmd.set_scissor(0, &[rect]);
-                    cmd.draw(*count, 1, *start, 0);
+            let rect = if let Some(s) = op.scissor {
+                vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: s[0] as i32,
+                        y: s[1] as i32,
+                    },
+                    extent: vk::Extent2D {
+                        width: s[2] as u32,
+                        height: s[3] as u32,
+                    },
                 }
-            }
+            } else {
+                default_scissor
+            };
+            cmd.set_scissor(0, &[rect]);
+            cmd.draw(op.count, 1, op.start, 0);
         }
         cmd.set_scissor(0, &[default_scissor]);
     }

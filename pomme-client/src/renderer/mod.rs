@@ -313,14 +313,14 @@ impl Renderer {
 
         let initial_slot_px =
             pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(sw, sh, 0));
-        let gui_item_atlas = pipelines::gui_item_atlas::GuiItemAtlas::new(
+        let gui_item_atlas = build_gui_item_atlas(
             &ctx.device,
             &ctx.allocator,
             ctx.graphics_queue,
             ctx.command_pool,
+            menu_pipeline.tex_descriptor_set(),
             initial_slot_px,
         );
-        gui_item_atlas.bind_into_menu_tex_set(&ctx.device, menu_pipeline.tex_descriptor_set());
 
         let gui_item_pipeline = pipelines::gui_item::GuiItemPipeline::new(
             &ctx.device,
@@ -1057,15 +1057,14 @@ impl Renderer {
             self.ctx.device.wait_idle().ok();
             self.gui_item_atlas
                 .destroy(&self.ctx.device, &self.ctx.allocator);
-            self.gui_item_atlas = pipelines::gui_item_atlas::GuiItemAtlas::new(
+            self.gui_item_atlas = build_gui_item_atlas(
                 &self.ctx.device,
                 &self.ctx.allocator,
                 self.ctx.graphics_queue,
                 self.ctx.command_pool,
+                self.menu_pipeline.tex_descriptor_set(),
                 target_slot_px,
             );
-            self.gui_item_atlas
-                .bind_into_menu_tex_set(&self.ctx.device, self.menu_pipeline.tex_descriptor_set());
             self.gui_item_pipeline
                 .set_atlas_px(self.gui_item_atlas.atlas_px());
         }
@@ -1344,6 +1343,20 @@ impl Renderer {
         self.ctx.advance_frame();
         Ok(())
     }
+}
+
+fn build_gui_item_atlas(
+    device: &vk::Device,
+    allocator: &Arc<std::sync::Mutex<pomme_gpu_allocator::vulkan::Allocator>>,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    menu_tex_set: vk::DescriptorSet,
+    slot_px: u32,
+) -> pipelines::gui_item_atlas::GuiItemAtlas {
+    let atlas =
+        pipelines::gui_item_atlas::GuiItemAtlas::new(device, allocator, queue, command_pool, slot_px);
+    atlas.bind_into_menu_tex_set(device, menu_tex_set);
+    atlas
 }
 
 fn warm_item_meshes(
