@@ -4,7 +4,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, SpatialSink};
+use rodio::source::ChannelVolume;
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 
 use self::sounds::{SoundsIndex, sound_asset_key};
 use crate::assets::{AssetIndex, resolve_asset_path};
@@ -24,6 +25,9 @@ const MENU_MUSIC_MAX_GAP: f32 = 30.0;
 /// Half the distance between the listener's ears, in blocks. Wider values
 /// exaggerate left/right panning.
 const LISTENER_EAR_OFFSET: f32 = 0.5;
+
+/// Vanilla's linear attenuation distance in blocks for a normal sound.
+const SOUND_ATTENUATION_BLOCKS: f32 = 16.0;
 
 /// Sound categories, matching the protocol `SoundSource` order so a packet's
 /// source index maps straight onto a volume slot.
@@ -192,18 +196,33 @@ impl AudioEngine {
         let Some((source, entry_volume)) = self.decode_sound(sound, seed) else {
             return;
         };
-        let Ok(sink) = SpatialSink::try_new(
-            &output.handle,
-            pos.as_vec3().into(),
-            self.listener_left,
-            self.listener_right,
-        ) else {
+        let emitter: [f32; 3] = pos.as_vec3().into();
+        let center = [
+            (self.listener_left[0] + self.listener_right[0]) * 0.5,
+            (self.listener_left[1] + self.listener_right[1]) * 0.5,
+            (self.listener_left[2] + self.listener_right[2]) * 0.5,
+        ];
+
+        // Vanilla linear distance attenuation, not rodio's 1/d^2.
+        let instance_volume = volume * entry_volume;
+        let atten_dist = instance_volume.max(1.0) * SOUND_ATTENUATION_BLOCKS;
+        let dist_gain = linear_attenuation(dist(center, emitter), atten_dist);
+        if dist_gain <= 0.0 {
+            return;
+        }
+
+        let (left_pan, right_pan) = stereo_pan(self.listener_left, self.listener_right, emitter);
+        let base =
+            self.category_gain(SoundCategory::from_index(category)) * instance_volume * dist_gain;
+
+        let Ok(sink) = Sink::try_new(&output.handle) else {
             return;
         };
-        let gain = self.category_gain(SoundCategory::from_index(category));
-        sink.set_volume(gain * volume * entry_volume);
         sink.set_speed(pitch.max(0.01));
-        sink.append(source);
+        sink.append(ChannelVolume::new(
+            source,
+            vec![base * left_pan, base * right_pan],
+        ));
         sink.detach();
     }
 
@@ -313,5 +332,43 @@ impl AudioEngine {
         Decoder::new(BufReader::new(file))
             .map_err(|e| tracing::warn!("failed to decode sound {}: {e}", path.display()))
             .ok()
+    }
+}
+
+/// Vanilla linear sound attenuation: 1.0 at the listener, falling to 0.0 at
+/// `atten_dist` and beyond (OpenAL `AL_LINEAR_DISTANCE_CLAMPED`, rolloff 1).
+fn linear_attenuation(distance: f32, atten_dist: f32) -> f32 {
+    1.0 - (distance / atten_dist).clamp(0.0, 1.0)
+}
+
+fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// Per-channel panning gains from each ear's distance to the emitter, matching
+/// rodio's `Spatial` balance so the left/right feel is unchanged.
+fn stereo_pan(left_ear: [f32; 3], right_ear: [f32; 3], emitter: [f32; 3]) -> (f32, f32) {
+    let left_d = dist(left_ear, emitter);
+    let right_d = dist(right_ear, emitter);
+    let max_diff = dist(left_ear, right_ear);
+    let left = (((left_d - right_d) / max_diff + 1.0) / 4.0 + 0.5).min(1.0);
+    let right = (((right_d - left_d) / max_diff + 1.0) / 4.0 + 0.5).min(1.0);
+    (left, right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_attenuation_matches_vanilla() {
+        let d = SOUND_ATTENUATION_BLOCKS;
+        assert_eq!(linear_attenuation(0.0, d), 1.0);
+        assert_eq!(linear_attenuation(8.0, d), 0.5);
+        assert_eq!(linear_attenuation(16.0, d), 0.0);
+        assert_eq!(linear_attenuation(24.0, d), 0.0);
     }
 }
