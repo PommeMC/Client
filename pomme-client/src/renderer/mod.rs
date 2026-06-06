@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use azalea_block::BlockState;
 use azalea_core::position::{BlockPos, ChunkPos};
 use camera::{Camera, CameraUniform};
 use chunk::atlas::TextureAtlas;
@@ -59,7 +60,7 @@ enum RenderMode<'a> {
     World {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
-        destroy_info: Option<(BlockPos, u32)>,
+        destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
         entities: &'a [EntityRenderInfo],
@@ -779,7 +780,7 @@ impl Renderer {
         hide_cursor: bool,
         overlay: Vec<MenuElement>,
         swing_progress: f32,
-        destroy_info: Option<(BlockPos, u32)>,
+        destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
         entities: &[EntityRenderInfo],
@@ -1200,9 +1201,15 @@ impl Renderer {
                 self.chunk_buffers.draw_indirect(cmd, frame);
                 let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
-                if let Some((block_pos, stage)) = destroy_info {
-                    self.block_overlay_pipeline
-                        .draw(cmd, frame, block_pos, *stage);
+                if let Some((block_pos, stage, state)) = destroy_info {
+                    self.block_overlay_pipeline.draw(
+                        cmd,
+                        frame,
+                        &self.registry,
+                        *state,
+                        block_pos,
+                        *stage,
+                    );
                 }
 
                 self.entity_renderer.draw(cmd, frame, entities);

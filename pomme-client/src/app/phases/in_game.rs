@@ -537,7 +537,10 @@ pub fn update_game(
     });
 
     let swing_progress = game.interaction.get_swing_progress(partial_tick);
-    let destroy_info = game.interaction.destroy_stage();
+    let destroy_info = game.interaction.destroy_stage().map(|(pos, stage)| {
+        let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+        (pos, stage, state)
+    });
 
     let mut entity_renders: Vec<EntityRenderInfo> = game
         .entity_store
