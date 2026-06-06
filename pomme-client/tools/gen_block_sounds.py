@@ -106,8 +106,13 @@ def parse_sound_events():
 
 
 def parse_sound_types(events):
-    """SoundType name -> (volume, pitch, hit_event or None for silent)."""
+    """SoundType name -> (volume, pitch, hit_event, break_event); None = silent."""
     text = SOUND_TYPE.read_text(encoding="utf8")
+
+    def event_for(arg):
+        const = arg.split(".")[-1]  # SoundEvents.STONE_HIT -> STONE_HIT
+        return None if const == "EMPTY" else events[const]
+
     out = {}
     for m in re.finditer(
         r"public static final SoundType (\w+) = new SoundType\(([^;]+)\);", text
@@ -116,12 +121,8 @@ def parse_sound_types(events):
         args = [a.strip() for a in m.group(2).split(",")]
         vol = float(args[0].rstrip("f"))
         pitch = float(args[1].rstrip("f"))
-        hit_const = args[5].split(".")[-1]  # SoundEvents.STONE_HIT -> STONE_HIT
-        if hit_const == "EMPTY":
-            hit_event = None
-        else:
-            hit_event = events[hit_const]
-        out[name] = (vol, pitch, hit_event)
+        # SoundType(volume, pitch, break, step, place, hit, fall)
+        out[name] = (vol, pitch, event_for(args[5]), event_for(args[2]))
     return out
 
 
@@ -232,8 +233,8 @@ def build():
         st = resolve_field(field)
         if st not in soundtypes:
             sys.exit(f"ERROR: {field} resolved to unknown SoundType {st!r}")
-        vol, pitch, hit = soundtypes[st]
-        entry = ["" if hit is None else hit, vol, pitch]
+        vol, pitch, hit, brk = soundtypes[st]
+        entry = [hit or "", brk or "", vol, pitch]
         stripped = expr.strip()
         if stripped.startswith("ColorCollection.registerBlocks"):
             suffix = FAMILY_SUFFIX.get(idc)
@@ -308,15 +309,24 @@ def build():
         ("pale_oak_log", "block.wood.hit"),
         ("cactus_flower", ""),  # silent (hit = EMPTY)
     ]
+    break_checks = [
+        ("stone", "block.stone.break"),
+        ("oak_planks", "block.wood.break"),
+        ("dirt", "block.gravel.break"),
+        ("white_wool", "block.wool.break"),
+        ("copper_block", "block.copper.break"),
+        ("cactus_flower", "block.cactus_flower.break"),  # break present, hit silent
+    ]
     print("spot checks:")
     bad = 0
-    for bid, want in checks:
-        got = out.get(bid)
-        got_ev = got[0] if got else "<MISSING>"
-        ok = got is not None and got_ev == want
-        if not ok:
-            bad += 1
-        print(f"  {'ok ' if ok else 'BAD'} {bid:22} {got_ev!r} (want {want!r})")
+    for label, idx, items in (("hit", 0, checks), ("break", 1, break_checks)):
+        for bid, want in items:
+            got = out.get(bid)
+            got_ev = got[idx] if got else "<MISSING>"
+            ok = got is not None and got_ev == want
+            if not ok:
+                bad += 1
+            print(f"  {'ok ' if ok else 'BAD'} {bid:22} {label}={got_ev!r} (want {want!r})")
     if bad:
         print(f"{bad} spot-check mismatch(es) -- review before committing")
 

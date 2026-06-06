@@ -1,54 +1,53 @@
-//! Per-block mining hit sound.
+//! Per-block hit and break sounds.
 //!
-//! Vanilla plays a block's `SoundType` hit sound every few ticks while it is
-//! being mined (`MultiPlayerGameMode.continueDestroyBlock`). `azalea-block`
-//! does not expose sound type, so the block id -> hit sound table is generated
-//! from the decompiled vanilla `Blocks.java` by `tools/gen_block_sounds.py` and
-//! embedded here as `block_sounds.json`.
+//! Vanilla plays a block's `SoundType` hit sound while it is being mined
+//! (`MultiPlayerGameMode.continueDestroyBlock`) and its break sound when the
+//! block is destroyed (level event 2001). `azalea-block` does not expose sound
+//! type, so the block id -> sounds table is generated from the decompiled
+//! vanilla `Blocks.java` by `tools/gen_block_sounds.py` and embedded here as
+//! `block_sounds.json`.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use azalea_block::{BlockState, BlockTrait};
 
-/// A block's vanilla mining hit sound: the `sounds.json` event and the block's
-/// raw `SoundType` volume and pitch, scaled by the caller at play time.
+/// A block's vanilla `SoundType` sounds: the `sounds.json` hit and break events
+/// plus the raw volume and pitch (the caller applies the play-time scaling). An
+/// empty event marks an action that is intentionally silent for the block.
 #[derive(Clone)]
-pub struct BlockHitSound {
-    pub event: String,
+pub struct BlockSounds {
+    pub hit_event: String,
+    pub break_event: String,
     pub volume: f32,
     pub pitch: f32,
 }
 
-/// block id (no namespace) -> (hit event, volume, pitch). An empty event marks
-/// a block whose `SoundType` hit sound is intentionally silent (e.g. cactus
-/// flower, water).
-static BLOCK_SOUNDS: LazyLock<HashMap<String, (String, f32, f32)>> = LazyLock::new(|| {
+/// block id (no namespace) -> (hit event, break event, volume, pitch).
+static BLOCK_SOUNDS: LazyLock<HashMap<String, (String, String, f32, f32)>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("block_sounds.json"))
         .expect("embedded block_sounds.json must be valid")
 });
 
-/// The vanilla mining hit sound for `state`, or `None` when the block is silent
-/// or has no hit sound. Unknown ids fall back to the vanilla `SoundType.STONE`
-/// default.
-pub fn block_hit_sound(state: BlockState) -> Option<BlockHitSound> {
+/// The vanilla `SoundType` sounds for `state`. Unknown ids fall back to the
+/// vanilla `SoundType.STONE` default. An empty event field means that action is
+/// silent for the block.
+pub fn block_sounds(state: BlockState) -> BlockSounds {
     let block: Box<dyn BlockTrait> = state.into();
     let id = block.id();
     let key = id.strip_prefix("minecraft:").unwrap_or(id);
 
-    let (event, volume, pitch) = BLOCK_SOUNDS
+    let (hit, brk, volume, pitch) = BLOCK_SOUNDS
         .get(key)
-        .map(|(e, v, p)| (e.as_str(), *v, *p))
-        .unwrap_or(("block.stone.hit", 1.0, 1.0));
+        .map(|(h, b, v, p)| (h.as_str(), b.as_str(), *v, *p))
+        .unwrap_or(("block.stone.hit", "block.stone.break", 1.0, 1.0));
 
-    if event.is_empty() {
-        return None;
-    }
-    Some(BlockHitSound {
-        event: event.to_string(),
+    BlockSounds {
+        hit_event: hit.to_string(),
+        break_event: brk.to_string(),
         volume,
         pitch,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -63,18 +62,26 @@ mod tests {
             BLOCK_SOUNDS.len()
         );
 
-        let event = |id: &str| BLOCK_SOUNDS.get(id).map(|(e, _, _)| e.as_str());
-        assert_eq!(event("stone"), Some("block.stone.hit"));
-        assert_eq!(event("oak_planks"), Some("block.wood.hit"));
-        assert_eq!(event("oak_door"), Some("block.wood.hit")); // BlockSetType.OAK
-        assert_eq!(event("dirt"), Some("block.gravel.hit"));
-        assert_eq!(event("copper_block"), Some("block.copper.hit"));
-        assert_eq!(event("waxed_oxidized_copper"), Some("block.copper.hit"));
+        let hit = |id: &str| BLOCK_SOUNDS.get(id).map(|(h, _, _, _)| h.as_str());
+        let brk = |id: &str| BLOCK_SOUNDS.get(id).map(|(_, b, _, _)| b.as_str());
+        assert_eq!(hit("stone"), Some("block.stone.hit"));
+        assert_eq!(brk("stone"), Some("block.stone.break"));
+        assert_eq!(hit("oak_door"), Some("block.wood.hit")); // BlockSetType.OAK
+        assert_eq!(brk("oak_door"), Some("block.wood.break"));
+        assert_eq!(hit("dirt"), Some("block.gravel.hit"));
+        assert_eq!(hit("copper_block"), Some("block.copper.hit"));
         // METAL carries a non-default pitch (1.5).
         assert_eq!(
             BLOCK_SOUNDS.get("gold_block"),
-            Some(&("block.metal.hit".to_string(), 1.0, 1.5))
+            Some(&(
+                "block.metal.hit".to_string(),
+                "block.metal.break".to_string(),
+                1.0,
+                1.5
+            ))
         );
-        assert_eq!(event("cactus_flower"), Some(""));
+        // Silent hit, but the break sound is still present.
+        assert_eq!(hit("cactus_flower"), Some(""));
+        assert_eq!(brk("cactus_flower"), Some("block.cactus_flower.break"));
     }
 }

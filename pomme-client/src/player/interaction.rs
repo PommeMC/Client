@@ -13,7 +13,7 @@ use crate::app::input::InputState;
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, SoundRef};
 use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
-use crate::world::block::sound::block_hit_sound;
+use crate::world::block::sound::block_sounds;
 use crate::world::chunk::ChunkStore;
 
 const REACH: f32 = 4.5;
@@ -147,7 +147,14 @@ impl InteractionState {
         }
 
         if input.left_just_pressed() {
-            self.start_attack(chunks, sender, on_ground, creative, &mut dirty_chunks);
+            self.start_attack(
+                chunks,
+                sender,
+                audio,
+                on_ground,
+                creative,
+                &mut dirty_chunks,
+            );
         }
 
         if input.left_held() {
@@ -183,6 +190,7 @@ impl InteractionState {
         &mut self,
         chunks: &ChunkStore,
         sender: &PacketSender,
+        audio: &AudioEngine,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -204,7 +212,15 @@ impl InteractionState {
             return;
         }
 
-        self.start_destroy_block(hit, chunks, sender, on_ground, creative, dirty_chunks);
+        self.start_destroy_block(
+            hit,
+            chunks,
+            sender,
+            audio,
+            on_ground,
+            creative,
+            dirty_chunks,
+        );
         self.swing(sender);
     }
 
@@ -275,11 +291,13 @@ impl InteractionState {
         }));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_destroy_block(
         &mut self,
         hit: HitResult,
         chunks: &ChunkStore,
         sender: &PacketSender,
+        audio: &AudioEngine,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -320,6 +338,7 @@ impl InteractionState {
             );
             self.pending_predictions.insert(hit.block_pos, seq);
             mark_dirty(&hit.block_pos, dirty_chunks);
+            play_break_sound(audio, state, hit.block_pos);
             self.destroy_delay = DESTROY_COOLDOWN;
             return;
         }
@@ -371,7 +390,15 @@ impl InteractionState {
         }
 
         if self.destroy_pos != hit.block_pos {
-            self.start_destroy_block(hit, chunks, sender, on_ground, creative, dirty_chunks);
+            self.start_destroy_block(
+                hit,
+                chunks,
+                sender,
+                audio,
+                on_ground,
+                creative,
+                dirty_chunks,
+            );
             return;
         }
 
@@ -405,6 +432,7 @@ impl InteractionState {
             );
             self.pending_predictions.insert(hit.block_pos, seq);
             mark_dirty(&hit.block_pos, dirty_chunks);
+            play_break_sound(audio, state, hit.block_pos);
             self.is_destroying = false;
             self.destroy_progress = 0.0;
             self.destroy_ticks = 0.0;
@@ -456,19 +484,44 @@ fn destroy_progress(state: BlockState, on_ground: bool, creative: bool) -> f32 {
 }
 
 /// Plays a block's mining hit sound, matching vanilla
-/// `MultiPlayerGameMode.continueDestroyBlock`: BLOCKS category at the block
-/// centre, volume `(soundType.volume + 1) / 8`, pitch `soundType.pitch * 0.5`,
-/// with a random variant.
+/// `MultiPlayerGameMode.continueDestroyBlock`: volume `(volume + 1) / 8`, pitch
+/// `pitch * 0.5`.
 fn play_hit_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
-    let Some(hit) = block_hit_sound(state) else {
+    let s = block_sounds(state);
+    play_block_sound(
+        audio,
+        &s.hit_event,
+        pos,
+        (s.volume + 1.0) / 8.0,
+        s.pitch * 0.5,
+    );
+}
+
+/// Plays a block's break sound, matching vanilla `LevelEventHandler` event
+/// 2001: volume `(volume + 1) / 2`, pitch `pitch * 0.8`.
+fn play_break_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
+    let s = block_sounds(state);
+    play_block_sound(
+        audio,
+        &s.break_event,
+        pos,
+        (s.volume + 1.0) / 2.0,
+        s.pitch * 0.8,
+    );
+}
+
+/// Plays a block sound event at the block centre in the BLOCKS category with a
+/// random variant. No-op for an empty event (a silent `SoundType` slot).
+fn play_block_sound(audio: &AudioEngine, event: &str, pos: BlockPos, volume: f32, pitch: f32) {
+    if event.is_empty() {
         return;
-    };
+    }
     audio.play_world_sound(
-        &SoundRef::Event(hit.event),
+        &SoundRef::Event(event.to_string()),
         CATEGORY_BLOCKS,
         Position::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5),
-        (hit.volume + 1.0) / 8.0,
-        hit.pitch * 0.5,
+        volume,
+        pitch,
         fastrand::u64(..),
     );
 }
