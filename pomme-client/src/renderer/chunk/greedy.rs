@@ -4,6 +4,8 @@
 
 use std::collections::BTreeSet;
 
+use super::block_ao;
+
 const MASK_6: u64 = 0b111111;
 
 #[derive(Copy, Clone)]
@@ -211,6 +213,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                         let ao_here = self.get_ao(face, layer, forward, bit_pos);
 
                         if (bits_next >> bit_pos & 1) != 0
+                            && ao_uniform(ao_here)
                             && v_type
                                 == voxels[get_axis_index::<CS>(
                                     axis,
@@ -227,6 +230,7 @@ impl<const CS: usize> GreedyMesher<CS> {
 
                         for right in (bit_pos + 1)..CS {
                             if (bits_here >> right & 1) == 0
+                                || !ao_uniform(ao_here)
                                 || self.forward_merged[bit_pos] != self.forward_merged[right]
                                 || v_type
                                     != voxels[get_axis_index::<CS>(
@@ -344,6 +348,7 @@ impl<const CS: usize> GreedyMesher<CS> {
 
                         if *right_merged_ref == 0
                             && (bits_forward >> bit_pos & 1) != 0
+                            && ao_uniform(ao_here)
                             && v_type
                                 == voxels
                                     [get_axis_index::<CS>(axis, right + 1, forward + 2, bit_pos)]
@@ -354,6 +359,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                         }
 
                         if (bits_right >> bit_pos & 1) != 0
+                            && ao_uniform(ao_here)
                             && self.forward_merged[forward_merge_i]
                                 == self.forward_merged[(right_cs + CS) + (bit_pos - 1)]
                             && v_type
@@ -434,19 +440,38 @@ fn compute_vertex_ao_packed(
     occ: &dyn Fn(i32, i32, i32) -> bool,
 ) -> u8 {
     let neighbors = face_ao_neighbors(face);
+    // Vanilla's `shade0` fallback (corners[0]) for the both-sides-occlude case,
+    // recovered from the neighbour table to stay in its coordinate frame.
+    let c0 = shared_side(&neighbors[0], &neighbors[1]);
+    let shade0_occ = occ(fx + c0[0], fy + c0[1], fz + c0[2]);
     let mut packed = 0u8;
     for (i, [s1, s2, c]) in neighbors.iter().enumerate() {
-        let side1 = occ(fx + s1[0], fy + s1[1], fz + s1[2]) as u8;
-        let side2 = occ(fx + s2[0], fy + s2[1], fz + s2[2]) as u8;
-        let corner = occ(fx + c[0], fy + c[1], fz + c[2]) as u8;
-        let ao = if side1 == 1 && side2 == 1 {
-            0
-        } else {
-            3 - (side1 + side2 + corner)
-        };
+        let side1 = occ(fx + s1[0], fy + s1[1], fz + s1[2]);
+        let side2 = occ(fx + s2[0], fy + s2[1], fz + s2[2]);
+        let corner = occ(fx + c[0], fy + c[1], fz + c[2]);
+        let ao = block_ao::vertex_ao_level(side1, side2, corner, shade0_occ);
         packed |= ao << (6 - i * 2);
     }
     packed
+}
+
+/// Whether all four packed AO corners are equal (a flat-lit face). Vanilla
+/// renders every block face individually, so a merged quad only reproduces its
+/// shading when the AO is uniform; gradient faces must stay 1x1.
+#[inline]
+fn ao_uniform(ao: u8) -> bool {
+    let c = (ao >> 6) & 3;
+    ((ao >> 4) & 3) == c && ((ao >> 2) & 3) == c && (ao & 3) == c
+}
+
+/// The side offset common to both vertices' neighbour triples (their first two
+/// entries are the two edge sides). This is vanilla's `corners[0]`.
+fn shared_side(v0: &[[i32; 3]; 3], v1: &[[i32; 3]; 3]) -> [i32; 3] {
+    if v0[0] == v1[0] || v0[0] == v1[1] {
+        v0[0]
+    } else {
+        v0[1]
+    }
 }
 
 fn face_ao_neighbors(face: u8) -> [[[i32; 3]; 3]; 4] {
