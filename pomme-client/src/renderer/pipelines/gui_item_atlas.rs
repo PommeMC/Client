@@ -283,15 +283,18 @@ impl GuiItemAtlas {
         )
     }
 
-    /// Bottom-origin framebuffer rect — feed to the bake-pass scissor / slot
-    /// clear.
-    pub fn scissor_rect_pixels(&self, slot: &Slot) -> (i32, i32, u32, u32) {
-        (
-            (slot.x * self.slot_px) as i32,
-            self.atlas_px as i32 - (slot.y as i32 + 1) * self.slot_px as i32,
-            self.slot_px,
-            self.slot_px,
-        )
+    /// Bottom-origin framebuffer rect for the bake-pass scissor and slot clear.
+    pub fn scissor_rect(&self, slot: &Slot) -> vk::Rect2D {
+        vk::Rect2D {
+            offset: vk::Offset2D {
+                x: (slot.x * self.slot_px) as i32,
+                y: self.atlas_px as i32 - (slot.y as i32 + 1) * self.slot_px as i32,
+            },
+            extent: vk::Extent2D {
+                width: self.slot_px,
+                height: self.slot_px,
+            },
+        }
     }
 
     pub fn slot_uv(&self, slot: &Slot) -> [f32; 4] {
@@ -339,7 +342,6 @@ impl GuiItemAtlas {
     }
 
     pub fn clear_slot_color(&self, cmd: vk::CommandBuffer, slot: &Slot) {
-        let (sx, sy, sw, sh) = self.scissor_rect_pixels(slot);
         let clear_attachment = vk::ClearAttachment {
             aspect_mask: vk::ImageAspectFlags::Color,
             color_attachment: 0,
@@ -350,13 +352,7 @@ impl GuiItemAtlas {
             },
         };
         let clear_rect = vk::ClearRect {
-            rect: vk::Rect2D {
-                offset: vk::Offset2D { x: sx, y: sy },
-                extent: vk::Extent2D {
-                    width: sw,
-                    height: sh,
-                },
-            },
+            rect: self.scissor_rect(slot),
             base_array_layer: 0,
             layer_count: 1,
         };

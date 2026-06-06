@@ -1081,49 +1081,44 @@ impl Renderer {
             self.gui_item_atlas.reclaim_space_for(&unique_names);
         }
         let mut item_atlas_uvs: HashMap<String, [f32; 4]> = HashMap::new();
-        let mut bake_list: Vec<(
-            pipelines::gui_item_atlas::Slot,
-            String,
-            bool,
-            pipelines::gui_item_atlas::SlotState,
-        )> = Vec::new();
+        struct BakeJob {
+            slot: pipelines::gui_item_atlas::Slot,
+            name: String,
+            is_block: bool,
+            needs_clear: bool,
+        }
+        let mut bake_list: Vec<BakeJob> = Vec::new();
         for name in &unique_names {
             let discard = pipelines::gui_item_atlas::is_animated_item(name);
             if let Some((slot, state)) = self.gui_item_atlas.get_or_allocate(name, discard) {
                 item_atlas_uvs.insert(name.clone(), self.gui_item_atlas.slot_uv(&slot));
                 if !matches!(state, pipelines::gui_item_atlas::SlotState::Ready) {
-                    let is_block = self.registry.get_item_model(name).is_some();
-                    bake_list.push((slot, name.clone(), is_block, state));
+                    bake_list.push(BakeJob {
+                        slot,
+                        name: name.clone(),
+                        is_block: self.registry.get_item_model(name).is_some(),
+                        needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
+                    });
                 }
             }
         }
         if !bake_list.is_empty() {
             self.gui_item_atlas.begin_bake_pass(cmd);
             self.gui_item_pipeline.bind_for_bake_pass(cmd);
-            for (slot, name, is_block, state) in &bake_list {
-                if matches!(state, pipelines::gui_item_atlas::SlotState::Stale) {
-                    self.gui_item_atlas.clear_slot_color(cmd, slot);
+            for job in &bake_list {
+                if job.needs_clear {
+                    self.gui_item_atlas.clear_slot_color(cmd, &job.slot);
                 }
-                let (scx, scy, scw, sch) = self.gui_item_atlas.scissor_rect_pixels(slot);
-                cmd.set_scissor(
-                    0,
-                    &[vk::Rect2D {
-                        offset: vk::Offset2D { x: scx, y: scy },
-                        extent: vk::Extent2D {
-                            width: scw,
-                            height: sch,
-                        },
-                    }],
-                );
-                let (sx, sy, sw_slot, _) = self.gui_item_atlas.slot_rect_pixels(slot);
+                cmd.set_scissor(0, &[self.gui_item_atlas.scissor_rect(&job.slot)]);
+                let (sx, sy, sw_slot, _) = self.gui_item_atlas.slot_rect_pixels(&job.slot);
                 self.gui_item_pipeline.bake_to_slot(
                     cmd,
                     &self.item_entity_pipeline,
                     sx as u32,
                     sy as u32,
                     sw_slot,
-                    name,
-                    *is_block,
+                    &job.name,
+                    job.is_block,
                 );
             }
             self.gui_item_atlas.end_bake_pass(cmd);
