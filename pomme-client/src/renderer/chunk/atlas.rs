@@ -79,12 +79,18 @@ impl TextureAtlas {
                 resolve_asset_path_with_packs(jar_assets_dir, asset_index, &asset_key, packs);
             match util::load_png(&file_path) {
                 Some((data, w, h)) => {
-                    total_area += (w as u64) * (h as u64);
+                    // Animated textures stack the texture one on top of another. So as a solution
+                    // we just take the first animation frame and use that, until animation is
+                    // implemented.
+                    let frame_size = if h > w { w } else { h };
+                    let row_bytes = w as usize * size_of::<u32>();
+                    let frame_data = data[..frame_size as usize * row_bytes].to_vec();
+                    total_area += (w as u64) * (frame_size as u64);
                     sources.push(Source {
                         name: name.to_string(),
-                        data,
+                        data: frame_data,
                         w,
-                        h,
+                        h: frame_size,
                     });
                 }
                 None => {
