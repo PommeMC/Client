@@ -13,6 +13,21 @@ fn main() {
     );
     options.set_source_language(shaderc::SourceLanguage::GLSL);
 
+    let include_dir = shader_dir.to_path_buf();
+    options.set_include_callback(move |requested, _ty, _requesting, _depth| {
+        let path = include_dir.join(requested);
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read shader include {requested}: {e}"))?;
+        Ok(shaderc::ResolvedInclude {
+            resolved_name: path.to_string_lossy().into_owned(),
+            content,
+        })
+    });
+    println!(
+        "cargo:rerun-if-changed={}",
+        shader_dir.join("fog.glsl").display()
+    );
+
     let shaders = [
         ("chunk.vert", shaderc::ShaderKind::Vertex),
         ("chunk.frag", shaderc::ShaderKind::Fragment),

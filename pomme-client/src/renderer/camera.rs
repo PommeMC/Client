@@ -168,13 +168,18 @@ pub struct CameraUniform {
 }
 
 impl CameraUniform {
-    pub fn new(camera: &Camera, fog_color: [f32; 3]) -> Self {
+    pub fn new(camera: &Camera, fog_color: [f32; 3], render_distance_chunks: u32) -> Self {
         let offset = camera.third_person_offset();
         let pos = camera.position.as_vec3() + offset;
+        // Vanilla render-distance fog band: the last clamp(blocks / 10, 4, 64) blocks.
+        let blocks = (render_distance_chunks * 16) as f32;
+        let span = (blocks / 10.0).clamp(4.0, 64.0);
+        let fog_start = blocks - span;
+        let fog_end = blocks;
         Self {
             view_proj: camera.view_projection().to_cols_array_2d(),
-            camera_pos: [pos.x, pos.y, pos.z, 0.0],
-            fog_color: [fog_color[0], fog_color[1], fog_color[2], 0.0],
+            camera_pos: [pos.x, pos.y, pos.z, fog_start],
+            fog_color: [fog_color[0], fog_color[1], fog_color[2], fog_end],
         }
     }
 

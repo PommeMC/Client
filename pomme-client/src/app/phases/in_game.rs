@@ -660,6 +660,11 @@ pub fn update_game(
         sky.rain(),
     );
 
+    let effective_rd = if game.server_render_distance > 0 {
+        core.menu.render_distance.min(game.server_render_distance)
+    } else {
+        core.menu.render_distance
+    };
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
@@ -672,6 +677,7 @@ pub fn update_game(
         &item_renders,
         &block_entity_renders,
         &weather_columns,
+        effective_rd,
     ) {
         tracing::error!("Render error: {e}");
     }

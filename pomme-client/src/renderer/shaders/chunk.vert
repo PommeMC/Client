@@ -1,5 +1,7 @@
 #version 450
 
+#include "fog.glsl"
+
 layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 view_proj;
     vec4 camera_pos;
@@ -15,12 +17,15 @@ layout(location = 1) out float v_light;
 layout(location = 2) out vec3 v_tint;
 layout(location = 3) flat out float v_visibility;
 layout(location = 4) out vec3 v_fog_color;
+layout(location = 5) out float v_fog;
 
 void main() {
-    gl_Position = view_proj * vec4(position - camera_pos.xyz, 1.0);
+    vec3 rel = position - camera_pos.xyz;
+    gl_Position = view_proj * vec4(rel, 1.0);
     v_tex_coords = tex_coords;
     v_light = light_tint.r;
     v_tint = light_tint.gba;
     v_visibility = uintBitsToFloat(gl_InstanceIndex);
     v_fog_color = fog_color.rgb;
+    v_fog = fog_factor(rel, camera_pos.w, fog_color.w);
 }

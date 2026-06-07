@@ -1,5 +1,7 @@
 #version 450
 
+#include "fog.glsl"
+
 layout(set = 1, binding = 0) uniform sampler2D atlas_texture;
 
 layout(location = 0) in vec2 v_tex_coords;
@@ -7,6 +9,7 @@ layout(location = 1) in float v_light;
 layout(location = 2) in vec3 v_tint;
 layout(location = 3) flat in float v_visibility;
 layout(location = 4) in vec3 v_fog_color;
+layout(location = 5) in float v_fog;
 
 layout(location = 0) out vec4 out_color;
 
@@ -20,6 +23,8 @@ void main() {
     if (v_visibility < 1.0) {
         tinted = mix(v_fog_color, tinted, v_visibility);
     }
+
+    tinted = apply_fog(tinted, v_fog, v_fog_color);
 
     out_color = vec4(tinted, color.a);
 }

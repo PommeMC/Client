@@ -68,6 +68,7 @@ enum RenderMode<'a> {
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: &'a [BlockEntityRenderInfo],
         weather: &'a [WeatherColumn],
+        render_distance: u32,
     },
     MainMenu {
         scroll: f32,
@@ -809,12 +810,13 @@ impl Renderer {
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: &[BlockEntityRenderInfo],
         weather: &[WeatherColumn],
+        render_distance: u32,
     ) -> Result<(), RendererError> {
-        let sky_col = sky.sky_color();
+        let fog_col = sky.fog_color();
         self.render_frame(
             window,
             hide_cursor,
-            [sky_col[0], sky_col[1], sky_col[2], 1.0],
+            [fog_col[0], fog_col[1], fog_col[2], 1.0],
             RenderMode::World {
                 overlay,
                 swing_progress,
@@ -825,6 +827,7 @@ impl Renderer {
                 item_entities,
                 block_entities,
                 weather,
+                render_distance,
             },
         )
     }
@@ -1025,9 +1028,14 @@ impl Renderer {
 
         let render_finished = self.render_finished_per_image[image_index as usize];
 
-        if let RenderMode::World { ref sky, .. } = mode {
+        if let RenderMode::World {
+            ref sky,
+            render_distance,
+            ..
+        } = mode
+        {
             let fog = sky.fog_color();
-            let uniform = CameraUniform::new(&self.camera, fog);
+            let uniform = CameraUniform::new(&self.camera, fog, render_distance);
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
@@ -1221,6 +1229,7 @@ impl Renderer {
                 item_entities,
                 block_entities,
                 weather,
+                render_distance: _,
             } => {
                 self.sky_pipeline
                     .update_and_draw(&self.ctx.device, cmd, frame, &self.camera, sky);
