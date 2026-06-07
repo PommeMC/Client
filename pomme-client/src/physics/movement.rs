@@ -19,6 +19,7 @@ const GROUND_FRICTION: f64 = BLOCK_FRICTION * HORIZONTAL_DRAG;
 const GROUND_ACCEL_FACTOR: f64 = 0.216;
 const MOVEMENT_SPEED: f64 = 0.1;
 const SPRINT_SPEED_MODIFIER: f64 = 0.3;
+const INPUT_DAMPING: f64 = 0.98;
 const AIR_ACCELERATION: f64 = 0.02;
 // TODO: WATER_MOVEMENT_EFFICIENCY attribute - scales drag toward 0.546 and
 // accel toward land speed
@@ -81,7 +82,7 @@ fn tick_land(
     cos_y_rot: f64,
 ) {
     if player.on_ground && input.key_pressed(KeyCode::Space) {
-        player.velocity.y = JUMP_VELOCITY;
+        player.velocity.y = JUMP_VELOCITY.max(player.velocity.y);
 
         if player.sprinting {
             player.velocity.x -= sin_y_rot * SPRINT_JUMP_BOOST;
@@ -95,12 +96,7 @@ fn tick_land(
         MOVEMENT_SPEED
     };
 
-    let accel = if player.on_ground {
-        let friction_cubed = GROUND_FRICTION * GROUND_FRICTION * GROUND_FRICTION;
-        speed * (GROUND_ACCEL_FACTOR / friction_cubed)
-    } else {
-        AIR_ACCELERATION
-    };
+    let accel = friction_influenced_speed(speed, player.on_ground, BLOCK_FRICTION);
     let (move_x, move_z) = world_movement(forward, strafe, sin_y_rot, cos_y_rot);
     player.velocity.x += move_x * accel;
     player.velocity.z += move_z * accel;
@@ -185,12 +181,20 @@ fn apply_collision(
     let step_height = if player.on_ground { STEP_HEIGHT } else { 0.0 };
     let (resolved, on_ground) = resolve_collision(chunk_store, aabb, player.velocity, step_height);
 
-    let horizontal_collision = (resolved.x - player.velocity.x).abs() > 1.0e-5
-        || (resolved.z - player.velocity.z).abs() > 1.0e-5;
+    let collided_x = (resolved.x - player.velocity.x).abs() > 1.0e-5;
+    let collided_z = (resolved.z - player.velocity.z).abs() > 1.0e-5;
+    let horizontal_collision = collided_x || collided_z;
 
     player.position += resolved;
     player.on_ground = on_ground;
     player.horizontal_collision = horizontal_collision;
+
+    if collided_x {
+        player.velocity.x = 0.0;
+    }
+    if collided_z {
+        player.velocity.z = 0.0;
+    }
 
     if player.sprinting
         && horizontal_collision
@@ -236,6 +240,18 @@ fn world_movement(forward: f64, strafe: f64, sin_y_rot: f64, cos_y_rot: f64) -> 
     )
 }
 
+fn friction_influenced_speed(speed: f64, on_ground: bool, block_friction: f64) -> f64 {
+    if on_ground {
+        if block_friction > BLOCK_FRICTION {
+            speed * (GROUND_ACCEL_FACTOR / block_friction.powi(3))
+        } else {
+            speed
+        }
+    } else {
+        AIR_ACCELERATION
+    }
+}
+
 fn is_minor_horizontal_collision(
     forward: f64,
     strafe: f64,
@@ -271,12 +287,19 @@ fn movement_input(input: &InputState) -> (f64, f64) {
         strafe += 1.0;
     }
 
-    let len_sq = forward * forward + strafe * strafe;
-    if len_sq > 1.0 {
-        let len = len_sq.sqrt();
-        forward /= len;
-        strafe /= len;
-    }
+    forward *= INPUT_DAMPING;
+    strafe *= INPUT_DAMPING;
 
-    (forward, strafe)
+    square_movement(forward, strafe)
+}
+
+fn square_movement(forward: f64, strafe: f64) -> (f64, f64) {
+    let len = (forward * forward + strafe * strafe).sqrt();
+    if len < 1.0e-7 {
+        return (0.0, 0.0);
+    }
+    let max_axis = forward.abs().max(strafe.abs());
+    let modified = (len * len / max_axis).min(1.0);
+    let scale = modified / len;
+    (forward * scale, strafe * scale)
 }
