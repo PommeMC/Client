@@ -207,7 +207,7 @@ fn with_default_port(address: &str) -> String {
     }
 }
 
-fn format_motd_spans(text: &azalea_chat::FormattedText) -> Vec<MotdSpan> {
+pub fn format_motd_spans(text: &azalea_chat::FormattedText) -> Vec<MotdSpan> {
     use std::cell::RefCell;
 
     use azalea_chat::style::Style;

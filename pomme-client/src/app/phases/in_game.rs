@@ -53,6 +53,7 @@ pub struct GameState {
     pub creative_inventory_open: bool,
     pub creative_state: crate::ui::creative_inventory::CreativeState,
     pub chat: ChatState,
+    pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
@@ -111,6 +112,7 @@ impl GameState {
             creative_inventory_open: false,
             creative_state: crate::ui::creative_inventory::CreativeState::new(),
             chat: ChatState::new(),
+            command_tree: None,
             tab_list: TabList::new(),
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
@@ -236,7 +238,16 @@ pub fn update_game(
     let typed = core.input.drain_typed_chars();
     let backspace = core.input.backspace_pressed();
     let enter = core.input.enter_pressed();
-    if let Some(msg) = game.chat.handle_key_input(&typed, backspace, enter) {
+    let tab = core.input.tab_pressed();
+    let shift = core.input.shift_held();
+    if let Some(msg) = game.chat.handle_key_input(
+        &typed,
+        backspace,
+        enter,
+        tab,
+        shift,
+        game.command_tree.as_deref(),
+    ) {
         core.send_chat_message(connection, msg);
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
@@ -532,7 +543,7 @@ pub fn update_game(
         core.input.clear_click_events();
     }
 
-    game.chat.build(&mut elements, sh, gs, &|t, s| {
+    game.chat.build(&mut elements, sw, sh, gs, &|t, s| {
         gfx.renderer.menu_text_width(t, s)
     });
 

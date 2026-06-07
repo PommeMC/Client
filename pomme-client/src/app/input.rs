@@ -170,6 +170,10 @@ impl InputState {
         self.pressed.contains(&KeyCode::Tab)
     }
 
+    pub fn shift_held(&self) -> bool {
+        self.modifiers.state().shift_key()
+    }
+
     pub fn f5_pressed(&mut self) -> bool {
         std::mem::take(&mut self.f5_pressed)
     }

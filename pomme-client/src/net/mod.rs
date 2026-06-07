@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod connection;
 pub mod handler;
 pub mod sender;
@@ -63,7 +64,10 @@ pub enum NetworkEvent {
         item: ItemStack,
     },
     ChatMessage {
-        text: String,
+        spans: Vec<crate::ui::server_list::MotdSpan>,
+    },
+    CommandTree {
+        tree: Arc<crate::net::commands::CommandTree>,
     },
     BlockUpdate {
         pos: BlockPos,

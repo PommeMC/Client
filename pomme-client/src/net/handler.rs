@@ -4,14 +4,17 @@ use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacke
 use crossbeam_channel::Sender;
 
 use super::NetworkEvent;
+use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::components::Position;
+use crate::ui::server_list::{MotdSpan, format_motd_spans};
 
 pub fn handle_game_packet(
     packet: &ClientboundGamePacket,
     sender: &PacketSender,
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
+    shared_tree: &SharedCommandTree,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
@@ -193,13 +196,13 @@ pub fn handle_game_packet(
             }
         }
         ClientboundGamePacket::SystemChat(p) if !p.overlay => {
-            send_chat(event_tx, p.content.to_string());
+            send_chat(event_tx, format_motd_spans(&p.content));
         }
         ClientboundGamePacket::PlayerChat(p) => {
-            send_chat(event_tx, p.message().to_string());
+            send_chat(event_tx, format_motd_spans(&p.message()));
         }
         ClientboundGamePacket::DisguisedChat(p) => {
-            send_chat(event_tx, p.message.to_string());
+            send_chat(event_tx, format_motd_spans(&p.message));
         }
         ClientboundGamePacket::BlockUpdate(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockUpdate {
@@ -471,13 +474,34 @@ pub fn handle_game_packet(
                 footer: p.footer.to_string(),
             });
         }
+        ClientboundGamePacket::Commands(p) => {
+            let tree = std::sync::Arc::new(CommandTree::from_packet(p));
+            tracing::info!(
+                "Command tree received: {} nodes, root commands = {:?}",
+                p.entries.len(),
+                tree.root_child_names()
+            );
+            *shared_tree.lock() = Some(tree.clone());
+            let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
+        }
+        ClientboundGamePacket::CommandSuggestions(p) => {
+            tracing::debug!("Command suggestions received (id {})", p.id);
+        }
+        ClientboundGamePacket::CustomChatCompletions(p) => {
+            tracing::debug!(
+                "Custom chat completions: {:?} ({} entries)",
+                p.action,
+                p.entries.len()
+            );
+        }
         _other => {}
     }
 }
 
-fn send_chat(event_tx: &Sender<NetworkEvent>, text: String) {
+fn send_chat(event_tx: &Sender<NetworkEvent>, spans: Vec<MotdSpan>) {
+    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
     tracing::info!("Chat: {text}");
-    let _ = event_tx.try_send(NetworkEvent::ChatMessage { text });
+    let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
 }
 
 /// Resolves a sound holder into either a `sounds.json` event name (registry

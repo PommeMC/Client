@@ -399,8 +399,11 @@ impl AppCore {
                 NetworkEvent::InventorySlot { index, item } => {
                     game.player.inventory.set_slot(index as usize, item);
                 }
-                NetworkEvent::ChatMessage { text } => {
-                    game.chat.push_message(text);
+                NetworkEvent::ChatMessage { spans } => {
+                    game.chat.push_message(spans);
+                }
+                NetworkEvent::CommandTree { tree } => {
+                    game.command_tree = Some(tree);
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
                     if game.interaction.has_pending_prediction(&pos) {
