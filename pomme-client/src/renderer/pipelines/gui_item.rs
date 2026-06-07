@@ -51,6 +51,7 @@ pub struct GuiItemPipeline {
     camera_buffer: vk::Buffer,
     camera_alloc: Option<Allocation>,
     sampler: vk::Sampler,
+    atlas_px: u32,
     display_cache: RefCell<HashMap<String, DisplayTransform>>,
     items_dir: PathBuf,
     models_dir: PathBuf,
@@ -59,7 +60,8 @@ pub struct GuiItemPipeline {
 impl GuiItemPipeline {
     pub fn new(
         device: &vk::Device,
-        render_pass: vk::RenderPass,
+        atlas_render_pass: vk::RenderPass,
+        atlas_px: u32,
         allocator: &Arc<Mutex<Allocator>>,
         atlas: &TextureAtlas,
         jar_assets_dir: &Path,
@@ -94,7 +96,7 @@ impl GuiItemPipeline {
 
         let pipeline = item_entity::create_pipeline_with_front_face(
             device,
-            render_pass,
+            atlas_render_pass,
             pipeline_layout,
             vk::FrontFace::Clockwise,
         );
@@ -192,7 +194,7 @@ impl GuiItemPipeline {
         device.update_descriptor_sets(&[cam_write, atlas_write], &[]);
 
         let mc_base = jar_assets_dir.join("minecraft");
-        Self {
+        let mut this = Self {
             pipeline,
             pipeline_layout,
             camera_layout,
@@ -203,14 +205,34 @@ impl GuiItemPipeline {
             camera_buffer,
             camera_alloc: Some(camera_alloc),
             sampler,
+            atlas_px,
             display_cache: RefCell::new(HashMap::new()),
             items_dir: mc_base.join("items"),
             models_dir: mc_base.join("models"),
-        }
+        };
+        this.write_atlas_ortho(atlas_px as f32);
+        this
     }
 
-    pub fn update_camera(&mut self, screen_w: f32, screen_h: f32) {
-        let view_proj = Mat4::orthographic_rh(0.0, screen_w, 0.0, screen_h, -10000.0, 10000.0);
+    pub fn set_atlas_px(&mut self, atlas_px: u32) {
+        self.atlas_px = atlas_px;
+        self.write_atlas_ortho(atlas_px as f32);
+    }
+
+    pub fn recreate_pipeline(&mut self, device: &vk::Device, atlas_render_pass: vk::RenderPass) {
+        device.destroy_pipeline(self.pipeline, None);
+        self.pipeline = item_entity::create_pipeline_with_front_face(
+            device,
+            atlas_render_pass,
+            self.pipeline_layout,
+            vk::FrontFace::Clockwise,
+        );
+    }
+
+    fn write_atlas_ortho(&mut self, atlas_px: f32) {
+        // Bottom/top swapped to Y-invert the projection (matches vanilla's
+        // `invertY=true`).
+        let view_proj = Mat4::orthographic_rh(0.0, atlas_px, atlas_px, 0.0, -10000.0, 10000.0);
         let uniform = CameraUniform::with_view_proj(view_proj);
         let bytes = bytemuck::bytes_of(&uniform);
         if let Some(alloc) = self.camera_alloc.as_mut() {
@@ -235,51 +257,7 @@ impl GuiItemPipeline {
         device.update_descriptor_sets(&[write], &[]);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_one(
-        &self,
-        cmd: vk::CommandBuffer,
-        item_entity: &ItemEntityPipeline,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        item_name: &str,
-        is_block: bool,
-    ) {
-        let Some((buffer, vertex_count)) = item_entity.mesh_handle(item_name) else {
-            return;
-        };
-
-        let display = self.resolve_display(item_name, is_block);
-        let model = slot_model_matrix(x, y, w, h, display);
-
-        let depth_clear_rect = vk::ClearRect {
-            rect: vk::Rect2D {
-                offset: vk::Offset2D {
-                    x: x.floor() as i32,
-                    y: y.floor() as i32,
-                },
-                extent: vk::Extent2D {
-                    width: w.ceil() as u32,
-                    height: h.ceil() as u32,
-                },
-            },
-            base_array_layer: 0,
-            layer_count: 1,
-        };
-        let depth_clear = vk::ClearAttachment {
-            aspect_mask: vk::ImageAspectFlags::Depth,
-            color_attachment: 0,
-            clear_value: vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
-            },
-        };
-        cmd.clear_attachments(&[depth_clear], &[depth_clear_rect]);
-
+    pub fn bind_for_bake_pass(&self, cmd: vk::CommandBuffer) {
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Graphics,
@@ -288,6 +266,41 @@ impl GuiItemPipeline {
             &[self.camera_set, self.atlas_set],
             &[],
         );
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: self.atlas_px as f32,
+            height: self.atlas_px as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        cmd.set_viewport(0, &[viewport]);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn bake_to_slot(
+        &self,
+        cmd: vk::CommandBuffer,
+        item_entity: &ItemEntityPipeline,
+        slot_x_px: u32,
+        slot_y_px: u32,
+        slot_size_px: u32,
+        item_name: &str,
+        is_block: bool,
+    ) {
+        let Some((buffer, vertex_count)) = item_entity.mesh_handle(item_name) else {
+            return;
+        };
+
+        let display = self.resolve_display(item_name, is_block);
+        let model = slot_model_matrix(
+            slot_x_px as f32,
+            slot_y_px as f32,
+            slot_size_px as f32,
+            slot_size_px as f32,
+            display,
+        );
+
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
 
         let mvp_data = model.to_cols_array();
@@ -324,16 +337,6 @@ impl GuiItemPipeline {
         resolved
     }
 
-    pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = item_entity::create_pipeline_with_front_face(
-            device,
-            render_pass,
-            self.pipeline_layout,
-            vk::FrontFace::Clockwise,
-        );
-    }
-
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         device.destroy_pipeline(self.pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -350,13 +353,11 @@ impl GuiItemPipeline {
 
 fn slot_model_matrix(x: f32, y: f32, w: f32, h: f32, display: DisplayTransform) -> Mat4 {
     let depth_scale = w.max(h);
-    // The negative-Y scale flips winding; the GUI pipeline uses
-    // `FrontFace::Clockwise` to keep `CullMode::Back` correct.
-    Mat4::from_translation(Vec3::new(x, y + h, 0.0))
+    // Vertices are pre-centered to `[-0.5, +0.5]` by `build_item_mesh`, so no
+    // T(-0.5) here.
+    Mat4::from_translation(Vec3::new(x + w * 0.5, y + h * 0.5, 0.0))
         * Mat4::from_scale(Vec3::new(w, -h, depth_scale))
-        * Mat4::from_translation(Vec3::splat(0.5))
         * display.to_matrix()
-        * Mat4::from_translation(Vec3::splat(-0.5))
 }
 
 fn default_display(is_block: bool) -> DisplayTransform {

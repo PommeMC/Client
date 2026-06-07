@@ -466,10 +466,10 @@ pub fn bake_chest_item_model() -> BakedModel {
     add_chest_cube(
         &mut quads,
         1.0 / 16.0,
-        10.0 / 16.0,
+        9.0 / 16.0,
         1.0 / 16.0,
         15.0 / 16.0,
-        15.0 / 16.0,
+        14.0 / 16.0,
         15.0 / 16.0,
         0.0,
         0.0,
@@ -482,11 +482,11 @@ pub fn bake_chest_item_model() -> BakedModel {
     add_chest_cube(
         &mut quads,
         7.0 / 16.0,
+        7.0 / 16.0,
+        15.0 / 16.0,
         9.0 / 16.0,
+        11.0 / 16.0,
         1.0,
-        9.0 / 16.0,
-        13.0 / 16.0,
-        17.0 / 16.0,
         0.0,
         0.0,
         2.0,
@@ -600,13 +600,13 @@ fn add_chest_cube(
     let face_specs: [FaceSpec; 6] = [
         FaceSpec {
             positions: [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]],
-            uv_pixels: (u + d, v, u + d + w, v + d),
+            uv_pixels: (u + d + w, v, u + d + w + w, v + d),
             uv_pattern: UvPattern::Up,
             shade: shades[0],
         },
         FaceSpec {
             positions: [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
-            uv_pixels: (u + d + w, v, u + d + w + w, v + d),
+            uv_pixels: (u + d, v, u + d + w, v + d),
             uv_pattern: UvPattern::Down,
             shade: shades[1],
         },

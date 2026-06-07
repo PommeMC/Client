@@ -649,7 +649,7 @@ fn face_texture_name(textures: &FaceTextures, face: greedy::Face) -> &str {
     }
 }
 
-const AO_BRIGHTNESS: [f32; 4] = [0.2, 0.467, 0.733, 1.0];
+use super::block_ao::AO_BRIGHTNESS;
 
 #[allow(clippy::too_many_arguments)]
 fn greedy_mesh_section(
@@ -1261,7 +1261,7 @@ fn emit_missing_cube(
     }
 }
 
-const CUBE_FACE_DIRS: [Direction; 6] = [
+pub(crate) const CUBE_FACE_DIRS: [Direction; 6] = [
     Direction::Up,
     Direction::Down,
     Direction::North,
@@ -1315,8 +1315,23 @@ fn shade_brightness(state: azalea_block::BlockState, registry: &BlockRegistry) -
     }
 }
 
-fn vertex_ao(side1: f32, side2: f32, corner: f32) -> f32 {
-    (side1 + side2 + corner + 1.0) * 0.25
+/// Centre-relative offset of vanilla's `AdjacencyInfo.corners[0]` neighbour
+/// (`centre + dir + corners[0]`), the `shade0` occlusion fallback.
+fn corners0_offset(dir: Direction) -> [i32; 3] {
+    match dir {
+        // corners[0] = EAST(+x)
+        Direction::Up => [1, 1, 0],
+        // corners[0] = WEST(-x)
+        Direction::Down => [-1, -1, 0],
+        // corners[0] = UP(+y)
+        Direction::North => [0, 1, -1],
+        // corners[0] = WEST(-x)
+        Direction::South => [-1, 0, 1],
+        // corners[0] = UP(+y)
+        Direction::West => [-1, 1, 0],
+        // corners[0] = DOWN(-y)
+        Direction::East => [1, -1, 0],
+    }
 }
 
 fn compute_face_ao(
@@ -1339,6 +1354,12 @@ fn compute_face_ao(
         Direction::Down => 0.5,
         Direction::North | Direction::South => 0.8,
         Direction::East | Direction::West => 0.6,
+    };
+
+    let c0 = corners0_offset(dir);
+    let shade0 = s(c0[0], c0[1], c0[2]);
+    let vertex_ao = |side1: f32, side2: f32, corner: f32| -> f32 {
+        super::block_ao::vertex_brightness(side1, side2, corner, shade0)
     };
 
     let (ao, lights) = match dir {
@@ -1472,7 +1493,7 @@ fn avg4(a: f32, b: f32, c: f32, d: f32) -> f32 {
     (a + b + c + d) * 0.25
 }
 
-fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4], f32) {
+pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4], f32) {
     match dir {
         Direction::Up => (
             [

@@ -39,19 +39,10 @@ struct Vertex {
 const MAX_VERTICES: usize = 16384;
 const VERTEX_SIZE: usize = size_of::<Vertex>();
 
-enum DrawOp {
-    Quads {
-        start: u32,
-        count: u32,
-        scissor: Option<[f32; 4]>,
-    },
-    Item {
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        item_name: String,
-    },
+struct DrawOp {
+    start: u32,
+    count: u32,
+    scissor: Option<[f32; 4]>,
 }
 
 struct GlyphEntry {
@@ -586,7 +577,7 @@ impl MenuOverlayPipeline {
         screen_w: f32,
         screen_h: f32,
         elements: &[MenuElement],
-        mut draw_item: impl FnMut(vk::CommandBuffer, f32, f32, f32, f32, &str),
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
     ) {
         let globals: [f32; 2] = [screen_w, screen_h];
         self.globals_allocation
@@ -616,7 +607,7 @@ impl MenuOverlayPipeline {
             ) {
                 let count = vertices.len() as u32 - cmd_start;
                 if count > 0 {
-                    draw_ops.push(DrawOp::Quads {
+                    draw_ops.push(DrawOp {
                         start: cmd_start,
                         count,
                         scissor: current_scissor,
@@ -768,24 +759,25 @@ impl MenuOverlayPipeline {
                     w,
                     h,
                     item_name,
-                    tint: _,
+                    tint,
                 } => {
-                    let count = vertices.len() as u32 - cmd_start;
-                    if count > 0 {
-                        draw_ops.push(DrawOp::Quads {
-                            start: cmd_start,
-                            count,
-                            scissor: current_scissor,
-                        });
+                    if let Some(uv) = item_atlas_uvs.get(item_name) {
+                        push_quad(
+                            &mut vertices,
+                            *x,
+                            *y,
+                            *w,
+                            *h,
+                            uv[0],
+                            uv[1],
+                            uv[2],
+                            uv[3],
+                            *tint,
+                            3.0,
+                            [0.0, 0.0],
+                            0.0,
+                        );
                     }
-                    cmd_start = vertices.len() as u32;
-                    draw_ops.push(DrawOp::Item {
-                        x: *x,
-                        y: *y,
-                        w: *w,
-                        h: *h,
-                        item_name: item_name.clone(),
-                    });
                 }
                 MenuElement::McText {
                     x,
@@ -1076,7 +1068,7 @@ impl MenuOverlayPipeline {
 
         let final_count = vertices.len() as u32 - cmd_start;
         if final_count > 0 {
-            draw_ops.push(DrawOp::Quads {
+            draw_ops.push(DrawOp {
                 start: cmd_start,
                 count: final_count,
                 scissor: current_scissor,
@@ -1106,56 +1098,53 @@ impl MenuOverlayPipeline {
             },
         };
 
-        let mut needs_bind = true;
+        if !draw_ops.is_empty() {
+            cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+            cmd.bind_descriptor_sets(
+                vk::PipelineBindPoint::Graphics,
+                self.pipeline_layout,
+                0,
+                &[self.globals_set, self.tex_set],
+                &[],
+            );
+            cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+        }
         for op in &draw_ops {
-            match op {
-                DrawOp::Quads {
-                    start,
-                    count,
-                    scissor,
-                } => {
-                    if needs_bind {
-                        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-                        cmd.bind_descriptor_sets(
-                            vk::PipelineBindPoint::Graphics,
-                            self.pipeline_layout,
-                            0,
-                            &[self.globals_set, self.tex_set],
-                            &[],
-                        );
-                        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-                        needs_bind = false;
-                    }
-                    let rect = if let Some(s) = scissor {
-                        vk::Rect2D {
-                            offset: vk::Offset2D {
-                                x: s[0] as i32,
-                                y: s[1] as i32,
-                            },
-                            extent: vk::Extent2D {
-                                width: s[2] as u32,
-                                height: s[3] as u32,
-                            },
-                        }
-                    } else {
-                        default_scissor
-                    };
-                    cmd.set_scissor(0, &[rect]);
-                    cmd.draw(*count, 1, *start, 0);
+            let rect = if let Some(s) = op.scissor {
+                vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: s[0] as i32,
+                        y: s[1] as i32,
+                    },
+                    extent: vk::Extent2D {
+                        width: s[2] as u32,
+                        height: s[3] as u32,
+                    },
                 }
-                DrawOp::Item {
-                    x,
-                    y,
-                    w,
-                    h,
-                    item_name,
-                } => {
-                    draw_item(cmd, *x, *y, *w, *h, item_name);
-                    needs_bind = true;
-                }
-            }
+            } else {
+                default_scissor
+            };
+            cmd.set_scissor(0, &[rect]);
+            cmd.draw(op.count, 1, op.start, 0);
         }
         cmd.set_scissor(0, &[default_scissor]);
+    }
+
+    pub fn set_item_atlas(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
+        let info = vk::DescriptorImageInfo {
+            sampler,
+            image_view: view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: self.tex_set,
+            dst_binding: 2,
+            descriptor_count: 1,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            image_info: &info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
     }
 
     pub fn set_blur_texture(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {

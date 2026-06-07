@@ -63,7 +63,7 @@ void main() {
 
     if (v_mode > 2.5) {
         vec4 tex = texture(item_tex, v_uv);
-        out_color = vec4(tex.rgb * v_color.rgb * tex.a * v_color.a, tex.a * v_color.a);
+        out_color = vec4(tex.rgb * v_color.rgb * v_color.a, tex.a * v_color.a);
         return;
     }
 

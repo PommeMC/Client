@@ -10,8 +10,10 @@ use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItem
 use glam::{DVec3, Vec3, dvec3};
 
 use crate::app::input::InputState;
+use crate::audio::{AudioEngine, CATEGORY_BLOCKS, SoundRef};
 use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
+use crate::world::block::sound::block_sounds;
 use crate::world::chunk::ChunkStore;
 
 const REACH: f32 = 4.5;
@@ -128,30 +130,42 @@ impl InteractionState {
         input: &InputState,
         chunks: &ChunkStore,
         sender: &PacketSender,
+        audio: &AudioEngine,
         on_ground: bool,
         creative: bool,
     ) -> Vec<azalea_core::position::ChunkPos> {
         let mut dirty_chunks = Vec::new();
-        self.update_swing();
 
-        if self.miss_time > 0 {
-            self.miss_time -= 1;
-        }
-        if self.right_click_delay > 0 {
-            self.right_click_delay -= 1;
-        }
-
+        // Vanilla `Minecraft.tick` order: attack/use input (which triggers the
+        // swing) runs first, then `--missTime`, then the player entity advances
+        // `updateSwingTime`. Running `update_swing` last keeps the swing
+        // animation cadence in lockstep with vanilla.
         if !input.is_cursor_captured() {
             self.stop_destroying(sender);
+            self.update_swing();
             return dirty_chunks;
         }
 
         if input.left_just_pressed() {
-            self.start_attack(chunks, sender, on_ground, creative, &mut dirty_chunks);
+            self.start_attack(
+                chunks,
+                sender,
+                audio,
+                on_ground,
+                creative,
+                &mut dirty_chunks,
+            );
         }
 
         if input.left_held() {
-            self.continue_attack(chunks, sender, on_ground, creative, &mut dirty_chunks);
+            self.continue_attack(
+                chunks,
+                sender,
+                audio,
+                on_ground,
+                creative,
+                &mut dirty_chunks,
+            );
         } else {
             self.miss_time = 0;
             self.stop_destroying(sender);
@@ -161,6 +175,14 @@ impl InteractionState {
             self.use_item_on(sender);
         }
 
+        if self.miss_time > 0 {
+            self.miss_time -= 1;
+        }
+        if self.right_click_delay > 0 {
+            self.right_click_delay -= 1;
+        }
+        self.update_swing();
+
         dirty_chunks
     }
 
@@ -168,6 +190,7 @@ impl InteractionState {
         &mut self,
         chunks: &ChunkStore,
         sender: &PacketSender,
+        audio: &AudioEngine,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -189,7 +212,15 @@ impl InteractionState {
             return;
         }
 
-        self.start_destroy_block(hit, chunks, sender, on_ground, creative, dirty_chunks);
+        self.start_destroy_block(
+            hit,
+            chunks,
+            sender,
+            audio,
+            on_ground,
+            creative,
+            dirty_chunks,
+        );
         self.swing(sender);
     }
 
@@ -197,6 +228,7 @@ impl InteractionState {
         &mut self,
         chunks: &ChunkStore,
         sender: &PacketSender,
+        audio: &AudioEngine,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -216,7 +248,15 @@ impl InteractionState {
             return;
         }
 
-        self.continue_destroy_block(hit, chunks, sender, on_ground, creative, dirty_chunks);
+        self.continue_destroy_block(
+            hit,
+            chunks,
+            sender,
+            audio,
+            on_ground,
+            creative,
+            dirty_chunks,
+        );
         self.swing(sender);
     }
 
@@ -251,11 +291,13 @@ impl InteractionState {
         }));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_destroy_block(
         &mut self,
         hit: HitResult,
         chunks: &ChunkStore,
         sender: &PacketSender,
+        audio: &AudioEngine,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -296,6 +338,7 @@ impl InteractionState {
             );
             self.pending_predictions.insert(hit.block_pos, seq);
             mark_dirty(&hit.block_pos, dirty_chunks);
+            play_break_sound(audio, state, hit.block_pos);
             self.destroy_delay = DESTROY_COOLDOWN;
             return;
         }
@@ -330,11 +373,13 @@ impl InteractionState {
         self.destroy_ticks = 0.0;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn continue_destroy_block(
         &mut self,
         hit: HitResult,
         chunks: &ChunkStore,
         sender: &PacketSender,
+        audio: &AudioEngine,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -345,7 +390,15 @@ impl InteractionState {
         }
 
         if self.destroy_pos != hit.block_pos {
-            self.start_destroy_block(hit, chunks, sender, on_ground, creative, dirty_chunks);
+            self.start_destroy_block(
+                hit,
+                chunks,
+                sender,
+                audio,
+                on_ground,
+                creative,
+                dirty_chunks,
+            );
             return;
         }
 
@@ -356,6 +409,9 @@ impl InteractionState {
         }
 
         self.destroy_progress += destroy_progress(state, on_ground, creative);
+        if self.destroy_ticks % 4.0 == 0.0 {
+            play_hit_sound(audio, state, hit.block_pos);
+        }
         self.destroy_ticks += 1.0;
 
         if self.destroy_progress >= 1.0 {
@@ -376,6 +432,7 @@ impl InteractionState {
             );
             self.pending_predictions.insert(hit.block_pos, seq);
             mark_dirty(&hit.block_pos, dirty_chunks);
+            play_break_sound(audio, state, hit.block_pos);
             self.is_destroying = false;
             self.destroy_progress = 0.0;
             self.destroy_ticks = 0.0;
@@ -424,6 +481,49 @@ fn destroy_progress(state: BlockState, on_ground: bool, creative: bool) -> f32 {
         30.0
     };
     speed / hardness / divisor
+}
+
+/// Plays a block's mining hit sound, matching vanilla
+/// `MultiPlayerGameMode.continueDestroyBlock`: volume `(volume + 1) / 8`, pitch
+/// `pitch * 0.5`.
+fn play_hit_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
+    let s = block_sounds(state);
+    play_block_sound(
+        audio,
+        &s.hit_event,
+        pos,
+        (s.volume + 1.0) / 8.0,
+        s.pitch * 0.5,
+    );
+}
+
+/// Plays a block's break sound, matching vanilla `LevelEventHandler` event
+/// 2001: volume `(volume + 1) / 2`, pitch `pitch * 0.8`.
+fn play_break_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
+    let s = block_sounds(state);
+    play_block_sound(
+        audio,
+        &s.break_event,
+        pos,
+        (s.volume + 1.0) / 2.0,
+        s.pitch * 0.8,
+    );
+}
+
+/// Plays a block sound event at the block centre in the BLOCKS category with a
+/// random variant. No-op for an empty event (a silent `SoundType` slot).
+fn play_block_sound(audio: &AudioEngine, event: &str, pos: BlockPos, volume: f32, pitch: f32) {
+    if event.is_empty() {
+        return;
+    }
+    audio.play_world_sound(
+        &SoundRef::Event(event.to_string()),
+        CATEGORY_BLOCKS,
+        Position::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5),
+        volume,
+        pitch,
+        fastrand::u64(..),
+    );
 }
 
 fn mark_dirty(pos: &BlockPos, dirty: &mut Vec<azalea_core::position::ChunkPos>) {

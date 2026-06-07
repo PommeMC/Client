@@ -1,17 +1,25 @@
+use std::f32::consts::{FRAC_PI_2, PI};
 use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
 
+use azalea_block::BlockState;
 use azalea_core::position::BlockPos;
+use glam::{Quat, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::CameraUniform;
+use crate::renderer::chunk::mesher::{CUBE_FACE_DIRS, cube_face_geometry};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::world::block::model::{BakedQuad, Direction};
+use crate::world::block::registry::BlockRegistry;
 
 const STAGE_COUNT: u32 = 10;
-const EPSILON: f32 = 0.001;
+/// Vertex-buffer capacity (a multiple of 6). Block models stay well under this;
+/// an oversized model is capped with a warning rather than truncated silently.
+const MAX_OVERLAY_VERTS: usize = 1536;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -170,10 +178,13 @@ impl BlockOverlayPipeline {
         };
         device.update_descriptor_sets(&[tex_write], &[]);
 
-        let placeholder = [OverlayVertex {
-            position: [0.0; 3],
-            uv: [0.0; 2],
-        }; 36];
+        let placeholder = vec![
+            OverlayVertex {
+                position: [0.0; 3],
+                uv: [0.0; 2],
+            };
+            MAX_OVERLAY_VERTS
+        ];
         let bytes = bytemuck::cast_slice::<OverlayVertex, u8>(&placeholder);
         let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
             device,
@@ -208,8 +219,19 @@ impl BlockOverlayPipeline {
             .copy_from_slice(bytes);
     }
 
-    pub fn draw(&mut self, cmd: vk::CommandBuffer, frame: usize, block_pos: &BlockPos, stage: u32) {
-        let vertices = build_overlay_vertices(block_pos, stage);
+    pub fn draw(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        registry: &BlockRegistry,
+        state: BlockState,
+        block_pos: &BlockPos,
+        stage: u32,
+    ) {
+        let vertices = build_overlay_vertices(registry, state, block_pos, stage);
+        if vertices.is_empty() {
+            return;
+        }
         let bytes = bytemuck::cast_slice::<OverlayVertex, u8>(&vertices);
         self.vertex_allocation.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
 
@@ -222,7 +244,7 @@ impl BlockOverlayPipeline {
             &[],
         );
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-        cmd.draw(36, 1, 0, 0);
+        cmd.draw(vertices.len() as u32, 1, 0, 0);
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
@@ -268,42 +290,136 @@ impl BlockOverlayPipeline {
     }
 }
 
-fn build_overlay_vertices(pos: &BlockPos, stage: u32) -> [OverlayVertex; 36] {
-    let x0 = pos.x as f32 - EPSILON;
-    let y0 = pos.y as f32 - EPSILON;
-    let z0 = pos.z as f32 - EPSILON;
-    let x1 = pos.x as f32 + 1.0 + EPSILON;
-    let y1 = pos.y as f32 + 1.0 + EPSILON;
-    let z1 = pos.z as f32 + 1.0 + EPSILON;
+/// Builds the crumbling overlay for a block by re-tessellating its model with
+/// vanilla's per-face crack projection (`SheetedDecalTextureGenerator`). There
+/// is no geometry inflation: the overlay sits exactly on the block and relies
+/// on the pipeline's polygon offset to avoid z-fighting, matching vanilla.
+fn build_overlay_vertices(
+    registry: &BlockRegistry,
+    state: BlockState,
+    pos: &BlockPos,
+    stage: u32,
+) -> Vec<OverlayVertex> {
+    let origin = [pos.x as f32, pos.y as f32, pos.z as f32];
+    let mut verts = Vec::new();
 
-    let v_top = stage as f32 / STAGE_COUNT as f32;
-    let v_bot = (stage + 1) as f32 / STAGE_COUNT as f32;
-
-    let mut verts = [OverlayVertex {
-        position: [0.0; 3],
-        uv: [0.0; 2],
-    }; 36];
-    let mut i = 0;
-
-    let mut quad = |positions: [[f32; 3]; 4]| {
-        let uvs = [[0.0, v_bot], [1.0, v_bot], [1.0, v_top], [0.0, v_top]];
-        for &idx in &[0usize, 1, 2, 0, 2, 3] {
-            verts[i] = OverlayVertex {
-                position: positions[idx],
-                uv: uvs[idx],
-            };
-            i += 1;
+    if let Some(model) = registry.get_baked_model(state) {
+        for quad in &model.quads {
+            push_quad(&mut verts, origin, quad, stage);
         }
-    };
+    } else if let Some(quads) = registry.get_multipart_quads(state) {
+        for quad in quads {
+            push_quad(&mut verts, origin, quad, stage);
+        }
+    } else if registry.get_textures(state).is_some() {
+        // Blocks rendered as a plain opaque cube (no baked model): crack a unit cube.
+        for dir in CUBE_FACE_DIRS {
+            let (positions, _, _) = cube_face_geometry(dir);
+            push_face(&mut verts, origin, &positions, dir, stage);
+        }
+    }
 
-    quad([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]]);
-    quad([[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]]);
-    quad([[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]]);
-    quad([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]]);
-    quad([[x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1]]);
-    quad([[x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0]]);
-
+    if verts.len() > MAX_OVERLAY_VERTS {
+        tracing::warn!(
+            "block overlay model emitted {} verts; capping at {MAX_OVERLAY_VERTS}",
+            verts.len()
+        );
+        verts.truncate(MAX_OVERLAY_VERTS);
+    }
     verts
+}
+
+fn push_quad(verts: &mut Vec<OverlayVertex>, origin: [f32; 3], quad: &BakedQuad, stage: u32) {
+    let dir = quad
+        .cullface
+        .unwrap_or_else(|| nearest_direction(&quad.positions));
+    push_face(verts, origin, &quad.positions, dir, stage);
+}
+
+/// Emits one quad (two triangles, six vertices) with crack UVs projected from
+/// the vertex world positions for `dir`, normalized into this stage's atlas
+/// tile.
+fn push_face(
+    verts: &mut Vec<OverlayVertex>,
+    origin: [f32; 3],
+    positions: &[[f32; 3]; 4],
+    dir: Direction,
+    stage: u32,
+) {
+    let world: [Vec3; 4] = std::array::from_fn(|i| {
+        Vec3::new(
+            origin[0] + positions[i][0],
+            origin[1] + positions[i][1],
+            origin[2] + positions[i][2],
+        )
+    });
+    let mut uv: [[f32; 2]; 4] = std::array::from_fn(|i| project_crack_uv(world[i], dir));
+
+    // 1 world unit maps to one crack tile, so a partial face shows a matching
+    // fraction. Shift to the quad's min so the tile lands in [0,1] (the vertical
+    // atlas can't wrap V across stages) and offset V into this stage's row.
+    let min_u = uv.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min);
+    let min_v = uv.iter().map(|c| c[1]).fold(f32::INFINITY, f32::min);
+    let v_scale = 1.0 / STAGE_COUNT as f32;
+    let v_base = stage as f32 * v_scale;
+    for c in &mut uv {
+        c[0] -= min_u;
+        c[1] = v_base + (c[1] - min_v) * v_scale;
+    }
+
+    for &idx in &[0usize, 1, 2, 0, 2, 3] {
+        verts.push(OverlayVertex {
+            position: world[idx].to_array(),
+            uv: uv[idx],
+        });
+    }
+}
+
+/// Vanilla `SheetedDecalTextureGenerator`: project the world position onto the
+/// crack plane for `dir` (`rotateY(π)`, `rotateX(-π/2)`, then the face
+/// rotation), taking `(-x, -y)` as the texture coordinate (texture scale 1.0).
+fn project_crack_uv(world: Vec3, dir: Direction) -> [f32; 2] {
+    let mut p = Quat::from_rotation_y(PI) * world;
+    p = Quat::from_rotation_x(-FRAC_PI_2) * p;
+    p = face_rotation(dir) * p;
+    [-p.x, -p.y]
+}
+
+/// `Direction.getRotation()` (Direction.java:157).
+fn face_rotation(dir: Direction) -> Quat {
+    match dir {
+        Direction::Down => Quat::from_rotation_x(PI),
+        Direction::Up => Quat::IDENTITY,
+        Direction::North => Quat::from_rotation_x(FRAC_PI_2) * Quat::from_rotation_z(PI),
+        Direction::South => Quat::from_rotation_x(FRAC_PI_2),
+        Direction::West => Quat::from_rotation_x(FRAC_PI_2) * Quat::from_rotation_z(FRAC_PI_2),
+        Direction::East => Quat::from_rotation_x(FRAC_PI_2) * Quat::from_rotation_z(-FRAC_PI_2),
+    }
+}
+
+/// Nearest axis-aligned face to a quad's geometric normal, matching vanilla
+/// `Direction.getApproximateNearest` (used for quads without a cull face).
+fn nearest_direction(positions: &[[f32; 3]; 4]) -> Direction {
+    let p0 = Vec3::from_array(positions[0]);
+    let n = (Vec3::from_array(positions[1]) - p0).cross(Vec3::from_array(positions[2]) - p0);
+    let (ax, ay, az) = (n.x.abs(), n.y.abs(), n.z.abs());
+    if ax >= ay && ax >= az {
+        if n.x >= 0.0 {
+            Direction::East
+        } else {
+            Direction::West
+        }
+    } else if ay >= az {
+        if n.y >= 0.0 {
+            Direction::Up
+        } else {
+            Direction::Down
+        }
+    } else if n.z >= 0.0 {
+        Direction::South
+    } else {
+        Direction::North
+    }
 }
 
 fn load_destroy_atlas(
@@ -428,9 +544,12 @@ fn create_pipeline(
         cull_mode: vk::CullModeFlags::None,
         front_face: vk::FrontFace::CounterClockwise,
         line_width: 1.0,
+        // No inflation, so this camera-ward offset is what wins the depth test.
+        // Mirror vanilla's constant-heavy crumbling offset (units 10, slope 1):
+        // a large slope pulls edge-on side faces in front of occluding neighbors.
         depth_bias_enable: vk::TRUE,
-        depth_bias_constant_factor: -1.0,
-        depth_bias_slope_factor: -10.0,
+        depth_bias_constant_factor: -10.0,
+        depth_bias_slope_factor: -1.0,
         ..Default::default()
     };
 
@@ -505,4 +624,29 @@ fn create_pipeline(
     device.destroy_shader_module(frag_module, None);
 
     pipeline
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each axis-aligned cube face must project to exactly one crack tile: its
+    /// four corners span 1.0 in both texture axes (no axis collapse, scale 1).
+    #[test]
+    fn projection_maps_each_face_to_a_unit_tile() {
+        let span = |xs: [f32; 4]| {
+            let min = xs.iter().copied().fold(f32::INFINITY, f32::min);
+            let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            max - min
+        };
+        for dir in CUBE_FACE_DIRS {
+            let (positions, _, _) = cube_face_geometry(dir);
+            let uv: [[f32; 2]; 4] =
+                std::array::from_fn(|i| project_crack_uv(Vec3::from_array(positions[i]), dir));
+            let us = std::array::from_fn(|i| uv[i][0]);
+            let vs = std::array::from_fn(|i| uv[i][1]);
+            assert!((span(us) - 1.0).abs() < 1e-4, "{dir:?} u span {}", span(us));
+            assert!((span(vs) - 1.0).abs() < 1e-4, "{dir:?} v span {}", span(vs));
+        }
+    }
 }

@@ -10,10 +10,11 @@ pub(crate) mod util;
 
 pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use azalea_block::BlockState;
 use azalea_core::position::{BlockPos, ChunkPos};
 use camera::{Camera, CameraUniform};
 use chunk::atlas::TextureAtlas;
@@ -59,7 +60,7 @@ enum RenderMode<'a> {
     World {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
-        destroy_info: Option<(BlockPos, u32)>,
+        destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
         entities: &'a [EntityRenderInfo],
@@ -105,6 +106,7 @@ pub struct Renderer {
     chunk_border_pipeline: ChunkBorderPipeline,
     item_entity_pipeline: ItemEntityPipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
+    gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
@@ -310,14 +312,25 @@ impl Renderer {
 
         splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
 
-        let mut gui_item_pipeline = pipelines::gui_item::GuiItemPipeline::new(
+        let initial_slot_px =
+            pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(sw, sh, 0));
+        let gui_item_atlas = build_gui_item_atlas(
             &ctx.device,
-            swapchain_state.render_pass,
+            &ctx.allocator,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            &menu_pipeline,
+            initial_slot_px,
+        );
+
+        let gui_item_pipeline = pipelines::gui_item::GuiItemPipeline::new(
+            &ctx.device,
+            gui_item_atlas.render_pass(),
+            gui_item_atlas.atlas_px(),
             &ctx.allocator,
             &atlas,
             jar_assets_dir,
         );
-        gui_item_pipeline.update_camera(sw, sh);
 
         warm_item_meshes(
             &ctx.device,
@@ -350,6 +363,7 @@ impl Renderer {
             chunk_border_pipeline,
             item_entity_pipeline,
             gui_item_pipeline,
+            gui_item_atlas,
             chunk_buffers,
             render_finished_per_image,
             swapchain_dirty: false,
@@ -481,7 +495,8 @@ impl Renderer {
         };
         cmd.set_scissor(0, &[scissor]);
 
-        menu.draw(cmd, sw, sh, &elements, |_, _, _, _, _, _| {});
+        let empty_uvs: HashMap<String, [f32; 4]> = HashMap::new();
+        menu.draw(cmd, sw, sh, &elements, &empty_uvs);
 
         cmd.end_render_pass();
         cmd.end()?;
@@ -565,10 +580,6 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.item_entity_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.gui_item_pipeline
-            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
-        self.gui_item_pipeline
-            .update_camera(self.width as f32, self.height as f32);
         self.blur_pipeline.resize(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -769,7 +780,7 @@ impl Renderer {
         hide_cursor: bool,
         overlay: Vec<MenuElement>,
         swing_progress: f32,
-        destroy_info: Option<(BlockPos, u32)>,
+        destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
         entities: &[EntityRenderInfo],
@@ -1032,6 +1043,96 @@ impl Renderer {
             },
         ];
 
+        let menu_elements: &[MenuElement] = match &mode {
+            RenderMode::World { overlay, .. } => overlay.as_slice(),
+            RenderMode::MainMenu { elements, .. } => elements.as_slice(),
+        };
+
+        let target_slot_px =
+            pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(
+                self.swapchain.extent.width as f32,
+                self.swapchain.extent.height as f32,
+                0,
+            ));
+        if target_slot_px != self.gui_item_atlas.slot_px() {
+            // Mid-cmd-recording wait_idle: this cmd buffer is unsubmitted so
+            // holds no in-flight references, and `submit_one_time` inside the
+            // rebuild uses a separate primary cmd from the same pool.
+            self.ctx.device.wait_idle().ok();
+            self.gui_item_atlas
+                .destroy(&self.ctx.device, &self.ctx.allocator);
+            self.gui_item_atlas = build_gui_item_atlas(
+                &self.ctx.device,
+                &self.ctx.allocator,
+                self.ctx.graphics_queue,
+                self.ctx.command_pool,
+                &self.menu_pipeline,
+                target_slot_px,
+            );
+            self.gui_item_pipeline
+                .recreate_pipeline(&self.ctx.device, self.gui_item_atlas.render_pass());
+            self.gui_item_pipeline
+                .set_atlas_px(self.gui_item_atlas.atlas_px());
+        }
+
+        let mut unique_names: HashSet<String> = HashSet::new();
+        for elem in menu_elements {
+            if let MenuElement::ItemIcon { item_name, .. } = elem {
+                unique_names.insert(item_name.clone());
+            }
+        }
+        if !self.gui_item_atlas.has_space_for_all(&unique_names)
+            && !self.gui_item_atlas.reclaim_space_for(&unique_names)
+        {
+            tracing::warn!(
+                "gui_item_atlas: out of slots for {} unique items; some icons will not render",
+                unique_names.len()
+            );
+        }
+        let mut item_atlas_uvs: HashMap<String, [f32; 4]> = HashMap::new();
+        struct BakeJob {
+            slot: pipelines::gui_item_atlas::Slot,
+            name: String,
+            is_block: bool,
+            needs_clear: bool,
+        }
+        let mut bake_list: Vec<BakeJob> = Vec::new();
+        for name in &unique_names {
+            let discard = pipelines::gui_item_atlas::is_animated_item(name);
+            if let Some((slot, state)) = self.gui_item_atlas.get_or_allocate(name, discard) {
+                item_atlas_uvs.insert(name.clone(), self.gui_item_atlas.slot_uv(&slot));
+                if !matches!(state, pipelines::gui_item_atlas::SlotState::Ready) {
+                    bake_list.push(BakeJob {
+                        slot,
+                        name: name.clone(),
+                        is_block: self.registry.get_item_model(name).is_some(),
+                        needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
+                    });
+                }
+            }
+        }
+        if !bake_list.is_empty() {
+            self.gui_item_atlas.begin_bake_pass(cmd);
+            self.gui_item_pipeline.bind_for_bake_pass(cmd);
+            for job in &bake_list {
+                if job.needs_clear {
+                    self.gui_item_atlas.clear_slot_color(cmd, &job.slot);
+                }
+                cmd.set_scissor(0, &[self.gui_item_atlas.scissor_rect(&job.slot)]);
+                let (sx, sy) = self.gui_item_atlas.slot_origin_pixels(&job.slot);
+                self.gui_item_pipeline.bake_to_slot(
+                    cmd,
+                    &self.item_entity_pipeline,
+                    sx,
+                    sy,
+                    self.gui_item_atlas.slot_px(),
+                    &job.name,
+                    job.is_block,
+                );
+            }
+            self.gui_item_atlas.end_bake_pass(cmd);
+        }
+
         let use_blur = matches!(&mode, RenderMode::MainMenu { blur, .. } if *blur > 0.01);
 
         let (rp, fb) = if use_blur {
@@ -1100,9 +1201,15 @@ impl Renderer {
                 self.chunk_buffers.draw_indirect(cmd, frame);
                 let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
-                if let Some((block_pos, stage)) = destroy_info {
-                    self.block_overlay_pipeline
-                        .draw(cmd, frame, block_pos, *stage);
+                if let Some((block_pos, stage, state)) = destroy_info {
+                    self.block_overlay_pipeline.draw(
+                        cmd,
+                        frame,
+                        &self.registry,
+                        *state,
+                        block_pos,
+                        *stage,
+                    );
                 }
 
                 self.entity_renderer.draw(cmd, frame, entities);
@@ -1138,26 +1245,8 @@ impl Renderer {
                         .update_and_draw(cmd, frame, aspect, *swing_progress);
                 }
 
-                let Renderer {
-                    menu_pipeline,
-                    gui_item_pipeline,
-                    item_entity_pipeline,
-                    registry,
-                    ..
-                } = &mut *self;
-                menu_pipeline.draw(cmd, sw, sh, overlay, |cmd, x, y, w, h, name| {
-                    let is_block = registry.get_item_model(name).is_some();
-                    gui_item_pipeline.draw_one(
-                        cmd,
-                        item_entity_pipeline,
-                        x,
-                        y,
-                        w,
-                        h,
-                        name,
-                        is_block,
-                    );
-                });
+                self.menu_pipeline
+                    .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
 
                 self.last_timings.cull_ms = cull_ms;
                 self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -1217,30 +1306,14 @@ impl Renderer {
                     );
                 }
 
-                let Renderer {
-                    menu_pipeline,
-                    gui_item_pipeline,
-                    item_entity_pipeline,
-                    registry,
-                    ..
-                } = &mut *self;
-                menu_pipeline.draw(cmd, sw, sh, elements, |cmd, x, y, w, h, name| {
-                    let is_block = registry.get_item_model(name).is_some();
-                    gui_item_pipeline.draw_one(
-                        cmd,
-                        item_entity_pipeline,
-                        x,
-                        y,
-                        w,
-                        h,
-                        name,
-                        is_block,
-                    );
-                });
+                self.menu_pipeline
+                    .draw(cmd, sw, sh, elements, &item_atlas_uvs);
             }
         }
 
         cmd.end_render_pass();
+
+        self.gui_item_atlas.end_frame();
 
         cmd.end()?;
 
@@ -1282,6 +1355,25 @@ impl Renderer {
         self.ctx.advance_frame();
         Ok(())
     }
+}
+
+fn build_gui_item_atlas(
+    device: &vk::Device,
+    allocator: &Arc<std::sync::Mutex<pomme_gpu_allocator::vulkan::Allocator>>,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    menu: &pipelines::menu_overlay::MenuOverlayPipeline,
+    slot_px: u32,
+) -> pipelines::gui_item_atlas::GuiItemAtlas {
+    let atlas = pipelines::gui_item_atlas::GuiItemAtlas::new(
+        device,
+        allocator,
+        queue,
+        command_pool,
+        slot_px,
+    );
+    menu.set_item_atlas(device, atlas.color_view(), atlas.sampler());
+    atlas
 }
 
 fn warm_item_meshes(
@@ -1413,6 +1505,8 @@ impl Drop for Renderer {
         self.item_entity_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.gui_item_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.gui_item_atlas
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
 
