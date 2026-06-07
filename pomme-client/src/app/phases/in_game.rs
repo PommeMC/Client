@@ -656,7 +656,7 @@ pub fn update_game(
     let weather_columns = build_weather_columns(
         &game.chunk_store,
         &game.biome_climate,
-        *gfx.renderer.camera_pivot_position(),
+        gfx.renderer.camera_render_position(),
         sky.rain(),
     );
 

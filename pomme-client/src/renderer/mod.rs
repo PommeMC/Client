@@ -715,6 +715,12 @@ impl Renderer {
         self.camera.position
     }
 
+    /// Camera position used for rendering (eye plus any third-person offset),
+    /// matching `CameraUniform`'s `camera_pos`.
+    pub fn camera_render_position(&self) -> glam::DVec3 {
+        *self.camera.position + self.camera.third_person_offset().as_dvec3()
+    }
+
     pub fn cycle_camera_mode(&mut self) {
         self.camera.mode = self.camera.mode.cycle();
     }
