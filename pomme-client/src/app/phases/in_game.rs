@@ -610,6 +610,7 @@ pub fn update_game(
         day_time: game.sky_state.day_time,
         game_time: game.sky_state.game_time,
         rain_level: game.sky_state.rain_level,
+        thunder_level: game.sky_state.thunder_level,
         partial_tick: sky_partial_tick,
     };
     if game.show_chunk_borders {
@@ -652,6 +653,13 @@ pub fn update_game(
         })
         .collect();
 
+    let weather_columns = build_weather_columns(
+        &game.chunk_store,
+        &game.biome_climate,
+        *gfx.renderer.camera_pivot_position(),
+        sky.rain(),
+    );
+
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
@@ -663,6 +671,7 @@ pub fn update_game(
         &entity_renders,
         &item_renders,
         &block_entity_renders,
+        &weather_columns,
     ) {
         tracing::error!("Render error: {e}");
     }
@@ -768,6 +777,63 @@ fn get_entity_light(chunk_store: &ChunkStore, pos: Position) -> f32 {
         .get_sky_light(bx, by, bz)
         .max(chunk_store.get_block_light(bx, by, bz));
     LIGHT_TABLE[level as usize]
+}
+
+/// Builds the rain/snow columns in a square around the camera (vanilla
+/// WeatherEffectRenderer.extractRenderState). Returns empty when it is not
+/// raining or when no precipitation biomes are nearby.
+fn build_weather_columns(
+    chunk_store: &ChunkStore,
+    biome_climate: &HashMap<u32, BiomeClimate>,
+    cam: glam::DVec3,
+    rain: f32,
+) -> Vec<crate::renderer::WeatherColumn> {
+    use crate::renderer::WeatherColumn;
+    use crate::renderer::pipelines::weather::{Precip, WEATHER_RADIUS, precipitation_for};
+
+    if rain <= 0.0 {
+        return Vec::new();
+    }
+
+    let cam_x = cam.x.floor() as i32;
+    let cam_y = cam.y.floor() as i32;
+    let cam_z = cam.z.floor() as i32;
+
+    let mut columns = Vec::new();
+    for dz in -WEATHER_RADIUS..=WEATHER_RADIUS {
+        for dx in -WEATHER_RADIUS..=WEATHER_RADIUS {
+            let wx = cam_x + dx;
+            let wz = cam_z + dz;
+            let terrain = chunk_store.motion_blocking_height(wx, wz);
+            let y0 = (cam_y - WEATHER_RADIUS).max(terrain);
+            let y1 = (cam_y + WEATHER_RADIUS).max(terrain);
+            if y1 - y0 == 0 {
+                continue;
+            }
+            let climate = biome_climate
+                .get(&chunk_store.biome_id(wx, cam_y, wz))
+                .copied()
+                .unwrap_or_default();
+            let precip = precipitation_for(&climate, cam_y);
+            if precip == Precip::None {
+                continue;
+            }
+            let light_y = cam_y.max(terrain);
+            let light = get_entity_light(
+                chunk_store,
+                Position::new(wx as f64, light_y as f64, wz as f64),
+            );
+            columns.push(WeatherColumn {
+                x: wx,
+                z: wz,
+                bottom_y: y0 as f32,
+                top_y: y1 as f32,
+                precip,
+                light,
+            });
+        }
+    }
+    columns
 }
 
 fn build_item_render_infos(

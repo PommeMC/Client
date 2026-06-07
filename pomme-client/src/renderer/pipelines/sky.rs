@@ -117,6 +117,7 @@ pub struct SkyState {
     pub day_time: u64,
     pub game_time: u64,
     pub rain_level: f32,
+    pub thunder_level: f32,
     pub partial_tick: f32,
 }
 
@@ -126,6 +127,7 @@ impl SkyState {
             day_time: 6000,
             game_time: 6000,
             rain_level: 0.0,
+            thunder_level: 0.0,
             partial_tick: 0.0,
         }
     }
@@ -134,8 +136,38 @@ impl SkyState {
         (self.day_time % TICKS_PER_DAY as u64) as f32 + self.partial_tick
     }
 
+    /// Clamped rain level (server-driven). Vanilla `setRainLevel` stores prev
+    /// == current, so no sub-tick interpolation is needed here.
+    pub fn rain(&self) -> f32 {
+        self.rain_level.clamp(0.0, 1.0)
+    }
+
+    /// Effective thunder, gated by rain (vanilla `getThunderLevel` multiplies
+    /// by the rain level so there is no thunder without rain).
+    pub fn thunder(&self) -> f32 {
+        self.thunder_level.clamp(0.0, 1.0) * self.rain()
+    }
+
     pub fn sky_color(&self) -> [f32; 3] {
-        let mult = sample_rgb_keyframes(self.day_tick(), SKY_COLOR_KEYFRAMES, TICKS_PER_DAY);
+        let base = self.day_color(SKY_COLOR_KEYFRAMES);
+        self.apply_weather(
+            base,
+            |c| blend_to_gray(c, 0.6, 0.75),
+            |c| blend_to_gray(c, 0.24, 0.94),
+        )
+    }
+
+    pub fn fog_color(&self) -> [f32; 3] {
+        let base = self.day_color(FOG_COLOR_KEYFRAMES);
+        self.apply_weather(
+            base,
+            |c| mul_rgb(c, [0.5, 0.5, 0.6]),
+            |c| mul_rgb(c, [0.25, 0.25, 0.3]),
+        )
+    }
+
+    fn day_color(&self, keyframes: &[(f32, [f32; 3])]) -> [f32; 3] {
+        let mult = sample_rgb_keyframes(self.day_tick(), keyframes, TICKS_PER_DAY);
         [
             BASE_SKY_COLOR[0] * mult[0],
             BASE_SKY_COLOR[1] * mult[1],
@@ -143,13 +175,24 @@ impl SkyState {
         ]
     }
 
-    pub fn fog_color(&self) -> [f32; 3] {
-        let mult = sample_rgb_keyframes(self.day_tick(), FOG_COLOR_KEYFRAMES, TICKS_PER_DAY);
-        [
-            BASE_SKY_COLOR[0] * mult[0],
-            BASE_SKY_COLOR[1] * mult[1],
-            BASE_SKY_COLOR[2] * mult[2],
-        ]
+    /// Layers the rain then thunder color modifiers over the base color, each
+    /// scaled by its level (thunder is gated by rain), matching vanilla
+    /// `WeatherAttributes`: the sky blends to grey, the fog multiplies its RGB.
+    fn apply_weather(
+        &self,
+        mut rgb: [f32; 3],
+        rain_mod: impl Fn([f32; 3]) -> [f32; 3],
+        thunder_mod: impl Fn([f32; 3]) -> [f32; 3],
+    ) -> [f32; 3] {
+        let thunder = self.thunder();
+        let rain_only = (self.rain() - thunder).max(0.0);
+        if rain_only > 0.0 {
+            rgb = lerp_rgb(rgb, rain_mod(rgb), rain_only);
+        }
+        if thunder > 0.0 {
+            rgb = lerp_rgb(rgb, thunder_mod(rgb), thunder);
+        }
+        rgb
     }
 }
 
@@ -413,23 +456,20 @@ impl SkyPipeline {
         let moon_angle = sun_angle + PI;
         let star_angle = sun_angle;
 
+        // Stars fade out as rain ramps up (vanilla forces star brightness to 0).
         let star_brightness =
-            sample_float_keyframes(day_tick, STAR_BRIGHTNESS_KEYFRAMES, TICKS_PER_DAY);
+            sample_float_keyframes(day_tick, STAR_BRIGHTNESS_KEYFRAMES, TICKS_PER_DAY)
+                * (1.0 - sky.rain());
 
-        let sky_mult = sample_rgb_keyframes(day_tick, SKY_COLOR_KEYFRAMES, TICKS_PER_DAY);
-        let sky_color = [
-            BASE_SKY_COLOR[0] * sky_mult[0],
-            BASE_SKY_COLOR[1] * sky_mult[1],
-            BASE_SKY_COLOR[2] * sky_mult[2],
-            1.0,
-        ];
+        let dome = sky.sky_color();
+        let sky_color = [dome[0], dome[1], dome[2], 1.0];
 
         let sunrise_argb = sample_argb_keyframes(day_tick, SUNRISE_COLOR_KEYFRAMES, TICKS_PER_DAY);
 
         let moon_phase_idx = ((sky.game_time / TICKS_PER_DAY as u64) % 8) as usize;
         let moon_brightness = MOON_BRIGHTNESS_PER_PHASE[moon_phase_idx];
 
-        let celestial_alpha = 1.0 - sky.rain_level;
+        let celestial_alpha = 1.0 - sky.rain();
 
         let view_proj = camera.sky_view_projection();
 
@@ -660,6 +700,26 @@ fn sample_rgb_keyframes(tick: f32, keyframes: &[(f32, [f32; 3])], period: f32) -
         v0[1] + (v1[1] - v0[1]) * frac,
         v0[2] + (v1[2] - v0[2]) * frac,
     ]
+}
+
+fn lerp_rgb(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+fn mul_rgb(rgb: [f32; 3], m: [f32; 3]) -> [f32; 3] {
+    [rgb[0] * m[0], rgb[1] * m[1], rgb[2] * m[2]]
+}
+
+/// Vanilla `ColorModifier.BlendToGray`: greyscale the color, scale it by
+/// `brightness`, then lerp the original toward that darkened grey by `factor`.
+fn blend_to_gray(rgb: [f32; 3], brightness: f32, factor: f32) -> [f32; 3] {
+    let luma = rgb[0] * 0.3 + rgb[1] * 0.59 + rgb[2] * 0.11;
+    let grey = [luma * brightness, luma * brightness, luma * brightness];
+    lerp_rgb(rgb, grey, factor)
 }
 
 fn argb_to_rgba(argb: i32) -> [f32; 4] {

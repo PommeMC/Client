@@ -33,6 +33,7 @@ use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
 use pipelines::panorama::PanoramaPipeline;
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
+pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
 use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
 use pyronyx::vk;
 use swapchain::Swapchain;
@@ -66,6 +67,7 @@ enum RenderMode<'a> {
         entities: &'a [EntityRenderInfo],
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: &'a [BlockEntityRenderInfo],
+        weather: &'a [WeatherColumn],
     },
     MainMenu {
         scroll: f32,
@@ -105,6 +107,7 @@ pub struct Renderer {
     skin_preview: SkinPreviewPipeline,
     chunk_border_pipeline: ChunkBorderPipeline,
     item_entity_pipeline: ItemEntityPipeline,
+    weather_pipeline: WeatherPipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
 
@@ -220,6 +223,16 @@ impl Renderer {
         splash(&mut menu_pipeline, 0.7, "Loading sky and panorama...");
 
         let sky_pipeline = SkyPipeline::new(
+            &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            jar_assets_dir,
+            asset_index,
+        );
+
+        let weather_pipeline = WeatherPipeline::new(
             &ctx.device,
             ctx.graphics_queue,
             ctx.command_pool,
@@ -362,6 +375,7 @@ impl Renderer {
             block_entity_pipeline,
             chunk_border_pipeline,
             item_entity_pipeline,
+            weather_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
             chunk_buffers,
@@ -580,6 +594,8 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.item_entity_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.weather_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.blur_pipeline.resize(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -786,6 +802,7 @@ impl Renderer {
         entities: &[EntityRenderInfo],
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: &[BlockEntityRenderInfo],
+        weather: &[WeatherColumn],
     ) -> Result<(), RendererError> {
         let sky_col = sky.sky_color();
         self.render_frame(
@@ -801,6 +818,7 @@ impl Renderer {
                 entities,
                 item_entities,
                 block_entities,
+                weather,
             },
         )
     }
@@ -1007,6 +1025,7 @@ impl Renderer {
             self.block_entity_pipeline.update_camera(frame, &uniform);
             self.chunk_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
+            self.weather_pipeline.update_camera(frame, &uniform);
         }
 
         if hide_cursor {
@@ -1192,6 +1211,7 @@ impl Renderer {
                 entities,
                 item_entities,
                 block_entities,
+                weather,
             } => {
                 self.sky_pipeline
                     .update_and_draw(&self.ctx.device, cmd, frame, &self.camera, sky);
@@ -1217,6 +1237,11 @@ impl Renderer {
                 self.block_entity_pipeline.draw(cmd, frame, block_entities);
 
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
+
+                // Weather draws after opaque world geometry (depth-tested against
+                // terrain) but before the depth clear for the hand pass.
+                self.weather_pipeline
+                    .update_and_draw(cmd, frame, &self.camera, sky, weather);
 
                 if *show_chunk_borders {
                     self.chunk_border_pipeline.draw(cmd, frame);
@@ -1503,6 +1528,8 @@ impl Drop for Renderer {
         self.chunk_border_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.item_entity_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.weather_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.gui_item_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);

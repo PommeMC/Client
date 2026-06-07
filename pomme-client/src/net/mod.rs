@@ -109,6 +109,10 @@ pub enum NetworkEvent {
         game_time: u64,
         day_time: Option<u64>,
     },
+    WeatherUpdate {
+        event: azalea_protocol::packets::game::c_game_event::EventType,
+        param: f32,
+    },
     GameModeChanged {
         game_mode: u8,
     },

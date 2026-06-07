@@ -242,10 +242,22 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::GameEvent(p) => {
             use azalea_protocol::packets::game::c_game_event::EventType;
-            if p.event == EventType::ChangeGameMode {
-                let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
-                    game_mode: p.param as u8,
-                });
+            match p.event {
+                EventType::ChangeGameMode => {
+                    let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
+                        game_mode: p.param as u8,
+                    });
+                }
+                EventType::StartRaining
+                | EventType::StopRaining
+                | EventType::RainLevelChange
+                | EventType::ThunderLevelChange => {
+                    let _ = event_tx.try_send(NetworkEvent::WeatherUpdate {
+                        event: p.event,
+                        param: p.param,
+                    });
+                }
+                _ => {}
             }
         }
         ClientboundGamePacket::Disconnect(p) => {

@@ -37,6 +37,8 @@ fn main() {
         ("chunk_border.frag", shaderc::ShaderKind::Fragment),
         ("item_entity.vert", shaderc::ShaderKind::Vertex),
         ("item_entity.frag", shaderc::ShaderKind::Fragment),
+        ("weather.vert", shaderc::ShaderKind::Vertex),
+        ("weather.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (file, kind) in &shaders {

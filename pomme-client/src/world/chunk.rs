@@ -211,6 +211,42 @@ impl ChunkStore {
     pub fn min_y(&self) -> i32 {
         self.chunk_storage.min_y()
     }
+
+    /// Top non-motion-blocking Y for the column (vanilla MOTION_BLOCKING
+    /// surface, i.e. one above the highest solid block). Used to position
+    /// weather columns. Returns `min_y` when the chunk or its heightmap is
+    /// missing.
+    pub fn motion_blocking_height(&self, x: i32, z: i32) -> i32 {
+        let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
+        let Some(chunk_lock) = self.get_chunk(&chunk_pos) else {
+            return self.min_y();
+        };
+        let chunk = chunk_lock.read();
+        chunk
+            .heightmaps
+            .get(&HeightmapKind::MotionBlocking)
+            .map(|h| h.get_first_available(x.rem_euclid(16) as u8, z.rem_euclid(16) as u8))
+            .unwrap_or(self.min_y())
+    }
+
+    /// Registry id of the biome at a block position (matches the mesher's biome
+    /// lookup). Returns 0 when the chunk is missing.
+    pub fn biome_id(&self, x: i32, y: i32, z: i32) -> u32 {
+        let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
+        let Some(chunk_lock) = self.get_chunk(&chunk_pos) else {
+            return 0;
+        };
+        let chunk = chunk_lock.read();
+        let biome_pos = azalea_core::position::ChunkBiomePos {
+            x: (x.rem_euclid(16) / 4) as u8,
+            y,
+            z: (z.rem_euclid(16) / 4) as u8,
+        };
+        let biome = chunk
+            .get_biome(biome_pos, self.chunk_storage.min_y())
+            .unwrap_or_default();
+        u32::from(biome)
+    }
 }
 
 pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i32) -> BlockState {
