@@ -293,6 +293,8 @@ fn movement_input(input: &InputState) -> (f64, f64) {
     square_movement(forward, strafe)
 }
 
+// Assumes cardinal keyboard input (-1/0/+1 axes); analog input would need a
+// normalize first.
 fn square_movement(forward: f64, strafe: f64) -> (f64, f64) {
     let len = (forward * forward + strafe * strafe).sqrt();
     if len < 1.0e-7 {
