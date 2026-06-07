@@ -471,6 +471,13 @@ async fn game_loop(
     let chat_outbound_tx = outbound_tx;
     let chat_tree = shared_tree.clone();
     tokio::spawn(async move {
+        // TODO: secure chat session + signing for enforce-secure-profile=true servers.
+        // When access_token is set, fetch profile certs
+        // (azalea_auth::certs::fetch_certificates),
+        // send ServerboundChatSessionUpdate, then sign chat and signable-arg commands
+        // (ServerboundChatCommandSigned) with azalea_crypto signing (needs the
+        // "signing" feature). Everything is sent unsigned atm, which only
+        // works on enforce-secure-profile=false.
         while let Ok(msg) = tokio::task::block_in_place(|| chat_rx.recv()) {
             let packet = if let Some(command) = msg.strip_prefix('/') {
                 tracing::info!("Sending command: {command:?}");
@@ -490,7 +497,6 @@ async fn game_loop(
                     },
                 )
             } else {
-                // TODO: implement chat signing - requires enforce-secure-profile=false for now
                 ServerboundGamePacket::Chat(
                     azalea_protocol::packets::game::s_chat::ServerboundChat {
                         message: msg,
