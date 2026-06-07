@@ -381,6 +381,9 @@ impl MeshDispatcher {
         let biome_climate = Arc::clone(&self.biome_climate);
         let tx = self.result_tx.clone();
 
+        // TODO(chunk-light): also include the 4 diagonal neighbors (pos.x±1, pos.z±1)
+        // so smooth-light corner samples at chunk corners read real data, not
+        // the fallback.
         let chunks_needed = [
             pos,
             ChunkPos::new(pos.x - 1, pos.z),
@@ -667,6 +670,7 @@ fn greedy_mesh_section(
     let mut mesher = M::new();
     let mut voxels = vec![0u16; M::CS_P3];
     let mut occluders = vec![false; M::CS_P3];
+    let mut light = vec![0.0f32; M::CS_P3];
 
     for ly in 0..18 {
         for lx in 0..18 {
@@ -678,12 +682,13 @@ fn greedy_mesh_section(
                 let idx = greedy::pad_linearize::<SECTION_SIZE>(lx, ly, lz);
                 voxels[idx] = type_map.get_id(state);
                 occluders[idx] = registry.is_opaque_full_cube(state);
+                light[idx] = snapshot.get_light(bx, by, bz);
             }
         }
     }
 
     let transparent_set = std::collections::BTreeSet::new();
-    mesher.mesh(&voxels, &occluders, &transparent_set);
+    mesher.mesh(&voxels, &occluders, &light, &transparent_set);
 
     for face_idx in 0..6 {
         let face = greedy::Face::from(face_idx);
@@ -710,15 +715,11 @@ fn greedy_mesh_section(
             );
 
             let ao = quad.ao_levels();
-            let [qx, qy, qz] = quad.xyz();
-            let face_offset = face.offset();
-            let light_sample = snapshot.get_light(
-                world_x + qx as i32 + face_offset[0],
-                section_y + qy as i32 + face_offset[1],
-                world_z + qz as i32 + face_offset[2],
-            );
-            let lights: [f32; 4] =
-                core::array::from_fn(|i| AO_BRIGHTNESS[ao[i] as usize] * light_sample * dir_shade);
+            // Per-vertex smooth light (averaged across chunk borders in the mesher); `i`
+            // matches `ao`.
+            let lights: [f32; 4] = core::array::from_fn(|i| {
+                AO_BRIGHTNESS[ao[i] as usize] * (quad.light[i] as f32 / 255.0) * dir_shade
+            });
 
             let base = vertices.len() as u32;
             let u_span = region.u_max - region.u_min;

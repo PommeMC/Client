@@ -12,13 +12,27 @@ const MASK_6: u64 = 0b111111;
 pub struct Quad {
     packed: u64,
     pub ao: u8,
+    /// Per-corner smooth light (quantised brightness 0..=255), ordered to match
+    /// `ao_levels`.
+    pub light: [u8; 4],
 }
 
 impl Quad {
-    fn pack(x: usize, y: usize, z: usize, w: usize, h: usize, v_type: usize, ao: u8) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn pack(
+        x: usize,
+        y: usize,
+        z: usize,
+        w: usize,
+        h: usize,
+        v_type: usize,
+        ao: u8,
+        light: [u8; 4],
+    ) -> Self {
         Self {
             packed: ((v_type << 32) | (h << 24) | (w << 18) | (z << 12) | (y << 6) | x) as u64,
             ao,
+            light,
         }
     }
 
@@ -56,6 +70,7 @@ pub struct GreedyMesher<const CS: usize> {
     pub quads: [Vec<Quad>; 6],
     face_masks: Box<[u64]>,
     ao_faces: Box<[u8]>,
+    light_faces: Box<[[u8; 4]]>,
     forward_merged: Box<[u8]>,
     right_merged: Box<[u8]>,
 }
@@ -69,15 +84,22 @@ impl<const CS: usize> GreedyMesher<CS> {
         Self {
             face_masks: vec![0; Self::CS_2 * 6].into_boxed_slice(),
             ao_faces: vec![0; Self::CS_2 * 6 * CS].into_boxed_slice(),
+            light_faces: vec![[0u8; 4]; Self::CS_2 * 6 * CS].into_boxed_slice(),
             forward_merged: vec![0; Self::CS_2].into_boxed_slice(),
             right_merged: vec![0; CS].into_boxed_slice(),
             quads: core::array::from_fn(|_| Vec::new()),
         }
     }
 
-    pub fn mesh(&mut self, voxels: &[u16], occluders: &[bool], transparents: &BTreeSet<u16>) {
+    pub fn mesh(
+        &mut self,
+        voxels: &[u16],
+        occluders: &[bool],
+        light: &[f32],
+        transparents: &BTreeSet<u16>,
+    ) {
         self.face_culling(voxels, transparents);
-        self.compute_ao(occluders);
+        self.compute_ao_and_light(occluders, light);
         self.face_merging(voxels);
     }
 
@@ -111,16 +133,35 @@ impl<const CS: usize> GreedyMesher<CS> {
         }
     }
 
-    fn compute_ao(&mut self, occluders: &[bool]) {
+    /// Linear index into `ao_faces` / `light_faces` for one face cell.
+    #[inline]
+    fn cell_index(face: usize, layer: usize, forward: usize, right: usize) -> usize {
+        face * Self::CS_2 * CS + (layer * CS + forward) * CS + right
+    }
+
+    /// Index into the padded `CS_P^3` voxel/occluder/light arrays, or `None`
+    /// when out of range.
+    #[inline]
+    fn padded_index(x: i32, y: i32, z: i32) -> Option<usize> {
+        if x < 0 || y < 0 || z < 0 {
+            return None;
+        }
+        let (x, y, z) = (x as usize, y as usize, z as usize);
+        if x >= Self::CS_P || y >= Self::CS_P || z >= Self::CS_P {
+            return None;
+        }
+        Some(pad_linearize::<CS>(x, y, z))
+    }
+
+    /// Per-corner AO and smooth light for every visible face cell, written to
+    /// the same `idx` so the light merge gate stays locked to the AO gate.
+    fn compute_ao_and_light(&mut self, occluders: &[bool], light: &[f32]) {
         let occ = |x: i32, y: i32, z: i32| -> bool {
-            if x < 0 || y < 0 || z < 0 {
-                return false;
-            }
-            let (x, y, z) = (x as usize, y as usize, z as usize);
-            if x >= Self::CS_P || y >= Self::CS_P || z >= Self::CS_P {
-                return false;
-            }
-            occluders[(y * Self::CS_P + x) * Self::CS_P + z]
+            Self::padded_index(x, y, z).is_some_and(|i| occluders[i])
+        };
+        // Out of range falls back to full bright (never reached for real face cells).
+        let lit = |x: i32, y: i32, z: i32| -> f32 {
+            Self::padded_index(x, y, z).map_or(1.0, |i| light[i])
         };
 
         for face in 0..=3u8 {
@@ -144,11 +185,9 @@ impl<const CS: usize> GreedyMesher<CS> {
                         let fy = y as i32 + ny;
                         let fz = z as i32 + nz;
 
-                        let ao = compute_vertex_ao_packed(face, fx, fy, fz, &occ);
-                        let ao_idx = (face as usize * Self::CS_2 * CS)
-                            + (layer * CS + forward) * CS
-                            + bit_pos;
-                        self.ao_faces[ao_idx] = ao;
+                        let idx = Self::cell_index(face as usize, layer, forward, bit_pos);
+                        self.ao_faces[idx] = compute_vertex_ao_packed(face, fx, fy, fz, &occ);
+                        self.light_faces[idx] = compute_vertex_light_packed(face, fx, fy, fz, &lit);
                     }
                 }
             }
@@ -174,11 +213,9 @@ impl<const CS: usize> GreedyMesher<CS> {
                         let fy = y as i32 + ny;
                         let fz = z as i32 + nz;
 
-                        let ao = compute_vertex_ao_packed(face, fx, fy, fz, &occ);
-                        let ao_idx = (face as usize * Self::CS_2 * CS)
-                            + (forward * CS + right) * CS
-                            + (bit_pos - 1);
-                        self.ao_faces[ao_idx] = ao;
+                        let idx = Self::cell_index(face as usize, forward, right, bit_pos - 1);
+                        self.ao_faces[idx] = compute_vertex_ao_packed(face, fx, fy, fz, &occ);
+                        self.light_faces[idx] = compute_vertex_light_packed(face, fx, fy, fz, &lit);
                     }
                 }
             }
@@ -186,8 +223,11 @@ impl<const CS: usize> GreedyMesher<CS> {
     }
 
     fn get_ao(&self, face: usize, layer: usize, forward: usize, right: usize) -> u8 {
-        let idx = face * Self::CS_2 * CS + (layer * CS + forward) * CS + right;
-        self.ao_faces[idx]
+        self.ao_faces[Self::cell_index(face, layer, forward, right)]
+    }
+
+    fn get_light4(&self, face: usize, layer: usize, forward: usize, right: usize) -> [u8; 4] {
+        self.light_faces[Self::cell_index(face, layer, forward, right)]
     }
 
     fn face_merging(&mut self, voxels: &[u16]) {
@@ -211,9 +251,11 @@ impl<const CS: usize> GreedyMesher<CS> {
                         let v_type =
                             voxels[get_axis_index::<CS>(axis, forward + 1, bit_pos + 1, layer + 1)];
                         let ao_here = self.get_ao(face, layer, forward, bit_pos);
+                        let light_here = self.get_light4(face, layer, forward, bit_pos);
 
                         if (bits_next >> bit_pos & 1) != 0
                             && ao_uniform(ao_here)
+                            && light_uniform(light_here)
                             && v_type
                                 == voxels[get_axis_index::<CS>(
                                     axis,
@@ -222,6 +264,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                                     layer + 1,
                                 )]
                             && ao_here == self.get_ao(face, layer, forward + 1, bit_pos)
+                            && light_here == self.get_light4(face, layer, forward + 1, bit_pos)
                         {
                             self.forward_merged[bit_pos] += 1;
                             bits_here &= !(1 << bit_pos);
@@ -231,6 +274,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                         for right in (bit_pos + 1)..CS {
                             if (bits_here >> right & 1) == 0
                                 || !ao_uniform(ao_here)
+                                || !light_uniform(light_here)
                                 || self.forward_merged[bit_pos] != self.forward_merged[right]
                                 || v_type
                                     != voxels[get_axis_index::<CS>(
@@ -240,6 +284,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                                         layer + 1,
                                     )]
                                 || ao_here != self.get_ao(face, layer, forward, right)
+                                || light_here != self.get_light4(face, layer, forward, right)
                             {
                                 break;
                             }
@@ -266,6 +311,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                                 mesh_width,
                                 v_type as usize,
                                 ao_here,
+                                light_here,
                             ),
                             1 => Quad::pack(
                                 mesh_front + mesh_length,
@@ -275,6 +321,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                                 mesh_width,
                                 v_type as usize,
                                 ao_here,
+                                light_here,
                             ),
                             2 => Quad::pack(
                                 mesh_up,
@@ -284,6 +331,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                                 mesh_width,
                                 v_type as usize,
                                 ao_here,
+                                light_here,
                             ),
                             3 => Quad::pack(
                                 mesh_up,
@@ -293,6 +341,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                                 mesh_width,
                                 v_type as usize,
                                 ao_here,
+                                light_here,
                             ),
                             _ => unreachable!(),
                         };
@@ -331,6 +380,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                         let v_type =
                             voxels[get_axis_index::<CS>(axis, right + 1, forward + 1, bit_pos)];
                         let ao_here = self.get_ao(face, forward, right, bit_pos - 1);
+                        let light_here = self.get_light4(face, forward, right, bit_pos - 1);
                         let forward_merge_i = right_cs + (bit_pos - 1);
 
                         let ao_forward = if (bits_forward >> bit_pos & 1) != 0 {
@@ -343,16 +393,30 @@ impl<const CS: usize> GreedyMesher<CS> {
                         } else {
                             255
                         };
+                        // Precomputed before the `right_merged` borrow below to avoid aliasing
+                        // `self`; sentinels are guarded by the `bits_*` checks, never compared.
+                        let light_forward = if (bits_forward >> bit_pos & 1) != 0 {
+                            self.get_light4(face, forward + 1, right, bit_pos - 1)
+                        } else {
+                            [255u8; 4]
+                        };
+                        let light_right = if (bits_right >> bit_pos & 1) != 0 {
+                            self.get_light4(face, forward, right + 1, bit_pos - 1)
+                        } else {
+                            [255u8; 4]
+                        };
 
                         let right_merged_ref = &mut self.right_merged[bit_pos - 1];
 
                         if *right_merged_ref == 0
                             && (bits_forward >> bit_pos & 1) != 0
                             && ao_uniform(ao_here)
+                            && light_uniform(light_here)
                             && v_type
                                 == voxels
                                     [get_axis_index::<CS>(axis, right + 1, forward + 2, bit_pos)]
                             && ao_here == ao_forward
+                            && light_here == light_forward
                         {
                             self.forward_merged[forward_merge_i] += 1;
                             continue;
@@ -360,12 +424,14 @@ impl<const CS: usize> GreedyMesher<CS> {
 
                         if (bits_right >> bit_pos & 1) != 0
                             && ao_uniform(ao_here)
+                            && light_uniform(light_here)
                             && self.forward_merged[forward_merge_i]
                                 == self.forward_merged[(right_cs + CS) + (bit_pos - 1)]
                             && v_type
                                 == voxels
                                     [get_axis_index::<CS>(axis, right + 2, forward + 1, bit_pos)]
                             && ao_here == ao_right
+                            && light_here == light_right
                         {
                             self.forward_merged[forward_merge_i] = 0;
                             *right_merged_ref += 1;
@@ -389,6 +455,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                             mesh_length as usize,
                             v_type as usize,
                             ao_here,
+                            light_here,
                         );
                         self.quads[face].push(quad);
                     }
@@ -455,6 +522,30 @@ fn compute_vertex_ao_packed(
     packed
 }
 
+/// Per-corner smooth light: each corner averages the face-adjacent block (`(fx,
+/// fy, fz)`, the face cell plus its normal) and the same three neighbours the
+/// AO pass samples, packed in `face_ao_neighbors` order to match
+/// `Quad::ao_levels`.
+fn compute_vertex_light_packed(
+    face: u8,
+    fx: i32,
+    fy: i32,
+    fz: i32,
+    lit: &dyn Fn(i32, i32, i32) -> f32,
+) -> [u8; 4] {
+    let neighbors = face_ao_neighbors(face);
+    let center = lit(fx, fy, fz);
+    let mut packed = [0u8; 4];
+    for (i, [s1, s2, c]) in neighbors.iter().enumerate() {
+        let side1 = lit(fx + s1[0], fy + s1[1], fz + s1[2]);
+        let side2 = lit(fx + s2[0], fy + s2[1], fz + s2[2]);
+        let corner = lit(fx + c[0], fy + c[1], fz + c[2]);
+        let brightness = 0.25 * (center + side1 + side2 + corner);
+        packed[i] = (brightness * 255.0).round() as u8;
+    }
+    packed
+}
+
 /// Whether all four packed AO corners are equal (a flat-lit face). Vanilla
 /// renders every block face individually, so a merged quad only reproduces its
 /// shading when the AO is uniform; gradient faces must stay 1x1.
@@ -462,6 +553,13 @@ fn compute_vertex_ao_packed(
 fn ao_uniform(ao: u8) -> bool {
     let c = (ao >> 6) & 3;
     ((ao >> 4) & 3) == c && ((ao >> 2) & 3) == c && (ao & 3) == c
+}
+
+/// Whether all four packed smooth-light corners are equal. Mirrors
+/// `ao_uniform`: a quad may only merge across cells whose light is uniform.
+#[inline]
+fn light_uniform(l: [u8; 4]) -> bool {
+    l[0] == l[1] && l[1] == l[2] && l[2] == l[3]
 }
 
 /// The side offset common to both vertices' neighbour triples (their first two
@@ -544,17 +642,6 @@ impl From<usize> for Face {
 }
 
 impl Face {
-    pub fn offset(&self) -> [i32; 3] {
-        match self {
-            Self::Up => [0, 1, 0],
-            Self::Down => [0, -1, 0],
-            Self::Right => [1, 0, 0],
-            Self::Left => [-1, 0, 0],
-            Self::Front => [0, 0, 1],
-            Self::Back => [0, 0, -1],
-        }
-    }
-
     pub fn shade_light(&self) -> f32 {
         match self {
             Self::Up => 1.0,

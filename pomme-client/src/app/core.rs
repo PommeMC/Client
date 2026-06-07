@@ -36,6 +36,25 @@ pub struct PendingPackDownload {
 
 pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::PackError>;
 
+/// Queues `pos` plus its already-loaded 8 neighbors for meshing
+/// (de-duplicated). A chunk's border faces sample light from its neighbors, so
+/// when `pos` arrives the already-meshed neighbors must re-mesh too, else their
+/// shared border keeps the stale full-bright edge light.
+fn enqueue_with_neighbors(
+    out: &mut Vec<azalea_core::position::ChunkPos>,
+    store: &ChunkStore,
+    pos: azalea_core::position::ChunkPos,
+) {
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let p = azalea_core::position::ChunkPos::new(pos.x + dx, pos.z + dz);
+            if ((dx == 0 && dz == 0) || store.get_chunk(&p).is_some()) && !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum DisplayMode {
     Windowed,
@@ -269,7 +288,7 @@ impl AppCore {
                         &sky_y_mask,
                         &block_y_mask,
                     );
-                    chunks_to_mesh.push(pos);
+                    enqueue_with_neighbors(&mut chunks_to_mesh, &game.chunk_store, pos);
                 }
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.chunk_store.unload_chunk(&pos);
@@ -411,6 +430,9 @@ impl AppCore {
                         pos.x.div_euclid(16),
                         pos.z.div_euclid(16),
                     );
+                    // TODO(chunk-light): route edge edits through enqueue_with_neighbors so the
+                    // neighbor's border lighting refreshes too (gate on edge-proximity to avoid
+                    // churn).
                     chunks_to_mesh.push(chunk_pos);
                 }
                 NetworkEvent::SectionBlocksUpdate { updates } => {
@@ -420,6 +442,8 @@ impl AppCore {
                             pos.x.div_euclid(16),
                             pos.z.div_euclid(16),
                         );
+                        // TODO(chunk-light): same neighbor re-mesh as BlockUpdate above for edge
+                        // edits.
                         if !chunks_to_mesh.contains(&chunk_pos) {
                             chunks_to_mesh.push(chunk_pos);
                         }
