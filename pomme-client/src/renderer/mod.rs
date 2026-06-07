@@ -438,7 +438,7 @@ impl Renderer {
             image_available,
             vk::Fence::null(),
         ) {
-            Ok(idx) => idx,
+            Ok(result) => result.value,
             Err(_) => return Ok(()),
         };
 
@@ -981,19 +981,22 @@ impl Renderer {
         let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
 
         let t_acquire = std::time::Instant::now();
-        let image_index = match self.ctx.device.acquire_next_image(
+        let image = match self.ctx.device.acquire_next_image(
             self.swapchain.handle,
             u64::MAX,
             image_available,
             vk::Fence::null(),
         ) {
-            Ok(idx) => idx,
-            Err(vk::Error::OutOfDateKHR | vk::Error::SuboptimalKHR) => {
+            Ok(image) => image,
+            Err(vk::Error::OutOfDateKHR) => {
                 self.swapchain_dirty = true;
                 return Ok(());
             }
             Err(e) => return Err(e.into()),
         };
+
+        self.swapchain_dirty |= image.suboptimal;
+        let image_index = image.value;
         let acquire_ms = t_acquire.elapsed().as_secs_f32() * 1000.0;
 
         let render_finished = self.render_finished_per_image[image_index as usize];
