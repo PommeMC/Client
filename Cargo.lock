@@ -5251,9 +5251,9 @@ checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
 
 [[package]]
 name = "pyronyx"
-version = "0.2.5+1.4.350"
+version = "0.3.0+1.4.350"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4732585e5d2dc3aad8e253f4d3081954d81c07206776cd917ab3b05c666affe6"
+checksum = "3d7f9c9e1bfab709033c8905e9f021f8a6296e07f911e6e2378c7c203e527b8d"
 dependencies = [
  "raw-window-handle",
 ]
