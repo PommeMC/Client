@@ -799,8 +799,23 @@ fn mesh_chunk_snapshot(
 
             let mut by = min_y;
             while by < max_y {
-                let state = snapshot.get_block_state(bx, by, bz);
-                let kind = classify_block(state);
+                let mut state = snapshot.get_block_state(bx, by, bz);
+                let mut kind = classify_block(state);
+                // Checks for non air block in the cube region to represent the area if the
+                // picked block is air
+                if lod > 0 && matches!(kind, BlockKind::Air) {
+                    let end_y = (by + step).min(max_y);
+                    for try_y in (by + 1)..end_y {
+                        let s = snapshot.get_block_state(bx, try_y, bz);
+                        let k = classify_block(s);
+                        if !matches!(k, BlockKind::Air) {
+                            state = s;
+                            kind = k;
+                            break;
+                        }
+                    }
+                }
+
                 if matches!(kind, BlockKind::Air) {
                     by += step;
                     continue;
@@ -831,16 +846,11 @@ fn mesh_chunk_snapshot(
                         step,
                     );
                 } else if let BlockKind::Water | BlockKind::Lava = kind {
-                    let fluid = if matches!(kind, BlockKind::Lava) {
-                        "lava"
-                    } else {
-                        "water"
-                    };
                     emit_fluid(
                         &mut vertices,
                         &mut indices,
                         block_pos,
-                        fluid,
+                        state,
                         snapshot,
                         registry,
                         uv_map,
@@ -1069,12 +1079,51 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
 
 const FLUID_MAX_HEIGHT: f32 = 8.0 / 9.0;
 
+fn block_face_tex_tint(
+    state: azalea_block::BlockState,
+    dir: Direction,
+    uv_map: &AtlasUVMap,
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    bx: i32,
+    by: i32,
+    bz: i32,
+) -> (AtlasRegion, u32) {
+    match classify_block(state) {
+        BlockKind::Water => (
+            uv_map.get_region("water_still"),
+            pack_tint_shifted([0.247, 0.463, 0.894]),
+        ),
+        BlockKind::Lava => (uv_map.get_region("lava_still"), PACKED_WHITE_SHIFTED),
+        _ => {
+            if let Some(textures) = registry.get_textures(state) {
+                let tint = tint_color(
+                    textures.tint,
+                    snapshot.grass_tint(bx, by, bz),
+                    snapshot.foliage_tint(bx, by, bz),
+                );
+                let tex_name = match dir {
+                    Direction::Up => &textures.top,
+                    Direction::Down => &textures.bottom,
+                    Direction::North => &textures.north,
+                    Direction::South => &textures.south,
+                    Direction::East => &textures.east,
+                    Direction::West => &textures.west,
+                };
+                (uv_map.get_region(tex_name), tint)
+            } else {
+                (uv_map.get_region(""), MISSING_TINT)
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_fluid(
     vertices: &mut Vec<ChunkVertex>,
     indices: &mut Vec<u32>,
     block_pos: [f32; 3],
-    fluid: &str,
+    state: azalea_block::BlockState,
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
     uv_map: &AtlasUVMap,
@@ -1082,12 +1131,8 @@ fn emit_fluid(
     by: i32,
     bz: i32,
 ) {
-    let (tex_name, tint) = if fluid == "lava" {
-        ("lava_still", PACKED_WHITE_SHIFTED)
-    } else {
-        ("water_still", pack_tint_shifted([0.247, 0.463, 0.894]))
-    };
-    let region = uv_map.get_region(tex_name);
+    let (region, tint) =
+        block_face_tex_tint(state, Direction::Up, uv_map, snapshot, registry, bx, by, bz);
 
     for dir in &CUBE_FACE_DIRS {
         let offset = dir.offset();
@@ -1174,16 +1219,17 @@ fn emit_lod_cube(
     bz: i32,
     step: i32,
 ) {
-    let region = if let Some(textures) = registry.get_textures(state) {
-        let tint = tint_color(
-            textures.tint,
-            snapshot.grass_tint(bx, by, bz),
-            snapshot.foliage_tint(bx, by, bz),
-        );
-        let tex = uv_map.get_region(&textures.top);
-        (tex, tint)
+    let is_fluid = matches!(classify_block(state), BlockKind::Water | BlockKind::Lava);
+    // We have to do this otherwise there becomes a visible seam at the LOD border
+    let fluid_top = if is_fluid {
+        let above = snapshot.get_block_state(bx, by + 1, bz);
+        if matches!(classify_block(above), BlockKind::Water | BlockKind::Lava) {
+            1.0
+        } else {
+            FLUID_MAX_HEIGHT
+        }
     } else {
-        (uv_map.get_region(""), MISSING_TINT)
+        1.0
     };
 
     for dir in &CUBE_FACE_DIRS {
@@ -1195,21 +1241,29 @@ fn emit_lod_cube(
         if registry.is_opaque_full_cube(neighbor) {
             continue;
         }
+        if is_fluid && matches!(classify_block(neighbor), BlockKind::Water | BlockKind::Lava) {
+            continue;
+        }
+
+        let (region, tint) =
+            block_face_tex_tint(state, *dir, uv_map, snapshot, registry, bx, by, bz);
 
         let (positions, uvs, light) = cube_face_geometry(*dir);
+        let s = step as f32;
+        let sy = if is_fluid { fluid_top } else { s };
         let base = vertices.len() as u32;
         for i in 0..4 {
             vertices.push(ChunkVertex {
                 position: [
-                    block_pos[0] + positions[i][0],
-                    block_pos[1] + positions[i][1],
-                    block_pos[2] + positions[i][2],
+                    block_pos[0] + positions[i][0] * s,
+                    block_pos[1] + positions[i][1] * sy,
+                    block_pos[2] + positions[i][2] * s,
                 ],
                 tex_coords: pack_uv(
-                    region.0.u_min + uvs[i][0] * (region.0.u_max - region.0.u_min),
-                    region.0.v_min + uvs[i][1] * (region.0.v_max - region.0.v_min),
+                    region.u_min + uvs[i][0] * (region.u_max - region.u_min),
+                    region.v_min + uvs[i][1] * (region.v_max - region.v_min),
                 ),
-                light_tint: pack_light_tint(light, region.1),
+                light_tint: pack_light_tint(light, tint),
             });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
