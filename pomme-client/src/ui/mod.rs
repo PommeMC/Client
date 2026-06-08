@@ -11,3 +11,4 @@ pub mod menu;
 pub mod pause;
 pub mod player_tab;
 pub mod server_list;
+pub mod text;

@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::server_list::MotdSpan;
+use crate::ui::text::TextSpan;
 
 pub(super) fn empty_result(blur: f32) -> MainMenuResult {
     MainMenuResult {
@@ -356,17 +356,17 @@ pub(super) fn push_server_status(
 }
 
 fn wrap_motd_spans(
-    spans: &[MotdSpan],
+    spans: &[TextSpan],
     max_w: f32,
     fs: f32,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
-) -> Vec<Vec<MotdSpan>> {
-    let mut lines: Vec<Vec<MotdSpan>> = Vec::new();
-    let mut current_line: Vec<MotdSpan> = Vec::new();
+) -> Vec<Vec<TextSpan>> {
+    let mut lines: Vec<Vec<TextSpan>> = Vec::new();
+    let mut current_line: Vec<TextSpan> = Vec::new();
     let mut current_w: f32 = 0.0;
 
     for span in spans {
-        let make_span = |text: String| MotdSpan {
+        let make_span = |text: String| TextSpan {
             text,
             color: span.color,
             bold: span.bold,

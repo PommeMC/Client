@@ -5,7 +5,7 @@ use super::common;
 use super::common::WHITE;
 use crate::net::commands::CommandTree;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
-use crate::ui::server_list::MotdSpan;
+use crate::ui::text::TextSpan;
 
 const MAX_MESSAGES: usize = 100;
 const CHAT_X: f32 = 4.0;
@@ -29,7 +29,7 @@ const SUGGEST_TEXT: [f32; 4] = [0.667, 0.667, 0.667, 1.0];
 const SUGGEST_SELECTED: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
 
 struct ChatLine {
-    spans: Vec<MotdSpan>,
+    spans: Vec<TextSpan>,
     received: Instant,
 }
 
@@ -60,7 +60,7 @@ impl ChatState {
         }
     }
 
-    pub fn push_message(&mut self, spans: Vec<MotdSpan>) {
+    pub fn push_message(&mut self, spans: Vec<TextSpan>) {
         self.messages.push_back(ChatLine {
             spans,
             received: Instant::now(),
@@ -204,7 +204,7 @@ impl ChatState {
 
         // Gather the visible wrapped lines newest-first; index 0 is the
         // bottom-most line. All wrapped lines of a message share its alpha.
-        let mut display: Vec<(Vec<MotdSpan>, f32)> = Vec::new();
+        let mut display: Vec<(Vec<TextSpan>, f32)> = Vec::new();
         for msg in self.messages.iter().rev() {
             let alpha = if self.open {
                 1.0
@@ -241,7 +241,7 @@ impl ChatState {
                 });
             }
             let text_a = alpha * TEXT_OPACITY;
-            let faded: Vec<MotdSpan> = line_spans
+            let faded: Vec<TextSpan> = line_spans
                 .iter()
                 .map(|s| {
                     let mut s = s.clone();
@@ -377,10 +377,10 @@ fn styled_text(chars: &[(char, CharStyle)]) -> String {
 
 /// Greedy word-wrap of styled text to `max_w` gui-space units, preserving each
 /// character's color/style and hard-breaking any single word wider than the
-/// line. Returns one `Vec<MotdSpan>` per display line. Mirrors vanilla
+/// line. Returns one `Vec<TextSpan>` per display line. Mirrors vanilla
 /// `Font.split` over a `FormattedText`. `width0` measures text width at
 /// gui-scale 1.
-fn wrap_spans(spans: &[MotdSpan], max_w: f32, width0: &dyn Fn(&str) -> f32) -> Vec<Vec<MotdSpan>> {
+fn wrap_spans(spans: &[TextSpan], max_w: f32, width0: &dyn Fn(&str) -> f32) -> Vec<Vec<TextSpan>> {
     // Split into whitespace-delimited words, keeping each character's style.
     let mut words: Vec<StyledLine> = Vec::new();
     let mut word: StyledLine = Vec::new();
@@ -456,16 +456,16 @@ fn hard_break_word(
     (out, piece)
 }
 
-/// Coalesce a run of styled characters into `MotdSpan`s, merging neighbours
+/// Coalesce a run of styled characters into `TextSpan`s, merging neighbours
 /// that share the same style.
-fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<MotdSpan> {
-    let mut spans: Vec<MotdSpan> = Vec::new();
+fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
+    let mut spans: Vec<TextSpan> = Vec::new();
     let mut last_style: Option<CharStyle> = None;
     for &(ch, st) in chars {
         if last_style == Some(st) {
             spans.last_mut().unwrap().text.push(ch);
         } else {
-            spans.push(MotdSpan {
+            spans.push(TextSpan {
                 text: ch.to_string(),
                 color: st.color,
                 bold: st.bold,
@@ -483,18 +483,11 @@ fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<MotdSpan> {
 mod tests {
     use super::*;
 
-    fn span(text: &str, color: [f32; 4]) -> MotdSpan {
-        MotdSpan {
-            text: text.to_string(),
-            color,
-            bold: false,
-            italic: false,
-            strikethrough: false,
-            underline: false,
-        }
+    fn span(text: &str, color: [f32; 4]) -> TextSpan {
+        TextSpan::new(text.to_string(), color)
     }
 
-    fn line_text(line: &[MotdSpan]) -> String {
+    fn line_text(line: &[TextSpan]) -> String {
         line.iter().map(|s| s.text.clone()).collect()
     }
 

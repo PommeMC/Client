@@ -9,7 +9,7 @@ use pyronyx::vk;
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{shader, util};
 use crate::ui::font::GlyphMap;
-use crate::ui::server_list::MotdSpan;
+use crate::ui::text::TextSpan;
 
 const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
 const ICON_FONT_BYTES: &[u8] = include_bytes!("../fonts/fa-solid-900.ttf");
@@ -646,14 +646,7 @@ impl MenuOverlayPipeline {
                         } else {
                             *x
                         };
-                        let span = MotdSpan {
-                            text: text.clone(),
-                            color: *color,
-                            bold: false,
-                            italic: false,
-                            strikethrough: false,
-                            underline: false,
-                        };
+                        let span = TextSpan::new(text.clone(), *color);
                         push_mc_text(&mut vertices, gm, start_x, *y, &[span], *scale, true);
                     }
                 }
@@ -665,14 +658,7 @@ impl MenuOverlayPipeline {
                     color,
                 } => {
                     if let Some(ref gm) = self.mc_glyph_map {
-                        let span = MotdSpan {
-                            text: text.clone(),
-                            color: *color,
-                            bold: false,
-                            italic: false,
-                            strikethrough: false,
-                            underline: false,
-                        };
+                        let span = TextSpan::new(text.clone(), *color);
                         push_mc_text(&mut vertices, gm, *x, *y, &[span], *scale, false);
                     }
                 }
@@ -971,14 +957,7 @@ impl MenuOverlayPipeline {
                 }
 
                 for (i, line) in lines.iter().enumerate() {
-                    let span = MotdSpan {
-                        text: line.clone(),
-                        color: white,
-                        bold: false,
-                        italic: false,
-                        strikethrough: false,
-                        underline: false,
-                    };
+                    let span = TextSpan::new(line.clone(), white);
                     push_mc_text(
                         &mut vertices,
                         gm,
@@ -1045,14 +1024,7 @@ impl MenuOverlayPipeline {
                 }
 
                 for (i, line) in lines.iter().enumerate() {
-                    let span = MotdSpan {
-                        text: line.text.clone(),
-                        color: line.color,
-                        bold: false,
-                        italic: false,
-                        strikethrough: false,
-                        underline: false,
-                    };
+                    let span = TextSpan::new(line.text.clone(), line.color);
                     push_mc_text(
                         &mut vertices,
                         gm,
@@ -1428,7 +1400,7 @@ pub enum MenuElement {
     McText {
         x: f32,
         y: f32,
-        spans: Vec<MotdSpan>,
+        spans: Vec<TextSpan>,
         scale: f32,
         centered: bool,
     },
@@ -2448,7 +2420,7 @@ fn push_mc_text(
     gm: &GlyphMap,
     x: f32,
     y: f32,
-    spans: &[MotdSpan],
+    spans: &[TextSpan],
     scale: f32,
     drop_shadow: bool,
 ) {

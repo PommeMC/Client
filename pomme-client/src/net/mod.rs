@@ -64,7 +64,7 @@ pub enum NetworkEvent {
         item: ItemStack,
     },
     ChatMessage {
-        spans: Vec<crate::ui::server_list::MotdSpan>,
+        spans: Vec<crate::ui::text::TextSpan>,
     },
     CommandTree {
         tree: Arc<crate::net::commands::CommandTree>,
