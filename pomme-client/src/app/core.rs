@@ -25,7 +25,7 @@ use crate::renderer::Renderer;
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::menu::{MainMenu, MenuInput};
 use crate::user::UserData;
-use crate::world::chunk::ChunkStore;
+use crate::world::chunk::{ChunkStore, mesh_neighborhood};
 
 pub struct PendingPackDownload {
     pub id: uuid::Uuid,
@@ -36,21 +36,17 @@ pub struct PendingPackDownload {
 
 pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::PackError>;
 
-/// Queues `pos` plus its already-loaded 8 neighbors for meshing
-/// (de-duplicated). A chunk's border faces sample light from its neighbors, so
-/// when `pos` arrives the already-meshed neighbors must re-mesh too, else their
-/// shared border keeps the stale full-bright edge light.
+/// Queues `pos` and its already-loaded mesh neighborhood (de-duplicated): when
+/// `pos` changes, every chunk whose mesh samples it must re-mesh too, else
+/// their shared border keeps the stale full-bright edge light.
 fn enqueue_with_neighbors(
     out: &mut Vec<azalea_core::position::ChunkPos>,
     store: &ChunkStore,
     pos: azalea_core::position::ChunkPos,
 ) {
-    for dz in -1..=1 {
-        for dx in -1..=1 {
-            let p = azalea_core::position::ChunkPos::new(pos.x + dx, pos.z + dz);
-            if ((dx == 0 && dz == 0) || store.get_chunk(&p).is_some()) && !out.contains(&p) {
-                out.push(p);
-            }
+    for p in mesh_neighborhood(pos) {
+        if (p == pos || store.get_chunk(&p).is_some()) && !out.contains(&p) {
+            out.push(p);
         }
     }
 }

@@ -381,16 +381,7 @@ impl MeshDispatcher {
         let biome_climate = Arc::clone(&self.biome_climate);
         let tx = self.result_tx.clone();
 
-        // TODO(chunk-light): also include the 4 diagonal neighbors (pos.x±1, pos.z±1)
-        // so smooth-light corner samples at chunk corners read real data, not
-        // the fallback.
-        let chunks_needed = [
-            pos,
-            ChunkPos::new(pos.x - 1, pos.z),
-            ChunkPos::new(pos.x + 1, pos.z),
-            ChunkPos::new(pos.x, pos.z - 1),
-            ChunkPos::new(pos.x, pos.z + 1),
-        ];
+        let chunks_needed = chunk::mesh_neighborhood(pos);
         let chunk_arcs: Vec<_> = chunks_needed
             .iter()
             .map(|p| chunk_store.get_chunk(p))

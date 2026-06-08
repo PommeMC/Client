@@ -15,6 +15,21 @@ use super::block_entity::StoredBlockEntity;
 const OVERWORLD_HEIGHT: u32 = 384;
 const OVERWORLD_MIN_Y: i32 = -64;
 
+/// `pos` and its four axis-neighbor chunks. This is both the neighborhood a
+/// chunk's mesh samples (see `MeshDispatcher::enqueue`) and, by symmetry, the
+/// set that must re-mesh when `pos` changes. Add the diagonals here when the
+/// corner-sample TODO(chunk-light) lands, so the mesh snapshot and the re-mesh
+/// set stay in sync.
+pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 5] {
+    [
+        pos,
+        ChunkPos::new(pos.x - 1, pos.z),
+        ChunkPos::new(pos.x + 1, pos.z),
+        ChunkPos::new(pos.x, pos.z - 1),
+        ChunkPos::new(pos.x, pos.z + 1),
+    ]
+}
+
 #[derive(Error, Debug)]
 pub enum ChunkError {
     #[error("failed to parse chunk data: {0}")]
