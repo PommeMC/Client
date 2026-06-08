@@ -53,20 +53,14 @@ version management, and spawns the client with the appropriate flags.
 
 ## Building
 
+Before building, you must have [just](https://github.com/casey/just) installed.
+
 ### Client
 
 Requires the [Vulkan SDK](https://vulkan.lunarg.com/) and a Rust toolchain.
 
-Can be built with [pnpm](https://pnpm.io/) (recommended):
-
 ```bash
-pnpm client:build-release
-```
-
-or with cargo:
-
-```bash
-cargo build -p pomme-client --release
+just client-build
 ```
 
 ### Launcher
@@ -75,7 +69,7 @@ Requires [Node.js](https://nodejs.org/) and [pnpm](https://pnpm.io/).
 
 ```bash
 pnpm install
-pnpm launcher:build-release
+just launcher-build
 ```
 
 ## Running
@@ -83,7 +77,8 @@ pnpm launcher:build-release
 ### Via the launcher (recommended)
 
 ```bash
-pnpm launcher:dev
+pnpm install
+just launcher-dev
 ```
 
 ### Standalone client
@@ -93,13 +88,7 @@ Running the standalone client requires minecraft assets, for which you have 2 op
 1. Run the launcher and install the latest supported release. Then you can do:
 
    ```bash
-   pnpm client:dev -- --username Steve --quick-access-multiplayer localhost
-   ```
-
-   or with cargo:
-
-   ```bash
-   cargo run -p pomme-client -- --username Steve --quick-access-server localhost
+   just client-dev -- --username Steve
    ```
 
 2. If you're on linux, extract the vanilla 26.1.1 assets from `.minecraft/` to `reference/`:
@@ -120,16 +109,7 @@ Running the standalone client requires minecraft assets, for which you have 2 op
    Then you can run the client with:
 
    ```bash
-   pnpm client:dev -- --version 26.1.1 \
-     --assets-dir $PWD/reference/assets \
-     --versions-dir $PWD/reference/versions \
-     --game-dir $PWD/reference/game-dir
-   ```
-
-   or with cargo:
-
-   ```bash
-   cargo run -p pomme-client -- --version 26.1.1 \
+   just client-dev -- --version 26.1.1 \
      --assets-dir $PWD/reference/assets \
      --versions-dir $PWD/reference/versions \
      --game-dir $PWD/reference/game-dir

@@ -15,8 +15,8 @@ Thanks for your interest in contributing to Pomme!
 3. Build and run:
 
    ```bash
-   pnpm client:build-debug
-   pnpm launcher:dev
+   just client-build --debug
+   just launcher-dev
    ```
 
 ## Before Submitting a PR
@@ -24,8 +24,8 @@ Thanks for your interest in contributing to Pomme!
 All of these must pass. CI will reject your PR if they don't.
 
 ```bash
-pnpm client:pre-pr          # Client (Rust)
-pnpm launcher:pre-pr        # Launcher (Rust & TypeScript)
+just client-pre-pr          # Client (Rust)
+just launcher-pre-pr        # Launcher (Rust & TypeScript)
 ```
 
 ## Development Guidelines
@@ -63,6 +63,7 @@ For bug fixes, also include:
 ```bash
 Pomme/
 ├── pomme-client            # Minecraft client (Vulkan, Rust)
+├── pomme-gpu-allocator     # Port of gpu-allocator, required by the client (Vulkan, Rust)
 └── pomme-launcher          # Launcher app (Tauri, React, TypeScript)
 ```
 
