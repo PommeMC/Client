@@ -1,8 +1,8 @@
 default:
     @just --list
 
-launcher-dev:
-    @pnpm --filter pomme-launcher tauri dev
+launcher-dev *args:
+    @pnpm --filter pomme-launcher tauri dev {{ args }}
 
 launcher-build *args:
     @pnpm --filter pomme-launcher tauri build {{ args }}
@@ -12,8 +12,8 @@ launcher-pre-pr:
     @cargo clippy -p pomme-launcher --release --all-targets --all-features -- -D warnings
     @pnpm --filter pomme-launcher pre-pr
 
-client-dev:
-    @cargo run -p pomme-client
+client-dev *args:
+    @cargo run -p pomme-client {{ args }}
 
 client-build *args:
     @cargo build -p pomme-client {{ args }}
