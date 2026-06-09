@@ -1079,6 +1079,7 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
 
 const FLUID_MAX_HEIGHT: f32 = 8.0 / 9.0;
 
+#[allow(clippy::too_many_arguments)]
 fn block_face_tex_tint(
     state: azalea_block::BlockState,
     dir: Direction,
