@@ -15,7 +15,7 @@ Thanks for your interest in contributing to Pomme!
 3. Build and run:
 
    ```bash
-   just client-build --debug
+   just client-build
    just launcher-dev
    ```
 

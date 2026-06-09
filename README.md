@@ -60,7 +60,7 @@ Before building, you must have [just](https://github.com/casey/just) installed.
 Requires the [Vulkan SDK](https://vulkan.lunarg.com/) and a Rust toolchain.
 
 ```bash
-just client-build
+just client-build --release
 ```
 
 ### Launcher
@@ -69,7 +69,7 @@ Requires [Node.js](https://nodejs.org/) and [pnpm](https://pnpm.io/).
 
 ```bash
 pnpm install
-just launcher-build
+just launcher-build --release
 ```
 
 ## Running
