@@ -5,6 +5,13 @@ use winit::event::{ElementState, Modifiers, MouseButton};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use gilrs::{Button, Event, Gamepad, GamepadId, Gilrs};
 
+pub enum Action {
+    Jump,
+    Sneak,
+    Sprint
+}
+
+
 pub struct InputState {
     pressed: HashSet<KeyCode>,
     modifiers: Modifiers,
@@ -76,8 +83,28 @@ impl InputState {
         self.active_gamepad_id = Some(event.id);
     }
 
+    pub fn get_active_gamepad(&self) -> Option<gilrs::Gamepad<'_>> {
+        self.active_gamepad_id.map(|id| self.controller_manager.gamepad(id))
+    }
+
+    pub fn gamepad_button_down(&self, button: Button) -> bool {
+        if let Some(gamepad) = self.get_active_gamepad() {
+            return gamepad.button_data(button).map(|button| {button.is_pressed()}).unwrap_or(false);
+        }
+
+        false
+    }
+
+    pub fn performing_action(&self, action: Action) -> bool {
+        match action {
+            Action::Jump => self.key_pressed(KeyCode::Space) || self.gamepad_button_down(Button::South),
+            Action::Sneak => self.key_pressed(KeyCode::ShiftLeft) || self.gamepad_button_down(Button::LeftThumb),
+            Action::Sprint => self.key_pressed(KeyCode::ControlLeft) || self.gamepad_button_down(Button::East),
+        }
+    }
+
     pub fn get_gamepad_left_analog(&self) -> Option<glam::Vec2> {
-        if let Some(gamepad) = self.active_gamepad_id.map(|id| self.controller_manager.gamepad(id)) {
+        if let Some(gamepad) = self.get_active_gamepad() {
             let desired = glam::vec2(
                 gamepad.axis_data(gilrs::Axis::LeftStickX).map(|data| { data.value() }).unwrap_or(0f32),
                 gamepad.axis_data(gilrs::Axis::LeftStickY).map(|data| { data.value() }).unwrap_or(0f32)

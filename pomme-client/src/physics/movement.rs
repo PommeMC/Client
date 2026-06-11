@@ -6,7 +6,7 @@ use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
 use super::collision::resolve_collision;
-use crate::app::input::InputState;
+use crate::app::input::{self, InputState};
 use crate::player::LocalPlayer;
 use crate::world::chunk::ChunkStore;
 
@@ -40,7 +40,7 @@ pub fn tick(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkSto
     player.update_water_state(chunk_store);
 
     let (forward, strafe) = movement_input(input);
-    let forward_pressed = input.key_pressed(KeyCode::KeyW);
+    let forward_pressed = input.key_pressed(KeyCode::KeyW) || input.get_gamepad_left_analog().map(|vec| { vec.y > 0.25}).unwrap_or(false);
 
     update_sprint_state(player, input, forward, forward_pressed);
 
@@ -81,7 +81,7 @@ fn tick_land(
     sin_y_rot: f64,
     cos_y_rot: f64,
 ) {
-    if player.on_ground && input.key_pressed(KeyCode::Space) {
+    if player.on_ground && input.performing_action(input::Action::Jump) {
         player.velocity.y = JUMP_VELOCITY.max(player.velocity.y);
 
         if player.sprinting {
@@ -128,10 +128,10 @@ fn tick_water(
     sin_y_rot: f64,
     cos_y_rot: f64,
 ) {
-    if input.key_pressed(KeyCode::Space) {
+    if input.performing_action(input::Action::Jump) {
         player.velocity.y += 0.04;
     }
-    if input.key_pressed(KeyCode::ShiftLeft) {
+    if input.performing_action(input::Action::Sneak) {
         player.velocity.y -= 0.04;
     }
 
@@ -217,7 +217,7 @@ fn update_sprint_state(
 
     let can_sprint = forward > 0.0 && player.food > SPRINT_HUNGER_THRESHOLD;
 
-    if input.key_pressed(KeyCode::ControlLeft) && can_sprint {
+    if input.performing_action(input::Action::Sprint) && can_sprint {
         player.sprinting = true;
     }
 

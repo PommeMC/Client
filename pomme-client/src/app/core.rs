@@ -9,7 +9,7 @@ use glam::dvec3;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
 
-use crate::app::input::InputState;
+use crate::app::input::{Action, InputState};
 use crate::app::phases::ConnectionPhase;
 use crate::app::phases::in_game::GameState;
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
@@ -863,13 +863,16 @@ impl AppCore {
 
     fn send_input_packet(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
+        
+        let analog_move = self.input.get_gamepad_left_analog().unwrap_or(glam::Vec2::ZERO);
+
         let current = PlayerInputState {
-            forward: self.input.key_pressed(KeyCode::KeyW),
-            backward: self.input.key_pressed(KeyCode::KeyS),
-            left: self.input.key_pressed(KeyCode::KeyA),
-            right: self.input.key_pressed(KeyCode::KeyD),
-            jump: self.input.key_pressed(KeyCode::Space),
-            shift: self.input.key_pressed(KeyCode::ShiftLeft),
+            forward: self.input.key_pressed(KeyCode::KeyW)  || analog_move.y > 0.25,
+            backward: self.input.key_pressed(KeyCode::KeyS) || analog_move.y < -0.25,
+            left: self.input.key_pressed(KeyCode::KeyA)     || analog_move.x > 0.25,
+            right: self.input.key_pressed(KeyCode::KeyD)    || analog_move.x < -0.25,
+            jump: self.input.performing_action(Action::Jump),
+            shift: self.input.performing_action(Action::Sneak),
             sprint: game.player.sprinting,
         };
 
