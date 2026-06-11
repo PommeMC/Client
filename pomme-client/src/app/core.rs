@@ -346,6 +346,7 @@ impl AppCore {
                     game.player.velocity = new_velocity;
                     game.player.look_dir = new_look_dir;
                     game.player.prev_look_dir = game.player.look_dir;
+                    game.interaction.on_teleport();
 
                     let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
                     game.chunk_store
@@ -421,7 +422,7 @@ impl AppCore {
                     game.command_tree = Some(tree);
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
-                    if game.interaction.has_pending_prediction(&pos) {
+                    if game.interaction.update_known_server_state(&pos, state) {
                         continue;
                     }
                     game.chunk_store.set_block_state(pos.x, pos.y, pos.z, state);
@@ -436,6 +437,9 @@ impl AppCore {
                 }
                 NetworkEvent::SectionBlocksUpdate { updates } => {
                     for (pos, state) in updates {
+                        if game.interaction.update_known_server_state(&pos, state) {
+                            continue;
+                        }
                         game.chunk_store.set_block_state(pos.x, pos.y, pos.z, state);
                         let chunk_pos = azalea_core::position::ChunkPos::new(
                             pos.x.div_euclid(16),
@@ -545,7 +549,15 @@ impl AppCore {
                     game.server_simulation_distance = distance;
                 }
                 NetworkEvent::BlockChangedAck { seq } => {
-                    game.interaction.acknowledge(seq);
+                    if let Some(snap) = game.interaction.acknowledge(
+                        seq,
+                        &game.chunk_store,
+                        game.player.position.into(),
+                        &mut chunks_to_mesh,
+                    ) {
+                        game.player.position = snap.into();
+                        game.player.prev_position = game.player.position;
+                    }
                 }
                 NetworkEvent::TimeUpdate {
                     game_time,
@@ -850,6 +862,7 @@ impl AppCore {
                 &game.chunk_store,
                 &connection.packet_tx,
                 &self.audio,
+                game.player.position.into(),
                 game.player.on_ground,
                 game.player.game_mode == 1,
             );

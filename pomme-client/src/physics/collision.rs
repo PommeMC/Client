@@ -249,7 +249,7 @@ static NO_COLLISION: LazyLock<HashSet<BlockKind>> = LazyLock::new(|| {
     ])
 });
 
-fn has_collision(state: azalea_block::BlockState) -> bool {
+pub fn has_collision(state: azalea_block::BlockState) -> bool {
     if state.is_air() {
         return false;
     }

@@ -13,6 +13,9 @@ use crate::app::input::InputState;
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, SoundRef};
 use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
+use crate::physics::aabb::Aabb;
+use crate::physics::collision::has_collision;
+use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
 use crate::world::block::sound::block_sounds;
 use crate::world::chunk::ChunkStore;
 
@@ -29,10 +32,19 @@ pub struct HitResult {
     pub hit_point: DVec3,
 }
 
+/// Last server-known state for a locally-predicted block change, matching
+/// vanilla `BlockStatePredictionHandler.ServerVerifiedState`.
+struct ServerVerifiedState {
+    seq: u32,
+    state: BlockState,
+    player_pos: DVec3,
+}
+
 pub struct InteractionState {
     pub target: Option<HitResult>,
     seq: u32,
-    pending_predictions: HashMap<BlockPos, u32>,
+    last_teleport_seq: u32,
+    pending_predictions: HashMap<BlockPos, ServerVerifiedState>,
     is_destroying: bool,
     destroy_pos: BlockPos,
     destroy_progress: f32,
@@ -51,6 +63,7 @@ impl InteractionState {
         Self {
             target: None,
             seq: 0,
+            last_teleport_seq: 0,
             pending_predictions: HashMap::new(),
             is_destroying: false,
             destroy_pos: BlockPos {
@@ -70,12 +83,93 @@ impl InteractionState {
         }
     }
 
-    pub fn has_pending_prediction(&self, pos: &BlockPos) -> bool {
-        self.pending_predictions.contains_key(pos)
+    /// Vanilla `retainKnownServerState`: an existing entry only gets its
+    /// sequence bumped, since its stored state is already the server's.
+    fn retain_known_server_state(&mut self, pos: BlockPos, state: BlockState, player_pos: DVec3) {
+        self.pending_predictions
+            .entry(pos)
+            .and_modify(|v| v.seq = self.seq)
+            .or_insert(ServerVerifiedState {
+                seq: self.seq,
+                state,
+                player_pos,
+            });
     }
 
-    pub fn acknowledge(&mut self, seq: u32) {
-        self.pending_predictions.retain(|_, &mut s| s > seq);
+    /// Vanilla `updateKnownServerState`: a server block update for a predicted
+    /// position only refreshes the stored state. Returns true if absorbed, in
+    /// which case the caller must not apply the update to the world.
+    pub fn update_known_server_state(&mut self, pos: &BlockPos, state: BlockState) -> bool {
+        if let Some(v) = self.pending_predictions.get_mut(pos) {
+            v.state = state;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn on_teleport(&mut self) {
+        self.last_teleport_seq = self.seq;
+    }
+
+    /// Applies a predicted break locally: remembers the server state for
+    /// rollback, clears the block, and plays the break effects.
+    fn predict_destroy(
+        &mut self,
+        pos: BlockPos,
+        state: BlockState,
+        player_pos: DVec3,
+        chunks: &ChunkStore,
+        audio: &AudioEngine,
+        dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
+    ) {
+        self.retain_known_server_state(pos, state, player_pos);
+        chunks.set_block_state(pos.x, pos.y, pos.z, BlockState::AIR);
+        mark_dirty(&pos, dirty_chunks);
+        play_break_sound(audio, state, pos);
+        self.destroy_delay = DESTROY_COOLDOWN;
+    }
+
+    /// Vanilla `endPredictionsUpTo` + `ClientLevel.syncBlockState`: resolves
+    /// every prediction up to `seq` to the server-verified state, so rejected
+    /// breaks pop back instead of desyncing the world. Returns the position to
+    /// snap the player back to when a restored block overlaps them.
+    pub fn acknowledge(
+        &mut self,
+        seq: u32,
+        chunks: &ChunkStore,
+        player_pos: DVec3,
+        dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
+    ) -> Option<DVec3> {
+        let snap_allowed = self.last_teleport_seq < seq;
+        let mut snap_to = None;
+        self.pending_predictions.retain(|pos, verified| {
+            if verified.seq > seq {
+                return true;
+            }
+            let current = chunks.get_block_state(pos.x, pos.y, pos.z);
+            if current != verified.state {
+                tracing::debug!(
+                    "Server did not confirm block change at {pos:?}, reverting to {:?}",
+                    verified.state
+                );
+                chunks.set_block_state(pos.x, pos.y, pos.z, verified.state);
+                mark_dirty(pos, dirty_chunks);
+                if snap_allowed && has_collision(verified.state) {
+                    let block = Aabb::new(
+                        dvec3(pos.x as f64, pos.y as f64, pos.z as f64),
+                        dvec3((pos.x + 1) as f64, (pos.y + 1) as f64, (pos.z + 1) as f64),
+                    );
+                    let player =
+                        Aabb::from_center(player_pos, PLAYER_HALF_WIDTH, PLAYER_HEIGHT / 2.0);
+                    if block.intersects(&player) {
+                        snap_to = Some(verified.player_pos);
+                    }
+                }
+            }
+            false
+        });
+        snap_to
     }
 
     pub fn destroy_stage(&self) -> Option<(BlockPos, u32)> {
@@ -125,12 +219,14 @@ impl InteractionState {
         self.target = raycast(eye_pos.into(), look_dir.as_vec(), REACH, chunks);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn tick(
         &mut self,
         input: &InputState,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        player_pos: DVec3,
         on_ground: bool,
         creative: bool,
     ) -> Vec<azalea_core::position::ChunkPos> {
@@ -151,6 +247,7 @@ impl InteractionState {
                 chunks,
                 sender,
                 audio,
+                player_pos,
                 on_ground,
                 creative,
                 &mut dirty_chunks,
@@ -162,6 +259,7 @@ impl InteractionState {
                 chunks,
                 sender,
                 audio,
+                player_pos,
                 on_ground,
                 creative,
                 &mut dirty_chunks,
@@ -186,11 +284,13 @@ impl InteractionState {
         dirty_chunks
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_attack(
         &mut self,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        player_pos: DVec3,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -217,6 +317,7 @@ impl InteractionState {
             chunks,
             sender,
             audio,
+            player_pos,
             on_ground,
             creative,
             dirty_chunks,
@@ -224,11 +325,13 @@ impl InteractionState {
         self.swing(sender);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn continue_attack(
         &mut self,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        player_pos: DVec3,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -253,6 +356,7 @@ impl InteractionState {
             chunks,
             sender,
             audio,
+            player_pos,
             on_ground,
             creative,
             dirty_chunks,
@@ -298,6 +402,7 @@ impl InteractionState {
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        player_pos: DVec3,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -330,16 +435,14 @@ impl InteractionState {
                 hit.face,
                 seq,
             );
-            chunks.set_block_state(
-                hit.block_pos.x,
-                hit.block_pos.y,
-                hit.block_pos.z,
-                BlockState::AIR,
+            self.predict_destroy(
+                hit.block_pos,
+                state,
+                player_pos,
+                chunks,
+                audio,
+                dirty_chunks,
             );
-            self.pending_predictions.insert(hit.block_pos, seq);
-            mark_dirty(&hit.block_pos, dirty_chunks);
-            play_break_sound(audio, state, hit.block_pos);
-            self.destroy_delay = DESTROY_COOLDOWN;
             return;
         }
 
@@ -380,6 +483,7 @@ impl InteractionState {
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        player_pos: DVec3,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -395,6 +499,7 @@ impl InteractionState {
                 chunks,
                 sender,
                 audio,
+                player_pos,
                 on_ground,
                 creative,
                 dirty_chunks,
@@ -424,19 +529,17 @@ impl InteractionState {
                 hit.face,
                 seq,
             );
-            chunks.set_block_state(
-                hit.block_pos.x,
-                hit.block_pos.y,
-                hit.block_pos.z,
-                BlockState::AIR,
+            self.predict_destroy(
+                hit.block_pos,
+                state,
+                player_pos,
+                chunks,
+                audio,
+                dirty_chunks,
             );
-            self.pending_predictions.insert(hit.block_pos, seq);
-            mark_dirty(&hit.block_pos, dirty_chunks);
-            play_break_sound(audio, state, hit.block_pos);
             self.is_destroying = false;
             self.destroy_progress = 0.0;
             self.destroy_ticks = 0.0;
-            self.destroy_delay = DESTROY_COOLDOWN;
         }
     }
 
