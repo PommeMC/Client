@@ -57,6 +57,13 @@ pub enum RendererError {
     Vulkan(#[from] vk::Error),
 }
 
+#[derive(Clone, Copy)]
+pub struct PlayerPreview {
+    pub rect: [f32; 4],
+    pub gui_scale: f32,
+    pub cursor: (f32, f32),
+}
+
 enum RenderMode<'a> {
     World {
         overlay: Vec<MenuElement>,
@@ -69,6 +76,7 @@ enum RenderMode<'a> {
         block_entities: &'a [BlockEntityRenderInfo],
         weather: &'a [WeatherColumn],
         render_distance: u32,
+        player_preview: Option<PlayerPreview>,
     },
     MainMenu {
         scroll: f32,
@@ -811,6 +819,7 @@ impl Renderer {
         block_entities: &[BlockEntityRenderInfo],
         weather: &[WeatherColumn],
         render_distance: u32,
+        player_preview: Option<PlayerPreview>,
     ) -> Result<(), RendererError> {
         let fog_col = sky.fog_color();
         self.render_frame(
@@ -828,6 +837,7 @@ impl Renderer {
                 block_entities,
                 weather,
                 render_distance,
+                player_preview,
             },
         )
     }
@@ -1230,6 +1240,7 @@ impl Renderer {
                 block_entities,
                 weather,
                 render_distance: _,
+                player_preview,
             } => {
                 self.sky_pipeline
                     .update_and_draw(&self.ctx.device, cmd, frame, &self.camera, sky);
@@ -1290,6 +1301,33 @@ impl Renderer {
 
                 self.menu_pipeline
                     .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+
+                if let Some(p) = player_preview {
+                    let x0 = p.rect[0].max(0.0) as i32;
+                    let y0 = p.rect[1].max(0.0) as i32;
+                    let w = (p.rect[2] as u32)
+                        .min(self.swapchain.extent.width.saturating_sub(x0 as u32));
+                    let h = (p.rect[3] as u32)
+                        .min(self.swapchain.extent.height.saturating_sub(y0 as u32));
+                    if w > 0 && h > 0 {
+                        let rect = vk::Rect2D {
+                            offset: vk::Offset2D { x: x0, y: y0 },
+                            extent: vk::Extent2D {
+                                width: w,
+                                height: h,
+                            },
+                        };
+                        let clear_rect = vk::ClearRect {
+                            rect,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        };
+                        cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
+                        cmd.set_scissor(0, &[rect]);
+                        self.skin_preview.draw_in_box(cmd, frame, *p, sw, sh);
+                        cmd.set_scissor(0, &[scissor]);
+                    }
+                }
 
                 self.last_timings.cull_ms = cull_ms;
                 self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
