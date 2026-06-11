@@ -372,6 +372,7 @@ impl SkinPreviewPipeline {
 
         let clip_offset =
             Mat4::from_translation(Vec3::new(cx / sw * 2.0 - 1.0, cy / sh * 2.0 - 1.0, 0.0));
+        let tilt = Mat4::from_rotation_x(-head_pitch_rad);
         // Vanilla lifts the entity by bbHeight/2 + 0.0625 = 0.9625 from its
         // feet; mesh feet are at y = -1.5, so +0.5375 centers it in the box.
         let center = Mat4::from_translation(Vec3::new(0.0, 0.5375, 0.0));
@@ -379,7 +380,7 @@ impl SkinPreviewPipeline {
         self.record(
             cmd,
             frame,
-            clip_offset * proj * camera_view() * center,
+            clip_offset * proj * camera_view() * tilt * center,
             body_rot_rad,
             head_yaw_rad,
             head_pitch_rad,
