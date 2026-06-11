@@ -22,6 +22,7 @@ pub struct EntityRenderInfo {
     pub head_y_rot_deg: f32,
     pub body_y_rot_deg: f32,
     pub is_baby: bool,
+    pub is_crouching: bool,
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
     pub entity_kind: EntityKind,
@@ -465,7 +466,12 @@ impl EntityRenderer {
             };
             let variant = entry.base_variant(info.is_baby, info.variant_index);
 
-            let entity_mat = glam::Mat4::from_translation(info.position.as_vec3())
+            let mut position = info.position.as_vec3();
+            if info.is_crouching {
+                // Crouching shifts the whole model down by 2 texels.
+                position.y -= 0.125;
+            }
+            let entity_mat = glam::Mat4::from_translation(position)
                 * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians());
 
             let anim = match entry.anim {
@@ -484,6 +490,7 @@ impl EntityRenderer {
                     info.head_y_rot_deg - info.body_y_rot_deg,
                     info.walk_anim_pos,
                     info.walk_anim_speed,
+                    info.is_crouching,
                 ),
             };
 

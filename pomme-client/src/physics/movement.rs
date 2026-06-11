@@ -1,13 +1,13 @@
 // TODO: fall damage - track fall distance, reset on water entry, apply damage
 // on ground impact
 
-use glam::DVec3;
+use glam::{DVec3, dvec3};
 use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
-use super::collision::resolve_collision;
+use super::collision::{no_collision, resolve_collision};
 use crate::app::input::InputState;
-use crate::player::LocalPlayer;
+use crate::player::{CROUCH_HEIGHT, LocalPlayer, STANDING_HEIGHT};
 use crate::world::chunk::ChunkStore;
 
 const GRAVITY: f64 = 0.08;
@@ -19,6 +19,8 @@ const GROUND_FRICTION: f64 = BLOCK_FRICTION * HORIZONTAL_DRAG;
 const GROUND_ACCEL_FACTOR: f64 = 0.216;
 const MOVEMENT_SPEED: f64 = 0.1;
 const SPRINT_SPEED_MODIFIER: f64 = 0.3;
+// TODO: SNEAKING_SPEED attribute - 0.3 is the default value
+const SNEAKING_SPEED: f64 = 0.3;
 const INPUT_DAMPING: f64 = 0.98;
 const AIR_ACCELERATION: f64 = 0.02;
 // TODO: WATER_MOVEMENT_EFFICIENCY attribute - scales drag toward 0.546 and
@@ -30,7 +32,6 @@ const WATER_VERTICAL_DRAG: f64 = 0.8;
 const WATER_GRAVITY: f64 = 0.02;
 const STEP_HEIGHT: f64 = 0.6;
 const PLAYER_HALF_WIDTH: f64 = 0.3;
-const PLAYER_HEIGHT: f64 = 1.8;
 const SPRINT_JUMP_BOOST: f64 = 0.2;
 const SPRINT_HUNGER_THRESHOLD: u32 = 6;
 const DEFAULT_SPRINT_WINDOW: u32 = 7;
@@ -38,8 +39,10 @@ const MINOR_COLLISION_ANGLE: f64 = 0.13962634;
 
 pub fn tick(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkStore) {
     player.update_water_state(chunk_store);
+    update_crouch_state(player, input, chunk_store);
+    player.tick_eye_height();
 
-    let (forward, strafe) = movement_input(input);
+    let (forward, strafe) = movement_input(input, player.crouching);
     let forward_pressed = input.key_pressed(KeyCode::KeyW);
 
     update_sprint_state(player, input, forward, forward_pressed);
@@ -101,7 +104,15 @@ fn tick_land(
     player.velocity.x += move_x * accel;
     player.velocity.z += move_z * accel;
 
-    apply_collision(player, chunk_store, forward, strafe, sin_y_rot, cos_y_rot);
+    apply_collision(
+        player,
+        input,
+        chunk_store,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
+    );
 
     player.velocity.y -= GRAVITY;
     player.velocity.y *= VERTICAL_DRAG as f64;
@@ -146,7 +157,15 @@ fn tick_water(
         player.velocity.y += (target_vy - player.velocity.y) * boost;
     }
 
-    apply_collision(player, chunk_store, forward, strafe, sin_y_rot, cos_y_rot);
+    apply_collision(
+        player,
+        input,
+        chunk_store,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
+    );
 
     let h_drag = if player.sprinting {
         WATER_HORIZONTAL_DRAG_SPRINT
@@ -167,6 +186,7 @@ fn tick_water(
 
 fn apply_collision(
     player: &mut LocalPlayer,
+    input: &InputState,
     chunk_store: &ChunkStore,
     forward: f64,
     strafe: f64,
@@ -176,13 +196,22 @@ fn apply_collision(
     let aabb = Aabb::from_center(
         player.position.into(),
         PLAYER_HALF_WIDTH,
-        PLAYER_HEIGHT / 2.0,
+        player.height() / 2.0,
+    );
+    let delta = back_off_from_edge(
+        chunk_store,
+        &aabb,
+        *player.velocity,
+        input.key_pressed(KeyCode::ShiftLeft),
+        player.on_ground,
     );
     let step_height = if player.on_ground { STEP_HEIGHT } else { 0.0 };
-    let (resolved, on_ground) = resolve_collision(chunk_store, aabb, player.velocity, step_height);
+    let (resolved, on_ground) = resolve_collision(chunk_store, aabb, delta.into(), step_height);
 
-    let collided_x = (resolved.x - player.velocity.x).abs() > 1.0e-5;
-    let collided_z = (resolved.z - player.velocity.z).abs() > 1.0e-5;
+    // Collisions compare against the edge-clamped delta so the clamp itself
+    // never zeroes velocity, letting the player keep creeping along the edge.
+    let collided_x = (resolved.x - delta.x).abs() > 1.0e-5;
+    let collided_z = (resolved.z - delta.z).abs() > 1.0e-5;
     let horizontal_collision = collided_x || collided_z;
 
     player.position += resolved;
@@ -214,8 +243,12 @@ fn update_sprint_state(
     if player.sprint_toggle_timer > 0 {
         player.sprint_toggle_timer -= 1;
     }
+    if input.key_pressed(KeyCode::ShiftLeft) {
+        player.sprint_toggle_timer = 0;
+    }
 
-    let can_sprint = forward > 0.0 && player.food > SPRINT_HUNGER_THRESHOLD;
+    // Crouching blocks starting a sprint but doesn't stop one in progress.
+    let can_sprint = forward > 0.0 && player.food > SPRINT_HUNGER_THRESHOLD && !player.crouching;
 
     if input.key_pressed(KeyCode::ControlLeft) && can_sprint {
         player.sprinting = true;
@@ -231,6 +264,93 @@ fn update_sprint_state(
     if player.sprinting && (forward <= 0.0 || player.food <= SPRINT_HUNGER_THRESHOLD) {
         player.sprinting = false;
     }
+}
+
+// Forces the crouch pose under ceilings too low to stand in; flying, riding
+// and sleeping aren't simulated.
+fn update_crouch_state(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkStore) {
+    player.crouching = player.game_mode != 3
+        && !player.swimming
+        && can_fit_with_height(chunk_store, player.position.into(), CROUCH_HEIGHT)
+        && (input.key_pressed(KeyCode::ShiftLeft)
+            || !can_fit_with_height(chunk_store, player.position.into(), STANDING_HEIGHT));
+}
+
+fn can_fit_with_height(chunk_store: &ChunkStore, pos: DVec3, height: f64) -> bool {
+    no_collision(
+        chunk_store,
+        &Aabb::from_center(pos, PLAYER_HALF_WIDTH, height / 2.0).deflate(1.0e-7),
+    )
+}
+
+// While holding shift on the ground, clamp the horizontal move so the player
+// can't fall further than the step height.
+fn back_off_from_edge(
+    chunk_store: &ChunkStore,
+    bb: &Aabb,
+    delta: DVec3,
+    shift_down: bool,
+    on_ground: bool,
+) -> DVec3 {
+    if !shift_down || delta.y > 0.0 {
+        return delta;
+    }
+    // TODO: fall distance - falling less than the step height still counts
+    // as above ground
+    let above_ground = on_ground || !can_fall_at_least(chunk_store, bb, 0.0, 0.0, STEP_HEIGHT);
+    if !above_ground {
+        return delta;
+    }
+
+    let mut dx = delta.x;
+    let mut dz = delta.z;
+    let step_x = dx.signum() * 0.05;
+    let step_z = dz.signum() * 0.05;
+
+    while dx != 0.0 && can_fall_at_least(chunk_store, bb, dx, 0.0, STEP_HEIGHT) {
+        if dx.abs() <= 0.05 {
+            dx = 0.0;
+            break;
+        }
+        dx -= step_x;
+    }
+    while dz != 0.0 && can_fall_at_least(chunk_store, bb, 0.0, dz, STEP_HEIGHT) {
+        if dz.abs() <= 0.05 {
+            dz = 0.0;
+            break;
+        }
+        dz -= step_z;
+    }
+    while dx != 0.0 && dz != 0.0 && can_fall_at_least(chunk_store, bb, dx, dz, STEP_HEIGHT) {
+        dx = if dx.abs() <= 0.05 { 0.0 } else { dx - step_x };
+        if dz.abs() <= 0.05 {
+            dz = 0.0;
+            continue;
+        }
+        dz -= step_z;
+    }
+
+    dvec3(dx, delta.y, dz)
+}
+
+fn can_fall_at_least(
+    chunk_store: &ChunkStore,
+    bb: &Aabb,
+    dx: f64,
+    dz: f64,
+    min_height: f64,
+) -> bool {
+    no_collision(
+        chunk_store,
+        &Aabb::new(
+            dvec3(
+                bb.min.x + 1.0e-7 + dx,
+                bb.min.y - min_height - 1.0e-7,
+                bb.min.z + 1.0e-7 + dz,
+            ),
+            dvec3(bb.max.x - 1.0e-7 + dx, bb.min.y, bb.max.z - 1.0e-7 + dz),
+        ),
+    )
 }
 
 fn world_movement(forward: f64, strafe: f64, sin_y_rot: f64, cos_y_rot: f64) -> (f64, f64) {
@@ -270,7 +390,7 @@ fn is_minor_horizontal_collision(
     angle < MINOR_COLLISION_ANGLE
 }
 
-fn movement_input(input: &InputState) -> (f64, f64) {
+fn movement_input(input: &InputState, crouching: bool) -> (f64, f64) {
     let mut forward = 0.0f64;
     let mut strafe = 0.0f64;
 
@@ -289,6 +409,11 @@ fn movement_input(input: &InputState) -> (f64, f64) {
 
     forward *= INPUT_DAMPING;
     strafe *= INPUT_DAMPING;
+
+    if crouching {
+        forward *= SNEAKING_SPEED;
+        strafe *= SNEAKING_SPEED;
+    }
 
     square_movement(forward, strafe)
 }

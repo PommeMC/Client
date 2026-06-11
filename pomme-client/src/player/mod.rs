@@ -8,6 +8,10 @@ use inventory::Inventory;
 use crate::entity::components::{LookDirection, Position, Velocity};
 
 pub const MAX_AIR_SUPPLY: i32 = 300;
+pub const STANDING_HEIGHT: f64 = 1.8;
+pub const CROUCH_HEIGHT: f64 = 1.5;
+const STANDING_EYE_HEIGHT: f64 = 1.62;
+const CROUCH_EYE_HEIGHT: f64 = 1.27;
 const DROWN_DAMAGE_THRESHOLD: i32 = -20;
 const DROWN_DAMAGE: f32 = 2.0;
 const AIR_RECOVERY_RATE: i32 = 4;
@@ -40,6 +44,9 @@ pub struct LocalPlayer {
     pub saturation: f32,
     pub inventory: Inventory,
     pub sprinting: bool,
+    pub crouching: bool,
+    pub eye_height: f64,
+    pub prev_eye_height: f64,
     pub horizontal_collision: bool,
     pub sprint_toggle_timer: u32,
     pub was_forward_pressed: bool,
@@ -69,6 +76,9 @@ impl LocalPlayer {
             saturation: 5.0,
             inventory: Inventory::new(),
             sprinting: false,
+            crouching: false,
+            eye_height: STANDING_EYE_HEIGHT,
+            prev_eye_height: STANDING_EYE_HEIGHT,
             horizontal_collision: false,
             sprint_toggle_timer: 0,
             was_forward_pressed: false,
@@ -84,12 +94,33 @@ impl LocalPlayer {
         }
     }
 
+    pub fn height(&self) -> f64 {
+        if self.crouching {
+            CROUCH_HEIGHT
+        } else {
+            STANDING_HEIGHT
+        }
+    }
+
+    pub fn target_eye_height(&self) -> f64 {
+        if self.crouching {
+            CROUCH_EYE_HEIGHT
+        } else {
+            STANDING_EYE_HEIGHT
+        }
+    }
+
+    pub fn tick_eye_height(&mut self) {
+        self.prev_eye_height = self.eye_height;
+        self.eye_height += (self.target_eye_height() - self.eye_height) * 0.5;
+    }
+
     pub fn prev_eye_pos(&self) -> Position {
-        self.prev_position + dvec3(0.0, 1.62, 0.0)
+        self.prev_position + dvec3(0.0, self.prev_eye_height, 0.0)
     }
 
     pub fn eye_pos(&self) -> Position {
-        self.position + dvec3(0.0, 1.62, 0.0)
+        self.position + dvec3(0.0, self.eye_height, 0.0)
     }
 
     // TODO: OXYGEN_BONUS attribute - chance to skip air loss per tick
@@ -107,8 +138,8 @@ impl LocalPlayer {
 
     pub fn update_water_state(&mut self, chunks: &crate::world::chunk::ChunkStore) {
         let half_w = 0.3;
-        let height = 1.8;
-        let eye_height = 1.62;
+        let height = self.height();
+        let eye_height = self.target_eye_height();
 
         let min_x = (self.position.x - half_w).floor() as i32;
         let max_x = (self.position.x + half_w).floor() as i32;

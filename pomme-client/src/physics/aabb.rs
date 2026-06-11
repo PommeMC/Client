@@ -29,6 +29,22 @@ impl Aabb {
         }
     }
 
+    pub fn intersects(&self, other: &Aabb) -> bool {
+        self.min.x < other.max.x
+            && self.max.x > other.min.x
+            && self.min.y < other.max.y
+            && self.max.y > other.min.y
+            && self.min.z < other.max.z
+            && self.max.z > other.min.z
+    }
+
+    pub fn deflate(self, amount: f64) -> Self {
+        Self {
+            min: self.min + amount,
+            max: self.max - amount,
+        }
+    }
+
     pub fn expand(self, delta: DVec3) -> Self {
         let mut min = self.min;
         let mut max = self.max;
