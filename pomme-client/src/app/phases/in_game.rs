@@ -676,11 +676,24 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
+    let held_item = match game.player.inventory.hotbar_slots()[core.input.selected_slot() as usize]
+    {
+        azalea_inventory::ItemStack::Present(ref data) => {
+            let name = crate::player::inventory::item_resource_name(data.kind);
+            (name != "air").then(|| {
+                let light =
+                    get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
+                (name, light)
+            })
+        }
+        _ => None,
+    };
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
         elements,
         swing_progress,
+        held_item,
         destroy_info,
         game.show_chunk_borders,
         sky,

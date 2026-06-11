@@ -7,6 +7,8 @@ pub mod entity_renderer;
 pub mod gui_item;
 pub mod gui_item_atlas;
 pub mod hand;
+pub mod held_item;
+pub mod item_display;
 pub mod item_entity;
 pub mod menu_overlay;
 pub mod panorama;

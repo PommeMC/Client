@@ -26,9 +26,10 @@ struct MeshEntry {
     vertex_count: u32,
 }
 
-pub struct ItemEntityPipeline {
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
+/// Descriptor layouts, per-frame camera UBOs, and atlas set shared by the
+/// pipelines that draw item meshes with the item_entity shaders.
+pub(super) struct ItemPipelineShared {
+    pub pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
     atlas_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
@@ -36,15 +37,14 @@ pub struct ItemEntityPipeline {
     atlas_set: vk::DescriptorSet,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Option<Allocation>>,
-    meshes: HashMap<String, MeshEntry>,
 }
 
-impl ItemEntityPipeline {
-    pub fn new(
+impl ItemPipelineShared {
+    pub(super) fn new(
         device: &vk::Device,
-        render_pass: vk::RenderPass,
         allocator: &Arc<Mutex<Allocator>>,
         atlas: &TextureAtlas,
+        label: &str,
     ) -> Self {
         let camera_layout = util::create_descriptor_set_layout(
             device,
@@ -72,9 +72,7 @@ impl ItemEntityPipeline {
         };
         let pipeline_layout = device
             .create_pipeline_layout(&layout_info, None)
-            .expect("failed to create item entity pipeline layout");
-
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
+            .unwrap_or_else(|_| panic!("failed to create {label} pipeline layout"));
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -94,7 +92,7 @@ impl ItemEntityPipeline {
         };
         let descriptor_pool = device
             .create_descriptor_pool(&pool_info, None)
-            .expect("failed to create item entity descriptor pool");
+            .unwrap_or_else(|_| panic!("failed to create {label} descriptor pool"));
 
         let camera_layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
         let camera_alloc_info = vk::DescriptorSetAllocateInfo {
@@ -106,7 +104,7 @@ impl ItemEntityPipeline {
         let mut camera_sets = vec![vk::DescriptorSet::null(); camera_layouts.len()];
         device
             .allocate_descriptor_sets(&camera_alloc_info, &mut camera_sets)
-            .expect("failed to allocate item entity camera sets");
+            .unwrap_or_else(|_| panic!("failed to allocate {label} camera sets"));
 
         let atlas_alloc_info = vk::DescriptorSetAllocateInfo {
             descriptor_pool,
@@ -117,7 +115,7 @@ impl ItemEntityPipeline {
         let mut atlas_set = vk::DescriptorSet::null();
         device
             .allocate_descriptor_sets(&atlas_alloc_info, slice::from_mut(&mut atlas_set))
-            .expect("failed to allocate item entity atlas set");
+            .unwrap_or_else(|_| panic!("failed to allocate {label} atlas set"));
 
         let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut camera_allocations: Vec<Option<Allocation>> =
@@ -128,7 +126,7 @@ impl ItemEntityPipeline {
                 device,
                 allocator,
                 size_of::<CameraUniform>() as u64,
-                "item_entity_camera",
+                &format!("{label}_camera"),
             );
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
@@ -148,23 +146,7 @@ impl ItemEntityPipeline {
             camera_allocations.push(Some(alloc));
         }
 
-        let image_info = vk::DescriptorImageInfo {
-            sampler: atlas.sampler,
-            image_view: atlas.view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let atlas_write = vk::WriteDescriptorSet {
-            dst_set: atlas_set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            image_info: &image_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[atlas_write], &[]);
-
-        Self {
-            pipeline,
+        let this = Self {
             pipeline_layout,
             camera_layout,
             atlas_layout,
@@ -173,15 +155,107 @@ impl ItemEntityPipeline {
             atlas_set,
             camera_buffers,
             camera_allocations,
+        };
+        this.rebind_atlas(device, atlas);
+        this
+    }
+
+    pub(super) fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
+        let image_info = vk::DescriptorImageInfo {
+            sampler: atlas.sampler,
+            image_view: atlas.view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: self.atlas_set,
+            dst_binding: 0,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            descriptor_count: 1,
+            image_info: &image_info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
+    }
+
+    pub(super) fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
+        let bytes = bytemuck::bytes_of(uniform);
+        if let Some(alloc) = self.camera_allocations[frame].as_mut() {
+            alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
+        }
+    }
+
+    pub(super) fn bind(&self, cmd: vk::CommandBuffer, frame: usize, pipeline: vk::Pipeline) {
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.camera_sets[frame], self.atlas_set],
+            &[],
+        );
+    }
+
+    pub(super) fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        for i in 0..MAX_FRAMES_IN_FLIGHT {
+            device.destroy_buffer(self.camera_buffers[i], None);
+            if let Some(alloc) = self.camera_allocations[i].take() {
+                allocator.lock().unwrap().free(alloc).ok();
+            }
+        }
+
+        device.destroy_pipeline_layout(self.pipeline_layout, None);
+        device.destroy_descriptor_pool(self.descriptor_pool, None);
+        device.destroy_descriptor_set_layout(self.camera_layout, None);
+        device.destroy_descriptor_set_layout(self.atlas_layout, None);
+    }
+}
+
+pub(super) fn push_model_light(
+    cmd: vk::CommandBuffer,
+    layout: vk::PipelineLayout,
+    model: &Mat4,
+    light: f32,
+) {
+    let mvp_data = model.to_cols_array();
+    cmd.push_constants(
+        layout,
+        vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
+        0,
+        bytemuck::bytes_of(&mvp_data),
+    );
+    cmd.push_constants(
+        layout,
+        vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
+        64,
+        bytemuck::bytes_of(&light),
+    );
+}
+
+pub struct ItemEntityPipeline {
+    pipeline: vk::Pipeline,
+    shared: ItemPipelineShared,
+    meshes: HashMap<String, MeshEntry>,
+}
+
+impl ItemEntityPipeline {
+    pub fn new(
+        device: &vk::Device,
+        render_pass: vk::RenderPass,
+        allocator: &Arc<Mutex<Allocator>>,
+        atlas: &TextureAtlas,
+    ) -> Self {
+        let shared = ItemPipelineShared::new(device, allocator, atlas, "item_entity");
+        let pipeline = create_pipeline(device, render_pass, shared.pipeline_layout);
+
+        Self {
+            pipeline,
+            shared,
             meshes: HashMap::new(),
         }
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
-        let bytes = bytemuck::bytes_of(uniform);
-        if let Some(alloc) = self.camera_allocations[frame].as_mut() {
-            alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
-        }
+        self.shared.update_camera(frame, uniform);
     }
 
     fn insert_mesh(
@@ -271,14 +345,7 @@ impl ItemEntityPipeline {
             return;
         }
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.camera_sets[frame], self.atlas_set],
-            &[],
-        );
+        self.shared.bind(cmd, frame, self.pipeline);
 
         for item in items {
             let mesh = match self.meshes.get(&item.item_name) {
@@ -286,22 +353,12 @@ impl ItemEntityPipeline {
                 None => continue,
             };
 
-            let mvp_data = item.model_matrix.to_cols_array();
-            let mvp_bytes = bytemuck::bytes_of(&mvp_data);
-            let light_bytes = bytemuck::bytes_of(&item.light);
-
             cmd.bind_vertex_buffers(0, &[mesh.buffer], &[0]);
-            cmd.push_constants(
-                self.pipeline_layout,
-                vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
-                0,
-                mvp_bytes,
-            );
-            cmd.push_constants(
-                self.pipeline_layout,
-                vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
-                64,
-                light_bytes,
+            push_model_light(
+                cmd,
+                self.shared.pipeline_layout,
+                &item.model_matrix,
+                item.light,
             );
             cmd.draw(mesh.vertex_count, 1, 0, 0);
         }
@@ -309,7 +366,7 @@ impl ItemEntityPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+        self.pipeline = create_pipeline(device, render_pass, self.shared.pipeline_layout);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -317,18 +374,8 @@ impl ItemEntityPipeline {
             device.destroy_buffer(entry.buffer, None);
             allocator.lock().unwrap().free(entry.allocation).ok();
         }
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            device.destroy_buffer(self.camera_buffers[i], None);
-            if let Some(alloc) = self.camera_allocations[i].take() {
-                allocator.lock().unwrap().free(alloc).ok();
-            }
-        }
-
         device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline_layout(self.pipeline_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_descriptor_set_layout(self.camera_layout, None);
-        device.destroy_descriptor_set_layout(self.atlas_layout, None);
+        self.shared.destroy(device, allocator);
     }
 }
 
