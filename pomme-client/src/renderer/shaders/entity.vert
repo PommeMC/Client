@@ -11,6 +11,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
 layout(push_constant) uniform PushConstants {
     mat4 model;
     vec4 tint;
+    vec4 overlay_color;
 };
 
 layout(location = 0) in vec3 position;
@@ -21,6 +22,7 @@ layout(location = 0) out vec2 v_tex_coords;
 layout(location = 1) out vec4 v_tint;
 layout(location = 2) out float v_fog;
 layout(location = 3) out vec3 v_fog_color;
+layout(location = 4) out vec4 v_overlay;
 
 void main() {
     vec4 world_pos = model * vec4(position, 1.0);
@@ -28,6 +30,7 @@ void main() {
     gl_Position = view_proj * vec4(rel, 1.0);
     v_tex_coords = tex_coords;
     v_tint = tint;
+    v_overlay = overlay_color;
     v_fog = fog_factor(rel, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
 }

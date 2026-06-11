@@ -663,6 +663,9 @@ impl AppCore {
                 NetworkEvent::EntityCustomName { id, name } => {
                     game.entity_store.set_custom_name(id, name);
                 }
+                NetworkEvent::EntityDamaged { id } => {
+                    game.entity_store.mark_hurt(id);
+                }
                 NetworkEvent::ItemPickedUp {
                     item_id,
                     collector_id,
@@ -853,8 +856,13 @@ impl AppCore {
         self.send_position_packet(connection, game);
 
         let eye_pos = game.player.eye_pos();
-        game.interaction
-            .update_target(eye_pos, game.player.look_dir, &game.chunk_store);
+        game.interaction.update_target(
+            eye_pos,
+            game.player.look_dir,
+            &game.chunk_store,
+            &game.entity_store,
+            game.player.game_mode == 1,
+        );
 
         let dirty = game.interaction.tick(
             input,
