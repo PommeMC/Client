@@ -137,6 +137,11 @@ impl GameState {
         self.inventory_open || self.creative_inventory_open
     }
 
+    /// No menu (pause, inventory, chat) is capturing input.
+    pub fn input_live(&self) -> bool {
+        !self.paused && !self.gui_open() && !self.chat.is_open()
+    }
+
     pub fn sync_render_distance(&mut self, connection: &ConnectionHandle, render_distance: u32) {
         self.last_render_distance = render_distance;
         tracing::info!("Render distance changed to {render_distance}");
@@ -210,24 +215,25 @@ pub fn update_game(
         core.time_tick_accumulator -= TICK_RATE;
     }
 
-    if !game.paused && !game.gui_open() && !game.chat.is_open() {
+    if game.input_live() {
         gfx.renderer.update_camera(&mut core.input);
+    }
 
-        core.tick_accumulator += dt;
-        while core.tick_accumulator >= TICK_RATE {
-            core.tick_physics(&mut gfx.renderer, connection, game);
-            game.item_entity_store.tick(
-                |bx, by, bz| !game.chunk_store.get_block_state(bx, by, bz).is_air(),
-                |bx, by, bz| block_friction(game.chunk_store.get_block_state(bx, by, bz)),
-            );
-            game.block_entity_anim.tick();
-            core.tick_accumulator -= TICK_RATE;
-        }
+    // Menus never pause the simulation; tick_physics substitutes neutral input.
+    core.tick_accumulator += dt;
+    while core.tick_accumulator >= TICK_RATE {
+        core.tick_physics(&mut gfx.renderer, connection, game);
+        game.item_entity_store.tick(
+            |bx, by, bz| !game.chunk_store.get_block_state(bx, by, bz).is_air(),
+            |bx, by, bz| block_friction(game.chunk_store.get_block_state(bx, by, bz)),
+        );
+        game.block_entity_anim.tick();
+        core.tick_accumulator -= TICK_RATE;
     }
 
     let partial_tick = core.tick_accumulator / TICK_RATE;
 
-    if !game.paused && !game.gui_open() && !game.chat.is_open() {
+    if game.input_live() {
         game.interaction.update_target(
             game.player.eye_pos(),
             gfx.renderer.camera_look_dir(),
