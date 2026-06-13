@@ -266,6 +266,7 @@ pub fn upload_image(
         queue,
         command_pool,
         staging_buffer,
+        rgba8_bytes(width, height),
         image,
         width,
         height,
@@ -474,18 +475,28 @@ pub fn upload_image_mipmapped(
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     staging_buffer: vk::Buffer,
+    staging_size: u64,
     image: vk::Image,
     width: u32,
     height: u32,
     mip_levels: u32,
 ) {
     submit_one_time(device, queue, command_pool, |cmd| {
-        record_image_upload(cmd, staging_buffer, image, width, height, mip_levels);
+        record_image_upload(
+            cmd,
+            staging_buffer,
+            staging_size,
+            image,
+            width,
+            height,
+            mip_levels,
+        );
     });
 }
 
 pub struct PendingImageUpload {
     pub staging_buffer: vk::Buffer,
+    pub staging_size: u64,
     pub image: vk::Image,
     pub width: u32,
     pub height: u32,
@@ -506,6 +517,7 @@ pub fn upload_images_batched(
             record_image_upload(
                 cmd,
                 u.staging_buffer,
+                u.staging_size,
                 u.image,
                 u.width,
                 u.height,
@@ -515,9 +527,14 @@ pub fn upload_images_batched(
     });
 }
 
+fn rgba8_bytes(width: u32, height: u32) -> u64 {
+    u64::from(width) * u64::from(height) * 4
+}
+
 fn record_image_upload(
     cmd: &vk::CommandBuffer,
     staging_buffer: vk::Buffer,
+    staging_size: u64,
     image: vk::Image,
     width: u32,
     height: u32,
@@ -570,10 +587,16 @@ fn record_image_upload(
                     depth: 1,
                 },
             };
-            buffer_offset += u64::from(w) * u64::from(h) * 4;
+            buffer_offset += rgba8_bytes(w, h);
             region
         })
         .collect();
+
+    debug_assert_eq!(
+        buffer_offset, staging_size,
+        "staging buffer ({staging_size} bytes) must hold exactly all {mip_levels} mip levels \
+         ({buffer_offset} bytes); a mismatch would copy out of bounds"
+    );
 
     cmd.copy_buffer_to_image(
         staging_buffer,

@@ -189,6 +189,7 @@ impl TextureAtlas {
             queue,
             command_pool,
             staging_buffer,
+            staging_pixels.len() as u64,
             image,
             atlas_size,
             atlas_size,
