@@ -708,6 +708,14 @@ impl ChunkBufferStore {
         self.count_allocs[frame].mapped_slice_mut().unwrap()[..4]
             .copy_from_slice(&0u32.to_ne_bytes());
 
+        // macOS draws the whole indirect buffer (no drawIndirectCount), so slots
+        // the cull shader leaves unfilled must read as no-op draws, not stale data.
+        #[cfg(target_os = "macos")]
+        self.indirect_allocs[frame]
+            .mapped_slice_mut()
+            .unwrap()
+            .fill(0);
+
         cmd.bind_pipeline(vk::PipelineBindPoint::Compute, self.compute_pipeline);
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Compute,
