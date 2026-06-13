@@ -827,11 +827,11 @@ impl Renderer {
         render_distance: u32,
     ) -> Result<(), RendererError> {
         let held_item = held_item.map(|(name, light)| {
-            let is_block = self.ensure_item_mesh(&name);
+            let has_3d_model = self.ensure_item_mesh(&name);
             pipelines::held_item::HeldItemInfo {
                 name,
                 light,
-                is_block,
+                has_3d_model,
             }
         });
         let fog_col = sky.fog_color();
@@ -980,9 +980,11 @@ impl Renderer {
         self.menu_pipeline.text_width(text, scale)
     }
 
+    /// Builds the item mesh if needed; returns whether it has a 3D model
+    /// (vs a flat sprite), used to pick the first-person transform.
     pub fn ensure_item_mesh(&mut self, name: &str) -> bool {
-        if self.item_entity_pipeline.has_mesh(name) {
-            return self.registry.get_item_model(name).is_some();
+        if let Some(has_3d_model) = self.item_entity_pipeline.mesh_is_3d(name) {
+            return has_3d_model;
         }
         if let Some(model) = self.registry.get_item_model(name) {
             self.item_entity_pipeline.ensure_mesh(
@@ -1310,6 +1312,8 @@ impl Renderer {
 
                 if self.camera.mode == camera::CameraMode::FirstPerson {
                     let aspect = sw / sh.max(1.0);
+                    // Vanilla renderArmWithItem draws the arm only for an empty
+                    // hand; a held item renders alone.
                     match held_item {
                         Some(item) => self.held_item_pipeline.update_and_draw(
                             cmd,

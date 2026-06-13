@@ -16,7 +16,7 @@ use crate::renderer::pipelines::item_entity::{
 pub struct HeldItemInfo {
     pub name: String,
     pub light: f32,
-    pub is_block: bool,
+    pub has_3d_model: bool,
 }
 
 pub struct HeldItemPipeline {
@@ -64,7 +64,7 @@ impl HeldItemPipeline {
 
         let display = self
             .display
-            .resolve(&item.name, default_first_person(item.is_block));
+            .resolve(&item.name, default_first_person(item.has_3d_model));
         let model = first_person_item_matrix(swing_progress) * display.to_matrix();
 
         self.shared.bind(cmd, frame, self.pipeline);
@@ -104,8 +104,8 @@ fn first_person_item_matrix(swing_progress: f32) -> Mat4 {
         * Mat4::from_rotation_y((-45.0_f32).to_radians())
 }
 
-fn default_first_person(is_block: bool) -> DisplayTransform {
-    if is_block {
+fn default_first_person(has_3d_model: bool) -> DisplayTransform {
+    if has_3d_model {
         // block/block.json firstperson_righthand
         DisplayTransform {
             rotation: Vec3::new(0.0, 45.0, 0.0),

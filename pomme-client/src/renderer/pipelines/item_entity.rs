@@ -24,6 +24,7 @@ struct MeshEntry {
     buffer: vk::Buffer,
     allocation: Allocation,
     vertex_count: u32,
+    is_3d_model: bool,
 }
 
 /// Descriptor layouts, per-frame camera UBOs, and atlas set shared by the
@@ -264,6 +265,7 @@ impl ItemEntityPipeline {
         allocator: &Arc<Mutex<Allocator>>,
         name: &str,
         vertices: &[ChunkVertex],
+        is_3d_model: bool,
     ) {
         let bytes = bytemuck::cast_slice(vertices);
         let (buffer, allocation) = util::create_mapped_buffer(
@@ -279,12 +281,14 @@ impl ItemEntityPipeline {
                 buffer,
                 allocation,
                 vertex_count: vertices.len() as u32,
+                is_3d_model,
             },
         );
     }
 
-    pub fn has_mesh(&self, name: &str) -> bool {
-        self.meshes.contains_key(name)
+    /// `None` if no mesh is built yet, else whether it came from a 3D model.
+    pub fn mesh_is_3d(&self, name: &str) -> Option<bool> {
+        self.meshes.get(name).map(|m| m.is_3d_model)
     }
 
     pub fn mesh_handle(&self, name: &str) -> Option<(vk::Buffer, u32)> {
@@ -304,7 +308,7 @@ impl ItemEntityPipeline {
         }
         let vertices = build_item_mesh(model, uv_map);
         if !vertices.is_empty() {
-            self.insert_mesh(device, allocator, name, &vertices);
+            self.insert_mesh(device, allocator, name, &vertices, true);
         }
     }
 
@@ -336,7 +340,7 @@ impl ItemEntityPipeline {
             Err(_) => build_flat_quad(region),
         };
         if !vertices.is_empty() {
-            self.insert_mesh(device, allocator, name, &vertices);
+            self.insert_mesh(device, allocator, name, &vertices, false);
         }
     }
 
