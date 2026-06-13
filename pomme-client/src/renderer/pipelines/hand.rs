@@ -205,13 +205,7 @@ impl HandPipeline {
         aspect: f32,
         swing_progress: f32,
     ) {
-        let mut proj = Mat4::perspective_rh(
-            crate::renderer::camera::DEFAULT_FOV_DEGREES.to_radians(),
-            aspect,
-            NEAR,
-            FAR,
-        );
-        proj.y_axis.y *= -1.0;
+        let proj = projection(aspect);
 
         let sp = swing_progress;
         let sqrt_sp = sp.sqrt();
@@ -348,6 +342,17 @@ impl HandPipeline {
         device.destroy_descriptor_set_layout(self.mvp_layout, None);
         device.destroy_descriptor_set_layout(self.skin_layout, None);
     }
+}
+
+pub(super) fn projection(aspect: f32) -> Mat4 {
+    let mut proj = Mat4::perspective_rh(
+        crate::renderer::camera::DEFAULT_FOV_DEGREES.to_radians(),
+        aspect,
+        NEAR,
+        FAR,
+    );
+    proj.y_axis.y *= -1.0;
+    proj
 }
 
 fn build_arm_vertices(skin_w: u32, skin_h: u32) -> Vec<HandVertex> {

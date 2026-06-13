@@ -61,6 +61,7 @@ enum RenderMode<'a> {
     World {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
+        held_item: Option<pipelines::held_item::HeldItemInfo>,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
@@ -108,6 +109,7 @@ pub struct Renderer {
     skin_preview: SkinPreviewPipeline,
     chunk_border_pipeline: ChunkBorderPipeline,
     item_entity_pipeline: ItemEntityPipeline,
+    held_item_pipeline: pipelines::held_item::HeldItemPipeline,
     weather_pipeline: WeatherPipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
@@ -324,6 +326,14 @@ impl Renderer {
             &atlas,
         );
 
+        let held_item_pipeline = pipelines::held_item::HeldItemPipeline::new(
+            &ctx.device,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            &atlas,
+            jar_assets_dir,
+        );
+
         splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
 
         let initial_slot_px =
@@ -376,6 +386,7 @@ impl Renderer {
             block_entity_pipeline,
             chunk_border_pipeline,
             item_entity_pipeline,
+            held_item_pipeline,
             weather_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
@@ -595,6 +606,8 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.item_entity_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.held_item_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.weather_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.blur_pipeline.resize(
@@ -803,6 +816,7 @@ impl Renderer {
         hide_cursor: bool,
         overlay: Vec<MenuElement>,
         swing_progress: f32,
+        held_item: Option<(String, f32)>,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
@@ -812,6 +826,14 @@ impl Renderer {
         weather: &[WeatherColumn],
         render_distance: u32,
     ) -> Result<(), RendererError> {
+        let held_item = held_item.map(|(name, light)| {
+            let has_3d_model = self.ensure_item_mesh(&name);
+            pipelines::held_item::HeldItemInfo {
+                name,
+                light,
+                has_3d_model,
+            }
+        });
         let fog_col = sky.fog_color();
         self.render_frame(
             window,
@@ -820,6 +842,7 @@ impl Renderer {
             RenderMode::World {
                 overlay,
                 swing_progress,
+                held_item,
                 destroy_info,
                 show_chunk_borders,
                 sky,
@@ -892,6 +915,8 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.gui_item_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        self.held_item_pipeline
+            .rebind_atlas(&self.ctx.device, &self.atlas);
 
         tracing::info!("Assets reloaded");
     }
@@ -955,9 +980,11 @@ impl Renderer {
         self.menu_pipeline.text_width(text, scale)
     }
 
+    /// Builds the item mesh if needed; returns whether it has a 3D model
+    /// (vs a flat sprite), used to pick the first-person transform.
     pub fn ensure_item_mesh(&mut self, name: &str) -> bool {
-        if self.item_entity_pipeline.has_mesh(name) {
-            return self.registry.get_item_model(name).is_some();
+        if let Some(has_3d_model) = self.item_entity_pipeline.mesh_is_3d(name) {
+            return has_3d_model;
         }
         if let Some(model) = self.registry.get_item_model(name) {
             self.item_entity_pipeline.ensure_mesh(
@@ -1222,6 +1249,7 @@ impl Renderer {
             RenderMode::World {
                 overlay,
                 swing_progress,
+                held_item,
                 destroy_info,
                 show_chunk_borders,
                 sky,
@@ -1284,8 +1312,22 @@ impl Renderer {
 
                 if self.camera.mode == camera::CameraMode::FirstPerson {
                     let aspect = sw / sh.max(1.0);
-                    self.hand_pipeline
-                        .update_and_draw(cmd, frame, aspect, *swing_progress);
+                    // Vanilla renderArmWithItem draws the arm only for an empty
+                    // hand; a held item renders alone.
+                    match held_item {
+                        Some(item) => self.held_item_pipeline.update_and_draw(
+                            cmd,
+                            frame,
+                            aspect,
+                            *swing_progress,
+                            item,
+                            &self.item_entity_pipeline,
+                        ),
+                        None => {
+                            self.hand_pipeline
+                                .update_and_draw(cmd, frame, aspect, *swing_progress)
+                        }
+                    }
                 }
 
                 self.menu_pipeline
@@ -1546,6 +1588,8 @@ impl Drop for Renderer {
         self.chunk_border_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.item_entity_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.held_item_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.weather_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
