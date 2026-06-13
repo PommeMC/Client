@@ -142,7 +142,10 @@ impl InteractionState {
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
     ) -> Option<DVec3> {
         let snap_allowed = self.last_teleport_seq < seq;
-        let mut snap_to = None;
+        let player = Aabb::from_center(player_pos, PLAYER_HALF_WIDTH, PLAYER_HEIGHT / 2.0);
+        // Keep the lowest block pos among overlapping reverts so the chosen snap
+        // is deterministic (HashMap iteration order is not).
+        let mut snap_to: Option<((i32, i32, i32), DVec3)> = None;
         self.pending_predictions.retain(|pos, verified| {
             if verified.seq > seq {
                 return true;
@@ -155,21 +158,18 @@ impl InteractionState {
                 );
                 chunks.set_block_state(pos.x, pos.y, pos.z, verified.state);
                 mark_dirty(pos, dirty_chunks);
+                // Full-cube collision, as the engine has no per-shape voxels.
                 if snap_allowed && has_collision(verified.state) {
-                    let block = Aabb::new(
-                        dvec3(pos.x as f64, pos.y as f64, pos.z as f64),
-                        dvec3((pos.x + 1) as f64, (pos.y + 1) as f64, (pos.z + 1) as f64),
-                    );
-                    let player =
-                        Aabb::from_center(player_pos, PLAYER_HALF_WIDTH, PLAYER_HEIGHT / 2.0);
-                    if block.intersects(&player) {
-                        snap_to = Some(verified.player_pos);
+                    let block = Aabb::block(pos.x, pos.y, pos.z);
+                    let key = (pos.x, pos.y, pos.z);
+                    if block.intersects(&player) && snap_to.is_none_or(|(best, _)| key < best) {
+                        snap_to = Some((key, verified.player_pos));
                     }
                 }
             }
             false
         });
-        snap_to
+        snap_to.map(|(_, pos)| pos)
     }
 
     pub fn destroy_stage(&self) -> Option<(BlockPos, u32)> {
