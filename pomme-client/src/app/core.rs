@@ -825,7 +825,7 @@ impl AppCore {
 
         // Open menus only release the keys; the simulation keeps ticking.
         let input_live = game.input_live();
-        let neutral = InputState::new();
+        let neutral = InputState::released();
         let input = if input_live { &self.input } else { &neutral };
 
         game.player.prev_look_dir = game.player.look_dir;

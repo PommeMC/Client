@@ -279,11 +279,7 @@ pub fn update_game(
     let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
 
     let mut elements: Vec<MenuElement> = Vec::new();
-    let hide_cursor = !game.paused
-        && !game.dead
-        && !game.gui_open()
-        && !game.chat.is_open()
-        && core.input.is_cursor_captured();
+    let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
 
     let debug = if game.show_debug {
         Some(hud::DebugInfo {
