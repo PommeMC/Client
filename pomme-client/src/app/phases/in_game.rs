@@ -211,7 +211,7 @@ pub fn update_game(
     }
 
     if !game.paused && !game.gui_open() && !game.chat.is_open() {
-        gfx.renderer.update_camera(&mut core.input);
+        gfx.renderer.update_camera(&mut core.input, dt);
 
         core.tick_accumulator += dt;
         while core.tick_accumulator >= TICK_RATE {

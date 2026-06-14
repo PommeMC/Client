@@ -14,8 +14,6 @@ pub enum Action {
     Sprint,
     Destroy,
     Use,
-    HotbarLeft,
-    HotbarRight,
     ToggleInventory,
     OpenMenu,
     ViewPlayerList,
@@ -43,7 +41,7 @@ pub struct InputState {
     copy_pressed: bool,
     cut_pressed: bool,
     undo_pressed: bool,
-    controller_manager: Gilrs,
+    controller_manager: Option<Gilrs>,
     active_gamepad_id: Option<GamepadId>,
     recent_actions: HashMap<Action, bool>,
 }
@@ -78,24 +76,32 @@ impl InputState {
             copy_pressed: false,
             cut_pressed: false,
             undo_pressed: false,
-            controller_manager: Gilrs::new().unwrap(),
+            controller_manager: match Gilrs::new() {
+                Ok(gilrs) => Some(gilrs),
+                Err(err) => {
+                    tracing::warn!(
+                        "Controller support disabled: failed to initialize gilrs: {err}"
+                    );
+                    None
+                }
+            },
             active_gamepad_id: None,
             recent_actions: HashMap::new(),
         }
     }
 
     pub fn update(&mut self, phase: &mut StateSlot<AppPhase>) -> bool {
-        while let Some(event) = self.controller_manager.next_event() {
-            self.on_gamepad_event(&event);
+        let events: Vec<gilrs::Event> = match self.controller_manager.as_mut() {
+            Some(manager) => std::iter::from_fn(|| manager.next_event()).collect(),
+            None => Vec::new(),
+        };
+        for event in &events {
+            self.on_gamepad_event(event);
         }
 
         let mut should_apply_cursor_grab = false;
 
         phase.transition(|mut app| {
-            // AppPhase::Setup { quick_access_multiplayer, pending_skin_uuid } => {},
-            // AppPhase::InMenu { gfx, panorama } => {},
-            // AppPhase::Connecting { gfx, panorama, connect_phase, connection, game } =>
-            // {},
             if let AppPhase::InGame {
                 gfx,
                 connection: _connection,
@@ -148,8 +154,8 @@ impl InputState {
     }
 
     pub fn get_active_gamepad(&self) -> Option<gilrs::Gamepad<'_>> {
-        self.active_gamepad_id
-            .map(|id| self.controller_manager.gamepad(id))
+        let manager = self.controller_manager.as_ref()?;
+        self.active_gamepad_id.map(|id| manager.gamepad(id))
     }
 
     pub fn gamepad_button_down(&self, button: Button) -> bool {
@@ -172,14 +178,12 @@ impl InputState {
                     self.recent_actions.insert(Action::Destroy, true);
                 }
                 Button::RightTrigger => {
-                    self.recent_actions.insert(Action::HotbarRight, true);
                     self.selected_slot = (self.selected_slot + 1) % 9;
                 }
                 Button::LeftTrigger2 => {
                     self.recent_actions.insert(Action::Use, true);
                 }
                 Button::LeftTrigger => {
-                    self.recent_actions.insert(Action::HotbarLeft, true);
                     self.selected_slot = (self.selected_slot + 8) % 9;
                 }
                 Button::North => {
@@ -200,14 +204,8 @@ impl InputState {
                 Button::RightTrigger2 => {
                     self.recent_actions.insert(Action::Destroy, false);
                 }
-                Button::RightTrigger => {
-                    self.recent_actions.insert(Action::HotbarRight, false);
-                }
                 Button::LeftTrigger2 => {
                     self.recent_actions.insert(Action::Use, false);
-                }
-                Button::LeftTrigger => {
-                    self.recent_actions.insert(Action::HotbarLeft, false);
                 }
                 Button::North => {
                     self.recent_actions.insert(Action::ToggleInventory, false);
@@ -241,8 +239,6 @@ impl InputState {
             }
             Action::Destroy => self.left_held() || self.gamepad_button_down(Button::RightTrigger2),
             Action::Use => self.right_held() || self.gamepad_button_down(Button::LeftTrigger2),
-            Action::HotbarLeft => self.gamepad_button_down(Button::LeftTrigger),
-            Action::HotbarRight => self.gamepad_button_down(Button::RightTrigger),
             Action::ToggleInventory => {
                 self.action_just_pressed(Action::ToggleInventory)
                     || self.gamepad_button_down(Button::North)
@@ -263,6 +259,12 @@ impl InputState {
         self.recent_actions.get(&action).copied().unwrap_or(false)
     }
 
+    /// Drops a pending action so a handler that already consumed the
+    /// originating key press doesn't trigger it again.
+    pub fn clear_action(&mut self, action: Action) {
+        self.recent_actions.remove(&action);
+    }
+
     pub fn clear_just_pressed_actions(&mut self) {
         self.recent_actions.clear();
 
@@ -273,55 +275,25 @@ impl InputState {
         self.cursor_moved = false;
     }
 
+    fn gamepad_stick(&self, x_axis: gilrs::Axis, y_axis: gilrs::Axis) -> Option<glam::Vec2> {
+        let gamepad = self.get_active_gamepad()?;
+        let value = |axis| {
+            gamepad
+                .axis_data(axis)
+                .map(|data| data.value())
+                .unwrap_or(0f32)
+        };
+        let desired = glam::vec2(value(x_axis), value(y_axis)).clamp_length_max(1.0);
+
+        (desired.length() >= 1E-1).then_some(desired)
+    }
+
     pub fn get_gamepad_left_analog(&self) -> Option<glam::Vec2> {
-        if let Some(gamepad) = self.get_active_gamepad() {
-            let desired = glam::vec2(
-                gamepad
-                    .axis_data(gilrs::Axis::LeftStickX)
-                    .map(|data| data.value())
-                    .unwrap_or(0f32),
-                gamepad
-                    .axis_data(gilrs::Axis::LeftStickY)
-                    .map(|data| data.value())
-                    .unwrap_or(0f32),
-            )
-            .clamp_length_max(1.0);
-
-            if desired.length() < 1E-1 {
-                return None;
-            }
-
-            return Some(desired);
-        }
-
-        None
+        self.gamepad_stick(gilrs::Axis::LeftStickX, gilrs::Axis::LeftStickY)
     }
 
     pub fn get_gamepad_right_analog(&self) -> Option<glam::Vec2> {
-        if let Some(gamepad) = self
-            .active_gamepad_id
-            .map(|id| self.controller_manager.gamepad(id))
-        {
-            let desired = glam::vec2(
-                gamepad
-                    .axis_data(gilrs::Axis::RightStickX)
-                    .map(|data| data.value())
-                    .unwrap_or(0f32),
-                gamepad
-                    .axis_data(gilrs::Axis::RightStickY)
-                    .map(|data| data.value())
-                    .unwrap_or(0f32),
-            )
-            .clamp_length_max(1.0);
-
-            if desired.length() < 1E-1 {
-                return None; // Some(glam::Vec2::ZERO)
-            }
-
-            return Some(desired);
-        }
-
-        None
+        self.gamepad_stick(gilrs::Axis::RightStickX, gilrs::Axis::RightStickY)
     }
 
     pub fn key_pressed(&self, key: KeyCode) -> bool {
@@ -342,9 +314,6 @@ impl InputState {
                         }
                         KeyCode::Escape => {
                             self.recent_actions.insert(Action::OpenMenu, true);
-                        }
-                        KeyCode::Tab => {
-                            self.recent_actions.insert(Action::ViewPlayerList, true);
                         }
                         KeyCode::F5 => {
                             self.recent_actions.insert(Action::ChangePerspective, true);

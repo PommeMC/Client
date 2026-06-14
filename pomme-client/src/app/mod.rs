@@ -266,6 +266,9 @@ impl ApplicationHandler for App {
                                         KeyCode::Escape => {
                                             game.chat.close();
                                             self.core
+                                                .input
+                                                .clear_action(crate::app::input::Action::OpenMenu);
+                                            self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
                                         KeyCode::F3 => game.show_debug = !game.show_debug,
@@ -275,6 +278,9 @@ impl ApplicationHandler for App {
                                     match code {
                                         KeyCode::Escape => {
                                             game.creative_inventory_open = false;
+                                            self.core
+                                                .input
+                                                .clear_action(crate::app::input::Action::OpenMenu);
                                             self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
