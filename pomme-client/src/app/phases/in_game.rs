@@ -233,14 +233,6 @@ pub fn update_game(
 
     let partial_tick = core.tick_accumulator / TICK_RATE;
 
-    if game.input_live() {
-        game.interaction.update_target(
-            game.player.eye_pos(),
-            gfx.renderer.camera_look_dir(),
-            &game.chunk_store,
-        );
-    }
-
     let typed = core.input.drain_typed_chars();
     let backspace = core.input.backspace_pressed();
     let enter = core.input.enter_pressed();
@@ -548,6 +540,12 @@ pub fn update_game(
     game.chat.build(&mut elements, sw, sh, gs, &|t, s| {
         gfx.renderer.menu_text_width(t, s)
     });
+
+    // Chat consumes keys, not clicks; nothing else clears them while only chat
+    // is open, so drop them here to keep stray clicks out of the live sim.
+    if game.chat.is_open() {
+        core.input.clear_click_events();
+    }
 
     let swing_progress = game.interaction.get_swing_progress(partial_tick);
     let destroy_info = game.interaction.destroy_stage().map(|(pos, stage)| {
