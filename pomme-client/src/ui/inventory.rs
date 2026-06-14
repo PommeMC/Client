@@ -47,8 +47,8 @@ pub fn build_inventory(
         elements,
         screen_w,
         screen_h,
-        [0.005, 0.005, 0.005, 0.753],
-        [0.005, 0.005, 0.005, 0.816],
+        [0.0627, 0.0627, 0.0627, 0.7529],
+        [0.0627, 0.0627, 0.0627, 0.8157],
     );
 
     elements.push(MenuElement::Image {
