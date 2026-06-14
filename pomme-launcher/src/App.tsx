@@ -195,9 +195,7 @@ function App() {
         16: "SIGSTKFLT",
       };
       const reason =
-        signal !== null
-          ? `signal ${SIGNAL_NAMES[signal] ?? signal}`
-          : `code ${code ?? "unknown"}`;
+        signal !== null ? `signal ${SIGNAL_NAMES[signal] ?? signal}` : `code ${code ?? "unknown"}`;
       const message =
         code === 1 && last_lines && last_lines.length > 0
           ? last_lines.map((line, i) => `${i + 1}: ${line}`).join("\n")
