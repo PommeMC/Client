@@ -1,7 +1,27 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use gilrs::{Button, GamepadId, Gilrs};
 use winit::event::{ElementState, Modifiers, MouseButton};
 use winit::keyboard::{KeyCode, PhysicalKey};
+
+use crate::app::phases::AppPhase;
+use crate::app::state_slot::StateSlot;
+
+/// Left-stick deflection past which a direction counts as a digital press.
+pub const STICK_MOVEMENT_THRESHOLD: f32 = 0.25;
+
+#[derive(Hash, PartialEq, Eq, Clone)]
+pub enum Action {
+    Jump,
+    Sneak,
+    Sprint,
+    Destroy,
+    Use,
+    ToggleInventory,
+    OpenMenu,
+    ViewPlayerList,
+    ChangePerspective,
+}
 
 pub struct InputState {
     pressed: HashSet<KeyCode>,
@@ -24,6 +44,9 @@ pub struct InputState {
     copy_pressed: bool,
     cut_pressed: bool,
     undo_pressed: bool,
+    controller_manager: Option<Gilrs>,
+    active_gamepad_id: Option<GamepadId>,
+    recent_actions: HashMap<Action, bool>,
 }
 
 #[derive(Default)]
@@ -35,6 +58,26 @@ pub struct ClickState {
 
 impl InputState {
     pub fn new() -> Self {
+        let controller_manager = match Gilrs::new() {
+            Ok(gilrs) => Some(gilrs),
+            Err(err) => {
+                tracing::warn!("Controller support disabled: failed to initialize gilrs: {err}");
+                None
+            }
+        };
+        Self::with_controller(controller_manager)
+    }
+
+    /// Neutral input (no keys, cursor released) for ticking while a menu is
+    /// open. Never reads the controller, so it skips gilrs initialization.
+    pub fn released() -> Self {
+        Self {
+            cursor_captured: false,
+            ..Self::with_controller(None)
+        }
+    }
+
+    fn with_controller(controller_manager: Option<Gilrs>) -> Self {
         Self {
             pressed: HashSet::new(),
             modifiers: Modifiers::default(),
@@ -56,16 +99,216 @@ impl InputState {
             copy_pressed: false,
             cut_pressed: false,
             undo_pressed: false,
+            controller_manager,
+            active_gamepad_id: None,
+            recent_actions: HashMap::new(),
         }
     }
 
-    /// Neutral input (no keys, cursor released) for ticking while a menu is
-    /// open.
-    pub fn released() -> Self {
-        Self {
-            cursor_captured: false,
-            ..Self::new()
+    pub fn update(&mut self, phase: &mut StateSlot<AppPhase>) -> bool {
+        let events: Vec<gilrs::Event> = match self.controller_manager.as_mut() {
+            Some(manager) => std::iter::from_fn(|| manager.next_event()).collect(),
+            None => Vec::new(),
+        };
+        for event in &events {
+            self.on_gamepad_event(event);
         }
+
+        let mut should_apply_cursor_grab = false;
+
+        phase.transition(|mut app| {
+            if let AppPhase::InGame {
+                gfx,
+                connection: _connection,
+                game,
+            } = &mut app
+            {
+                if self.action_just_pressed(Action::ToggleInventory) {
+                    if game.creative_inventory_open {
+                        game.creative_inventory_open = false;
+                        should_apply_cursor_grab = true;
+                    } else if !game.paused
+                        && !game.dead
+                        && game.player.game_mode != 3
+                        && !game.chat.is_open()
+                    {
+                        if game.player.game_mode == 1 {
+                            game.creative_inventory_open = true;
+                        } else {
+                            game.inventory_open = !game.inventory_open;
+                        }
+                        should_apply_cursor_grab = true;
+                    }
+
+                    self.recent_actions.remove(&Action::ToggleInventory);
+                }
+                if self.action_just_pressed(Action::OpenMenu) {
+                    if !game.dead {
+                        if game.inventory_open {
+                            game.inventory_open = false;
+                        } else {
+                            game.paused = !game.paused;
+                        }
+
+                        should_apply_cursor_grab = true;
+                    }
+
+                    self.recent_actions.remove(&Action::OpenMenu);
+                }
+                if self.action_just_pressed(Action::ChangePerspective) {
+                    gfx.renderer.cycle_camera_mode();
+
+                    self.recent_actions.remove(&Action::ChangePerspective);
+                }
+            }
+
+            app
+        });
+
+        should_apply_cursor_grab
+    }
+
+    pub fn get_active_gamepad(&self) -> Option<gilrs::Gamepad<'_>> {
+        let manager = self.controller_manager.as_ref()?;
+        self.active_gamepad_id.map(|id| manager.gamepad(id))
+    }
+
+    pub fn gamepad_button_down(&self, button: Button) -> bool {
+        if let Some(gamepad) = self.get_active_gamepad() {
+            return gamepad
+                .button_data(button)
+                .map(|button| button.is_pressed())
+                .unwrap_or(false);
+        }
+
+        false
+    }
+
+    pub fn on_gamepad_event(&mut self, event: &gilrs::Event) {
+        self.active_gamepad_id = Some(event.id);
+
+        match event.event {
+            gilrs::EventType::ButtonPressed(button, _) => match button {
+                Button::RightTrigger2 => {
+                    self.recent_actions.insert(Action::Destroy, true);
+                }
+                Button::RightTrigger => {
+                    self.selected_slot = (self.selected_slot + 1) % 9;
+                }
+                Button::LeftTrigger2 => {
+                    self.recent_actions.insert(Action::Use, true);
+                }
+                Button::LeftTrigger => {
+                    self.selected_slot = (self.selected_slot + 8) % 9;
+                }
+                Button::North => {
+                    self.recent_actions.insert(Action::ToggleInventory, true);
+                }
+
+                Button::Start => {
+                    self.recent_actions.insert(Action::OpenMenu, true);
+                }
+
+                Button::DPadUp => {
+                    self.recent_actions.insert(Action::ChangePerspective, true);
+                }
+
+                _ => {}
+            },
+            gilrs::EventType::ButtonReleased(button, _) => match button {
+                Button::RightTrigger2 => {
+                    self.recent_actions.insert(Action::Destroy, false);
+                }
+                Button::LeftTrigger2 => {
+                    self.recent_actions.insert(Action::Use, false);
+                }
+                Button::North => {
+                    self.recent_actions.insert(Action::ToggleInventory, false);
+                }
+
+                Button::Start => {
+                    self.recent_actions.insert(Action::OpenMenu, false);
+                }
+
+                Button::DPadUp => {
+                    self.recent_actions.insert(Action::ChangePerspective, false);
+                }
+
+                _ => {}
+            },
+
+            _ => {}
+        }
+    }
+
+    pub fn performing_action(&self, action: Action) -> bool {
+        match action {
+            Action::Jump => {
+                self.key_pressed(KeyCode::Space) || self.gamepad_button_down(Button::South)
+            }
+            Action::Sneak => {
+                self.key_pressed(KeyCode::ShiftLeft) || self.gamepad_button_down(Button::LeftThumb)
+            }
+            Action::Sprint => {
+                self.key_pressed(KeyCode::ControlLeft) || self.gamepad_button_down(Button::West)
+            }
+            Action::Destroy => self.left_held() || self.gamepad_button_down(Button::RightTrigger2),
+            Action::Use => self.right_held() || self.gamepad_button_down(Button::LeftTrigger2),
+            Action::ToggleInventory => {
+                self.action_just_pressed(Action::ToggleInventory)
+                    || self.gamepad_button_down(Button::North)
+            }
+            Action::OpenMenu => {
+                self.key_pressed(KeyCode::Escape) || self.gamepad_button_down(Button::East)
+            }
+            Action::ViewPlayerList => {
+                self.key_pressed(KeyCode::Tab) || self.gamepad_button_down(Button::Select)
+            }
+            Action::ChangePerspective => {
+                self.key_pressed(KeyCode::F5) || self.gamepad_button_down(Button::DPadUp)
+            }
+        }
+    }
+
+    pub fn action_just_pressed(&self, action: Action) -> bool {
+        self.recent_actions.get(&action).copied().unwrap_or(false)
+    }
+
+    /// Drops a pending action so a handler that already consumed the
+    /// originating key press doesn't trigger it again.
+    pub fn clear_action(&mut self, action: Action) {
+        self.recent_actions.remove(&action);
+    }
+
+    pub fn clear_just_pressed_actions(&mut self) {
+        self.recent_actions.clear();
+
+        self.left_click.just_pressed = false;
+        self.left_click.just_released = false;
+        self.right_click.just_pressed = false;
+        self.right_click.just_released = false;
+        self.cursor_moved = false;
+    }
+
+    fn gamepad_stick(&self, x_axis: gilrs::Axis, y_axis: gilrs::Axis) -> Option<glam::Vec2> {
+        let gamepad = self.get_active_gamepad()?;
+        let value = |axis| {
+            gamepad
+                .axis_data(axis)
+                .map(|data| data.value())
+                .unwrap_or(0f32)
+        };
+        let desired = glam::vec2(value(x_axis), value(y_axis)).clamp_length_max(1.0);
+
+        (desired.length() >= 1E-1).then_some(desired)
+    }
+
+    pub fn get_gamepad_left_analog(&self) -> Option<glam::Vec2> {
+        self.gamepad_stick(gilrs::Axis::LeftStickX, gilrs::Axis::LeftStickY)
+    }
+
+    pub fn get_gamepad_right_analog(&self) -> Option<glam::Vec2> {
+        self.gamepad_stick(gilrs::Axis::RightStickX, gilrs::Axis::RightStickY)
     }
 
     pub fn key_pressed(&self, key: KeyCode) -> bool {
@@ -79,6 +322,18 @@ impl InputState {
                     self.pressed.insert(code);
                     if let Some(slot) = hotbar_slot(code) {
                         self.selected_slot = slot;
+                    }
+                    match code {
+                        KeyCode::KeyE => {
+                            self.recent_actions.insert(Action::ToggleInventory, true);
+                        }
+                        KeyCode::Escape => {
+                            self.recent_actions.insert(Action::OpenMenu, true);
+                        }
+                        KeyCode::F5 => {
+                            self.recent_actions.insert(Action::ChangePerspective, true);
+                        }
+                        _ => {}
                     }
                 }
                 ElementState::Released => {
@@ -175,10 +430,6 @@ impl InputState {
         std::mem::take(&mut self.tab_pressed)
     }
 
-    pub fn tab_held(&self) -> bool {
-        self.pressed.contains(&KeyCode::Tab)
-    }
-
     pub fn shift_held(&self) -> bool {
         self.modifiers.state().shift_key()
     }
@@ -227,20 +478,33 @@ impl InputState {
     }
 
     pub fn on_mouse_button(&mut self, button: MouseButton, state: ElementState) {
-        let click = match button {
-            MouseButton::Left => &mut self.left_click,
-            MouseButton::Right => &mut self.right_click,
-            _ => return,
+        let was_pressed = match state {
+            ElementState::Pressed => true,
+            ElementState::Released => false,
         };
-        match state {
-            ElementState::Pressed => {
-                click.held = true;
-                click.just_pressed = true;
+
+        match button {
+            MouseButton::Left => {
+                self.left_click.held = was_pressed;
+                if was_pressed {
+                    self.left_click.just_pressed = true;
+                    self.recent_actions.insert(Action::Destroy, true);
+                } else {
+                    self.left_click.just_released = true;
+                    self.recent_actions.insert(Action::Destroy, false);
+                }
             }
-            ElementState::Released => {
-                click.held = false;
-                click.just_released = true;
+            MouseButton::Right => {
+                self.right_click.held = was_pressed;
+                if was_pressed {
+                    self.right_click.just_pressed = true;
+                    self.recent_actions.insert(Action::Use, true);
+                } else {
+                    self.right_click.just_released = true;
+                    self.recent_actions.insert(Action::Use, false);
+                }
             }
+            _ => (),
         }
     }
 
@@ -252,20 +516,8 @@ impl InputState {
         self.left_click.held
     }
 
-    pub fn right_just_pressed(&self) -> bool {
-        self.right_click.just_pressed
-    }
-
     pub fn right_held(&self) -> bool {
         self.right_click.held
-    }
-
-    pub fn clear_click_events(&mut self) {
-        self.left_click.just_pressed = false;
-        self.left_click.just_released = false;
-        self.right_click.just_pressed = false;
-        self.right_click.just_released = false;
-        self.cursor_moved = false;
     }
 
     pub fn on_cursor_moved(&mut self, x: f32, y: f32) {

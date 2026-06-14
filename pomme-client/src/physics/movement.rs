@@ -6,7 +6,7 @@ use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
 use super::collision::{no_collision, resolve_collision};
-use crate::app::input::InputState;
+use crate::app::input::{self, InputState};
 use crate::player::{CROUCH_HEIGHT, LocalPlayer, STANDING_HEIGHT};
 use crate::world::chunk::ChunkStore;
 
@@ -44,7 +44,11 @@ pub fn tick(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkSto
     player.tick_eye_height();
 
     let (forward, strafe) = movement_input(input, player.crouching);
-    let forward_pressed = input.key_pressed(KeyCode::KeyW);
+    let forward_pressed = input.key_pressed(KeyCode::KeyW)
+        || input
+            .get_gamepad_left_analog()
+            .map(|vec| vec.y > input::STICK_MOVEMENT_THRESHOLD)
+            .unwrap_or(false);
 
     update_sprint_state(player, input, forward, forward_pressed);
 
@@ -85,7 +89,7 @@ fn tick_land(
     sin_y_rot: f64,
     cos_y_rot: f64,
 ) {
-    if player.on_ground && input.key_pressed(KeyCode::Space) {
+    if player.on_ground && input.performing_action(input::Action::Jump) {
         player.velocity.y = JUMP_VELOCITY.max(player.velocity.y);
 
         if player.sprinting {
@@ -140,10 +144,10 @@ fn tick_water(
     sin_y_rot: f64,
     cos_y_rot: f64,
 ) {
-    if input.key_pressed(KeyCode::Space) {
+    if input.performing_action(input::Action::Jump) {
         player.velocity.y += 0.04;
     }
-    if input.key_pressed(KeyCode::ShiftLeft) {
+    if input.performing_action(input::Action::Sneak) {
         player.velocity.y -= 0.04;
     }
 
@@ -251,7 +255,7 @@ fn update_sprint_state(
     // Crouching blocks starting a sprint but doesn't stop one in progress.
     let can_sprint = forward > 0.0 && player.food > SPRINT_HUNGER_THRESHOLD && !player.crouching;
 
-    if input.key_pressed(KeyCode::ControlLeft) && can_sprint {
+    if input.performing_action(input::Action::Sprint) && can_sprint {
         player.sprinting = true;
     }
 
@@ -395,17 +399,22 @@ fn movement_input(input: &InputState, crouching: bool) -> (f64, f64) {
     let mut forward = 0.0f64;
     let mut strafe = 0.0f64;
 
-    if input.key_pressed(KeyCode::KeyW) {
-        forward += 1.0;
-    }
-    if input.key_pressed(KeyCode::KeyS) {
-        forward -= 1.0;
-    }
-    if input.key_pressed(KeyCode::KeyA) {
-        strafe -= 1.0;
-    }
-    if input.key_pressed(KeyCode::KeyD) {
-        strafe += 1.0;
+    if let Some(analog_input) = input.get_gamepad_left_analog() {
+        forward = analog_input.y as f64;
+        strafe = analog_input.x as f64;
+    } else {
+        if input.key_pressed(KeyCode::KeyW) {
+            forward += 1.0;
+        }
+        if input.key_pressed(KeyCode::KeyS) {
+            forward -= 1.0;
+        }
+        if input.key_pressed(KeyCode::KeyA) {
+            strafe -= 1.0;
+        }
+        if input.key_pressed(KeyCode::KeyD) {
+            strafe += 1.0;
+        }
     }
 
     forward *= INPUT_DAMPING;

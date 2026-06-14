@@ -197,6 +197,7 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(mods) => {
                 self.core.input.set_modifiers(mods);
             }
+            // TODO: Migrate _fully_ to Action system
             WindowEvent::KeyboardInput { event, .. } => {
                 self.phase.transition(|mut app| {
                     if let Some(Gfx { window, .. }) = app.gfx_mut()
@@ -207,6 +208,8 @@ impl ApplicationHandler for App {
                         self.core.menu.display_mode = self.core.display_mode;
                         self.core.apply_display_mode(window);
                     }
+
+                    self.core.input.on_key_event(&event);
 
                     match app {
                         AppPhase::Setup { .. } => app,
@@ -247,7 +250,7 @@ impl ApplicationHandler for App {
                             }
                         }
                         AppPhase::InGame {
-                            mut gfx,
+                            gfx,
                             connection,
                             mut game,
                         } => {
@@ -263,6 +266,9 @@ impl ApplicationHandler for App {
                                         KeyCode::Escape => {
                                             game.chat.close();
                                             self.core
+                                                .input
+                                                .clear_action(crate::app::input::Action::OpenMenu);
+                                            self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
                                         KeyCode::F3 => game.show_debug = !game.show_debug,
@@ -270,8 +276,11 @@ impl ApplicationHandler for App {
                                     }
                                 } else if game.creative_inventory_open {
                                     match code {
-                                        KeyCode::Escape | KeyCode::KeyE => {
+                                        KeyCode::Escape => {
                                             game.creative_inventory_open = false;
+                                            self.core
+                                                .input
+                                                .clear_action(crate::app::input::Action::OpenMenu);
                                             self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
@@ -291,28 +300,6 @@ impl ApplicationHandler for App {
                                             game.death_confirm = false;
                                             self.core.send_respawn(&connection, &mut game);
                                         }
-                                        KeyCode::Escape if !game.dead => {
-                                            if game.inventory_open {
-                                                game.inventory_open = false;
-                                            } else {
-                                                game.paused = !game.paused;
-                                            }
-                                            self.core
-                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
-                                        }
-                                        KeyCode::KeyE
-                                            if !game.paused
-                                                && !game.dead
-                                                && game.player.game_mode != 3 =>
-                                        {
-                                            if game.player.game_mode == 1 {
-                                                game.creative_inventory_open = true;
-                                            } else {
-                                                game.inventory_open = !game.inventory_open;
-                                            }
-                                            self.core
-                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
-                                        }
                                         KeyCode::KeyT if !game.paused && !game.gui_open() => {
                                             game.chat.open();
                                             self.core
@@ -331,16 +318,9 @@ impl ApplicationHandler for App {
                                         {
                                             game.show_chunk_borders = !game.show_chunk_borders;
                                         }
-                                        KeyCode::F5 => {
-                                            gfx.renderer.cycle_camera_mode();
-                                        }
                                         _ => {}
                                     }
                                 }
-                            }
-
-                            if !game.paused && !game.chat.is_open() && !game.gui_open() {
-                                self.core.input.on_key_event(&event);
                             }
 
                             AppPhase::InGame {
@@ -352,6 +332,7 @@ impl ApplicationHandler for App {
                     }
                 });
             }
+
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
@@ -403,6 +384,14 @@ impl ApplicationHandler for App {
                 };
 
                 let core = &mut self.core;
+
+                let should_apply_cursor_grab = core.input.update(&mut self.phase);
+                if should_apply_cursor_grab
+                    && let AppPhase::InGame { gfx, game, .. } = self.phase.get_mut()
+                {
+                    core.apply_cursor_grab(&gfx.window, Some(game));
+                }
+
                 self.phase.transition(|app| match app {
                     AppPhase::Setup { .. } => unreachable!(
                         "The function early returns above if the phase is AppPhase::Setup"

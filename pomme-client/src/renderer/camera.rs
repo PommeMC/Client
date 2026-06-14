@@ -11,7 +11,9 @@ pub const MIN_FOV_DEGREES: f32 = 30.0;
 pub const MAX_FOV_DEGREES: f32 = 110.0;
 const NEAR: f32 = 0.1;
 const FAR: f32 = 1000.0;
-const SENSITIVITY: f32 = 0.15;
+const MOUSE_SENSITIVITY: f32 = 0.15;
+/// Controller look speed in degrees per second, scaled by frame delta.
+const CONTROLLER_SENSITIVITY: f32 = 150.0;
 pub const THIRD_PERSON_DISTANCE: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,13 +58,21 @@ impl Camera {
         }
     }
 
-    pub fn update_look(&mut self, input: &mut InputState) {
+    pub fn update_look(&mut self, input: &mut InputState, dt: f32) {
+        if let Some(look_vec) = input.get_gamepad_right_analog() {
+            let step = CONTROLLER_SENSITIVITY * dt;
+            let y_rot_deg =
+                ((self.look_dir.y_rot_deg() + look_vec.x * step) + 180.0).rem_euclid(360.0) - 180.0;
+            let x_rot_deg = self.look_dir.x_rot_deg() - look_vec.y * step; //TODO: Add preference for inverting the Y axis
+            self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
+        }
+
         if input.is_cursor_captured() {
             let (dx, dy) = input.consume_mouse_delta();
-            let y_rot_deg = ((self.look_dir.y_rot_deg() + dx as f32 * SENSITIVITY) + 180.0)
+            let y_rot_deg = ((self.look_dir.y_rot_deg() + dx as f32 * MOUSE_SENSITIVITY) + 180.0)
                 .rem_euclid(360.0)
                 - 180.0;
-            let x_rot_deg = self.look_dir.x_rot_deg() + dy as f32 * SENSITIVITY;
+            let x_rot_deg = self.look_dir.x_rot_deg() + dy as f32 * MOUSE_SENSITIVITY;
             self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
         }
     }

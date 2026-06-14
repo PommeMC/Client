@@ -58,7 +58,7 @@ pub fn update_menu(
         tracing::error!("Render error: {e}");
     }
 
-    core.input.clear_click_events();
+    core.input.clear_just_pressed_actions();
 
     if core.menu.display_mode != core.display_mode {
         core.display_mode = core.menu.display_mode;

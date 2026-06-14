@@ -656,8 +656,8 @@ impl Renderer {
         &self.last_timings
     }
 
-    pub fn update_camera(&mut self, input: &mut InputState) {
-        self.camera.update_look(input);
+    pub fn update_camera(&mut self, input: &mut InputState, dt: f32) {
+        self.camera.update_look(input, dt);
     }
 
     pub fn sync_camera_pos(&mut self, position: Position) {

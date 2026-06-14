@@ -9,7 +9,7 @@ use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
-use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE};
+use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE, input};
 use crate::benchmark::{Benchmark, BenchmarkResult};
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
@@ -216,7 +216,7 @@ pub fn update_game(
     }
 
     if game.input_live() {
-        gfx.renderer.update_camera(&mut core.input);
+        gfx.renderer.update_camera(&mut core.input, dt);
     }
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
@@ -325,7 +325,7 @@ pub fn update_game(
         core.menu.gui_scale_setting,
     );
 
-    if core.input.tab_held()
+    if core.input.performing_action(input::Action::ViewPlayerList)
         && !game.paused
         && !game.gui_open()
         && !game.chat.is_open()
@@ -440,7 +440,7 @@ pub fn update_game(
             .menu
             .build(sw, sh, &menu_input, |t, s| r.menu_text_width(t, s));
         elements.extend(result.elements);
-        core.input.clear_click_events();
+        core.input.clear_just_pressed_actions();
     } else if game.dead {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed() && !game.respawn_sent;
@@ -471,12 +471,12 @@ pub fn update_game(
                 &|t, s| r.menu_text_width(t, s),
             )
         };
-        core.input.clear_click_events();
+        core.input.clear_just_pressed_actions();
     } else if game.paused {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         pause_action = pause::build_pause_menu(&mut elements, sw, sh, cursor, clicked, gs);
-        core.input.clear_click_events();
+        core.input.clear_just_pressed_actions();
     }
 
     let mut player_preview = None;
@@ -494,7 +494,7 @@ pub fn update_game(
         );
         close_inventory = result.clicked_outside;
         player_preview = Some(result.player_preview);
-        core.input.clear_click_events();
+        core.input.clear_just_pressed_actions();
     }
 
     if game.creative_inventory_open {
@@ -540,7 +540,7 @@ pub fn update_game(
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
         }
-        core.input.clear_click_events();
+        core.input.clear_just_pressed_actions();
     }
 
     game.chat.build(&mut elements, sw, sh, gs, &|t, s| {
@@ -550,7 +550,7 @@ pub fn update_game(
     // Chat consumes keys, not clicks; nothing else clears them while only chat
     // is open, so drop them here to keep stray clicks out of the live sim.
     if game.chat.is_open() {
-        core.input.clear_click_events();
+        core.input.clear_just_pressed_actions();
     }
 
     let swing_progress = game.interaction.get_swing_progress(partial_tick);

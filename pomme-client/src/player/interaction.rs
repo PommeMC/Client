@@ -12,7 +12,7 @@ use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerA
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
 use glam::{DVec3, Vec3, dvec3};
 
-use crate::app::input::InputState;
+use crate::app::input::{self, InputState};
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, SoundRef};
 use crate::entity::EntityStore;
 use crate::entity::components::{LookDirection, Position};
@@ -28,7 +28,7 @@ const ENTITY_REACH: f64 = 3.0;
 const CREATIVE_ENTITY_REACH_BONUS: f64 = 2.0;
 const DESTROY_COOLDOWN: u32 = 5;
 const MISS_COOLDOWN: u32 = 10;
-const RIGHT_CLICK_DELAY: u32 = 4;
+const USE_DELAY: u32 = 4;
 const SWING_DURATION: i32 = 6;
 
 #[derive(Debug, Clone, Copy)]
@@ -69,7 +69,7 @@ pub struct InteractionState {
     destroy_ticks: f32,
     destroy_delay: u32,
     miss_time: u32,
-    right_click_delay: u32,
+    use_delay: u32,
     swinging: bool,
     swing_time: i32,
     attack_anim: f32,
@@ -93,7 +93,7 @@ impl InteractionState {
             destroy_ticks: 0.0,
             destroy_delay: 0,
             miss_time: 0,
-            right_click_delay: 0,
+            use_delay: 0,
             swinging: false,
             swing_time: 0,
             attack_anim: 0.0,
@@ -291,7 +291,7 @@ impl InteractionState {
             return dirty_chunks;
         }
 
-        if input.left_just_pressed() {
+        if input.action_just_pressed(input::Action::Destroy) {
             self.start_attack(
                 chunks,
                 sender,
@@ -303,7 +303,7 @@ impl InteractionState {
             );
         }
 
-        if input.left_held() {
+        if input.performing_action(input::Action::Destroy) {
             self.continue_attack(
                 chunks,
                 sender,
@@ -318,15 +318,17 @@ impl InteractionState {
             self.stop_destroying(sender);
         }
 
-        if input.right_just_pressed() || (input.right_held() && self.right_click_delay == 0) {
+        if input.action_just_pressed(input::Action::Use)
+            || (input.performing_action(input::Action::Use) && self.use_delay == 0)
+        {
             self.use_item_on(sender);
         }
 
         if self.miss_time > 0 {
             self.miss_time -= 1;
         }
-        if self.right_click_delay > 0 {
-            self.right_click_delay -= 1;
+        if self.use_delay > 0 {
+            self.use_delay -= 1;
         }
         self.update_swing();
 
@@ -430,7 +432,7 @@ impl InteractionState {
             return;
         }
 
-        self.right_click_delay = RIGHT_CLICK_DELAY;
+        self.use_delay = USE_DELAY;
 
         let Some(HitResult::Block(hit)) = self.target else {
             return;

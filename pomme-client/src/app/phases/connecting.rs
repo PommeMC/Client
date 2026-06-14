@@ -106,7 +106,7 @@ pub fn update_connecting(
         cancel = true;
     }
 
-    core.input.clear_click_events();
+    core.input.clear_just_pressed_actions();
 
     if let Err(e) = gfx.renderer.render_menu(
         &gfx.window,
