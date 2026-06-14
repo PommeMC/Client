@@ -46,6 +46,13 @@ impl Aabb {
         }
     }
 
+    pub fn deflate(self, amount: f64) -> Self {
+        Self {
+            min: self.min + amount,
+            max: self.max - amount,
+        }
+    }
+
     pub fn expand(self, delta: DVec3) -> Self {
         let mut min = self.min;
         let mut max = self.max;

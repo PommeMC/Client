@@ -170,6 +170,7 @@ pub struct LivingEntity {
     pub walk_anim_speed: f32,
     pub prev_walk_anim_speed: f32,
     pub is_baby: bool,
+    pub is_crouching: bool,
     pub on_ground: bool,
     pub wool_color: Option<u8>,
     pub is_sheared: bool,
@@ -208,6 +209,7 @@ impl LivingEntity {
             walk_anim_speed: 0.0,
             prev_walk_anim_speed: 0.0,
             is_baby: false,
+            is_crouching: false,
             on_ground: false,
             wool_color: None,
             is_sheared: false,
@@ -528,6 +530,12 @@ impl EntityStore {
     pub fn set_baby(&mut self, id: i32, is_baby: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.is_baby = is_baby;
+        }
+    }
+
+    pub fn set_crouching(&mut self, id: i32, is_crouching: bool) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.is_crouching = is_crouching;
         }
     }
 

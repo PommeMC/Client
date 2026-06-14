@@ -739,8 +739,10 @@ pub fn compute_humanoid_anim(
     local_head_y_rot_deg: f32,
     walk_pos: f32,
     walk_speed: f32,
+    is_crouching: bool,
 ) -> PartAnim {
     let mut anim = PartAnim::default();
+    let crouch_arm_rot = if is_crouching { 0.4 } else { 0.0 };
 
     for (i, part) in model.parts.iter().enumerate() {
         let rot = match part.name.as_str() {
@@ -750,12 +752,18 @@ pub fn compute_humanoid_anim(
                 let (x, y, z) = rot.to_euler(glam::EulerRot::XYZ);
                 Vec3::new(x, y, z)
             }
+            "body" if is_crouching => Vec3::new(0.5, 0.0, 0.0),
             "right_arm" => Vec3::new(
-                (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 2.0 * walk_speed * 0.5,
+                (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 2.0 * walk_speed * 0.5
+                    + crouch_arm_rot,
                 0.0,
                 0.0,
             ),
-            "left_arm" => Vec3::new((walk_pos * 0.6662).cos() * 2.0 * walk_speed * 0.5, 0.0, 0.0),
+            "left_arm" => Vec3::new(
+                (walk_pos * 0.6662).cos() * 2.0 * walk_speed * 0.5 + crouch_arm_rot,
+                0.0,
+                0.0,
+            ),
             "right_leg" => Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.0, 0.0),
             "left_leg" => Vec3::new(
                 (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 1.4 * walk_speed,
@@ -764,6 +772,17 @@ pub fn compute_humanoid_anim(
             ),
             _ => continue,
         };
+        if is_crouching {
+            let translation = match part.name.as_str() {
+                "head" => Vec3::new(0.0, 4.2, 0.0),
+                "body" | "right_arm" | "left_arm" => Vec3::new(0.0, 3.2, 0.0),
+                "right_leg" | "left_leg" => Vec3::new(0.0, 0.0, 4.0),
+                _ => Vec3::ZERO,
+            };
+            if translation != Vec3::ZERO {
+                anim.translation.push((i, translation));
+            }
+        }
         anim.rotation.push((i, rot));
     }
 

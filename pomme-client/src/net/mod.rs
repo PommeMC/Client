@@ -171,6 +171,10 @@ pub enum NetworkEvent {
         id: i32,
         is_baby: bool,
     },
+    EntityPose {
+        id: i32,
+        is_crouching: bool,
+    },
     SheepWoolData {
         id: i32,
         color: u8,

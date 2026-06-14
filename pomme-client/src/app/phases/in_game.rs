@@ -576,6 +576,7 @@ pub fn update_game(
                     .lerp(e.look_dir.x_rot_deg(), partial_tick),
                 body_y_rot_deg: lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick),
                 is_baby: e.is_baby,
+                is_crouching: e.is_crouching,
                 walk_anim_pos: {
                     let scale = if e.is_baby { 3.0 } else { 1.0 };
                     (e.walk_anim_pos - e.walk_anim_speed * (1.0 - partial_tick)) * scale
@@ -611,6 +612,7 @@ pub fn update_game(
             head_x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
             body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
             is_baby: false,
+            is_crouching: game.player.crouching,
             walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
                 + (game.player_walk_speed - game.player_prev_walk_speed) * partial_tick)

@@ -651,6 +651,9 @@ impl AppCore {
                 NetworkEvent::EntityBabyFlag { id, is_baby } => {
                     game.entity_store.set_baby(id, is_baby);
                 }
+                NetworkEvent::EntityPose { id, is_crouching } => {
+                    game.entity_store.set_crouching(id, is_crouching);
+                }
                 NetworkEvent::SheepWoolData { id, color, sheared } => {
                     game.entity_store.set_sheep_wool(id, color, sheared);
                 }

@@ -22,6 +22,7 @@ pub struct EntityRenderInfo {
     pub head_y_rot_deg: f32,
     pub body_y_rot_deg: f32,
     pub is_baby: bool,
+    pub is_crouching: bool,
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
     pub entity_kind: EntityKind,
@@ -490,6 +491,7 @@ impl EntityRenderer {
                     info.head_y_rot_deg - info.body_y_rot_deg,
                     info.walk_anim_pos,
                     info.walk_anim_speed,
+                    info.is_crouching,
                 ),
             };
 

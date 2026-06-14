@@ -344,6 +344,15 @@ pub fn handle_game_packet(
                         count: data.count,
                     });
                 }
+                // Index 6 = entity pose
+                if item.index == 6
+                    && let azalea_entity::EntityDataValue::Pose(pose) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::EntityPose {
+                        id: p.id.0,
+                        is_crouching: matches!(pose, azalea_entity::Pose::Crouching),
+                    });
+                }
                 if item.index == 16
                     && let azalea_entity::EntityDataValue::Boolean(is_baby) = &item.value
                 {

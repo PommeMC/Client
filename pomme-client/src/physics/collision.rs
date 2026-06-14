@@ -281,6 +281,12 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
     aabbs
 }
 
+pub fn no_collision(chunk_store: &ChunkStore, aabb: &Aabb) -> bool {
+    collect_block_aabbs(chunk_store, aabb)
+        .iter()
+        .all(|block| !block.intersects(aabb))
+}
+
 fn collide_along_axes(
     block_aabbs: &[Aabb],
     player_aabb: Aabb,
