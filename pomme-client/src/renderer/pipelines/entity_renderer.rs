@@ -466,12 +466,7 @@ impl EntityRenderer {
             };
             let variant = entry.base_variant(info.is_baby, info.variant_index);
 
-            let mut position = info.position.as_vec3();
-            if info.is_crouching {
-                // Crouching shifts the whole model down by 2 texels.
-                position.y -= 0.125;
-            }
-            let entity_mat = glam::Mat4::from_translation(position)
+            let entity_mat = glam::Mat4::from_translation(info.position.as_vec3())
                 * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians());
 
             let anim = match entry.anim {
