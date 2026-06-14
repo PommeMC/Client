@@ -5,7 +5,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use rodio::source::ChannelVolume;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
 
 use self::sounds::{SoundsIndex, sound_asset_key};
 use crate::assets::{AssetIndex, resolve_asset_path};
@@ -76,11 +76,10 @@ pub enum SoundRef {
     Direct(String),
 }
 
-/// The rodio output device. `OutputStream` must be kept alive for the whole
-/// program, hence it is stored even though it is never read directly.
+/// The rodio output device. The `MixerDeviceSink` must be kept alive for the
+/// whole program; sounds play by connecting `Player`s to its mixer.
 struct Output {
-    _stream: OutputStream,
-    handle: OutputStreamHandle,
+    sink: MixerDeviceSink,
 }
 
 /// Plays menu and in-world sounds, resolving `.ogg` files through the same
@@ -95,7 +94,7 @@ pub struct AudioEngine {
     volumes: [f32; 10],
     listener_left: [f32; 3],
     listener_right: [f32; 3],
-    music_sink: Option<Sink>,
+    music_sink: Option<Player>,
     /// Per-entry `sounds.json` volume of the track currently in `music_sink`,
     /// reapplied each frame so live volume changes keep its relative loudness.
     music_track_volume: f32,
@@ -105,11 +104,8 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     pub fn new(jar_assets_dir: &Path, asset_index: Option<AssetIndex>, volumes: [f32; 10]) -> Self {
-        let output = match OutputStream::try_default() {
-            Ok((stream, handle)) => Some(Output {
-                _stream: stream,
-                handle,
-            }),
+        let output = match DeviceSinkBuilder::open_default_sink() {
+            Ok(sink) => Some(Output { sink }),
             Err(e) => {
                 tracing::warn!("audio disabled: no output device ({e})");
                 None
@@ -215,9 +211,7 @@ impl AudioEngine {
         let base =
             self.category_gain(SoundCategory::from_index(category)) * instance_volume * dist_gain;
 
-        let Ok(sink) = Sink::try_new(&output.handle) else {
-            return;
-        };
+        let sink = Player::connect_new(output.sink.mixer());
         sink.set_speed(pitch.max(0.01));
         sink.append(ChannelVolume::new(
             source,
@@ -278,10 +272,10 @@ impl AudioEngine {
     /// Decodes a weighted-random variant of `event` into a queued sink,
     /// returned with the variant's per-entry volume for the caller to
     /// apply.
-    fn make_sink(&self, event: &str) -> Option<(Sink, f32)> {
+    fn make_sink(&self, event: &str) -> Option<(Player, f32)> {
         let output = self.output.as_ref()?;
         let (source, volume) = self.decode_event(event, None)?;
-        let sink = Sink::try_new(&output.handle).ok()?;
+        let sink = Player::connect_new(output.sink.mixer());
         sink.append(source);
         Some((sink, volume))
     }
