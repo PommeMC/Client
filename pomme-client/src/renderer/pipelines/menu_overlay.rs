@@ -1511,6 +1511,10 @@ pub enum SpriteId {
     EmptyLeggings,
     EmptyBoots,
     EmptyShield,
+    SlotHighlightBack,
+    SlotHighlightFront,
+    RecipeBookButton,
+    RecipeBookButtonHighlighted,
     ButtonNormal,
     ButtonHover,
     ButtonDisabled,
@@ -1727,6 +1731,26 @@ fn build_sprite_atlas(
         (
             SpriteId::EmptyShield,
             "minecraft/textures/gui/sprites/container/slot/shield.png",
+            0.0,
+        ),
+        (
+            SpriteId::SlotHighlightBack,
+            "minecraft/textures/gui/sprites/container/slot_highlight_back.png",
+            0.0,
+        ),
+        (
+            SpriteId::SlotHighlightFront,
+            "minecraft/textures/gui/sprites/container/slot_highlight_front.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookButton,
+            "minecraft/textures/gui/sprites/recipe_book/button.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookButtonHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/button_highlighted.png",
             0.0,
         ),
         (

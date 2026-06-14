@@ -11,15 +11,13 @@ pub enum DeathAction {
 }
 
 fn push_gradient(elements: &mut Vec<MenuElement>, screen_w: f32, screen_h: f32) {
-    elements.push(MenuElement::GradientRect {
-        x: 0.0,
-        y: 0.0,
-        w: screen_w,
-        h: screen_h,
-        corner_radius: 0.0,
-        color_top: [0.080, 0.0, 0.0, 0.376],
-        color_bottom: [0.216, 0.029, 0.029, 0.627],
-    });
+    common::push_gradient_overlay(
+        elements,
+        screen_w,
+        screen_h,
+        [0.080, 0.0, 0.0, 0.376],
+        [0.216, 0.029, 0.029, 0.627],
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

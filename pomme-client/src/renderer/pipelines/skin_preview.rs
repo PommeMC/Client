@@ -335,16 +335,71 @@ impl SkinPreviewPipeline {
         let ndc_y = screen_y * 2.0 - 1.0;
         let clip_offset = Mat4::from_translation(Vec3::new(ndc_x, ndc_y, 0.0));
 
-        let eye = Vec3::new(0.0, 0.0, -4.5);
-        let target = Vec3::ZERO;
-        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+        let vp = clip_offset * proj * camera_view();
+        self.record(
+            cmd,
+            frame,
+            vp,
+            body_rot_rad,
+            body_rot_rad + head_y_rot_rad,
+            head_x_rot_rad,
+        );
+    }
 
+    /// Draws the player in a GUI box like vanilla's inventory preview:
+    /// orthographic, 30 GUI px per model unit, mouse-follow rotation.
+    pub fn draw_in_box(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        p: crate::renderer::PlayerPreview,
+        sw: f32,
+        sh: f32,
+    ) {
+        let cx = p.rect[0] + p.rect[2] / 2.0;
+        let cy = p.rect[1] + p.rect[3] / 2.0;
+        let xa = ((p.cursor.0 - cx) / (40.0 * p.gui_scale)).atan();
+        let ya = ((p.cursor.1 - cy) / (40.0 * p.gui_scale)).atan();
+        let body_rot_rad = std::f32::consts::PI + (xa * 20.0).to_radians();
+        let head_yaw_rad = std::f32::consts::PI + (xa * 40.0).to_radians();
+        let head_pitch_rad = (ya * 20.0).to_radians();
+
+        let units_to_px = 30.0 * p.gui_scale;
+        let half_w = sw / (2.0 * units_to_px);
+        let half_h = sh / (2.0 * units_to_px);
+        let mut proj = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
+        proj.y_axis.y *= -1.0;
+
+        let clip_offset =
+            Mat4::from_translation(Vec3::new(cx / sw * 2.0 - 1.0, cy / sh * 2.0 - 1.0, 0.0));
+        let tilt = Mat4::from_rotation_x(-head_pitch_rad);
+        // Vanilla lifts the entity by bbHeight/2 + 0.0625 = 0.9625 from its
+        // feet; mesh feet are at y = -1.5, so +0.5375 centers it in the box.
+        let center = Mat4::from_translation(Vec3::new(0.0, 0.5375, 0.0));
+
+        self.record(
+            cmd,
+            frame,
+            clip_offset * proj * camera_view() * tilt * center,
+            body_rot_rad,
+            head_yaw_rad,
+            head_pitch_rad,
+        );
+    }
+
+    fn record(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        vp: Mat4,
+        body_rot_rad: f32,
+        head_yaw_rad: f32,
+        head_pitch_rad: f32,
+    ) {
         let body_rot_mat = Mat4::from_rotation_y(body_rot_rad);
-
-        let vp = clip_offset * proj * view;
         let body_mvp = vp * body_rot_mat;
-        let head_rot_mat = Mat4::from_rotation_y(body_rot_rad + head_y_rot_rad)
-            * Mat4::from_rotation_x(head_x_rot_rad);
+        let head_rot_mat =
+            Mat4::from_rotation_y(head_yaw_rad) * Mat4::from_rotation_x(head_pitch_rad);
         let head_mvp = vp * head_rot_mat;
 
         // Right arm swing animation
@@ -463,6 +518,10 @@ impl SkinPreviewPipeline {
         device.destroy_descriptor_set_layout(self.mvp_layout, None);
         device.destroy_descriptor_set_layout(self.tex_layout, None);
     }
+}
+
+fn camera_view() -> Mat4 {
+    Mat4::look_at_rh(Vec3::new(0.0, 0.0, -4.5), Vec3::ZERO, Vec3::Y)
 }
 
 fn write_uniform(alloc: &mut Allocation, mvp: &Mat4) {

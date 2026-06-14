@@ -15,7 +15,7 @@ use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::player::LocalPlayer;
-use crate::player::interaction::InteractionState;
+use crate::player::interaction::{HitResult, InteractionState};
 use crate::player::tab_list::TabList;
 use crate::renderer::chunk::mesher::{BiomeClimate, MeshDispatcher};
 use crate::renderer::pipelines::entity_renderer::{
@@ -137,6 +137,11 @@ impl GameState {
         self.inventory_open || self.creative_inventory_open
     }
 
+    /// No menu (pause, inventory, chat) is capturing input.
+    pub fn input_live(&self) -> bool {
+        !self.paused && !self.gui_open() && !self.chat.is_open()
+    }
+
     pub fn sync_render_distance(&mut self, connection: &ConnectionHandle, render_distance: u32) {
         self.last_render_distance = render_distance;
         tracing::info!("Render distance changed to {render_distance}");
@@ -210,30 +215,23 @@ pub fn update_game(
         core.time_tick_accumulator -= TICK_RATE;
     }
 
-    if !game.paused && !game.gui_open() && !game.chat.is_open() {
+    if game.input_live() {
         gfx.renderer.update_camera(&mut core.input, dt);
+    }
 
-        core.tick_accumulator += dt;
-        while core.tick_accumulator >= TICK_RATE {
-            core.tick_physics(&mut gfx.renderer, connection, game);
-            game.item_entity_store.tick(
-                |bx, by, bz| !game.chunk_store.get_block_state(bx, by, bz).is_air(),
-                |bx, by, bz| block_friction(game.chunk_store.get_block_state(bx, by, bz)),
-            );
-            game.block_entity_anim.tick();
-            core.tick_accumulator -= TICK_RATE;
-        }
+    // Menus never pause the simulation; tick_physics substitutes neutral input.
+    core.tick_accumulator += dt;
+    while core.tick_accumulator >= TICK_RATE {
+        core.tick_physics(&mut gfx.renderer, connection, game);
+        game.item_entity_store.tick(
+            |bx, by, bz| !game.chunk_store.get_block_state(bx, by, bz).is_air(),
+            |bx, by, bz| block_friction(game.chunk_store.get_block_state(bx, by, bz)),
+        );
+        game.block_entity_anim.tick();
+        core.tick_accumulator -= TICK_RATE;
     }
 
     let partial_tick = core.tick_accumulator / TICK_RATE;
-
-    if !game.paused && !game.gui_open() && !game.chat.is_open() {
-        game.interaction.update_target(
-            game.player.eye_pos(),
-            gfx.renderer.camera_look_dir(),
-            &game.chunk_store,
-        );
-    }
 
     let typed = core.input.drain_typed_chars();
     let backspace = core.input.backspace_pressed();
@@ -273,11 +271,7 @@ pub fn update_game(
     let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
 
     let mut elements: Vec<MenuElement> = Vec::new();
-    let hide_cursor = !game.paused
-        && !game.dead
-        && !game.gui_open()
-        && !game.chat.is_open()
-        && core.input.is_cursor_captured();
+    let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
 
     let debug = if game.show_debug {
         Some(hud::DebugInfo {
@@ -285,12 +279,15 @@ pub fn update_game(
             position: *game.player.position,
             y_rot_deg: gfx.renderer.camera_look_dir().y_rot_deg(),
             x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
-            target_block: game.interaction.target.map(|t| {
+            target_block: game.interaction.target.and_then(|t| {
+                let HitResult::Block(t) = t else {
+                    return None;
+                };
                 let state =
                     game.chunk_store
                         .get_block_state(t.block_pos.x, t.block_pos.y, t.block_pos.z);
                 let block: Box<dyn azalea_block::BlockTrait> = state.into();
-                (t.block_pos, t.face, block.id().to_string())
+                Some((t.block_pos, t.face, block.id().to_string()))
             }),
             chunk_count: gfx.renderer.loaded_chunk_count(),
             gpu_name: gfx.renderer.gpu_name(),
@@ -482,10 +479,11 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
+    let mut player_preview = None;
     if game.inventory_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
-        close_inventory = crate::ui::inventory::build_inventory(
+        let result = crate::ui::inventory::build_inventory(
             &mut elements,
             sw,
             sh,
@@ -494,6 +492,8 @@ pub fn update_game(
             &game.player.inventory,
             gs,
         );
+        close_inventory = result.clicked_outside;
+        player_preview = Some(result.player_preview);
         core.input.clear_just_pressed_actions();
     }
 
@@ -547,6 +547,12 @@ pub fn update_game(
         gfx.renderer.menu_text_width(t, s)
     });
 
+    // Chat consumes keys, not clicks; nothing else clears them while only chat
+    // is open, so drop them here to keep stray clicks out of the live sim.
+    if game.chat.is_open() {
+        core.input.clear_just_pressed_actions();
+    }
+
     let swing_progress = game.interaction.get_swing_progress(partial_tick);
     let destroy_info = game.interaction.destroy_stage().map(|(pos, stage)| {
         let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
@@ -582,6 +588,7 @@ pub fn update_game(
                 overlay_tints: extras.overlay_tints,
                 head_y_offset: extras.head_y_offset,
                 head_x_rot_deg_override: extras.head_x_rot_deg_override,
+                has_red_overlay: e.hurt_time > 0,
             }
         })
         .collect();
@@ -613,6 +620,7 @@ pub fn update_game(
             overlay_tints: [None, None],
             head_y_offset: 0.0,
             head_x_rot_deg_override: None,
+            has_red_overlay: false,
         });
     }
 
@@ -676,11 +684,24 @@ pub fn update_game(
     } else {
         core.menu.render_distance
     };
+    let held_item = match game.player.inventory.hotbar_slots()[core.input.selected_slot() as usize]
+    {
+        azalea_inventory::ItemStack::Present(ref data) => {
+            let name = crate::player::inventory::item_resource_name(data.kind);
+            (name != "air").then(|| {
+                let light =
+                    get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
+                (name, light)
+            })
+        }
+        _ => None,
+    };
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
         elements,
         swing_progress,
+        held_item,
         destroy_info,
         game.show_chunk_borders,
         sky,
@@ -689,6 +710,7 @@ pub fn update_game(
         &block_entity_renders,
         &weather_columns,
         effective_rd,
+        player_preview,
     ) {
         tracing::error!("Render error: {e}");
     }

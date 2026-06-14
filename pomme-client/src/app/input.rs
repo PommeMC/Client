@@ -55,6 +55,26 @@ pub struct ClickState {
 
 impl InputState {
     pub fn new() -> Self {
+        let controller_manager = match Gilrs::new() {
+            Ok(gilrs) => Some(gilrs),
+            Err(err) => {
+                tracing::warn!("Controller support disabled: failed to initialize gilrs: {err}");
+                None
+            }
+        };
+        Self::with_controller(controller_manager)
+    }
+
+    /// Neutral input (no keys, cursor released) for ticking while a menu is
+    /// open. Never reads the controller, so it skips gilrs initialization.
+    pub fn released() -> Self {
+        Self {
+            cursor_captured: false,
+            ..Self::with_controller(None)
+        }
+    }
+
+    fn with_controller(controller_manager: Option<Gilrs>) -> Self {
         Self {
             pressed: HashSet::new(),
             modifiers: Modifiers::default(),
@@ -76,15 +96,7 @@ impl InputState {
             copy_pressed: false,
             cut_pressed: false,
             undo_pressed: false,
-            controller_manager: match Gilrs::new() {
-                Ok(gilrs) => Some(gilrs),
-                Err(err) => {
-                    tracing::warn!(
-                        "Controller support disabled: failed to initialize gilrs: {err}"
-                    );
-                    None
-                }
-            },
+            controller_manager,
             active_gamepad_id: None,
             recent_actions: HashMap::new(),
         }

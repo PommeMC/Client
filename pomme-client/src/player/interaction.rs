@@ -2,8 +2,11 @@ use std::collections::HashMap;
 
 use azalea_block::BlockState;
 use azalea_core::direction::Direction;
+use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::position::BlockPos;
+use azalea_entity::dimensions::EntityDimensions;
 use azalea_protocol::packets::game::ServerboundGamePacket;
+use azalea_protocol::packets::game::s_attack::ServerboundAttack;
 use azalea_protocol::packets::game::s_interact::InteractionHand;
 use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerAction};
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
@@ -11,28 +14,55 @@ use glam::{DVec3, Vec3, dvec3};
 
 use crate::app::input::{self, InputState};
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, SoundRef};
+use crate::entity::EntityStore;
 use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
+use crate::physics::aabb::Aabb;
+use crate::physics::collision::has_collision;
+use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
 use crate::world::block::sound::block_sounds;
 use crate::world::chunk::ChunkStore;
 
 const REACH: f32 = 4.5;
+const ENTITY_REACH: f64 = 3.0;
+const CREATIVE_ENTITY_REACH_BONUS: f64 = 2.0;
 const DESTROY_COOLDOWN: u32 = 5;
 const MISS_COOLDOWN: u32 = 10;
 const USE_DELAY: u32 = 4;
 const SWING_DURATION: i32 = 6;
 
 #[derive(Debug, Clone, Copy)]
-pub struct HitResult {
+pub struct BlockHitResult {
     pub block_pos: BlockPos,
     pub face: Direction,
     pub hit_point: DVec3,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct EntityHitResult {
+    pub entity_id: i32,
+    pub location: DVec3,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HitResult {
+    Block(BlockHitResult),
+    Entity(EntityHitResult),
+}
+
+/// Last server-known state for a locally-predicted block change, matching
+/// vanilla `BlockStatePredictionHandler.ServerVerifiedState`.
+struct ServerVerifiedState {
+    seq: u32,
+    state: BlockState,
+    player_pos: DVec3,
+}
+
 pub struct InteractionState {
     pub target: Option<HitResult>,
     seq: u32,
-    pending_predictions: HashMap<BlockPos, u32>,
+    last_teleport_seq: u32,
+    pending_predictions: HashMap<BlockPos, ServerVerifiedState>,
     is_destroying: bool,
     destroy_pos: BlockPos,
     destroy_progress: f32,
@@ -51,6 +81,7 @@ impl InteractionState {
         Self {
             target: None,
             seq: 0,
+            last_teleport_seq: 0,
             pending_predictions: HashMap::new(),
             is_destroying: false,
             destroy_pos: BlockPos {
@@ -70,12 +101,93 @@ impl InteractionState {
         }
     }
 
-    pub fn has_pending_prediction(&self, pos: &BlockPos) -> bool {
-        self.pending_predictions.contains_key(pos)
+    /// Vanilla `retainKnownServerState`: an existing entry only gets its
+    /// sequence bumped, since its stored state is already the server's.
+    fn retain_known_server_state(&mut self, pos: BlockPos, state: BlockState, player_pos: DVec3) {
+        self.pending_predictions
+            .entry(pos)
+            .and_modify(|v| v.seq = self.seq)
+            .or_insert(ServerVerifiedState {
+                seq: self.seq,
+                state,
+                player_pos,
+            });
     }
 
-    pub fn acknowledge(&mut self, seq: u32) {
-        self.pending_predictions.retain(|_, &mut s| s > seq);
+    /// Vanilla `updateKnownServerState`: a server block update for a predicted
+    /// position only refreshes the stored state. Returns true if absorbed, in
+    /// which case the caller must not apply the update to the world.
+    pub fn update_known_server_state(&mut self, pos: &BlockPos, state: BlockState) -> bool {
+        if let Some(v) = self.pending_predictions.get_mut(pos) {
+            v.state = state;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn on_teleport(&mut self) {
+        self.last_teleport_seq = self.seq;
+    }
+
+    /// Applies a predicted break locally: remembers the server state for
+    /// rollback, clears the block, and plays the break effects.
+    fn predict_destroy(
+        &mut self,
+        pos: BlockPos,
+        state: BlockState,
+        player_pos: DVec3,
+        chunks: &ChunkStore,
+        audio: &AudioEngine,
+        dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
+    ) {
+        self.retain_known_server_state(pos, state, player_pos);
+        chunks.set_block_state(pos.x, pos.y, pos.z, BlockState::AIR);
+        mark_dirty(&pos, dirty_chunks);
+        play_break_sound(audio, state, pos);
+        self.destroy_delay = DESTROY_COOLDOWN;
+    }
+
+    /// Vanilla `endPredictionsUpTo` + `ClientLevel.syncBlockState`: resolves
+    /// every prediction up to `seq` to the server-verified state, so rejected
+    /// breaks pop back instead of desyncing the world. Returns the position to
+    /// snap the player back to when a restored block overlaps them.
+    pub fn acknowledge(
+        &mut self,
+        seq: u32,
+        chunks: &ChunkStore,
+        player_pos: DVec3,
+        dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
+    ) -> Option<DVec3> {
+        let snap_allowed = self.last_teleport_seq < seq;
+        let player = Aabb::from_center(player_pos, PLAYER_HALF_WIDTH, PLAYER_HEIGHT / 2.0);
+        // Keep the lowest block pos among overlapping reverts so the chosen snap
+        // is deterministic (HashMap iteration order is not).
+        let mut snap_to: Option<((i32, i32, i32), DVec3)> = None;
+        self.pending_predictions.retain(|pos, verified| {
+            if verified.seq > seq {
+                return true;
+            }
+            let current = chunks.get_block_state(pos.x, pos.y, pos.z);
+            if current != verified.state {
+                tracing::debug!(
+                    "Server did not confirm block change at {pos:?}, reverting to {:?}",
+                    verified.state
+                );
+                chunks.set_block_state(pos.x, pos.y, pos.z, verified.state);
+                mark_dirty(pos, dirty_chunks);
+                // Full-cube collision, as the engine has no per-shape voxels.
+                if snap_allowed && has_collision(verified.state) {
+                    let block = Aabb::block(pos.x, pos.y, pos.z);
+                    let key = (pos.x, pos.y, pos.z);
+                    if block.intersects(&player) && snap_to.is_none_or(|(best, _)| key < best) {
+                        snap_to = Some((key, verified.player_pos));
+                    }
+                }
+            }
+            false
+        });
+        snap_to.map(|(_, pos)| pos)
     }
 
     pub fn destroy_stage(&self) -> Option<(BlockPos, u32)> {
@@ -116,21 +228,54 @@ impl InteractionState {
         self.attack_anim = self.swing_time as f32 / SWING_DURATION as f32;
     }
 
+    /// Ports vanilla `LocalPlayer.pick`: block raycast first, entity ray
+    /// truncated at the block hit, the entity wins only if strictly closer.
+    /// An entity hit beyond entity reach is a miss, not a block fallback.
     pub fn update_target(
         &mut self,
         eye_pos: Position,
         look_dir: LookDirection,
         chunks: &ChunkStore,
+        entities: &EntityStore,
+        creative: bool,
     ) {
-        self.target = raycast(eye_pos.into(), look_dir.as_vec(), REACH, chunks);
+        let entity_reach = ENTITY_REACH
+            + if creative {
+                CREATIVE_ENTITY_REACH_BONUS
+            } else {
+                0.0
+            };
+        let max_dist = (REACH as f64).max(entity_reach);
+
+        let from: DVec3 = eye_pos.into();
+        let dir = look_dir.as_vec();
+        let block_hit = raycast(from, dir, REACH, chunks);
+
+        let block_dist_sq = block_hit
+            .map(|h| h.hit_point.distance_squared(from))
+            .unwrap_or(max_dist * max_dist);
+        let to = from + dir.as_dvec3() * block_dist_sq.sqrt();
+
+        if let Some(hit) = nearest_entity_hit(from, to, entities) {
+            let dist_sq = hit.location.distance_squared(from);
+            if dist_sq < block_dist_sq {
+                self.target =
+                    (dist_sq < entity_reach * entity_reach).then_some(HitResult::Entity(hit));
+                return;
+            }
+        }
+
+        self.target = block_hit.map(HitResult::Block);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn tick(
         &mut self,
         input: &InputState,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        player_pos: DVec3,
         on_ground: bool,
         creative: bool,
     ) -> Vec<azalea_core::position::ChunkPos> {
@@ -151,6 +296,7 @@ impl InteractionState {
                 chunks,
                 sender,
                 audio,
+                player_pos,
                 on_ground,
                 creative,
                 &mut dirty_chunks,
@@ -162,6 +308,7 @@ impl InteractionState {
                 chunks,
                 sender,
                 audio,
+                player_pos,
                 on_ground,
                 creative,
                 &mut dirty_chunks,
@@ -188,11 +335,13 @@ impl InteractionState {
         dirty_chunks
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_attack(
         &mut self,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        player_pos: DVec3,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -201,10 +350,20 @@ impl InteractionState {
             return;
         }
 
-        let Some(hit) = self.target else {
-            self.miss_time = MISS_COOLDOWN;
-            self.swing(sender);
-            return;
+        let hit = match self.target {
+            None => {
+                self.miss_time = MISS_COOLDOWN;
+                self.swing(sender);
+                return;
+            }
+            Some(HitResult::Entity(hit)) => {
+                sender.send(ServerboundGamePacket::Attack(ServerboundAttack {
+                    entity_id: MinecraftEntityId(hit.entity_id),
+                }));
+                self.swing(sender);
+                return;
+            }
+            Some(HitResult::Block(hit)) => hit,
         };
 
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
@@ -219,6 +378,7 @@ impl InteractionState {
             chunks,
             sender,
             audio,
+            player_pos,
             on_ground,
             creative,
             dirty_chunks,
@@ -226,11 +386,13 @@ impl InteractionState {
         self.swing(sender);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn continue_attack(
         &mut self,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        player_pos: DVec3,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -239,7 +401,9 @@ impl InteractionState {
             return;
         }
 
-        let Some(hit) = self.target else {
+        // Vanilla `continueAttack` only mines blocks; holding the button over
+        // an entity does not re-attack it.
+        let Some(HitResult::Block(hit)) = self.target else {
             self.stop_destroying(sender);
             return;
         };
@@ -255,6 +419,7 @@ impl InteractionState {
             chunks,
             sender,
             audio,
+            player_pos,
             on_ground,
             creative,
             dirty_chunks,
@@ -269,7 +434,7 @@ impl InteractionState {
 
         self.use_delay = USE_DELAY;
 
-        let Some(hit) = self.target else {
+        let Some(HitResult::Block(hit)) = self.target else {
             return;
         };
 
@@ -281,11 +446,7 @@ impl InteractionState {
             block_hit: BlockHit {
                 block_pos: hit.block_pos,
                 direction: hit.face,
-                location: azalea_core::position::Vec3 {
-                    x: hit.hit_point.x,
-                    y: hit.hit_point.y,
-                    z: hit.hit_point.z,
-                },
+                location: azalea_vec3(hit.hit_point),
                 inside: false,
                 world_border: false,
             },
@@ -296,10 +457,11 @@ impl InteractionState {
     #[allow(clippy::too_many_arguments)]
     fn start_destroy_block(
         &mut self,
-        hit: HitResult,
+        hit: BlockHitResult,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        player_pos: DVec3,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -332,16 +494,14 @@ impl InteractionState {
                 hit.face,
                 seq,
             );
-            chunks.set_block_state(
-                hit.block_pos.x,
-                hit.block_pos.y,
-                hit.block_pos.z,
-                BlockState::AIR,
+            self.predict_destroy(
+                hit.block_pos,
+                state,
+                player_pos,
+                chunks,
+                audio,
+                dirty_chunks,
             );
-            self.pending_predictions.insert(hit.block_pos, seq);
-            mark_dirty(&hit.block_pos, dirty_chunks);
-            play_break_sound(audio, state, hit.block_pos);
-            self.destroy_delay = DESTROY_COOLDOWN;
             return;
         }
 
@@ -378,10 +538,11 @@ impl InteractionState {
     #[allow(clippy::too_many_arguments)]
     fn continue_destroy_block(
         &mut self,
-        hit: HitResult,
+        hit: BlockHitResult,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        player_pos: DVec3,
         on_ground: bool,
         creative: bool,
         dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
@@ -397,6 +558,7 @@ impl InteractionState {
                 chunks,
                 sender,
                 audio,
+                player_pos,
                 on_ground,
                 creative,
                 dirty_chunks,
@@ -426,19 +588,17 @@ impl InteractionState {
                 hit.face,
                 seq,
             );
-            chunks.set_block_state(
-                hit.block_pos.x,
-                hit.block_pos.y,
-                hit.block_pos.z,
-                BlockState::AIR,
+            self.predict_destroy(
+                hit.block_pos,
+                state,
+                player_pos,
+                chunks,
+                audio,
+                dirty_chunks,
             );
-            self.pending_predictions.insert(hit.block_pos, seq);
-            mark_dirty(&hit.block_pos, dirty_chunks);
-            play_break_sound(audio, state, hit.block_pos);
             self.is_destroying = false;
             self.destroy_progress = 0.0;
             self.destroy_ticks = 0.0;
-            self.destroy_delay = DESTROY_COOLDOWN;
         }
     }
 
@@ -553,7 +713,12 @@ fn mark_dirty(pos: &BlockPos, dirty: &mut Vec<azalea_core::position::ChunkPos>) 
     }
 }
 
-pub fn raycast(origin: DVec3, dir: Vec3, max_dist: f32, chunks: &ChunkStore) -> Option<HitResult> {
+pub fn raycast(
+    origin: DVec3,
+    dir: Vec3,
+    max_dist: f32,
+    chunks: &ChunkStore,
+) -> Option<BlockHitResult> {
     let dir = dir.as_dvec3();
     let mut bx = origin.x.floor() as i32;
     let mut by = origin.y.floor() as i32;
@@ -606,7 +771,7 @@ pub fn raycast(origin: DVec3, dir: Vec3, max_dist: f32, chunks: &ChunkStore) -> 
             };
             let hit_point = origin + dir * t;
             let face = hit_face(origin, dir.as_vec3(), &block_pos);
-            return Some(HitResult {
+            return Some(BlockHitResult {
                 block_pos,
                 face,
                 hit_point,
@@ -627,6 +792,47 @@ pub fn raycast(origin: DVec3, dir: Vec3, max_dist: f32, chunks: &ChunkStore) -> 
         }
     }
     None
+}
+
+/// Ports vanilla `ProjectileUtil.getEntityHitResult`: clips the ray against
+/// each entity's bounding box and keeps the nearest hit. A box containing the
+/// ray origin counts as distance zero.
+fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<EntityHitResult> {
+    let from_v = azalea_vec3(from);
+    let to_v = azalea_vec3(to);
+
+    let mut nearest_dist_sq = f64::MAX;
+    let mut nearest = None;
+    for (&entity_id, entity) in &entities.living {
+        let mut dims = EntityDimensions::from(entity.entity_type);
+        if entity.is_baby {
+            dims.width *= 0.5;
+            dims.height *= 0.5;
+        }
+        let aabb = dims.make_bounding_box(entity.position.into());
+
+        let (location, dist_sq) = if aabb.contains(from_v) {
+            (from, 0.0)
+        } else if let Some(clip) = aabb.clip(from_v, to_v) {
+            let clip = DVec3::new(clip.x, clip.y, clip.z);
+            (clip, clip.distance_squared(from))
+        } else {
+            continue;
+        };
+
+        if dist_sq < nearest_dist_sq {
+            nearest_dist_sq = dist_sq;
+            nearest = Some(EntityHitResult {
+                entity_id,
+                location,
+            });
+        }
+    }
+    nearest
+}
+
+fn azalea_vec3(v: DVec3) -> azalea_core::position::Vec3 {
+    azalea_core::position::Vec3::new(v.x, v.y, v.z)
 }
 
 fn hit_face(origin: DVec3, dir: Vec3, pos: &BlockPos) -> Direction {
