@@ -512,19 +512,17 @@ pub async fn launch_game(
 
         let last = result_rx.await.unwrap_or(None);
 
-        if !status.success() {
-            #[cfg(unix)]
-            let signal = status.signal();
-            #[cfg(not(unix))]
-            let signal: Option<i32> = None;
+        #[cfg(unix)]
+        let signal = status.signal();
+        #[cfg(not(unix))]
+        let signal: Option<i32> = None;
 
-            let _ = GameExitedEvent {
-                code: status.code(),
-                signal,
-                last_lines: last,
-            }
-            .emit(&app);
+        let _ = GameExitedEvent {
+            code: status.code(),
+            signal,
+            last_lines: last,
         }
+        .emit(&app);
     });
 
     Ok(format!("Launched as {username}"))

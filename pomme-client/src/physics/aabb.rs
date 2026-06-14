@@ -11,6 +11,14 @@ impl Aabb {
         Self { min, max }
     }
 
+    /// Unit cube occupying the block at the given coordinates.
+    pub fn block(x: i32, y: i32, z: i32) -> Self {
+        Self::new(
+            dvec3(x as f64, y as f64, z as f64),
+            dvec3((x + 1) as f64, (y + 1) as f64, (z + 1) as f64),
+        )
+    }
+
     pub fn from_center(center: DVec3, half_width: f64, half_height: f64) -> Self {
         Self {
             min: dvec3(center.x - half_width, center.y, center.z - half_width),
@@ -22,13 +30,6 @@ impl Aabb {
         }
     }
 
-    pub fn offset(self, offset: DVec3) -> Self {
-        Self {
-            min: self.min + offset,
-            max: self.max + offset,
-        }
-    }
-
     pub fn intersects(&self, other: &Aabb) -> bool {
         self.min.x < other.max.x
             && self.max.x > other.min.x
@@ -36,6 +37,13 @@ impl Aabb {
             && self.max.y > other.min.y
             && self.min.z < other.max.z
             && self.max.z > other.min.z
+    }
+
+    pub fn offset(self, offset: DVec3) -> Self {
+        Self {
+            min: self.min + offset,
+            max: self.max + offset,
+        }
     }
 
     pub fn deflate(self, amount: f64) -> Self {

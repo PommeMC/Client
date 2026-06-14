@@ -9,7 +9,6 @@ pub const BTN_H: f32 = 20.0;
 pub const COL_DISABLED: [f32; 4] = [0.35, 0.36, 0.45, 1.0];
 pub const SLOT_SIZE: f32 = 16.0;
 pub const SLOT_STRIDE: f32 = 18.0;
-pub const SLOT_HIGHLIGHT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.5];
 pub const SLOT_LABEL_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 const BTN_BORDER: f32 = 3.0;
 
@@ -39,6 +38,24 @@ pub fn push_overlay(elements: &mut Vec<MenuElement>, screen_w: f32, screen_h: f3
         h: screen_h,
         corner_radius: 0.0,
         color: [0.0, 0.0, 0.0, alpha],
+    });
+}
+
+pub fn push_gradient_overlay(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    color_top: [f32; 4],
+    color_bottom: [f32; 4],
+) {
+    elements.push(MenuElement::GradientRect {
+        x: 0.0,
+        y: 0.0,
+        w: screen_w,
+        h: screen_h,
+        corner_radius: 0.0,
+        color_top,
+        color_bottom,
     });
 }
 
@@ -85,15 +102,16 @@ pub fn push_slot(
     empty_sprite: Option<SpriteId>,
 ) -> bool {
     let hovered = hit_test(cursor, [x, y, size, size]);
+    let highlight = |sprite| MenuElement::Image {
+        x: x - 4.0 * scale,
+        y: y - 4.0 * scale,
+        w: 24.0 * scale,
+        h: 24.0 * scale,
+        sprite,
+        tint: WHITE,
+    };
     if hovered {
-        elements.push(MenuElement::Rect {
-            x,
-            y,
-            w: size,
-            h: size,
-            corner_radius: 0.0,
-            color: SLOT_HIGHLIGHT_COLOR,
-        });
+        elements.push(highlight(SpriteId::SlotHighlightBack));
     }
     match item {
         ItemStack::Empty => {
@@ -121,6 +139,9 @@ pub fn push_slot(
                 push_item_count(elements, x, y, size, scale, data.count);
             }
         }
+    }
+    if hovered {
+        elements.push(highlight(SpriteId::SlotHighlightFront));
     }
     hovered
 }

@@ -249,7 +249,7 @@ static NO_COLLISION: LazyLock<HashSet<BlockKind>> = LazyLock::new(|| {
     ])
 });
 
-fn has_collision(state: azalea_block::BlockState) -> bool {
+pub fn has_collision(state: azalea_block::BlockState) -> bool {
     if state.is_air() {
         return false;
     }
@@ -272,10 +272,7 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
             for bx in min_x..max_x {
                 let state = chunk_store.get_block_state(bx, by, bz);
                 if has_collision(state) {
-                    aabbs.push(Aabb::new(
-                        dvec3(bx as f64, by as f64, bz as f64),
-                        dvec3((bx + 1) as f64, (by + 1) as f64, (bz + 1) as f64),
-                    ));
+                    aabbs.push(Aabb::block(bx, by, bz));
                 }
             }
         }

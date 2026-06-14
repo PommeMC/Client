@@ -153,6 +153,7 @@ fn sweep_axis_z(
 }
 
 const INTERPOLATION_STEPS: i32 = 3;
+const HURT_DURATION: u8 = 10;
 
 #[allow(dead_code)]
 pub struct LivingEntity {
@@ -176,6 +177,7 @@ pub struct LivingEntity {
     pub cow_variant: u8,
     pub eat_anim_tick: u8,
     pub prev_eat_anim_tick: u8,
+    pub hurt_time: u8,
     pub age_in_ticks: u32,
     pub custom_name: Option<String>,
     interp_target: Position,
@@ -214,6 +216,7 @@ impl LivingEntity {
             cow_variant: 0,
             eat_anim_tick: 0,
             prev_eat_anim_tick: 0,
+            hurt_time: 0,
             age_in_ticks: 0,
             custom_name: None,
             interp_target: position,
@@ -562,6 +565,13 @@ impl EntityStore {
         }
     }
 
+    /// Mirrors vanilla `LivingEntity.handleDamageEvent`: `hurtTime = 10`.
+    pub fn mark_hurt(&mut self, id: i32) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.hurt_time = HURT_DURATION;
+        }
+    }
+
     pub fn set_custom_name(&mut self, id: i32, name: Option<String>) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.custom_name = name;
@@ -602,6 +612,9 @@ impl EntityStore {
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
             if entity.eat_anim_tick > 0 {
                 entity.eat_anim_tick -= 1;
+            }
+            if entity.hurt_time > 0 {
+                entity.hurt_time -= 1;
             }
             entity.age_in_ticks = entity.age_in_ticks.wrapping_add(1);
         }

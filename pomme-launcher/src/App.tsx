@@ -179,6 +179,40 @@ function App() {
 
   const gameRunningRef = useRef(false);
 
+  useEffect(() => {
+    const unlisten = events.gameExitedEvent.listen((event) => {
+      if (!gameRunningRef.current) return;
+      gameRunningRef.current = false;
+      setCurrentActivity(ACTIVITY_IDLE);
+      const { code, signal, last_lines } = event.payload;
+      if (code === 0) return;
+      const SIGNAL_NAMES: Record<number, string> = {
+        4: "SIGILL",
+        6: "SIGABRT",
+        7: "SIGBUS",
+        8: "SIGFPE",
+        11: "SIGSEGV",
+        16: "SIGSTKFLT",
+      };
+      const reason =
+        signal !== null ? `signal ${SIGNAL_NAMES[signal] ?? signal}` : `code ${code ?? "unknown"}`;
+      const message =
+        code === 1 && last_lines && last_lines.length > 0
+          ? last_lines.map((line, i) => `${i + 1}: ${line}`).join("\n")
+          : "The game exited unexpectedly.";
+      setOpenedDialog({
+        name: "alert_dialog",
+        props: {
+          title: `Game exited (${reason})`,
+          message,
+        },
+      });
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [setCurrentActivity, setOpenedDialog]);
+
   const handleLaunch: handleLaunchType = useCallback(
     async ({ serverIp, serverVersion, install } = {}) => {
       if (gameRunningRef.current) {
@@ -223,36 +257,6 @@ function App() {
         setLaunchingStatus(null);
         return;
       }
-
-      await events.gameExitedEvent.once((event) => {
-        gameRunningRef.current = false;
-        setCurrentActivity(ACTIVITY_IDLE);
-        const { code, signal, last_lines } = event.payload;
-        if (code === 0) return;
-        const SIGNAL_NAMES: Record<number, string> = {
-          4: "SIGILL",
-          6: "SIGABRT",
-          7: "SIGBUS",
-          8: "SIGFPE",
-          11: "SIGSEGV",
-          16: "SIGSTKFLT",
-        };
-        const reason =
-          signal !== null
-            ? `signal ${SIGNAL_NAMES[signal] ?? signal}`
-            : `code ${code ?? "unknown"}`;
-        const message =
-          code === 1 && last_lines && last_lines.length > 0
-            ? last_lines.map((line, i) => `${i + 1}: ${line}`).join("\n")
-            : "The game exited unexpectedly.";
-        setOpenedDialog({
-          name: "alert_dialog",
-          props: {
-            title: `Game exited (${reason})`,
-            message,
-          },
-        });
-      });
 
       setLaunchingStatus("launching");
       setStatus("Launching Pomme...");

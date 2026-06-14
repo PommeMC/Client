@@ -192,7 +192,12 @@ impl VulkanContext {
         };
 
         let mut vk12_features = vk::PhysicalDeviceVulkan12Features {
-            draw_indirect_count: vk::TRUE,
+            // MoltenVK lacks drawIndirectCount; the chunk renderer has a macOS fallback.
+            draw_indirect_count: if cfg!(target_os = "macos") {
+                vk::FALSE
+            } else {
+                vk::TRUE
+            },
             ..Default::default()
         };
 

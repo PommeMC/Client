@@ -52,6 +52,12 @@ pub struct TextureAtlas {
 
 const MISSING_TILE: u32 = 16;
 
+/// Mip levels beyond level 0; level 4 reduces a 16x16 sprite to one texel.
+const MIP_EXTRA: u32 = 4;
+/// Sprite placement granularity, so every sprite origin stays on a texel
+/// boundary at every mip level.
+const MIP_ALIGN: u32 = 1 << MIP_EXTRA;
+
 struct Source {
     name: String,
     data: Vec<u8>,
@@ -85,7 +91,8 @@ impl TextureAtlas {
                     let frame_size = if h > w { w } else { h };
                     let row_bytes = w as usize * size_of::<u32>();
                     let frame_data = data[..frame_size as usize * row_bytes].to_vec();
-                    total_area += (w as u64) * (frame_size as u64);
+                    total_area += u64::from(w.next_multiple_of(MIP_ALIGN))
+                        * u64::from(frame_size.next_multiple_of(MIP_ALIGN));
                     sources.push(Source {
                         name: name.to_string(),
                         data: frame_data,
@@ -138,6 +145,7 @@ impl TextureAtlas {
         }
 
         let mut regions = HashMap::new();
+        let mut sprite_rects = vec![(0u32, 0u32, MISSING_TILE, MISSING_TILE)];
         for src in &sources {
             match placements.get(src.name.as_str()) {
                 Some(Some((cx, cy))) => {
@@ -149,6 +157,7 @@ impl TextureAtlas {
                             atlas_pixels[d..d + 4].copy_from_slice(&src.data[s..s + 4]);
                         }
                     }
+                    sprite_rects.push((*cx, *cy, src.w, src.h));
                     regions.insert(src.name.clone(), region);
                 }
                 _ => {
@@ -162,21 +171,25 @@ impl TextureAtlas {
             missing: missing_region,
         };
 
+        let staging_pixels = build_mip_chain(atlas_pixels, atlas_size, &sprite_rects);
+
         let (image, view, allocation, mip_levels) = util::create_gpu_image_mipmapped(
             device,
             allocator,
             atlas_size,
             atlas_size,
+            MIP_EXTRA + 1,
             "atlas_image",
         );
         let (staging_buffer, staging_allocation) =
-            util::create_staging_buffer(device, allocator, &atlas_pixels, "atlas_staging");
+            util::create_staging_buffer(device, allocator, &staging_pixels, "atlas_staging");
 
         util::upload_image_mipmapped(
             device,
             queue,
             command_pool,
             staging_buffer,
+            staging_pixels.len() as u64,
             image,
             atlas_size,
             atlas_size,
@@ -219,13 +232,95 @@ impl TextureAtlas {
     }
 }
 
+/// Builds level 0 plus `MIP_EXTRA` downsampled levels, each sprite filtered
+/// within its own region so neighbouring sprites never bleed in, packed
+/// tightly level 0 first for `upload_image_mipmapped`.
+fn build_mip_chain(
+    atlas_pixels: Vec<u8>,
+    atlas_size: u32,
+    sprite_rects: &[(u32, u32, u32, u32)],
+) -> Vec<u8> {
+    let mut levels = vec![atlas_pixels];
+    for level in 1..=MIP_EXTRA {
+        let src_size = (atlas_size >> (level - 1)).max(1);
+        let dst_size = (atlas_size >> level).max(1);
+        let mut dst = vec![0u8; (dst_size * dst_size * 4) as usize];
+        for &rect in sprite_rects {
+            downsample_sprite(
+                levels.last().unwrap(),
+                src_size,
+                &mut dst,
+                dst_size,
+                rect,
+                level,
+            );
+        }
+        levels.push(dst);
+    }
+    levels.concat()
+}
+
+/// A sprite's pixel rect scaled down to the given mip level.
+fn mip_rect((x, y, w, h): (u32, u32, u32, u32), level: u32) -> (u32, u32, u32, u32) {
+    (
+        x >> level,
+        y >> level,
+        (w >> level).max(1),
+        (h >> level).max(1),
+    )
+}
+
+/// Box-filters one sprite's region from the previous mip level, clamped to the
+/// sprite's own texels. RGB is averaged over the covered texels with non-zero
+/// alpha so transparent texels don't darken cutout edges.
+fn downsample_sprite(
+    src: &[u8],
+    src_size: u32,
+    dst: &mut [u8],
+    dst_size: u32,
+    rect: (u32, u32, u32, u32),
+    level: u32,
+) {
+    let (sx, sy, sw, sh) = mip_rect(rect, level - 1);
+    let (dx, dy, dw, dh) = mip_rect(rect, level);
+    for j in 0..dh {
+        for i in 0..dw {
+            let mut rgb = [0u32; 3];
+            let mut alpha = 0u32;
+            let mut opaque = 0u32;
+            for (oi, oj) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let px = sx + (2 * i + oi).min(sw - 1);
+                let py = sy + (2 * j + oj).min(sh - 1);
+                let s = ((py * src_size + px) * 4) as usize;
+                let a = u32::from(src[s + 3]);
+                alpha += a;
+                if a > 0 {
+                    for (c, v) in rgb.iter_mut().enumerate() {
+                        *v += u32::from(src[s + c]);
+                    }
+                    opaque += 1;
+                }
+            }
+            let d = (((dy + j) * dst_size + dx + i) * 4) as usize;
+            for (c, v) in rgb.iter().enumerate() {
+                dst[d + c] = v.checked_div(opaque).unwrap_or(0) as u8;
+            }
+            dst[d + 3] = (alpha / 4) as u8;
+        }
+    }
+}
+
 fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion {
+    // Quarter-texel inset: `pack_uv` quantises UVs to u16, whose granularity
+    // doesn't divide the atlas size, so exact-boundary UVs can round into the
+    // neighbouring sprite. The inset absorbs that at every mip level.
+    const INSET: f32 = 0.25;
     let s = atlas_size as f32;
     AtlasRegion {
-        u_min: x as f32 / s,
-        v_min: y as f32 / s,
-        u_max: (x + w) as f32 / s,
-        v_max: (y + h) as f32 / s,
+        u_min: (x as f32 + INSET) / s,
+        v_min: (y as f32 + INSET) / s,
+        u_max: ((x + w) as f32 - INSET) / s,
+        v_max: ((y + h) as f32 - INSET) / s,
     }
 }
 
@@ -244,7 +339,7 @@ fn pack(sources: &[Source], atlas_size: u32) -> (PackResult, bool) {
             continue;
         }
         if cursor_x + src.w > atlas_size {
-            cursor_y += shelf_h;
+            cursor_y = (cursor_y + shelf_h).next_multiple_of(MIP_ALIGN);
             cursor_x = 0;
             shelf_h = 0;
         }
@@ -254,8 +349,78 @@ fn pack(sources: &[Source], atlas_size: u32) -> (PackResult, bool) {
             continue;
         }
         placements.insert(src.name.clone(), Some((cursor_x, cursor_y)));
-        cursor_x += src.w;
+        cursor_x = (cursor_x + src.w).next_multiple_of(MIP_ALIGN);
         shelf_h = shelf_h.max(src.h);
     }
     ((placements, missing_region), all_fit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fill(pixels: &mut [u8], atlas_size: u32, rect: (u32, u32, u32, u32), color: [u8; 4]) {
+        let (x, y, w, h) = rect;
+        for py in y..y + h {
+            for px in x..x + w {
+                let i = ((py * atlas_size + px) * 4) as usize;
+                pixels[i..i + 4].copy_from_slice(&color);
+            }
+        }
+    }
+
+    #[test]
+    fn mips_stay_within_sprite_regions() {
+        const SIZE: u32 = 64;
+        let rects = [(16u32, 0u32, 16u32, 16u32), (32, 0, 16, 16)];
+        let colors = [[255u8, 0, 0, 255], [0, 0, 255, 255]];
+
+        let mut pixels = vec![0u8; (SIZE * SIZE * 4) as usize];
+        for (&rect, &color) in rects.iter().zip(&colors) {
+            fill(&mut pixels, SIZE, rect, color);
+        }
+
+        let chain = build_mip_chain(pixels, SIZE, &rects);
+
+        let mut offset = (SIZE * SIZE * 4) as usize;
+        for level in 1..=MIP_EXTRA {
+            let size = SIZE >> level;
+            for (&rect, &color) in rects.iter().zip(&colors) {
+                let (dx, dy, dw, dh) = mip_rect(rect, level);
+                for py in dy..dy + dh {
+                    for px in dx..dx + dw {
+                        let i = offset + ((py * size + px) * 4) as usize;
+                        assert_eq!(
+                            &chain[i..i + 4],
+                            &color,
+                            "level {level} texel ({px}, {py}) leaked outside its sprite"
+                        );
+                    }
+                }
+            }
+            offset += (size * size * 4) as usize;
+        }
+        assert_eq!(offset, chain.len());
+    }
+
+    #[test]
+    fn transparent_texels_do_not_darken_rgb() {
+        const SIZE: u32 = 16;
+        let rect = (0u32, 0u32, 16u32, 16u32);
+        let mut pixels = vec![0u8; (SIZE * SIZE * 4) as usize];
+        // Alternating opaque-green and transparent-black columns.
+        for py in 0..16 {
+            for px in (0..16).step_by(2) {
+                let i = ((py * SIZE + px) * 4) as usize;
+                pixels[i..i + 4].copy_from_slice(&[0, 255, 0, 255]);
+            }
+        }
+
+        let chain = build_mip_chain(pixels, SIZE, &[rect]);
+
+        // Level 1: each 2x2 block holds two opaque green and two transparent
+        // texels; RGB must stay full green, alpha averages to half.
+        let l1 = &chain[(SIZE * SIZE * 4) as usize..];
+        assert_eq!(&l1[0..4], &[0, 255, 0, 127]);
+    }
 }

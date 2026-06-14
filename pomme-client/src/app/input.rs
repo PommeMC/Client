@@ -59,6 +59,15 @@ impl InputState {
         }
     }
 
+    /// Neutral input (no keys, cursor released) for ticking while a menu is
+    /// open.
+    pub fn released() -> Self {
+        Self {
+            cursor_captured: false,
+            ..Self::new()
+        }
+    }
+
     pub fn key_pressed(&self, key: KeyCode) -> bool {
         self.pressed.contains(&key)
     }

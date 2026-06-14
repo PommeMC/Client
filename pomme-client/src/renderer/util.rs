@@ -44,10 +44,7 @@ fn create_gpu_image_core(
     mip_levels: u32,
     name: &str,
 ) -> (vk::Image, vk::ImageView, Allocation, u32) {
-    let mut usage = vk::ImageUsageFlags::TransferDst | vk::ImageUsageFlags::Sampled;
-    if mip_levels > 1 {
-        usage |= vk::ImageUsageFlags::TransferSrc;
-    }
+    let usage = vk::ImageUsageFlags::TransferDst | vk::ImageUsageFlags::Sampled;
 
     let image_info = vk::ImageCreateInfo {
         image_type: vk::ImageType::Type2D,
@@ -269,6 +266,7 @@ pub fn upload_image(
         queue,
         command_pool,
         staging_buffer,
+        rgba8_bytes(width, height),
         image,
         width,
         height,
@@ -450,18 +448,14 @@ pub unsafe fn create_linear_sampler(device: &vk::Device) -> vk::Sampler {
         .expect("failed to create linear sampler")
 }
 
-pub fn calculate_mip_levels(w: u32, h: u32) -> u32 {
-    (w.max(h) as f32).log2().floor() as u32 + 1
-}
-
 pub fn create_gpu_image_mipmapped(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,
     width: u32,
     height: u32,
+    mip_levels: u32,
     name: &str,
 ) -> (vk::Image, vk::ImageView, Allocation, u32) {
-    let mip_levels = calculate_mip_levels(width, height);
     create_gpu_image_core(
         device,
         allocator,
@@ -473,24 +467,36 @@ pub fn create_gpu_image_mipmapped(
     )
 }
 
+/// Uploads an image whose mip levels are all present in the staging buffer,
+/// packed tightly with level 0 first.
 #[allow(clippy::too_many_arguments)]
 pub fn upload_image_mipmapped(
     device: &vk::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     staging_buffer: vk::Buffer,
+    staging_size: u64,
     image: vk::Image,
     width: u32,
     height: u32,
     mip_levels: u32,
 ) {
     submit_one_time(device, queue, command_pool, |cmd| {
-        record_image_upload(cmd, staging_buffer, image, width, height, mip_levels);
+        record_image_upload(
+            cmd,
+            staging_buffer,
+            staging_size,
+            image,
+            width,
+            height,
+            mip_levels,
+        );
     });
 }
 
 pub struct PendingImageUpload {
     pub staging_buffer: vk::Buffer,
+    pub staging_size: u64,
     pub image: vk::Image,
     pub width: u32,
     pub height: u32,
@@ -511,6 +517,7 @@ pub fn upload_images_batched(
             record_image_upload(
                 cmd,
                 u.staging_buffer,
+                u.staging_size,
                 u.image,
                 u.width,
                 u.height,
@@ -520,9 +527,14 @@ pub fn upload_images_batched(
     });
 }
 
+fn rgba8_bytes(width: u32, height: u32) -> u64 {
+    u64::from(width) * u64::from(height) * 4
+}
+
 fn record_image_upload(
     cmd: &vk::CommandBuffer,
     staging_buffer: vk::Buffer,
+    staging_size: u64,
     image: vk::Image,
     width: u32,
     height: u32,
@@ -553,131 +565,46 @@ fn record_image_upload(
         &[barrier_all],
     );
 
-    let copy_region = vk::BufferImageCopy {
-        buffer_offset: 0,
-        buffer_row_length: 0,
-        buffer_image_height: 0,
-        image_subresource: vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::Color,
-            mip_level: 0,
-            base_array_layer: 0,
-            layer_count: 1,
-        },
-        image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
-        image_extent: vk::Extent3D {
-            width,
-            height,
-            depth: 1,
-        },
-    };
+    let mut buffer_offset = 0u64;
+    let copy_regions: Vec<vk::BufferImageCopy> = (0..mip_levels)
+        .map(|level| {
+            let w = (width >> level).max(1);
+            let h = (height >> level).max(1);
+            let region = vk::BufferImageCopy {
+                buffer_offset,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::Color,
+                    mip_level: level,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                image_extent: vk::Extent3D {
+                    width: w,
+                    height: h,
+                    depth: 1,
+                },
+            };
+            buffer_offset += rgba8_bytes(w, h);
+            region
+        })
+        .collect();
+
+    debug_assert_eq!(
+        buffer_offset, staging_size,
+        "staging buffer ({staging_size} bytes) must hold exactly all {mip_levels} mip levels \
+         ({buffer_offset} bytes); a mismatch would copy out of bounds"
+    );
 
     cmd.copy_buffer_to_image(
         staging_buffer,
         image,
         vk::ImageLayout::TransferDstOptimal,
-        &[copy_region],
+        &copy_regions,
     );
 
-    let mut mip_w = width as i32;
-    let mut mip_h = height as i32;
-
-    for i in 1..mip_levels {
-        let barrier = vk::ImageMemoryBarrier {
-            image,
-            old_layout: vk::ImageLayout::TransferDstOptimal,
-            new_layout: vk::ImageLayout::TransferSrcOptimal,
-            src_access_mask: vk::AccessFlags::TransferWrite,
-            dst_access_mask: vk::AccessFlags::TransferRead,
-            subresource_range: vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::Color,
-                base_mip_level: i - 1,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
-            ..Default::default()
-        };
-
-        cmd.pipeline_barrier(
-            vk::PipelineStageFlags::Transfer,
-            vk::PipelineStageFlags::Transfer,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier],
-        );
-
-        let next_w = (mip_w / 2).max(1);
-        let next_h = (mip_h / 2).max(1);
-
-        let blit = vk::ImageBlit {
-            src_subresource: vk::ImageSubresourceLayers {
-                aspect_mask: vk::ImageAspectFlags::Color,
-                mip_level: i - 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
-            src_offsets: [
-                vk::Offset3D { x: 0, y: 0, z: 0 },
-                vk::Offset3D {
-                    x: mip_w,
-                    y: mip_h,
-                    z: 1,
-                },
-            ],
-            dst_subresource: vk::ImageSubresourceLayers {
-                aspect_mask: vk::ImageAspectFlags::Color,
-                mip_level: i,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
-            dst_offsets: [
-                vk::Offset3D { x: 0, y: 0, z: 0 },
-                vk::Offset3D {
-                    x: next_w,
-                    y: next_h,
-                    z: 1,
-                },
-            ],
-        };
-
-        cmd.blit_image(
-            image,
-            vk::ImageLayout::TransferSrcOptimal,
-            image,
-            vk::ImageLayout::TransferDstOptimal,
-            &[blit],
-            vk::Filter::Nearest,
-        );
-
-        let barrier = vk::ImageMemoryBarrier {
-            image,
-            old_layout: vk::ImageLayout::TransferSrcOptimal,
-            new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-            src_access_mask: vk::AccessFlags::TransferRead,
-            dst_access_mask: vk::AccessFlags::ShaderRead,
-            subresource_range: vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::Color,
-                base_mip_level: i - 1,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
-            ..Default::default()
-        };
-
-        cmd.pipeline_barrier(
-            vk::PipelineStageFlags::Transfer,
-            vk::PipelineStageFlags::FragmentShader,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier],
-        );
-
-        mip_w = next_w;
-        mip_h = next_h;
-    }
     let barrier = vk::ImageMemoryBarrier {
         image,
         old_layout: vk::ImageLayout::TransferDstOptimal,
@@ -686,8 +613,8 @@ fn record_image_upload(
         dst_access_mask: vk::AccessFlags::ShaderRead,
         subresource_range: vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::Color,
-            base_mip_level: mip_levels - 1,
-            level_count: 1,
+            base_mip_level: 0,
+            level_count: mip_levels,
             base_array_layer: 0,
             layer_count: 1,
         },

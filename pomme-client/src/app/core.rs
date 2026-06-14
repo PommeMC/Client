@@ -184,13 +184,8 @@ impl AppCore {
     }
 
     pub fn apply_cursor_grab(&self, window: &Window, game: Option<&mut GameState>) {
-        let captured = game.is_some_and(|g| {
-            !g.paused
-                && !g.dead
-                && !g.gui_open()
-                && !g.chat.is_open()
-                && self.input.is_cursor_captured()
-        });
+        let captured =
+            game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
         if captured {
             let _ = window
                 .set_cursor_grab(CursorGrabMode::Locked)
@@ -346,6 +341,7 @@ impl AppCore {
                     game.player.velocity = new_velocity;
                     game.player.look_dir = new_look_dir;
                     game.player.prev_look_dir = game.player.look_dir;
+                    game.interaction.on_teleport();
 
                     let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
                     game.chunk_store
@@ -421,7 +417,7 @@ impl AppCore {
                     game.command_tree = Some(tree);
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
-                    if game.interaction.has_pending_prediction(&pos) {
+                    if game.interaction.update_known_server_state(&pos, state) {
                         continue;
                     }
                     game.chunk_store.set_block_state(pos.x, pos.y, pos.z, state);
@@ -436,6 +432,9 @@ impl AppCore {
                 }
                 NetworkEvent::SectionBlocksUpdate { updates } => {
                     for (pos, state) in updates {
+                        if game.interaction.update_known_server_state(&pos, state) {
+                            continue;
+                        }
                         game.chunk_store.set_block_state(pos.x, pos.y, pos.z, state);
                         let chunk_pos = azalea_core::position::ChunkPos::new(
                             pos.x.div_euclid(16),
@@ -545,7 +544,15 @@ impl AppCore {
                     game.server_simulation_distance = distance;
                 }
                 NetworkEvent::BlockChangedAck { seq } => {
-                    game.interaction.acknowledge(seq);
+                    if let Some(snap) = game.interaction.acknowledge(
+                        seq,
+                        &game.chunk_store,
+                        game.player.position.into(),
+                        &mut chunks_to_mesh,
+                    ) {
+                        game.player.position = snap.into();
+                        game.player.prev_position = game.player.position;
+                    }
                 }
                 NetworkEvent::TimeUpdate {
                     game_time,
@@ -658,6 +665,9 @@ impl AppCore {
                 }
                 NetworkEvent::EntityCustomName { id, name } => {
                     game.entity_store.set_custom_name(id, name);
+                }
+                NetworkEvent::EntityDamaged { id } => {
+                    game.entity_store.mark_hurt(id);
                 }
                 NetworkEvent::ItemPickedUp {
                     item_id,
@@ -819,11 +829,16 @@ impl AppCore {
             return;
         }
 
+        // Open menus only release the keys; the simulation keeps ticking.
+        let input_live = game.input_live();
+        let neutral = InputState::released();
+        let input = if input_live { &self.input } else { &neutral };
+
         game.player.prev_look_dir = game.player.look_dir;
         game.player.look_dir = renderer.camera_look_dir();
 
         game.player.prev_position = game.player.position;
-        movement::tick(&mut game.player, &self.input, &game.chunk_store);
+        movement::tick(&mut game.player, input, &game.chunk_store);
         game.entity_store.tick_living();
 
         let dx = game.player.position.x - game.player.prev_position.x;
@@ -839,40 +854,48 @@ impl AppCore {
         renderer.set_base_fov(self.menu.fov as f32);
         renderer.update_fov_mod(compute_fov_modifier(&game.player));
 
-        self.send_input_packet(connection, game);
+        Self::send_input_packet(input, connection, game);
         self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
 
-        if !game.paused && !game.gui_open() && !game.chat.is_open() {
-            let eye_pos = game.player.eye_pos();
-            game.interaction
-                .update_target(eye_pos, game.player.look_dir, &game.chunk_store);
+        let eye_pos = game.player.eye_pos();
+        game.interaction.update_target(
+            eye_pos,
+            game.player.look_dir,
+            &game.chunk_store,
+            &game.entity_store,
+            game.player.game_mode == 1,
+        );
 
-            let dirty = game.interaction.tick(
-                &self.input,
-                &game.chunk_store,
-                &connection.packet_tx,
-                &self.audio,
-                game.player.on_ground,
-                game.player.game_mode == 1,
-            );
-            for pos in dirty {
-                game.mesh_dispatcher.enqueue(&game.chunk_store, pos, 0);
-            }
+        let dirty = game.interaction.tick(
+            input,
+            &game.chunk_store,
+            &connection.packet_tx,
+            &self.audio,
+            game.player.position.into(),
+            game.player.on_ground,
+            game.player.game_mode == 1,
+        );
+        for pos in dirty {
+            game.mesh_dispatcher.enqueue(&game.chunk_store, pos, 0);
+        }
 
+        // Menus consume their own clicks later in the frame, so only clear
+        // them when the simulation saw the live input.
+        if input_live {
             self.input.clear_click_events();
         }
     }
 
-    fn send_input_packet(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
+    fn send_input_packet(input: &InputState, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
         let current = PlayerInputState {
-            forward: self.input.key_pressed(KeyCode::KeyW),
-            backward: self.input.key_pressed(KeyCode::KeyS),
-            left: self.input.key_pressed(KeyCode::KeyA),
-            right: self.input.key_pressed(KeyCode::KeyD),
-            jump: self.input.key_pressed(KeyCode::Space),
-            shift: self.input.key_pressed(KeyCode::ShiftLeft),
+            forward: input.key_pressed(KeyCode::KeyW),
+            backward: input.key_pressed(KeyCode::KeyS),
+            left: input.key_pressed(KeyCode::KeyA),
+            right: input.key_pressed(KeyCode::KeyD),
+            jump: input.key_pressed(KeyCode::Space),
+            shift: input.key_pressed(KeyCode::ShiftLeft),
             sprint: game.player.sprinting,
         };
 
@@ -892,7 +915,7 @@ impl AppCore {
         }
     }
 
-    pub fn send_sprint_command(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
+    pub fn send_sprint_command(&self, connection: &ConnectionHandle, game: &mut GameState) {
         let sprinting = game.player.sprinting;
         if sprinting != game.was_sprinting {
             let sender = &connection.packet_tx;
@@ -912,7 +935,7 @@ impl AppCore {
         }
     }
 
-    pub fn send_position_packet(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
+    pub fn send_position_packet(&self, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
         use azalea_protocol::common::movements::MoveFlags;
         use azalea_protocol::packets::game::*;

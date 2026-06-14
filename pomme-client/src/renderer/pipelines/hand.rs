@@ -205,13 +205,7 @@ impl HandPipeline {
         aspect: f32,
         swing_progress: f32,
     ) {
-        let mut proj = Mat4::perspective_rh(
-            crate::renderer::camera::DEFAULT_FOV_DEGREES.to_radians(),
-            aspect,
-            NEAR,
-            FAR,
-        );
-        proj.y_axis.y *= -1.0;
+        let proj = projection(aspect);
 
         let sp = swing_progress;
         let sqrt_sp = sp.sqrt();
@@ -225,9 +219,7 @@ impl HandPipeline {
         let swing_z = (sp * sp * pi).sin() * (-20.0_f32).to_radians();
 
         let pivot = Vec3::new(-5.0 / 16.0, 2.0 / 16.0, 0.0);
-        let arm_local_rot = Mat4::from_translation(pivot)
-            * Mat4::from_rotation_z(0.1)
-            * Mat4::from_translation(-pivot);
+        let arm_local_rot = Mat4::from_translation(pivot) * Mat4::from_rotation_z(0.1);
 
         let model = Mat4::from_translation(Vec3::new(x_off + 0.64, y_off - 0.6, z_off - 0.72))
             * Mat4::from_rotation_y(45.0_f32.to_radians())
@@ -350,11 +342,23 @@ impl HandPipeline {
     }
 }
 
+pub(super) fn projection(aspect: f32) -> Mat4 {
+    let mut proj = Mat4::perspective_rh(
+        crate::renderer::camera::DEFAULT_FOV_DEGREES.to_radians(),
+        aspect,
+        NEAR,
+        FAR,
+    );
+    proj.y_axis.y *= -1.0;
+    proj
+}
+
 fn build_arm_vertices(skin_w: u32, skin_h: u32) -> Vec<HandVertex> {
     let sw = skin_w as f32;
     let sh = skin_h as f32;
 
-    // Vanilla addBox(-3, -2, -2, 4, 12, 4) scaled to blocks (1/16)
+    // Vanilla addBox(-3, -2, -2, 4, 12, 4) scaled to blocks (1/16).
+    // Model space is Y-down: y0 is the shoulder end, y1 the hand end.
     let x0: f32 = -3.0 / 16.0;
     let x1: f32 = 1.0 / 16.0;
     let y0: f32 = -2.0 / 16.0;
@@ -369,26 +373,32 @@ fn build_arm_vertices(skin_w: u32, skin_h: u32) -> Vec<HandVertex> {
     let h = 12.0;
     let d = 4.0;
 
-    let right_uv = [u0, v0 + d, u0 + d, v0 + d + h];
-    let front_uv = [u0 + d, v0 + d, u0 + d + w, v0 + d + h];
-    let left_uv = [u0 + d + w, v0 + d, u0 + d + w + d, v0 + d + h];
-    let back_uv = [u0 + d + w + d, v0 + d, u0 + d + w + d + w, v0 + d + h];
-    let top_uv = [u0 + d, v0, u0 + d + w, v0 + d];
-    let bot_uv = [u0 + d + w, v0, u0 + d + w + w, v0 + d];
+    let u1 = u0 + d;
+    let u2 = u1 + w;
+    let u3 = u2 + d;
+    let u4 = u3 + w;
+    let v1 = v0 + d;
+    let v2 = v1 + h;
+
+    // Corner naming follows vanilla ModelPart.Cube (t* = min Z, l* = max Z)
+    let t0 = [x0, y0, z0];
+    let t1 = [x1, y0, z0];
+    let t2 = [x1, y1, z0];
+    let t3 = [x0, y1, z0];
+    let l0 = [x0, y0, z1];
+    let l1 = [x1, y0, z1];
+    let l2 = [x1, y1, z1];
+    let l3 = [x0, y1, z1];
 
     let mut verts = Vec::with_capacity(36);
 
+    // UV corner order matches vanilla ModelPart.Polygon
     let mut quad = |positions: [[f32; 3]; 4], uv_px: [f32; 4]| {
-        let u_min = uv_px[0] / sw;
-        let v_min = uv_px[1] / sh;
-        let u_max = uv_px[2] / sw;
-        let v_max = uv_px[3] / sh;
-        let uvs = [
-            [u_min, v_max],
-            [u_max, v_max],
-            [u_max, v_min],
-            [u_min, v_min],
-        ];
+        let ua = uv_px[0] / sw;
+        let va = uv_px[1] / sh;
+        let ub = uv_px[2] / sw;
+        let vb = uv_px[3] / sh;
+        let uvs = [[ub, va], [ua, va], [ua, vb], [ub, vb]];
         for &i in &[0usize, 1, 2, 0, 2, 3] {
             verts.push(HandVertex {
                 position: positions[i],
@@ -397,41 +407,12 @@ fn build_arm_vertices(skin_w: u32, skin_h: u32) -> Vec<HandVertex> {
         }
     };
 
-    // -X face (outer side of right arm)
-    quad(
-        [[x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1]],
-        right_uv,
-    );
-
-    // +X face (inner side)
-    quad(
-        [[x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0]],
-        left_uv,
-    );
-
-    // +Y face (shoulder/top)
-    quad(
-        [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]],
-        top_uv,
-    );
-
-    // -Y face (wrist/bottom)
-    quad(
-        [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
-        bot_uv,
-    );
-
-    // -Z face (front, facing camera)
-    quad(
-        [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]],
-        front_uv,
-    );
-
-    // +Z face (back)
-    quad(
-        [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]],
-        back_uv,
-    );
+    quad([l1, l0, t0, t1], [u1, v0, u2, v1]); // down (shoulder cap)
+    quad([t2, t3, l3, l2], [u2, v1, u2 + w, v0]); // up (hand cap, V reversed as vanilla)
+    quad([t0, l0, l3, t3], [u0, v1, u1, v2]); // west (outer)
+    quad([t1, t0, t3, t2], [u1, v1, u2, v2]); // north (front)
+    quad([l1, t1, t2, l2], [u2, v1, u3, v2]); // east (inner)
+    quad([l0, l1, l2, l3], [u3, v1, u4, v2]); // south (back)
 
     verts
 }

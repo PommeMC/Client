@@ -562,6 +562,7 @@ fn build_texture_slot(
         util::create_staging_buffer(device, allocator, &pixels, "block_entity_texture_staging");
     pending_uploads.push(util::PendingImageUpload {
         staging_buffer: staging_buf,
+        staging_size: pixels.len() as u64,
         image,
         width,
         height,
