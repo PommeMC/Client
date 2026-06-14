@@ -29,6 +29,7 @@ pub struct EntityRenderInfo {
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
     pub head_y_offset: f32,
     pub head_x_rot_deg_override: Option<f32>,
+    pub has_red_overlay: bool,
 }
 
 struct MobVariant {
@@ -70,6 +71,11 @@ impl MobEntry {
 }
 
 pub const WHITE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// Vanilla `OverlayTexture` hurt pixel (ARGB 0xB2FF0000): rgb is the overlay
+/// color, `a` is how much of the base color survives the mix.
+const HURT_OVERLAY: [f32; 4] = [1.0, 0.0, 0.0, 178.0 / 255.0];
+const NO_OVERLAY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 pub const WOOL_COLOR_RGBA: [[f32; 4]; 16] = [
     rgb(0xF0F0F0), // 0 white
@@ -284,7 +290,7 @@ impl EntityRenderer {
         let push_constant_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::Vertex,
             offset: 0,
-            size: 80,
+            size: 96,
         };
 
         let layouts = [camera_layout, texture_layout];
@@ -487,6 +493,12 @@ impl EntityRenderer {
                 ),
             };
 
+            let overlay_color = if info.has_red_overlay {
+                HURT_OVERLAY
+            } else {
+                NO_OVERLAY
+            };
+
             self.draw_variant(
                 cmd,
                 frame,
@@ -494,6 +506,7 @@ impl EntityRenderer {
                 entity_mat,
                 &anim,
                 WHITE_TINT,
+                overlay_color,
                 &mut last_variant,
             );
 
@@ -508,6 +521,7 @@ impl EntityRenderer {
                     entity_mat,
                     &anim,
                     tint,
+                    overlay_color,
                     &mut last_variant,
                 );
             }
@@ -523,6 +537,7 @@ impl EntityRenderer {
         entity_mat: glam::Mat4,
         anim: &entity_model::PartAnim,
         tint: [f32; 4],
+        overlay_color: [f32; 4],
         last_variant: &mut *const MobVariant,
     ) {
         let ptr: *const MobVariant = variant;
@@ -545,9 +560,10 @@ impl EntityRenderer {
             }
             let part_mat = entity_mat * part_transforms[i];
             let mat_array = part_mat.to_cols_array();
-            let mut bytes = [0u8; 80];
+            let mut bytes = [0u8; 96];
             bytes[..64].copy_from_slice(bytemuck::cast_slice(&mat_array));
-            bytes[64..].copy_from_slice(bytemuck::cast_slice(&tint));
+            bytes[64..80].copy_from_slice(bytemuck::cast_slice(&tint));
+            bytes[80..].copy_from_slice(bytemuck::cast_slice(&overlay_color));
             cmd.push_constants(
                 self.pipeline_layout,
                 vk::ShaderStageFlags::Vertex,

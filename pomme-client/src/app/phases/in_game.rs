@@ -15,7 +15,7 @@ use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::player::LocalPlayer;
-use crate::player::interaction::InteractionState;
+use crate::player::interaction::{HitResult, InteractionState};
 use crate::player::tab_list::TabList;
 use crate::renderer::chunk::mesher::{BiomeClimate, MeshDispatcher};
 use crate::renderer::pipelines::entity_renderer::{
@@ -279,12 +279,15 @@ pub fn update_game(
             position: *game.player.position,
             y_rot_deg: gfx.renderer.camera_look_dir().y_rot_deg(),
             x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
-            target_block: game.interaction.target.map(|t| {
+            target_block: game.interaction.target.and_then(|t| {
+                let HitResult::Block(t) = t else {
+                    return None;
+                };
                 let state =
                     game.chunk_store
                         .get_block_state(t.block_pos.x, t.block_pos.y, t.block_pos.z);
                 let block: Box<dyn azalea_block::BlockTrait> = state.into();
-                (t.block_pos, t.face, block.id().to_string())
+                Some((t.block_pos, t.face, block.id().to_string()))
             }),
             chunk_count: gfx.renderer.loaded_chunk_count(),
             gpu_name: gfx.renderer.gpu_name(),
@@ -582,6 +585,7 @@ pub fn update_game(
                 overlay_tints: extras.overlay_tints,
                 head_y_offset: extras.head_y_offset,
                 head_x_rot_deg_override: extras.head_x_rot_deg_override,
+                has_red_overlay: e.hurt_time > 0,
             }
         })
         .collect();
@@ -613,6 +617,7 @@ pub fn update_game(
             overlay_tints: [None, None],
             head_y_offset: 0.0,
             head_x_rot_deg_override: None,
+            has_red_overlay: false,
         });
     }
 
