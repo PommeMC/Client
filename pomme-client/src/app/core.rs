@@ -9,7 +9,7 @@ use glam::dvec3;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
 
-use crate::app::input::{Action, InputState};
+use crate::app::input::{Action, InputState, STICK_MOVEMENT_THRESHOLD};
 use crate::app::phases::ConnectionPhase;
 use crate::app::phases::in_game::GameState;
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
@@ -890,10 +890,10 @@ impl AppCore {
         let analog_move = input.get_gamepad_left_analog().unwrap_or(glam::Vec2::ZERO);
 
         let current = PlayerInputState {
-            forward: input.key_pressed(KeyCode::KeyW) || analog_move.y > 0.25,
-            backward: input.key_pressed(KeyCode::KeyS) || analog_move.y < -0.25,
-            left: input.key_pressed(KeyCode::KeyA) || analog_move.x > 0.25,
-            right: input.key_pressed(KeyCode::KeyD) || analog_move.x < -0.25,
+            forward: input.key_pressed(KeyCode::KeyW) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
+            backward: input.key_pressed(KeyCode::KeyS) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
+            left: input.key_pressed(KeyCode::KeyA) || analog_move.x > STICK_MOVEMENT_THRESHOLD,
+            right: input.key_pressed(KeyCode::KeyD) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
             jump: input.performing_action(Action::Jump),
             shift: input.performing_action(Action::Sneak),
             sprint: game.player.sprinting,

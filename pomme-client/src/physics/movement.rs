@@ -43,7 +43,7 @@ pub fn tick(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkSto
     let forward_pressed = input.key_pressed(KeyCode::KeyW)
         || input
             .get_gamepad_left_analog()
-            .map(|vec| vec.y > 0.25)
+            .map(|vec| vec.y > input::STICK_MOVEMENT_THRESHOLD)
             .unwrap_or(false);
 
     update_sprint_state(player, input, forward, forward_pressed);

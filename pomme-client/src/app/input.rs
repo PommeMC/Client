@@ -7,6 +7,9 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use crate::app::phases::AppPhase;
 use crate::app::state_slot::StateSlot;
 
+/// Left-stick deflection past which a direction counts as a digital press.
+pub const STICK_MOVEMENT_THRESHOLD: f32 = 0.25;
+
 #[derive(Hash, PartialEq, Eq, Clone)]
 pub enum Action {
     Jump,
