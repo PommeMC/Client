@@ -434,6 +434,22 @@ pub unsafe fn create_nearest_sampler(device: &vk::Device) -> vk::Sampler {
     unsafe { create_nearest_sampler_mipmapped(device, 1) }
 }
 
+/// Nearest sampler with REPEAT wrapping, for scrolling/tiling textures such as the
+/// charged-creeper energy swirl.
+pub unsafe fn create_nearest_repeat_sampler(device: &vk::Device) -> vk::Sampler {
+    let info = vk::SamplerCreateInfo {
+        mag_filter: vk::Filter::Nearest,
+        min_filter: vk::Filter::Nearest,
+        address_mode_u: vk::SamplerAddressMode::Repeat,
+        address_mode_v: vk::SamplerAddressMode::Repeat,
+        address_mode_w: vk::SamplerAddressMode::Repeat,
+        ..Default::default()
+    };
+    device
+        .create_sampler(&info, None)
+        .expect("failed to create repeat sampler")
+}
+
 pub unsafe fn create_linear_sampler(device: &vk::Device) -> vk::Sampler {
     let info = vk::SamplerCreateInfo {
         mag_filter: vk::Filter::Linear,

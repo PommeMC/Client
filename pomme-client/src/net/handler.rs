@@ -370,6 +370,15 @@ pub fn handle_game_packet(
                         score: *score,
                     });
                 }
+                // Index 15 = mob flags byte (AbstractInsentient): bit 0x04 = aggressive.
+                if item.index == 15
+                    && let azalea_entity::EntityDataValue::Byte(flags) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::EntityAggressive {
+                        id: p.id.0,
+                        aggressive: (*flags & 0x04) != 0,
+                    });
+                }
                 // Index 17 = sheep wool/sheared byte (low nibble = DyeColor, bit 4 = sheared).
                 // Emit unconditionally; consumer filters by entity type.
                 if item.index == 17
@@ -379,6 +388,16 @@ pub fn handle_game_packet(
                         id: p.id.0,
                         color: *packed & 0x0F,
                         sheared: (*packed & 0x10) != 0,
+                    });
+                }
+                // Index 17 (Boolean) = creeper "powered"/charged flag. Disambiguated
+                // from the sheep byte above by value type.
+                if item.index == 17
+                    && let azalea_entity::EntityDataValue::Boolean(powered) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::CreeperPowered {
+                        id: p.id.0,
+                        powered: *powered,
                     });
                 }
                 // Index 2 = custom name (Optional<Component>); needed for jeb_ sheep detection.
@@ -415,6 +434,17 @@ pub fn handle_game_packet(
         // Event id 10 = sheep eat-grass animation start (40-tick head-dip).
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 10 => {
             let _ = event_tx.try_send(NetworkEvent::SheepEatStart { id: p.entity_id.0 });
+        }
+        // Arm-swing animation drives the zombie attack swing (skeleton aim uses the
+        // aggressive flag instead). Both hands trigger the same swing timer.
+        ClientboundGamePacket::Animate(p)
+            if matches!(
+                p.action,
+                azalea_protocol::packets::game::c_animate::AnimationAction::SwingMainHand
+                    | azalea_protocol::packets::game::c_animate::AnimationAction::SwingOffHand
+            ) =>
+        {
+            let _ = event_tx.try_send(NetworkEvent::EntitySwing { id: p.id.0 });
         }
         ClientboundGamePacket::TakeItemEntity(p) => {
             let _ = event_tx.try_send(NetworkEvent::ItemPickedUp {

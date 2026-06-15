@@ -31,6 +31,23 @@ pub struct EntityRenderInfo {
     pub head_y_offset: f32,
     pub head_x_rot_deg_override: Option<f32>,
     pub has_red_overlay: bool,
+    /// Mob is targeting/attacking — raises zombie/skeleton arms.
+    pub aggressive: bool,
+    /// Interpolated entity age in ticks; drives the undead idle arm bob.
+    pub age_in_ticks: f32,
+    /// Arm-swing progress 0..1; drives the zombie attack swing.
+    pub attack_time: f32,
+}
+
+/// How an overlay layer is blended. Base/baby variants are always `Opaque`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OverlayKind {
+    /// Cutout, depth-writing — sheep wool and all base models.
+    Opaque,
+    /// Translucent, full-bright, depth-write off — spider glowing eyes.
+    EyesTranslucent,
+    /// Additive, full-bright, depth-write off, scrolling UV — charged creeper swirl.
+    SwirlAdditive,
 }
 
 struct MobVariant {
@@ -41,6 +58,7 @@ struct MobVariant {
     texture_view: vk::ImageView,
     texture_allocation: Allocation,
     texture_set: vk::DescriptorSet,
+    overlay_kind: OverlayKind,
 }
 
 struct MobEntry {
@@ -125,6 +143,10 @@ pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
 
 pub struct EntityRenderer {
     pipeline: vk::Pipeline,
+    /// Translucent, depth-write off — spider eyes.
+    eyes_pipeline: vk::Pipeline,
+    /// Additive, depth-write off — charged-creeper energy swirl.
+    swirl_pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
     texture_layout: vk::DescriptorSetLayout,
@@ -133,13 +155,25 @@ pub struct EntityRenderer {
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Allocation>,
     texture_sampler: vk::Sampler,
+    /// REPEAT-wrap sampler for the scrolling swirl overlay.
+    texture_sampler_repeat: vk::Sampler,
     mobs: HashMap<EntityKind, MobEntry>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlendMode {
+    Opaque,
+    Translucent,
+    Additive,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AnimationType {
     Quadruped,
     Humanoid,
+    Zombie,
+    Skeleton,
+    Spider,
 }
 
 struct VariantDef {
@@ -148,6 +182,7 @@ struct VariantDef {
     /// fallback chain of asset keys.
     tex_variants: &'static [&'static [&'static str]],
     tex_size: u32,
+    overlay_kind: OverlayKind,
 }
 
 struct MobDef {
@@ -186,81 +221,123 @@ fn mob_definitions() -> Vec<MobDef> {
     const SHEEP_BABY_WOOL_TEX: &[&[&str]] =
         &[&["minecraft/textures/entity/sheep/sheep_wool_baby.png"]];
     const PLAYER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/player/wide/steve.png"]];
+    const ZOMBIE_TEX: &[&[&str]] = &[&["minecraft/textures/entity/zombie/zombie.png"]];
+    const SKELETON_TEX: &[&[&str]] = &[&["minecraft/textures/entity/skeleton/skeleton.png"]];
+    const CREEPER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/creeper/creeper.png"]];
+    const CREEPER_ARMOR_TEX: &[&[&str]] =
+        &[&["minecraft/textures/entity/creeper/creeper_armor.png"]];
+    const SPIDER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/spider/spider.png"]];
+    const SPIDER_EYES_TEX: &[&[&str]] = &[&["minecraft/textures/entity/spider/spider_eyes.png"]];
+
+    // Base and baby models, plus opaque overlays (sheep wool), are all Opaque.
+    fn opaque(
+        model: BakedEntityModel,
+        tex_variants: &'static [&'static [&'static str]],
+        tex_size: u32,
+    ) -> VariantDef {
+        VariantDef {
+            model,
+            tex_variants,
+            tex_size,
+            overlay_kind: OverlayKind::Opaque,
+        }
+    }
 
     vec![
         MobDef {
             kind: EntityKind::Pig,
             anim: AnimationType::Quadruped,
-            adult: VariantDef {
-                model: entity_model::bake_pig_model(),
-                tex_variants: PIG_ADULT_TEX,
-                tex_size: 64,
-            },
-            baby: Some(VariantDef {
-                model: entity_model::bake_baby_pig_model(),
-                tex_variants: PIG_BABY_TEX,
-                tex_size: 32,
-            }),
+            adult: opaque(entity_model::bake_pig_model(), PIG_ADULT_TEX, 64),
+            baby: Some(opaque(entity_model::bake_baby_pig_model(), PIG_BABY_TEX, 32)),
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
         MobDef {
             kind: EntityKind::Cow,
             anim: AnimationType::Quadruped,
-            adult: VariantDef {
-                model: entity_model::bake_cow_model(),
-                tex_variants: COW_ADULT_TEX,
-                tex_size: 64,
-            },
-            baby: Some(VariantDef {
-                model: entity_model::bake_baby_cow_model(),
-                tex_variants: COW_BABY_TEX,
-                tex_size: 64,
-            }),
+            adult: opaque(entity_model::bake_cow_model(), COW_ADULT_TEX, 64),
+            baby: Some(opaque(entity_model::bake_baby_cow_model(), COW_BABY_TEX, 64)),
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
         MobDef {
             kind: EntityKind::Sheep,
             anim: AnimationType::Quadruped,
-            adult: VariantDef {
-                model: entity_model::bake_sheep_model(),
-                tex_variants: SHEEP_ADULT_TEX,
-                tex_size: 64,
-            },
-            baby: Some(VariantDef {
-                model: entity_model::bake_baby_sheep_model(),
-                tex_variants: SHEEP_BABY_TEX,
-                tex_size: 64,
-            }),
+            adult: opaque(entity_model::bake_sheep_model(), SHEEP_ADULT_TEX, 64),
+            baby: Some(opaque(
+                entity_model::bake_baby_sheep_model(),
+                SHEEP_BABY_TEX,
+                64,
+            )),
             adult_overlays: vec![
-                VariantDef {
-                    model: entity_model::bake_sheep_wool_undercoat_model(),
-                    tex_variants: SHEEP_WOOL_UNDERCOAT_TEX,
-                    tex_size: 64,
-                },
-                VariantDef {
-                    model: entity_model::bake_sheep_wool_model(),
-                    tex_variants: SHEEP_WOOL_TEX,
-                    tex_size: 64,
-                },
+                opaque(
+                    entity_model::bake_sheep_wool_undercoat_model(),
+                    SHEEP_WOOL_UNDERCOAT_TEX,
+                    64,
+                ),
+                opaque(entity_model::bake_sheep_wool_model(), SHEEP_WOOL_TEX, 64),
             ],
-            baby_overlays: vec![VariantDef {
-                model: entity_model::bake_baby_sheep_wool_model(),
-                tex_variants: SHEEP_BABY_WOOL_TEX,
-                tex_size: 64,
-            }],
+            baby_overlays: vec![opaque(
+                entity_model::bake_baby_sheep_wool_model(),
+                SHEEP_BABY_WOOL_TEX,
+                64,
+            )],
         },
         MobDef {
             kind: EntityKind::Player,
             anim: AnimationType::Humanoid,
-            adult: VariantDef {
-                model: entity_model::bake_player_model(),
-                tex_variants: PLAYER_TEX,
-                tex_size: 64,
-            },
+            adult: opaque(entity_model::bake_player_model(), PLAYER_TEX, 64),
             baby: None,
             adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Zombie,
+            anim: AnimationType::Zombie,
+            adult: opaque(entity_model::bake_zombie_model(), ZOMBIE_TEX, 64),
+            baby: Some(opaque(
+                entity_model::bake_baby_zombie_model(),
+                ZOMBIE_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Skeleton,
+            anim: AnimationType::Skeleton,
+            adult: opaque(entity_model::bake_skeleton_model(), SKELETON_TEX, 64),
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Creeper,
+            anim: AnimationType::Quadruped,
+            adult: opaque(entity_model::bake_creeper_model(), CREEPER_TEX, 64),
+            baby: None,
+            // Slot 0: charged-creeper energy swirl (additive, scrolling), shown only
+            // when `powered` (gated via overlay_tints in entity_extras).
+            adult_overlays: vec![VariantDef {
+                model: entity_model::bake_creeper_model(),
+                tex_variants: CREEPER_ARMOR_TEX,
+                tex_size: 64,
+                overlay_kind: OverlayKind::SwirlAdditive,
+            }],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Spider,
+            anim: AnimationType::Spider,
+            adult: opaque(entity_model::bake_spider_model(), SPIDER_TEX, 64),
+            baby: None,
+            // Slot 0: glowing eyes (translucent, full-bright), always visible.
+            adult_overlays: vec![VariantDef {
+                model: entity_model::bake_spider_model(),
+                tex_variants: SPIDER_EYES_TEX,
+                tex_size: 64,
+                overlay_kind: OverlayKind::EyesTranslucent,
+            }],
             baby_overlays: vec![],
         },
     ]
@@ -291,7 +368,7 @@ impl EntityRenderer {
         let push_constant_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::Vertex,
             offset: 0,
-            size: 96,
+            size: 112,
         };
 
         let layouts = [camera_layout, texture_layout];
@@ -307,7 +384,8 @@ impl EntityRenderer {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create entity pipeline layout");
 
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
+        let [pipeline, eyes_pipeline, swirl_pipeline] =
+            create_pipelines(device, render_pass, pipeline_layout);
 
         let defs = mob_definitions();
         let tex_count: u32 = defs
@@ -390,6 +468,7 @@ impl EntityRenderer {
         }
 
         let texture_sampler = unsafe { util::create_nearest_sampler(device) };
+        let texture_sampler_repeat = unsafe { util::create_nearest_repeat_sampler(device) };
 
         let mut mobs = HashMap::new();
 
@@ -403,6 +482,7 @@ impl EntityRenderer {
                     descriptor_pool,
                     texture_layout,
                     texture_sampler,
+                    texture_sampler_repeat,
                     jar_assets_dir,
                     asset_index,
                     v,
@@ -440,6 +520,8 @@ impl EntityRenderer {
 
         Self {
             pipeline,
+            eyes_pipeline,
+            swirl_pipeline,
             pipeline_layout,
             camera_layout,
             texture_layout,
@@ -448,6 +530,7 @@ impl EntityRenderer {
             camera_buffers,
             camera_allocations,
             texture_sampler,
+            texture_sampler_repeat,
             mobs,
         }
     }
@@ -458,43 +541,80 @@ impl EntityRenderer {
             .copy_from_slice(bytes);
     }
 
+    fn compute_anim(
+        &self,
+        anim_type: AnimationType,
+        model: &BakedEntityModel,
+        info: &EntityRenderInfo,
+    ) -> entity_model::PartAnim {
+        let local_head_y = info.head_y_rot_deg - info.body_y_rot_deg;
+        match anim_type {
+            AnimationType::Quadruped => entity_model::compute_quadruped_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.head_y_offset,
+                info.head_x_rot_deg_override,
+            ),
+            AnimationType::Humanoid => entity_model::compute_humanoid_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.is_crouching,
+            ),
+            AnimationType::Zombie => entity_model::compute_zombie_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.aggressive,
+                info.age_in_ticks,
+                info.attack_time,
+            ),
+            AnimationType::Skeleton => entity_model::compute_skeleton_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.aggressive,
+                info.age_in_ticks,
+            ),
+            AnimationType::Spider => entity_model::compute_spider_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+            ),
+        }
+    }
+
+    fn entity_matrix(info: &EntityRenderInfo) -> glam::Mat4 {
+        glam::Mat4::from_translation(info.position.as_vec3())
+            * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians())
+    }
+
     pub fn draw(&self, cmd: vk::CommandBuffer, frame: usize, entities: &[EntityRenderInfo]) {
         if entities.is_empty() {
             return;
         }
 
+        // Pass 1: opaque base models + opaque overlays (sheep wool).
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-
         let mut last_variant: *const MobVariant = std::ptr::null();
         for info in entities {
             let Some(entry) = self.mobs.get(&info.entity_kind) else {
                 continue;
             };
             let variant = entry.base_variant(info.is_baby, info.variant_index);
-
-            let entity_mat = glam::Mat4::from_translation(info.position.as_vec3())
-                * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians());
-
-            let anim = match entry.anim {
-                AnimationType::Quadruped => entity_model::compute_quadruped_anim(
-                    &variant.model,
-                    info.head_x_rot_deg,
-                    info.head_y_rot_deg - info.body_y_rot_deg,
-                    info.walk_anim_pos,
-                    info.walk_anim_speed,
-                    info.head_y_offset,
-                    info.head_x_rot_deg_override,
-                ),
-                AnimationType::Humanoid => entity_model::compute_humanoid_anim(
-                    &variant.model,
-                    info.head_x_rot_deg,
-                    info.head_y_rot_deg - info.body_y_rot_deg,
-                    info.walk_anim_pos,
-                    info.walk_anim_speed,
-                    info.is_crouching,
-                ),
-            };
-
+            let entity_mat = Self::entity_matrix(info);
+            let anim = self.compute_anim(entry.anim, &variant.model, info);
             let overlay_color = if info.has_red_overlay {
                 HURT_OVERLAY
             } else {
@@ -509,10 +629,14 @@ impl EntityRenderer {
                 &anim,
                 WHITE_TINT,
                 overlay_color,
+                [0.0, 0.0],
                 &mut last_variant,
             );
 
             for (slot, overlay) in entry.overlays(info.is_baby).iter().enumerate() {
+                if overlay.overlay_kind != OverlayKind::Opaque {
+                    continue;
+                }
                 let Some(tint) = info.overlay_tints[slot] else {
                     continue;
                 };
@@ -524,6 +648,72 @@ impl EntityRenderer {
                     &anim,
                     tint,
                     overlay_color,
+                    [0.0, 0.0],
+                    &mut last_variant,
+                );
+            }
+        }
+
+        // Pass 2: full-bright, depth-write-off emissive overlays.
+        self.draw_emissive_pass(cmd, frame, entities, OverlayKind::EyesTranslucent);
+        self.draw_emissive_pass(cmd, frame, entities, OverlayKind::SwirlAdditive);
+    }
+
+    fn draw_emissive_pass(
+        &self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        entities: &[EntityRenderInfo],
+        kind: OverlayKind,
+    ) {
+        let pipeline = match kind {
+            OverlayKind::EyesTranslucent => self.eyes_pipeline,
+            OverlayKind::SwirlAdditive => self.swirl_pipeline,
+            OverlayKind::Opaque => return,
+        };
+        let mut bound = false;
+        let mut last_variant: *const MobVariant = std::ptr::null();
+        for info in entities {
+            let Some(entry) = self.mobs.get(&info.entity_kind) else {
+                continue;
+            };
+            let overlays = entry.overlays(info.is_baby);
+            let has_visible = overlays.iter().enumerate().any(|(slot, ov)| {
+                ov.overlay_kind == kind && info.overlay_tints[slot].is_some()
+            });
+            if !has_visible {
+                continue;
+            }
+            if !bound {
+                cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
+                bound = true;
+            }
+            let variant = entry.base_variant(info.is_baby, info.variant_index);
+            let entity_mat = Self::entity_matrix(info);
+            let anim = self.compute_anim(entry.anim, &variant.model, info);
+            // Energy swirl scrolls its UVs over time (vanilla `EnergySwirlLayer`).
+            let uv_offset = if kind == OverlayKind::SwirlAdditive {
+                let o = (info.age_in_ticks * 0.01).rem_euclid(1.0);
+                [o, o]
+            } else {
+                [0.0, 0.0]
+            };
+            for (slot, overlay) in overlays.iter().enumerate() {
+                if overlay.overlay_kind != kind {
+                    continue;
+                }
+                let Some(tint) = info.overlay_tints[slot] else {
+                    continue;
+                };
+                self.draw_variant(
+                    cmd,
+                    frame,
+                    overlay,
+                    entity_mat,
+                    &anim,
+                    tint,
+                    NO_OVERLAY,
+                    uv_offset,
                     &mut last_variant,
                 );
             }
@@ -540,6 +730,7 @@ impl EntityRenderer {
         anim: &entity_model::PartAnim,
         tint: [f32; 4],
         overlay_color: [f32; 4],
+        uv_offset: [f32; 2],
         last_variant: &mut *const MobVariant,
     ) {
         let ptr: *const MobVariant = variant;
@@ -555,6 +746,7 @@ impl EntityRenderer {
             *last_variant = ptr;
         }
 
+        let uv_params = [uv_offset[0], uv_offset[1], 0.0, 0.0];
         let part_transforms = variant.model.compute_part_transforms(anim);
         for (i, (start, count)) in variant.model.part_ranges.iter().enumerate() {
             if *count == 0 {
@@ -562,10 +754,11 @@ impl EntityRenderer {
             }
             let part_mat = entity_mat * part_transforms[i];
             let mat_array = part_mat.to_cols_array();
-            let mut bytes = [0u8; 96];
+            let mut bytes = [0u8; 112];
             bytes[..64].copy_from_slice(bytemuck::cast_slice(&mat_array));
             bytes[64..80].copy_from_slice(bytemuck::cast_slice(&tint));
-            bytes[80..].copy_from_slice(bytemuck::cast_slice(&overlay_color));
+            bytes[80..96].copy_from_slice(bytemuck::cast_slice(&overlay_color));
+            bytes[96..112].copy_from_slice(bytemuck::cast_slice(&uv_params));
             cmd.push_constants(
                 self.pipeline_layout,
                 vk::ShaderStageFlags::Vertex,
@@ -578,7 +771,10 @@ impl EntityRenderer {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+        device.destroy_pipeline(self.eyes_pipeline, None);
+        device.destroy_pipeline(self.swirl_pipeline, None);
+        [self.pipeline, self.eyes_pipeline, self.swirl_pipeline] =
+            create_pipelines(device, render_pass, self.pipeline_layout);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -593,6 +789,7 @@ impl EntityRenderer {
         }
 
         device.destroy_sampler(self.texture_sampler, None);
+        device.destroy_sampler(self.texture_sampler_repeat, None);
 
         for entry in self.mobs.values_mut() {
             let variants: Vec<&mut MobVariant> = entry
@@ -622,6 +819,8 @@ impl EntityRenderer {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.eyes_pipeline, None);
+        device.destroy_pipeline(self.swirl_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
@@ -662,6 +861,7 @@ fn build_variants(
     descriptor_pool: vk::DescriptorPool,
     texture_layout: vk::DescriptorSetLayout,
     texture_sampler: vk::Sampler,
+    texture_sampler_repeat: vk::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     variant: VariantDef,
@@ -670,7 +870,13 @@ fn build_variants(
         model,
         tex_variants,
         tex_size,
+        overlay_kind,
     } = variant;
+    // The scrolling swirl needs REPEAT wrapping; everything else clamps.
+    let sampler = match overlay_kind {
+        OverlayKind::SwirlAdditive => texture_sampler_repeat,
+        _ => texture_sampler,
+    };
     let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
 
     tex_variants
@@ -707,7 +913,7 @@ fn build_variants(
                 .expect("failed to allocate entity texture descriptor set");
 
             let image_info = vk::DescriptorImageInfo {
-                sampler: texture_sampler,
+                sampler,
                 image_view: texture_view,
                 image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
             };
@@ -729,6 +935,7 @@ fn build_variants(
                 texture_view,
                 texture_allocation,
                 texture_set,
+                overlay_kind,
             }
         })
         .collect()
@@ -785,10 +992,25 @@ pub(super) fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
     (pixels, size, size)
 }
 
+/// The entity render pipelines, in draw order: opaque base, translucent eyes,
+/// additive swirl.
+fn create_pipelines(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+) -> [vk::Pipeline; 3] {
+    [
+        create_pipeline(device, render_pass, layout, BlendMode::Opaque),
+        create_pipeline(device, render_pass, layout, BlendMode::Translucent),
+        create_pipeline(device, render_pass, layout, BlendMode::Additive),
+    ]
+}
+
 pub(super) fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
+    blend: BlendMode,
 ) -> vk::Pipeline {
     let vert_spv = shader::include_spirv!("entity.vert.spv");
     let frag_spv = shader::include_spirv!("entity.frag.spv");
@@ -846,17 +1068,48 @@ pub(super) fn create_pipeline(
         ..Default::default()
     };
 
+    // Emissive overlays (eyes, swirl) blend over the opaque pass and must not write
+    // depth, or they'd occlude later geometry.
+    let depth_write = if blend == BlendMode::Opaque {
+        vk::TRUE
+    } else {
+        vk::FALSE
+    };
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
-        depth_write_enable: vk::TRUE,
+        depth_write_enable: depth_write,
         depth_compare_op: vk::CompareOp::LessOrEqual,
         ..Default::default()
     };
 
-    let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::FALSE,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-        ..Default::default()
+    let blend_attachment = match blend {
+        BlendMode::Opaque => vk::PipelineColorBlendAttachmentState {
+            blend_enable: vk::FALSE,
+            color_write_mask: vk::ColorComponentFlags::RGBA,
+            ..Default::default()
+        },
+        // Standard src-alpha over (glowing eyes).
+        BlendMode::Translucent => vk::PipelineColorBlendAttachmentState {
+            blend_enable: vk::TRUE,
+            src_color_blend_factor: vk::BlendFactor::SrcAlpha,
+            dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+            color_blend_op: vk::BlendOp::Add,
+            src_alpha_blend_factor: vk::BlendFactor::One,
+            dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+            alpha_blend_op: vk::BlendOp::Add,
+            color_write_mask: vk::ColorComponentFlags::RGBA,
+        },
+        // Additive (energy swirl glow).
+        BlendMode::Additive => vk::PipelineColorBlendAttachmentState {
+            blend_enable: vk::TRUE,
+            src_color_blend_factor: vk::BlendFactor::SrcAlpha,
+            dst_color_blend_factor: vk::BlendFactor::One,
+            color_blend_op: vk::BlendOp::Add,
+            src_alpha_blend_factor: vk::BlendFactor::One,
+            dst_alpha_blend_factor: vk::BlendFactor::One,
+            alpha_blend_op: vk::BlendOp::Add,
+            color_write_mask: vk::ColorComponentFlags::RGBA,
+        },
     };
     let color_blending = vk::PipelineColorBlendStateCreateInfo {
         attachment_count: 1,
