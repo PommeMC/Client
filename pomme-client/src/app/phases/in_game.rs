@@ -196,6 +196,8 @@ pub fn update_game(
         .set_listener(listener_pos, game.player.look_dir.y_rot_deg());
     core.audio.set_volumes(core.menu.category_volumes());
 
+    gfx.renderer.set_vsync(core.menu.vsync);
+
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
     if let Some(reason) = disconnect_reason {

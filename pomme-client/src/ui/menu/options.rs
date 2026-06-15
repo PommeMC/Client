@@ -84,10 +84,15 @@ impl MainMenu {
         } else {
             format!("GUI Scale: {}", self.gui_scale_setting)
         };
+        let vsync_label = if self.vsync {
+            "VSync: ON"
+        } else {
+            "VSync: OFF"
+        };
         let rows: Vec<[&str; 2]> = vec![
             [&rd, &sd],
             ["Graphics: Fancy", "Smooth Lighting: ON"],
-            [&mf, "VSync: OFF"],
+            [&mf, vsync_label],
             [self.view_bobbing_label(), &gui_label],
             ["Attack Indicator: Crosshair", "Brightness: 50%"],
             ["Clouds: Fancy", fullscreen_label],
@@ -607,6 +612,10 @@ impl MainMenu {
                     }
                     if label.starts_with("View Bobbing:") {
                         self.view_bobbing = !self.view_bobbing;
+                        self.save_settings();
+                    }
+                    if label.starts_with("VSync:") {
+                        self.vsync = !self.vsync;
                         self.save_settings();
                     }
                     if label.starts_with("Show Online Status:") {

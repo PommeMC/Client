@@ -25,6 +25,8 @@ struct Settings {
     #[serde(default = "default_true")]
     view_bobbing: bool,
     #[serde(default = "default_true")]
+    vsync: bool,
+    #[serde(default = "default_true")]
     show_online_status: bool,
     #[serde(default = "default_true")]
     show_current_server: bool,
@@ -88,6 +90,7 @@ impl Default for Settings {
             simulation_distance: 12,
             fov: 70,
             view_bobbing: true,
+            vsync: true,
             show_online_status: true,
             show_current_server: true,
             skin_cape: true,
@@ -284,6 +287,7 @@ pub struct MainMenu {
     pub simulation_distance: u32,
     pub fov: u32,
     pub view_bobbing: bool,
+    pub vsync: bool,
     pub show_online_status: bool,
     pub show_current_server: bool,
     pub master_volume: f32,
@@ -354,6 +358,7 @@ impl MainMenu {
             simulation_distance: settings.simulation_distance,
             fov: settings.fov,
             view_bobbing: settings.view_bobbing,
+            vsync: settings.vsync,
             show_online_status: settings.show_online_status,
             show_current_server: settings.show_current_server,
             master_volume: settings.master_volume,
@@ -427,6 +432,7 @@ impl MainMenu {
                 simulation_distance: self.simulation_distance,
                 fov: self.fov,
                 view_bobbing: self.view_bobbing,
+                vsync: self.vsync,
                 show_online_status: self.show_online_status,
                 show_current_server: self.show_current_server,
                 master_volume: self.master_volume,

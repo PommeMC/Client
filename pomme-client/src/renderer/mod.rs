@@ -128,6 +128,7 @@ pub struct Renderer {
     chunk_buffers: ChunkBufferStore,
     render_finished_per_image: Vec<vk::Semaphore>,
     swapchain_dirty: bool,
+    vsync: bool,
     width: u32,
     height: u32,
     last_timings: RenderTimings,
@@ -153,10 +154,12 @@ impl Renderer {
 
         let ctx = VulkanContext::new(&window)?;
 
+        let vsync = true;
         let swapchain_state = Swapchain::new(
             &ctx,
             size.width.max(1),
             size.height.max(1),
+            vsync,
             vk::SwapchainKHR::null(),
         )?;
 
@@ -401,6 +404,7 @@ impl Renderer {
             chunk_buffers,
             render_finished_per_image,
             swapchain_dirty: false,
+            vsync,
             width: size.width.max(1),
             height: size.height.max(1),
             last_timings: RenderTimings::default(),
@@ -574,6 +578,13 @@ impl Renderer {
             .set_aspect_ratio(new_size.width as f32 / new_size.height as f32);
     }
 
+    pub fn set_vsync(&mut self, vsync: bool) {
+        if self.vsync != vsync {
+            self.vsync = vsync;
+            self.swapchain_dirty = true;
+        }
+    }
+
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
         let _ = self.ctx.device.wait_idle();
 
@@ -584,8 +595,13 @@ impl Renderer {
         self.chunk_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
 
-        let mut old_swapchain =
-            Swapchain::new(&self.ctx, self.width, self.height, self.swapchain.handle)?;
+        let mut old_swapchain = Swapchain::new(
+            &self.ctx,
+            self.width,
+            self.height,
+            self.vsync,
+            self.swapchain.handle,
+        )?;
         std::mem::swap(&mut self.swapchain, &mut old_swapchain);
         old_swapchain.destroy(&self.ctx.device, &self.ctx.allocator);
 

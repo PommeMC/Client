@@ -33,6 +33,7 @@ impl Swapchain {
         ctx: &VulkanContext,
         width: u32,
         height: u32,
+        vsync: bool,
         old_swapchain: vk::SwapchainKHR,
     ) -> Result<Self, ContextError> {
         let caps = ctx.physical_device.get_surface_capabilities(ctx.surface)?;
@@ -48,7 +49,9 @@ impl Swapchain {
             .copied()
             .unwrap_or(formats[0]);
 
-        let present_mode = if present_modes.contains(&vk::PresentModeKHR::Mailbox) {
+        let present_mode = if vsync {
+            vk::PresentModeKHR::Fifo
+        } else if present_modes.contains(&vk::PresentModeKHR::Mailbox) {
             vk::PresentModeKHR::Mailbox
         } else if present_modes.contains(&vk::PresentModeKHR::Immediate) {
             vk::PresentModeKHR::Immediate
