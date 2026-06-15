@@ -316,7 +316,7 @@ fn build_status_bar(
 ) {
     let icon_size = ICON_SIZE * gs;
     let stride = ICON_STRIDE * gs;
-    // Ceil to half-units so a partial heart still renders while alive (vanilla Mth.ceil).
+    // Ceil like vanilla so a partial heart still shows while alive.
     let halves = value.ceil().max(0.0) as u32;
     let full_icons = (halves / 2) as u8;
     let has_half = halves % 2 == 1;
