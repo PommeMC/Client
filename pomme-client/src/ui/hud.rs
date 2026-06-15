@@ -316,8 +316,10 @@ fn build_status_bar(
 ) {
     let icon_size = ICON_SIZE * gs;
     let stride = ICON_STRIDE * gs;
-    let full_icons = (value / 2.0).floor() as u8;
-    let has_half = (value % 2.0) >= 1.0;
+    // Ceil to half-units so a partial heart still renders while alive (vanilla Mth.ceil).
+    let halves = value.ceil().max(0.0) as u32;
+    let full_icons = (halves / 2) as u8;
+    let has_half = halves % 2 == 1;
 
     for i in 0..10u8 {
         let x = if right_to_left {
