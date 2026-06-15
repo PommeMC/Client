@@ -664,6 +664,10 @@ impl Renderer {
         self.camera.sync_pos(position);
     }
 
+    pub fn set_view_bob(&mut self, walk_dist: f32, bob: f32, enabled: bool) {
+        self.camera.set_view_bob(walk_dist, bob, enabled);
+    }
+
     pub fn reset_camera(&mut self, position: Position, look_dir: LookDirection) {
         self.camera.reset(position, look_dir);
     }
@@ -1323,6 +1327,9 @@ impl Renderer {
 
                 if self.camera.mode == camera::CameraMode::FirstPerson {
                     let aspect = sw / sh.max(1.0);
+                    // Same view-bob the world uses, so the arm/item bob in lockstep
+                    // (vanilla applies bobView to the hand pose stack too).
+                    let bob = self.camera.view_bob_matrix();
                     // Vanilla renderArmWithItem draws the arm only for an empty
                     // hand; a held item renders alone.
                     match held_item {
@@ -1333,10 +1340,11 @@ impl Renderer {
                             *swing_progress,
                             item,
                             &self.item_entity_pipeline,
+                            bob,
                         ),
                         None => {
                             self.hand_pipeline
-                                .update_and_draw(cmd, frame, aspect, *swing_progress)
+                                .update_and_draw(cmd, frame, aspect, *swing_progress, bob)
                         }
                     }
                 }

@@ -259,6 +259,12 @@ pub fn update_game(
             .prev_eye_pos()
             .lerp(game.player.eye_pos(), partial_tick as f64),
     );
+    // Plain lerp (vanilla getInterpolatedWalkDistance); the forward-extrapolating camera
+    // variant judders across tick boundaries when per-tick speed varies.
+    let bob_walk = game.player.prev_walk_dist.lerp(game.player.walk_dist, partial_tick);
+    let bob_amount = game.player.prev_bob.lerp(game.player.bob, partial_tick);
+    gfx.renderer
+        .set_view_bob(bob_walk, bob_amount, core.menu.view_bobbing);
     gfx.renderer.update_third_person_distance(
         game.player
             .prev_eye_pos()

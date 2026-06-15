@@ -850,6 +850,7 @@ impl AppCore {
             &mut game.player_walk_speed,
             &mut game.player_prev_walk_speed,
         );
+        game.player.tick_bob(dx, dz);
 
         renderer.set_base_fov(self.menu.fov as f32);
         renderer.update_fov_mod(compute_fov_modifier(&game.player));

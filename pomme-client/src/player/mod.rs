@@ -47,6 +47,10 @@ pub struct LocalPlayer {
     pub crouching: bool,
     pub eye_height: f64,
     pub prev_eye_height: f64,
+    pub walk_dist: f32,
+    pub prev_walk_dist: f32,
+    pub bob: f32,
+    pub prev_bob: f32,
     pub horizontal_collision: bool,
     pub sprint_toggle_timer: u32,
     pub was_forward_pressed: bool,
@@ -79,6 +83,10 @@ impl LocalPlayer {
             crouching: false,
             eye_height: STANDING_EYE_HEIGHT,
             prev_eye_height: STANDING_EYE_HEIGHT,
+            walk_dist: 0.0,
+            prev_walk_dist: 0.0,
+            bob: 0.0,
+            prev_bob: 0.0,
             horizontal_collision: false,
             sprint_toggle_timer: 0,
             was_forward_pressed: false,
@@ -113,6 +121,22 @@ impl LocalPlayer {
     pub fn tick_eye_height(&mut self) {
         self.prev_eye_height = self.eye_height;
         self.eye_height += (self.target_eye_height() - self.eye_height) * 0.5;
+    }
+
+    /// Accumulates walk distance and a smoothed bob amplitude for view bobbing,
+    /// mirroring vanilla `AbstractClientPlayer.updateBob` (caller skips this when dead).
+    pub fn tick_bob(&mut self, dx: f64, dz: f64) {
+        let horizontal = ((dx * dx + dz * dz) as f32).sqrt();
+        self.prev_walk_dist = self.walk_dist;
+        // Vanilla LocalPlayer.move: addWalkedDistance(len * 0.6) — the 0.6 sets the cadence.
+        self.walk_dist += horizontal * 0.6;
+        let target = if self.on_ground && !self.swimming {
+            horizontal.min(0.1)
+        } else {
+            0.0
+        };
+        self.prev_bob = self.bob;
+        self.bob += (target - self.bob) * 0.4;
     }
 
     pub fn prev_eye_pos(&self) -> Position {

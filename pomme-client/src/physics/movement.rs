@@ -129,10 +129,6 @@ fn tick_land(
     };
     player.velocity.x *= h_friction;
     player.velocity.z *= h_friction;
-
-    if player.on_ground && player.velocity.y < 0.0 {
-        player.velocity.y = 0.0;
-    }
 }
 
 fn tick_water(
@@ -216,6 +212,7 @@ fn apply_collision(
     // Collisions compare against the edge-clamped delta so the clamp itself
     // never zeroes velocity, letting the player keep creeping along the edge.
     let collided_x = (resolved.x - delta.x).abs() > 1.0e-5;
+    let collided_y = (resolved.y - delta.y).abs() > 1.0e-5;
     let collided_z = (resolved.z - delta.z).abs() > 1.0e-5;
     let horizontal_collision = collided_x || collided_z;
 
@@ -228,6 +225,12 @@ fn apply_collision(
     }
     if collided_z {
         player.velocity.z = 0.0;
+    }
+    // Zero the vertical velocity on ground/ceiling contact (vanilla does this in move()).
+    // Gravity is re-applied after the move, leaving vy slightly negative so the next tick's
+    // move always probes downward and keeps `on_ground` stable instead of flickering.
+    if collided_y {
+        player.velocity.y = 0.0;
     }
 
     if player.sprinting
