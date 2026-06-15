@@ -46,7 +46,8 @@ enum OverlayKind {
     Opaque,
     /// Translucent, full-bright, depth-write off — spider glowing eyes.
     EyesTranslucent,
-    /// Additive, full-bright, depth-write off, scrolling UV — charged creeper swirl.
+    /// Additive, full-bright, depth-write off, scrolling UV — charged creeper
+    /// swirl.
     SwirlAdditive,
 }
 
@@ -248,7 +249,11 @@ fn mob_definitions() -> Vec<MobDef> {
             kind: EntityKind::Pig,
             anim: AnimationType::Quadruped,
             adult: opaque(entity_model::bake_pig_model(), PIG_ADULT_TEX, 64),
-            baby: Some(opaque(entity_model::bake_baby_pig_model(), PIG_BABY_TEX, 32)),
+            baby: Some(opaque(
+                entity_model::bake_baby_pig_model(),
+                PIG_BABY_TEX,
+                32,
+            )),
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
@@ -256,7 +261,11 @@ fn mob_definitions() -> Vec<MobDef> {
             kind: EntityKind::Cow,
             anim: AnimationType::Quadruped,
             adult: opaque(entity_model::bake_cow_model(), COW_ADULT_TEX, 64),
-            baby: Some(opaque(entity_model::bake_baby_cow_model(), COW_BABY_TEX, 64)),
+            baby: Some(opaque(
+                entity_model::bake_baby_cow_model(),
+                COW_BABY_TEX,
+                64,
+            )),
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
@@ -678,9 +687,10 @@ impl EntityRenderer {
                 continue;
             };
             let overlays = entry.overlays(info.is_baby);
-            let has_visible = overlays.iter().enumerate().any(|(slot, ov)| {
-                ov.overlay_kind == kind && info.overlay_tints[slot].is_some()
-            });
+            let has_visible = overlays
+                .iter()
+                .enumerate()
+                .any(|(slot, ov)| ov.overlay_kind == kind && info.overlay_tints[slot].is_some());
             if !has_visible {
                 continue;
             }

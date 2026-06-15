@@ -49,17 +49,18 @@ pub struct BakedEntityModel {
     pub vertices: Vec<ChunkVertex>,
     pub part_ranges: Vec<(u32, u32)>,
     /// Per-part scale (parallel to `parts`), applied about each part's pivot at
-    /// transform time. Scales geometry only, never UVs — used for baby mobs whose
-    /// head and body shrink by different factors. Default 1.0 for every part.
+    /// transform time. Scales geometry only, never UVs — used for baby mobs
+    /// whose head and body shrink by different factors. Default 1.0 for
+    /// every part.
     pub part_scales: Vec<f32>,
 }
 
 #[derive(Default)]
 pub struct PartAnim {
     pub rotation: Vec<(usize, Vec3)>,
-    /// Quaternion rotation override; takes precedence over `rotation` for a part.
-    /// Used where the engine's fixed euler order can't reproduce vanilla's
-    /// composition (e.g. spider legs with combined yaw + tilt).
+    /// Quaternion rotation override; takes precedence over `rotation` for a
+    /// part. Used where the engine's fixed euler order can't reproduce
+    /// vanilla's composition (e.g. spider legs with combined yaw + tilt).
     pub rotation_quat: Vec<(usize, Quat)>,
     pub translation: Vec<(usize, Vec3)>,
 }
@@ -386,10 +387,10 @@ pub fn bake_player_model() -> BakedEntityModel {
 }
 
 /// Legacy single-arm humanoid layout (head/body/right_arm/left_arm/right_leg/
-/// left_leg), shared by zombie and skeleton. `limb` builds the four limb cubes so
-/// zombie (4-wide) and skeleton (2-wide thin) can differ while keeping identical
-/// part names/order (required for shared animation indexing). `tex_h` lets zombie
-/// use a 64-tall sheet and skeleton a 32-tall one.
+/// left_leg), shared by zombie and skeleton. `limb` builds the four limb cubes
+/// so zombie (4-wide) and skeleton (2-wide thin) can differ while keeping
+/// identical part names/order (required for shared animation indexing). `tex_h`
+/// lets zombie use a 64-tall sheet and skeleton a 32-tall one.
 fn humanoid_parts(
     arm_cube_right: ModelCube,
     leg_cube_right: ModelCube,
@@ -650,7 +651,14 @@ fn spider_parts() -> Vec<EntityPart> {
             }],
             parent: None,
         },
-        leg("right_hind_leg", -4.0, 2.0, FRAC_PI_4, -FRAC_PI_4, right_leg),
+        leg(
+            "right_hind_leg",
+            -4.0,
+            2.0,
+            FRAC_PI_4,
+            -FRAC_PI_4,
+            right_leg,
+        ),
         leg("left_hind_leg", 4.0, 2.0, -FRAC_PI_4, FRAC_PI_4, left_leg),
         leg(
             "right_middle_hind_leg",
@@ -1192,17 +1200,18 @@ fn head_rotation(head_x_rot_deg: f32, local_head_y_rot_deg: f32) -> Vec3 {
     Vec3::new(x, y, z)
 }
 
-/// Vanilla `AnimationUtils.bobModelPart`: a gentle idle sway added to undead arms.
-/// Returns the (xRot, zRot) delta; `side` is +1.0 for the right arm, -1.0 left.
+/// Vanilla `AnimationUtils.bobModelPart`: a gentle idle sway added to undead
+/// arms. Returns the (xRot, zRot) delta; `side` is +1.0 for the right arm, -1.0
+/// left.
 fn bob_arm(age_in_ticks: f32, side: f32) -> (f32, f32) {
     let z = side * ((age_in_ticks * 0.09).cos() * 0.05 + 0.05);
     let x = side * (age_in_ticks * 0.067).sin() * 0.05;
     (x, z)
 }
 
-/// Zombie: humanoid head/body/legs, but arms held out forward (the classic zombie
-/// pose) and raised higher when aggressive, plus the `AnimationUtils.animateZombieArms`
-/// attack swing driven by `attack_time`.
+/// Zombie: humanoid head/body/legs, but arms held out forward (the classic
+/// zombie pose) and raised higher when aggressive, plus the
+/// `AnimationUtils.animateZombieArms` attack swing driven by `attack_time`.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_zombie_anim(
     model: &BakedEntityModel,
@@ -1235,11 +1244,7 @@ pub fn compute_zombie_anim(
                 Vec3::new(arm_drop + arm_swing_x + bx, 0.1 - attack_y * 0.6, bz)
             }
             "right_leg" => Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.0, 0.0),
-            "left_leg" => Vec3::new(
-                (walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed,
-                0.0,
-                0.0,
-            ),
+            "left_leg" => Vec3::new((walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed, 0.0, 0.0),
             _ => continue,
         };
         anim.rotation.push((i, rot));
@@ -1249,9 +1254,9 @@ pub fn compute_zombie_anim(
 }
 
 /// Skeleton: standard humanoid limb swing; when aggressive the arms take the
-/// vanilla `HumanoidModel` `BOW_AND_ARROW` aim pose tracking the head (no held bow
-/// item is rendered). `age_in_ticks` is currently unused but kept for parity with
-/// the other humanoid anims.
+/// vanilla `HumanoidModel` `BOW_AND_ARROW` aim pose tracking the head (no held
+/// bow item is rendered). `age_in_ticks` is currently unused but kept for
+/// parity with the other humanoid anims.
 pub fn compute_skeleton_anim(
     model: &BakedEntityModel,
     head_x_rot_deg: f32,
@@ -1280,11 +1285,7 @@ pub fn compute_skeleton_anim(
             ),
             "left_arm" => Vec3::new((walk_pos * 0.6662).cos() * 2.0 * walk_speed * 0.5, 0.0, 0.0),
             "right_leg" => Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.0, 0.0),
-            "left_leg" => Vec3::new(
-                (walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed,
-                0.0,
-                0.0,
-            ),
+            "left_leg" => Vec3::new((walk_pos * 0.6662 + PI).cos() * 1.4 * walk_speed, 0.0, 0.0),
             _ => continue,
         };
         anim.rotation.push((i, rot));
@@ -1316,9 +1317,8 @@ pub fn compute_spider_anim(
     // Each leg's exact render-space orientation = F·vanilla·F = Rz(-z)·Ry(+y)
     // (Y unchanged under the Y-flip; X/Z negate). Build it as a quaternion so the
     // engine reproduces vanilla's composition order exactly.
-    let leg_quat = |full_y: f32, full_z: f32| {
-        Quat::from_rotation_z(-full_z) * Quat::from_rotation_y(full_y)
-    };
+    let leg_quat =
+        |full_y: f32, full_z: f32| Quat::from_rotation_z(-full_z) * Quat::from_rotation_y(full_y);
 
     for (i, part) in model.parts.iter().enumerate() {
         let base = part.default_rotation;
@@ -1332,10 +1332,18 @@ pub fn compute_spider_anim(
             "left_hind_leg" => leg_quat(base.y - swing(0.0), base.z - step(0.0)),
             "right_middle_hind_leg" => leg_quat(base.y + swing(PI), base.z + step(PI)),
             "left_middle_hind_leg" => leg_quat(base.y - swing(PI), base.z - step(PI)),
-            "right_middle_front_leg" => leg_quat(base.y + swing(FRAC_PI_2), base.z + step(FRAC_PI_2)),
-            "left_middle_front_leg" => leg_quat(base.y - swing(FRAC_PI_2), base.z - step(FRAC_PI_2)),
-            "right_front_leg" => leg_quat(base.y + swing(three_half_pi), base.z + step(three_half_pi)),
-            "left_front_leg" => leg_quat(base.y - swing(three_half_pi), base.z - step(three_half_pi)),
+            "right_middle_front_leg" => {
+                leg_quat(base.y + swing(FRAC_PI_2), base.z + step(FRAC_PI_2))
+            }
+            "left_middle_front_leg" => {
+                leg_quat(base.y - swing(FRAC_PI_2), base.z - step(FRAC_PI_2))
+            }
+            "right_front_leg" => {
+                leg_quat(base.y + swing(three_half_pi), base.z + step(three_half_pi))
+            }
+            "left_front_leg" => {
+                leg_quat(base.y - swing(three_half_pi), base.z - step(three_half_pi))
+            }
             _ => continue,
         };
         anim.rotation_quat.push((i, q));

@@ -154,7 +154,8 @@ fn sweep_axis_z(
 
 const INTERPOLATION_STEPS: i32 = 3;
 const HURT_DURATION: u8 = 10;
-/// Vanilla default arm-swing duration in ticks (`LivingEntity.getCurrentSwingDuration`).
+/// Vanilla default arm-swing duration in ticks
+/// (`LivingEntity.getCurrentSwingDuration`).
 const SWING_DURATION: u8 = 6;
 
 #[allow(dead_code)]
@@ -187,8 +188,9 @@ pub struct LivingEntity {
     pub aggressive: bool,
     /// Creeper charged/powered flag — shows the blue aura overlay.
     pub powered: bool,
-    /// Arm-swing animation timer, counts down from `SWING_DURATION` to 0 (driven by
-    /// the server `Animate` packet). Drives the zombie attack swing.
+    /// Arm-swing animation timer, counts down from `SWING_DURATION` to 0
+    /// (driven by the server `Animate` packet). Drives the zombie attack
+    /// swing.
     pub swing_time: u8,
     pub prev_swing_time: u8,
     interp_target: Position,
@@ -279,9 +281,10 @@ impl LivingEntity {
         self.prev_body_y_rot_deg = self.body_y_rot_deg;
     }
 
-    /// Arm-swing progress 0..1 for the current frame. `swing_time` counts down, so
-    /// progress rises 0→1 over the swing; idle clamps to 1 (where the attack pose
-    /// contribution is zero, like vanilla's attackTime endpoints).
+    /// Arm-swing progress 0..1 for the current frame. `swing_time` counts down,
+    /// so progress rises 0→1 over the swing; idle clamps to 1 (where the
+    /// attack pose contribution is zero, like vanilla's attackTime
+    /// endpoints).
     pub fn swing_progress(&self, partial: f32) -> f32 {
         ((SWING_DURATION as f32 - self.swing_time as f32 + partial) / SWING_DURATION as f32)
             .clamp(0.0, 1.0)
@@ -615,8 +618,8 @@ impl EntityStore {
         }
     }
 
-    /// Begins an arm swing (server `Animate` packet). Restarts only if not already
-    /// mid-swing, mirroring vanilla `LivingEntity.swing`.
+    /// Begins an arm swing (server `Animate` packet). Restarts only if not
+    /// already mid-swing, mirroring vanilla `LivingEntity.swing`.
     pub fn start_swing(&mut self, id: i32) {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.swing_time == 0
