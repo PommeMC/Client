@@ -70,13 +70,14 @@ impl Camera {
         self.bob_enabled = enabled;
     }
 
-    /// The view-space bob transform, also applied to the first-person arm/held item.
+    /// The view-space bob transform, also applied to the first-person arm/held
+    /// item.
     pub fn view_bob_matrix(&self) -> Mat4 {
         self.bob_matrix()
     }
 
-    /// Replicates vanilla `GameRenderer.bobView`. Identity when disabled, not in first
-    /// person, or at rest.
+    /// Replicates vanilla `GameRenderer.bobView`. Identity when disabled, not
+    /// in first person, or at rest.
     fn bob_matrix(&self) -> Mat4 {
         if !self.bob_enabled || self.mode != CameraMode::FirstPerson || self.bob_amount == 0.0 {
             return Mat4::IDENTITY;

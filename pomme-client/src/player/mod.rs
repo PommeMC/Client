@@ -124,11 +124,13 @@ impl LocalPlayer {
     }
 
     /// Accumulates walk distance and a smoothed bob amplitude for view bobbing,
-    /// mirroring vanilla `AbstractClientPlayer.updateBob` (caller skips this when dead).
+    /// mirroring vanilla `AbstractClientPlayer.updateBob` (caller skips this
+    /// when dead).
     pub fn tick_bob(&mut self, dx: f64, dz: f64) {
         let horizontal = ((dx * dx + dz * dz) as f32).sqrt();
         self.prev_walk_dist = self.walk_dist;
-        // Vanilla LocalPlayer.move: addWalkedDistance(len * 0.6) — the 0.6 sets the cadence.
+        // Vanilla LocalPlayer.move: addWalkedDistance(len * 0.6) — the 0.6 sets the
+        // cadence.
         self.walk_dist += horizontal * 0.6;
         let target = if self.on_ground && !self.swimming {
             horizontal.min(0.1)

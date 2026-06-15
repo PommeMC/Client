@@ -1342,10 +1342,13 @@ impl Renderer {
                             &self.item_entity_pipeline,
                             bob,
                         ),
-                        None => {
-                            self.hand_pipeline
-                                .update_and_draw(cmd, frame, aspect, *swing_progress, bob)
-                        }
+                        None => self.hand_pipeline.update_and_draw(
+                            cmd,
+                            frame,
+                            aspect,
+                            *swing_progress,
+                            bob,
+                        ),
                     }
                 }
 

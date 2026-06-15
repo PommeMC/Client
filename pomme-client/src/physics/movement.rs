@@ -226,9 +226,10 @@ fn apply_collision(
     if collided_z {
         player.velocity.z = 0.0;
     }
-    // Zero the vertical velocity on ground/ceiling contact (vanilla does this in move()).
-    // Gravity is re-applied after the move, leaving vy slightly negative so the next tick's
-    // move always probes downward and keeps `on_ground` stable instead of flickering.
+    // Zero the vertical velocity on ground/ceiling contact (vanilla does this in
+    // move()). Gravity is re-applied after the move, leaving vy slightly
+    // negative so the next tick's move always probes downward and keeps
+    // `on_ground` stable instead of flickering.
     if collided_y {
         player.velocity.y = 0.0;
     }
