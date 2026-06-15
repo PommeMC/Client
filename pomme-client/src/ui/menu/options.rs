@@ -1,6 +1,15 @@
 use super::*;
 use crate::resource_pack::PackCompat;
 
+/// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or two
+/// 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
+pub(super) enum OptRow<'a> {
+    Header(&'a str),
+    Big(&'a str),
+    Pair(&'a str, &'a str),
+    PairLeft(&'a str),
+}
+
 fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
     match compat {
         PackCompat::Compatible => ("Compatible", [0.33, 0.87, 0.33, 1.0]),
@@ -18,13 +27,14 @@ impl MainMenu {
         } else {
             format!("FOV: {}", self.fov)
         };
-        let rows: Vec<[&str; 2]> = vec![
-            [&fov_label, "Online..."],
-            ["Skin Customization...", "Music & Sounds..."],
-            ["Video Settings...", "Controls..."],
-            ["Language...", "Chat Settings..."],
-            ["Resource Packs...", "Accessibility Settings..."],
-            ["Telemetry Data...", "Credits & Attribution..."],
+        // FOV slider + Online lead the grid, above the categories (vanilla header sub-row).
+        let rows: Vec<OptRow> = vec![
+            OptRow::Pair(&fov_label, "Online..."),
+            OptRow::Pair("Skin Customization...", "Music & Sounds..."),
+            OptRow::Pair("Video Settings...", "Controls..."),
+            OptRow::Pair("Language...", "Chat Settings..."),
+            OptRow::Pair("Resource Packs...", "Accessibility Settings..."),
+            OptRow::Pair("Telemetry Data...", "Credits & Attribution..."),
         ];
 
         let nav: &[(&str, Screen)] = &[
@@ -77,7 +87,7 @@ impl MainMenu {
             DisplayMode::Fullscreen => "Fullscreen: Exclusive",
         };
         let rd = format!("Render Distance: {} chunks", self.render_distance);
-        let sd = format!("Simulation Distance: {} chunks", self.render_distance);
+        let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = format!("Max Framerate: {} fps", 120);
         let gui_label = if self.gui_scale_setting == 0 {
             "GUI Scale: Auto".to_string()
@@ -89,14 +99,27 @@ impl MainMenu {
         } else {
             "VSync: OFF"
         };
-        let rows: Vec<[&str; 2]> = vec![
-            [&rd, &sd],
-            ["Graphics: Fancy", "Smooth Lighting: ON"],
-            [&mf, vsync_label],
-            [self.view_bobbing_label(), &gui_label],
-            ["Attack Indicator: Crosshair", "Brightness: 50%"],
-            ["Clouds: Fancy", fullscreen_label],
-            ["Particles: All", "Mipmap Levels: 4"],
+        let rows: Vec<OptRow> = vec![
+            OptRow::Header("Display"),
+            OptRow::Big("Fullscreen Resolution: Current"),
+            OptRow::Pair(&mf, vsync_label),
+            OptRow::Pair("Inactivity FPS Limit: 1 minute", &gui_label),
+            OptRow::Pair(fullscreen_label, "Exclusive Fullscreen: OFF"),
+            OptRow::PairLeft("Brightness: 50%"),
+            OptRow::Header("Quality"),
+            OptRow::Big("Graphics: Fancy"),
+            OptRow::Pair("Biome Blend: 5x5", &rd),
+            OptRow::Pair("Prioritize Chunk Updates: None", &sd),
+            OptRow::Pair("Smooth Lighting: ON", "Clouds: Fancy"),
+            OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
+            OptRow::Pair("Entity Shadows: ON", "Entity Distance: 100%"),
+            OptRow::Pair("Menu Background Blur: 50%", "Cloud Range: 128"),
+            OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
+            OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
+            OptRow::PairLeft("Weather Radius: 10"),
+            OptRow::Header("Preferences"),
+            OptRow::Pair("Show Autosave Indicator: ON", "Vignette: ON"),
+            OptRow::Pair("Attack Indicator: Crosshair", "Chunk Fade-in: 1.0s"),
         ];
         let rd_frac = (self.render_distance as f32 - 2.0) / 30.0;
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
@@ -124,11 +147,11 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
     ) -> MainMenuResult {
-        let rows: Vec<[&str; 2]> = vec![
-            ["Sensitivity: 100%", "Invert Mouse: OFF"],
-            ["Auto-Jump: ON", "Operator Items Tab: OFF"],
-            ["Key Binds...", "Mouse Settings..."],
-            ["Sneak: Toggle", "Sprint: Hold"],
+        let rows: Vec<OptRow> = vec![
+            OptRow::Pair("Sensitivity: 100%", "Invert Mouse: OFF"),
+            OptRow::Pair("Auto-Jump: ON", "Operator Items Tab: OFF"),
+            OptRow::Pair("Key Binds...", "Mouse Settings..."),
+            OptRow::Pair("Sneak: Toggle", "Sprint: Hold"),
         ];
         let nav: &[(&str, Screen)] = &[("Key Binds...", Screen::OptionsKeybinds)];
         self.build_options_grid(
@@ -151,16 +174,16 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
     ) -> MainMenuResult {
-        let rows: Vec<[&str; 2]> = vec![
-            ["Chat: Shown", "Chat Colors: ON"],
-            ["Web Links: ON", "Prompt on Links: ON"],
-            ["Chat Text Opacity: 100%", "Text Background Opacity: 50%"],
-            ["Chat Text Size: 100%", "Line Spacing: 0%"],
-            ["Chat Delay: None", "Chat Width: 100%"],
-            ["Focused Height: 100%", "Unfocused Height: 100%"],
-            ["Narrator: OFF", "Command Suggestions: ON"],
-            ["Hide Matched Names: ON", "Reduced Debug Info: OFF"],
-            ["Only Show Secure Chat: OFF", "Save Chat Drafts: OFF"],
+        let rows: Vec<OptRow> = vec![
+            OptRow::Pair("Chat: Shown", "Chat Colors: ON"),
+            OptRow::Pair("Web Links: ON", "Prompt on Links: ON"),
+            OptRow::Pair("Chat Text Opacity: 100%", "Text Background Opacity: 50%"),
+            OptRow::Pair("Chat Text Size: 100%", "Line Spacing: 0%"),
+            OptRow::Pair("Chat Delay: None", "Chat Width: 100%"),
+            OptRow::Pair("Focused Height: 100%", "Unfocused Height: 100%"),
+            OptRow::Pair("Narrator: OFF", "Command Suggestions: ON"),
+            OptRow::Pair("Hide Matched Names: ON", "Reduced Debug Info: OFF"),
+            OptRow::Pair("Only Show Secure Chat: OFF", "Save Chat Drafts: OFF"),
         ];
         self.build_options_grid(
             sw,
@@ -182,22 +205,19 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
     ) -> MainMenuResult {
-        let rows: Vec<[&str; 2]> = vec![
-            ["Narrator: OFF", "Show Subtitles: OFF"],
-            ["High Contrast: OFF", "Menu Background Blur: 50%"],
-            [
-                "Text Background Opacity: 50%",
-                "Background for Chat Only: OFF",
-            ],
-            ["Chat Text Opacity: 100%", "Line Spacing: 0%"],
-            ["Chat Delay: None", "Notification Time: 10.0s"],
-            [self.view_bobbing_label(), "Distortion Effects: 100%"],
-            ["FOV Effects: 100%", "Darkness Pulsing: 100%"],
-            ["Damage Tilt: 100%", "Glint Speed: 100%"],
-            ["Glint Strength: 100%", "Hide Lightning Flashes: OFF"],
-            ["Dark Loading Screen: OFF", "Panorama Scroll Speed: 100%"],
-            ["Hide Splash Texts: OFF", "Narrator Hotkey: ON"],
-            ["Rotate with Minecart: OFF", "High Contrast Outlines: OFF"],
+        let rows: Vec<OptRow> = vec![
+            OptRow::Pair("Narrator: OFF", "Show Subtitles: OFF"),
+            OptRow::Pair("High Contrast: OFF", "Menu Background Blur: 50%"),
+            OptRow::Pair("Text Background Opacity: 50%", "Background for Chat Only: OFF"),
+            OptRow::Pair("Chat Text Opacity: 100%", "Line Spacing: 0%"),
+            OptRow::Pair("Chat Delay: None", "Notification Time: 10.0s"),
+            OptRow::Pair(self.view_bobbing_label(), "Distortion Effects: 100%"),
+            OptRow::Pair("FOV Effects: 100%", "Darkness Pulsing: 100%"),
+            OptRow::Pair("Damage Tilt: 100%", "Glint Speed: 100%"),
+            OptRow::Pair("Glint Strength: 100%", "Hide Lightning Flashes: OFF"),
+            OptRow::Pair("Dark Loading Screen: OFF", "Panorama Scroll Speed: 100%"),
+            OptRow::Pair("Hide Splash Texts: OFF", "Narrator Hotkey: ON"),
+            OptRow::Pair("Rotate with Minecart: OFF", "High Contrast Outlines: OFF"),
         ];
         self.build_options_grid(
             sw,
@@ -238,16 +258,16 @@ impl MainMenu {
         let ambient = format!("Ambient/Environment: {}", pct(self.ambient_volume));
         let voice = format!("Voice/Speech: {}", pct(self.voice_volume));
         let ui = format!("UI: {}", pct(self.ui_volume));
-        let rows: Vec<[&str; 2]> = vec![
-            [&master, ""],
-            [&music, &jukebox],
-            [&weather, &blocks],
-            [&hostile, &friendly],
-            [&players, &ambient],
-            [&voice, &ui],
-            ["Device: Default", ""],
-            ["Show Subtitles: OFF", "Directional Audio: OFF"],
-            ["Music Frequency: Normal", "Music Toast: ON"],
+        let rows: Vec<OptRow> = vec![
+            OptRow::Big(&master),
+            OptRow::Pair(&music, &jukebox),
+            OptRow::Pair(&weather, &blocks),
+            OptRow::Pair(&hostile, &friendly),
+            OptRow::Pair(&players, &ambient),
+            OptRow::Pair(&voice, &ui),
+            OptRow::Big("Device: Default"),
+            OptRow::Pair("Show Subtitles: OFF", "Directional Audio: OFF"),
+            OptRow::Pair("Music Frequency: Normal", "Music Toast: ON"),
         ];
         let sliders: &[(&str, f32)] = &[
             ("Master Volume:", self.master_volume),
@@ -318,11 +338,11 @@ impl MainMenu {
         } else {
             "Main Hand: Left"
         };
-        let rows: Vec<[&str; 2]> = vec![
-            [cape, jacket],
-            [left_sleeve, right_sleeve],
-            [left_pants, right_pants],
-            [hat, main_hand],
+        let rows: Vec<OptRow> = vec![
+            OptRow::Pair(cape, jacket),
+            OptRow::Pair(left_sleeve, right_sleeve),
+            OptRow::Pair(left_pants, right_pants),
+            OptRow::Pair(hat, main_hand),
         ];
         self.build_options_grid(
             sw,
@@ -354,9 +374,9 @@ impl MainMenu {
         } else {
             "Show Current Server: OFF"
         };
-        let rows: Vec<[&str; 2]> = vec![
-            ["Realms Notifications: ON", "Allow Server Listings: ON"],
-            [online_status_label, current_server_label],
+        let rows: Vec<OptRow> = vec![
+            OptRow::Pair("Realms Notifications: ON", "Allow Server Listings: ON"),
+            OptRow::Pair(online_status_label, current_server_label),
         ];
         let tooltips: &[(&str, &str)] = &[
             (
@@ -398,7 +418,7 @@ impl MainMenu {
         input: &MenuInput,
         title: &str,
         back: Screen,
-        rows: &[[&str; 2]],
+        rows: &[OptRow],
         nav: &[(&str, Screen)],
         sliders: &[(&'static str, f32)],
         header_footer: bool,
@@ -412,10 +432,14 @@ impl MainMenu {
         let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
-        let gap = BTN_GAP * gs;
-        let btn_w = 150.0 * gs;
-        let half_w = (btn_w * 2.0 + gap) / 2.0;
+        let big_w = 310.0 * gs;
+        let small_w = 150.0 * gs;
+        let row_h = 25.0 * gs;
+        let lh = 9.0 * gs;
+        let btn_dy = (row_h - btn_h) / 2.0;
         let cx = sw / 2.0;
+        let left_x = cx - 155.0 * gs;
+        let right_x = left_x + 160.0 * gs;
         let cursor = input.cursor;
         let clicked = input.clicked;
 
@@ -495,9 +519,19 @@ impl MainMenu {
         }
 
         let content_pad = if header_footer { 4.0 * gs } else { 0.0 };
-        let first_row_gap = if header_footer { 0.0 } else { 24.0 * gs };
-        let grid_h =
-            rows.len() as f32 * btn_h + (rows.len() as f32 - 1.0).max(0.0) * gap + first_row_gap;
+        // Vertical advance per row (vanilla OptionsList: 25px pitch; headers pad above).
+        let header_pad_top = |i: usize| if i == 0 { 0.0 } else { 2.0 * lh };
+        let row_advance = |i: usize, row: &OptRow| -> f32 {
+            match row {
+                OptRow::Header(_) => header_pad_top(i) + lh + 4.0 * gs,
+                _ => row_h,
+            }
+        };
+        let grid_h: f32 = rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| row_advance(i, row))
+            .sum();
         let content_h = content_bottom - content_top;
         let scrollable = header_footer && grid_h + content_pad > content_h;
         if scrollable {
@@ -515,10 +549,6 @@ impl MainMenu {
         } else {
             content_top + (content_h - grid_h) / 2.0
         };
-        let lx = cx - half_w;
-        let rx = lx + btn_w + gap;
-        let full_w = btn_w * 2.0 + gap;
-
         let mut slider_results: Vec<(&str, f32)> = Vec::new();
 
         if header_footer {
@@ -530,22 +560,30 @@ impl MainMenu {
             });
         }
 
-        for (row, pair) in rows.iter().enumerate() {
-            let extra = if row > 0 { first_row_gap } else { 0.0 };
-            let by = top_y + row as f32 * (btn_h + gap) + extra;
-            let is_full_width = pair[1].is_empty();
-            for (col, label) in pair.iter().enumerate() {
-                if label.is_empty() {
-                    continue;
+        let mut y_cursor = top_y;
+        for (i, row) in rows.iter().enumerate() {
+            let by = y_cursor + btn_dy;
+            let mut widgets: Vec<(&str, f32, f32)> = Vec::new();
+            match row {
+                OptRow::Header(title) => {
+                    let pad_top = header_pad_top(i);
+                    elements.push(MenuElement::Text {
+                        x: left_x,
+                        y: y_cursor + pad_top + (lh - fs) / 2.0,
+                        text: (*title).into(),
+                        scale: fs,
+                        color: WHITE,
+                        centered: false,
+                    });
                 }
-                let (bx, bw) = if is_full_width {
-                    (lx, full_w)
-                } else if col == 0 {
-                    (lx, btn_w)
-                } else {
-                    (rx, btn_w)
-                };
-
+                OptRow::Big(label) => widgets.push((*label, left_x, big_w)),
+                OptRow::Pair(a, b) => {
+                    widgets.push((*a, left_x, small_w));
+                    widgets.push((*b, right_x, small_w));
+                }
+                OptRow::PairLeft(a) => widgets.push((*a, left_x, small_w)),
+            }
+            for (label, bx, bw) in widgets {
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
                     let is_active = self.active_slider == Some(*prefix);
                     let result = common::push_slider(
@@ -593,7 +631,7 @@ impl MainMenu {
                 }
                 if clicked && h {
                     any_clicked = true;
-                    if let Some((_, target)) = nav.iter().find(|(l, _)| *l == *label) {
+                    if let Some((_, target)) = nav.iter().find(|(l, _)| *l == label) {
                         if matches!(target, Screen::OptionsResourcePacks) {
                             self.rescan_packs = true;
                         }
@@ -660,6 +698,7 @@ impl MainMenu {
                     }
                 }
             }
+            y_cursor += row_advance(i, row);
         }
 
         for (prefix, value) in &slider_results {
