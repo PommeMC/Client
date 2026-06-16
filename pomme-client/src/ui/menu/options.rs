@@ -20,6 +20,8 @@ fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
 
 impl MainMenu {
     pub(super) fn build_options(&mut self, sw: f32, sh: f32, input: &MenuInput) -> MainMenuResult {
+        // Sub-screens reached from here (Language/Accessibility) return to Options.
+        self.settings_back = Screen::Options;
         let fov_label = if self.fov == 70 {
             "FOV: Normal".to_string()
         } else if self.fov >= 110 {
@@ -219,12 +221,13 @@ impl MainMenu {
             OptRow::Pair("Hide Splash Texts: OFF", "Narrator Hotkey: ON"),
             OptRow::Pair("Rotate with Minecart: OFF", "High Contrast Outlines: OFF"),
         ];
+        let back = self.settings_back.clone_screen();
         self.build_options_grid(
             sw,
             sh,
             input,
             "Accessibility Settings",
-            Screen::Options,
+            back,
             &rows,
             &[],
             &[],

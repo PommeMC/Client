@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::core::DisplayMode;
 use crate::renderer::pipelines::menu_overlay::{
-    ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_GEAR, ICON_GLOBE, ICON_LINK, ICON_PAINTBRUSH,
-    ICON_USER, MenuElement, SpriteId,
+    ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_GEAR, ICON_GLOBE, ICON_LANGUAGE, ICON_LINK,
+    ICON_PAINTBRUSH, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS, MenuElement, SpriteId,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -271,6 +271,9 @@ pub struct MainMenu {
     rt: Arc<tokio::runtime::Runtime>,
     links_open: bool,
     theme_open: bool,
+    /// Return target for Language/Accessibility, which open from both the
+    /// title-screen icon row and the Options grid.
+    settings_back: Screen,
     theme: PanoramaTheme,
     transition: Option<ThemeTransition>,
     scroll_offset: f32,
@@ -342,6 +345,7 @@ impl MainMenu {
             rt,
             links_open: false,
             theme_open: false,
+            settings_back: Screen::Options,
             theme: PanoramaTheme::Pomme,
             transition: None,
             scroll_offset: 0.0,
@@ -585,7 +589,8 @@ impl MainMenu {
                 Screen::OptionsControls,
             ),
             Screen::OptionsLanguage => {
-                self.build_options_stub(screen_w, screen_h, input, "Language", Screen::Options)
+                let back = self.settings_back.clone_screen();
+                self.build_options_stub(screen_w, screen_h, input, "Language", back)
             }
             Screen::OptionsChatSettings => self.build_options_chat(screen_w, screen_h, input),
             Screen::OptionsResourcePacks => {

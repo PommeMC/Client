@@ -24,6 +24,9 @@ pub const ICON_GLOBE: char = '\u{f0ac}';
 pub const ICON_COMMENT: char = '\u{f075}';
 pub const ICON_CODE: char = '\u{f121}';
 pub const ICON_CHECK: char = '\u{f00c}';
+pub const ICON_USERS: char = '\u{f0c0}';
+pub const ICON_LANGUAGE: char = '\u{f1ab}';
+pub const ICON_UNIVERSAL_ACCESS: char = '\u{f29a}';
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -81,6 +84,9 @@ fn build_font_atlas() -> FontAtlas {
         ICON_COMMENT,
         ICON_CODE,
         ICON_CHECK,
+        ICON_USERS,
+        ICON_LANGUAGE,
+        ICON_UNIVERSAL_ACCESS,
     ]
     .iter()
     .map(|&ch| (ch, &icon_font))
