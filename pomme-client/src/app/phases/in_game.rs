@@ -436,9 +436,13 @@ pub fn update_game(
     if game.options_from_game {
         let menu_input = core.build_menu_input();
         let r = &gfx.renderer;
-        let result = core
-            .menu
-            .build(sw, sh, &menu_input, |t, s| r.menu_text_width(t, s));
+        let result = core.menu.build(
+            sw,
+            sh,
+            &menu_input,
+            |t, s| r.menu_text_width(t, s),
+            &|name| r.block_textures(name),
+        );
         elements.extend(result.elements);
         core.input.clear_just_pressed_actions();
     } else if game.dead {
@@ -755,6 +759,12 @@ pub fn update_game(
             game.paused = false;
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
+        PauseAction::TextureEditor => {
+            core.menu.open_texture_editor();
+            game.options_from_game = true;
+            game.paused = false;
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
         PauseAction::Disconnect => {
             return GameUpdateResult::ManualDisconnect;
         }
@@ -776,7 +786,10 @@ pub fn update_game(
         if core.menu.render_distance != game.last_render_distance {
             game.sync_render_distance(connection, core.menu.render_distance);
         }
-        if !core.menu.is_options_screen() && !core.menu.is_editor_screen() {
+        if !core.menu.is_options_screen()
+            && !core.menu.is_editor_screen()
+            && !core.menu.is_texture_editor_screen()
+        {
             game.options_from_game = false;
             game.paused = true;
             core.apply_cursor_grab(&gfx.window, Some(game));

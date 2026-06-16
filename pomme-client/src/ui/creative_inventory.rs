@@ -1075,6 +1075,12 @@ fn stack_of(kind: ItemKind) -> ItemStack {
     })
 }
 
+/// All blocks/items that appear in the creative tabs, deduped — used by the
+/// texture editor's block grid.
+pub fn all_block_items() -> &'static [ItemKind] {
+    search_items_cached()
+}
+
 fn search_items_cached() -> &'static [ItemKind] {
     static CACHE: OnceLock<Vec<ItemKind>> = OnceLock::new();
     CACHE.get_or_init(|| {

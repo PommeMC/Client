@@ -14,6 +14,7 @@ pub enum PauseAction {
     Options,
     Benchmark,
     Editor,
+    TextureEditor,
 }
 
 pub fn build_pause_menu(
@@ -112,7 +113,7 @@ pub fn build_pause_menu(
     {
         action = PauseAction::Editor;
     }
-    common::push_button(
+    if common::push_button(
         elements,
         cursor,
         col2_x,
@@ -121,9 +122,12 @@ pub fn build_pause_menu(
         btn_h,
         gs,
         fs,
-        "Report Bugs",
-        false,
-    );
+        "Textures",
+        true,
+    ) && clicked
+    {
+        action = PauseAction::TextureEditor;
+    }
 
     if common::push_button(
         elements,

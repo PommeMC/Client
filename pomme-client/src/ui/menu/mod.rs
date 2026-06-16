@@ -3,6 +3,7 @@ mod helpers;
 mod main_screen;
 mod options;
 mod servers;
+mod texture_editor;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,9 +12,11 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::app::core::DisplayMode;
+use azalea_registry::builtin::ItemKind;
+
 use crate::renderer::pipelines::menu_overlay::{
-    ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_GEAR, ICON_GLOBE, ICON_LINK, ICON_PAINTBRUSH,
-    ICON_USER, MenuElement, SpriteId,
+    ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_CUBES, ICON_GEAR, ICON_GLOBE, ICON_LINK,
+    ICON_PAINTBRUSH, ICON_TRASH, ICON_USER, MenuElement, SpriteId,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -233,6 +236,7 @@ enum Screen {
     OptionsTelemetry,
     OptionsCredits,
     Editor,
+    TextureEditor,
 }
 
 impl Screen {
@@ -240,6 +244,7 @@ impl Screen {
         match self {
             Self::Main => Self::Main,
             Self::Editor => Self::Editor,
+            Self::TextureEditor => Self::TextureEditor,
             Self::Options => Self::Options,
             Self::OptionsOnline => Self::OptionsOnline,
             Self::OptionsVideo => Self::OptionsVideo,
@@ -332,6 +337,11 @@ pub struct MainMenu {
     editor_scroll: f32,
     editor_dirty: bool,
     editor_status: String,
+    editor_pending_delete: Option<PathBuf>,
+    tex_search: String,
+    tex_scroll: f32,
+    tex_selected: Option<ItemKind>,
+    tex_status: String,
 }
 
 impl MainMenu {
@@ -409,6 +419,11 @@ impl MainMenu {
             editor_scroll: 0.0,
             editor_dirty: false,
             editor_status: String::new(),
+            editor_pending_delete: None,
+            tex_search: String::new(),
+            tex_scroll: 0.0,
+            tex_selected: None,
+            tex_status: String::new(),
         }
     }
 
@@ -478,11 +493,23 @@ impl MainMenu {
 
     pub fn open_editor(&mut self) {
         self.set_screen(Screen::Editor);
+        self.editor_pending_delete = None;
         self.scan_plugins();
     }
 
     pub fn is_editor_screen(&self) -> bool {
         matches!(self.screen, Screen::Editor)
+    }
+
+    pub fn open_texture_editor(&mut self) {
+        self.set_screen(Screen::TextureEditor);
+        self.tex_selected = None;
+        self.tex_scroll = 0.0;
+        self.tex_status.clear();
+    }
+
+    pub fn is_texture_editor_screen(&self) -> bool {
+        matches!(self.screen, Screen::TextureEditor)
     }
 
     pub fn is_options_screen(&self) -> bool {
@@ -577,6 +604,7 @@ impl MainMenu {
         screen_h: f32,
         input: &MenuInput,
         text_width_fn: impl Fn(&str, f32) -> f32,
+        block_textures_fn: &dyn Fn(&str) -> Vec<crate::renderer::BlockTextureRef>,
     ) -> MainMenuResult {
         match self.screen {
             Screen::Main => self.build_main(screen_w, screen_h, input, text_width_fn),
@@ -632,6 +660,9 @@ impl MainMenu {
                 Screen::Options,
             ),
             Screen::Editor => self.build_editor(screen_w, screen_h, input, &text_width_fn),
+            Screen::TextureEditor => {
+                self.build_texture_editor(screen_w, screen_h, input, &text_width_fn, block_textures_fn)
+            }
         }
     }
 

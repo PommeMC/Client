@@ -11,6 +11,7 @@ layout(set = 1, binding = 2) uniform sampler2D item_tex;
 layout(set = 1, binding = 3) uniform sampler2D mc_font_tex;
 layout(set = 1, binding = 4) uniform sampler2D blur_tex;
 layout(set = 1, binding = 5) uniform sampler2D favicon_tex;
+layout(set = 1, binding = 6) uniform sampler2D block_tex;
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec4 v_color;
@@ -26,6 +27,12 @@ float sdf_rounded_rect(vec2 p, vec2 half_size, float radius) {
 }
 
 void main() {
+    if (v_mode > 6.5) {
+        vec4 tex = texture(block_tex, v_uv);
+        out_color = vec4(tex.rgb * v_color.rgb * tex.a * v_color.a, tex.a * v_color.a);
+        return;
+    }
+
     if (v_mode > 5.5) {
         vec4 tex = texture(favicon_tex, v_uv);
         out_color = vec4(tex.rgb * tex.a * v_color.a, tex.a * v_color.a);

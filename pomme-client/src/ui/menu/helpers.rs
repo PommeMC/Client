@@ -1,6 +1,82 @@
 use super::*;
 use crate::ui::text::TextSpan;
 
+/// Dark "studio" palette shared by the code editor and texture editor.
+pub(super) struct Pal {
+    pub(super) glass: [f32; 4],
+    pub(super) glass_hover: [f32; 4],
+    pub(super) accent: [f32; 4],
+    pub(super) text: [f32; 4],
+    pub(super) bright: [f32; 4],
+    pub(super) dim: [f32; 4],
+}
+
+impl Pal {
+    pub(super) fn dark() -> Self {
+        Self {
+            glass: [0.07, 0.08, 0.16, 0.55],
+            glass_hover: [0.12, 0.14, 0.25, 0.75],
+            accent: [0.29, 0.87, 0.5, 1.0],
+            text: [0.89, 0.90, 0.96, 0.85],
+            bright: [0.94, 0.95, 0.98, 1.0],
+            dim: [0.53, 0.56, 0.69, 0.7],
+        }
+    }
+}
+
+pub(super) fn hover_col(pal: &Pal, hovered: bool) -> [f32; 4] {
+    if hovered { pal.glass_hover } else { pal.glass }
+}
+
+pub(super) fn push_panel(
+    elements: &mut Vec<MenuElement>,
+    r: [f32; 4],
+    radius: f32,
+    color: [f32; 4],
+) {
+    elements.push(MenuElement::Rect {
+        x: r[0],
+        y: r[1],
+        w: r[2],
+        h: r[3],
+        corner_radius: radius,
+        color,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn button(
+    elements: &mut Vec<MenuElement>,
+    any_hovered: &mut bool,
+    cursor: (f32, f32),
+    r: [f32; 4],
+    fs: f32,
+    label: &str,
+    radius: f32,
+    pal: &Pal,
+    accent_text: bool,
+) -> bool {
+    let hovered = common::hit_test(cursor, r);
+    *any_hovered |= hovered;
+    push_panel(elements, r, radius, hover_col(pal, hovered));
+    let color = if accent_text {
+        pal.accent
+    } else if hovered {
+        pal.bright
+    } else {
+        pal.text
+    };
+    elements.push(MenuElement::Text {
+        x: r[0] + r[2] / 2.0,
+        y: r[1] + (r[3] - fs) / 2.0,
+        text: label.into(),
+        scale: fs,
+        color,
+        centered: true,
+    });
+    hovered
+}
+
 pub(super) fn empty_result(blur: f32) -> MainMenuResult {
     MainMenuResult {
         elements: Vec::new(),

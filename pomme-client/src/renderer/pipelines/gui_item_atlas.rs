@@ -336,24 +336,6 @@ impl GuiItemAtlas {
         cmd.end_render_pass();
     }
 
-    pub fn clear_slot_color(&self, cmd: vk::CommandBuffer, slot: &Slot) {
-        let clear_attachment = vk::ClearAttachment {
-            aspect_mask: vk::ImageAspectFlags::Color,
-            color_attachment: 0,
-            clear_value: vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 0.0],
-                },
-            },
-        };
-        let clear_rect = vk::ClearRect {
-            rect: self.scissor_rect(slot),
-            base_array_layer: 0,
-            layer_count: 1,
-        };
-        cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
-    }
-
     pub fn color_view(&self) -> vk::ImageView {
         self.color_view
     }
@@ -563,7 +545,10 @@ fn create_render_pass(device: &vk::Device) -> vk::RenderPass {
         vk::AttachmentDescription {
             format: COLOR_FORMAT,
             samples: vk::SampleCountFlags::Type1,
-            load_op: vk::AttachmentLoadOp::Load,
+            // Clear (not Load): icons are re-baked every frame, so prior atlas
+            // contents are never relied on — sidesteps MoltenVK dropping
+            // LoadOp::Load / clear_attachments content.
+            load_op: vk::AttachmentLoadOp::Clear,
             store_op: vk::AttachmentStoreOp::Store,
             initial_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
             final_layout: vk::ImageLayout::ShaderReadOnlyOptimal,

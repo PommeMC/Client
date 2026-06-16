@@ -6,15 +6,6 @@ use super::*;
 
 const STUB_NOTICE: &str = "Plugin runtime not yet implemented \u{2014} coming soon";
 
-struct Pal {
-    glass: [f32; 4],
-    glass_hover: [f32; 4],
-    accent: [f32; 4],
-    text: [f32; 4],
-    bright: [f32; 4],
-    dim: [f32; 4],
-}
-
 impl MainMenu {
     pub(super) fn scan_plugins(&mut self) {
         let prev = self
@@ -102,6 +93,16 @@ impl MainMenu {
         }
     }
 
+    fn delete_editor_file(&mut self, path: &Path) {
+        match std::fs::remove_file(path) {
+            Ok(()) => {
+                self.scan_plugins();
+                self.editor_status = format!("Deleted {}", file_name(path));
+            }
+            Err(e) => self.editor_status = format!("Delete failed: {e}"),
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn build_editor(
         &mut self,
@@ -111,18 +112,15 @@ impl MainMenu {
         text_width_fn: &dyn Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
         if input.escape {
-            self.set_screen(Screen::Main);
-            return helpers::empty_result(1.0);
+            if self.editor_pending_delete.is_some() {
+                self.editor_pending_delete = None;
+            } else {
+                self.set_screen(Screen::Main);
+                return helpers::empty_result(1.0);
+            }
         }
 
-        let pal = Pal {
-            glass: [0.07, 0.08, 0.16, 0.55],
-            glass_hover: [0.12, 0.14, 0.25, 0.75],
-            accent: [0.29, 0.87, 0.5, 1.0],
-            text: [0.89, 0.90, 0.96, 0.85],
-            bright: [0.94, 0.95, 0.98, 1.0],
-            dim: [0.53, 0.56, 0.69, 0.7],
-        };
+        let pal = Pal::dark();
 
         let cursor = input.cursor;
         let clicked = input.clicked;
@@ -385,6 +383,7 @@ impl MainMenu {
         let row_h = 17.0 * s;
         let list_top = new_rect[1] + new_rect[3] + 6.0 * s;
         let mut clicked_file: Option<usize> = None;
+        let mut delete_request: Option<PathBuf> = None;
         if self.editor_files.is_empty() {
             elements.push(MenuElement::Text {
                 x: sidebar_x + pad,
@@ -440,11 +439,34 @@ impl MainMenu {
                 },
                 centered: false,
             });
-            if clicked && hovered {
+
+            let trash_rect = [rect[0] + rect[2] - row_h, ry, row_h, row_h];
+            let trash_hover = common::hit_test(cursor, trash_rect);
+            any_hovered |= trash_hover;
+            if hovered || trash_hover {
+                elements.push(MenuElement::Icon {
+                    x: trash_rect[0] + row_h / 2.0,
+                    y: ry + row_h / 2.0,
+                    icon: ICON_TRASH,
+                    scale: 8.0 * s,
+                    color: if trash_hover {
+                        [0.95, 0.45, 0.45, 1.0]
+                    } else {
+                        pal.dim
+                    },
+                });
+            }
+
+            if clicked && trash_hover {
+                delete_request = Some(path.clone());
+            } else if clicked && hovered {
                 clicked_file = Some(i);
             }
         }
-        if let Some(i) = clicked_file {
+        if let Some(path) = delete_request {
+            any_clicked = true;
+            self.editor_pending_delete = Some(path);
+        } else if let Some(i) = clicked_file {
             any_clicked = true;
             self.load_editor_file(i);
         }
@@ -555,19 +577,66 @@ impl MainMenu {
             6.0 * s,
             [0.05, 0.055, 0.11, 0.92],
         );
-        let status = if self.editor_status.is_empty() {
-            "Ready"
+        if let Some(path) = self.editor_pending_delete.clone() {
+            elements.push(MenuElement::Text {
+                x: x0 + pad,
+                y: console_y + (console_h - ui_fs) / 2.0,
+                text: format!("Delete {}?", file_name(&path)),
+                scale: ui_fs,
+                color: [0.95, 0.6, 0.6, 1.0],
+                centered: false,
+            });
+            let cb_w = 56.0 * s;
+            let cb_gap = 5.0 * s;
+            let cb_h = console_h - 6.0 * s;
+            let cb_y = console_y + 3.0 * s;
+            let del_rect = [x1 - pad - cb_w, cb_y, cb_w, cb_h];
+            let cancel_rect = [del_rect[0] - cb_gap - cb_w, cb_y, cb_w, cb_h];
+            let del_hover = button(
+                &mut elements,
+                &mut any_hovered,
+                cursor,
+                del_rect,
+                ui_fs,
+                "Delete",
+                5.0 * s,
+                &pal,
+                true,
+            );
+            let cancel_hover = button(
+                &mut elements,
+                &mut any_hovered,
+                cursor,
+                cancel_rect,
+                ui_fs,
+                "Cancel",
+                5.0 * s,
+                &pal,
+                false,
+            );
+            if clicked && del_hover {
+                any_clicked = true;
+                self.delete_editor_file(&path);
+                self.editor_pending_delete = None;
+            } else if clicked && cancel_hover {
+                any_clicked = true;
+                self.editor_pending_delete = None;
+            }
         } else {
-            &self.editor_status
-        };
-        elements.push(MenuElement::Text {
-            x: x0 + pad,
-            y: console_y + (console_h - ui_fs) / 2.0,
-            text: format!("\u{203a} {status}"),
-            scale: ui_fs,
-            color: pal.dim,
-            centered: false,
-        });
+            let status = if self.editor_status.is_empty() {
+                "Ready"
+            } else {
+                &self.editor_status
+            };
+            elements.push(MenuElement::Text {
+                x: x0 + pad,
+                y: console_y + (console_h - ui_fs) / 2.0,
+                text: format!("\u{203a} {status}"),
+                scale: ui_fs,
+                color: pal.dim,
+                centered: false,
+            });
+        }
 
         MainMenuResult {
             elements,
@@ -577,54 +646,6 @@ impl MainMenu {
             clicked_button: any_clicked,
         }
     }
-}
-
-fn hover_col(pal: &Pal, hovered: bool) -> [f32; 4] {
-    if hovered { pal.glass_hover } else { pal.glass }
-}
-
-fn push_panel(elements: &mut Vec<MenuElement>, r: [f32; 4], radius: f32, color: [f32; 4]) {
-    elements.push(MenuElement::Rect {
-        x: r[0],
-        y: r[1],
-        w: r[2],
-        h: r[3],
-        corner_radius: radius,
-        color,
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn button(
-    elements: &mut Vec<MenuElement>,
-    any_hovered: &mut bool,
-    cursor: (f32, f32),
-    r: [f32; 4],
-    fs: f32,
-    label: &str,
-    radius: f32,
-    pal: &Pal,
-    accent_text: bool,
-) -> bool {
-    let hovered = common::hit_test(cursor, r);
-    *any_hovered |= hovered;
-    push_panel(elements, r, radius, hover_col(pal, hovered));
-    let color = if accent_text {
-        pal.accent
-    } else if hovered {
-        pal.bright
-    } else {
-        pal.text
-    };
-    elements.push(MenuElement::Text {
-        x: r[0] + r[2] / 2.0,
-        y: r[1] + (r[3] - fs) / 2.0,
-        text: label.into(),
-        scale: fs,
-        color,
-        centered: true,
-    });
-    hovered
 }
 
 fn file_name(p: &Path) -> String {

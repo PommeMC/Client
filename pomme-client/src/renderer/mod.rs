@@ -98,6 +98,10 @@ pub struct RenderTimings {
     pub present_ms: f32,
 }
 
+/// One of a block's textures for the texture editor: (face label, texture key,
+/// atlas UV region `[u0, v0, u1, v1]`).
+pub type BlockTextureRef = (String, String, [f32; 4]);
+
 pub struct Renderer {
     ctx: VulkanContext,
     swapchain: Swapchain,
@@ -201,6 +205,7 @@ impl Renderer {
             &texture_names,
             None,
         )?;
+        menu_pipeline.set_block_atlas(&ctx.device, atlas.view, atlas.sampler);
 
         splash(&mut menu_pipeline, 0.5, "Creating pipelines...");
 
@@ -530,7 +535,7 @@ impl Renderer {
         cmd.set_scissor(0, &[scissor]);
 
         let empty_uvs: HashMap<String, [f32; 4]> = HashMap::new();
-        menu.draw(cmd, sw, sh, &elements, &empty_uvs);
+        menu.draw(0, cmd, sw, sh, &elements, &empty_uvs);
 
         cmd.end_render_pass();
         cmd.end()?;
@@ -888,6 +893,19 @@ impl Renderer {
         )
     }
 
+    /// Labeled textures making up a block's appearance, with each one's UV
+    /// region in the block atlas, for the texture editor. Empty for non-blocks.
+    pub fn block_textures(&self, item_name: &str) -> Vec<BlockTextureRef> {
+        self.registry
+            .block_face_textures(item_name)
+            .into_iter()
+            .map(|(label, key)| {
+                let r = self.atlas.uv_map.get_region(&key);
+                (label, key, [r.u_min, r.v_min, r.u_max, r.v_max])
+            })
+            .collect()
+    }
+
     pub fn reload_assets(
         &mut self,
         game_dir: &Path,
@@ -927,6 +945,8 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.held_item_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        self.menu_pipeline
+            .set_block_atlas(&self.ctx.device, self.atlas.view, self.atlas.sampler);
 
         tracing::info!("Assets reloaded");
     }
@@ -1167,30 +1187,25 @@ impl Renderer {
             slot: pipelines::gui_item_atlas::Slot,
             name: String,
             is_block: bool,
-            needs_clear: bool,
         }
+        // Re-bake all visible icons every frame; the bake pass clears the whole
+        // atlas, so nothing carries over between frames.
         let mut bake_list: Vec<BakeJob> = Vec::new();
         for name in &unique_names {
             let discard = pipelines::gui_item_atlas::is_animated_item(name);
-            if let Some((slot, state)) = self.gui_item_atlas.get_or_allocate(name, discard) {
+            if let Some((slot, _state)) = self.gui_item_atlas.get_or_allocate(name, discard) {
                 item_atlas_uvs.insert(name.clone(), self.gui_item_atlas.slot_uv(&slot));
-                if !matches!(state, pipelines::gui_item_atlas::SlotState::Ready) {
-                    bake_list.push(BakeJob {
-                        slot,
-                        name: name.clone(),
-                        is_block: self.registry.get_item_model(name).is_some(),
-                        needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
-                    });
-                }
+                bake_list.push(BakeJob {
+                    slot,
+                    name: name.clone(),
+                    is_block: self.registry.get_item_model(name).is_some(),
+                });
             }
         }
         if !bake_list.is_empty() {
             self.gui_item_atlas.begin_bake_pass(cmd);
             self.gui_item_pipeline.bind_for_bake_pass(cmd);
             for job in &bake_list {
-                if job.needs_clear {
-                    self.gui_item_atlas.clear_slot_color(cmd, &job.slot);
-                }
                 cmd.set_scissor(0, &[self.gui_item_atlas.scissor_rect(&job.slot)]);
                 let (sx, sy) = self.gui_item_atlas.slot_origin_pixels(&job.slot);
                 self.gui_item_pipeline.bake_to_slot(
@@ -1342,7 +1357,7 @@ impl Renderer {
                 }
 
                 self.menu_pipeline
-                    .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+                    .draw(frame, cmd, sw, sh, overlay, &item_atlas_uvs);
 
                 if let Some(p) = player_preview {
                     let x0 = p.rect[0].max(0.0) as i32;
@@ -1430,7 +1445,7 @@ impl Renderer {
                 }
 
                 self.menu_pipeline
-                    .draw(cmd, sw, sh, elements, &item_atlas_uvs);
+                    .draw(frame, cmd, sw, sh, elements, &item_atlas_uvs);
             }
         }
 

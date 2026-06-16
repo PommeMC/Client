@@ -137,6 +137,64 @@ impl BlockRegistry {
         self.textures.get(block.id())
     }
 
+    /// Labeled, key-deduped textures making up a block's appearance, keyed by
+    /// block id (== item name for blocks). Empty for non-block items.
+    pub fn block_face_textures(&self, name: &str) -> Vec<(String, String)> {
+        if let Some(ft) = self.textures.get(name) {
+            let faces: [(&str, &str); 6] = [
+                ("Top", &ft.top),
+                ("Bottom", &ft.bottom),
+                ("North", &ft.north),
+                ("South", &ft.south),
+                ("East", &ft.east),
+                ("West", &ft.west),
+            ];
+            let mut order: Vec<&str> = Vec::new();
+            let mut groups: HashMap<&str, Vec<&str>> = HashMap::new();
+            for (label, key) in faces {
+                let entry = groups.entry(key).or_default();
+                if entry.is_empty() {
+                    order.push(key);
+                }
+                entry.push(label);
+            }
+            let mut out: Vec<(String, String)> = order
+                .into_iter()
+                .map(|key| {
+                    let labels = &groups[key];
+                    let label = if labels.len() == 6 {
+                        "All faces".to_string()
+                    } else if labels.len() == 4
+                        && !labels.contains(&"Top")
+                        && !labels.contains(&"Bottom")
+                    {
+                        "Sides".to_string()
+                    } else {
+                        labels.join("/")
+                    };
+                    (label, key.to_string())
+                })
+                .collect();
+            if let Some(overlay) = &ft.side_overlay {
+                out.push(("Overlay".to_string(), overlay.clone()));
+            }
+            out
+        } else if let Some(variants) = self.baked.get(name) {
+            let mut seen = std::collections::HashSet::new();
+            let mut out = Vec::new();
+            for model in variants.values() {
+                for quad in &model.quads {
+                    if seen.insert(quad.texture.as_str()) {
+                        out.push((format!("Texture {}", out.len() + 1), quad.texture.clone()));
+                    }
+                }
+            }
+            out
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn get_baked_model(&self, state: BlockState) -> Option<&BakedModel> {
         let block: Box<dyn azalea_block::BlockTrait> = state.into();
         let variants = self.baked.get(block.id())?;

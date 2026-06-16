@@ -7,7 +7,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::{shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 use crate::ui::font::GlyphMap;
 use crate::ui::text::TextSpan;
 
@@ -24,6 +24,8 @@ pub const ICON_GLOBE: char = '\u{f0ac}';
 pub const ICON_COMMENT: char = '\u{f075}';
 pub const ICON_CODE: char = '\u{f121}';
 pub const ICON_CHECK: char = '\u{f00c}';
+pub const ICON_TRASH: char = '\u{f1f8}';
+pub const ICON_CUBES: char = '\u{f1b3}';
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -38,6 +40,8 @@ struct Vertex {
 
 const MAX_VERTICES: usize = 16384;
 const VERTEX_SIZE: usize = size_of::<Vertex>();
+/// Per-in-flight-frame slice of the vertex buffer.
+const VERTEX_REGION_BYTES: usize = MAX_VERTICES * VERTEX_SIZE;
 
 struct DrawOp {
     start: u32,
@@ -81,6 +85,8 @@ fn build_font_atlas() -> FontAtlas {
         ICON_COMMENT,
         ICON_CODE,
         ICON_CHECK,
+        ICON_TRASH,
+        ICON_CUBES,
     ]
     .iter()
     .map(|&ch| (ch, &icon_font))
@@ -236,6 +242,13 @@ impl MenuOverlayPipeline {
                 stage_flags: vk::ShaderStageFlags::Fragment,
                 ..Default::default()
             },
+            vk::DescriptorSetLayoutBinding {
+                binding: 6,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::Fragment,
+                ..Default::default()
+            },
         ];
         let tex_layout_info = vk::DescriptorSetLayoutCreateInfo {
             binding_count: tex_bindings.len() as u32,
@@ -265,7 +278,7 @@ impl MenuOverlayPipeline {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 6,
+                descriptor_count: 7,
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
@@ -517,13 +530,23 @@ impl MenuOverlayPipeline {
                 image_info: &favicon_img_info,
                 ..Default::default()
             },
+            vk::WriteDescriptorSet {
+                dst_set: tex_set,
+                dst_binding: 6,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: &item_img_info,
+                ..Default::default()
+            },
         ];
         device.update_descriptor_sets(&writes, &[]);
 
+        // One region per in-flight frame so a frame being recorded never
+        // overwrites vertices another in-flight frame is still reading.
         let (vertex_buffer, vertex_allocation) = util::create_host_buffer(
             device,
             allocator,
-            (MAX_VERTICES * VERTEX_SIZE) as u64,
+            (VERTEX_REGION_BYTES * MAX_FRAMES_IN_FLIGHT) as u64,
             vk::BufferUsageFlags::VertexBuffer,
             "menu_vertices",
         );
@@ -573,6 +596,7 @@ impl MenuOverlayPipeline {
 
     pub fn draw(
         &mut self,
+        frame: usize,
         cmd: vk::CommandBuffer,
         screen_w: f32,
         screen_h: f32,
@@ -871,6 +895,30 @@ impl MenuOverlayPipeline {
                         );
                     }
                 }
+                MenuElement::AtlasTexture {
+                    x,
+                    y,
+                    w,
+                    h,
+                    region,
+                    tint,
+                } => {
+                    push_quad(
+                        &mut vertices,
+                        *x,
+                        *y,
+                        *w,
+                        *h,
+                        region[0],
+                        region[1],
+                        region[2],
+                        region[3],
+                        *tint,
+                        7.0,
+                        [*w, *h],
+                        0.0,
+                    );
+                }
                 _ => {}
             }
         }
@@ -1051,6 +1099,7 @@ impl MenuOverlayPipeline {
             return;
         }
 
+        let region_offset = frame * VERTEX_REGION_BYTES;
         if !vertices.is_empty() {
             let count = vertices.len().min(MAX_VERTICES);
             let byte_data = bytemuck::cast_slice(&vertices[..count]);
@@ -1058,7 +1107,7 @@ impl MenuOverlayPipeline {
                 .as_mut()
                 .unwrap()
                 .mapped_slice_mut()
-                .unwrap()[..byte_data.len()]
+                .unwrap()[region_offset..region_offset + byte_data.len()]
                 .copy_from_slice(byte_data);
         }
 
@@ -1079,7 +1128,7 @@ impl MenuOverlayPipeline {
                 &[self.globals_set, self.tex_set],
                 &[],
             );
-            cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+            cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[region_offset as u64]);
         }
         for op in &draw_ops {
             let rect = if let Some(s) = op.scissor {
@@ -1111,6 +1160,23 @@ impl MenuOverlayPipeline {
         let write = vk::WriteDescriptorSet {
             dst_set: self.tex_set,
             dst_binding: 2,
+            descriptor_count: 1,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            image_info: &info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
+    }
+
+    pub fn set_block_atlas(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
+        let info = vk::DescriptorImageInfo {
+            sampler,
+            image_view: view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: self.tex_set,
+            dst_binding: 6,
             descriptor_count: 1,
             descriptor_type: vk::DescriptorType::CombinedImageSampler,
             image_info: &info,
@@ -1451,6 +1517,15 @@ pub enum MenuElement {
         y: f32,
         size: f32,
         address: String,
+    },
+    /// A texture drawn straight from the block atlas, by its UV region.
+    AtlasTexture {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        region: [f32; 4],
+        tint: [f32; 4],
     },
 }
 
