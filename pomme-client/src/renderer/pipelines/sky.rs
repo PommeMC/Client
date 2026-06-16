@@ -166,6 +166,21 @@ impl SkyState {
         )
     }
 
+    /// Cloud tint (rgba): vanilla base is white at 0.8 alpha, darkened toward
+    /// night and blended to grey under rain/thunder. The day/night curve reuses
+    /// the sky-colour keyframes (1.0 by day, 0.0 at midnight) with a floor so
+    /// clouds stay faintly lit at night.
+    pub fn cloud_color(&self) -> [f32; 4] {
+        let day = sample_rgb_keyframes(self.day_tick(), SKY_COLOR_KEYFRAMES, TICKS_PER_DAY)[0];
+        let brightness = 0.1 + 0.9 * day;
+        let rgb = self.apply_weather(
+            [brightness, brightness, brightness],
+            |c| blend_to_gray(c, 0.24, 0.5),
+            |c| blend_to_gray(c, 0.095, 0.94),
+        );
+        [rgb[0], rgb[1], rgb[2], 0.8]
+    }
+
     fn day_color(&self, keyframes: &[(f32, [f32; 3])]) -> [f32; 3] {
         let mult = sample_rgb_keyframes(self.day_tick(), keyframes, TICKS_PER_DAY);
         [

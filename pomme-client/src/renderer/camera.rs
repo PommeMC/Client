@@ -33,6 +33,50 @@ impl CameraMode {
     }
 }
 
+/// Cloud graphics setting, mirroring vanilla's `CloudStatus` plus an off state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CloudMode {
+    Off,
+    Fast,
+    #[default]
+    Fancy,
+}
+
+impl CloudMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Fast,
+            Self::Fast => Self::Fancy,
+            Self::Fancy => Self::Off,
+        }
+    }
+
+    /// Short label for the video-options row (the menu prefixes "Clouds: ").
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "OFF",
+            Self::Fast => "Fast",
+            Self::Fancy => "Fancy",
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Fast => 1,
+            Self::Fancy => 2,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Off,
+            1 => Self::Fast,
+            _ => Self::Fancy,
+        }
+    }
+}
+
 pub struct Camera {
     pub position: Position,
     pub look_dir: LookDirection,

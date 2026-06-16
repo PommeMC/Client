@@ -76,13 +76,14 @@ impl MainMenu {
         } else {
             format!("GUI Scale: {}", self.gui_scale_setting)
         };
+        let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
         let rows: Vec<[&str; 2]> = vec![
             [&rd, &sd],
             ["Graphics: Fancy", "Smooth Lighting: ON"],
             [&mf, "VSync: OFF"],
             ["View Bobbing: ON", &gui_label],
             ["Attack Indicator: Crosshair", "Brightness: 50%"],
-            ["Clouds: Fancy", fullscreen_label],
+            [&clouds_label, fullscreen_label],
             ["Particles: All", "Mipmap Levels: 4"],
         ];
         let rd_frac = (self.render_distance as f32 - 2.0) / 30.0;
@@ -596,6 +597,10 @@ impl MainMenu {
                     }
                     if label.starts_with("Fullscreen:") {
                         self.display_mode = self.display_mode.cycle();
+                    }
+                    if label.starts_with("Clouds:") {
+                        self.cloud_mode = self.cloud_mode.cycle();
+                        self.save_settings();
                     }
                     if label.starts_with("Show Online Status:") {
                         self.show_online_status = !self.show_online_status;

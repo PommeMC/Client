@@ -318,6 +318,11 @@ impl ApplicationHandler for App {
                                         {
                                             game.show_chunk_borders = !game.show_chunk_borders;
                                         }
+                                        KeyCode::KeyC
+                                            if self.core.input.key_pressed(KeyCode::F3) =>
+                                        {
+                                            self.core.menu.cycle_cloud_mode();
+                                        }
                                         _ => {}
                                     }
                                 }

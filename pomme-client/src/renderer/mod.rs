@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use azalea_block::BlockState;
 use azalea_core::position::{BlockPos, ChunkPos};
+pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
 use chunk::atlas::TextureAtlas;
 use chunk::buffer::ChunkBufferStore;
@@ -27,6 +28,7 @@ pub use pipelines::block_entity::BlockEntityRenderInfo;
 use pipelines::block_overlay::BlockOverlayPipeline;
 use pipelines::blur::BlurPipeline;
 use pipelines::chunk::ChunkPipeline;
+use pipelines::clouds::CloudPipeline;
 use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
 use pipelines::hand::HandPipeline;
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
@@ -76,6 +78,7 @@ enum RenderMode<'a> {
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: &'a [BlockEntityRenderInfo],
         weather: &'a [WeatherColumn],
+        cloud_mode: CloudMode,
         render_distance: u32,
         player_preview: Option<PlayerPreview>,
     },
@@ -119,6 +122,7 @@ pub struct Renderer {
     item_entity_pipeline: ItemEntityPipeline,
     held_item_pipeline: pipelines::held_item::HeldItemPipeline,
     weather_pipeline: WeatherPipeline,
+    cloud_pipeline: CloudPipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
 
@@ -247,6 +251,14 @@ impl Renderer {
             &ctx.device,
             ctx.graphics_queue,
             ctx.command_pool,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            jar_assets_dir,
+            asset_index,
+        );
+
+        let cloud_pipeline = CloudPipeline::new(
+            &ctx.device,
             swapchain_state.render_pass,
             &ctx.allocator,
             jar_assets_dir,
@@ -396,6 +408,7 @@ impl Renderer {
             item_entity_pipeline,
             held_item_pipeline,
             weather_pipeline,
+            cloud_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
             chunk_buffers,
@@ -618,6 +631,8 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.weather_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.cloud_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.blur_pipeline.resize(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -832,6 +847,7 @@ impl Renderer {
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: &[BlockEntityRenderInfo],
         weather: &[WeatherColumn],
+        cloud_mode: CloudMode,
         render_distance: u32,
         player_preview: Option<PlayerPreview>,
     ) -> Result<(), RendererError> {
@@ -859,6 +875,7 @@ impl Renderer {
                 item_entities,
                 block_entities,
                 weather,
+                cloud_mode,
                 render_distance,
                 player_preview,
             },
@@ -1080,6 +1097,7 @@ impl Renderer {
             self.chunk_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
             self.weather_pipeline.update_camera(frame, &uniform);
+            self.cloud_pipeline.update_camera(frame, &uniform);
         }
 
         if hide_cursor {
@@ -1267,6 +1285,7 @@ impl Renderer {
                 item_entities,
                 block_entities,
                 weather,
+                cloud_mode,
                 render_distance: _,
                 player_preview,
             } => {
@@ -1294,6 +1313,11 @@ impl Renderer {
                 self.block_entity_pipeline.draw(cmd, frame, block_entities);
 
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
+
+                // Clouds draw after opaque world geometry (so terrain occludes
+                // them) and before weather, depth-tested against the scene.
+                self.cloud_pipeline
+                    .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
 
                 // Weather draws after opaque world geometry (depth-tested against
                 // terrain) but before the depth clear for the hand pass.
@@ -1630,6 +1654,8 @@ impl Drop for Renderer {
         self.held_item_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.weather_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.cloud_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.gui_item_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);

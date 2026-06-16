@@ -54,6 +54,8 @@ fn main() {
         ("item_entity.frag", shaderc::ShaderKind::Fragment),
         ("weather.vert", shaderc::ShaderKind::Vertex),
         ("weather.frag", shaderc::ShaderKind::Fragment),
+        ("clouds.vert", shaderc::ShaderKind::Vertex),
+        ("clouds.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (file, kind) in &shaders {

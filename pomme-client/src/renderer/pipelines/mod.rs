@@ -3,6 +3,7 @@ pub mod block_overlay;
 pub mod blur;
 pub mod chunk;
 pub mod chunk_borders;
+pub mod clouds;
 pub mod entity_renderer;
 pub mod gui_item;
 pub mod gui_item_atlas;
