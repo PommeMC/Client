@@ -178,14 +178,14 @@ impl MainMenu {
                 let hovered = common::hit_test(cursor, rect);
                 any_hovered |= hovered;
                 let selected = self.tex_selected == Some(kind);
-                if hovered || selected {
-                    push_panel(
-                        &mut elements,
-                        rect,
-                        4.0 * s,
-                        if selected { pal.glass_hover } else { pal.glass },
-                    );
-                }
+                let cell_col = if selected {
+                    pal.glass_hover
+                } else if hovered {
+                    pal.glass
+                } else {
+                    [1.0, 1.0, 1.0, 0.04]
+                };
+                push_panel(&mut elements, rect, 4.0 * s, cell_col);
                 elements.push(MenuElement::ItemIcon {
                     x: cx,
                     y: cy,
