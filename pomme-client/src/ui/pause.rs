@@ -13,6 +13,7 @@ pub enum PauseAction {
     Disconnect,
     Options,
     Benchmark,
+    Editor,
 }
 
 pub fn build_pause_menu(
@@ -96,7 +97,7 @@ pub fn build_pause_menu(
         false,
     );
 
-    common::push_button(
+    if common::push_button(
         elements,
         cursor,
         col1_x,
@@ -105,9 +106,12 @@ pub fn build_pause_menu(
         btn_h,
         gs,
         fs,
-        "Give Feedback",
-        false,
-    );
+        "Code Editor",
+        true,
+    ) && clicked
+    {
+        action = PauseAction::Editor;
+    }
     common::push_button(
         elements,
         cursor,

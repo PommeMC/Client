@@ -1,3 +1,4 @@
+mod editor;
 mod helpers;
 mod main_screen;
 mod options;
@@ -179,6 +180,13 @@ pub struct MenuInput {
     pub copy: bool,
     pub cut: bool,
     pub undo: bool,
+    pub caret_left: bool,
+    pub caret_right: bool,
+    pub caret_up: bool,
+    pub caret_down: bool,
+    pub caret_home: bool,
+    pub caret_end: bool,
+    pub save: bool,
     pub scroll_delta: f32,
 }
 
@@ -224,12 +232,14 @@ enum Screen {
     OptionsAccessibility,
     OptionsTelemetry,
     OptionsCredits,
+    Editor,
 }
 
 impl Screen {
     fn clone_screen(&self) -> Self {
         match self {
             Self::Main => Self::Main,
+            Self::Editor => Self::Editor,
             Self::Options => Self::Options,
             Self::OptionsOnline => Self::OptionsOnline,
             Self::OptionsVideo => Self::OptionsVideo,
@@ -314,6 +324,14 @@ pub struct MainMenu {
     pub rescan_packs: bool,
     pub reload_assets: bool,
     pack_search: String,
+    plugins_dir: PathBuf,
+    editor_files: Vec<PathBuf>,
+    editor_selected: Option<usize>,
+    editor_buffer: String,
+    editor_caret: usize,
+    editor_scroll: f32,
+    editor_dirty: bool,
+    editor_status: String,
 }
 
 impl MainMenu {
@@ -383,6 +401,14 @@ impl MainMenu {
             rescan_packs: false,
             reload_assets: false,
             pack_search: String::new(),
+            plugins_dir: game_dir.join("plugins"),
+            editor_files: Vec::new(),
+            editor_selected: None,
+            editor_buffer: String::new(),
+            editor_caret: 0,
+            editor_scroll: 0.0,
+            editor_dirty: false,
+            editor_status: String::new(),
         }
     }
 
@@ -448,6 +474,15 @@ impl MainMenu {
 
     pub fn open_options(&mut self) {
         self.set_screen(Screen::Options);
+    }
+
+    pub fn open_editor(&mut self) {
+        self.set_screen(Screen::Editor);
+        self.scan_plugins();
+    }
+
+    pub fn is_editor_screen(&self) -> bool {
+        matches!(self.screen, Screen::Editor)
     }
 
     pub fn is_options_screen(&self) -> bool {
@@ -596,6 +631,7 @@ impl MainMenu {
                 "Credits & Attribution",
                 Screen::Options,
             ),
+            Screen::Editor => self.build_editor(screen_w, screen_h, input, &text_width_fn),
         }
     }
 

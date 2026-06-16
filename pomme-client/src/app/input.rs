@@ -44,6 +44,13 @@ pub struct InputState {
     copy_pressed: bool,
     cut_pressed: bool,
     undo_pressed: bool,
+    caret_left_pressed: bool,
+    caret_right_pressed: bool,
+    caret_up_pressed: bool,
+    caret_down_pressed: bool,
+    caret_home_pressed: bool,
+    caret_end_pressed: bool,
+    save_pressed: bool,
     controller_manager: Option<Gilrs>,
     active_gamepad_id: Option<GamepadId>,
     recent_actions: HashMap<Action, bool>,
@@ -99,6 +106,13 @@ impl InputState {
             copy_pressed: false,
             cut_pressed: false,
             undo_pressed: false,
+            caret_left_pressed: false,
+            caret_right_pressed: false,
+            caret_up_pressed: false,
+            caret_down_pressed: false,
+            caret_home_pressed: false,
+            caret_end_pressed: false,
+            save_pressed: false,
             controller_manager,
             active_gamepad_id: None,
             recent_actions: HashMap::new(),
@@ -359,6 +373,12 @@ impl InputState {
                 KeyCode::Escape => self.escape_pressed = true,
                 KeyCode::Tab => self.tab_pressed = true,
                 KeyCode::F5 => self.f5_pressed = true,
+                KeyCode::ArrowLeft => self.caret_left_pressed = true,
+                KeyCode::ArrowRight => self.caret_right_pressed = true,
+                KeyCode::ArrowUp => self.caret_up_pressed = true,
+                KeyCode::ArrowDown => self.caret_down_pressed = true,
+                KeyCode::Home => self.caret_home_pressed = true,
+                KeyCode::End => self.caret_end_pressed = true,
                 KeyCode::KeyV if self.modifiers.state().control_key() => {
                     if let Ok(mut cb) = arboard::Clipboard::new()
                         && let Ok(text) = cb.get_text()
@@ -385,6 +405,10 @@ impl InputState {
                 }
                 KeyCode::KeyZ if self.modifiers.state().control_key() => {
                     self.undo_pressed = true;
+                    return;
+                }
+                KeyCode::KeyS if self.modifiers.state().control_key() => {
+                    self.save_pressed = true;
                     return;
                 }
                 _ => {}
@@ -452,6 +476,34 @@ impl InputState {
 
     pub fn undo_pressed(&mut self) -> bool {
         std::mem::take(&mut self.undo_pressed)
+    }
+
+    pub fn caret_left_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.caret_left_pressed)
+    }
+
+    pub fn caret_right_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.caret_right_pressed)
+    }
+
+    pub fn caret_up_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.caret_up_pressed)
+    }
+
+    pub fn caret_down_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.caret_down_pressed)
+    }
+
+    pub fn caret_home_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.caret_home_pressed)
+    }
+
+    pub fn caret_end_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.caret_end_pressed)
+    }
+
+    pub fn save_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.save_pressed)
     }
 
     pub fn selected_slot(&self) -> u8 {

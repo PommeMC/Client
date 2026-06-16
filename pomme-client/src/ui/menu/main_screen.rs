@@ -242,9 +242,10 @@ impl MainMenu {
         let icon_scale = 13.0 * s;
         let drop_style = DropdownStyle::new(gs);
 
-        let bottom_icons: [(f32, char); 4] = [
+        let bottom_icons: [(f32, char); 5] = [
             (btn_x, ICON_USER),
             (btn_x + icon_size + icon_gap, ICON_LINK),
+            (btn_x + (icon_size + icon_gap) * 2.0, ICON_CODE),
             (btn_x + content_w - icon_size, ICON_GEAR),
             (
                 btn_x + content_w - icon_size * 2.0 - icon_gap,
@@ -288,6 +289,9 @@ impl MainMenu {
                     }
                     ICON_GEAR => {
                         self.open_options();
+                    }
+                    ICON_CODE => {
+                        self.open_editor();
                     }
                     ICON_PAINTBRUSH => {
                         self.theme_open = !self.theme_open;

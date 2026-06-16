@@ -749,6 +749,12 @@ pub fn update_game(
             game.paused = false;
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
+        PauseAction::Editor => {
+            core.menu.open_editor();
+            game.options_from_game = true;
+            game.paused = false;
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
         PauseAction::Disconnect => {
             return GameUpdateResult::ManualDisconnect;
         }
@@ -770,7 +776,7 @@ pub fn update_game(
         if core.menu.render_distance != game.last_render_distance {
             game.sync_render_distance(connection, core.menu.render_distance);
         }
-        if !core.menu.is_options_screen() {
+        if !core.menu.is_options_screen() && !core.menu.is_editor_screen() {
             game.options_from_game = false;
             game.paused = true;
             core.apply_cursor_grab(&gfx.window, Some(game));

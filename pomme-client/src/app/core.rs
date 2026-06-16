@@ -154,6 +154,13 @@ impl AppCore {
             copy: self.input.copy_pressed(),
             cut: self.input.cut_pressed(),
             undo: self.input.undo_pressed(),
+            caret_left: self.input.caret_left_pressed(),
+            caret_right: self.input.caret_right_pressed(),
+            caret_up: self.input.caret_up_pressed(),
+            caret_down: self.input.caret_down_pressed(),
+            caret_home: self.input.caret_home_pressed(),
+            caret_end: self.input.caret_end_pressed(),
+            save: self.input.save_pressed(),
             scroll_delta: self.input.consume_menu_scroll(),
         }
     }
