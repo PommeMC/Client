@@ -396,14 +396,15 @@ fn humanoid_parts(
     leg_cube_right: ModelCube,
     right_leg_x: f32,
 ) -> Vec<EntityPart> {
-    let arm_cube_left = ModelCube {
+    // Pomme's `mirror` flag only flips UVs, so mirror the geometry origin across
+    // x=0 too (vanilla `.mirror()` does both, e.g. arm origin -3 -> -1).
+    let mirror_x = |c: ModelCube| ModelCube {
+        origin: Vec3::new(-(c.origin.x + c.size.x), c.origin.y, c.origin.z),
         mirror: true,
-        ..arm_cube_right
+        ..c
     };
-    let leg_cube_left = ModelCube {
-        mirror: true,
-        ..leg_cube_right
-    };
+    let arm_cube_left = mirror_x(arm_cube_right);
+    let leg_cube_left = mirror_x(leg_cube_right);
     vec![
         EntityPart {
             name: "head".into(),
@@ -1212,6 +1213,8 @@ fn bob_arm(age_in_ticks: f32, side: f32) -> (f32, f32) {
 /// Zombie: humanoid head/body/legs, but arms held out forward (the classic
 /// zombie pose) and raised higher when aggressive, plus the
 /// `AnimationUtils.animateZombieArms` attack swing driven by `attack_time`.
+// TODO: hardcodes vanilla's `raiseArms = true` path; a baby zombie holding an item
+// needs the `raiseArms = false` path. Implement once held items are rendered.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_zombie_anim(
     model: &BakedEntityModel,
@@ -1257,6 +1260,9 @@ pub fn compute_zombie_anim(
 /// vanilla `HumanoidModel` `BOW_AND_ARROW` aim pose tracking the head (no held
 /// bow item is rendered). `age_in_ticks` is currently unused but kept for
 /// parity with the other humanoid anims.
+// TODO: aim pose is hardcoded right-handed and gated on `aggressive` alone;
+// vanilla keys it off the main arm and a held bow. Implement once held items
+// are rendered.
 pub fn compute_skeleton_anim(
     model: &BakedEntityModel,
     head_x_rot_deg: f32,

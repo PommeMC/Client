@@ -192,7 +192,6 @@ pub struct LivingEntity {
     /// (driven by the server `Animate` packet). Drives the zombie attack
     /// swing.
     pub swing_time: u8,
-    pub prev_swing_time: u8,
     interp_target: Position,
     interp_look_dir: LookDirection,
     interp_steps: i32,
@@ -235,7 +234,6 @@ impl LivingEntity {
             aggressive: false,
             powered: false,
             swing_time: 0,
-            prev_swing_time: 0,
             interp_target: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
@@ -618,11 +616,12 @@ impl EntityStore {
         }
     }
 
-    /// Begins an arm swing (server `Animate` packet). Restarts only if not
-    /// already mid-swing, mirroring vanilla `LivingEntity.swing`.
+    /// Begins an arm swing (server `Animate` packet). Restarts when idle or
+    /// past the halfway point (vanilla `LivingEntity.swing`); `swing_time`
+    /// counts down, so that is `swing_time <= SWING_DURATION / 2`.
     pub fn start_swing(&mut self, id: i32) {
         if let Some(entity) = self.living.get_mut(&id)
-            && entity.swing_time == 0
+            && entity.swing_time <= SWING_DURATION / 2
         {
             entity.swing_time = SWING_DURATION;
         }
@@ -666,7 +665,6 @@ impl EntityStore {
             if entity.hurt_time > 0 {
                 entity.hurt_time -= 1;
             }
-            entity.prev_swing_time = entity.swing_time;
             if entity.swing_time > 0 {
                 entity.swing_time -= 1;
             }

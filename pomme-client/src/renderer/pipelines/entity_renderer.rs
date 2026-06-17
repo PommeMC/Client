@@ -1078,12 +1078,12 @@ pub(super) fn create_pipeline(
         ..Default::default()
     };
 
-    // Emissive overlays (eyes, swirl) blend over the opaque pass and must not write
-    // depth, or they'd occlude later geometry.
-    let depth_write = if blend == BlendMode::Opaque {
-        vk::TRUE
-    } else {
+    // Only the translucent eyes overlay skips depth-write (vanilla `EYES`); the
+    // opaque base and additive swirl write depth (vanilla `ENERGY_SWIRL`).
+    let depth_write = if blend == BlendMode::Translucent {
         vk::FALSE
+    } else {
+        vk::TRUE
     };
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
