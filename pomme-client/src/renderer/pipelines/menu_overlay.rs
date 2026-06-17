@@ -619,9 +619,10 @@ impl MenuOverlayPipeline {
         self.draw_from(cmd, screen_w, screen_h, elements, item_atlas_uvs, 0);
     }
 
-    /// Like [`draw`], but writes vertices starting at `vertex_base` in the shared
-    /// vertex buffer and returns the next free index, so it can be called more
-    /// than once per frame (e.g. a backdrop before the blur and a dialog after).
+    /// Like [`draw`], but writes vertices starting at `vertex_base` in the
+    /// shared vertex buffer and returns the next free index, so it can be
+    /// called more than once per frame (e.g. a backdrop before the blur and
+    /// a dialog after).
     pub fn draw_from(
         &mut self,
         cmd: vk::CommandBuffer,

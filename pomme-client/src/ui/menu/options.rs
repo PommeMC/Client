@@ -1,8 +1,8 @@
 use super::*;
 use crate::resource_pack::PackCompat;
 
-/// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or two
-/// 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
+/// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or
+/// two 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
 pub(super) enum OptRow<'a> {
     Header(&'a str),
     Big(&'a str),
@@ -29,7 +29,8 @@ impl MainMenu {
         } else {
             format!("FOV: {}", self.fov)
         };
-        // FOV slider + Online lead the grid, above the categories (vanilla header sub-row).
+        // FOV slider + Online lead the grid, above the categories (vanilla header
+        // sub-row).
         let rows: Vec<OptRow> = vec![
             OptRow::Pair(&fov_label, "Online..."),
             OptRow::Pair("Skin Customization...", "Music & Sounds..."),
@@ -107,7 +108,7 @@ impl MainMenu {
             OptRow::Pair(&mf, vsync_label),
             OptRow::Pair("Inactivity FPS Limit: 1 minute", &gui_label),
             OptRow::Pair(fullscreen_label, "Exclusive Fullscreen: OFF"),
-            OptRow::PairLeft("Brightness: 50%"),
+            OptRow::Pair("Brightness: 50%", "Graphics Backend: Default"),
             OptRow::Header("Quality"),
             OptRow::Big("Graphics: Fancy"),
             OptRow::Pair("Biome Blend: 5x5", &rd),
@@ -210,7 +211,10 @@ impl MainMenu {
         let rows: Vec<OptRow> = vec![
             OptRow::Pair("Narrator: OFF", "Show Subtitles: OFF"),
             OptRow::Pair("High Contrast: OFF", "Menu Background Blur: 50%"),
-            OptRow::Pair("Text Background Opacity: 50%", "Background for Chat Only: OFF"),
+            OptRow::Pair(
+                "Text Background Opacity: 50%",
+                "Background for Chat Only: OFF",
+            ),
             OptRow::Pair("Chat Text Opacity: 100%", "Line Spacing: 0%"),
             OptRow::Pair("Chat Delay: None", "Notification Time: 10.0s"),
             OptRow::Pair(self.view_bobbing_label(), "Distortion Effects: 100%"),
@@ -522,7 +526,8 @@ impl MainMenu {
         }
 
         let content_pad = if header_footer { 4.0 * gs } else { 0.0 };
-        // Vertical advance per row (vanilla OptionsList: 25px pitch; headers pad above).
+        // Vertical advance per row (vanilla OptionsList: 25px pitch; headers pad
+        // above).
         let header_pad_top = |i: usize| if i == 0 { 0.0 } else { 2.0 * lh };
         let row_advance = |i: usize, row: &OptRow| -> f32 {
             match row {

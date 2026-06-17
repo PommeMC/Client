@@ -1437,9 +1437,14 @@ impl Renderer {
                     .position(|e| matches!(e, MenuElement::BlurBackdrop));
                 let mut vbase = 0u32;
                 if let Some(i) = split {
-                    vbase = self
-                        .menu_pipeline
-                        .draw_from(cmd, sw, sh, &elements[..i], &item_atlas_uvs, 0);
+                    vbase = self.menu_pipeline.draw_from(
+                        cmd,
+                        sw,
+                        sh,
+                        &elements[..i],
+                        &item_atlas_uvs,
+                        0,
+                    );
                 }
 
                 if *blur > 0.01 {

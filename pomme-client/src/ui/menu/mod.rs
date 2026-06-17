@@ -532,14 +532,7 @@ impl MainMenu {
         self.add_friend_name.clear();
         self.pending_remove = None;
         *self.action_error.write() = None;
-        if let Some(token) = self.access_token.clone() {
-            friends::refresh_friends(
-                Arc::clone(&self.rt),
-                token,
-                &self.friends_data,
-                &self.face_cache,
-            );
-        }
+        self.refresh_friends_now();
     }
 
     pub fn is_options_screen(&self) -> bool {

@@ -71,6 +71,12 @@ impl Swapchain {
                 height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
             }
         };
+        // Guard against a degenerate (0,0) extent (e.g. a minimized window
+        // reporting current_extent = 0) so the aspect ratio stays finite.
+        let extent = vk::Extent2D {
+            width: extent.width.max(1),
+            height: extent.height.max(1),
+        };
 
         let image_count = (caps.min_image_count + 1).min(if caps.max_image_count == 0 {
             u32::MAX

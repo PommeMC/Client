@@ -4,7 +4,7 @@ use crate::ui::friends::{FriendAction, FriendLists, FriendStatus, FriendsState, 
 // Vanilla friends-list status colors: green for any online/playing state, gray
 // for offline (gui.friends.presence.status.* uses -16711936 / -6250336).
 const STATUS_ONLINE: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
-const STATUS_OFFLINE: [f32; 4] = [0.63, 0.63, 0.63, 1.0];
+const STATUS_OFFLINE: [f32; 4] = [0.627, 0.627, 0.627, 1.0]; // -6250336 (0xFFA0A0A0)
 const MSG_DIM: [f32; 4] = [0.667, 0.667, 0.667, 1.0]; // ChatFormatting.GRAY (0xAAAAAA)
 const TAB_DIM: [f32; 4] = [0.627, 0.627, 0.627, 1.0]; // -6250336 (0xFFA0A0A0)
 const ERR_COL: [f32; 4] = [0.88, 0.45, 0.45, 1.0];
@@ -70,15 +70,16 @@ impl MainMenu {
         // Click outside the panel closes (unless a popup is capturing input).
         if !popup_open
             && clicked
-            && !common::hit_test(cursor, [panel_x, tab_y, panel_w, (panel_y + panel_h) - tab_y])
+            && !common::hit_test(
+                cursor,
+                [panel_x, tab_y, panel_w, (panel_y + panel_h) - tab_y],
+            )
         {
             self.set_screen(Screen::Main);
             return empty_result(2.0);
         }
-        if input.f5
-            && let Some(token) = self.access_token.clone()
-        {
-            self.refresh_friends_now(token);
+        if input.f5 {
+            self.refresh_friends_now();
         }
 
         let state = self.friends_data.read().clone();
@@ -143,7 +144,15 @@ impl MainMenu {
             } else {
                 (SpriteId::FriendsTabDisabled, 1.0)
             };
-            nine_slice(&mut elements, *tx, tab_y, tab_w, tab_h, sprite, tab_border * gs);
+            nine_slice(
+                &mut elements,
+                *tx,
+                tab_y,
+                tab_w,
+                tab_h,
+                sprite,
+                tab_border * gs,
+            );
             elements.push(MenuElement::Text {
                 x: tx + tab_w / 2.0,
                 y: tab_y + (tab_h - fs) / 2.0,
@@ -393,10 +402,18 @@ impl MainMenu {
             color: WHITE,
             centered: false,
         });
-        // Vanilla: the profile name is a button that copies to clipboard (with tooltip).
+        // Vanilla: the profile name is a button that copies to clipboard (with
+        // tooltip).
         let name_w = text_width_fn(&self.username, fs);
         if common::hit_test(cursor, [name_x, profile_y, name_w, fs]) {
-            common::push_tooltip(elements, cursor, screen_w, screen_h, gs, "Copy to clipboard");
+            common::push_tooltip(
+                elements,
+                cursor,
+                screen_w,
+                screen_h,
+                gs,
+                "Copy to clipboard",
+            );
             if clicked {
                 super::servers::write_clipboard(&self.username);
             }
@@ -578,7 +595,16 @@ impl MainMenu {
 
         // Incoming: accept (left) + reject (right).
         if !lists.incoming.is_empty() {
-            push_section_header(elements, text_width_fn, content_x, content_w, y, fs, gs, "Received");
+            push_section_header(
+                elements,
+                text_width_fn,
+                content_x,
+                content_w,
+                y,
+                fs,
+                gs,
+                "Received",
+            );
             y += header_h;
             for req in &lists.incoming {
                 if visible(y) {
@@ -631,7 +657,16 @@ impl MainMenu {
         }
         // Outgoing: cancel (right).
         if !lists.outgoing.is_empty() {
-            push_section_header(elements, text_width_fn, content_x, content_w, y, fs, gs, "Sent");
+            push_section_header(
+                elements,
+                text_width_fn,
+                content_x,
+                content_w,
+                y,
+                fs,
+                gs,
+                "Sent",
+            );
             y += header_h;
             for req in &lists.outgoing {
                 if visible(y) {
@@ -699,13 +734,16 @@ impl MainMenu {
         }
     }
 
-    fn refresh_friends_now(&mut self, token: String) {
-        friends::refresh_friends(
-            std::sync::Arc::clone(&self.rt),
-            token,
-            &self.friends_data,
-            &self.face_cache,
-        );
+    /// Re-fetch the friends list + faces (no-op without a signed-in account).
+    pub(super) fn refresh_friends_now(&mut self) {
+        if let Some(token) = self.access_token.clone() {
+            friends::refresh_friends(
+                std::sync::Arc::clone(&self.rt),
+                token,
+                &self.friends_data,
+                &self.face_cache,
+            );
+        }
     }
 }
 
@@ -916,9 +954,9 @@ fn status_label(status: &FriendStatus) -> (&'static str, [f32; 4]) {
     }
 }
 
-/// Vanilla insets the input/profile rows and list entries 8px from the content's
-/// left edge (paddingLeft 8; getListContentWidth = w - 16), leaving the right
-/// margin for the scrollbar. Returns `(left x, usable width)`.
+/// Vanilla insets the input/profile rows and list entries 8px from the
+/// content's left edge (paddingLeft 8; getListContentWidth = w - 16), leaving
+/// the right margin for the scrollbar. Returns `(left x, usable width)`.
 fn content_inset(content_x: f32, content_w: f32, gs: f32) -> (f32, f32) {
     let inset = 8.0 * gs;
     (content_x + inset, content_w - inset * 2.0)
