@@ -2,7 +2,7 @@ pub mod interaction;
 pub mod inventory;
 pub mod tab_list;
 
-use glam::dvec3;
+use glam::{dvec2, dvec3};
 use inventory::Inventory;
 
 use crate::entity::components::{LookDirection, Position, Velocity};
@@ -127,13 +127,12 @@ impl LocalPlayer {
     /// mirroring vanilla `AbstractClientPlayer.updateBob` (caller skips this
     /// when dead).
     pub fn tick_bob(&mut self, dx: f64, dz: f64) {
-        let horizontal = ((dx * dx + dz * dz) as f32).sqrt();
         self.prev_walk_dist = self.walk_dist;
-        // Vanilla LocalPlayer.move: addWalkedDistance(len * 0.6) — the 0.6 sets the
-        // cadence.
-        self.walk_dist += horizontal * 0.6;
+        // Vanilla LocalPlayer.move: addWalkedDistance(len * 0.6).
+        self.walk_dist += dvec2(dx, dz).length() as f32 * 0.6;
+        // updateBob's target is horizontal speed, not the walk delta.
         let target = if self.on_ground && !self.swimming {
-            horizontal.min(0.1)
+            (dvec2(self.velocity.x, self.velocity.z).length() as f32).min(0.1)
         } else {
             0.0
         };
