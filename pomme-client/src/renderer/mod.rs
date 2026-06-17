@@ -162,6 +162,9 @@ impl Renderer {
             vsync,
             vk::SwapchainKHR::null(),
         )?;
+        // The swapchain may pick the surface's `current_extent` rather than the
+        // requested size; track that actual extent so layout matches rendering.
+        let swapchain_extent = swapchain_state.extent;
 
         let mut menu_pipeline = MenuOverlayPipeline::new(
             &ctx.device,
@@ -405,8 +408,8 @@ impl Renderer {
             render_finished_per_image,
             swapchain_dirty: false,
             vsync,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: swapchain_extent.width,
+            height: swapchain_extent.height,
             last_timings: RenderTimings::default(),
         })
     }
@@ -604,6 +607,14 @@ impl Renderer {
         )?;
         std::mem::swap(&mut self.swapchain, &mut old_swapchain);
         old_swapchain.destroy(&self.ctx.device, &self.ctx.allocator);
+
+        // Adopt the swapchain's actual extent (may differ from the requested
+        // window size, e.g. macOS fullscreen) so the viewport, menu layout, blur,
+        // and camera aspect all agree — otherwise the image stretches/letterboxes.
+        self.width = self.swapchain.extent.width;
+        self.height = self.swapchain.extent.height;
+        self.camera
+            .set_aspect_ratio(self.width as f32 / self.height as f32);
 
         self.chunk_pipeline = ChunkPipeline::new(
             &self.ctx.device,
@@ -1004,6 +1015,12 @@ impl Renderer {
             &self.ctx.allocator,
             favicons,
         );
+    }
+
+    /// Friend faces reuse the favicon atlas — they're never shown on the same
+    /// screen as server favicons, so they share one string-keyed RGBA atlas.
+    pub fn update_face_atlas(&mut self, faces: &[(String, Vec<u8>, u32)]) {
+        self.update_favicon_atlas(faces);
     }
 
     pub fn menu_text_width(&self, text: &str, scale: f32) -> f32 {
@@ -1412,6 +1429,19 @@ impl Renderer {
                 self.panorama_pipeline
                     .draw(&self.ctx.device, cmd, *scroll, aspect, 0.0);
 
+                // A BlurBackdrop marker splits the elements: those before it are
+                // drawn into the scene so the blur pass captures them (the title
+                // screen behind the Friends dialog); the rest are drawn sharp.
+                let split = elements
+                    .iter()
+                    .position(|e| matches!(e, MenuElement::BlurBackdrop));
+                let mut vbase = 0u32;
+                if let Some(i) = split {
+                    vbase = self
+                        .menu_pipeline
+                        .draw_from(cmd, sw, sh, &elements[..i], &item_atlas_uvs, 0);
+                }
+
                 if *blur > 0.01 {
                     cmd.end_render_pass();
 
@@ -1456,8 +1486,12 @@ impl Renderer {
                     );
                 }
 
+                let fg = match split {
+                    Some(i) => &elements[i + 1..],
+                    None => &elements[..],
+                };
                 self.menu_pipeline
-                    .draw(cmd, sw, sh, elements, &item_atlas_uvs);
+                    .draw_from(cmd, sw, sh, fg, &item_atlas_uvs, vbase);
             }
         }
 
@@ -1565,7 +1599,7 @@ fn warm_item_meshes(
     }
 }
 
-async fn fetch_skin_texture(uuid: &str) -> Result<(Vec<u8>, u32, u32), String> {
+pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<(Vec<u8>, u32, u32), String> {
     #[derive(serde::Deserialize)]
     struct SessionProfile {
         properties: Vec<ProfileProperty>,

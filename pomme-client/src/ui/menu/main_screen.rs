@@ -317,12 +317,18 @@ impl MainMenu {
             }
         }
 
-        // Second row mirrors vanilla 26.2: friends (disabled — pomme has no
-        // social system), language and accessibility, centered.
+        // Second row mirrors vanilla 26.2: friends, language and accessibility,
+        // centered. Friends needs a signed-in account, so it's disabled offline.
+        let friends_enabled = self.access_token.is_some();
+        let friends_tip = if friends_enabled {
+            "Friends"
+        } else {
+            "Sign in to use friends"
+        };
         let new_row_w = icon_size * 3.0 + icon_gap * 2.0;
         let new_x0 = btn_x + (content_w - new_row_w) / 2.0;
         let new_icons: [(f32, char, bool, &str); 3] = [
-            (new_x0, ICON_USERS, false, "Friends (unavailable)"),
+            (new_x0, ICON_USERS, friends_enabled, friends_tip),
             (
                 new_x0 + icon_size + icon_gap,
                 ICON_LANGUAGE,
@@ -347,10 +353,16 @@ impl MainMenu {
 
             if enabled && clicked && hovered {
                 any_clicked = true;
-                self.settings_back = Screen::Main;
                 match icon {
-                    ICON_LANGUAGE => self.set_screen(Screen::OptionsLanguage),
-                    ICON_UNIVERSAL_ACCESS => self.set_screen(Screen::OptionsAccessibility),
+                    ICON_USERS => self.open_friends(),
+                    ICON_LANGUAGE => {
+                        self.settings_back = Screen::Main;
+                        self.set_screen(Screen::OptionsLanguage);
+                    }
+                    ICON_UNIVERSAL_ACCESS => {
+                        self.settings_back = Screen::Main;
+                        self.set_screen(Screen::OptionsAccessibility);
+                    }
                     _ => {}
                 }
             }

@@ -2772,7 +2772,7 @@ dependencies = [
  "vec_map",
  "wasm-bindgen",
  "web-sys",
- "windows 0.61.3",
+ "windows",
 ]
 
 [[package]]

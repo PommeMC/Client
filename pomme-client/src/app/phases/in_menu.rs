@@ -47,6 +47,13 @@ pub fn update_menu(
         }
     }
 
+    if core.menu.is_friends_screen() && core.menu.faces_changed() {
+        let faces = core.menu.collect_faces();
+        if !faces.is_empty() {
+            gfx.renderer.update_face_atlas(&faces);
+        }
+    }
+
     if let Err(e) = gfx.renderer.render_menu(
         &gfx.window,
         panorama.scroll(),

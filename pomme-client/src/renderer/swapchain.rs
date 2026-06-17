@@ -59,9 +59,17 @@ impl Swapchain {
             vk::PresentModeKHR::Fifo
         };
 
-        let extent = vk::Extent2D {
-            width: width.clamp(caps.min_image_extent.width, caps.max_image_extent.width),
-            height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
+        // Prefer the surface's reported drawable size: when `current_extent` is
+        // defined (not u32::MAX, as on macOS/MoltenVK), the Vulkan spec requires
+        // using it. Falling back to the window size here is what letterboxed the
+        // image in native fullscreen.
+        let extent = if caps.current_extent.width != u32::MAX {
+            caps.current_extent
+        } else {
+            vk::Extent2D {
+                width: width.clamp(caps.min_image_extent.width, caps.max_image_extent.width),
+                height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
+            }
         };
 
         let image_count = (caps.min_image_count + 1).min(if caps.max_image_count == 0 {

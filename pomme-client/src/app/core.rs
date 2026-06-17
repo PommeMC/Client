@@ -110,6 +110,7 @@ impl AppCore {
             &data_dirs.game_dir,
             Arc::clone(&tokio_rt),
             user.username.clone(),
+            user.access_token.clone(),
         );
 
         let asset_index =
