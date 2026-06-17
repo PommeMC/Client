@@ -111,6 +111,7 @@ impl ApplicationHandler for App {
                     &self.core.data_dirs.jar_assets_dir,
                     &self.core.asset_index,
                     &self.core.data_dirs.game_dir,
+                    self.core.menu.vsync,
                 ) {
                     Ok(r) => r,
                     Err(e) => {

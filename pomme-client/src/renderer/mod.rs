@@ -140,6 +140,7 @@ impl Renderer {
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
         game_dir: &Path,
+        vsync: bool,
     ) -> Result<Self, RendererError> {
         let size = window.inner_size();
 
@@ -154,7 +155,6 @@ impl Renderer {
 
         let ctx = VulkanContext::new(&window)?;
 
-        let vsync = true;
         let swapchain_state = Swapchain::new(
             &ctx,
             size.width.max(1),
