@@ -65,6 +65,8 @@ pub fn update_menu(
         core.apply_display_mode(&gfx.window);
     }
 
+    gfx.renderer.set_vsync(core.menu.vsync);
+
     if core.menu.rescan_packs {
         core.menu.rescan_packs = false;
         core.resource_packs.scan_local_packs();
