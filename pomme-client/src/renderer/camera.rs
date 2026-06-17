@@ -42,6 +42,9 @@ pub struct Camera {
     pub base_fov_degrees: f32,
     fov_modifier: f32,
     old_fov_modifier: f32,
+    bob_walk_dist: f32,
+    bob_amount: f32,
+    bob_enabled: bool,
 }
 
 impl Camera {
@@ -55,7 +58,41 @@ impl Camera {
             base_fov_degrees: DEFAULT_FOV_DEGREES,
             fov_modifier: 1.0,
             old_fov_modifier: 1.0,
+            bob_walk_dist: 0.0,
+            bob_amount: 0.0,
+            bob_enabled: false,
         }
+    }
+
+    pub fn set_view_bob(&mut self, walk_dist: f32, bob: f32, enabled: bool) {
+        self.bob_walk_dist = walk_dist;
+        self.bob_amount = bob;
+        self.bob_enabled = enabled;
+    }
+
+    /// The view-space bob transform, also applied to the first-person arm/held
+    /// item.
+    pub fn view_bob_matrix(&self) -> Mat4 {
+        self.bob_matrix()
+    }
+
+    /// Replicates vanilla `GameRenderer.bobView`. Identity when disabled, not
+    /// in first person, or at rest.
+    fn bob_matrix(&self) -> Mat4 {
+        if !self.bob_enabled || self.mode != CameraMode::FirstPerson || self.bob_amount == 0.0 {
+            return Mat4::IDENTITY;
+        }
+        use std::f32::consts::PI;
+        // Vanilla's `backwardsInterpolatedWalkDistance` is the negated walk distance.
+        let f = -self.bob_walk_dist;
+        let bob = self.bob_amount;
+        let tx = (f * PI).sin() * bob * 0.5;
+        let ty = -((f * PI).cos() * bob).abs();
+        let roll_deg = (f * PI).sin() * bob * 3.0;
+        let pitch_deg = ((f * PI - 0.2).cos() * bob).abs() * 5.0;
+        Mat4::from_translation(Vec3::new(tx, ty, 0.0))
+            * Mat4::from_rotation_z(roll_deg.to_radians())
+            * Mat4::from_rotation_x(pitch_deg.to_radians())
     }
 
     pub fn update_look(&mut self, input: &mut InputState, dt: f32) {
@@ -162,7 +199,7 @@ impl Camera {
             look_dir
         };
 
-        let view = Mat4::look_to_rh(offset, forward, UP);
+        let view = self.bob_matrix() * Mat4::look_to_rh(offset, forward, UP);
         let mut proj = Mat4::perspective_rh(fov, self.aspect_ratio, NEAR, FAR);
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view

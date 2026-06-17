@@ -204,6 +204,7 @@ impl HandPipeline {
         frame: usize,
         aspect: f32,
         swing_progress: f32,
+        bob: Mat4,
     ) {
         let proj = projection(aspect);
 
@@ -232,7 +233,7 @@ impl HandPipeline {
             * Mat4::from_translation(Vec3::new(5.6, 0.0, 0.0))
             * arm_local_rot;
 
-        let mvp = proj * model;
+        let mvp = proj * bob * model;
         let uniform = HandUniform {
             mvp: mvp.to_cols_array_2d(),
         };

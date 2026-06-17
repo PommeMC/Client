@@ -46,6 +46,7 @@ impl HeldItemPipeline {
         self.shared.rebind_atlas(device, atlas);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_and_draw(
         &mut self,
         cmd: vk::CommandBuffer,
@@ -54,12 +55,13 @@ impl HeldItemPipeline {
         swing_progress: f32,
         item: &HeldItemInfo,
         meshes: &ItemEntityPipeline,
+        bob: Mat4,
     ) {
         let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.name) else {
             return;
         };
 
-        let uniform = CameraUniform::with_view_proj(hand::projection(aspect));
+        let uniform = CameraUniform::with_view_proj(hand::projection(aspect) * bob);
         self.shared.update_camera(frame, &uniform);
 
         let display = self

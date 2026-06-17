@@ -57,6 +57,14 @@ impl MainMenu {
         )
     }
 
+    fn view_bobbing_label(&self) -> &'static str {
+        if self.view_bobbing {
+            "View Bobbing: ON"
+        } else {
+            "View Bobbing: OFF"
+        }
+    }
+
     pub(super) fn build_options_video(
         &mut self,
         sw: f32,
@@ -80,7 +88,7 @@ impl MainMenu {
             [&rd, &sd],
             ["Graphics: Fancy", "Smooth Lighting: ON"],
             [&mf, "VSync: OFF"],
-            ["View Bobbing: ON", &gui_label],
+            [self.view_bobbing_label(), &gui_label],
             ["Attack Indicator: Crosshair", "Brightness: 50%"],
             ["Clouds: Fancy", fullscreen_label],
             ["Particles: All", "Mipmap Levels: 4"],
@@ -178,7 +186,7 @@ impl MainMenu {
             ],
             ["Chat Text Opacity: 100%", "Line Spacing: 0%"],
             ["Chat Delay: None", "Notification Time: 10.0s"],
-            ["View Bobbing: ON", "Distortion Effects: 100%"],
+            [self.view_bobbing_label(), "Distortion Effects: 100%"],
             ["FOV Effects: 100%", "Darkness Pulsing: 100%"],
             ["Damage Tilt: 100%", "Glint Speed: 100%"],
             ["Glint Strength: 100%", "Hide Lightning Flashes: OFF"],
@@ -596,6 +604,10 @@ impl MainMenu {
                     }
                     if label.starts_with("Fullscreen:") {
                         self.display_mode = self.display_mode.cycle();
+                    }
+                    if label.starts_with("View Bobbing:") {
+                        self.view_bobbing = !self.view_bobbing;
+                        self.save_settings();
                     }
                     if label.starts_with("Show Online Status:") {
                         self.show_online_status = !self.show_online_status;
