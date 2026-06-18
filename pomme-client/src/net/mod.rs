@@ -191,6 +191,17 @@ pub enum NetworkEvent {
         id: i32,
         name: Option<String>,
     },
+    EntityAggressive {
+        id: i32,
+        aggressive: bool,
+    },
+    EntitySwing {
+        id: i32,
+    },
+    CreeperPowered {
+        id: i32,
+        powered: bool,
+    },
     EntityDamaged {
         id: i32,
     },

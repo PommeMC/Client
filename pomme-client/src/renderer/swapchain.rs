@@ -33,6 +33,7 @@ impl Swapchain {
         ctx: &VulkanContext,
         width: u32,
         height: u32,
+        vsync: bool,
         old_swapchain: vk::SwapchainKHR,
     ) -> Result<Self, ContextError> {
         let caps = ctx.physical_device.get_surface_capabilities(ctx.surface)?;
@@ -48,7 +49,9 @@ impl Swapchain {
             .copied()
             .unwrap_or(formats[0]);
 
-        let present_mode = if present_modes.contains(&vk::PresentModeKHR::Mailbox) {
+        let present_mode = if vsync {
+            vk::PresentModeKHR::Fifo
+        } else if present_modes.contains(&vk::PresentModeKHR::Mailbox) {
             vk::PresentModeKHR::Mailbox
         } else if present_modes.contains(&vk::PresentModeKHR::Immediate) {
             vk::PresentModeKHR::Immediate
@@ -56,9 +59,23 @@ impl Swapchain {
             vk::PresentModeKHR::Fifo
         };
 
+        // Prefer the surface's reported drawable size: when `current_extent` is
+        // defined (not u32::MAX, as on macOS/MoltenVK), the Vulkan spec requires
+        // using it. Falling back to the window size here is what letterboxed the
+        // image in native fullscreen.
+        let extent = if caps.current_extent.width != u32::MAX {
+            caps.current_extent
+        } else {
+            vk::Extent2D {
+                width: width.clamp(caps.min_image_extent.width, caps.max_image_extent.width),
+                height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
+            }
+        };
+        // Guard against a degenerate (0,0) extent (e.g. a minimized window
+        // reporting current_extent = 0) so the aspect ratio stays finite.
         let extent = vk::Extent2D {
-            width: width.clamp(caps.min_image_extent.width, caps.max_image_extent.width),
-            height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
+            width: extent.width.max(1),
+            height: extent.height.max(1),
         };
 
         let image_count = (caps.min_image_count + 1).min(if caps.max_image_count == 0 {

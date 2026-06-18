@@ -24,6 +24,9 @@ pub const ICON_GLOBE: char = '\u{f0ac}';
 pub const ICON_COMMENT: char = '\u{f075}';
 pub const ICON_CODE: char = '\u{f121}';
 pub const ICON_CHECK: char = '\u{f00c}';
+pub const ICON_USERS: char = '\u{f0c0}';
+pub const ICON_LANGUAGE: char = '\u{f1ab}';
+pub const ICON_UNIVERSAL_ACCESS: char = '\u{f29a}';
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -81,6 +84,9 @@ fn build_font_atlas() -> FontAtlas {
         ICON_COMMENT,
         ICON_CODE,
         ICON_CHECK,
+        ICON_USERS,
+        ICON_LANGUAGE,
+        ICON_UNIVERSAL_ACCESS,
     ]
     .iter()
     .map(|&ch| (ch, &icon_font))
@@ -131,6 +137,37 @@ fn build_font_atlas() -> FontAtlas {
     }
 
     FontAtlas { glyphs, pixels }
+}
+
+/// Extract an 8x8 RGBA player face (front face at (8,8) with the hat layer at
+/// (40,8) composited over it) from a wide player skin. `None` if the skin is
+/// too small. Shared by the Steve-head sprite and live friend faces.
+pub(crate) fn extract_face_8x8(rgba: &[u8], sw: u32, sh: u32) -> Option<Vec<u8>> {
+    // Skins are 64x64 (or 64x32 legacy); both have the face/hat in the top-left.
+    if sw < 48 || sh < 16 {
+        return None;
+    }
+    let mut out = vec![0u8; 8 * 8 * 4];
+    for y in 0..8u32 {
+        for x in 0..8u32 {
+            let face_off = (((8 + y) * sw + (8 + x)) * 4) as usize;
+            let dst = ((y * 8 + x) * 4) as usize;
+            out[dst..dst + 4].copy_from_slice(&rgba[face_off..face_off + 4]);
+            // Composite hat over face (ignore fully transparent hat pixels).
+            let hat_off = (((8 + y) * sw + (40 + x)) * 4) as usize;
+            let ha = rgba[hat_off + 3];
+            if ha > 0 {
+                let a = ha as f32 / 255.0;
+                for c in 0..3 {
+                    let fg = rgba[hat_off + c] as f32;
+                    let bg = out[dst + c] as f32;
+                    out[dst + c] = (fg * a + bg * (1.0 - a)) as u8;
+                }
+                out[dst + 3] = out[dst + 3].max(ha);
+            }
+        }
+    }
+    Some(out)
 }
 
 pub struct MenuOverlayPipeline {
@@ -579,6 +616,22 @@ impl MenuOverlayPipeline {
         elements: &[MenuElement],
         item_atlas_uvs: &HashMap<String, [f32; 4]>,
     ) {
+        self.draw_from(cmd, screen_w, screen_h, elements, item_atlas_uvs, 0);
+    }
+
+    /// Like [`draw`], but writes vertices starting at `vertex_base` in the
+    /// shared vertex buffer and returns the next free index, so it can be
+    /// called more than once per frame (e.g. a backdrop before the blur and
+    /// a dialog after).
+    pub fn draw_from(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        screen_w: f32,
+        screen_h: f32,
+        elements: &[MenuElement],
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        vertex_base: u32,
+    ) -> u32 {
         let globals: [f32; 2] = [screen_w, screen_h];
         self.globals_allocation
             .as_mut()
@@ -835,41 +888,28 @@ impl MenuOverlayPipeline {
                     size,
                     address,
                 } => {
-                    if let Some([u0, v0, u1, v1]) = self.favicon_regions.get(address.as_str()) {
-                        push_quad(
-                            &mut vertices,
-                            *x,
-                            *y,
-                            *size,
-                            *size,
-                            *u0,
-                            *v0,
-                            *u1,
-                            *v1,
-                            [1.0, 1.0, 1.0, 1.0],
-                            6.0,
-                            [*size, *size],
-                            0.0,
-                        );
-                    } else if let Some(region) =
-                        self.sprite_atlas.regions.get(&SpriteId::UnknownServer)
-                    {
-                        push_quad(
-                            &mut vertices,
-                            *x,
-                            *y,
-                            *size,
-                            *size,
-                            region.u0,
-                            region.v0,
-                            region.u1,
-                            region.v1,
-                            [1.0, 1.0, 1.0, 1.0],
-                            2.0,
-                            [*size, *size],
-                            0.0,
-                        );
-                    }
+                    push_atlas_image(
+                        &mut vertices,
+                        &self.favicon_regions,
+                        &self.sprite_atlas,
+                        address,
+                        SpriteId::UnknownServer,
+                        *x,
+                        *y,
+                        *size,
+                    );
+                }
+                MenuElement::SkinFace { x, y, size, uuid } => {
+                    push_atlas_image(
+                        &mut vertices,
+                        &self.favicon_regions,
+                        &self.sprite_atlas,
+                        uuid,
+                        SpriteId::SteveHead,
+                        *x,
+                        *y,
+                        *size,
+                    );
                 }
                 _ => {}
             }
@@ -1048,19 +1088,24 @@ impl MenuOverlayPipeline {
         }
 
         if draw_ops.is_empty() {
-            return;
+            return vertex_base;
         }
 
-        if !vertices.is_empty() {
-            let count = vertices.len().min(MAX_VERTICES);
+        let written = if vertices.is_empty() {
+            0
+        } else {
+            let avail = MAX_VERTICES.saturating_sub(vertex_base as usize);
+            let count = vertices.len().min(avail);
             let byte_data = bytemuck::cast_slice(&vertices[..count]);
+            let byte_off = vertex_base as usize * VERTEX_SIZE;
             self.vertex_allocation
                 .as_mut()
                 .unwrap()
                 .mapped_slice_mut()
-                .unwrap()[..byte_data.len()]
+                .unwrap()[byte_off..byte_off + byte_data.len()]
                 .copy_from_slice(byte_data);
-        }
+            count
+        };
 
         let default_scissor = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
@@ -1097,9 +1142,10 @@ impl MenuOverlayPipeline {
                 default_scissor
             };
             cmd.set_scissor(0, &[rect]);
-            cmd.draw(op.count, 1, op.start, 0);
+            cmd.draw(op.count, 1, vertex_base + op.start, 0);
         }
         cmd.set_scissor(0, &[default_scissor]);
+        vertex_base + written as u32
     }
 
     pub fn set_item_atlas(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
@@ -1452,6 +1498,18 @@ pub enum MenuElement {
         size: f32,
         address: String,
     },
+    /// A player's 8x8 skin face, looked up in the shared face/favicon atlas by
+    /// UUID; falls back to the default `SteveHead` sprite until it loads.
+    SkinFace {
+        x: f32,
+        y: f32,
+        size: f32,
+        uuid: String,
+    },
+    /// Split marker for the menu draw: elements before it are rendered into the
+    /// scene so the blur pass captures them; elements after are drawn sharp on
+    /// top. Used to render the title screen blurred behind the Friends dialog.
+    BlurBackdrop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1550,6 +1608,16 @@ pub enum SpriteId {
     Incompatible,
     Unreachable,
     SteveHead,
+    FriendsBackground,
+    FriendsTab,
+    FriendsTabDisabled,
+    FriendsTabHighlighted,
+    FriendsIllustration,
+    FriendsSend,
+    FriendsRemove,
+    FriendsAccept,
+    FriendsReject,
+    FriendsCancel,
 }
 
 pub const CREATIVE_TAB_SPRITES: [[[SpriteId; 7]; 2]; 2] = [
@@ -1824,6 +1892,56 @@ fn build_sprite_atlas(
             1.0,
         ),
         (
+            SpriteId::FriendsBackground,
+            "minecraft/textures/gui/sprites/friends/background.png",
+            8.0,
+        ),
+        (
+            SpriteId::FriendsTab,
+            "minecraft/textures/gui/sprites/friends/button.png",
+            3.0,
+        ),
+        (
+            SpriteId::FriendsTabDisabled,
+            "minecraft/textures/gui/sprites/friends/button_disabled.png",
+            1.0,
+        ),
+        (
+            SpriteId::FriendsTabHighlighted,
+            "minecraft/textures/gui/sprites/friends/button_highlighted.png",
+            3.0,
+        ),
+        (
+            SpriteId::FriendsIllustration,
+            "minecraft/textures/gui/sprites/friends/illustrations_00.png",
+            0.0,
+        ),
+        (
+            SpriteId::FriendsSend,
+            "minecraft/textures/gui/sprites/friends/send_request.png",
+            0.0,
+        ),
+        (
+            SpriteId::FriendsRemove,
+            "minecraft/textures/gui/sprites/friends/remove.png",
+            0.0,
+        ),
+        (
+            SpriteId::FriendsAccept,
+            "minecraft/textures/gui/sprites/friends/accept.png",
+            0.0,
+        ),
+        (
+            SpriteId::FriendsReject,
+            "minecraft/textures/gui/sprites/friends/reject.png",
+            0.0,
+        ),
+        (
+            SpriteId::FriendsCancel,
+            "minecraft/textures/gui/sprites/friends/cancel.png",
+            0.0,
+        ),
+        (
             SpriteId::Ping1,
             "minecraft/textures/gui/sprites/icon/ping_1.png",
             0.0,
@@ -1961,35 +2079,12 @@ fn build_sprite_atlas(
     match crate::assets::load_image(&steve_path) {
         Ok(img) => {
             let rgba = img.to_rgba8();
-            let sw = rgba.width();
-            let sh = rgba.height();
-            // Skins are 64x64 (or 64x32 legacy). Face at (8,8), hat at (40,8).
-            if sw >= 48 && sh >= 16 {
-                let raw = rgba.as_raw();
-                let mut out = vec![0u8; 8 * 8 * 4];
-                for y in 0..8u32 {
-                    for x in 0..8u32 {
-                        let face_off = (((8 + y) * sw + (8 + x)) * 4) as usize;
-                        let dst = ((y * 8 + x) * 4) as usize;
-                        out[dst..dst + 4].copy_from_slice(&raw[face_off..face_off + 4]);
-                        // Composite hat over face (ignore fully transparent hat pixels).
-                        let hat_off = (((8 + y) * sw + (40 + x)) * 4) as usize;
-                        let ha = raw[hat_off + 3];
-                        if ha > 0 {
-                            let a = ha as f32 / 255.0;
-                            for c in 0..3 {
-                                let fg = raw[hat_off + c] as f32;
-                                let bg = out[dst + c] as f32;
-                                out[dst + c] = (fg * a + bg * (1.0 - a)) as u8;
-                            }
-                            out[dst + 3] = out[dst + 3].max(ha);
-                        }
-                    }
+            match extract_face_8x8(rgba.as_raw(), rgba.width(), rgba.height()) {
+                Some(out) => images.push((SpriteId::SteveHead, out, 8, 8, 0.0)),
+                None => {
+                    tracing::warn!("Steve skin too small: {}x{}", rgba.width(), rgba.height());
+                    images.push((SpriteId::SteveHead, vec![255, 0, 255, 255], 1, 1, 0.0));
                 }
-                images.push((SpriteId::SteveHead, out, 8, 8, 0.0));
-            } else {
-                tracing::warn!("Steve skin too small: {sw}x{sh}");
-                images.push((SpriteId::SteveHead, vec![255, 0, 255, 255], 1, 1, 0.0));
             }
         }
         Err(e) => {
@@ -2210,6 +2305,55 @@ fn blit_image(
                 dst[di..di + 4].copy_from_slice(&src[si..si + 4]);
             }
         }
+    }
+}
+
+/// Draw a quad from the string-keyed image atlas (favicons / friend faces),
+/// falling back to a sprite-atlas sprite when the key hasn't loaded yet.
+#[allow(clippy::too_many_arguments)]
+fn push_atlas_image(
+    verts: &mut Vec<Vertex>,
+    atlas_regions: &std::collections::HashMap<String, [f32; 4]>,
+    sprite_atlas: &SpriteAtlas,
+    key: &str,
+    fallback: SpriteId,
+    x: f32,
+    y: f32,
+    size: f32,
+) {
+    let white = [1.0, 1.0, 1.0, 1.0];
+    if let Some([u0, v0, u1, v1]) = atlas_regions.get(key) {
+        push_quad(
+            verts,
+            x,
+            y,
+            size,
+            size,
+            *u0,
+            *v0,
+            *u1,
+            *v1,
+            white,
+            6.0,
+            [size, size],
+            0.0,
+        );
+    } else if let Some(r) = sprite_atlas.regions.get(&fallback) {
+        push_quad(
+            verts,
+            x,
+            y,
+            size,
+            size,
+            r.u0,
+            r.v0,
+            r.u1,
+            r.v1,
+            white,
+            2.0,
+            [size, size],
+            0.0,
+        );
     }
 }
 

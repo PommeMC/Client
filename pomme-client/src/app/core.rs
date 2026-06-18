@@ -110,6 +110,7 @@ impl AppCore {
             &data_dirs.game_dir,
             Arc::clone(&tokio_rt),
             user.username.clone(),
+            user.access_token.clone(),
         );
 
         let asset_index =
@@ -666,6 +667,15 @@ impl AppCore {
                 NetworkEvent::EntityCustomName { id, name } => {
                     game.entity_store.set_custom_name(id, name);
                 }
+                NetworkEvent::EntityAggressive { id, aggressive } => {
+                    game.entity_store.set_aggressive(id, aggressive);
+                }
+                NetworkEvent::EntitySwing { id } => {
+                    game.entity_store.start_swing(id);
+                }
+                NetworkEvent::CreeperPowered { id, powered } => {
+                    game.entity_store.set_powered(id, powered);
+                }
                 NetworkEvent::EntityDamaged { id } => {
                     game.entity_store.mark_hurt(id);
                 }
@@ -850,6 +860,7 @@ impl AppCore {
             &mut game.player_walk_speed,
             &mut game.player_prev_walk_speed,
         );
+        game.player.tick_bob(dx, dz);
 
         renderer.set_base_fov(self.menu.fov as f32);
         renderer.update_fov_mod(compute_fov_modifier(&game.player));

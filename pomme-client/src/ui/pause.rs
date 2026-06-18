@@ -49,7 +49,7 @@ pub fn build_pause_menu(
     elements.push(MenuElement::Text {
         x: screen_w / 2.0,
         y: grid_y + 40.0 * gs - top_pad,
-        text: "Game Menu".into(),
+        text: "Game".into(),
         scale: fs,
         color: WHITE,
         centered: true,
@@ -64,7 +64,7 @@ pub fn build_pause_menu(
         btn_h,
         gs,
         fs,
-        "Back to Game",
+        "Return to Game",
         true,
     ) && clicked
     {

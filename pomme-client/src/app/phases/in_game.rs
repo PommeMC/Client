@@ -196,6 +196,8 @@ pub fn update_game(
         .set_listener(listener_pos, game.player.look_dir.y_rot_deg());
     core.audio.set_volumes(core.menu.category_volumes());
 
+    gfx.renderer.set_vsync(core.menu.vsync);
+
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
     if let Some(reason) = disconnect_reason {
@@ -259,6 +261,15 @@ pub fn update_game(
             .prev_eye_pos()
             .lerp(game.player.eye_pos(), partial_tick as f64),
     );
+    // Plain lerp (vanilla getInterpolatedWalkDistance); the forward-extrapolating
+    // camera variant judders across tick boundaries when per-tick speed varies.
+    let bob_walk = game
+        .player
+        .prev_walk_dist
+        .lerp(game.player.walk_dist, partial_tick);
+    let bob_amount = game.player.prev_bob.lerp(game.player.bob, partial_tick);
+    gfx.renderer
+        .set_view_bob(bob_walk, bob_amount, core.menu.view_bobbing);
     gfx.renderer.update_third_person_distance(
         game.player
             .prev_eye_pos()
@@ -590,6 +601,9 @@ pub fn update_game(
                 head_y_offset: extras.head_y_offset,
                 head_x_rot_deg_override: extras.head_x_rot_deg_override,
                 has_red_overlay: e.hurt_time > 0,
+                aggressive: e.aggressive,
+                age_in_ticks: e.age_in_ticks as f32 + partial_tick,
+                attack_time: e.swing_progress(partial_tick),
             }
         })
         .collect();
@@ -623,6 +637,9 @@ pub fn update_game(
             head_y_offset: 0.0,
             head_x_rot_deg_override: None,
             has_red_overlay: false,
+            aggressive: false,
+            age_in_ticks: 0.0,
+            attack_time: 0.0,
         });
     }
 
@@ -988,6 +1005,16 @@ fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) ->
             ..EMPTY_EXTRAS
         },
         EntityKind::Sheep => sheep_extras(entity_id, e, alpha),
+        // Spider eyes overlay is always visible (slot 0).
+        EntityKind::Spider => EntityExtras {
+            overlay_tints: [Some(WHITE_TINT), None],
+            ..EMPTY_EXTRAS
+        },
+        // Charged-creeper aura overlay (slot 0) only when powered.
+        EntityKind::Creeper if e.powered => EntityExtras {
+            overlay_tints: [Some(WHITE_TINT), None],
+            ..EMPTY_EXTRAS
+        },
         _ => EMPTY_EXTRAS,
     }
 }

@@ -67,12 +67,20 @@ impl MainMenu {
         let accent_w = 3.0 * s;
         let icon_size = 28.0 * s;
         let icon_gap = 6.0 * s;
+        let icon_row_gap = icon_gap;
 
         let header_h = accent_bar_h + 14.0 * s + title_size + 4.0 * s + sub_size + 18.0 * s;
         let btns_total = buttons.len() as f32 * (btn_h + btn_gap) - btn_gap;
-        let panel_h =
-            (panel_pad + header_h + 1.0 + 16.0 * s + btns_total + 16.0 * s + icon_size + panel_pad)
-                .min(screen_h * 0.9);
+        let icons_total = icon_size * 2.0 + icon_row_gap;
+        let panel_h = (panel_pad
+            + header_h
+            + 1.0
+            + 16.0 * s
+            + btns_total
+            + 16.0 * s
+            + icons_total
+            + panel_pad)
+            .min(screen_h * 0.9);
         let panel_margin = (screen_w * 0.06).max(12.0);
         let panel_start_x = -panel_w;
         let panel_final_x = panel_margin;
@@ -237,10 +245,40 @@ impl MainMenu {
             }
         }
 
-        let icon_area_y = panel_y + panel_h - panel_pad - icon_size;
+        let new_row_y = panel_y + panel_h - panel_pad - icon_size;
+        let icon_area_y = new_row_y - icon_size - icon_row_gap;
         let icon_r = 7.0 * s;
         let icon_scale = 13.0 * s;
         let drop_style = DropdownStyle::new(gs);
+
+        let icon_btn =
+            |elements: &mut Vec<MenuElement>, bx: f32, by: f32, icon: char, enabled: bool| {
+                let hovered = common::hit_test(cursor, [bx, by, icon_size, icon_size]);
+                if hovered && enabled {
+                    elements.push(MenuElement::Rect {
+                        x: bx,
+                        y: by,
+                        w: icon_size,
+                        h: icon_size,
+                        corner_radius: icon_r,
+                        color: glass_hover,
+                    });
+                }
+                elements.push(MenuElement::Icon {
+                    x: bx + icon_size / 2.0,
+                    y: by + icon_size / 2.0,
+                    icon,
+                    scale: icon_scale,
+                    color: if !enabled {
+                        [0.45, 0.47, 0.58, 0.35]
+                    } else if hovered {
+                        text_bright
+                    } else {
+                        text_dim
+                    },
+                });
+                hovered
+            };
 
         let bottom_icons: [(f32, char); 4] = [
             (btn_x, ICON_USER),
@@ -253,29 +291,8 @@ impl MainMenu {
         ];
 
         for &(bx, icon) in &bottom_icons {
-            let rect = [bx, icon_area_y, icon_size, icon_size];
-            let hovered = common::hit_test(cursor, rect);
+            let hovered = icon_btn(&mut elements, bx, icon_area_y, icon, true);
             any_hovered |= hovered;
-
-            elements.push(MenuElement::Rect {
-                x: bx,
-                y: icon_area_y,
-                w: icon_size,
-                h: icon_size,
-                corner_radius: icon_r,
-                color: if hovered {
-                    glass_hover
-                } else {
-                    [0.0, 0.0, 0.0, 0.0]
-                },
-            });
-            elements.push(MenuElement::Icon {
-                x: bx + icon_size / 2.0,
-                y: icon_area_y + icon_size / 2.0,
-                icon,
-                scale: icon_scale,
-                color: if hovered { text_bright } else { text_dim },
-            });
 
             if clicked && hovered {
                 any_clicked = true;
@@ -294,6 +311,57 @@ impl MainMenu {
                         if self.theme_open {
                             self.links_open = false;
                         }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Second row mirrors vanilla 26.2: friends, language and accessibility,
+        // centered. Friends needs a signed-in account, so it's disabled offline.
+        let friends_enabled = self.access_token.is_some();
+        let friends_tip = if friends_enabled {
+            "Friends"
+        } else {
+            "Sign in to use friends"
+        };
+        let new_row_w = icon_size * 3.0 + icon_gap * 2.0;
+        let new_x0 = btn_x + (content_w - new_row_w) / 2.0;
+        let new_icons: [(f32, char, bool, &str); 3] = [
+            (new_x0, ICON_USERS, friends_enabled, friends_tip),
+            (
+                new_x0 + icon_size + icon_gap,
+                ICON_LANGUAGE,
+                true,
+                "Language",
+            ),
+            (
+                new_x0 + (icon_size + icon_gap) * 2.0,
+                ICON_UNIVERSAL_ACCESS,
+                true,
+                "Accessibility Settings",
+            ),
+        ];
+
+        for &(bx, icon, enabled, tip) in &new_icons {
+            let hovered = icon_btn(&mut elements, bx, new_row_y, icon, enabled);
+            any_hovered |= enabled && hovered;
+
+            if hovered {
+                common::push_tooltip(&mut elements, cursor, screen_w, screen_h, gs, tip);
+            }
+
+            if enabled && clicked && hovered {
+                any_clicked = true;
+                match icon {
+                    ICON_USERS => self.open_friends(),
+                    ICON_LANGUAGE => {
+                        self.settings_back = Screen::Main;
+                        self.set_screen(Screen::OptionsLanguage);
+                    }
+                    ICON_UNIVERSAL_ACCESS => {
+                        self.settings_back = Screen::Main;
+                        self.set_screen(Screen::OptionsAccessibility);
                     }
                     _ => {}
                 }

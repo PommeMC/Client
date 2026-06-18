@@ -47,6 +47,13 @@ pub fn update_menu(
         }
     }
 
+    if core.menu.is_friends_screen() && core.menu.faces_changed() {
+        let faces = core.menu.collect_faces();
+        if !faces.is_empty() {
+            gfx.renderer.update_face_atlas(&faces);
+        }
+    }
+
     if let Err(e) = gfx.renderer.render_menu(
         &gfx.window,
         panorama.scroll(),
@@ -64,6 +71,8 @@ pub fn update_menu(
         core.display_mode = core.menu.display_mode;
         core.apply_display_mode(&gfx.window);
     }
+
+    gfx.renderer.set_vsync(core.menu.vsync);
 
     if core.menu.rescan_packs {
         core.menu.rescan_packs = false;

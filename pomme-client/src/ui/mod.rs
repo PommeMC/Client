@@ -5,6 +5,7 @@ pub mod creative_tab_data;
 pub mod death;
 #[allow(dead_code)]
 pub mod font;
+pub mod friends;
 pub mod hud;
 pub mod inventory;
 pub mod menu;

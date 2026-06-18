@@ -886,12 +886,14 @@ impl MainMenu {
             (Screen::AddServer | Screen::EditServer(_), 1) => TextTarget::EditAddress,
             (Screen::DirectConnect, 0) => TextTarget::EditAddress,
             (Screen::OptionsResourcePacks, 0) => TextTarget::PackSearch,
+            (Screen::Friends, 0) => TextTarget::AddFriend,
             _ => return,
         };
         let text: &mut String = match target {
             TextTarget::EditName => &mut self.edit_name,
             TextTarget::EditAddress => &mut self.edit_address,
             TextTarget::PackSearch => &mut self.pack_search,
+            TextTarget::AddFriend => &mut self.add_friend_name,
         };
 
         if input.copy && !text.is_empty() {
@@ -1023,6 +1025,7 @@ enum TextTarget {
     EditName,
     EditAddress,
     PackSearch,
+    AddFriend,
 }
 
 fn push_undo(stack: &mut Vec<(u8, String)>, field_idx: u8, prev: String) {
@@ -1032,7 +1035,7 @@ fn push_undo(stack: &mut Vec<(u8, String)>, field_idx: u8, prev: String) {
     stack.push((field_idx, prev));
 }
 
-fn write_clipboard(text: &str) -> bool {
+pub(super) fn write_clipboard(text: &str) -> bool {
     arboard::Clipboard::new()
         .and_then(|mut cb| cb.set_text(text.to_string()))
         .is_ok()
