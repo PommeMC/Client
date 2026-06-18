@@ -10,7 +10,7 @@ pub const MIN_FOV_DEGREES: f32 = 30.0;
 #[allow(dead_code)]
 pub const MAX_FOV_DEGREES: f32 = 110.0;
 const NEAR: f32 = 0.1;
-const FAR: f32 = 1000.0;
+pub(crate) const FAR: f32 = 1000.0;
 const MOUSE_SENSITIVITY: f32 = 0.15;
 /// Controller look speed in degrees per second, scaled by frame delta.
 const CONTROLLER_SENSITIVITY: f32 = 150.0;
@@ -29,6 +29,50 @@ impl CameraMode {
             Self::FirstPerson => Self::ThirdPersonBack,
             Self::ThirdPersonBack => Self::ThirdPersonFront,
             Self::ThirdPersonFront => Self::FirstPerson,
+        }
+    }
+}
+
+/// Cloud graphics setting, mirroring vanilla's `CloudStatus` plus an off state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CloudMode {
+    Off,
+    Fast,
+    #[default]
+    Fancy,
+}
+
+impl CloudMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Fast,
+            Self::Fast => Self::Fancy,
+            Self::Fancy => Self::Off,
+        }
+    }
+
+    /// Short label for the video-options row (the menu prefixes "Clouds: ").
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "OFF",
+            Self::Fast => "Fast",
+            Self::Fancy => "Fancy",
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Fast => 1,
+            Self::Fancy => 2,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Off,
+            1 => Self::Fast,
+            _ => Self::Fancy,
         }
     }
 }

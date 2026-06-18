@@ -728,6 +728,7 @@ pub fn update_game(
         &item_renders,
         &block_entity_renders,
         &weather_columns,
+        core.menu.cloud_mode,
         effective_rd,
         player_preview,
     ) {

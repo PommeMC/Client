@@ -11,6 +11,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::app::core::DisplayMode;
+use crate::renderer::CloudMode;
 use crate::renderer::pipelines::menu_overlay::{
     ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_GEAR, ICON_GLOBE, ICON_LANGUAGE, ICON_LINK,
     ICON_PAINTBRUSH, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS, MenuElement, SpriteId,
@@ -69,10 +70,16 @@ struct Settings {
     voice_volume: f32,
     #[serde(default = "default_volume")]
     ui_volume: f32,
+    #[serde(default = "default_cloud_mode")]
+    cloud_mode: u8,
 }
 
 fn default_fov() -> u32 {
     70
+}
+
+fn default_cloud_mode() -> u8 {
+    2
 }
 
 fn default_true() -> bool {
@@ -113,6 +120,7 @@ impl Default for Settings {
             ambient_volume: 1.0,
             voice_volume: 1.0,
             ui_volume: 1.0,
+            cloud_mode: 2,
         }
     }
 }
@@ -351,6 +359,7 @@ pub struct MainMenu {
     skin_hat: bool,
     skin_main_hand_right: bool,
     pub display_mode: DisplayMode,
+    pub cloud_mode: CloudMode,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
     menu_open_time: Option<Instant>,
@@ -437,6 +446,7 @@ impl MainMenu {
             skin_hat: settings.skin_hat,
             skin_main_hand_right: settings.skin_main_hand_right,
             display_mode: DisplayMode::Windowed,
+            cloud_mode: CloudMode::from_u8(settings.cloud_mode),
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             menu_open_time: None,
@@ -516,6 +526,7 @@ impl MainMenu {
                 skin_right_pants: self.skin_right_pants,
                 skin_hat: self.skin_hat,
                 skin_main_hand_right: self.skin_main_hand_right,
+                cloud_mode: self.cloud_mode.to_u8(),
             },
         );
     }

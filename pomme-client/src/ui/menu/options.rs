@@ -102,6 +102,7 @@ impl MainMenu {
         } else {
             "VSync: OFF"
         };
+        let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
             OptRow::Big("Fullscreen Resolution: Current"),
@@ -113,7 +114,7 @@ impl MainMenu {
             OptRow::Big("Graphics: Fancy"),
             OptRow::Pair("Biome Blend: 5x5", &rd),
             OptRow::Pair("Prioritize Chunk Updates: None", &sd),
-            OptRow::Pair("Smooth Lighting: ON", "Clouds: Fancy"),
+            OptRow::Pair("Smooth Lighting: ON", &clouds_label),
             OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
             OptRow::Pair("Entity Shadows: ON", "Entity Distance: 100%"),
             OptRow::Pair("Menu Background Blur: 50%", "Cloud Range: 128"),
@@ -655,6 +656,10 @@ impl MainMenu {
                     }
                     if label.starts_with("Fullscreen:") {
                         self.display_mode = self.display_mode.cycle();
+                    }
+                    if label.starts_with("Clouds:") {
+                        self.cloud_mode = self.cloud_mode.cycle();
+                        self.save_settings();
                     }
                     if label.starts_with("View Bobbing:") {
                         self.view_bobbing = !self.view_bobbing;
