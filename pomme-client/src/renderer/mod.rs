@@ -1457,7 +1457,7 @@ impl Renderer {
                 block_entities,
                 weather,
                 cloud_mode,
-                render_distance: _,
+                render_distance,
                 player_preview,
             } => {
                 self.sky_pipeline
@@ -1479,7 +1479,20 @@ impl Renderer {
                     );
                 }
 
-                self.entity_renderer.draw(cmd, frame, entities);
+                let ent_frustum = self.camera.frustum_planes();
+                let ent_eye: [f32; 3] =
+                    (self.camera.position.as_vec3() + self.camera.third_person_offset()).into();
+                // Entities aren't sent beyond the server's tracking range; a
+                // generous render-distance cap just trims anything stray.
+                let ent_cull_dist = (*render_distance * 16) as f32 + 16.0;
+                self.entity_renderer.draw(
+                    cmd,
+                    frame,
+                    entities,
+                    &ent_frustum,
+                    ent_eye,
+                    ent_cull_dist,
+                );
 
                 self.block_entity_pipeline.draw(cmd, frame, block_entities);
 

@@ -606,6 +606,7 @@ pub fn update_game(
                 aggressive: e.aggressive,
                 age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                 attack_time: e.swing_progress(partial_tick),
+                skip_cull: false,
             }
         })
         .collect();
@@ -642,6 +643,7 @@ pub fn update_game(
             aggressive: false,
             age_in_ticks: 0.0,
             attack_time: 0.0,
+            skip_cull: true,
         });
     }
 
