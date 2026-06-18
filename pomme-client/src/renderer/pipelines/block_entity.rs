@@ -13,7 +13,7 @@ use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::{BakedEntityModel, PartAnim};
 use crate::renderer::pipelines::entity_renderer::{
-    BlendMode, WHITE_TINT, create_pipeline, fallback_texture,
+    BlendMode, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, block_entity_model, util};
 
@@ -256,7 +256,13 @@ impl BlockEntityPipeline {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create block-entity pipeline layout");
 
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout, BlendMode::Opaque);
+        let pipeline = create_pipeline(
+            device,
+            render_pass,
+            pipeline_layout,
+            BlendMode::Opaque,
+            ModelInput::PushConstant,
+        );
 
         let defs = kind_definitions();
         let tex_count = defs
@@ -448,8 +454,13 @@ impl BlockEntityPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline =
-            create_pipeline(device, render_pass, self.pipeline_layout, BlendMode::Opaque);
+        self.pipeline = create_pipeline(
+            device,
+            render_pass,
+            self.pipeline_layout,
+            BlendMode::Opaque,
+            ModelInput::PushConstant,
+        );
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {

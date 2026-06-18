@@ -1175,10 +1175,36 @@ fn create_pipelines(
     layout: vk::PipelineLayout,
 ) -> [vk::Pipeline; 3] {
     [
-        create_pipeline(device, render_pass, layout, BlendMode::Opaque),
-        create_pipeline(device, render_pass, layout, BlendMode::Translucent),
-        create_pipeline(device, render_pass, layout, BlendMode::Additive),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::Opaque,
+            ModelInput::Instanced,
+        ),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::Translucent,
+            ModelInput::Instanced,
+        ),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::Additive,
+            ModelInput::Instanced,
+        ),
     ]
+}
+
+/// Source of a draw's model matrix: mobs are GPU-instanced (binding 1, a perf
+/// divergence from vanilla); block entities keep vanilla's per-draw
+/// push-constant transform (binding 0 only).
+pub(super) enum ModelInput {
+    Instanced,
+    PushConstant,
 }
 
 pub(super) fn create_pipeline(
@@ -1186,8 +1212,12 @@ pub(super) fn create_pipeline(
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
     blend: BlendMode,
+    model_input: ModelInput,
 ) -> vk::Pipeline {
-    let vert_spv = shader::include_spirv!("entity.vert.spv");
+    let vert_spv: &[u8] = match model_input {
+        ModelInput::Instanced => shader::include_spirv!("entity.vert.spv"),
+        ModelInput::PushConstant => shader::include_spirv!("block_entity.vert.spv"),
+    };
     let frag_spv = shader::include_spirv!("entity.frag.spv");
 
     let vert_module = shader::create_shader_module(device, vert_spv);
@@ -1208,24 +1238,25 @@ pub(super) fn create_pipeline(
         },
     ];
 
-    // Binding 0: per-vertex mesh data. Binding 1: per-instance data (model
-    // columns + tint + overlay + uv), one EntityInstance per (entity, part).
-    let bindings = [
-        ChunkVertex::binding_description(),
-        vk::VertexInputBindingDescription {
+    // Binding 0: per-vertex mesh data. Instanced pipelines add binding 1 with
+    // per-instance data (model columns + tint + overlay + uv), one EntityInstance
+    // per (entity, part); push-constant ones bind only the mesh.
+    let mut bindings = vec![ChunkVertex::binding_description()];
+    let mut attrs = ChunkVertex::attribute_descriptions().to_vec();
+    if let ModelInput::Instanced = model_input {
+        bindings.push(vk::VertexInputBindingDescription {
             binding: 1,
             stride: size_of::<EntityInstance>() as u32,
             input_rate: vk::VertexInputRate::Instance,
-        },
-    ];
-    let mut attrs = ChunkVertex::attribute_descriptions().to_vec();
-    for i in 0..7u32 {
-        attrs.push(vk::VertexInputAttributeDescription {
-            location: 3 + i,
-            binding: 1,
-            format: vk::Format::R32G32B32A32Sfloat,
-            offset: i * 16,
         });
+        for i in 0..7u32 {
+            attrs.push(vk::VertexInputAttributeDescription {
+                location: 3 + i,
+                binding: 1,
+                format: vk::Format::R32G32B32A32Sfloat,
+                offset: i * 16,
+            });
+        }
     }
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
