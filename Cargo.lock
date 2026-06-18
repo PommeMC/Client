@@ -2771,7 +2771,7 @@ dependencies = [
  "vec_map",
  "wasm-bindgen",
  "web-sys",
- "windows 0.61.3",
+ "windows",
 ]
 
 [[package]]
@@ -5054,7 +5054,6 @@ dependencies = [
  "pomme-gpu-allocator",
  "pyronyx",
  "raw-window-handle",
- "rayon",
  "reqwest",
  "rodio",
  "scopeguard",

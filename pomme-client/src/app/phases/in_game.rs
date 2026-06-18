@@ -220,6 +220,9 @@ pub fn update_game(
         gfx.renderer.upload_chunk_mesh(&mesh);
     }
 
+    game.mesh_dispatcher
+        .set_camera_position(*game.player.position);
+
     // Sky time ticks unconditionally so it keeps flowing in menus;
     // server SetTime packets reconcile drift.
     core.time_tick_accumulator = (core.time_tick_accumulator + dt).min(1.0);

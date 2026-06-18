@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
 use azalea_core::position::ChunkPos;
@@ -361,10 +362,8 @@ pub struct MeshDispatcher {
     // Edits drain ahead of and uncapped by the bulk load lane (see drain_results).
     priority_rx: crossbeam_channel::Receiver<ChunkMeshData>,
     priority_tx: crossbeam_channel::Sender<ChunkMeshData>,
-    // Edits mesh on dedicated threads rather than rayon's shared pool, so a
-    // block change applies right away instead of queueing behind the streaming-
-    // chunk backlog (which left walk-through "ghost" blocks for seconds).
-    edit_tx: crossbeam_channel::Sender<Box<dyn FnOnce() + Send>>,
+    queue: Arc<MeshQueue>,
+    workers: Vec<std::thread::JoinHandle<()>>,
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
     grass_colormap: Arc<Colormap>,
@@ -383,22 +382,20 @@ impl MeshDispatcher {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         let (priority_tx, priority_rx) = crossbeam_channel::unbounded();
 
-        // Edits are infrequent and touch few chunks, so a couple of threads
-        // cover bursts without oversubscribing the CPU.
-        let (edit_tx, edit_rx) = crossbeam_channel::unbounded::<Box<dyn FnOnce() + Send>>();
-        let edit_threads = std::thread::available_parallelism()
-            .map(|n| (n.get() / 4).clamp(1, 3))
+        let queue = Arc::new(MeshQueue::new());
+        // One worker per core minus one, leaving a core for the main/render thread.
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(1).max(1))
             .unwrap_or(1);
-        for _ in 0..edit_threads {
-            let rx = edit_rx.clone();
-            std::thread::Builder::new()
-                .name("edit-mesher".into())
-                .spawn(move || {
-                    while let Ok(job) = rx.recv() {
-                        job();
-                    }
-                })
-                .expect("spawn edit-mesher thread");
+        let mut workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let queue = Arc::clone(&queue);
+            workers.push(
+                std::thread::Builder::new()
+                    .name("chunk-mesher".into())
+                    .spawn(move || queue.run_worker())
+                    .expect("spawn chunk-mesher thread"),
+            );
         }
 
         Self {
@@ -406,7 +403,8 @@ impl MeshDispatcher {
             result_tx,
             priority_rx,
             priority_tx,
-            edit_tx,
+            queue,
+            workers,
             registry: Arc::new(registry),
             uv_map: Arc::new(uv_map),
             grass_colormap: Arc::new(grass_colormap),
@@ -419,6 +417,10 @@ impl MeshDispatcher {
         self.biome_climate = climate;
     }
 
+    // Always async, matching vanilla's default `prioritizeChunkUpdates = NONE`.
+    // TODO: the PLAYER_AFFECTED/NEARBY modes add a synchronous same-frame rebuild
+    // (a `mesh_now` path); deferred — pomme meshes whole columns, so it'd hitch
+    // ~200ms.
     pub fn enqueue(&self, chunk_store: &ChunkStore, pos: ChunkPos, lod: u32, priority: bool) {
         let registry = Arc::clone(&self.registry);
         let uv_map = Arc::clone(&self.uv_map);
@@ -452,33 +454,29 @@ impl MeshDispatcher {
                 })
                 .collect();
 
-        let job = move || {
-            let started_at = enqueued_at.map(|_| std::time::Instant::now());
-            let snapshot = ChunkStoreSnapshot {
-                chunks: chunks_needed.into_iter().zip(chunk_arcs).collect(),
-                light,
-                grass_colormap,
-                foliage_colormap,
-                biome_climate,
-                min_y,
-                height,
-            };
-            let mut mesh = mesh_chunk_snapshot(&snapshot, pos, &registry, &uv_map, lod);
-            if let (Some(enqueued_at), Some(started_at)) = (enqueued_at, started_at) {
-                mesh.timing = Some(RemeshTiming {
-                    enqueued_at,
-                    started_at,
-                    meshed_at: std::time::Instant::now(),
-                });
-            }
-            let _ = tx.send(mesh);
-        };
+        self.queue.push(PendingJob {
+            pos,
+            lod,
+            // An edit re-meshes an already-shown chunk (vanilla's "recompile").
+            is_recompile: priority,
+            enqueued_at,
+            chunks_needed,
+            chunk_arcs,
+            light,
+            registry,
+            uv_map,
+            grass_colormap,
+            foliage_colormap,
+            biome_climate,
+            min_y,
+            height,
+            tx,
+        });
+    }
 
-        if priority {
-            let _ = self.edit_tx.send(Box::new(job));
-        } else {
-            rayon::spawn(job);
-        }
+    /// Latest camera position, used to mesh the nearest pending chunk first.
+    pub fn set_camera_position(&self, pos: glam::DVec3) {
+        self.queue.set_camera(pos);
     }
 
     pub fn drain_results(&self) -> impl Iterator<Item = ChunkMeshData> + '_ {
@@ -487,6 +485,167 @@ impl MeshDispatcher {
             .try_iter()
             .chain(self.result_rx.try_iter().take(MAX_MESH_UPLOADS_PER_FRAME))
     }
+}
+
+impl Drop for MeshDispatcher {
+    fn drop(&mut self) {
+        self.queue.close();
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+const MAX_RECOMPILE_QUOTA: i32 = 2;
+
+/// A pending chunk-mesh job: a point-in-time snapshot of the neighbourhood plus
+/// everything `mesh_chunk_snapshot` needs. Gathered on the calling thread
+/// (chunk data isn't shareable across threads), then meshed by a worker.
+struct PendingJob {
+    pos: ChunkPos,
+    lod: u32,
+    is_recompile: bool,
+    enqueued_at: Option<std::time::Instant>,
+    chunks_needed: [ChunkPos; 5],
+    chunk_arcs: Vec<Option<Arc<parking_lot::RwLock<azalea_world::Chunk>>>>,
+    light: HashMap<(i32, i32), crate::world::chunk::ChunkLightData>,
+    registry: Arc<BlockRegistry>,
+    uv_map: Arc<AtlasUVMap>,
+    grass_colormap: Arc<Colormap>,
+    foliage_colormap: Arc<Colormap>,
+    biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+    min_y: i32,
+    height: u32,
+    tx: crossbeam_channel::Sender<ChunkMeshData>,
+}
+
+impl PendingJob {
+    fn run(self) {
+        let started_at = self.enqueued_at.map(|_| std::time::Instant::now());
+        let snapshot = ChunkStoreSnapshot {
+            chunks: self
+                .chunks_needed
+                .into_iter()
+                .zip(self.chunk_arcs)
+                .collect(),
+            light: self.light,
+            grass_colormap: self.grass_colormap,
+            foliage_colormap: self.foliage_colormap,
+            biome_climate: self.biome_climate,
+            min_y: self.min_y,
+            height: self.height,
+        };
+        let mut mesh =
+            mesh_chunk_snapshot(&snapshot, self.pos, &self.registry, &self.uv_map, self.lod);
+        if let (Some(enqueued_at), Some(started_at)) = (self.enqueued_at, started_at) {
+            mesh.timing = Some(RemeshTiming {
+                enqueued_at,
+                started_at,
+                meshed_at: std::time::Instant::now(),
+            });
+        }
+        let _ = self.tx.send(mesh);
+    }
+}
+
+struct QueueState {
+    tasks: Vec<PendingJob>,
+    // Consecutive edits served ahead of an initial load before one is forced, so
+    // streaming never starves (vanilla SectionTaskDynamicQueue.MAX_RECOMPILE_QUOTA).
+    recompile_quota: i32,
+    camera: glam::DVec3,
+}
+
+/// Re-orderable mesh queue, a port of vanilla `SectionTaskDynamicQueue`. The
+/// best task is chosen at poll time rather than fixed at submission, so a
+/// freshly enqueued edit is taken before the already-queued chunk-load backlog.
+struct MeshQueue {
+    state: Mutex<QueueState>,
+    available: Condvar,
+    closed: AtomicBool,
+}
+
+impl MeshQueue {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(QueueState {
+                tasks: Vec::new(),
+                recompile_quota: MAX_RECOMPILE_QUOTA,
+                camera: glam::DVec3::ZERO,
+            }),
+            available: Condvar::new(),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn push(&self, job: PendingJob) {
+        self.state.lock().unwrap().tasks.push(job);
+        self.available.notify_one();
+    }
+
+    fn set_camera(&self, camera: glam::DVec3) {
+        self.state.lock().unwrap().camera = camera;
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+        self.available.notify_all();
+    }
+
+    fn run_worker(&self) {
+        loop {
+            let mut state = self.state.lock().unwrap();
+            let job = loop {
+                if self.closed.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Some(job) = poll(&mut state) {
+                    break job;
+                }
+                state = self.available.wait(state).unwrap();
+            };
+            drop(state);
+            job.run();
+        }
+    }
+}
+
+/// Pick the next task: nearest to the camera, preferring edits (recompiles)
+/// over initial loads when the edit is closer, bounded by the recompile quota.
+/// Mirrors vanilla `SectionTaskDynamicQueue.poll`.
+fn poll(state: &mut QueueState) -> Option<PendingJob> {
+    let camera = state.camera;
+    let dist_sq = |task: &PendingJob| {
+        let dx = (task.pos.x as f64 * 16.0 + 8.0) - camera.x;
+        let dz = (task.pos.z as f64 * 16.0 + 8.0) - camera.z;
+        dx * dx + dz * dz
+    };
+
+    let mut best_initial: Option<(usize, f64)> = None;
+    let mut best_recompile: Option<(usize, f64)> = None;
+    for (i, task) in state.tasks.iter().enumerate() {
+        let dist = dist_sq(task);
+        if task.is_recompile {
+            if best_recompile.is_none_or(|(_, d)| dist < d) {
+                best_recompile = Some((i, dist));
+            }
+        } else if best_initial.is_none_or(|(_, d)| dist < d) {
+            best_initial = Some((i, dist));
+        }
+    }
+
+    if let Some((ri, rd)) = best_recompile {
+        let take_recompile = match best_initial {
+            None => true,
+            Some((_, id)) => state.recompile_quota > 0 && rd < id,
+        };
+        if take_recompile {
+            state.recompile_quota -= 1;
+            return Some(state.tasks.swap_remove(ri));
+        }
+    }
+    state.recompile_quota = MAX_RECOMPILE_QUOTA;
+    best_initial.map(|(ii, _)| state.tasks.swap_remove(ii))
 }
 
 struct ChunkStoreSnapshot {
