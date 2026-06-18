@@ -44,6 +44,7 @@ fn main() {
         ("sky.vert", shaderc::ShaderKind::Vertex),
         ("sky.frag", shaderc::ShaderKind::Fragment),
         ("cull.comp", shaderc::ShaderKind::Compute),
+        ("hiz_downsample.comp", shaderc::ShaderKind::Compute),
         ("blur.vert", shaderc::ShaderKind::Vertex),
         ("blur.frag", shaderc::ShaderKind::Fragment),
         ("entity.vert", shaderc::ShaderKind::Vertex),

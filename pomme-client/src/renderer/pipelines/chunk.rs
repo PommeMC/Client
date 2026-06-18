@@ -10,6 +10,8 @@ use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 pub struct ChunkPipeline {
     pub pipeline: vk::Pipeline,
+    /// Depth-only variant rendered into the Hi-Z prepass (no color attachment).
+    pub depth_pipeline: vk::Pipeline,
     pub pipeline_layout: vk::PipelineLayout,
     pub descriptor_set_layout_camera: vk::DescriptorSetLayout,
     pub descriptor_set_layout_atlas: vk::DescriptorSetLayout,
@@ -24,6 +26,7 @@ impl ChunkPipeline {
     pub fn new(
         device: &vk::Device,
         render_pass: vk::RenderPass,
+        depth_render_pass: vk::RenderPass,
         allocator: &Arc<Mutex<Allocator>>,
         atlas: &TextureAtlas,
     ) -> Self {
@@ -49,6 +52,7 @@ impl ChunkPipeline {
             .expect("failed to create pipeline layout");
 
         let pipeline = create_pipeline(device, render_pass, pipeline_layout);
+        let depth_pipeline = create_depth_pipeline(device, depth_render_pass, pipeline_layout);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -140,6 +144,7 @@ impl ChunkPipeline {
 
         Self {
             pipeline,
+            depth_pipeline,
             pipeline_layout,
             descriptor_set_layout_camera: camera_layout,
             descriptor_set_layout_atlas: atlas_layout,
@@ -185,6 +190,18 @@ impl ChunkPipeline {
         );
     }
 
+    /// Bind the depth-only variant for the Hi-Z occlusion prepass.
+    pub fn bind_depth(&self, cmd: vk::CommandBuffer, frame: usize) {
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.depth_pipeline);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.camera_sets[frame], self.atlas_set],
+            &[],
+        );
+    }
+
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
         for i in 0..MAX_FRAMES_IN_FLIGHT {
@@ -198,10 +215,23 @@ impl ChunkPipeline {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.depth_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.descriptor_set_layout_camera, None);
         device.destroy_descriptor_set_layout(self.descriptor_set_layout_atlas, None);
+    }
+}
+
+fn shader_stage(
+    stage: vk::ShaderStageFlags,
+    module: vk::ShaderModule,
+) -> vk::PipelineShaderStageCreateInfo<'static> {
+    vk::PipelineShaderStageCreateInfo {
+        stage,
+        module,
+        name: c"main".as_ptr(),
+        ..Default::default()
     }
 }
 
@@ -210,31 +240,61 @@ fn create_pipeline(
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
 ) -> vk::Pipeline {
-    let vert_spv = shader::include_spirv!("chunk.vert.spv");
-    let frag_spv = shader::include_spirv!("chunk.frag.spv");
-
-    let vert_module = shader::create_shader_module(device, vert_spv);
-    let frag_module = shader::create_shader_module(device, frag_spv);
+    let vert_module =
+        shader::create_shader_module(device, shader::include_spirv!("chunk.vert.spv"));
+    let frag_module =
+        shader::create_shader_module(device, shader::include_spirv!("chunk.frag.spv"));
 
     let stages = [
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Vertex,
-            module: vert_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
-        vk::PipelineShaderStageCreateInfo {
-            stage: vk::ShaderStageFlags::Fragment,
-            module: frag_module,
-            name: c"main".as_ptr(),
-            ..Default::default()
-        },
+        shader_stage(vk::ShaderStageFlags::Vertex, vert_module),
+        shader_stage(vk::ShaderStageFlags::Fragment, frag_module),
     ];
+    let blend_attachment = [vk::PipelineColorBlendAttachmentState {
+        blend_enable: vk::FALSE,
+        color_write_mask: vk::ColorComponentFlags::RGBA,
+        ..Default::default()
+    }];
+    let color_blend = vk::PipelineColorBlendStateCreateInfo {
+        attachment_count: blend_attachment.len() as u32,
+        attachments: blend_attachment.as_ptr(),
+        ..Default::default()
+    };
 
+    let pipeline = build_pipeline(device, render_pass, layout, &stages, &color_blend);
+    device.destroy_shader_module(vert_module, None);
+    device.destroy_shader_module(frag_module, None);
+    pipeline
+}
+
+/// Depth-only variant for the Hi-Z prepass: vertex stage only, no color
+/// attachment.
+fn create_depth_pipeline(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+) -> vk::Pipeline {
+    let vert_module =
+        shader::create_shader_module(device, shader::include_spirv!("chunk.vert.spv"));
+    let stages = [shader_stage(vk::ShaderStageFlags::Vertex, vert_module)];
+    let color_blend = vk::PipelineColorBlendStateCreateInfo::default();
+
+    let pipeline = build_pipeline(device, render_pass, layout, &stages, &color_blend);
+    device.destroy_shader_module(vert_module, None);
+    pipeline
+}
+
+/// Shared chunk pipeline state; callers supply the shader stages and
+/// color-blend (the only difference between the main and depth-only variants).
+fn build_pipeline(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+    stages: &[vk::PipelineShaderStageCreateInfo],
+    color_blend: &vk::PipelineColorBlendStateCreateInfo,
+) -> vk::Pipeline {
     use crate::renderer::chunk::mesher::ChunkVertex;
     let binding_descs = [ChunkVertex::binding_description()];
     let attr_descs = ChunkVertex::attribute_descriptions();
-
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
         vertex_binding_description_count: binding_descs.len() as u32,
         vertex_binding_descriptions: binding_descs.as_ptr(),
@@ -275,17 +335,6 @@ fn create_pipeline(
         ..Default::default()
     };
 
-    let blend_attachment = [vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::FALSE,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-        ..Default::default()
-    }];
-    let color_blending = vk::PipelineColorBlendStateCreateInfo {
-        attachment_count: blend_attachment.len() as u32,
-        attachments: blend_attachment.as_ptr(),
-        ..Default::default()
-    };
-
     let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
     let dynamic_state = vk::PipelineDynamicStateCreateInfo {
         dynamic_state_count: dynamic_states.len() as u32,
@@ -302,7 +351,7 @@ fn create_pipeline(
         rasterization_state: &rasterizer,
         multisample_state: &multisampling,
         depth_stencil_state: &depth_stencil,
-        color_blend_state: &color_blending,
+        color_blend_state: color_blend,
         dynamic_state: &dynamic_state,
         layout,
         render_pass,
@@ -311,7 +360,6 @@ fn create_pipeline(
     }];
 
     let mut pipeline = vk::Pipeline::null();
-
     device
         .create_graphics_pipelines(
             vk::PipelineCache::null(),
@@ -320,9 +368,5 @@ fn create_pipeline(
             slice::from_mut(&mut pipeline),
         )
         .expect("failed to create chunk pipeline");
-
-    device.destroy_shader_module(vert_module, None);
-    device.destroy_shader_module(frag_module, None);
-
     pipeline
 }

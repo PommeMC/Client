@@ -251,7 +251,7 @@ impl ApplicationHandler for App {
                             }
                         }
                         AppPhase::InGame {
-                            gfx,
+                            mut gfx,
                             connection,
                             mut game,
                         } => {
@@ -318,6 +318,12 @@ impl ApplicationHandler for App {
                                             if self.core.input.key_pressed(KeyCode::F3) =>
                                         {
                                             game.show_chunk_borders = !game.show_chunk_borders;
+                                        }
+                                        KeyCode::KeyO
+                                            if self.core.input.key_pressed(KeyCode::F3) =>
+                                        {
+                                            let on = gfx.renderer.toggle_hiz_occlusion();
+                                            tracing::info!("Hi-Z occlusion: {on}");
                                         }
                                         _ => {}
                                     }

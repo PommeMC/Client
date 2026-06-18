@@ -3,6 +3,7 @@ pub mod camera;
 pub mod chunk;
 mod context;
 pub mod entity_model;
+mod hiz;
 pub mod pipelines;
 pub(crate) mod shader;
 mod swapchain;
@@ -130,6 +131,13 @@ pub struct Renderer {
     entity_renderer: EntityRenderer,
     block_entity_pipeline: BlockEntityPipeline,
     chunk_buffers: ChunkBufferStore,
+    hiz: hiz::HiZPyramid,
+    /// Whether the Hi-Z pyramid has been built at least once since the last
+    /// (re)creation; occlusion stays off until then to avoid sampling garbage.
+    hiz_built: bool,
+    /// Runtime toggle for Hi-Z chunk occlusion culling (set to `false` to fall
+    /// back to pure per-section frustum culling).
+    hiz_occlusion_enabled: bool,
     render_finished_per_image: Vec<vk::Semaphore>,
     swapchain_dirty: bool,
     vsync: bool,
@@ -217,6 +225,7 @@ impl Renderer {
         let chunk_pipeline = ChunkPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
+            swapchain_state.render_pass_depth,
             &ctx.allocator,
             &atlas,
         );
@@ -345,6 +354,14 @@ impl Renderer {
             &ctx.allocator,
         );
 
+        let hiz = hiz::HiZPyramid::new(
+            &ctx.device,
+            &ctx.allocator,
+            swapchain_state.extent,
+            swapchain_state.depth_view,
+        );
+        chunk_buffers.set_hiz(&ctx.device, hiz.sampled_view(), hiz.sampler());
+
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
@@ -418,6 +435,11 @@ impl Renderer {
             gui_item_pipeline,
             gui_item_atlas,
             chunk_buffers,
+            hiz,
+            hiz_built: false,
+            // Off by default; toggle in-world with F3+O. Untested GPU path, so the
+            // branch runs as plain per-section frustum culling until enabled.
+            hiz_occlusion_enabled: false,
             render_finished_per_image,
             swapchain_dirty: false,
             vsync,
@@ -632,8 +654,25 @@ impl Renderer {
         self.chunk_pipeline = ChunkPipeline::new(
             &self.ctx.device,
             self.swapchain.render_pass,
+            self.swapchain.render_pass_depth,
             &self.ctx.allocator,
             &self.atlas,
+        );
+
+        // The Hi-Z pyramid is sized to the framebuffer, so rebuild it (and the
+        // scene depth view it samples) for the new extent.
+        self.hiz.destroy(&self.ctx.device, &self.ctx.allocator);
+        self.hiz = hiz::HiZPyramid::new(
+            &self.ctx.device,
+            &self.ctx.allocator,
+            self.swapchain.extent,
+            self.swapchain.depth_view,
+        );
+        self.hiz_built = false;
+        self.chunk_buffers.set_hiz(
+            &self.ctx.device,
+            self.hiz.sampled_view(),
+            self.hiz.sampler(),
         );
 
         self.hand_pipeline
@@ -809,6 +848,17 @@ impl Renderer {
         self.chunk_buffers.chunk_count()
     }
 
+    /// Sections actually drawn after frustum + Hi-Z occlusion culling (lags a
+    /// few frames). Drops when occlusion culls geometry — useful for the F3
+    /// overlay.
+    pub fn sections_drawn(&self) -> u32 {
+        self.chunk_buffers.sections_drawn()
+    }
+
+    pub fn hiz_occlusion_enabled(&self) -> bool {
+        self.hiz_occlusion_enabled
+    }
+
     pub fn wait_for_all_frames(&self) {
         let _ = self
             .ctx
@@ -817,7 +867,12 @@ impl Renderer {
     }
 
     pub fn upload_chunk_mesh(&mut self, mesh: &ChunkMeshData) {
-        self.chunk_buffers.upload(self.ctx.graphics_queue, mesh);
+        self.chunk_buffers.upload(
+            &self.ctx.device,
+            &self.ctx.allocator,
+            self.ctx.graphics_queue,
+            mesh,
+        );
     }
 
     pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {
@@ -827,6 +882,12 @@ impl Renderer {
     pub fn clear_chunk_meshes(&mut self) {
         self.wait_for_all_frames();
         self.chunk_buffers.clear();
+    }
+
+    /// Toggle Hi-Z chunk occlusion culling (F3+O). Returns the new state.
+    pub fn toggle_hiz_occlusion(&mut self) -> bool {
+        self.hiz_occlusion_enabled = !self.hiz_occlusion_enabled;
+        self.hiz_occlusion_enabled
     }
 
     pub fn create_mesh_dispatcher(
@@ -1150,11 +1211,97 @@ impl Renderer {
         };
         cmd.begin(&begin_info)?;
 
+        let extent = self.swapchain.extent;
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: extent.width as f32,
+            height: extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent,
+        };
+
         if matches!(&mode, RenderMode::World { .. }) {
             let frustum = self.camera.frustum_planes();
-            let cam_pos = self.camera.position.as_vec3().into();
-            self.chunk_buffers
-                .dispatch_cull(cmd, frame, &frustum, cam_pos);
+            // The eye (including the third-person offset) is the origin the chunk
+            // vertex shader renders relative to, so cull/occlusion must use it too.
+            let eye = self.camera.position.as_vec3() + self.camera.third_person_offset();
+            let cam_pos: [f32; 3] = eye.into();
+            let view_proj = self.camera.view_projection().to_cols_array_2d();
+            let screen_size = [extent.width as f32, extent.height as f32];
+            let occlusion_active = self.hiz_occlusion_enabled && self.hiz_built;
+
+            self.chunk_buffers.dispatch_cull(
+                cmd,
+                frame,
+                &frustum,
+                cam_pos,
+                view_proj,
+                screen_size,
+                occlusion_active,
+            );
+
+            if self.hiz_occlusion_enabled {
+                // Depth-only prepass of the just-culled set, then reduce it into
+                // the Hi-Z pyramid for the next frame's occlusion test. (The main
+                // pass re-clears and re-draws depth, so it is unaffected.)
+                let depth_clear = [vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                }];
+                let rp_info = vk::RenderPassBeginInfo {
+                    render_pass: self.swapchain.render_pass_depth,
+                    framebuffer: self.swapchain.framebuffer_depth,
+                    render_area: vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent,
+                    },
+                    clear_value_count: depth_clear.len() as u32,
+                    clear_values: depth_clear.as_ptr(),
+                    ..Default::default()
+                };
+                cmd.begin_render_pass(&rp_info, vk::SubpassContents::Inline);
+                cmd.set_viewport(0, &[viewport]);
+                cmd.set_scissor(0, &[scissor]);
+                self.chunk_pipeline.bind_depth(cmd, frame);
+                self.chunk_buffers.draw_indirect(cmd, frame);
+                cmd.end_render_pass();
+
+                self.hiz.build(cmd, !self.hiz_built);
+                self.hiz_built = true;
+
+                // The build sampled the scene depth; finish those reads before the
+                // main pass clears and re-renders the (shared) depth image.
+                let depth_war = vk::ImageMemoryBarrier {
+                    image: self.swapchain.depth_image,
+                    old_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+                    new_layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
+                    src_access_mask: vk::AccessFlags::ShaderRead,
+                    dst_access_mask: vk::AccessFlags::DepthStencilAttachmentWrite,
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::Depth,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    ..Default::default()
+                };
+                cmd.pipeline_barrier(
+                    vk::PipelineStageFlags::ComputeShader,
+                    vk::PipelineStageFlags::EarlyFragmentTests,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[depth_war],
+                );
+            }
         }
 
         let clear_values = [
@@ -1289,20 +1436,7 @@ impl Renderer {
 
         cmd.begin_render_pass(&render_pass_info, vk::SubpassContents::Inline);
 
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: self.swapchain.extent.width as f32,
-            height: self.swapchain.extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
         cmd.set_viewport(0, &[viewport]);
-
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: self.swapchain.extent,
-        };
         cmd.set_scissor(0, &[scissor]);
 
         let sw = self.swapchain.extent.width as f32;
@@ -1693,6 +1827,7 @@ impl Drop for Renderer {
 
         self.chunk_buffers
             .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.hiz.destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.hand_pipeline

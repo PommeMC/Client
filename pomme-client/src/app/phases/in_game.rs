@@ -301,6 +301,8 @@ pub fn update_game(
                 Some((t.block_pos, t.face, block.id().to_string()))
             }),
             chunk_count: gfx.renderer.loaded_chunk_count(),
+            sections_drawn: gfx.renderer.sections_drawn(),
+            occlusion_on: gfx.renderer.hiz_occlusion_enabled(),
             gpu_name: gfx.renderer.gpu_name(),
             vulkan_version: gfx.renderer.vulkan_version(),
             screen_w: gfx.renderer.screen_width(),

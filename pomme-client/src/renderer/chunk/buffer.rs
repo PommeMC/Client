@@ -79,17 +79,34 @@ struct FrustumData {
     planes: [[f32; 4]; 6],
     chunk_count: u32,
     camera_pos: [f32; 3],
+    // std140: camera_pos ends at offset 112 (16-aligned), so the mat4 packs with
+    // no extra padding and the Rust/GLSL layouts match.
+    view_proj: [[f32; 4]; 4],
+    screen_size: [f32; 2],
+    occlusion_enabled: u32,
+    _pad: u32,
+}
+
+/// One uploaded 16³ section: a self-contained indexed draw plus its tight AABB.
+struct SectionAlloc {
+    aabb: ChunkAABB,
+    first_index: u32,
+    index_count: u32,
+    vertex_offset: i32,
 }
 
 struct ChunkAlloc {
+    /// Buckets this column occupies, returned to the free list on removal.
     buckets: Vec<u32>,
-    index_counts: Vec<u32>,
-    aabb: ChunkAABB,
+    sections: Vec<SectionAlloc>,
     uploaded_at: std::time::Instant,
 }
 
 pub struct ChunkBufferStore {
     total_buckets: u32,
+    /// Capacity (in draws) of the per-frame meta/indirect buffers. Grown on
+    /// demand because per-section packing yields many more draws than buckets.
+    max_meta: usize,
     vertex_buffer: vk::Buffer,
     vertex_alloc: Allocation,
     index_buffer: vk::Buffer,
@@ -121,6 +138,9 @@ pub struct ChunkBufferStore {
     frustum_buffers: Vec<vk::Buffer>,
     frustum_allocs: Vec<Allocation>,
     fade_enabled: bool,
+    /// Post-cull section draw count read back from the GPU (lags a few frames);
+    /// exposed for the debug overlay so occlusion's effect is visible.
+    last_draw_count: u32,
 }
 
 impl ChunkBufferStore {
@@ -218,9 +238,9 @@ impl ChunkBufferStore {
             free_buckets.push_back(i);
         }
 
-        let max_meta = (total_buckets * 2) as u64;
-        let meta_size = max_meta * size_of::<ChunkMeta>() as u64;
-        let indirect_size = max_meta * size_of::<DrawCommand>() as u64;
+        let max_meta = (total_buckets * 2) as usize;
+        let meta_size = (max_meta * size_of::<ChunkMeta>()) as u64;
+        let indirect_size = (max_meta * size_of::<DrawCommand>()) as u64;
         let count_size = 4u64;
         let frustum_size = size_of::<FrustumData>() as u64;
 
@@ -318,6 +338,10 @@ impl ChunkBufferStore {
                 ty: vk::DescriptorType::UniformBuffer,
                 descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
             },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
+            },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
             max_sets: MAX_FRAMES_IN_FLIGHT as u32,
@@ -388,6 +412,7 @@ impl ChunkBufferStore {
 
         Self {
             total_buckets,
+            max_meta,
             vertex_buffer,
             vertex_alloc,
             index_buffer,
@@ -416,167 +441,243 @@ impl ChunkBufferStore {
             frustum_buffers,
             frustum_allocs,
             fade_enabled: false,
+            last_draw_count: 0,
         }
     }
 
-    pub fn upload(&mut self, queue: vk::Queue, mesh: &ChunkMeshData) {
-        if mesh.vertices.is_empty() || mesh.indices.is_empty() {
-            self.remove(&mesh.pos);
-            return;
+    /// Sections drawn last time this frame slot ran (post frustum + occlusion
+    /// cull). Read back from the GPU count buffer, so it lags a few frames.
+    pub fn sections_drawn(&self) -> u32 {
+        self.last_draw_count
+    }
+
+    pub fn upload(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        queue: vk::Queue,
+        mesh: &ChunkMeshData,
+    ) {
+        // Tight AABB over a section's own vertices (better cull granularity than
+        // the chunk-column bounds; also robust to LOD cubes that exceed 16 tall).
+        fn section_aabb(verts: &[ChunkVertex]) -> ChunkAABB {
+            let mut mn = [f32::MAX; 3];
+            let mut mx = [f32::MIN; 3];
+            for v in verts {
+                for k in 0..3 {
+                    mn[k] = mn[k].min(v.position[k]);
+                    mx[k] = mx[k].max(v.position[k]);
+                }
+            }
+            ChunkAABB {
+                min: [mn[0], mn[1], mn[2], 0.0],
+                max: [mx[0], mx[1], mx[2], 0.0],
+            }
         }
+
+        fn pop_bucket(free: &mut VecDeque<u32>, popped: &mut Vec<u32>) -> Option<u32> {
+            let b = free.pop_front()?;
+            popped.push(b);
+            Some(b)
+        }
+
+        // A chunk already resident at this position is being re-meshed (LOD swap,
+        // block edit, or neighbor remesh) rather than newly streamed in. Re-running
+        // the fade-in on it reads as flashing/reloading, so swap it instantly.
+        let was_present = self.chunks.contains_key(&mesh.pos);
 
         self.remove(&mesh.pos);
-
-        let num_buckets = mesh.vertices.len().div_ceil(BUCKET_VERTICES as usize) as u32;
-        if self.free_buckets.len() < num_buckets as usize {
-            tracing::warn!(
-                "Bucket pool full ({} free, need {}), skipping {:?}",
-                self.free_buckets.len(),
-                num_buckets,
-                mesh.pos,
-            );
+        if mesh.sections.is_empty() {
             return;
         }
 
-        let mut min_y = f32::MAX;
-        let mut max_y = f32::MIN;
-        for v in &mesh.vertices {
-            min_y = min_y.min(v.position[1]);
-            max_y = max_y.max(v.position[1]);
-        }
-        let cx = mesh.pos.x as f32 * 16.0;
-        let cz = mesh.pos.z as f32 * 16.0;
-        let aabb = ChunkAABB {
-            min: [cx, min_y, cz, 0.0],
-            max: [cx + 16.0, max_y, cz + 16.0, 0.0],
-        };
-
-        let mut bucket_ids = Vec::with_capacity(num_buckets as usize);
-        let mut index_counts = Vec::with_capacity(num_buckets as usize);
-        let mut copy_regions_v: Vec<vk::BufferCopy> = Vec::new();
-        let mut copy_regions_i: Vec<vk::BufferCopy> = Vec::new();
-
-        let write_buf = if self.use_staging {
-            self.staging_alloc.mapped_slice_mut().unwrap()
-        } else {
-            self.vertex_alloc.mapped_slice_mut().unwrap()
-        };
         let staging_half = self.staging_size as usize / 2;
-
-        let verts = &mesh.vertices;
-        let indices = &mesh.indices;
-        let mut vert_cursor = 0usize;
-        let mut idx_cursor = 0usize;
-        let mut stg_v_cursor = 0usize;
-        let mut stg_i_cursor = 0usize;
-
-        for _ in 0..num_buckets {
-            let bucket = self.free_buckets.pop_front().unwrap();
-            let vert_end = (vert_cursor + BUCKET_VERTICES as usize).min(verts.len());
-
-            let vb_offset = bucket as usize * BUCKET_VERTICES as usize * VERTEX_SIZE as usize;
-            let src = bytemuck::cast_slice(&verts[vert_cursor..vert_end]);
-
-            if self.use_staging {
-                write_buf[stg_v_cursor..stg_v_cursor + src.len()].copy_from_slice(src);
-                copy_regions_v.push(vk::BufferCopy {
-                    src_offset: stg_v_cursor as u64,
-                    dst_offset: vb_offset as u64,
-                    size: src.len() as u64,
-                });
-                stg_v_cursor += src.len();
-            } else {
-                write_buf[vb_offset..vb_offset + src.len()].copy_from_slice(src);
-            }
-
-            let local_base = vert_cursor as u32;
-            let local_end = vert_end as u32;
-            let mut bucket_indices: Vec<u32> = Vec::new();
-
-            while idx_cursor + 6 <= indices.len() {
-                let max_idx = indices[idx_cursor..idx_cursor + 6]
-                    .iter()
-                    .copied()
-                    .max()
-                    .unwrap_or(0);
-                if max_idx >= local_end {
-                    break;
-                }
-                for &idx in &indices[idx_cursor..idx_cursor + 6] {
-                    bucket_indices.push(idx - local_base);
-                }
-                idx_cursor += 6;
-            }
-
-            let ib_offset = bucket as usize * BUCKET_INDICES as usize * INDEX_SIZE as usize;
-            let idx_bytes = bytemuck::cast_slice(&bucket_indices);
-
-            if self.use_staging {
-                let stg_off = staging_half + stg_i_cursor;
-                write_buf[stg_off..stg_off + idx_bytes.len()].copy_from_slice(idx_bytes);
-                copy_regions_i.push(vk::BufferCopy {
-                    src_offset: stg_off as u64,
-                    dst_offset: ib_offset as u64,
-                    size: idx_bytes.len() as u64,
-                });
-                stg_i_cursor += idx_bytes.len();
-            } else {
-                let ib_ptr = self.index_alloc.mapped_slice_mut().unwrap();
-                ib_ptr[ib_offset..ib_offset + idx_bytes.len()].copy_from_slice(idx_bytes);
-            }
-
-            index_counts.push(bucket_indices.len() as u32);
-            bucket_ids.push(bucket);
-            vert_cursor = vert_end;
-        }
-
-        if idx_cursor < indices.len() {
-            let last_bucket = *bucket_ids.last().unwrap();
-            let local_base = (verts.len() - (verts.len() % BUCKET_VERTICES as usize).max(1)) as u32;
-            let remaining: Vec<u32> = indices[idx_cursor..]
+        if self.use_staging {
+            // Verts and indices share the staging buffer (two halves), copied in
+            // one transfer. A chunk too large for staging is skipped rather than
+            // overflowing the buffer (matches the prior column-sized limit).
+            let v_bytes: usize = mesh
+                .sections
                 .iter()
-                .map(|&idx| idx - local_base)
-                .collect();
-            let ib_offset = last_bucket as usize * BUCKET_INDICES as usize * INDEX_SIZE as usize;
-            let existing_count = *index_counts.last().unwrap() as usize;
-            let idx_bytes = bytemuck::cast_slice(&remaining);
-            let start = ib_offset + existing_count * INDEX_SIZE as usize;
-
-            if self.use_staging {
-                let stg_off = staging_half + stg_i_cursor;
-                write_buf[stg_off..stg_off + idx_bytes.len()].copy_from_slice(idx_bytes);
-                copy_regions_i.push(vk::BufferCopy {
-                    src_offset: stg_off as u64,
-                    dst_offset: start as u64,
-                    size: idx_bytes.len() as u64,
-                });
-            } else {
-                let ib_ptr = self.index_alloc.mapped_slice_mut().unwrap();
-                ib_ptr[start..start + idx_bytes.len()].copy_from_slice(idx_bytes);
+                .map(|s| s.vertices.len() * VERTEX_SIZE as usize)
+                .sum();
+            let i_bytes: usize = mesh
+                .sections
+                .iter()
+                .map(|s| s.indices.len() * INDEX_SIZE as usize)
+                .sum();
+            if v_bytes > staging_half || i_bytes > staging_half {
+                tracing::warn!(
+                    "Chunk {:?} too large for staging ({} v / {} i bytes), skipping",
+                    mesh.pos,
+                    v_bytes,
+                    i_bytes,
+                );
+                return;
             }
-            *index_counts.last_mut().unwrap() += remaining.len() as u32;
         }
 
-        if self.use_staging && (!copy_regions_v.is_empty() || !copy_regions_i.is_empty()) {
+        // Per-draw placement: where each (sub-)section lands in the pools.
+        enum IdxData<'a> {
+            Borrowed(&'a [u32]),
+            Owned(Vec<u32>),
+        }
+        struct Plan<'a> {
+            verts: &'a [ChunkVertex],
+            idx: IdxData<'a>,
+            vpos: usize, // vertex element offset in the pool
+            ipos: usize, // index element offset in the pool
+            aabb: ChunkAABB,
+        }
+        impl IdxData<'_> {
+            fn slice(&self) -> &[u32] {
+                match self {
+                    IdxData::Borrowed(s) => s,
+                    IdxData::Owned(v) => v,
+                }
+            }
+        }
+
+        let mut popped: Vec<u32> = Vec::new();
+        let mut plans: Vec<Plan> = Vec::new();
+        // Sections pack into a shared bucket until one won't fit; each section is
+        // a self-contained draw (indices stay section-local, vertex_offset points
+        // at its vertices), so multiple sections share a bucket without rebasing.
+        let mut cur_bucket: Option<u32> = None;
+        let mut bucket_verts_used = 0usize;
+        let mut bucket_idx_used = 0usize;
+
+        for sec in &mesh.sections {
+            let vcount = sec.vertices.len();
+            let icount = sec.indices.len();
+            if vcount == 0 || icount == 0 {
+                continue;
+            }
+            let aabb = section_aabb(&sec.vertices);
+
+            if vcount > BUCKET_VERTICES as usize || icount > BUCKET_INDICES as usize {
+                // Oversized (pathologically dense) section: give it whole buckets
+                // and split into bucket-sized windows with rebased indices. Quads
+                // are 4 verts / 6 indices and BUCKET_VERTICES is a multiple of 4,
+                // so windows never cut a quad.
+                cur_bucket = None;
+                bucket_verts_used = 0;
+                bucket_idx_used = 0;
+                let verts = &sec.vertices;
+                let indices = &sec.indices;
+                let mut vcur = 0usize;
+                let mut icur = 0usize;
+                while vcur < verts.len() {
+                    let Some(bucket) = pop_bucket(&mut self.free_buckets, &mut popped) else {
+                        for b in popped {
+                            self.free_buckets.push_back(b);
+                        }
+                        tracing::warn!("Bucket pool full, skipping {:?}", mesh.pos);
+                        return;
+                    };
+                    let vend = (vcur + BUCKET_VERTICES as usize).min(verts.len());
+                    let local_base = vcur as u32;
+                    let local_end = vend as u32;
+                    let mut win: Vec<u32> = Vec::new();
+                    while icur + 6 <= indices.len() {
+                        let grp = &indices[icur..icur + 6];
+                        let maxi = grp.iter().copied().max().unwrap_or(0);
+                        if maxi >= local_end {
+                            break;
+                        }
+                        for &i in grp {
+                            win.push(i - local_base);
+                        }
+                        icur += 6;
+                    }
+                    plans.push(Plan {
+                        verts: &verts[vcur..vend],
+                        idx: IdxData::Owned(win),
+                        vpos: bucket as usize * BUCKET_VERTICES as usize,
+                        ipos: bucket as usize * BUCKET_INDICES as usize,
+                        aabb,
+                    });
+                    vcur = vend;
+                }
+                continue;
+            }
+
+            let need_new = match cur_bucket {
+                None => true,
+                Some(_) => {
+                    bucket_verts_used + vcount > BUCKET_VERTICES as usize
+                        || bucket_idx_used + icount > BUCKET_INDICES as usize
+                }
+            };
+            if need_new {
+                let Some(bucket) = pop_bucket(&mut self.free_buckets, &mut popped) else {
+                    for b in popped {
+                        self.free_buckets.push_back(b);
+                    }
+                    tracing::warn!("Bucket pool full, skipping {:?}", mesh.pos);
+                    return;
+                };
+                cur_bucket = Some(bucket);
+                bucket_verts_used = 0;
+                bucket_idx_used = 0;
+            }
+            let bucket = cur_bucket.unwrap();
+            plans.push(Plan {
+                verts: &sec.vertices,
+                idx: IdxData::Borrowed(&sec.indices),
+                vpos: bucket as usize * BUCKET_VERTICES as usize + bucket_verts_used,
+                ipos: bucket as usize * BUCKET_INDICES as usize + bucket_idx_used,
+                aabb,
+            });
+            bucket_verts_used += vcount;
+            bucket_idx_used += icount;
+        }
+
+        if plans.is_empty() {
+            for b in popped {
+                self.free_buckets.push_back(b);
+            }
+            return;
+        }
+
+        if self.use_staging {
+            let mut copy_v: Vec<vk::BufferCopy> = Vec::new();
+            let mut copy_i: Vec<vk::BufferCopy> = Vec::new();
+            {
+                let buf = self.staging_alloc.mapped_slice_mut().unwrap();
+                let mut stg_v = 0usize;
+                let mut stg_i = 0usize;
+                for p in &plans {
+                    let vb: &[u8] = bytemuck::cast_slice(p.verts);
+                    buf[stg_v..stg_v + vb.len()].copy_from_slice(vb);
+                    copy_v.push(vk::BufferCopy {
+                        src_offset: stg_v as u64,
+                        dst_offset: (p.vpos * VERTEX_SIZE as usize) as u64,
+                        size: vb.len() as u64,
+                    });
+                    stg_v += vb.len();
+
+                    let ib: &[u8] = bytemuck::cast_slice(p.idx.slice());
+                    let off = staging_half + stg_i;
+                    buf[off..off + ib.len()].copy_from_slice(ib);
+                    copy_i.push(vk::BufferCopy {
+                        src_offset: off as u64,
+                        dst_offset: (p.ipos * INDEX_SIZE as usize) as u64,
+                        size: ib.len() as u64,
+                    });
+                    stg_i += ib.len();
+                }
+            }
+
             let begin = vk::CommandBufferBeginInfo {
                 flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
                 ..Default::default()
             };
             self.transfer_cmd.begin(&begin).unwrap();
-            if !copy_regions_v.is_empty() {
-                self.transfer_cmd.copy_buffer(
-                    self.staging_buffer,
-                    self.vertex_buffer,
-                    &copy_regions_v,
-                );
-            }
-            if !copy_regions_i.is_empty() {
-                self.transfer_cmd.copy_buffer(
-                    self.staging_buffer,
-                    self.index_buffer,
-                    &copy_regions_i,
-                );
-            }
+            self.transfer_cmd
+                .copy_buffer(self.staging_buffer, self.vertex_buffer, &copy_v);
+            self.transfer_cmd
+                .copy_buffer(self.staging_buffer, self.index_buffer, &copy_i);
             self.transfer_cmd.end().unwrap();
             let submit = [vk::SubmitInfo {
                 command_buffer_count: 1,
@@ -585,18 +686,137 @@ impl ChunkBufferStore {
             }];
             queue.submit(&submit, vk::Fence::null()).unwrap();
             queue.wait_idle().unwrap();
+        } else {
+            {
+                let vbuf = self.vertex_alloc.mapped_slice_mut().unwrap();
+                for p in &plans {
+                    let vb: &[u8] = bytemuck::cast_slice(p.verts);
+                    let off = p.vpos * VERTEX_SIZE as usize;
+                    vbuf[off..off + vb.len()].copy_from_slice(vb);
+                }
+            }
+            {
+                let ibuf = self.index_alloc.mapped_slice_mut().unwrap();
+                for p in &plans {
+                    let ib: &[u8] = bytemuck::cast_slice(p.idx.slice());
+                    let off = p.ipos * INDEX_SIZE as usize;
+                    ibuf[off..off + ib.len()].copy_from_slice(ib);
+                }
+            }
         }
+
+        let sections: Vec<SectionAlloc> = plans
+            .iter()
+            .map(|p| SectionAlloc {
+                aabb: p.aabb,
+                first_index: p.ipos as u32,
+                index_count: p.idx.slice().len() as u32,
+                vertex_offset: p.vpos as i32,
+            })
+            .collect();
 
         self.chunks.insert(
             mesh.pos,
             ChunkAlloc {
-                buckets: bucket_ids,
-                index_counts,
-                aabb,
-                uploaded_at: std::time::Instant::now(),
+                buckets: popped,
+                sections,
+                // Re-meshes start already faded-in (instant swap); only genuinely
+                // new chunks play the fade.
+                uploaded_at: if was_present {
+                    std::time::Instant::now()
+                        .checked_sub(std::time::Duration::from_secs(2))
+                        .unwrap_or_else(std::time::Instant::now)
+                } else {
+                    std::time::Instant::now()
+                },
             },
         );
         self.meta_dirty = true;
+
+        let total_sections: usize = self.chunks.values().map(|c| c.sections.len()).sum();
+        self.ensure_meta_capacity(device, allocator, total_sections);
+    }
+
+    /// Grow the per-frame meta and indirect buffers so they can hold `needed`
+    /// section draws. No-op while capacity suffices.
+    fn ensure_meta_capacity(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        needed: usize,
+    ) {
+        if needed <= self.max_meta {
+            return;
+        }
+        let new_max = (needed.saturating_mul(3) / 2)
+            .next_power_of_two()
+            .max(self.max_meta * 2);
+
+        // The meta/indirect buffers are referenced by every in-flight frame's
+        // descriptor set; wait the GPU out before freeing them.
+        device.wait_idle().ok();
+
+        {
+            let mut alloc = allocator.lock().unwrap();
+            for i in 0..MAX_FRAMES_IN_FLIGHT {
+                device.destroy_buffer(self.meta_buffers[i], None);
+                alloc
+                    .free(std::mem::replace(&mut self.meta_allocs[i], unsafe {
+                        std::mem::zeroed()
+                    }))
+                    .ok();
+                device.destroy_buffer(self.indirect_buffers[i], None);
+                alloc
+                    .free(std::mem::replace(&mut self.indirect_allocs[i], unsafe {
+                        std::mem::zeroed()
+                    }))
+                    .ok();
+            }
+        }
+
+        let meta_size = (new_max * size_of::<ChunkMeta>()) as u64;
+        let indirect_size = (new_max * size_of::<DrawCommand>()) as u64;
+        for i in 0..MAX_FRAMES_IN_FLIGHT {
+            let (b, a) = util::create_host_buffer(
+                device,
+                allocator,
+                meta_size,
+                vk::BufferUsageFlags::StorageBuffer,
+                "chunk_meta",
+            );
+            self.meta_buffers[i] = b;
+            self.meta_allocs[i] = a;
+
+            let (b, a) = util::create_host_buffer(
+                device,
+                allocator,
+                indirect_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "indirect_cmds",
+            );
+            self.indirect_buffers[i] = b;
+            self.indirect_allocs[i] = a;
+
+            let (meta_info, mut meta_write) = desc_write(
+                self.compute_sets[i],
+                0,
+                vk::DescriptorType::StorageBuffer,
+                self.meta_buffers[i],
+                meta_size,
+            );
+            let (indirect_info, mut indirect_write) = desc_write(
+                self.compute_sets[i],
+                2,
+                vk::DescriptorType::StorageBuffer,
+                self.indirect_buffers[i],
+                indirect_size,
+            );
+            meta_write.buffer_info = meta_info.as_ptr();
+            indirect_write.buffer_info = indirect_info.as_ptr();
+            device.update_descriptor_sets(&[meta_write, indirect_write], &[]);
+        }
+
+        self.max_meta = new_max;
     }
 
     pub fn remove(&mut self, pos: &ChunkPos) {
@@ -623,12 +843,39 @@ impl ChunkBufferStore {
         self.chunks.len() as u32
     }
 
+    /// Point each frame's cull descriptor at the Hi-Z pyramid (binding 4).
+    /// Called once after the pyramid is created and again whenever it is
+    /// recreated (e.g. on resize), so the cull shader's occlusion test
+    /// reads a live view.
+    pub fn set_hiz(&self, device: &vk::Device, hiz_view: vk::ImageView, hiz_sampler: vk::Sampler) {
+        for &set in &self.compute_sets {
+            let image_info = [vk::DescriptorImageInfo {
+                sampler: hiz_sampler,
+                image_view: hiz_view,
+                image_layout: vk::ImageLayout::General,
+            }];
+            let write = vk::WriteDescriptorSet {
+                dst_set: set,
+                dst_binding: 4,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: image_info.as_ptr(),
+                ..Default::default()
+            };
+            device.update_descriptor_sets(&[write], &[]);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn dispatch_cull(
         &mut self,
         cmd: vk::CommandBuffer,
         frame: usize,
         frustum: &[[f32; 4]; 6],
         camera_pos: [f32; 3],
+        view_proj: [[f32; 4]; 4],
+        screen_size: [f32; 2],
+        occlusion_enabled: bool,
     ) {
         if self.chunks.is_empty() {
             return;
@@ -645,9 +892,10 @@ impl ChunkBufferStore {
 
         if self.meta_dirty || any_fading {
             self.cached_meta.clear();
-            for alloc in self.chunks.values() {
-                let dx = (alloc.aabb.min[0] + alloc.aabb.max[0]) * 0.5 - camera_pos[0];
-                let dz = (alloc.aabb.min[2] + alloc.aabb.max[2]) * 0.5 - camera_pos[2];
+            for (pos, alloc) in self.chunks.iter() {
+                // Fade is still per-column: distance from the chunk centre in X/Z.
+                let dx = pos.x as f32 * 16.0 + 8.0 - camera_pos[0];
+                let dz = pos.z as f32 * 16.0 + 8.0 - camera_pos[2];
                 let dist_sq = dx * dx + dz * dz;
                 let vis = if !self.fade_enabled || dist_sq < NEARBY_DIST_SQ {
                     1.0
@@ -657,13 +905,13 @@ impl ChunkBufferStore {
                 };
                 let vis_bits = vis.to_bits();
 
-                for (i, &bucket) in alloc.buckets.iter().enumerate() {
+                for sec in &alloc.sections {
                     self.cached_meta.push(ChunkMeta {
-                        aabb_min: alloc.aabb.min,
-                        aabb_max: alloc.aabb.max,
-                        index_count: alloc.index_counts[i],
-                        first_index: bucket * BUCKET_INDICES,
-                        vertex_offset: (bucket * BUCKET_VERTICES) as i32,
+                        aabb_min: sec.aabb.min,
+                        aabb_max: sec.aabb.max,
+                        index_count: sec.index_count,
+                        first_index: sec.first_index,
+                        vertex_offset: sec.vertex_offset,
                         visibility: vis_bits,
                     });
                 }
@@ -700,11 +948,22 @@ impl ChunkBufferStore {
             planes: *frustum,
             chunk_count: count,
             camera_pos,
+            view_proj,
+            screen_size,
+            occlusion_enabled: occlusion_enabled as u32,
+            _pad: 0,
         };
         let frustum_bytes = bytemuck::bytes_of(&frustum_data);
         self.frustum_allocs[frame].mapped_slice_mut().unwrap()[..frustum_bytes.len()]
             .copy_from_slice(frustum_bytes);
 
+        // This frame slot's GPU work has completed (fence-waited at frame start),
+        // so the count buffer still holds its previous cull result; capture it for
+        // the debug overlay before clearing it for this dispatch.
+        {
+            let s = self.count_allocs[frame].mapped_slice_mut().unwrap();
+            self.last_draw_count = u32::from_ne_bytes([s[0], s[1], s[2], s[3]]);
+        }
         self.count_allocs[frame].mapped_slice_mut().unwrap()[..4]
             .copy_from_slice(&0u32.to_ne_bytes());
 
@@ -753,7 +1012,7 @@ impl ChunkBufferStore {
         let max_draws = self
             .chunks
             .values()
-            .map(|c| c.buckets.len() as u32)
+            .map(|c| c.sections.len() as u32)
             .sum::<u32>();
 
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
@@ -863,6 +1122,13 @@ fn create_cull_desc_layout(device: &vk::Device) -> vk::DescriptorSetLayout {
         vk::DescriptorSetLayoutBinding {
             binding: 3,
             descriptor_type: vk::DescriptorType::StorageBuffer,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::Compute,
+            ..Default::default()
+        },
+        vk::DescriptorSetLayoutBinding {
+            binding: 4,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
             descriptor_count: 1,
             stage_flags: vk::ShaderStageFlags::Compute,
             ..Default::default()

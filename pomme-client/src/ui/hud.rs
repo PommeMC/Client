@@ -22,6 +22,8 @@ pub struct DebugInfo<'a> {
     pub x_rot_deg: f32,
     pub target_block: Option<(BlockPos, azalea_core::direction::Direction, String)>,
     pub chunk_count: u32,
+    pub sections_drawn: u32,
+    pub occlusion_on: bool,
     pub gpu_name: &'a str,
     pub vulkan_version: &'a str,
     pub screen_w: u32,
@@ -387,6 +389,11 @@ fn build_debug_overlay(elements: &mut Vec<MenuElement>, info: &DebugInfo<'_>, gs
         format!("Facing: {} ({:.1} / {:.1})", facing, y_rot_deg, x_rot_deg),
         String::new(),
         format!("Chunks: {} loaded", info.chunk_count),
+        format!(
+            "Sections drawn: {} (occlusion {})",
+            info.sections_drawn,
+            if info.occlusion_on { "on" } else { "off" }
+        ),
     ];
 
     if let Some((target, face, name)) = &info.target_block {

@@ -83,10 +83,18 @@ pub const fn pack_tint_shifted(rgb: [f32; 3]) -> u32 {
 
 pub const PACKED_WHITE_SHIFTED: u32 = pack_tint_shifted([1.0, 1.0, 1.0]);
 
-pub struct ChunkMeshData {
-    pub pos: ChunkPos,
+/// One 16³ section's geometry. Indices are section-local (0-based into
+/// `vertices`) so each section can be uploaded as a self-contained draw with
+/// its own tight AABB, giving per-section cull granularity instead of
+/// per-column.
+pub struct SectionMesh {
     pub vertices: Vec<ChunkVertex>,
     pub indices: Vec<u32>,
+}
+
+pub struct ChunkMeshData {
+    pub pos: ChunkPos,
+    pub sections: Vec<SectionMesh>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -754,8 +762,6 @@ fn mesh_chunk_snapshot(
     uv_map: &AtlasUVMap,
     lod: u32,
 ) -> ChunkMeshData {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
     let mut logged_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let step = 1i32 << lod;
@@ -765,6 +771,14 @@ fn mesh_chunk_snapshot(
     let world_x = pos.x * 16;
     let world_z = pos.z * 16;
 
+    let section_count = ((max_y - min_y) / 16).max(0) as usize;
+    let mut sections: Vec<SectionMesh> = (0..section_count)
+        .map(|_| SectionMesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        })
+        .collect();
+
     let type_map = if lod == 0 {
         Some(BlockTypeMap::build(
             snapshot, registry, world_x, world_z, min_y, max_y,
@@ -773,12 +787,11 @@ fn mesh_chunk_snapshot(
         None
     };
     if let Some(ref tm) = type_map {
-        let sections = (max_y - min_y) / 16;
-        for section in 0..sections {
-            let section_y = min_y + section * 16;
+        for (section, sec) in sections.iter_mut().enumerate() {
+            let section_y = min_y + section as i32 * 16;
             greedy_mesh_section(
-                &mut vertices,
-                &mut indices,
+                &mut sec.vertices,
+                &mut sec.indices,
                 snapshot,
                 registry,
                 tm,
@@ -831,10 +844,15 @@ fn mesh_chunk_snapshot(
 
                 let block_pos = [bx as f32, by as f32, bz as f32];
 
+                // Route this block's geometry to its 16-tall section. Clamped so
+                // a non-16-aligned world height can't index past the last section.
+                let s = (((by - min_y) / 16) as usize).min(section_count - 1);
+                let sec = &mut sections[s];
+
                 if lod > 0 {
                     emit_lod_cube(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         state,
                         snapshot,
@@ -847,8 +865,8 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let BlockKind::Water | BlockKind::Lava = kind {
                     emit_fluid(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         state,
                         snapshot,
@@ -860,8 +878,8 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(baked) = registry.get_baked_model(state) {
                     emit_baked_model(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         baked,
                         snapshot,
@@ -873,8 +891,8 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(quads) = registry.get_multipart_quads(state) {
                     emit_multipart(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         &quads,
                         snapshot,
@@ -886,8 +904,8 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         textures,
                         snapshot,
@@ -904,8 +922,8 @@ fn mesh_chunk_snapshot(
                         tracing::warn!("Missing model: {id}");
                     }
                     emit_missing_cube(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         snapshot,
                         registry,
@@ -921,11 +939,10 @@ fn mesh_chunk_snapshot(
         local_z += step;
     }
 
-    ChunkMeshData {
-        pos,
-        vertices,
-        indices,
-    }
+    // Drop empty (all-air) sections so they never reach the GPU as no-op draws.
+    sections.retain(|s| !s.vertices.is_empty() && !s.indices.is_empty());
+
+    ChunkMeshData { pos, sections }
 }
 
 #[allow(clippy::too_many_arguments)]
