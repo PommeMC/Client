@@ -361,6 +361,10 @@ pub struct MeshDispatcher {
     // Edits drain ahead of and uncapped by the bulk load lane (see drain_results).
     priority_rx: crossbeam_channel::Receiver<ChunkMeshData>,
     priority_tx: crossbeam_channel::Sender<ChunkMeshData>,
+    // Edits mesh on dedicated threads rather than rayon's shared pool, so a
+    // block change applies right away instead of queueing behind the streaming-
+    // chunk backlog (which left walk-through "ghost" blocks for seconds).
+    edit_tx: crossbeam_channel::Sender<Box<dyn FnOnce() + Send>>,
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
     grass_colormap: Arc<Colormap>,
@@ -378,11 +382,31 @@ impl MeshDispatcher {
     ) -> Self {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         let (priority_tx, priority_rx) = crossbeam_channel::unbounded();
+
+        // Edits are infrequent and touch few chunks, so a couple of threads
+        // cover bursts without oversubscribing the CPU.
+        let (edit_tx, edit_rx) = crossbeam_channel::unbounded::<Box<dyn FnOnce() + Send>>();
+        let edit_threads = std::thread::available_parallelism()
+            .map(|n| (n.get() / 4).clamp(1, 3))
+            .unwrap_or(1);
+        for _ in 0..edit_threads {
+            let rx = edit_rx.clone();
+            std::thread::Builder::new()
+                .name("edit-mesher".into())
+                .spawn(move || {
+                    while let Ok(job) = rx.recv() {
+                        job();
+                    }
+                })
+                .expect("spawn edit-mesher thread");
+        }
+
         Self {
             result_rx,
             result_tx,
             priority_rx,
             priority_tx,
+            edit_tx,
             registry: Arc::new(registry),
             uv_map: Arc::new(uv_map),
             grass_colormap: Arc::new(grass_colormap),
@@ -428,7 +452,7 @@ impl MeshDispatcher {
                 })
                 .collect();
 
-        rayon::spawn(move || {
+        let job = move || {
             let started_at = enqueued_at.map(|_| std::time::Instant::now());
             let snapshot = ChunkStoreSnapshot {
                 chunks: chunks_needed.into_iter().zip(chunk_arcs).collect(),
@@ -448,7 +472,13 @@ impl MeshDispatcher {
                 });
             }
             let _ = tx.send(mesh);
-        });
+        };
+
+        if priority {
+            let _ = self.edit_tx.send(Box::new(job));
+        } else {
+            rayon::spawn(job);
+        }
     }
 
     pub fn drain_results(&self) -> impl Iterator<Item = ChunkMeshData> + '_ {
