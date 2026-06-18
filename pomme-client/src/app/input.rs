@@ -47,6 +47,7 @@ pub struct InputState {
     controller_manager: Option<Gilrs>,
     active_gamepad_id: Option<GamepadId>,
     recent_actions: HashMap<Action, bool>,
+    packet_queue: Vec<azalea_protocol::packets::game::ServerboundGamePacket>,
 }
 
 #[derive(Default)]
@@ -102,6 +103,7 @@ impl InputState {
             controller_manager,
             active_gamepad_id: None,
             recent_actions: HashMap::new(),
+            packet_queue: Vec::new(),
         }
     }
 
@@ -119,7 +121,7 @@ impl InputState {
         phase.transition(|mut app| {
             if let AppPhase::InGame {
                 gfx,
-                connection: _connection,
+                connection,
                 game,
             } = &mut app
             {
@@ -160,6 +162,10 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::ChangePerspective);
                 }
+
+                for packet in &self.packet_queue {
+                    connection.packet_tx.send(packet.clone());
+                }
             }
 
             app
@@ -193,13 +199,13 @@ impl InputState {
                     self.recent_actions.insert(Action::Destroy, true);
                 }
                 Button::RightTrigger => {
-                    self.selected_slot = (self.selected_slot + 1) % 9;
+                    self.shift_selected_slot_right();
                 }
                 Button::LeftTrigger2 => {
                     self.recent_actions.insert(Action::Use, true);
                 }
                 Button::LeftTrigger => {
-                    self.selected_slot = (self.selected_slot + 8) % 9;
+                    self.shift_selected_slot_left();
                 }
                 Button::North => {
                     self.recent_actions.insert(Action::ToggleInventory, true);
@@ -321,7 +327,7 @@ impl InputState {
                 ElementState::Pressed => {
                     self.pressed.insert(code);
                     if let Some(slot) = hotbar_slot(code) {
-                        self.selected_slot = slot;
+                        self.set_slot(slot);
                     }
                     match code {
                         KeyCode::KeyE => {
@@ -341,6 +347,24 @@ impl InputState {
                 }
             }
         }
+    }
+
+    pub fn set_slot(&mut self, slot: u8) {
+        self.selected_slot = slot;
+
+        let action =
+            azalea_protocol::packets::game::ServerboundSetCarriedItem { slot: slot as u16 };
+
+        self.packet_queue
+            .push(azalea_protocol::packets::game::ServerboundGamePacket::SetCarriedItem(action));
+    }
+
+    pub fn shift_selected_slot_right(&mut self) {
+        self.set_slot((self.selected_slot + 1) % 9);
+    }
+
+    pub fn shift_selected_slot_left(&mut self) {
+        self.set_slot((self.selected_slot + 8) % 9);
     }
 
     pub fn set_modifiers(&mut self, modifiers: Modifiers) {
@@ -460,9 +484,9 @@ impl InputState {
 
     pub fn on_scroll(&mut self, delta: f32) {
         if delta > 0.0 {
-            self.selected_slot = (self.selected_slot + 8) % 9;
+            self.shift_selected_slot_left();
         } else if delta < 0.0 {
-            self.selected_slot = (self.selected_slot + 1) % 9;
+            self.shift_selected_slot_right();
         }
     }
 
