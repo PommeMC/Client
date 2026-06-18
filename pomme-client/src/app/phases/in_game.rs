@@ -781,6 +781,9 @@ pub fn update_game(
             game.paused = false;
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
+        PauseAction::ReportBugs => {
+            let _ = open::that("https://github.com/PommeMC/Client/issues");
+        }
         PauseAction::None => {}
     }
 

@@ -13,6 +13,7 @@ pub enum PauseAction {
     Disconnect,
     Options,
     Benchmark,
+    ReportBugs,
 }
 
 pub fn build_pause_menu(
@@ -108,7 +109,7 @@ pub fn build_pause_menu(
         "Give Feedback",
         false,
     );
-    common::push_button(
+    if common::push_button(
         elements,
         cursor,
         col2_x,
@@ -118,8 +119,11 @@ pub fn build_pause_menu(
         gs,
         fs,
         "Report Bugs",
-        false,
-    );
+        true,
+    ) && clicked
+    {
+        action = PauseAction::ReportBugs;
+    }
 
     if common::push_button(
         elements,
