@@ -374,9 +374,13 @@ impl MainMenu {
             let drop_x = anchor_x;
             let drop_y = icon_area_y - 2.0 * s;
             let links: [(&str, char, &str); 3] = [
-                ("Website", ICON_GLOBE, "https://website.com"),
+                ("Website", ICON_GLOBE, "https://pomme.rs"),
                 ("Discord", ICON_COMMENT, "https://discord.gg/ucBA55bHPR"),
-                ("GitHub", ICON_CODE, "https://github.com"),
+                (
+                    "GitHub",
+                    ICON_CODE,
+                    "https://github.com/PommeMC/Pomme-Client",
+                ),
             ];
             let total_h = links.len() as f32 * drop_style.item_h;
             let drop_y_top = drop_y - total_h;
