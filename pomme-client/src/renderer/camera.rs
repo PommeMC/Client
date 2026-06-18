@@ -188,7 +188,18 @@ impl Camera {
     }
 
     pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
-        let m = self.view_projection();
+        Self::planes_from_view_projection(self.view_projection())
+    }
+
+    /// Frustum planes for a FOV widened by `extra_radians` (clamped below
+    /// 180°), giving an "about to be seen" margin for occlusion-gated mesh
+    /// scheduling.
+    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
+        let fov = (self.fov_radians(1.0) + extra_radians).min(2.96);
+        Self::planes_from_view_projection(self.view_projection_with_fov(fov))
+    }
+
+    fn planes_from_view_projection(m: Mat4) -> [[f32; 4]; 6] {
         let mt = m.transpose();
         let r0 = mt.x_axis;
         let r1 = mt.y_axis;

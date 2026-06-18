@@ -288,7 +288,9 @@ impl AppCore {
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.chunk_store.unload_chunk(&pos);
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
-                    game.meshed_lod.remove(&pos);
+                    game.content_gen.remove(&pos);
+                    game.enqueued.remove(&pos);
+                    game.vis_tiers.remove(&pos);
 
                     renderer.remove_chunk_mesh(&pos);
                 }
@@ -812,31 +814,26 @@ impl AppCore {
             (game.player.position.x as i32).div_euclid(16),
             (game.player.position.z as i32).div_euclid(16),
         );
-        // Edits (priority lane) first, then bulk loads minus anything just remeshed.
-        let edits = priority_remesh.iter().map(|&pos| (pos, true));
-        let bulk = chunks_to_mesh
-            .iter()
-            .filter(|pos| !priority_remesh.contains(pos))
-            .map(|&pos| (pos, false));
-        for (pos, priority) in edits.chain(bulk) {
-            let lod = chunk_lod(pos, player_chunk);
-            game.meshed_lod.insert(pos, lod);
-            game.mesh_dispatcher
-                .enqueue(&game.chunk_store, pos, lod, priority);
+        // Edits mesh immediately on the priority lane, ungated by visibility.
+        for &pos in &priority_remesh {
+            game.enqueue_edit(pos, chunk_lod(pos, player_chunk));
         }
 
-        if player_chunk != game.last_player_chunk {
-            game.last_player_chunk = player_chunk;
-            for pos in game.chunk_store.loaded_positions() {
-                let new_lod = chunk_lod(pos, player_chunk);
-                let old_lod = game.meshed_lod.get(&pos).copied();
-                if old_lod != Some(new_lod) {
-                    game.meshed_lod.insert(pos, new_lod);
-                    game.mesh_dispatcher
-                        .enqueue(&game.chunk_store, pos, new_lod, false);
-                }
+        // New chunk loads (and their neighbours, for border lighting) are only
+        // marked dirty here; the visibility re-scan enqueues them gated by tier so
+        // hidden/behind-camera columns don't waste meshing time.
+        for &pos in &chunks_to_mesh {
+            if !priority_remesh.contains(&pos) {
+                game.bump_content_gen(pos);
             }
         }
+
+        // Refresh the frustum tiers (throttled to camera movement / new loads),
+        // then enqueue everything that needs meshing — visible-first, with hidden
+        // columns backfilled at a bounded rate so the world still completes.
+        let loads_happened = !chunks_to_mesh.is_empty();
+        game.update_visibility(renderer, player_chunk, loads_happened);
+        game.rescan_mesh_jobs(player_chunk, renderer.mesh_pool_has_headroom());
 
         disconnect_reason
     }
@@ -900,8 +897,8 @@ impl AppCore {
             game.player.game_mode == 1,
         );
         for pos in dirty {
-            game.mesh_dispatcher
-                .enqueue(&game.chunk_store, pos, 0, true);
+            // Player edits are always adjacent (lod 0).
+            game.enqueue_edit(pos, 0);
         }
 
         // Menus consume their own clicks later in the frame, so only clear
@@ -1026,7 +1023,10 @@ impl AppCore {
     }
 }
 
-fn chunk_lod(pos: azalea_core::position::ChunkPos, player: azalea_core::position::ChunkPos) -> u32 {
+pub(crate) fn chunk_lod(
+    pos: azalea_core::position::ChunkPos,
+    player: azalea_core::position::ChunkPos,
+) -> u32 {
     let dx = (pos.x - player.x).unsigned_abs();
     let dz = (pos.z - player.z).unsigned_abs();
     let dist = dx.max(dz);

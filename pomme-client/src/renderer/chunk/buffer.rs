@@ -17,6 +17,9 @@ const BYTES_PER_BUCKET: u64 =
 const MIN_BUCKETS: u32 = 128;
 const MAX_BUCKETS: u32 = 2048;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
+/// Spare pool fraction the hidden-column backfill leaves free, so visible/near
+/// columns can always upload (see `GameState::rescan_mesh_jobs`).
+const BACKFILL_HEADROOM_FRACTION: f32 = 0.1;
 
 fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
     let mem_props = physical_device.get_memory_properties();
@@ -572,7 +575,7 @@ impl ChunkBufferStore {
                         for b in popped {
                             self.free_buckets.push_back(b);
                         }
-                        tracing::warn!("Bucket pool full, skipping {:?}", mesh.pos);
+                        tracing::debug!("Bucket pool full, skipping {:?}", mesh.pos);
                         return;
                     };
                     let vend = (vcur + BUCKET_VERTICES as usize).min(verts.len());
@@ -841,6 +844,12 @@ impl ChunkBufferStore {
 
     pub fn chunk_count(&self) -> u32 {
         self.chunks.len() as u32
+    }
+
+    /// Whether the pool has spare capacity for discretionary hidden-column
+    /// backfill.
+    pub fn has_bucket_headroom(&self) -> bool {
+        self.free_buckets.len() as f32 > self.total_buckets as f32 * BACKFILL_HEADROOM_FRACTION
     }
 
     /// Point each frame's cull descriptor at the Hi-Z pyramid (binding 4).

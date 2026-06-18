@@ -15,7 +15,7 @@ use pomme_gpu_allocator::MemoryLocation;
 use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use pyronyx::vk;
 
-use crate::renderer::shader;
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const FORMAT: vk::Format = vk::Format::R32Sfloat;
 
@@ -46,6 +46,14 @@ pub struct HiZPyramid {
     /// One descriptor set per mip: {binding0 src sampler, binding1 dst
     /// storage}.
     sets: Vec<vk::DescriptorSet>,
+
+    /// A coarse mip copied to the CPU each frame so the mesh scheduler can skip
+    /// columns that are fully behind nearer terrain (frame-lagged, like the
+    /// cull count readback). One host buffer per frame-in-flight.
+    readback_mip: u32,
+    readback_dims: (u32, u32),
+    readback_buffers: Vec<vk::Buffer>,
+    readback_allocs: Vec<Allocation>,
 }
 
 impl HiZPyramid {
@@ -64,6 +72,29 @@ impl HiZPyramid {
         let mut mip_sizes = Vec::with_capacity(mip_count as usize);
         for m in 0..mip_count {
             mip_sizes.push(((w0 >> m).max(1), (h0 >> m).max(1)));
+        }
+
+        // Finest mip whose width <= 192: small enough to copy/read every frame,
+        // still fine enough to tell whether a 16-wide column is fully occluded.
+        let readback_mip = mip_sizes
+            .iter()
+            .position(|&(w, _)| w <= 192)
+            .unwrap_or(mip_count as usize - 1) as u32;
+        let readback_dims = mip_sizes[readback_mip as usize];
+        let readback_bytes = (readback_dims.0 * readback_dims.1 * 4) as u64;
+
+        let mut readback_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut readback_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let (b, a) = util::create_host_buffer(
+                device,
+                allocator,
+                readback_bytes,
+                vk::BufferUsageFlags::TransferDst,
+                "hiz_readback",
+            );
+            readback_buffers.push(b);
+            readback_allocs.push(a);
         }
 
         let image_info = vk::ImageCreateInfo {
@@ -316,6 +347,10 @@ impl HiZPyramid {
             desc_layout,
             pool,
             sets,
+            readback_mip,
+            readback_dims,
+            readback_buffers,
+            readback_allocs,
         }
     }
 
@@ -325,6 +360,69 @@ impl HiZPyramid {
 
     pub fn sampler(&self) -> vk::Sampler {
         self.sampler
+    }
+
+    /// Dimensions of the coarse mip exposed for CPU occlusion readback.
+    pub fn readback_dims(&self) -> (u32, u32) {
+        self.readback_dims
+    }
+
+    /// Copy the coarse readback mip into this frame's host buffer. Must be
+    /// recorded after `build`; the next frame's WAR barrier waits on this read.
+    pub fn record_readback(&self, cmd: vk::CommandBuffer, frame: usize) {
+        // The build wrote the mip (compute ShaderWrite); make it visible to the
+        // transfer read. The pyramid stays in General, valid as a transfer src.
+        let to_transfer = vk::ImageMemoryBarrier {
+            image: self.image,
+            old_layout: vk::ImageLayout::General,
+            new_layout: vk::ImageLayout::General,
+            src_access_mask: vk::AccessFlags::ShaderWrite,
+            dst_access_mask: vk::AccessFlags::TransferRead,
+            subresource_range: self.mip_range(self.readback_mip),
+            ..Default::default()
+        };
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::ComputeShader,
+            vk::PipelineStageFlags::Transfer,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_transfer],
+        );
+
+        let (w, h) = self.readback_dims;
+        let region = vk::BufferImageCopy {
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image_subresource: vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::Color,
+                mip_level: self.readback_mip,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+            image_extent: vk::Extent3D {
+                width: w,
+                height: h,
+                depth: 1,
+            },
+        };
+        cmd.copy_image_to_buffer(
+            self.image,
+            vk::ImageLayout::General,
+            self.readback_buffers[frame],
+            &[region],
+        );
+    }
+
+    /// Read the coarse mip copied for `frame` (valid once that frame's fence
+    /// has been waited). Row-major max-depth, `readback_dims` wide.
+    pub fn read_mip(&mut self, frame: usize) -> Vec<f32> {
+        let (w, h) = self.readback_dims;
+        let n = (w * h) as usize;
+        let bytes = self.readback_allocs[frame].mapped_slice_mut().unwrap();
+        bytemuck::cast_slice::<u8, f32>(&bytes[..n * 4]).to_vec()
     }
 
     /// Record the pyramid build. `depth` must already be in
@@ -344,13 +442,14 @@ impl HiZPyramid {
                 self.full_range(),
             );
         } else {
-            // WAR: this frame's cull already sampled the pyramid; finish those
-            // reads before overwriting it.
+            // WAR: this frame's cull sampled the pyramid (ShaderRead) and the
+            // previous frame's readback copied a mip (TransferRead); finish both
+            // before overwriting it.
             self.barrier(
                 cmd,
                 vk::ImageLayout::General,
-                compute,
-                vk::AccessFlags::ShaderRead,
+                compute | vk::PipelineStageFlags::Transfer,
+                vk::AccessFlags::ShaderRead | vk::AccessFlags::TransferRead,
                 vk::AccessFlags::ShaderWrite,
                 self.full_range(),
             );
@@ -463,6 +562,19 @@ impl HiZPyramid {
         }
         device.destroy_image_view(self.sampled_view, None);
         device.destroy_image(self.image, None);
+
+        {
+            let mut alloc = allocator.lock().unwrap();
+            for i in 0..self.readback_buffers.len() {
+                device.destroy_buffer(self.readback_buffers[i], None);
+                alloc
+                    .free(std::mem::replace(&mut self.readback_allocs[i], unsafe {
+                        std::mem::zeroed()
+                    }))
+                    .ok();
+            }
+        }
+
         allocator
             .lock()
             .unwrap()
