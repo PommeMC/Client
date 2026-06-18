@@ -350,6 +350,9 @@ pub fn int_to_rgb(color: i32) -> [f32; 3] {
 pub struct MeshDispatcher {
     result_rx: crossbeam_channel::Receiver<ChunkMeshData>,
     result_tx: crossbeam_channel::Sender<ChunkMeshData>,
+    // Edits drain ahead of and uncapped by the bulk load lane (see drain_results).
+    priority_rx: crossbeam_channel::Receiver<ChunkMeshData>,
+    priority_tx: crossbeam_channel::Sender<ChunkMeshData>,
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
     grass_colormap: Arc<Colormap>,
@@ -366,9 +369,12 @@ impl MeshDispatcher {
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     ) -> Self {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
+        let (priority_tx, priority_rx) = crossbeam_channel::unbounded();
         Self {
             result_rx,
             result_tx,
+            priority_rx,
+            priority_tx,
             registry: Arc::new(registry),
             uv_map: Arc::new(uv_map),
             grass_colormap: Arc::new(grass_colormap),
@@ -381,13 +387,17 @@ impl MeshDispatcher {
         self.biome_climate = climate;
     }
 
-    pub fn enqueue(&self, chunk_store: &ChunkStore, pos: ChunkPos, lod: u32) {
+    pub fn enqueue(&self, chunk_store: &ChunkStore, pos: ChunkPos, lod: u32, priority: bool) {
         let registry = Arc::clone(&self.registry);
         let uv_map = Arc::clone(&self.uv_map);
         let grass_colormap = Arc::clone(&self.grass_colormap);
         let foliage_colormap = Arc::clone(&self.foliage_colormap);
         let biome_climate = Arc::clone(&self.biome_climate);
-        let tx = self.result_tx.clone();
+        let tx = if priority {
+            self.priority_tx.clone()
+        } else {
+            self.result_tx.clone()
+        };
 
         let chunks_needed = chunk::mesh_neighborhood(pos);
         let chunk_arcs: Vec<_> = chunks_needed
@@ -425,7 +435,10 @@ impl MeshDispatcher {
     }
 
     pub fn drain_results(&self) -> impl Iterator<Item = ChunkMeshData> + '_ {
-        self.result_rx.try_iter().take(MAX_MESH_UPLOADS_PER_FRAME)
+        // Edits drain fully and first; bulk chunk loads stay capped per frame.
+        self.priority_rx
+            .try_iter()
+            .chain(self.result_rx.try_iter().take(MAX_MESH_UPLOADS_PER_FRAME))
     }
 }
 

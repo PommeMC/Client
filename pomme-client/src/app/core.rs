@@ -226,6 +226,9 @@ impl AppCore {
         let rx = &connection.event_rx;
 
         let mut chunks_to_mesh = Vec::new();
+        // Block edits go on the priority lane so they apply instantly even while
+        // chunks stream in, instead of starving behind the load backlog.
+        let mut priority_remesh: Vec<azalea_core::position::ChunkPos> = Vec::new();
         let mut disconnect_reason: Option<String> = None;
         let mut processed = 0u32;
 
@@ -429,7 +432,9 @@ impl AppCore {
                     // TODO(chunk-light): route edge edits through enqueue_with_neighbors so the
                     // neighbor's border lighting refreshes too (gate on edge-proximity to avoid
                     // churn).
-                    chunks_to_mesh.push(chunk_pos);
+                    if !priority_remesh.contains(&chunk_pos) {
+                        priority_remesh.push(chunk_pos);
+                    }
                 }
                 NetworkEvent::SectionBlocksUpdate { updates } => {
                     for (pos, state) in updates {
@@ -443,8 +448,8 @@ impl AppCore {
                         );
                         // TODO(chunk-light): same neighbor re-mesh as BlockUpdate above for edge
                         // edits.
-                        if !chunks_to_mesh.contains(&chunk_pos) {
-                            chunks_to_mesh.push(chunk_pos);
+                        if !priority_remesh.contains(&chunk_pos) {
+                            priority_remesh.push(chunk_pos);
                         }
                     }
                 }
@@ -807,10 +812,17 @@ impl AppCore {
             (game.player.position.x as i32).div_euclid(16),
             (game.player.position.z as i32).div_euclid(16),
         );
-        for pos in chunks_to_mesh {
+        // Edits (priority lane) first, then bulk loads minus anything just remeshed.
+        let edits = priority_remesh.iter().map(|&pos| (pos, true));
+        let bulk = chunks_to_mesh
+            .iter()
+            .filter(|pos| !priority_remesh.contains(pos))
+            .map(|&pos| (pos, false));
+        for (pos, priority) in edits.chain(bulk) {
             let lod = chunk_lod(pos, player_chunk);
             game.meshed_lod.insert(pos, lod);
-            game.mesh_dispatcher.enqueue(&game.chunk_store, pos, lod);
+            game.mesh_dispatcher
+                .enqueue(&game.chunk_store, pos, lod, priority);
         }
 
         if player_chunk != game.last_player_chunk {
@@ -821,7 +833,7 @@ impl AppCore {
                 if old_lod != Some(new_lod) {
                     game.meshed_lod.insert(pos, new_lod);
                     game.mesh_dispatcher
-                        .enqueue(&game.chunk_store, pos, new_lod);
+                        .enqueue(&game.chunk_store, pos, new_lod, false);
                 }
             }
         }
@@ -888,7 +900,8 @@ impl AppCore {
             game.player.game_mode == 1,
         );
         for pos in dirty {
-            game.mesh_dispatcher.enqueue(&game.chunk_store, pos, 0);
+            game.mesh_dispatcher
+                .enqueue(&game.chunk_store, pos, 0, true);
         }
 
         // Menus consume their own clicks later in the frame, so only clear
