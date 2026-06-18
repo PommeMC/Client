@@ -951,11 +951,14 @@ impl Renderer {
                 has_3d_model,
             }
         });
-        let fog_col = sky.fog_color();
+        // Clear to the sky color: the strip between the sky disc's edge and the
+        // terrain shows the clear color, so it must match the sky/terrain or it
+        // reads as a horizon band (visible at night).
+        let sky_col = sky.sky_color();
         self.render_frame(
             window,
             hide_cursor,
-            [fog_col[0], fog_col[1], fog_col[2], 1.0],
+            [sky_col[0], sky_col[1], sky_col[2], 1.0],
             RenderMode::World {
                 overlay,
                 swing_progress,
@@ -1186,8 +1189,7 @@ impl Renderer {
             ..
         } = mode
         {
-            let fog = sky.fog_color();
-            let uniform = CameraUniform::new(&self.camera, fog, render_distance);
+            let uniform = CameraUniform::new(&self.camera, sky.sky_color(), render_distance);
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
