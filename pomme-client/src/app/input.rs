@@ -143,7 +143,7 @@ impl InputState {
                     self.recent_actions.remove(&Action::ToggleInventory);
                 }
                 if self.action_just_pressed(Action::OpenMenu) {
-                    if !game.dead {
+                    if !game.dead && !game.options_from_game {
                         if game.inventory_open {
                             game.inventory_open = false;
                         } else {
