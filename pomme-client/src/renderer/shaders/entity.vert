@@ -12,6 +12,8 @@ layout(push_constant) uniform PushConstants {
     mat4 model;
     vec4 tint;
     vec4 overlay_color;
+    // xy = texture-coordinate scroll offset (energy swirl); zw unused.
+    vec4 uv_params;
 };
 
 layout(location = 0) in vec3 position;
@@ -28,7 +30,7 @@ void main() {
     vec4 world_pos = model * vec4(position, 1.0);
     vec3 rel = world_pos.xyz - camera_pos.xyz;
     gl_Position = view_proj * vec4(rel, 1.0);
-    v_tex_coords = tex_coords;
+    v_tex_coords = tex_coords + uv_params.xy;
     v_tint = tint;
     v_overlay = overlay_color;
     v_fog = fog_factor(rel, camera_pos.w, fog_color.w);

@@ -154,6 +154,9 @@ fn sweep_axis_z(
 
 const INTERPOLATION_STEPS: i32 = 3;
 const HURT_DURATION: u8 = 10;
+/// Vanilla default arm-swing duration in ticks
+/// (`LivingEntity.getCurrentSwingDuration`).
+const SWING_DURATION: u8 = 6;
 
 #[allow(dead_code)]
 pub struct LivingEntity {
@@ -180,6 +183,15 @@ pub struct LivingEntity {
     pub hurt_time: u8,
     pub age_in_ticks: u32,
     pub custom_name: Option<String>,
+    /// Mob is targeting/attacking (metadata mob-flags bit 0x04). Raises
+    /// zombie/skeleton arms.
+    pub aggressive: bool,
+    /// Creeper charged/powered flag — shows the blue aura overlay.
+    pub powered: bool,
+    /// Arm-swing animation timer, counts down from `SWING_DURATION` to 0
+    /// (driven by the server `Animate` packet). Drives the zombie attack
+    /// swing.
+    pub swing_time: u8,
     interp_target: Position,
     interp_look_dir: LookDirection,
     interp_steps: i32,
@@ -219,6 +231,9 @@ impl LivingEntity {
             hurt_time: 0,
             age_in_ticks: 0,
             custom_name: None,
+            aggressive: false,
+            powered: false,
+            swing_time: 0,
             interp_target: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
@@ -262,6 +277,15 @@ impl LivingEntity {
         }
 
         self.prev_body_y_rot_deg = self.body_y_rot_deg;
+    }
+
+    /// Arm-swing progress 0..1 for the current frame. `swing_time` counts down,
+    /// so progress rises 0→1 over the swing; idle clamps to 1 (where the
+    /// attack pose contribution is zero, like vanilla's attackTime
+    /// endpoints).
+    pub fn swing_progress(&self, partial: f32) -> f32 {
+        ((SWING_DURATION as f32 - self.swing_time as f32 + partial) / SWING_DURATION as f32)
+            .clamp(0.0, 1.0)
     }
 
     pub fn tick_body_rotation(&mut self) {
@@ -578,6 +602,31 @@ impl EntityStore {
         }
     }
 
+    pub fn set_aggressive(&mut self, id: i32, aggressive: bool) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.aggressive = aggressive;
+        }
+    }
+
+    pub fn set_powered(&mut self, id: i32, powered: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Creeper
+        {
+            entity.powered = powered;
+        }
+    }
+
+    /// Begins an arm swing (server `Animate` packet). Restarts when idle or
+    /// past the halfway point (vanilla `LivingEntity.swing`); `swing_time`
+    /// counts down, so that is `swing_time <= SWING_DURATION / 2`.
+    pub fn start_swing(&mut self, id: i32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.swing_time <= SWING_DURATION / 2
+        {
+            entity.swing_time = SWING_DURATION;
+        }
+    }
+
     pub fn update_living_rotation(&mut self, id: i32, y_rot_deg: f32, x_rot_deg: f32) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.interp_look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
@@ -615,6 +664,9 @@ impl EntityStore {
             }
             if entity.hurt_time > 0 {
                 entity.hurt_time -= 1;
+            }
+            if entity.swing_time > 0 {
+                entity.swing_time -= 1;
             }
             entity.age_in_ticks = entity.age_in_ticks.wrapping_add(1);
         }

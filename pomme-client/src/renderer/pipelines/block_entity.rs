@@ -12,7 +12,9 @@ use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::{BakedEntityModel, PartAnim};
-use crate::renderer::pipelines::entity_renderer::{WHITE_TINT, create_pipeline, fallback_texture};
+use crate::renderer::pipelines::entity_renderer::{
+    BlendMode, WHITE_TINT, create_pipeline, fallback_texture,
+};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, block_entity_model, util};
 
 pub struct BlockEntityRenderInfo {
@@ -135,6 +137,7 @@ fn lid_anim(kind: BlockEntityKind, openness: f32) -> PartAnim {
         BlockEntityKind::ShulkerBox => PartAnim {
             rotation: vec![(0, glam::Vec3::new(0.0, eased * 270.0f32.to_radians(), 0.0))],
             translation: vec![(0, glam::Vec3::new(0.0, -eased * 8.0, 0.0))],
+            ..Default::default()
         },
         _ => PartAnim::default(),
     }
@@ -239,7 +242,7 @@ impl BlockEntityPipeline {
         let push_constant_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::Vertex,
             offset: 0,
-            size: 80,
+            size: 112,
         };
         let layouts = [camera_layout, texture_layout];
         let layout_info = vk::PipelineLayoutCreateInfo {
@@ -253,7 +256,7 @@ impl BlockEntityPipeline {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create block-entity pipeline layout");
 
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
+        let pipeline = create_pipeline(device, render_pass, pipeline_layout, BlendMode::Opaque);
 
         let defs = kind_definitions();
         let tex_count = defs
@@ -423,9 +426,15 @@ impl BlockEntityPipeline {
                 }
                 let part_mat = model_mat * part_transforms[i];
                 let cols = part_mat.to_cols_array();
-                let mut bytes = [0u8; 80];
+                // Shared entity shader push block: mat, tint, overlay_color, uv_params.
+                // Block entities are opaque with no hurt flash or UV scroll.
+                let no_overlay = [0.0f32, 0.0, 0.0, 1.0];
+                let uv_params = [0.0f32; 4];
+                let mut bytes = [0u8; 112];
                 bytes[..64].copy_from_slice(bytemuck::cast_slice(&cols));
-                bytes[64..].copy_from_slice(bytemuck::cast_slice(&WHITE_TINT));
+                bytes[64..80].copy_from_slice(bytemuck::cast_slice(&WHITE_TINT));
+                bytes[80..96].copy_from_slice(bytemuck::cast_slice(&no_overlay));
+                bytes[96..112].copy_from_slice(bytemuck::cast_slice(&uv_params));
                 cmd.push_constants(
                     self.pipeline_layout,
                     vk::ShaderStageFlags::Vertex,
@@ -439,7 +448,8 @@ impl BlockEntityPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+        self.pipeline =
+            create_pipeline(device, render_pass, self.pipeline_layout, BlendMode::Opaque);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {

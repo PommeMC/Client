@@ -667,6 +667,15 @@ impl AppCore {
                 NetworkEvent::EntityCustomName { id, name } => {
                     game.entity_store.set_custom_name(id, name);
                 }
+                NetworkEvent::EntityAggressive { id, aggressive } => {
+                    game.entity_store.set_aggressive(id, aggressive);
+                }
+                NetworkEvent::EntitySwing { id } => {
+                    game.entity_store.start_swing(id);
+                }
+                NetworkEvent::CreeperPowered { id, powered } => {
+                    game.entity_store.set_powered(id, powered);
+                }
                 NetworkEvent::EntityDamaged { id } => {
                     game.entity_store.mark_hurt(id);
                 }
