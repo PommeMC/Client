@@ -49,6 +49,10 @@ enum SoundCategory {
 /// directly.
 pub const CATEGORY_BLOCKS: u8 = SoundCategory::Blocks as u8;
 
+/// `SoundSource::PLAYERS` index, for client-side player sounds (e.g. item
+/// pickup).
+pub const CATEGORY_PLAYERS: u8 = SoundCategory::Players as u8;
+
 impl SoundCategory {
     fn from_index(index: u8) -> Self {
         match index {

@@ -580,7 +580,6 @@ impl AppCore {
                     id,
                     entity_type,
                     position,
-                    velocity,
                     y_rot_deg,
                     x_rot_deg,
                     head_y_rot_deg,
@@ -596,7 +595,7 @@ impl AppCore {
                         );
                     }
                     if entity_type == azalea_registry::builtin::EntityKind::Item {
-                        game.item_entity_store.spawn_item(id, position, velocity);
+                        game.item_entity_store.spawn_item(id, position);
                     }
                 }
                 NetworkEvent::EntityMoved { id, dx, dy, dz } => {
@@ -642,12 +641,20 @@ impl AppCore {
                 NetworkEvent::EntityItemData {
                     id,
                     item_name,
+                    item_id,
                     count,
                 } => {
-                    let is_block_model = renderer.ensure_item_mesh(&item_name);
+                    let mesh = renderer.ensure_item_mesh(&item_name);
 
-                    game.item_entity_store
-                        .set_item_data(id, item_name, count, is_block_model);
+                    game.item_entity_store.set_item_data(
+                        id,
+                        item_name,
+                        item_id,
+                        count,
+                        mesh.is_block_model,
+                        mesh.min_y,
+                        mesh.z_size,
+                    );
                 }
                 NetworkEvent::EntityBabyFlag { id, is_baby } => {
                     game.entity_store.set_baby(id, is_baby);
@@ -682,6 +689,7 @@ impl AppCore {
                 NetworkEvent::ItemPickedUp {
                     item_id,
                     collector_id,
+                    amount,
                 } => {
                     let target_pos = game
                         .entity_store
@@ -695,7 +703,19 @@ impl AppCore {
                                 game.player.position.z,
                             )
                         });
-                    game.item_entity_store.pickup(item_id, target_pos);
+                    if let Some(item_pos) =
+                        game.item_entity_store.pickup(item_id, target_pos, amount)
+                    {
+                        // Vanilla plays this client-side in handleTakeItemEntity.
+                        self.audio.play_world_sound(
+                            &crate::audio::SoundRef::Event("entity.item.pickup".to_string()),
+                            crate::audio::CATEGORY_PLAYERS,
+                            item_pos,
+                            0.2,
+                            (fastrand::f32() - fastrand::f32()) * 1.4 + 2.0,
+                            fastrand::u64(..),
+                        );
+                    }
                 }
                 NetworkEvent::PlayerLogin { entity_id } => {
                     game.player.entity_id = entity_id;

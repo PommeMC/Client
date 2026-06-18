@@ -12,7 +12,7 @@ use azalea_inventory::ItemStack;
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use simdnbt::owned::NbtCompound;
 
-use crate::entity::components::{Position, Velocity};
+use crate::entity::components::Position;
 
 pub enum NetworkEvent {
     Connected,
@@ -130,7 +130,6 @@ pub enum NetworkEvent {
         id: i32,
         entity_type: EntityKind,
         position: Position,
-        velocity: Velocity,
         y_rot_deg: f32,
         x_rot_deg: f32,
         head_y_rot_deg: f32,
@@ -161,6 +160,7 @@ pub enum NetworkEvent {
     EntityItemData {
         id: i32,
         item_name: String,
+        item_id: u32,
         count: i32,
     },
     EntityHeadRotation {
@@ -208,6 +208,7 @@ pub enum NetworkEvent {
     ItemPickedUp {
         item_id: i32,
         collector_id: i32,
+        amount: i32,
     },
     PlayerLogin {
         entity_id: i32,

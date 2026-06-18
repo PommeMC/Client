@@ -15,6 +15,7 @@ mod renderer;
 mod resource_pack;
 mod ui;
 mod user;
+mod util;
 mod world;
 
 use std::sync::Arc;

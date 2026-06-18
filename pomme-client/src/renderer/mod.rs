@@ -883,7 +883,7 @@ impl Renderer {
         player_preview: Option<PlayerPreview>,
     ) -> Result<(), RendererError> {
         let held_item = held_item.map(|(name, light)| {
-            let has_3d_model = self.ensure_item_mesh(&name);
+            let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
             pipelines::held_item::HeldItemInfo {
                 name,
                 light,
@@ -1046,11 +1046,11 @@ impl Renderer {
 
     /// Builds the item mesh if needed; returns whether it has a 3D model
     /// (vs a flat sprite), used to pick the first-person transform.
-    pub fn ensure_item_mesh(&mut self, name: &str) -> bool {
-        if let Some(has_3d_model) = self.item_entity_pipeline.mesh_is_3d(name) {
-            return has_3d_model;
+    pub fn ensure_item_mesh(&mut self, name: &str) -> pipelines::item_entity::ItemMeshInfo {
+        if let Some(info) = self.item_entity_pipeline.mesh_info(name) {
+            return info;
         }
-        if let Some(model) = self.registry.get_item_model(name) {
+        let is_block_model = if let Some(model) = self.registry.get_item_model(name) {
             self.item_entity_pipeline.ensure_mesh(
                 &self.ctx.device,
                 &self.ctx.allocator,
@@ -1075,7 +1075,16 @@ impl Renderer {
                 &self.asset_index,
             );
             false
-        }
+        };
+        // Read back the real bounds; fall back to full-cube / flat defaults if the
+        // mesh baked empty (missing asset) — nothing renders for it anyway.
+        self.item_entity_pipeline
+            .mesh_info(name)
+            .unwrap_or(pipelines::item_entity::ItemMeshInfo {
+                is_block_model,
+                min_y: -0.5,
+                z_size: if is_block_model { 1.0 } else { 1.0 / 16.0 },
+            })
     }
 
     fn render_frame(
