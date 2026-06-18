@@ -205,6 +205,18 @@ pub fn update_game(
     }
 
     for mesh in game.mesh_dispatcher.drain_results() {
+        if let Some(t) = &mesh.timing {
+            let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
+            tracing::info!(
+                "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
+                mesh.pos.x,
+                mesh.pos.z,
+                ms(t.started_at - t.enqueued_at),
+                ms(t.meshed_at - t.started_at),
+                ms(t.meshed_at.elapsed()),
+                ms(t.enqueued_at.elapsed()),
+            );
+        }
         gfx.renderer.upload_chunk_mesh(&mesh);
     }
 

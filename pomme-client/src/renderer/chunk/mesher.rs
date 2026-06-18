@@ -95,6 +95,14 @@ pub struct SectionMesh {
 pub struct ChunkMeshData {
     pub pos: ChunkPos,
     pub sections: Vec<SectionMesh>,
+    /// Latency stamps for edit remeshes (diagnostic); `None` for bulk loads.
+    pub timing: Option<RemeshTiming>,
+}
+
+pub struct RemeshTiming {
+    pub enqueued_at: std::time::Instant,
+    pub started_at: std::time::Instant,
+    pub meshed_at: std::time::Instant,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -398,6 +406,7 @@ impl MeshDispatcher {
         } else {
             self.result_tx.clone()
         };
+        let enqueued_at = priority.then(std::time::Instant::now);
 
         let chunks_needed = chunk::mesh_neighborhood(pos);
         let chunk_arcs: Vec<_> = chunks_needed
@@ -420,6 +429,7 @@ impl MeshDispatcher {
                 .collect();
 
         rayon::spawn(move || {
+            let started_at = enqueued_at.map(|_| std::time::Instant::now());
             let snapshot = ChunkStoreSnapshot {
                 chunks: chunks_needed.into_iter().zip(chunk_arcs).collect(),
                 light,
@@ -429,7 +439,14 @@ impl MeshDispatcher {
                 min_y,
                 height,
             };
-            let mesh = mesh_chunk_snapshot(&snapshot, pos, &registry, &uv_map, lod);
+            let mut mesh = mesh_chunk_snapshot(&snapshot, pos, &registry, &uv_map, lod);
+            if let (Some(enqueued_at), Some(started_at)) = (enqueued_at, started_at) {
+                mesh.timing = Some(RemeshTiming {
+                    enqueued_at,
+                    started_at,
+                    meshed_at: std::time::Instant::now(),
+                });
+            }
             let _ = tx.send(mesh);
         });
     }
@@ -955,7 +972,11 @@ fn mesh_chunk_snapshot(
     // Drop empty (all-air) sections so they never reach the GPU as no-op draws.
     sections.retain(|s| !s.vertices.is_empty() && !s.indices.is_empty());
 
-    ChunkMeshData { pos, sections }
+    ChunkMeshData {
+        pos,
+        sections,
+        timing: None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
