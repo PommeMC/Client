@@ -10,7 +10,7 @@ pub const MIN_FOV_DEGREES: f32 = 30.0;
 #[allow(dead_code)]
 pub const MAX_FOV_DEGREES: f32 = 110.0;
 const NEAR: f32 = 0.1;
-const FAR: f32 = 1000.0;
+pub(crate) const FAR: f32 = 1000.0;
 const MOUSE_SENSITIVITY: f32 = 0.15;
 /// Controller look speed in degrees per second, scaled by frame delta.
 const CONTROLLER_SENSITIVITY: f32 = 150.0;

@@ -172,9 +172,10 @@ impl SkyState {
     /// clouds stay faintly lit at night.
     pub fn cloud_color(&self) -> [f32; 4] {
         let day = sample_rgb_keyframes(self.day_tick(), SKY_COLOR_KEYFRAMES, TICKS_PER_DAY)[0];
-        let brightness = 0.1 + 0.9 * day;
+        // Vanilla's night cloud multiplier is (0.1, 0.1, 0.15) — faintly blue.
+        let base = [0.1 + 0.9 * day, 0.1 + 0.9 * day, 0.15 + 0.85 * day];
         let rgb = self.apply_weather(
-            [brightness, brightness, brightness],
+            base,
             |c| blend_to_gray(c, 0.24, 0.5),
             |c| blend_to_gray(c, 0.095, 0.94),
         );

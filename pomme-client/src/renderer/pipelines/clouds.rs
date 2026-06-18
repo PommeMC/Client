@@ -5,12 +5,12 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::camera::{Camera, CameraUniform, CloudMode};
+use crate::renderer::camera::{Camera, CameraUniform, CloudMode, FAR};
 use crate::renderer::pipelines::sky::SkyState;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 /// World-space Y of the cloud layer bottom (vanilla overworld `cloud_height`).
-const CLOUD_HEIGHT: f32 = 192.0;
+const CLOUD_HEIGHT: f32 = 192.33;
 /// Vertical thickness of the cloud layer in blocks.
 const CLOUD_THICKNESS: f32 = 4.0;
 /// Horizontal size of one cloud cell in blocks (one clouds.png texel).
@@ -20,36 +20,51 @@ const SCROLL_PER_TICK: f32 = 0.030_000_001;
 /// Fixed Z bias vanilla adds to the cloud origin.
 const Z_BIAS: f64 = 3.96;
 
-/// Per-face brightness, matching the classic Minecraft cloud shading.
-const SHADE_TOP: f32 = 1.0;
-const SHADE_BOTTOM: f32 = 0.7;
-const SHADE_NS: f32 = 0.8; // north / south faces (Z)
-const SHADE_EW: f32 = 0.9; // east / west faces (X)
+/// Distance (blocks) by which cloud alpha fades to zero (vanilla
+/// `FogCloudsEnd`). Kept just below the camera far plane so the fade completes
+/// before clouds would clip at it into a hard circle.
+// TODO: vanilla reaches its full `cloudRange` (128 chunks / 2048 blocks). Here
+// the fixed camera far plane (`camera::FAR` = 1000) caps the usable reach;
+// matching vanilla would mean raising it, which affects depth precision and fog
+// globally.
+const CLOUD_FADE_END: f32 = FAR * 0.96;
+/// Disc radius in cells: `ceil(CLOUD_FADE_END / CELL_SIZE)`.
+const RADIUS_CELLS: i32 = (CLOUD_FADE_END as i32 + CELL_SIZE as i32 - 1) / CELL_SIZE as i32;
 
-/// How far the cloud layer extends, in chunks. Fixed (not tied to the view
-/// distance) so the layer reaches toward the horizon like vanilla regardless of
-/// the player's render-distance setting.
-const CLOUD_RENDER_DISTANCE_CHUNKS: i32 = 32;
-/// Disc radius in cells. `ceil(CLOUD_RENDER_DISTANCE_CHUNKS * 16 / CELL_SIZE)`.
-const RADIUS_CELLS: i32 =
-    (CLOUD_RENDER_DISTANCE_CHUNKS * 16 + CELL_SIZE as i32 - 1) / CELL_SIZE as i32;
+/// Upper bound on faces for the per-frame instance buffers, mirroring vanilla
+/// `CloudRenderer.getSizeForCloudDistance` (4 faces per cell over the disc's
+/// bounding diamond, plus the 9 interior cells' extra faces).
+const MAX_FACES: usize = {
+    let span = ((RADIUS_CELLS + 1) * 2) as usize;
+    (span * span / 2) * 4 + 54
+};
 
-/// Upper bound on vertices for the per-frame buffers: each cell emits at most 6
-/// faces (top, bottom, four sides) of 6 vertices.
-const MAX_CELLS: usize = ((2 * RADIUS_CELLS + 1) * (2 * RADIUS_CELLS + 1)) as usize;
-const MAX_CLOUD_VERTS: usize = MAX_CELLS * 6 * 6;
+/// Face direction, matching vanilla `Direction.get3DDataValue()` and the corner
+/// table in `clouds.vert`.
+const DIR_DOWN: u8 = 0;
+const DIR_UP: u8 = 1;
+const DIR_NORTH: u8 = 2;
+const DIR_SOUTH: u8 = 3;
+const DIR_WEST: u8 = 4;
+const DIR_EAST: u8 = 5;
 
+/// Face flag bit: use the top (brightest) shade regardless of direction.
+const FLAG_USE_TOP_COLOR: u8 = 1;
+
+/// One cloud face, drawn as a single instance; the vertex shader expands it
+/// into a quad. Layout must match the attributes in `clouds.vert`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct CloudVertex {
-    position: [f32; 3],
-    /// Per-cell texel colour pre-multiplied by the face shade; alpha unused
-    /// (the cloud tint alpha is applied in the shader).
-    color: [f32; 4],
+struct CloudFace {
+    /// Relative cell offset (rcx, rcz) from the centre cell.
+    cell: [i16; 2],
+    dir: u8,
+    flags: u8,
 }
 
 /// Push constants shared by both stages: cloud tint (rgba) and the camera-
-/// relative grid offset (xyz). Layout must match `clouds.vert`/`clouds.frag`.
+/// relative grid offset (xyz) plus the fog-fade end (w). Layout must match
+/// `clouds.vert`/`clouds.frag`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CloudPush {
@@ -70,7 +85,6 @@ enum RelativePos {
 #[derive(Clone, Copy, Default)]
 struct CloudCell {
     present: bool,
-    rgb: [f32; 3],
     /// Whether the neighbour in each direction is empty (cull the shared face).
     north_empty: bool,
     east_empty: bool,
@@ -98,14 +112,14 @@ pub struct CloudPipeline {
     camera_sets: Vec<vk::DescriptorSet>,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Option<Allocation>>,
-    vertex_buffers: Vec<vk::Buffer>,
-    vertex_allocations: Vec<Option<Allocation>>,
+    instance_buffers: Vec<vk::Buffer>,
+    instance_allocations: Vec<Option<Allocation>>,
 
     grid: Option<CloudGrid>,
 
-    /// Cached CPU mesh and the state it was built for.
-    verts: Vec<CloudVertex>,
-    /// Per-frame flag: the frame's vertex buffer still holds a stale mesh.
+    /// Cached CPU face list and the state it was built for.
+    faces: Vec<CloudFace>,
+    /// Per-frame flag: the frame's instance buffer still holds a stale mesh.
     dirty: Vec<bool>,
     prev_cell_x: i32,
     prev_cell_z: i32,
@@ -201,20 +215,20 @@ impl CloudPipeline {
             camera_allocations.push(Some(alloc));
         }
 
-        let mut vertex_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut vertex_allocations: Vec<Option<Allocation>> =
+        let mut instance_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut instance_allocations: Vec<Option<Allocation>> =
             Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let vertex_bytes = (MAX_CLOUD_VERTS * std::mem::size_of::<CloudVertex>()) as u64;
+        let instance_bytes = (MAX_FACES * std::mem::size_of::<CloudFace>()) as u64;
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let (buf, alloc) = util::create_host_buffer(
                 device,
                 allocator,
-                vertex_bytes,
+                instance_bytes,
                 vk::BufferUsageFlags::VertexBuffer,
-                "cloud_vertices",
+                "cloud_faces",
             );
-            vertex_buffers.push(buf);
-            vertex_allocations.push(Some(alloc));
+            instance_buffers.push(buf);
+            instance_allocations.push(Some(alloc));
         }
 
         let grid = load_cloud_grid(jar_assets_dir, asset_index);
@@ -227,10 +241,10 @@ impl CloudPipeline {
             camera_sets,
             camera_buffers,
             camera_allocations,
-            vertex_buffers,
-            vertex_allocations,
+            instance_buffers,
+            instance_allocations,
             grid,
-            verts: Vec::new(),
+            faces: Vec::new(),
             dirty: vec![false; MAX_FRAMES_IN_FLIGHT],
             prev_cell_x: i32::MIN,
             prev_cell_z: i32::MIN,
@@ -310,29 +324,29 @@ impl CloudPipeline {
             }
         }
 
-        if self.verts.is_empty() {
+        if self.faces.is_empty() {
             return;
         }
 
         if self.dirty[frame] {
-            let bytes = bytemuck::cast_slice::<CloudVertex, u8>(&self.verts);
-            if let Some(alloc) = self.vertex_allocations[frame].as_mut() {
+            let bytes = bytemuck::cast_slice::<CloudFace, u8>(&self.faces);
+            if let Some(alloc) = self.instance_allocations[frame].as_mut() {
                 alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
             }
             self.dirty[frame] = false;
         }
 
         let tint = sky.cloud_color();
-        // offset.w carries the disc edge distance (blocks) so the fragment
-        // shader can fade clouds out instead of cutting off at a hard circle.
-        let edge = RADIUS_CELLS as f32 * CELL_SIZE;
+        // offset.w carries the fog-fade end (blocks): the fragment shader fades
+        // cloud alpha to zero by this distance so the field melts into the sky
+        // instead of ending at a hard circle.
         let push = CloudPush {
             tint,
-            offset: [-x_in_cell, relative_bottom_y, -z_in_cell, edge],
+            offset: [-x_in_cell, relative_bottom_y, -z_in_cell, CLOUD_FADE_END],
         };
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
+        cmd.bind_vertex_buffers(0, &[self.instance_buffers[frame]], &[0]);
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
@@ -346,38 +360,50 @@ impl CloudPipeline {
             0,
             bytemuck::bytes_of(&push),
         );
-        cmd.draw(self.verts.len() as u32, 1, 0, 0);
+        // Six vertices (two triangles) per face, one instance per face.
+        cmd.draw(6, self.faces.len() as u32, 0, 0);
     }
 
     fn build_mesh(&mut self, cell_x: i32, cell_z: i32, mode: CloudMode, rel: RelativePos) {
-        self.verts.clear();
+        self.faces.clear();
         let Some(grid) = self.grid.as_ref() else {
             return;
         };
-        let r2 = RADIUS_CELLS * RADIUS_CELLS;
+        let faces = &mut self.faces;
         let fancy = mode == CloudMode::Fancy;
+        let r2 = RADIUS_CELLS * RADIUS_CELLS;
 
-        for rcz in -RADIUS_CELLS..=RADIUS_CELLS {
-            for rcx in -RADIUS_CELLS..=RADIUS_CELLS {
-                if rcx * rcx + rcz * rcz > r2 {
+        let mut emit = |rcx: i32, rcz: i32| {
+            let gx = (cell_x + rcx).rem_euclid(grid.width as i32) as usize;
+            let gz = (cell_z + rcz).rem_euclid(grid.height as i32) as usize;
+            let cell = grid.cell(gx, gz);
+            if !cell.present {
+                return;
+            }
+            if fancy {
+                build_extruded_cell(faces, rcx, rcz, cell, rel);
+            } else {
+                build_flat_cell(faces, rcx, rcz);
+            }
+        };
+
+        // Vanilla `CloudRenderer.buildMesh`: walk rings outward from the centre so
+        // nearer cells draw first (depth-write keeps the closest face).
+        for ring in 0..=(2 * RADIUS_CELLS) {
+            for rcx in -ring..=ring {
+                let rcz = ring - rcx.abs();
+                if !(0..=RADIUS_CELLS).contains(&rcz) || rcx * rcx + rcz * rcz > r2 {
                     continue;
                 }
-                let gx = (cell_x + rcx).rem_euclid(grid.width as i32) as usize;
-                let gz = (cell_z + rcz).rem_euclid(grid.height as i32) as usize;
-                let cell = *grid.cell(gx, gz);
-                if !cell.present {
-                    continue;
+                if rcz != 0 {
+                    emit(rcx, -rcz);
                 }
-                if fancy {
-                    build_extruded_cell(&mut self.verts, rcx, rcz, &cell, rel);
-                } else {
-                    build_flat_cell(&mut self.verts, rcx, rcz, &cell);
-                }
+                emit(rcx, rcz);
             }
         }
 
-        if self.verts.len() > MAX_CLOUD_VERTS {
-            self.verts.truncate(MAX_CLOUD_VERTS);
+        if faces.len() > MAX_FACES {
+            faces.truncate(MAX_FACES);
         }
     }
 
@@ -393,8 +419,8 @@ impl CloudPipeline {
             if let Some(a) = self.camera_allocations[i].take() {
                 alloc.free(a).ok();
             }
-            device.destroy_buffer(self.vertex_buffers[i], None);
-            if let Some(a) = self.vertex_allocations[i].take() {
+            device.destroy_buffer(self.instance_buffers[i], None);
+            if let Some(a) = self.instance_allocations[i].take() {
                 alloc.free(a).ok();
             }
         }
@@ -407,130 +433,54 @@ impl CloudPipeline {
     }
 }
 
-/// Pushes a quad (two triangles) given its four corners in CCW order.
-fn push_quad(
-    verts: &mut Vec<CloudVertex>,
-    a: [f32; 3],
-    b: [f32; 3],
-    c: [f32; 3],
-    d: [f32; 3],
-    rgb: [f32; 3],
-    shade: f32,
-) {
-    let color = [rgb[0] * shade, rgb[1] * shade, rgb[2] * shade, 1.0];
-    for p in [a, b, c, a, c, d] {
-        verts.push(CloudVertex { position: p, color });
-    }
+fn emit_face(faces: &mut Vec<CloudFace>, rcx: i32, rcz: i32, dir: u8, flags: u8) {
+    faces.push(CloudFace {
+        cell: [rcx as i16, rcz as i16],
+        dir,
+        flags,
+    });
 }
 
-/// Fast clouds: a single flat quad at the layer bottom, using the top colour.
-fn build_flat_cell(verts: &mut Vec<CloudVertex>, rcx: i32, rcz: i32, cell: &CloudCell) {
-    let bx = rcx as f32 * CELL_SIZE;
-    let bz = rcz as f32 * CELL_SIZE;
-    let x1 = bx + CELL_SIZE;
-    let z1 = bz + CELL_SIZE;
-    push_quad(
-        verts,
-        [bx, 0.0, bz],
-        [bx, 0.0, z1],
-        [x1, 0.0, z1],
-        [x1, 0.0, bz],
-        cell.rgb,
-        SHADE_TOP,
-    );
+/// Fast clouds: a single down-facing quad at the layer bottom using the top
+/// (brightest) shade (vanilla `buildFlatCell` → `encodeFace(DOWN,
+/// USE_TOP_COLOR)`).
+fn build_flat_cell(faces: &mut Vec<CloudFace>, rcx: i32, rcz: i32) {
+    emit_face(faces, rcx, rcz, DIR_DOWN, FLAG_USE_TOP_COLOR);
 }
 
 /// Fancy clouds: an extruded 3D box per cell, mirroring vanilla
 /// `CloudRenderer.buildExtrudedCell`. The visible horizontal face is gated by
 /// the camera position (`rel`); a side is drawn only when its neighbour is
-/// empty and it faces back toward the centre, so translucent back-faces don't
-/// show through. The centre cells get every face so the layer reads solid when
-/// the camera is near or inside the clouds.
+/// empty and it faces back toward the centre. The centre cells get every face
+/// so the layer reads solid when the camera is near or inside the clouds. No
+/// separate inside faces are needed: culling is disabled, so each face is
+/// visible from both sides.
 fn build_extruded_cell(
-    verts: &mut Vec<CloudVertex>,
+    faces: &mut Vec<CloudFace>,
     rcx: i32,
     rcz: i32,
     cell: &CloudCell,
     rel: RelativePos,
 ) {
-    let bx = rcx as f32 * CELL_SIZE;
-    let bz = rcz as f32 * CELL_SIZE;
-    let x1 = bx + CELL_SIZE;
-    let z1 = bz + CELL_SIZE;
-    let y0 = 0.0;
-    let y1 = CLOUD_THICKNESS;
     let interior = rcx.abs() <= 1 && rcz.abs() <= 1;
-
-    if interior || rel != RelativePos::Below {
-        push_quad(
-            verts,
-            [bx, y1, bz],
-            [bx, y1, z1],
-            [x1, y1, z1],
-            [x1, y1, bz],
-            cell.rgb,
-            SHADE_TOP,
-        );
-    }
-    if interior || rel != RelativePos::Above {
-        push_quad(
-            verts,
-            [bx, y0, z1],
-            [bx, y0, bz],
-            [x1, y0, bz],
-            [x1, y0, z1],
-            cell.rgb,
-            SHADE_BOTTOM,
-        );
-    }
-    if interior || (cell.north_empty && rcz > 0) {
-        push_quad(
-            verts,
-            [bx, y0, bz],
-            [x1, y0, bz],
-            [x1, y1, bz],
-            [bx, y1, bz],
-            cell.rgb,
-            SHADE_NS,
-        );
-    }
-    if interior || (cell.south_empty && rcz < 0) {
-        push_quad(
-            verts,
-            [x1, y0, z1],
-            [bx, y0, z1],
-            [bx, y1, z1],
-            [x1, y1, z1],
-            cell.rgb,
-            SHADE_NS,
-        );
-    }
-    if interior || (cell.west_empty && rcx > 0) {
-        push_quad(
-            verts,
-            [bx, y0, z1],
-            [bx, y0, bz],
-            [bx, y1, bz],
-            [bx, y1, z1],
-            cell.rgb,
-            SHADE_EW,
-        );
-    }
-    if interior || (cell.east_empty && rcx < 0) {
-        push_quad(
-            verts,
-            [x1, y0, bz],
-            [x1, y0, z1],
-            [x1, y1, z1],
-            [x1, y1, bz],
-            cell.rgb,
-            SHADE_EW,
-        );
+    let faces_present = [
+        (DIR_UP, rel != RelativePos::Below),
+        (DIR_DOWN, rel != RelativePos::Above),
+        (DIR_NORTH, cell.north_empty && rcz > 0),
+        (DIR_SOUTH, cell.south_empty && rcz < 0),
+        (DIR_WEST, cell.west_empty && rcx > 0),
+        (DIR_EAST, cell.east_empty && rcx < 0),
+    ];
+    for (dir, present) in faces_present {
+        if interior || present {
+            emit_face(faces, rcx, rcz, dir, 0);
+        }
     }
 }
 
 /// Loads and parses `clouds.png` into a cell grid. A texel is a cloud cell when
-/// its alpha is >= 10 (vanilla `isCellEmpty`).
+/// its alpha is >= 10 (vanilla `isCellEmpty`). The texel colour is ignored —
+/// vanilla colours clouds purely from the uniform tint times the face shade.
 fn load_cloud_grid(jar_assets_dir: &Path, asset_index: &Option<AssetIndex>) -> Option<CloudGrid> {
     let key = "minecraft/textures/environment/clouds.png";
     let path = resolve_asset_path(jar_assets_dir, asset_index, key);
@@ -552,14 +502,8 @@ fn load_cloud_grid(jar_assets_dir: &Path, asset_index: &Option<AssetIndex>) -> O
                 cells.push(CloudCell::default());
                 continue;
             }
-            let p = (x as usize + y as usize * width) * 4;
             cells.push(CloudCell {
                 present: true,
-                rgb: [
-                    pixels[p] as f32 / 255.0,
-                    pixels[p + 1] as f32 / 255.0,
-                    pixels[p + 2] as f32 / 255.0,
-                ],
                 north_empty: empty(x, y - 1),
                 east_empty: empty(x + 1, y),
                 south_empty: empty(x, y + 1),
@@ -601,23 +545,25 @@ fn create_pipeline(
         },
     ];
 
+    // One per-instance binding: each instance is a packed cloud face, expanded to
+    // a quad by the vertex shader via gl_VertexIndex.
     let binding_descs = [vk::VertexInputBindingDescription {
         binding: 0,
-        stride: std::mem::size_of::<CloudVertex>() as u32,
-        input_rate: vk::VertexInputRate::Vertex,
+        stride: std::mem::size_of::<CloudFace>() as u32,
+        input_rate: vk::VertexInputRate::Instance,
     }];
     let attr_descs = [
         vk::VertexInputAttributeDescription {
             location: 0,
             binding: 0,
-            format: vk::Format::R32G32B32Sfloat,
+            format: vk::Format::R16G16Sint,
             offset: 0,
         },
         vk::VertexInputAttributeDescription {
             location: 1,
             binding: 0,
-            format: vk::Format::R32G32B32A32Sfloat,
-            offset: 12,
+            format: vk::Format::R8G8Uint,
+            offset: 4,
         },
     ];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {

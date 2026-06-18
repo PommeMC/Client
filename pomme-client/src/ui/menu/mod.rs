@@ -457,13 +457,6 @@ impl MainMenu {
         );
     }
 
-    /// Cycles the cloud graphics setting (Off → Fast → Fancy) and persists it.
-    /// Used by the in-game F3+C toggle.
-    pub fn cycle_cloud_mode(&mut self) {
-        self.cloud_mode = self.cloud_mode.cycle();
-        self.save_settings();
-    }
-
     pub fn open_options(&mut self) {
         self.set_screen(Screen::Options);
     }
