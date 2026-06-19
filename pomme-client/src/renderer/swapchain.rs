@@ -55,12 +55,19 @@ impl Swapchain {
 
         let present_mode = if vsync {
             vk::PresentModeKHR::Fifo
-        } else if present_modes.contains(&vk::PresentModeKHR::Mailbox) {
-            vk::PresentModeKHR::Mailbox
-        } else if present_modes.contains(&vk::PresentModeKHR::Immediate) {
-            vk::PresentModeKHR::Immediate
         } else {
-            vk::PresentModeKHR::Fifo
+            // MoltenVK's Mailbox stays synced to the display refresh, so on macOS
+            // only Immediate (displaySyncEnabled = NO) truly uncaps; elsewhere
+            // Mailbox is preferred (uncapped and tear-free).
+            let prefer = if cfg!(target_os = "macos") {
+                [vk::PresentModeKHR::Immediate, vk::PresentModeKHR::Mailbox]
+            } else {
+                [vk::PresentModeKHR::Mailbox, vk::PresentModeKHR::Immediate]
+            };
+            prefer
+                .into_iter()
+                .find(|m| present_modes.contains(m))
+                .unwrap_or(vk::PresentModeKHR::Fifo)
         };
 
         // Prefer the surface's reported drawable size: when `current_extent` is
