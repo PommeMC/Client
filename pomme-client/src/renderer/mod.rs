@@ -1131,6 +1131,9 @@ impl Renderer {
         self.ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
         let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
 
+        // Fence signalled: reclaim chunk slices the GPU is now provably done with.
+        self.chunk_buffers.begin_frame();
+
         let t_acquire = std::time::Instant::now();
         let image = match self.ctx.device.acquire_next_image(
             self.swapchain.handle,

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use azalea_core::position::ChunkPos;
@@ -208,6 +208,14 @@ pub struct ChunkBufferStore {
     /// Post-cull section draw count read back from the GPU (lags a few frames);
     /// exposed for the debug overlay so occlusion's effect is visible.
     last_draw_count: u32,
+
+    /// Monotonic frame counter, bumped once per rendered frame in
+    /// `begin_frame`.
+    frame_seq: u64,
+    /// Slices freed by a re-mesh or unload, each tagged with the `frame_seq` at
+    /// which it's safe to reclaim (`MAX_FRAMES_IN_FLIGHT` out, so no in-flight
+    /// frame still draws it). Drained in `begin_frame`.
+    pending_free: VecDeque<(u64, (u32, u32, u32, u32))>,
 }
 
 impl ChunkBufferStore {
@@ -504,6 +512,8 @@ impl ChunkBufferStore {
             frustum_allocs,
             fade_enabled: false,
             last_draw_count: 0,
+            frame_seq: 0,
+            pending_free: VecDeque::new(),
         }
     }
 
@@ -537,10 +547,10 @@ impl ChunkBufferStore {
             }
         }
 
-        // Free the slices of every section index this job covers (`replaced`): the
-        // re-meshed ones are re-allocated below, the now-empty ones simply vanish.
-        // Remember which were present so a re-meshed section swaps instantly while
-        // a freshly revealed one still fades in.
+        // Retire the slices of every section index this job covers (`replaced`):
+        // the re-meshed ones are re-allocated below, the now-empty ones simply
+        // vanish. Remember which were present so a re-meshed section swaps
+        // instantly while a freshly revealed one still fades in.
         let mut freed: Vec<(u32, u32, u32, u32)> = Vec::new();
         let mut was_present: std::collections::HashSet<i32> = std::collections::HashSet::new();
         if let Some(entry) = self.chunks.get_mut(&mesh.pos) {
@@ -559,7 +569,7 @@ impl ChunkBufferStore {
                 }
             });
         }
-        self.free_slices(&freed);
+        self.retire_slices(freed.iter().copied());
 
         if mesh.sections.is_empty() {
             // Every replaced section is now empty (freed above); drop the column
@@ -826,22 +836,59 @@ impl ChunkBufferStore {
         self.max_meta = new_max;
     }
 
-    /// Return a batch of `(vtx_off, vtx_len, idx_off, idx_len)` slices to the
-    /// pools.
+    /// Return one slice's vertex and index ranges to the pools.
+    fn free_slice(&mut self, (vo, vl, io, il): (u32, u32, u32, u32)) {
+        self.vtx_free.free_region(vo, vl);
+        self.idx_free.free_region(io, il);
+    }
+
+    /// Return slices immediately. Only safe for slices never submitted to a
+    /// frame (e.g. rolling back allocations made earlier in the same `upload`);
+    /// slices that may still be drawn by an in-flight frame must go through
+    /// `retire_slices`.
     fn free_slices(&mut self, slices: &[(u32, u32, u32, u32)]) {
-        for &(vo, vl, io, il) in slices {
-            self.vtx_free.free_region(vo, vl);
-            self.idx_free.free_region(io, il);
+        for &slice in slices {
+            self.free_slice(slice);
+        }
+    }
+
+    /// Defer returning slices to the pools until `MAX_FRAMES_IN_FLIGHT` frames
+    /// have passed, so the GPU can't still be reading them from an in-flight
+    /// frame. Use for slices that were potentially drawn (re-mesh replacement,
+    /// chunk unload).
+    fn retire_slices(&mut self, slices: impl IntoIterator<Item = (u32, u32, u32, u32)>) {
+        let retire_at = self.frame_seq + MAX_FRAMES_IN_FLIGHT as u64;
+        for slice in slices {
+            self.pending_free.push_back((retire_at, slice));
+        }
+    }
+
+    /// Advance one frame and reclaim any slices whose retirement deadline has
+    /// passed. Call once per rendered frame, right after the frame's fence has
+    /// been waited (that wait guarantees the frame from `MAX_FRAMES_IN_FLIGHT`
+    /// ago — and everything before it — is done on the GPU).
+    pub fn begin_frame(&mut self) {
+        self.frame_seq += 1;
+        while self
+            .pending_free
+            .front()
+            .is_some_and(|&(retire_at, _)| retire_at <= self.frame_seq)
+        {
+            let (_, slice) = self.pending_free.pop_front().unwrap();
+            self.free_slice(slice);
         }
     }
 
     pub fn remove(&mut self, pos: &ChunkPos) {
         if let Some(alloc) = self.chunks.remove(pos) {
-            for sec in &alloc.sections {
-                self.vtx_free
-                    .free_region(sec.vertex_offset as u32, sec.vtx_len);
-                self.idx_free.free_region(sec.first_index, sec.index_count);
-            }
+            self.retire_slices(alloc.sections.iter().map(|sec| {
+                (
+                    sec.vertex_offset as u32,
+                    sec.vtx_len,
+                    sec.first_index,
+                    sec.index_count,
+                )
+            }));
             self.meta_dirty = true;
         }
     }
@@ -850,6 +897,7 @@ impl ChunkBufferStore {
         self.chunks.clear();
         self.vtx_free.reset();
         self.idx_free.reset();
+        self.pending_free.clear();
         self.cached_meta.clear();
         self.meta_dirty = true;
         self.fade_enabled = false;

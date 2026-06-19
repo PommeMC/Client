@@ -280,14 +280,18 @@ impl GameState {
             self.apply_visibility(renderer, &bfs);
         }
 
-        // Schedule the next walk on 8-block movement or chunk loads, one in flight.
+        // Schedule the next walk on 8-block movement, chunk loads, or an
+        // invalidated result (`!vis_valid`, e.g. the F3+O toggle forcing a
+        // recompute while stationary), one in flight.
         let eye = renderer.camera_render_position();
         let cam_bucket = (
             (eye.x / 8.0).floor() as i32,
             (eye.y / 8.0).floor() as i32,
             (eye.z / 8.0).floor() as i32,
         );
-        if self.vis_task.is_none() && (cam_bucket != self.last_vis_cam || loads_happened) {
+        if self.vis_task.is_none()
+            && (!self.vis_valid || cam_bucket != self.last_vis_cam || loads_happened)
+        {
             self.last_vis_cam = cam_bucket;
             let section_vis = self.section_vis.clone();
             let min_y = self.chunk_store.min_y();
