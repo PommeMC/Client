@@ -166,6 +166,8 @@ impl InputState {
                 for packet in &self.packet_queue {
                     connection.packet_tx.send(packet.clone());
                 }
+
+                let _ = &self.packet_queue.clear();
             }
 
             app
@@ -350,13 +352,15 @@ impl InputState {
     }
 
     pub fn set_slot(&mut self, slot: u8) {
-        self.selected_slot = slot;
+        if self.selected_slot != slot {
+            let action =
+                azalea_protocol::packets::game::ServerboundSetCarriedItem { slot: slot as u16 };
 
-        let action =
-            azalea_protocol::packets::game::ServerboundSetCarriedItem { slot: slot as u16 };
+            self.packet_queue
+                .push(azalea_protocol::packets::game::ServerboundGamePacket::SetCarriedItem(action));
 
-        self.packet_queue
-            .push(azalea_protocol::packets::game::ServerboundGamePacket::SetCarriedItem(action));
+            self.selected_slot = slot;
+        }
     }
 
     pub fn shift_selected_slot_right(&mut self) {
