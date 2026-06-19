@@ -5,6 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use azalea_core::position::ChunkPos;
+use glam::DVec3;
 
 /// The six block faces, ordinals matching vanilla `Direction`
 /// (DOWN, UP, NORTH, SOUTH, WEST, EAST).
@@ -49,6 +50,15 @@ impl Face {
             Face::South => Face::North,
             Face::West => Face::East,
             Face::East => Face::West,
+        }
+    }
+
+    /// 0 = X, 1 = Y, 2 = Z.
+    fn axis(self) -> u8 {
+        match self {
+            Face::West | Face::East => 0,
+            Face::Down | Face::Up => 1,
+            Face::North | Face::South => 2,
         }
     }
 
@@ -186,6 +196,14 @@ pub fn compute_visibility(opaque: impl Fn(usize, usize, usize) -> bool) -> Visib
     vis
 }
 
+/// Vanilla advanced-culling thresholds: sections farther than this many
+/// sections (any axis) also get the ray-march, which steps by one section
+/// diagonal toward the camera and stops within 60 blocks (the near field is
+/// covered by the walk).
+const ADV_CULL_SECTION_DIST: i32 = 3;
+const CEILED_SECTION_DIAGONAL: f64 = 28.0;
+const ADV_CULL_MIN_DIST_SQ: f64 = 3600.0;
+
 /// BFS node: the faces this section was entered from (`source`) and the cone of
 /// travel directions taken to reach it (`cone`, for backtrack prevention).
 struct Node {
@@ -205,12 +223,22 @@ pub fn compute_visible_mask(
     section_vis: &HashMap<(ChunkPos, i32), VisibilitySet>,
     cam_col: ChunkPos,
     cam_si: i32,
+    eye: DVec3,
+    min_y: i32,
     section_count: i32,
     render_distance: i32,
 ) -> HashMap<ChunkPos, u32> {
     let mut visible: HashMap<ChunkPos, u32> = HashMap::new();
     let mut nodes: HashMap<(i32, i32, i32), Node> = HashMap::new();
     let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
+
+    let cam_center = DVec3::new(
+        (cam_col.x * 16 + 8) as f64,
+        (min_y + cam_si * 16 + 8) as f64,
+        (cam_col.z * 16 + 8) as f64,
+    );
+    let world_min_y = min_y as f64;
+    let world_max_y = (min_y + section_count * 16) as f64;
 
     let start = (cam_col.x, cam_si.clamp(0, section_count - 1), cam_col.z);
     nodes.insert(start, Node { source: 0, cone: 0 });
@@ -223,6 +251,9 @@ pub fn compute_visible_mask(
             .get(&(ChunkPos::new(x, z), si))
             .copied()
             .unwrap_or_else(VisibilitySet::all);
+        let distant = (x - cam_col.x).abs() > ADV_CULL_SECTION_DIST
+            || (si - cam_si).abs() > ADV_CULL_SECTION_DIST
+            || (z - cam_col.z).abs() > ADV_CULL_SECTION_DIST;
         for face in Face::ALL {
             // Don't walk back the way we came (limits the search to a cone).
             if cone & face.opposite().bit() != 0 {
@@ -234,6 +265,23 @@ pub fn compute_visible_mask(
                 && !Face::ALL
                     .into_iter()
                     .any(|sf| source & sf.bit() != 0 && vis.visible_between(sf.opposite(), face))
+            {
+                continue;
+            }
+            // Distant sections also get a coarse ray-march back to the camera: if a
+            // step lands in a section the walk never reached, the line of sight is
+            // blocked, so don't propagate.
+            if distant
+                && ray_occluded(
+                    &nodes,
+                    eye,
+                    cam_center,
+                    face,
+                    (x, si, z),
+                    min_y,
+                    world_min_y,
+                    world_max_y,
+                )
             {
                 continue;
             }
@@ -262,6 +310,49 @@ pub fn compute_visible_mask(
         }
     }
     visible
+}
+
+/// Step from the distant section's corner facing the camera toward the camera
+/// by one section diagonal at a time; if a step lands in a section the walk
+/// hasn't reached (occluded or unloaded), the line of sight is blocked.
+#[allow(clippy::too_many_arguments)]
+fn ray_occluded(
+    nodes: &HashMap<(i32, i32, i32), Node>,
+    eye: DVec3,
+    cam_center: DVec3,
+    face: Face,
+    (sx, ssi, sz): (i32, i32, i32),
+    min_y: i32,
+    world_min_y: f64,
+    world_max_y: f64,
+) -> bool {
+    let ox = (sx * 16) as f64;
+    let oy = (min_y + ssi * 16) as f64;
+    let oz = (sz * 16) as f64;
+    // Per-axis corner the ray starts from (vanilla's advanced-cull pick).
+    let corner = |axis: u8, c: f64, o: f64| {
+        let max = if face.axis() == axis { c > o } else { c < o };
+        o + if max { 16.0 } else { 0.0 }
+    };
+    let mut check = DVec3::new(
+        corner(0, cam_center.x, ox),
+        corner(1, cam_center.y, oy),
+        corner(2, cam_center.z, oz),
+    );
+    let step = (eye - check).normalize() * CEILED_SECTION_DIAGONAL;
+    while check.distance_squared(eye) > ADV_CULL_MIN_DIST_SQ {
+        check += step;
+        if check.y > world_max_y || check.y < world_min_y {
+            return false;
+        }
+        let cx = (check.x / 16.0).floor() as i32;
+        let csi = ((check.y - min_y as f64) / 16.0).floor() as i32;
+        let cz = (check.z / 16.0).floor() as i32;
+        if !nodes.contains_key(&(cx, csi, cz)) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -301,10 +392,13 @@ mod tests {
     fn open_grid_reaches_every_section() {
         // No visibility data => every section is see-through; the walk must reach
         // every section within render distance (monotonic paths cover the box).
+        // rd > the advanced-culling distance so the ray-march runs too — in open
+        // space it must never false-cull.
         let section_vis = HashMap::new();
         let sc = 8;
-        let rd = 3;
-        let mask = compute_visible_mask(&section_vis, ChunkPos::new(0, 0), 4, sc, rd);
+        let rd = 6;
+        let eye = DVec3::new(8.0, 72.0, 8.0);
+        let mask = compute_visible_mask(&section_vis, ChunkPos::new(0, 0), 4, eye, 0, sc, rd);
         let full = (1u32 << sc) - 1;
         for x in -rd..=rd {
             for z in -rd..=rd {
@@ -323,7 +417,8 @@ mod tests {
         // beyond it (same row) from being reached.
         let mut section_vis = HashMap::new();
         section_vis.insert((ChunkPos::new(0, -1), 4), VisibilitySet::none());
-        let mask = compute_visible_mask(&section_vis, ChunkPos::new(0, 0), 4, 8, 4);
+        let eye = DVec3::new(8.0, 72.0, 8.0);
+        let mask = compute_visible_mask(&section_vis, ChunkPos::new(0, 0), 4, eye, 0, 8, 4);
         // The wall section itself is reached (visible face)...
         assert!(mask.get(&ChunkPos::new(0, -1)).copied().unwrap_or(0) & (1 << 4) != 0);
         // ...but the section directly behind it on the same row/height is not.

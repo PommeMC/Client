@@ -76,7 +76,6 @@ pub struct GameState {
     pub block_entity_anim: BlockEntityAnimStore,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
-    pub last_player_chunk: ChunkPos,
     /// Monotonic content generation per column, bumped on every edit (and chunk
     /// load). This is the dirty marker: a column needs (re)meshing whenever its
     /// `content_gen` outruns what was last enqueued, regardless of visibility,
@@ -100,14 +99,17 @@ pub struct GameState {
     /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
     /// `section_gen`. Fed by mesh results; consumed by the occlusion walk.
     pub section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
-    /// Cached per-column meshing tier (0 visible … 2 hidden) and whether it is
-    /// trustworthy. Recomputed only when the camera moves a chunk / rotates;
-    /// shared with the mesh queue so `poll` and the re-scan agree.
+    /// Cached per-column frustum tier (0 in view, 1 margin, 2 behind),
+    /// recomputed each time an occlusion walk completes. Only the F3
+    /// overlay reads it now.
     pub vis_tiers: HashMap<ChunkPos, u8>,
     pub vis_valid: bool,
-    /// Throttle keys for the visibility recompute (player chunk + rotation
-    /// bucket).
-    pub last_vis_rot: (i32, i32),
+    /// Camera 8-block bucket that last triggered an occlusion walk — movement,
+    /// not rotation, drives recomputes (vanilla's cadence).
+    pub last_vis_cam: (i32, i32, i32),
+    /// In-flight async occlusion walk; its result is applied a few frames
+    /// later.
+    pub vis_task: Option<crossbeam_channel::Receiver<HashMap<ChunkPos, u32>>>,
     /// Runtime toggle for graph-driven chunk occlusion culling (F3+O). When
     /// off, only frustum culling applies (full masks pushed to the
     /// renderer).
@@ -172,7 +174,6 @@ impl GameState {
             position_send_counter: 0,
             benchmark: None,
             benchmark_result: None,
-            last_player_chunk: ChunkPos::new(0, 0),
             content_gen: HashMap::new(),
             meshed: HashMap::new(),
             vis_mask: HashMap::new(),
@@ -181,7 +182,8 @@ impl GameState {
             section_vis: HashMap::new(),
             vis_tiers: HashMap::new(),
             vis_valid: false,
-            last_vis_rot: (i32::MIN, i32::MIN),
+            last_vis_cam: (i32::MIN, i32::MIN, i32::MIN),
+            vis_task: None,
             chunk_occlusion_enabled: true,
         }
     }
@@ -249,12 +251,11 @@ impl GameState {
             .enqueue(&self.chunk_store, col, lod, true, g, si..si + 1);
     }
 
-    /// Recompute the per-column meshing tier (visible/margin/hidden) from the
-    /// camera frustum and each column's set of occlusion-visible sections from
-    /// the cave-cull visibility graph, throttled to camera-chunk / rotation /
-    /// load changes (mirrors vanilla's frustum-update gating). Pushes the tiers
-    /// to the mesh queue so `poll` orders bulk work tier-then-distance, and the
-    /// section masks to the renderer so the GPU cull omits occluded sections.
+    /// Drive the cave-cull occlusion walk: apply a finished async walk to the
+    /// per-column draw masks, then schedule the next one on 8-block camera
+    /// movement or chunk loads (one at a time, off the main thread — vanilla's
+    /// async, movement-gated cadence). The walk is rotation-independent;
+    /// frustum culling runs per-frame on the GPU.
     pub fn update_visibility(
         &mut self,
         renderer: &mut Renderer,
@@ -272,48 +273,70 @@ impl GameState {
             return;
         }
 
-        let look = renderer.camera_look_dir();
-        let rot_bucket = (
-            (look.y_rot_deg() / 2.0).floor() as i32,
-            (look.x_rot_deg() / 2.0).floor() as i32,
-        );
-        let moved = player_chunk != self.last_player_chunk;
-        let rotated = rot_bucket != self.last_vis_rot;
-        if self.vis_valid && !moved && !rotated && !loads_happened {
-            return;
+        // Apply a finished walk (its result lags a few frames, like vanilla's).
+        let finished = self.vis_task.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(bfs) = finished {
+            self.vis_task = None;
+            self.apply_visibility(renderer, &bfs);
         }
-        self.last_player_chunk = player_chunk;
-        self.last_vis_rot = rot_bucket;
 
+        // Schedule the next walk on 8-block movement or chunk loads, one in flight.
+        let eye = renderer.camera_render_position();
+        let cam_bucket = (
+            (eye.x / 8.0).floor() as i32,
+            (eye.y / 8.0).floor() as i32,
+            (eye.z / 8.0).floor() as i32,
+        );
+        if self.vis_task.is_none() && (cam_bucket != self.last_vis_cam || loads_happened) {
+            self.last_vis_cam = cam_bucket;
+            let section_vis = self.section_vis.clone();
+            let min_y = self.chunk_store.min_y();
+            let n = self.chunk_store.section_count();
+            let cam_si = ((eye.y - min_y as f64) / 16.0).floor() as i32;
+            // Bound the walk by the actual loaded radius (a server can stream
+            // terrain past the client render distance).
+            let rd = self
+                .chunk_store
+                .loaded_positions()
+                .iter()
+                .map(|p| {
+                    (p.x - player_chunk.x)
+                        .abs()
+                        .max((p.z - player_chunk.z).abs())
+                })
+                .max()
+                .unwrap_or(0);
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            std::thread::spawn(move || {
+                let bfs = occlusion_graph::compute_visible_mask(
+                    &section_vis,
+                    player_chunk,
+                    cam_si,
+                    eye,
+                    min_y,
+                    n,
+                    rd,
+                );
+                let _ = tx.send(bfs);
+            });
+            self.vis_task = Some(rx);
+        }
+    }
+
+    /// Combine a finished walk with the current camera frustum into per-column
+    /// draw masks (occluded sections omitted) and tiers, and push them to the
+    /// GPU cull.
+    fn apply_visibility(&mut self, renderer: &mut Renderer, bfs: &HashMap<ChunkPos, u32>) {
         let planes = renderer.frustum_planes();
         let planes_wide = renderer.frustum_planes_dilated(VIS_MARGIN_RADIANS);
-        let eye = renderer.camera_render_position();
-        let eye_f = eye.as_vec3();
+        let eye_f = renderer.camera_render_position().as_vec3();
         let min_y = self.chunk_store.min_y() as f32;
         let max_y = min_y + self.chunk_store.height() as f32;
-
-        let n = self.chunk_store.section_count();
-        let full = section_mask(n);
-        let cam_si = ((eye.y as f32 - min_y) / 16.0).floor() as i32;
-        // Bound the walk by the actual loaded radius, not the client render-distance
-        // setting — a server can stream terrain past it, and the walk must still
-        // reach that terrain or it gets culled as unreached.
-        let loaded = self.chunk_store.loaded_positions();
-        let rd = loaded
-            .iter()
-            .map(|p| {
-                (p.x - player_chunk.x)
-                    .abs()
-                    .max((p.z - player_chunk.z).abs())
-            })
-            .max()
-            .unwrap_or(0);
-        let bfs =
-            occlusion_graph::compute_visible_mask(&self.section_vis, player_chunk, cam_si, n, rd);
+        let full = section_mask(self.chunk_store.section_count());
 
         let mut tiers = HashMap::new();
         let mut masks = HashMap::new();
-        for pos in loaded {
+        for pos in self.chunk_store.loaded_positions() {
             let near = column_is_near(pos, eye_f);
             let tier = if near {
                 0
@@ -338,8 +361,7 @@ impl GameState {
         // Meshing is nearest-first; occlusion gates drawing, not meshing.
         self.mesh_dispatcher.set_visibility(HashMap::new(), false);
 
-        // Drive drawing from the graph: occluded sections are omitted from the
-        // GPU cull. With occlusion off, push full masks (frustum still applies).
+        // With occlusion off, push full masks (frustum still applies on the GPU).
         if !self.chunk_occlusion_enabled {
             for m in masks.values_mut() {
                 *m = full;
