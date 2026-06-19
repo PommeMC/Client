@@ -18,11 +18,12 @@ use crate::player::LocalPlayer;
 use crate::player::interaction::{HitResult, InteractionState};
 use crate::player::tab_list::TabList;
 use crate::renderer::chunk::mesher::{BiomeClimate, MeshDispatcher};
+use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::pipelines::entity_renderer::{
     EntityRenderInfo, WHITE_TINT, jeb_sheep_tint, wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
-use crate::renderer::{HizReadback, Renderer, SkyState};
+use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::ChatState;
 use crate::ui::death::{self, DeathAction};
@@ -96,6 +97,9 @@ pub struct GameState {
     /// section never invalidates a sibling section's in-flight result.
     pub section_gen: HashMap<(ChunkPos, i32), u64>,
     pub next_section_gen: u64,
+    /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
+    /// `section_gen`. Fed by mesh results; consumed by the occlusion walk.
+    pub section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
     /// Cached per-column meshing tier (0 visible … 2 hidden) and whether it is
     /// trustworthy. Recomputed only when the camera moves a chunk / rotates;
     /// shared with the mesh queue so `poll` and the re-scan agree.
@@ -104,6 +108,10 @@ pub struct GameState {
     /// Throttle keys for the visibility recompute (player chunk + rotation
     /// bucket).
     pub last_vis_rot: (i32, i32),
+    /// Runtime toggle for graph-driven chunk occlusion culling (F3+O). When
+    /// off, only frustum culling applies (full masks pushed to the
+    /// renderer).
+    pub chunk_occlusion_enabled: bool,
 }
 
 /// What a column was last meshed as: LOD, content generation, and the set of
@@ -170,9 +178,11 @@ impl GameState {
             vis_mask: HashMap::new(),
             section_gen: HashMap::new(),
             next_section_gen: 0,
+            section_vis: HashMap::new(),
             vis_tiers: HashMap::new(),
             vis_valid: false,
             last_vis_rot: (i32::MIN, i32::MIN),
+            chunk_occlusion_enabled: true,
         }
     }
 
@@ -240,12 +250,14 @@ impl GameState {
     }
 
     /// Recompute the per-column meshing tier (visible/margin/hidden) from the
-    /// camera frustum, throttled to camera-chunk / rotation / load changes
-    /// (mirrors vanilla's frustum-update gating). Pushes the result to the mesh
-    /// queue so `poll` orders bulk work tier-then-distance.
+    /// camera frustum and each column's set of occlusion-visible sections from
+    /// the cave-cull visibility graph, throttled to camera-chunk / rotation /
+    /// load changes (mirrors vanilla's frustum-update gating). Pushes the tiers
+    /// to the mesh queue so `poll` orders bulk work tier-then-distance, and the
+    /// section masks to the renderer so the GPU cull omits occluded sections.
     pub fn update_visibility(
         &mut self,
-        renderer: &Renderer,
+        renderer: &mut Renderer,
         player_chunk: ChunkPos,
         loads_happened: bool,
     ) {
@@ -275,89 +287,86 @@ impl GameState {
 
         let planes = renderer.frustum_planes();
         let planes_wide = renderer.frustum_planes_dilated(VIS_MARGIN_RADIANS);
-        let eye = renderer.camera_render_position().as_vec3();
+        let eye = renderer.camera_render_position();
+        let eye_f = eye.as_vec3();
         let min_y = self.chunk_store.min_y() as f32;
         let max_y = min_y + self.chunk_store.height() as f32;
-        // Hi-Z occluder depth used to demote in-frustum columns fully behind
-        // terrain. `None` => frustum-only (occlusion off, or no readback yet).
-        let occlusion = renderer
-            .hiz_occlusion_enabled()
-            .then(|| renderer.hiz_readback())
-            .flatten();
 
         let n = self.chunk_store.section_count();
         let full = section_mask(n);
+        let cam_si = ((eye.y as f32 - min_y) / 16.0).floor() as i32;
+        // Bound the walk by the actual loaded radius, not the client render-distance
+        // setting — a server can stream terrain past it, and the walk must still
+        // reach that terrain or it gets culled as unreached.
+        let loaded = self.chunk_store.loaded_positions();
+        let rd = loaded
+            .iter()
+            .map(|p| {
+                (p.x - player_chunk.x)
+                    .abs()
+                    .max((p.z - player_chunk.z).abs())
+            })
+            .max()
+            .unwrap_or(0);
+        let bfs =
+            occlusion_graph::compute_visible_mask(&self.section_vis, player_chunk, cam_si, n, rd);
+
         let mut tiers = HashMap::new();
         let mut masks = HashMap::new();
-        for pos in self.chunk_store.loaded_positions() {
-            let near = column_is_near(pos, eye);
+        for pos in loaded {
+            let near = column_is_near(pos, eye_f);
             let tier = if near {
                 0
             } else {
-                column_frustum_tier(pos, eye, &planes, &planes_wide, min_y, max_y)
+                column_frustum_tier(pos, eye_f, &planes, &planes_wide, min_y, max_y)
             };
-            // In-frustum columns mesh only their non-occluded sections; out-of-
-            // frustum / hidden columns mesh the whole column (deferred/backfilled).
-            let mask = if tier == 0
-                && !near
-                && let Some(rb) = occlusion
-            {
-                visible_section_mask(pos, n, min_y, rb)
-            } else {
+            // Near columns always draw fully; otherwise a column draws only the
+            // sections the graph proved occlusion-visible (none => fully hidden).
+            let mask = if near {
                 full
+            } else {
+                bfs.get(&pos).copied().unwrap_or(0)
             };
             // A fully-occluded column (no visible section) drops to the hidden tier.
             let tier = if tier == 0 && mask == 0 { 2 } else { tier };
             tiers.insert(pos, tier);
             masks.insert(pos, mask);
         }
-        self.vis_tiers = tiers.clone();
-        self.vis_mask = masks;
+        self.vis_tiers = tiers;
+        self.vis_mask = masks.clone();
         self.vis_valid = true;
-        self.mesh_dispatcher.set_visibility(tiers, true);
+        // Meshing is nearest-first; occlusion gates drawing, not meshing.
+        self.mesh_dispatcher.set_visibility(HashMap::new(), false);
+
+        // Drive drawing from the graph: occluded sections are omitted from the
+        // GPU cull. With occlusion off, push full masks (frustum still applies).
+        if !self.chunk_occlusion_enabled {
+            for m in masks.values_mut() {
+                *m = full;
+            }
+        }
+        renderer.set_chunk_visibility(masks);
     }
 
-    /// Enqueue each loaded column's visible-but-not-yet-meshed sections (and
-    /// re-mesh all visible ones on a lod/content change). Visible (tier 0) and
-    /// margin (tier 1) columns go immediately; hidden (tier 2) ones backfill
-    /// only while the GPU pool has spare capacity (`allow_backfill`),
-    /// retrying once buckets free up. Runs every frame to drain the
-    /// backlog.
-    pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos, allow_backfill: bool) {
-        let mut bg_budget = MAX_BACKGROUND_ENQUEUE_PER_FRAME;
+    /// Enqueue every loaded column's not-yet-meshed sections (re-meshing the
+    /// whole column on a lod/content change). Like vanilla, every section in
+    /// render distance meshes regardless of visibility — occlusion gates only
+    /// drawing — and the queue orders the backlog nearest-first. Runs every
+    /// frame to drain it.
+    pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos) {
         let n = self.chunk_store.section_count();
         let full = section_mask(n);
         for pos in self.chunk_store.loaded_positions() {
             let lod = crate::app::core::chunk_lod(pos, player_chunk);
             let content_gen = self.content_gen.get(&pos).copied().unwrap_or(0);
-            let vis = if self.vis_valid {
-                self.vis_mask.get(&pos).copied().unwrap_or(full)
-            } else {
-                full
+            // Mesh the whole column once, then nothing until a lod/content change.
+            // Occlusion gates drawing, not meshing, so off-screen and hidden
+            // sections still mesh (the queue orders the backlog nearest-first).
+            let to_mesh = match self.meshed.get(&pos) {
+                Some(m) if m.lod == lod && m.content_gen == content_gen => full & !m.mask,
+                _ => full,
             };
-            // On a lod/content change re-mesh all visible sections; otherwise only
-            // sections newly made visible (meshes persist, so the meshed set grows).
-            let (to_mesh, new_mask) = match self.meshed.get(&pos) {
-                Some(m) if m.lod == lod && m.content_gen == content_gen => {
-                    (vis & !m.mask, m.mask | vis)
-                }
-                _ => (vis, vis),
-            };
-            // Enqueue the sections that need meshing (none on a no-change pass).
             if to_mesh != 0 {
-                let tier = if self.vis_valid {
-                    self.vis_tiers.get(&pos).copied().unwrap_or(0)
-                } else {
-                    0
-                };
-                if tier >= 2 {
-                    // Hidden: backfill only into spare pool capacity; when the
-                    // budget is spent, retry next frame (don't record as meshed).
-                    if !allow_backfill || bg_budget == 0 {
-                        continue;
-                    }
-                    bg_budget -= 1;
-                }
                 for (start, end) in contiguous_runs(to_mesh) {
                     self.mesh_dispatcher.enqueue(
                         &self.chunk_store,
@@ -374,7 +383,7 @@ impl GameState {
                 MeshedCol {
                     lod,
                     content_gen,
-                    mask: new_mask,
+                    mask: full,
                 },
             );
         }
@@ -389,9 +398,6 @@ const NEARBY_DIST_SQ: f32 = 768.0;
 /// small camera turns reveal already-meshed terrain instead of a meshing
 /// curtain.
 const VIS_MARGIN_RADIANS: f32 = 0.6;
-/// Max hidden (tier 2) columns enqueued per frame, so backfill completes the
-/// world without stealing worker throughput from visible work.
-const MAX_BACKGROUND_ENQUEUE_PER_FRAME: u32 = 8;
 
 /// Frustum tier for a column: 0 in view, 1 in the dilated margin, 2 behind the
 /// camera. (Nearby columns are forced to 0 by the caller.)
@@ -425,30 +431,6 @@ fn column_is_near(pos: ChunkPos, eye: glam::Vec3) -> bool {
     cx * cx + cz * cz < NEARBY_DIST_SQ
 }
 
-/// Bitmask of a column's sections that are NOT occluded by nearer terrain in
-/// the Hi-Z buffer (bit `si` set = mesh it). Occluded sections — underground or
-/// behind terrain from this view — are cleared so they never mesh. Air sections
-/// above the surface project onto sky and stay set (they mesh to nothing,
-/// cheap).
-fn visible_section_mask(col: ChunkPos, n: i32, min_y: f32, rb: &HizReadback) -> u32 {
-    let mut mask = 0u32;
-    for si in 0..n.min(32) {
-        let (mn, mx) = section_box(col, si, min_y);
-        if !matches!(section_occlusion(&mn, &mx, rb), SectionOcc::Occluded) {
-            mask |= 1u32 << si;
-        }
-    }
-    mask
-}
-
-/// World-space AABB of a column's `si`-th 16³ section.
-fn section_box(col: ChunkPos, si: i32, min_y: f32) -> ([f32; 3], [f32; 3]) {
-    let bx = col.x as f32 * 16.0;
-    let bz = col.z as f32 * 16.0;
-    let y0 = min_y + si as f32 * 16.0;
-    ([bx, y0, bz], [bx + 16.0, y0 + 16.0, bz + 16.0])
-}
-
 /// Full mask for an `n`-section column (bits `0..n` set).
 fn section_mask(n: i32) -> u32 {
     if n >= 32 { u32::MAX } else { (1u32 << n) - 1 }
@@ -471,57 +453,6 @@ fn contiguous_runs(mask: u32) -> Vec<(i32, i32)> {
         }
     }
     runs
-}
-
-enum SectionOcc {
-    Visible,
-    Occluded,
-    Offscreen,
-}
-
-/// Project a section's box with the Hi-Z frame's matrix and compare its nearest
-/// depth against the coarse occluder depth in its screen footprint.
-fn section_occlusion(mn: &[f32; 3], mx: &[f32; 3], rb: &HizReadback) -> SectionOcc {
-    let mut rect_min = glam::Vec2::splat(f32::INFINITY);
-    let mut rect_max = glam::Vec2::splat(f32::NEG_INFINITY);
-    let mut near_depth = f32::INFINITY;
-    for i in 0..8 {
-        let corner = glam::Vec3::new(
-            if i & 1 != 0 { mx[0] } else { mn[0] },
-            if i & 2 != 0 { mx[1] } else { mn[1] },
-            if i & 4 != 0 { mx[2] } else { mn[2] },
-        ) - rb.eye;
-        let clip = rb.view_proj * corner.extend(1.0);
-        if clip.w <= 0.0 {
-            return SectionOcc::Visible; // crosses the near plane: don't trust it
-        }
-        let ndc = clip.truncate() / clip.w;
-        let uv = ndc.truncate() * 0.5 + 0.5;
-        rect_min = rect_min.min(uv);
-        rect_max = rect_max.max(uv);
-        near_depth = near_depth.min(ndc.z);
-    }
-
-    if rect_max.x < 0.0 || rect_min.x > 1.0 || rect_max.y < 0.0 || rect_min.y > 1.0 {
-        return SectionOcc::Offscreen;
-    }
-    let lo = rect_min.clamp(glam::Vec2::ZERO, glam::Vec2::ONE);
-    let hi = rect_max.clamp(glam::Vec2::ZERO, glam::Vec2::ONE);
-    let occ = sample_hiz(rb, lo.x, lo.y)
-        .max(sample_hiz(rb, hi.x, lo.y))
-        .max(sample_hiz(rb, lo.x, hi.y))
-        .max(sample_hiz(rb, hi.x, hi.y));
-    if near_depth - 0.0005 > occ {
-        SectionOcc::Occluded
-    } else {
-        SectionOcc::Visible
-    }
-}
-
-fn sample_hiz(rb: &HizReadback, u: f32, v: f32) -> f32 {
-    let x = ((u * rb.width as f32) as i32).clamp(0, rb.width as i32 - 1) as usize;
-    let y = ((v * rb.height as f32) as i32).clamp(0, rb.height as i32 - 1) as usize;
-    rb.depth[y * rb.width as usize + x]
 }
 
 /// Conservative AABB-vs-frustum test (the dominant-corner max-dot used by
@@ -594,6 +525,10 @@ pub fn update_game(
             );
         }
         gfx.renderer.upload_chunk_mesh(&mesh);
+        let pos = mesh.pos;
+        for (si, vis) in mesh.visibility {
+            game.section_vis.insert((pos, si), vis);
+        }
     }
 
     game.mesh_dispatcher
@@ -693,7 +628,7 @@ pub fn update_game(
             }),
             chunk_count: gfx.renderer.loaded_chunk_count(),
             sections_drawn: gfx.renderer.sections_drawn(),
-            occlusion_on: gfx.renderer.hiz_occlusion_enabled(),
+            occlusion_on: game.chunk_occlusion_enabled,
             mesh_gate: game.vis_valid.then(|| {
                 // Among in-frustum columns: sections we mesh vs sections skipped as
                 // occluded (the per-section occlusion win). Middle slot unused.

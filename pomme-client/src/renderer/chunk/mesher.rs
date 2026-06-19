@@ -7,6 +7,7 @@ use azalea_core::position::ChunkPos;
 use pyronyx::vk;
 
 use super::greedy;
+use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::world::block::model::{BakedModel, Direction};
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
@@ -109,6 +110,9 @@ pub struct ChunkMeshData {
     /// `GameState::content_gen`). Lets the drain drop a stale result whose
     /// column has since been edited.
     pub content_gen: u64,
+    /// Per-section cave-cull visibility, one entry per index in `replaced`
+    /// (including now-empty sections, which connect all faces).
+    pub visibility: Vec<(i32, VisibilitySet)>,
     /// Latency stamps for edit remeshes (diagnostic); `None` for bulk loads.
     pub timing: Option<RemeshTiming>,
 }
@@ -952,7 +956,7 @@ fn greedy_mesh_section(
     world_x: i32,
     section_y: i32,
     world_z: i32,
-) {
+) -> VisibilitySet {
     type M = greedy::GreedyMesher<SECTION_SIZE>;
     let mut mesher = M::new();
     let mut voxels = vec![0u16; M::CS_P3];
@@ -1041,6 +1045,12 @@ fn greedy_mesh_section(
             }
         }
     }
+
+    // Section visibility (cave culling) shares the opacity grid the mesher just
+    // built: the section's 16³ cells sit at padded coords +1.
+    compute_visibility(|x, y, z| {
+        occluders[greedy::pad_linearize::<SECTION_SIZE>(x + 1, y + 1, z + 1)]
+    })
 }
 
 fn mesh_chunk_snapshot(
@@ -1084,11 +1094,12 @@ fn mesh_chunk_snapshot(
     } else {
         None
     };
+    let mut visibility: Vec<(i32, VisibilitySet)> = Vec::new();
     if let Some(ref tm) = type_map {
         for si in range.clone() {
             let sec = &mut sections[si as usize];
             let section_y = min_y + si * 16;
-            greedy_mesh_section(
+            let vis = greedy_mesh_section(
                 &mut sec.vertices,
                 &mut sec.indices,
                 snapshot,
@@ -1099,6 +1110,13 @@ fn mesh_chunk_snapshot(
                 section_y,
                 world_z,
             );
+            visibility.push((si, vis));
+        }
+    } else {
+        // LOD > 0 (distant): treat as fully see-through. Cave culling is a
+        // near-field win; the long-range pass is deferred.
+        for si in range.clone() {
+            visibility.push((si, VisibilitySet::all()));
         }
     }
 
@@ -1248,6 +1266,7 @@ fn mesh_chunk_snapshot(
         sections,
         replaced: range,
         content_gen: 0,
+        visibility,
         timing: None,
     }
 }

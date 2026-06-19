@@ -17,9 +17,6 @@ const BYTES_PER_BUCKET: u64 =
 const MIN_BUCKETS: u32 = 128;
 const MAX_BUCKETS: u32 = 2048;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
-/// Spare pool fraction the hidden-column backfill leaves free, so visible/near
-/// columns can always upload (see `GameState::rescan_mesh_jobs`).
-const BACKFILL_HEADROOM_FRACTION: f32 = 0.1;
 
 /// First-fit free-list sub-allocator over a fixed element range, coalescing on
 /// free. Each section gets an exact-size vertex (and index) slice instead of
@@ -81,11 +78,6 @@ impl FreeList {
                 self.free.remove(pos);
             }
         }
-    }
-
-    fn free_fraction(&self) -> f32 {
-        let free: u32 = self.free.iter().map(|&(_, l)| l).sum();
-        free as f32 / self.capacity.max(1) as f32
     }
 }
 
@@ -150,12 +142,6 @@ struct FrustumData {
     planes: [[f32; 4]; 6],
     chunk_count: u32,
     camera_pos: [f32; 3],
-    // std140: camera_pos ends at offset 112 (16-aligned), so the mat4 packs with
-    // no extra padding and the Rust/GLSL layouts match.
-    view_proj: [[f32; 4]; 4],
-    screen_size: [f32; 2],
-    occlusion_enabled: u32,
-    _pad: u32,
 }
 
 /// One uploaded 16³ section: a self-contained indexed draw plus its tight AABB.
@@ -197,6 +183,10 @@ pub struct ChunkBufferStore {
     vtx_free: FreeList,
     idx_free: FreeList,
     chunks: HashMap<ChunkPos, ChunkAlloc>,
+    /// Per-column bitmask of occlusion-visible section indices (bit `si`), from
+    /// the CPU visibility graph. A column absent here defaults to fully
+    /// visible, so freshly-loaded-but-not-yet-graphed columns still draw.
+    chunk_visibility: HashMap<ChunkPos, u32>,
     cached_meta: Vec<ChunkMeta>,
     meta_dirty: bool,
 
@@ -413,10 +403,6 @@ impl ChunkBufferStore {
                 ty: vk::DescriptorType::UniformBuffer,
                 descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
             },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
             max_sets: MAX_FRAMES_IN_FLIGHT as u32,
@@ -500,6 +486,7 @@ impl ChunkBufferStore {
             vtx_free,
             idx_free,
             chunks: HashMap::new(),
+            chunk_visibility: HashMap::new(),
             cached_meta: Vec::new(),
             meta_dirty: true,
             compute_pipeline,
@@ -872,46 +859,20 @@ impl ChunkBufferStore {
         self.chunks.len() as u32
     }
 
-    /// Whether the pools have spare capacity for discretionary hidden-column
-    /// backfill (both the vertex and index pools must keep a margin free).
-    pub fn has_bucket_headroom(&self) -> bool {
-        self.vtx_free.free_fraction() > BACKFILL_HEADROOM_FRACTION
-            && self.idx_free.free_fraction() > BACKFILL_HEADROOM_FRACTION
+    /// Push the CPU visibility graph's per-column visible-section masks.
+    /// Columns not present default to fully visible, so the cull only omits
+    /// sections the graph proved occluded.
+    pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
+        self.chunk_visibility = vis;
+        self.meta_dirty = true;
     }
 
-    /// Point each frame's cull descriptor at the Hi-Z pyramid (binding 4).
-    /// Called once after the pyramid is created and again whenever it is
-    /// recreated (e.g. on resize), so the cull shader's occlusion test
-    /// reads a live view.
-    pub fn set_hiz(&self, device: &vk::Device, hiz_view: vk::ImageView, hiz_sampler: vk::Sampler) {
-        for &set in &self.compute_sets {
-            let image_info = [vk::DescriptorImageInfo {
-                sampler: hiz_sampler,
-                image_view: hiz_view,
-                image_layout: vk::ImageLayout::General,
-            }];
-            let write = vk::WriteDescriptorSet {
-                dst_set: set,
-                dst_binding: 4,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: image_info.as_ptr(),
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn dispatch_cull(
         &mut self,
         cmd: vk::CommandBuffer,
         frame: usize,
         frustum: &[[f32; 4]; 6],
         camera_pos: [f32; 3],
-        view_proj: [[f32; 4]; 4],
-        screen_size: [f32; 2],
-        occlusion_enabled: bool,
     ) {
         if self.chunks.is_empty() {
             return;
@@ -935,7 +896,14 @@ impl ChunkBufferStore {
                 let dz = pos.z as f32 * 16.0 + 8.0 - camera_pos[2];
                 let nearby = !self.fade_enabled || dx * dx + dz * dz < NEARBY_DIST_SQ;
 
+                // CPU omission: the visibility graph's mask skips sections proven
+                // occluded, so they never reach the GPU cull (absent => all draw).
+                let col_vis = self.chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
+
                 for sec in &alloc.sections {
+                    if col_vis & (1u32 << sec.section_index) == 0 {
+                        continue;
+                    }
                     let vis = if nearby {
                         1.0
                     } else {
@@ -984,10 +952,6 @@ impl ChunkBufferStore {
             planes: *frustum,
             chunk_count: count,
             camera_pos,
-            view_proj,
-            screen_size,
-            occlusion_enabled: occlusion_enabled as u32,
-            _pad: 0,
         };
         let frustum_bytes = bytemuck::bytes_of(&frustum_data);
         self.frustum_allocs[frame].mapped_slice_mut().unwrap()[..frustum_bytes.len()]
@@ -1158,13 +1122,6 @@ fn create_cull_desc_layout(device: &vk::Device) -> vk::DescriptorSetLayout {
         vk::DescriptorSetLayoutBinding {
             binding: 3,
             descriptor_type: vk::DescriptorType::StorageBuffer,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::Compute,
-            ..Default::default()
-        },
-        vk::DescriptorSetLayoutBinding {
-            binding: 4,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
             descriptor_count: 1,
             stage_flags: vk::ShaderStageFlags::Compute,
             ..Default::default()

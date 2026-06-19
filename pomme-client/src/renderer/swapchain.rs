@@ -23,13 +23,9 @@ pub struct Swapchain {
     pub render_pass: vk::RenderPass,
     pub render_pass_scene: vk::RenderPass,
     pub render_pass_load: vk::RenderPass,
-    /// Depth-only render pass for the Hi-Z occlusion prepass (no color
-    /// attachment; ends in ShaderReadOnly so the pyramid build can sample it).
-    pub render_pass_depth: vk::RenderPass,
     pub framebuffers: Vec<vk::Framebuffer>,
     pub framebuffers_scene: Vec<vk::Framebuffer>,
     pub framebuffers_load: Vec<vk::Framebuffer>,
-    pub framebuffer_depth: vk::Framebuffer,
 }
 
 impl Swapchain {
@@ -147,7 +143,6 @@ impl Swapchain {
         let render_pass = create_render_pass(&ctx.device, format.format)?;
         let render_pass_scene = create_render_pass_scene(&ctx.device, format.format)?;
         let render_pass_load = create_render_pass_load(&ctx.device, format.format)?;
-        let render_pass_depth = create_render_pass_depth(&ctx.device)?;
 
         let make_fbs = |rp: vk::RenderPass| -> Result<Vec<vk::Framebuffer>, vk::Error> {
             image_views
@@ -172,22 +167,6 @@ impl Swapchain {
         let framebuffers_scene = make_fbs(render_pass_scene)?;
         let framebuffers_load = make_fbs(render_pass_load)?;
 
-        // The depth prepass writes only depth, so its framebuffer references just
-        // the (shared) depth view.
-        let depth_attachments = [depth_view];
-        let framebuffer_depth = ctx.device.create_framebuffer(
-            &vk::FramebufferCreateInfo {
-                render_pass: render_pass_depth,
-                attachment_count: depth_attachments.len() as u32,
-                attachments: depth_attachments.as_ptr(),
-                width: extent.width,
-                height: extent.height,
-                layers: 1,
-                ..Default::default()
-            },
-            None,
-        )?;
-
         Ok(Self {
             handle: swapchain,
             images,
@@ -200,11 +179,9 @@ impl Swapchain {
             render_pass,
             render_pass_scene,
             render_pass_load,
-            render_pass_depth,
             framebuffers,
             framebuffers_scene,
             framebuffers_load,
-            framebuffer_depth,
         })
     }
 
@@ -221,13 +198,11 @@ impl Swapchain {
             }
             fbs.clear();
         }
-        device.destroy_framebuffer(self.framebuffer_depth, None);
 
         for &rp in &[
             self.render_pass,
             self.render_pass_scene,
             self.render_pass_load,
-            self.render_pass_depth,
         ] {
             device.destroy_render_pass(rp, None);
         }
@@ -270,8 +245,7 @@ fn create_depth_resources(
         array_layers: 1,
         samples: vk::SampleCountFlags::Type1,
         tiling: vk::ImageTiling::Optimal,
-        // Sampled so the Hi-Z occlusion prepass can read this depth back.
-        usage: vk::ImageUsageFlags::DepthStencilAttachment | vk::ImageUsageFlags::Sampled,
+        usage: vk::ImageUsageFlags::DepthStencilAttachment,
         ..Default::default()
     };
 
@@ -298,67 +272,6 @@ fn create_depth_resources(
     let view = device.create_image_view(&view_info, None)?;
 
     Ok((image, view, allocation))
-}
-
-fn create_render_pass_depth(device: &vk::Device) -> Result<vk::RenderPass, vk::Error> {
-    let attachments = [vk::AttachmentDescription {
-        format: vk::Format::D32Sfloat,
-        samples: vk::SampleCountFlags::Type1,
-        load_op: vk::AttachmentLoadOp::Clear,
-        store_op: vk::AttachmentStoreOp::Store,
-        stencil_load_op: vk::AttachmentLoadOp::DontCare,
-        stencil_store_op: vk::AttachmentStoreOp::DontCare,
-        initial_layout: vk::ImageLayout::Undefined,
-        // Sampled by the Hi-Z pyramid build immediately after this pass.
-        final_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        ..Default::default()
-    }];
-
-    let depth_ref = vk::AttachmentReference {
-        attachment: 0,
-        layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
-    };
-
-    let subpass = [vk::SubpassDescription {
-        pipeline_bind_point: vk::PipelineBindPoint::Graphics,
-        depth_stencil_attachment: &depth_ref,
-        ..Default::default()
-    }];
-
-    let dependencies = [
-        vk::SubpassDependency {
-            src_subpass: vk::SUBPASS_EXTERNAL,
-            dst_subpass: 0,
-            src_stage_mask: vk::PipelineStageFlags::LateFragmentTests,
-            src_access_mask: vk::AccessFlags::DepthStencilAttachmentWrite,
-            dst_stage_mask: vk::PipelineStageFlags::EarlyFragmentTests,
-            dst_access_mask: vk::AccessFlags::DepthStencilAttachmentWrite
-                | vk::AccessFlags::DepthStencilAttachmentRead,
-            ..Default::default()
-        },
-        // Make the stored depth available to the pyramid build's compute reads.
-        vk::SubpassDependency {
-            src_subpass: 0,
-            dst_subpass: vk::SUBPASS_EXTERNAL,
-            src_stage_mask: vk::PipelineStageFlags::LateFragmentTests,
-            src_access_mask: vk::AccessFlags::DepthStencilAttachmentWrite,
-            dst_stage_mask: vk::PipelineStageFlags::ComputeShader,
-            dst_access_mask: vk::AccessFlags::ShaderRead,
-            ..Default::default()
-        },
-    ];
-
-    let render_pass_info = vk::RenderPassCreateInfo {
-        attachment_count: attachments.len() as u32,
-        attachments: attachments.as_ptr(),
-        subpass_count: subpass.len() as u32,
-        subpasses: subpass.as_ptr(),
-        dependency_count: dependencies.len() as u32,
-        dependencies: dependencies.as_ptr(),
-        ..Default::default()
-    };
-
-    device.create_render_pass(&render_pass_info, None)
 }
 
 fn create_render_pass(

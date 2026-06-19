@@ -323,6 +323,7 @@ impl AppCore {
                     game.vis_mask.remove(&pos);
                     game.vis_tiers.remove(&pos);
                     game.section_gen.retain(|(p, _), _| *p != pos);
+                    game.section_vis.retain(|(p, _), _| *p != pos);
 
                     renderer.remove_chunk_mesh(&pos);
                 }
@@ -870,7 +871,7 @@ impl AppCore {
         // columns backfilled at a bounded rate so the world still completes.
         let loads_happened = !chunks_to_mesh.is_empty();
         game.update_visibility(renderer, player_chunk, loads_happened);
-        game.rescan_mesh_jobs(player_chunk, renderer.mesh_pool_has_headroom());
+        game.rescan_mesh_jobs(player_chunk);
 
         disconnect_reason
     }

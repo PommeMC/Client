@@ -251,7 +251,7 @@ impl ApplicationHandler for App {
                             }
                         }
                         AppPhase::InGame {
-                            mut gfx,
+                            gfx,
                             connection,
                             mut game,
                         } => {
@@ -322,8 +322,15 @@ impl ApplicationHandler for App {
                                         KeyCode::KeyO
                                             if self.core.input.key_pressed(KeyCode::F3) =>
                                         {
-                                            let on = gfx.renderer.toggle_hiz_occlusion();
-                                            tracing::info!("Hi-Z occlusion: {on}");
+                                            game.chunk_occlusion_enabled =
+                                                !game.chunk_occlusion_enabled;
+                                            // Force the throttled recompute to run
+                                            // next frame so the toggle takes effect.
+                                            game.vis_valid = false;
+                                            tracing::info!(
+                                                "Chunk occlusion: {}",
+                                                game.chunk_occlusion_enabled
+                                            );
                                         }
                                         _ => {}
                                     }

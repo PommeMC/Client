@@ -3,7 +3,6 @@ pub mod camera;
 pub mod chunk;
 mod context;
 pub mod entity_model;
-mod hiz;
 pub mod pipelines;
 pub(crate) mod shader;
 mod swapchain;
@@ -102,23 +101,6 @@ pub struct RenderTimings {
     pub present_ms: f32,
 }
 
-#[derive(Clone, Copy)]
-struct HizSlotMeta {
-    view_proj: glam::Mat4,
-    eye: glam::Vec3,
-}
-
-/// A CPU-side copy of a coarse Hi-Z mip plus the camera that produced it, so
-/// the mesh scheduler can project a column's AABB and skip it when it is fully
-/// behind nearer terrain. Frame-lagged; conservative (only ever under-culls).
-pub struct HizReadback {
-    pub depth: Vec<f32>,
-    pub width: u32,
-    pub height: u32,
-    pub view_proj: glam::Mat4,
-    pub eye: glam::Vec3,
-}
-
 pub struct Renderer {
     ctx: VulkanContext,
     swapchain: Swapchain,
@@ -148,20 +130,6 @@ pub struct Renderer {
     entity_renderer: EntityRenderer,
     block_entity_pipeline: BlockEntityPipeline,
     chunk_buffers: ChunkBufferStore,
-    hiz: hiz::HiZPyramid,
-    /// Whether the Hi-Z pyramid has been built at least once since the last
-    /// (re)creation; occlusion stays off until then to avoid sampling garbage.
-    hiz_built: bool,
-    /// Runtime toggle for Hi-Z chunk occlusion culling (set to `false` to fall
-    /// back to pure per-section frustum culling).
-    hiz_occlusion_enabled: bool,
-    /// Per-frame-in-flight camera captured when that slot's Hi-Z readback was
-    /// recorded, so the CPU occlusion test projects with the matching matrix.
-    hiz_readback_meta: [Option<HizSlotMeta>; MAX_FRAMES_IN_FLIGHT],
-    /// Latest completed coarse Hi-Z readback (owned CPU copy), queried by the
-    /// mesh scheduler. `None` until the first readback or while occlusion is
-    /// off.
-    hiz_latest: Option<HizReadback>,
     render_finished_per_image: Vec<vk::Semaphore>,
     swapchain_dirty: bool,
     vsync: bool,
@@ -249,7 +217,6 @@ impl Renderer {
         let chunk_pipeline = ChunkPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
-            swapchain_state.render_pass_depth,
             &ctx.allocator,
             &atlas,
         );
@@ -378,14 +345,6 @@ impl Renderer {
             &ctx.allocator,
         );
 
-        let hiz = hiz::HiZPyramid::new(
-            &ctx.device,
-            &ctx.allocator,
-            swapchain_state.extent,
-            swapchain_state.depth_view,
-        );
-        chunk_buffers.set_hiz(&ctx.device, hiz.sampled_view(), hiz.sampler());
-
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
@@ -459,13 +418,6 @@ impl Renderer {
             gui_item_pipeline,
             gui_item_atlas,
             chunk_buffers,
-            hiz,
-            hiz_built: false,
-            // Off by default; toggle in-world with F3+O. Untested GPU path, so the
-            // branch runs as plain per-section frustum culling until enabled.
-            hiz_occlusion_enabled: false,
-            hiz_readback_meta: [None; MAX_FRAMES_IN_FLIGHT],
-            hiz_latest: None,
             render_finished_per_image,
             swapchain_dirty: false,
             vsync,
@@ -680,28 +632,8 @@ impl Renderer {
         self.chunk_pipeline = ChunkPipeline::new(
             &self.ctx.device,
             self.swapchain.render_pass,
-            self.swapchain.render_pass_depth,
             &self.ctx.allocator,
             &self.atlas,
-        );
-
-        // The Hi-Z pyramid is sized to the framebuffer, so rebuild it (and the
-        // scene depth view it samples) for the new extent.
-        self.hiz.destroy(&self.ctx.device, &self.ctx.allocator);
-        self.hiz = hiz::HiZPyramid::new(
-            &self.ctx.device,
-            &self.ctx.allocator,
-            self.swapchain.extent,
-            self.swapchain.depth_view,
-        );
-        self.hiz_built = false;
-        // The readback buffers/dims belong to the old pyramid; drop stale data.
-        self.hiz_latest = None;
-        self.hiz_readback_meta = [None; MAX_FRAMES_IN_FLIGHT];
-        self.chunk_buffers.set_hiz(
-            &self.ctx.device,
-            self.hiz.sampled_view(),
-            self.hiz.sampler(),
         );
 
         self.hand_pipeline
@@ -869,12 +801,6 @@ impl Renderer {
         self.camera.frustum_planes_dilated(extra_radians)
     }
 
-    /// Latest coarse Hi-Z readback for the mesh scheduler's occlusion test, or
-    /// `None` when occlusion is off or no readback has completed yet.
-    pub fn hiz_readback(&self) -> Option<&HizReadback> {
-        self.hiz_latest.as_ref()
-    }
-
     pub fn cycle_camera_mode(&mut self) {
         self.camera.mode = self.camera.mode.cycle();
     }
@@ -895,20 +821,17 @@ impl Renderer {
         self.chunk_buffers.chunk_count()
     }
 
-    /// Whether the GPU mesh pool has spare capacity for hidden-column backfill.
-    pub fn mesh_pool_has_headroom(&self) -> bool {
-        self.chunk_buffers.has_bucket_headroom()
-    }
-
-    /// Sections actually drawn after frustum + Hi-Z occlusion culling (lags a
-    /// few frames). Drops when occlusion culls geometry — useful for the F3
-    /// overlay.
+    /// Sections actually drawn after frustum culling (lags a few frames). The
+    /// graph's occluded sections are omitted before the cull, so this also
+    /// drops when occlusion hides geometry — useful for the F3 overlay.
     pub fn sections_drawn(&self) -> u32 {
         self.chunk_buffers.sections_drawn()
     }
 
-    pub fn hiz_occlusion_enabled(&self) -> bool {
-        self.hiz_occlusion_enabled
+    /// Push the CPU visibility graph's per-column visible-section masks to the
+    /// chunk buffer store, which omits occluded sections from the GPU cull.
+    pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
+        self.chunk_buffers.set_chunk_visibility(vis);
     }
 
     pub fn wait_for_all_frames(&self) {
@@ -934,12 +857,6 @@ impl Renderer {
     pub fn clear_chunk_meshes(&mut self) {
         self.wait_for_all_frames();
         self.chunk_buffers.clear();
-    }
-
-    /// Toggle Hi-Z chunk occlusion culling (F3+O). Returns the new state.
-    pub fn toggle_hiz_occlusion(&mut self) -> bool {
-        self.hiz_occlusion_enabled = !self.hiz_occlusion_enabled;
-        self.hiz_occlusion_enabled
     }
 
     pub fn create_mesh_dispatcher(
@@ -1214,27 +1131,6 @@ impl Renderer {
         self.ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
         let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
 
-        // This slot's GPU work just finished, so its Hi-Z readback (recorded a
-        // few frames ago) is now host-visible. Snapshot it for the mesh
-        // scheduler, paired with the camera that produced that depth.
-        if self.hiz_occlusion_enabled {
-            if let Some(meta) = self.hiz_readback_meta[frame] {
-                let (width, height) = self.hiz.readback_dims();
-                self.hiz_latest = Some(HizReadback {
-                    depth: self.hiz.read_mip(frame),
-                    width,
-                    height,
-                    view_proj: meta.view_proj,
-                    eye: meta.eye,
-                });
-            }
-        } else {
-            self.hiz_latest = None;
-        }
-        // Cleared here; set again below only if this frame records a fresh copy,
-        // so a slot never yields a buffer it didn't actually write.
-        self.hiz_readback_meta[frame] = None;
-
         let t_acquire = std::time::Instant::now();
         let image = match self.ctx.device.acquire_next_image(
             self.swapchain.handle,
@@ -1303,88 +1199,12 @@ impl Renderer {
         if matches!(&mode, RenderMode::World { .. }) {
             let frustum = self.camera.frustum_planes();
             // The eye (including the third-person offset) is the origin the chunk
-            // vertex shader renders relative to, so cull/occlusion must use it too.
+            // vertex shader renders relative to, so the cull must use it too.
             let eye = self.camera.position.as_vec3() + self.camera.third_person_offset();
             let cam_pos: [f32; 3] = eye.into();
-            let view_proj = self.camera.view_projection().to_cols_array_2d();
-            let screen_size = [extent.width as f32, extent.height as f32];
-            let occlusion_active = self.hiz_occlusion_enabled && self.hiz_built;
 
-            self.chunk_buffers.dispatch_cull(
-                cmd,
-                frame,
-                &frustum,
-                cam_pos,
-                view_proj,
-                screen_size,
-                occlusion_active,
-            );
-
-            if self.hiz_occlusion_enabled {
-                // Depth-only prepass of the just-culled set, then reduce it into
-                // the Hi-Z pyramid for the next frame's occlusion test. (The main
-                // pass re-clears and re-draws depth, so it is unaffected.)
-                let depth_clear = [vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 1.0,
-                        stencil: 0,
-                    },
-                }];
-                let rp_info = vk::RenderPassBeginInfo {
-                    render_pass: self.swapchain.render_pass_depth,
-                    framebuffer: self.swapchain.framebuffer_depth,
-                    render_area: vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent,
-                    },
-                    clear_value_count: depth_clear.len() as u32,
-                    clear_values: depth_clear.as_ptr(),
-                    ..Default::default()
-                };
-                cmd.begin_render_pass(&rp_info, vk::SubpassContents::Inline);
-                cmd.set_viewport(0, &[viewport]);
-                cmd.set_scissor(0, &[scissor]);
-                self.chunk_pipeline.bind_depth(cmd, frame);
-                self.chunk_buffers.draw_indirect(cmd, frame);
-                cmd.end_render_pass();
-
-                self.hiz.build(cmd, !self.hiz_built);
-                self.hiz_built = true;
-
-                // Copy a coarse mip back for the mesh scheduler, tagging it with
-                // this frame's camera so the CPU occlusion test projects to match.
-                self.hiz.record_readback(cmd, frame);
-                self.hiz_readback_meta[frame] = Some(HizSlotMeta {
-                    view_proj: self.camera.view_projection(),
-                    eye,
-                });
-
-                // The build sampled the scene depth; finish those reads before the
-                // main pass clears and re-renders the (shared) depth image.
-                let depth_war = vk::ImageMemoryBarrier {
-                    image: self.swapchain.depth_image,
-                    old_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-                    new_layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
-                    src_access_mask: vk::AccessFlags::ShaderRead,
-                    dst_access_mask: vk::AccessFlags::DepthStencilAttachmentWrite,
-                    subresource_range: vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::Depth,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    },
-                    ..Default::default()
-                };
-                cmd.pipeline_barrier(
-                    vk::PipelineStageFlags::ComputeShader,
-                    vk::PipelineStageFlags::EarlyFragmentTests,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[depth_war],
-                );
-            }
+            self.chunk_buffers
+                .dispatch_cull(cmd, frame, &frustum, cam_pos);
         }
 
         let clear_values = [
@@ -1923,7 +1743,6 @@ impl Drop for Renderer {
 
         self.chunk_buffers
             .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.hiz.destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.hand_pipeline

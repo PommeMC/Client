@@ -29,10 +29,6 @@ layout(set = 0, binding = 1) uniform FrustumBuf {
     float cam_x;
     float cam_y;
     float cam_z;
-    mat4 view_proj;        // camera-relative (eye at origin), Vulkan depth 0..1
-    vec2 screen_size;      // full-res framebuffer size in pixels
-    uint occlusion_enabled; // 1 only when Hi-Z is valid (>= 2nd world frame)
-    uint _pad;
 };
 
 layout(set = 0, binding = 2) writeonly buffer IndirectBuf {
@@ -42,50 +38,6 @@ layout(set = 0, binding = 2) writeonly buffer IndirectBuf {
 layout(set = 0, binding = 3) buffer CountBuf {
     uint draw_count;
 };
-
-// Hi-Z max-depth pyramid built from the previous frame's terrain depth.
-layout(set = 0, binding = 4) uniform sampler2D hiz;
-
-// True if the section's screen-space AABB is fully behind the recorded occluder
-// depth in its footprint. Conservative: bails (keeps the section) whenever the
-// projection is unreliable, so it can only ever under-cull, never punch holes.
-bool occluded(vec3 bmin, vec3 bmax) {
-    vec2 rect_min = vec2(1e9);
-    vec2 rect_max = vec2(-1e9);
-    float near_depth = 1e9;
-    for (int i = 0; i < 8; i++) {
-        vec3 c = vec3(
-            (i & 1) != 0 ? bmax.x : bmin.x,
-            (i & 2) != 0 ? bmax.y : bmin.y,
-            (i & 4) != 0 ? bmax.z : bmin.z);
-        vec4 clip = view_proj * vec4(c, 1.0);
-        if (clip.w <= 0.0) {
-            return false; // crosses the near plane: don't trust the projection
-        }
-        vec3 ndc = clip.xyz / clip.w;
-        rect_min = min(rect_min, ndc.xy * 0.5 + 0.5);
-        rect_max = max(rect_max, ndc.xy * 0.5 + 0.5);
-        near_depth = min(near_depth, ndc.z);
-    }
-
-    rect_min = clamp(rect_min, vec2(0.0), vec2(1.0));
-    rect_max = clamp(rect_max, vec2(0.0), vec2(1.0));
-
-    // Pick a mip whose texels each cover the footprint, so 4 corner taps span
-    // the whole rect (Hi-Z mip 0 is half-res, hence the -1).
-    vec2 size_px = (rect_max - rect_min) * screen_size;
-    int lod = int(ceil(log2(max(max(size_px.x, size_px.y), 1.0)))) - 1;
-    lod = clamp(lod, 0, textureQueryLevels(hiz) - 1);
-
-    float occ = textureLod(hiz, vec2(rect_min.x, rect_min.y), float(lod)).r;
-    occ = max(occ, textureLod(hiz, vec2(rect_max.x, rect_min.y), float(lod)).r);
-    occ = max(occ, textureLod(hiz, vec2(rect_min.x, rect_max.y), float(lod)).r);
-    occ = max(occ, textureLod(hiz, vec2(rect_max.x, rect_max.y), float(lod)).r);
-
-    // Larger depth = farther. Cull only if the nearest AABB point is still
-    // behind the farthest occluder in the footprint (small bias avoids z-fight).
-    return near_depth - 0.0005 > occ;
-}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -105,10 +57,6 @@ void main() {
                 + p.z * (p.z >= 0.0 ? mx.z : mn.z)
                 + p.w;
         if (d < 0.0) return;
-    }
-
-    if (occlusion_enabled == 1u && occluded(mn, mx)) {
-        return;
     }
 
     uint slot = atomicAdd(draw_count, 1u);

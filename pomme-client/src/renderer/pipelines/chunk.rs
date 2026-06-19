@@ -10,8 +10,6 @@ use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 pub struct ChunkPipeline {
     pub pipeline: vk::Pipeline,
-    /// Depth-only variant rendered into the Hi-Z prepass (no color attachment).
-    pub depth_pipeline: vk::Pipeline,
     pub pipeline_layout: vk::PipelineLayout,
     pub descriptor_set_layout_camera: vk::DescriptorSetLayout,
     pub descriptor_set_layout_atlas: vk::DescriptorSetLayout,
@@ -26,7 +24,6 @@ impl ChunkPipeline {
     pub fn new(
         device: &vk::Device,
         render_pass: vk::RenderPass,
-        depth_render_pass: vk::RenderPass,
         allocator: &Arc<Mutex<Allocator>>,
         atlas: &TextureAtlas,
     ) -> Self {
@@ -52,7 +49,6 @@ impl ChunkPipeline {
             .expect("failed to create pipeline layout");
 
         let pipeline = create_pipeline(device, render_pass, pipeline_layout);
-        let depth_pipeline = create_depth_pipeline(device, depth_render_pass, pipeline_layout);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -144,7 +140,6 @@ impl ChunkPipeline {
 
         Self {
             pipeline,
-            depth_pipeline,
             pipeline_layout,
             descriptor_set_layout_camera: camera_layout,
             descriptor_set_layout_atlas: atlas_layout,
@@ -190,18 +185,6 @@ impl ChunkPipeline {
         );
     }
 
-    /// Bind the depth-only variant for the Hi-Z occlusion prepass.
-    pub fn bind_depth(&self, cmd: vk::CommandBuffer, frame: usize) {
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.depth_pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.camera_sets[frame], self.atlas_set],
-            &[],
-        );
-    }
-
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
         for i in 0..MAX_FRAMES_IN_FLIGHT {
@@ -215,7 +198,6 @@ impl ChunkPipeline {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
-        device.destroy_pipeline(self.depth_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.descriptor_set_layout_camera, None);
@@ -266,25 +248,8 @@ fn create_pipeline(
     pipeline
 }
 
-/// Depth-only variant for the Hi-Z prepass: vertex stage only, no color
-/// attachment.
-fn create_depth_pipeline(
-    device: &vk::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-) -> vk::Pipeline {
-    let vert_module =
-        shader::create_shader_module(device, shader::include_spirv!("chunk.vert.spv"));
-    let stages = [shader_stage(vk::ShaderStageFlags::Vertex, vert_module)];
-    let color_blend = vk::PipelineColorBlendStateCreateInfo::default();
-
-    let pipeline = build_pipeline(device, render_pass, layout, &stages, &color_blend);
-    device.destroy_shader_module(vert_module, None);
-    pipeline
-}
-
 /// Shared chunk pipeline state; callers supply the shader stages and
-/// color-blend (the only difference between the main and depth-only variants).
+/// color-blend.
 fn build_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
