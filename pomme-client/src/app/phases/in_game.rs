@@ -225,10 +225,7 @@ pub fn update_game(
     core.tick_accumulator += dt;
     while core.tick_accumulator >= TICK_RATE {
         core.tick_physics(&mut gfx.renderer, connection, game);
-        game.item_entity_store.tick(
-            |bx, by, bz| !game.chunk_store.get_block_state(bx, by, bz).is_air(),
-            |bx, by, bz| block_friction(game.chunk_store.get_block_state(bx, by, bz)),
-        );
+        game.item_entity_store.tick();
         game.block_entity_anim.tick();
         core.tick_accumulator -= TICK_RATE;
     }
@@ -800,16 +797,6 @@ pub fn update_game(
     GameUpdateResult::None
 }
 
-fn block_friction(state: azalea_block::BlockState) -> f32 {
-    let block: Box<dyn azalea_block::BlockTrait> = state.into();
-    match block.id() {
-        "ice" | "packed_ice" | "frosted_ice" => 0.98,
-        "blue_ice" => 0.989,
-        "slime_block" => 0.8,
-        _ => 0.6,
-    }
-}
-
 fn stack_render_count(count: i32) -> usize {
     if count <= 1 {
         1
@@ -822,11 +809,6 @@ fn stack_render_count(count: i32) -> usize {
     } else {
         5
     }
-}
-
-fn seeded_rand(state: &mut u32) -> f32 {
-    *state = state.wrapping_mul(1103515245).wrapping_add(12345);
-    ((*state >> 16) & 0x7FFF) as f32 / 0x7FFF as f32
 }
 
 fn get_entity_light(chunk_store: &ChunkStore, pos: Position) -> f32 {
@@ -897,6 +879,73 @@ fn build_weather_columns(
     columns
 }
 
+/// Emits the hovering, spinning, multi-copy cluster for one dropped item,
+/// shared by resting items and the pickup fly-animation. Mirrors
+/// `ItemEntityRenderer.submit` + `submitMultipleFromCount`: hover from the
+/// post-scale model bounds, 3D-vs-flat copy layout on the model depth, scatter
+/// RNG seeded by item id.
+#[allow(clippy::too_many_arguments)]
+fn emit_item_copies(
+    infos: &mut Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo>,
+    item_name: &str,
+    item_id: u32,
+    count: i32,
+    world_pos: glam::Vec3,
+    age_f: f32,
+    bob_offset: f32,
+    is_block_model: bool,
+    min_y: f32,
+    z_size: f32,
+    light: f32,
+) {
+    use crate::renderer::pipelines::item_entity::ItemRenderInfo;
+    use crate::util::JavaRandom;
+
+    let bob = (age_f / 10.0 + bob_offset).sin() * 0.1 + 0.1;
+    let spin = age_f / 20.0 + bob_offset;
+    let copies = stack_render_count(count);
+    // GROUND display scale: blocks 0.25, flat items 0.5.
+    let scale = if is_block_model { 0.25 } else { 0.5 };
+    let min_y_r = min_y * scale;
+    let z_size_r = z_size * scale;
+    // hover = bob + (-modelBoundingBox.minY) + 0.0625
+    let hover_y = bob - min_y_r + 0.0625;
+
+    let base = glam::Mat4::from_translation(world_pos + glam::Vec3::new(0.0, hover_y, 0.0))
+        * glam::Mat4::from_rotation_y(spin);
+    let scale_mat = glam::Mat4::from_scale(glam::Vec3::splat(scale));
+    let mut push = |copy_offset: glam::Mat4| {
+        infos.push(ItemRenderInfo {
+            item_name: item_name.to_string(),
+            model_matrix: base * copy_offset * scale_mat,
+            light,
+        });
+    };
+
+    // getSeedForItemStack seeds from item id (+ damage, not extracted yet).
+    let mut rng = JavaRandom::new(item_id as i64);
+    let mut jitter = |spread: f32| (rng.next_float() * 2.0 - 1.0) * spread;
+
+    if z_size_r > 0.0625 {
+        push(glam::Mat4::IDENTITY);
+        for _ in 1..copies {
+            let off = glam::Vec3::new(jitter(0.15), jitter(0.15), jitter(0.15));
+            push(glam::Mat4::from_translation(off));
+        }
+    } else {
+        let z_step = z_size_r * 1.5;
+        let z_start = -(z_step * (copies - 1) as f32 / 2.0);
+        push(glam::Mat4::from_translation(glam::Vec3::new(
+            0.0, 0.0, z_start,
+        )));
+        for i in 1..copies {
+            let z = z_start + z_step * i as f32;
+            let off = glam::Vec3::new(jitter(0.15 * 0.5), jitter(0.15 * 0.5), z);
+            push(glam::Mat4::from_translation(off));
+        }
+    }
+}
+
 fn build_item_render_infos(
     entity_store: &crate::entity::ItemEntityStore,
     chunk_store: &ChunkStore,
@@ -906,81 +955,41 @@ fn build_item_render_infos(
     let mut infos = Vec::new();
     for item in entity_store.visible_items(camera_pos, 64.0) {
         let age_f = item.age as f32 + partial_tick;
-        let bob = (age_f / 10.0 + item.bob_offset).sin() * 0.1 + 0.1;
-        let spin = age_f / 20.0 + item.bob_offset;
         let lerped = item.prev_position.lerp(item.position, partial_tick as f64);
-        let pos = lerped.as_vec3();
         let light = get_entity_light(chunk_store, lerped);
-        let copies = stack_render_count(item.count);
-
-        // Vanilla GROUND display transform: blocks scale=0.25, flat items scale=0.5
-        // Hover = bob + (-boundingBox.minY) + 0.0625
-        // Block model: minY after scale = -0.5 * 0.25 = -0.125 → hover = bob + 0.1875
-        // Flat item: minY after scale = -0.5 * 0.5 = -0.25 → hover = bob + 0.3125
-        let (scale, hover_y) = if item.is_block_model {
-            (0.25, bob + 0.1875)
-        } else {
-            (0.5, bob + 0.3125)
-        };
-
-        let base = glam::Mat4::from_translation(pos + glam::Vec3::new(0.0, hover_y, 0.0))
-            * glam::Mat4::from_rotation_y(spin);
-
-        let mut rng_state = (item.bob_offset * 1000.0) as u32;
-        if item.is_block_model {
-            for i in 0..copies {
-                let copy_offset = if i == 0 {
-                    glam::Mat4::IDENTITY
-                } else {
-                    let rx = seeded_rand(&mut rng_state) * 0.3 - 0.15;
-                    let ry = seeded_rand(&mut rng_state) * 0.3 - 0.15;
-                    let rz = seeded_rand(&mut rng_state) * 0.3 - 0.15;
-                    glam::Mat4::from_translation(glam::Vec3::new(rx, ry, rz))
-                };
-                let model = base * copy_offset * glam::Mat4::from_scale(glam::Vec3::splat(scale));
-                infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
-                    item_name: item.item_name.clone(),
-                    model_matrix: model,
-                    light,
-                });
-            }
-        } else {
-            let depth = 1.0 / 16.0 * scale;
-            let z_step = depth * 1.5;
-            let z_start = -(z_step * (copies - 1) as f32 / 2.0);
-            for i in 0..copies {
-                let z_offset = z_start + z_step * i as f32;
-                let copy_offset = if i == 0 {
-                    glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, z_offset))
-                } else {
-                    let rx = (seeded_rand(&mut rng_state) * 2.0 - 1.0) * 0.15 * 0.5;
-                    let ry = (seeded_rand(&mut rng_state) * 2.0 - 1.0) * 0.15 * 0.5;
-                    glam::Mat4::from_translation(glam::Vec3::new(rx, ry, z_offset))
-                };
-                let model = base * copy_offset * glam::Mat4::from_scale(glam::Vec3::splat(scale));
-                infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
-                    item_name: item.item_name.clone(),
-                    model_matrix: model,
-                    light,
-                });
-            }
-        }
+        emit_item_copies(
+            &mut infos,
+            &item.item_name,
+            item.item_id,
+            item.count,
+            lerped.as_vec3(),
+            age_f,
+            item.bob_offset,
+            item.is_block_model,
+            item.min_y,
+            item.z_size,
+            light,
+        );
     }
 
+    // Pickup fly-animation: the cluster at the lerped position, age frozen at
+    // pickup.
     for pickup in entity_store.active_pickups(partial_tick) {
-        let pos = pickup.position.as_vec3();
-        let light = get_entity_light(chunk_store, pickup.position);
         let age_f = pickup.age as f32 + partial_tick;
-        let spin = age_f / 20.0 + pickup.bob_offset;
-        let scale = if pickup.is_block_model { 0.25 } else { 0.5 };
-        let model = glam::Mat4::from_translation(pos)
-            * glam::Mat4::from_rotation_y(spin)
-            * glam::Mat4::from_scale(glam::Vec3::splat(scale));
-        infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
-            item_name: pickup.item_name,
-            model_matrix: model,
+        let light = get_entity_light(chunk_store, pickup.position);
+        emit_item_copies(
+            &mut infos,
+            &pickup.item_name,
+            pickup.item_id,
+            pickup.count,
+            pickup.position.as_vec3(),
+            age_f,
+            pickup.bob_offset,
+            pickup.is_block_model,
+            pickup.min_y,
+            pickup.z_size,
             light,
-        });
+        );
     }
 
     infos

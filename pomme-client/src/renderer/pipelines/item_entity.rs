@@ -20,11 +20,24 @@ pub struct ItemRenderInfo {
     pub light: f32,
 }
 
+/// What the item-entity renderer needs to place a mesh: whether it baked from a
+/// 3D (block) model, plus its local-space bounding box used for the hover
+/// height and the 3D-vs-flat copy layout (vanilla reads these off
+/// `getModelBoundingBox`).
+#[derive(Clone, Copy)]
+pub struct ItemMeshInfo {
+    pub is_block_model: bool,
+    pub min_y: f32,
+    pub z_size: f32,
+}
+
 struct MeshEntry {
     buffer: vk::Buffer,
     allocation: Allocation,
     vertex_count: u32,
     is_3d_model: bool,
+    min_y: f32,
+    z_size: f32,
 }
 
 /// Descriptor layouts, per-frame camera UBOs, and atlas set shared by the
@@ -275,6 +288,7 @@ impl ItemEntityPipeline {
             vk::BufferUsageFlags::VertexBuffer,
             &format!("item_{name}"),
         );
+        let (min_y, z_size) = mesh_bounds(vertices);
         self.meshes.insert(
             name.to_string(),
             MeshEntry {
@@ -282,13 +296,19 @@ impl ItemEntityPipeline {
                 allocation,
                 vertex_count: vertices.len() as u32,
                 is_3d_model,
+                min_y,
+                z_size,
             },
         );
     }
 
-    /// `None` if no mesh is built yet, else whether it came from a 3D model.
-    pub fn mesh_is_3d(&self, name: &str) -> Option<bool> {
-        self.meshes.get(name).map(|m| m.is_3d_model)
+    /// `None` if no mesh is built yet, else its 3D-model flag and local bounds.
+    pub fn mesh_info(&self, name: &str) -> Option<ItemMeshInfo> {
+        self.meshes.get(name).map(|m| ItemMeshInfo {
+            is_block_model: m.is_3d_model,
+            min_y: m.min_y,
+            z_size: m.z_size,
+        })
     }
 
     pub fn mesh_handle(&self, name: &str) -> Option<(vk::Buffer, u32)> {
@@ -381,6 +401,23 @@ impl ItemEntityPipeline {
         device.destroy_pipeline(self.pipeline, None);
         self.shared.destroy(device, allocator);
     }
+}
+
+/// Local-space `(min_y, z_size)` of a baked mesh, before the per-entity model
+/// scale. Empty meshes report a degenerate box at the origin.
+fn mesh_bounds(vertices: &[ChunkVertex]) -> (f32, f32) {
+    let mut min_y = f32::INFINITY;
+    let mut min_z = f32::INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+    for v in vertices {
+        min_y = min_y.min(v.position[1]);
+        min_z = min_z.min(v.position[2]);
+        max_z = max_z.max(v.position[2]);
+    }
+    if vertices.is_empty() {
+        return (0.0, 0.0);
+    }
+    (min_y, max_z - min_z)
 }
 
 fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ChunkVertex> {

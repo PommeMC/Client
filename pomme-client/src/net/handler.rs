@@ -273,12 +273,10 @@ pub fn handle_game_packet(
             let y_rot_deg = (p.y_rot as f32) * 360.0 / 256.0;
             let x_rot_deg = (p.x_rot as f32) * 360.0 / 256.0;
             let head_y_rot_deg = (p.y_head_rot as f32) * 360.0 / 256.0;
-            let velocity = p.movement.to_vec3();
             let _ = event_tx.try_send(NetworkEvent::EntitySpawned {
                 id: p.id.0,
                 entity_type: p.entity_type,
                 position: p.position.into(),
-                velocity: velocity.into(),
                 y_rot_deg,
                 x_rot_deg,
                 head_y_rot_deg,
@@ -337,10 +335,12 @@ pub fn handle_game_packet(
                         azalea_inventory::ItemStack::Present(data),
                     ) = &item.value
                 {
+                    use azalea_registry::Registry;
                     let name = crate::player::inventory::item_resource_name(data.kind);
                     let _ = event_tx.try_send(NetworkEvent::EntityItemData {
                         id: p.id.0,
                         item_name: name,
+                        item_id: data.kind.to_u32(),
                         count: data.count,
                     });
                 }
@@ -450,6 +450,7 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ItemPickedUp {
                 item_id: p.item_id as i32,
                 collector_id: p.player_id.0,
+                amount: p.amount as i32,
             });
         }
         ClientboundGamePacket::Respawn(p) => {
