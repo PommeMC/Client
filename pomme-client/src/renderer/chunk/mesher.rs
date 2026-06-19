@@ -89,13 +89,22 @@ pub const PACKED_WHITE_SHIFTED: u32 = pack_tint_shifted([1.0, 1.0, 1.0]);
 /// its own tight AABB, giving per-section cull granularity instead of
 /// per-column.
 pub struct SectionMesh {
+    /// 0-based section index from the column's min_y; stable identity for
+    /// per-section upload/replace.
+    pub section_index: i32,
     pub vertices: Vec<ChunkVertex>,
     pub indices: Vec<u32>,
 }
 
 pub struct ChunkMeshData {
     pub pos: ChunkPos,
+    /// Non-empty meshed sections (each tagged with its `section_index`).
     pub sections: Vec<SectionMesh>,
+    /// The section-index range this job (re)meshed. Upload replaces exactly
+    /// these indices: any index in the range with no `SectionMesh` is now
+    /// empty and its slice is freed. `0..section_count` for a whole-column
+    /// (re)mesh.
+    pub replaced: std::ops::Range<i32>,
     /// Content generation this mesh was built from (see
     /// `GameState::content_gen`). Lets the drain drop a stale result whose
     /// column has since been edited.
@@ -432,6 +441,7 @@ impl MeshDispatcher {
         lod: u32,
         priority: bool,
         content_gen: u64,
+        sections: std::ops::Range<i32>,
     ) {
         let registry = Arc::clone(&self.registry);
         let uv_map = Arc::clone(&self.uv_map);
@@ -469,6 +479,7 @@ impl MeshDispatcher {
             pos,
             lod,
             content_gen,
+            sections,
             // An edit re-meshes an already-shown chunk (vanilla's "recompile").
             is_recompile: priority,
             enqueued_at,
@@ -523,6 +534,7 @@ struct PendingJob {
     pos: ChunkPos,
     lod: u32,
     content_gen: u64,
+    sections: std::ops::Range<i32>,
     is_recompile: bool,
     enqueued_at: Option<std::time::Instant>,
     chunks_needed: [ChunkPos; 5],
@@ -554,8 +566,14 @@ impl PendingJob {
             min_y: self.min_y,
             height: self.height,
         };
-        let mut mesh =
-            mesh_chunk_snapshot(&snapshot, self.pos, &self.registry, &self.uv_map, self.lod);
+        let mut mesh = mesh_chunk_snapshot(
+            &snapshot,
+            self.pos,
+            &self.registry,
+            &self.uv_map,
+            self.lod,
+            self.sections,
+        );
         mesh.content_gen = self.content_gen;
         if let (Some(enqueued_at), Some(started_at)) = (self.enqueued_at, started_at) {
             mesh.timing = Some(RemeshTiming {
@@ -1031,6 +1049,7 @@ fn mesh_chunk_snapshot(
     registry: &BlockRegistry,
     uv_map: &AtlasUVMap,
     lod: u32,
+    sections_to_mesh: std::ops::Range<i32>,
 ) -> ChunkMeshData {
     let mut logged_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1041,24 +1060,34 @@ fn mesh_chunk_snapshot(
     let world_x = pos.x * 16;
     let world_z = pos.z * 16;
 
-    let section_count = ((max_y - min_y) / 16).max(0) as usize;
+    let section_count = ((max_y - min_y) / 16).max(0);
+    // Clamp the request; only these sections are meshed. The Vec still spans the
+    // whole column so blocks route by absolute section index.
+    let range = sections_to_mesh.start.max(0)..sections_to_mesh.end.min(section_count);
+    let by_start = min_y + range.start * 16;
+    let by_end = min_y + range.end * 16;
+
     let mut sections: Vec<SectionMesh> = (0..section_count)
-        .map(|_| SectionMesh {
+        .map(|i| SectionMesh {
+            section_index: i,
             vertices: Vec::new(),
             indices: Vec::new(),
         })
         .collect();
 
+    // The type map is a state->id map, so it only needs the meshed span (+1-block
+    // border for face culling); states outside it are never queried.
     let type_map = if lod == 0 {
         Some(BlockTypeMap::build(
-            snapshot, registry, world_x, world_z, min_y, max_y,
+            snapshot, registry, world_x, world_z, by_start, by_end,
         ))
     } else {
         None
     };
     if let Some(ref tm) = type_map {
-        for (section, sec) in sections.iter_mut().enumerate() {
-            let section_y = min_y + section as i32 * 16;
+        for si in range.clone() {
+            let sec = &mut sections[si as usize];
+            let section_y = min_y + si * 16;
             greedy_mesh_section(
                 &mut sec.vertices,
                 &mut sec.indices,
@@ -1080,14 +1109,14 @@ fn mesh_chunk_snapshot(
             let bx = world_x + local_x;
             let bz = world_z + local_z;
 
-            let mut by = min_y;
-            while by < max_y {
+            let mut by = by_start;
+            while by < by_end {
                 let mut state = snapshot.get_block_state(bx, by, bz);
                 let mut kind = classify_block(state);
                 // Checks for non air block in the cube region to represent the area if the
                 // picked block is air
                 if lod > 0 && matches!(kind, BlockKind::Air) {
-                    let end_y = (by + step).min(max_y);
+                    let end_y = (by + step).min(by_end);
                     for try_y in (by + 1)..end_y {
                         let s = snapshot.get_block_state(bx, try_y, bz);
                         let k = classify_block(s);
@@ -1116,7 +1145,8 @@ fn mesh_chunk_snapshot(
 
                 // Route this block's geometry to its 16-tall section. Clamped so
                 // a non-16-aligned world height can't index past the last section.
-                let s = (((by - min_y) / 16) as usize).min(section_count - 1);
+                let s =
+                    (((by - min_y) / 16) as usize).min((section_count as usize).saturating_sub(1));
                 let sec = &mut sections[s];
 
                 if lod > 0 {
@@ -1209,12 +1239,14 @@ fn mesh_chunk_snapshot(
         local_z += step;
     }
 
-    // Drop empty (all-air) sections so they never reach the GPU as no-op draws.
+    // Keep only non-empty sections (untouched out-of-range ones stay empty);
+    // empty indices within `range` are freed by the per-section upload.
     sections.retain(|s| !s.vertices.is_empty() && !s.indices.is_empty());
 
     ChunkMeshData {
         pos,
         sections,
+        replaced: range,
         content_gen: 0,
         timing: None,
     }

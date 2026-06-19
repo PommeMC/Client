@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use azalea_core::position::ChunkPos;
@@ -20,6 +20,74 @@ const VRAM_BUDGET_FRACTION: f64 = 0.25;
 /// Spare pool fraction the hidden-column backfill leaves free, so visible/near
 /// columns can always upload (see `GameState::rescan_mesh_jobs`).
 const BACKFILL_HEADROOM_FRACTION: f32 = 0.1;
+
+/// First-fit free-list sub-allocator over a fixed element range, coalescing on
+/// free. Each section gets an exact-size vertex (and index) slice instead of
+/// whole fixed buckets — vanilla's `UberGpuBuffer` model — so re-uploading one
+/// section never disturbs the rest and there is no per-section bucket waste.
+struct FreeList {
+    capacity: u32,
+    /// Free regions `(offset, len)`, sorted by offset and coalesced (no two
+    /// adjacent).
+    free: Vec<(u32, u32)>,
+}
+
+impl FreeList {
+    fn new(capacity: u32) -> Self {
+        Self {
+            capacity,
+            free: vec![(0, capacity)],
+        }
+    }
+
+    fn reset(&mut self) {
+        self.free.clear();
+        self.free.push((0, self.capacity));
+    }
+
+    /// Allocate `n` contiguous elements; `None` if no region is large enough.
+    fn alloc(&mut self, n: u32) -> Option<u32> {
+        for i in 0..self.free.len() {
+            let (off, len) = self.free[i];
+            if len >= n {
+                if len == n {
+                    self.free.remove(i);
+                } else {
+                    self.free[i] = (off + n, len - n);
+                }
+                return Some(off);
+            }
+        }
+        None
+    }
+
+    /// Return a region, coalescing with an adjacent free region on either side.
+    fn free_region(&mut self, off: u32, n: u32) {
+        let pos = self.free.partition_point(|&(o, _)| o < off);
+        self.free.insert(pos, (off, n));
+        if pos + 1 < self.free.len() {
+            let (o, l) = self.free[pos];
+            let (no, nl) = self.free[pos + 1];
+            if o + l == no {
+                self.free[pos] = (o, l + nl);
+                self.free.remove(pos + 1);
+            }
+        }
+        if pos > 0 {
+            let (po, pl) = self.free[pos - 1];
+            let (o, l) = self.free[pos];
+            if po + pl == o {
+                self.free[pos - 1] = (po, pl + l);
+                self.free.remove(pos);
+            }
+        }
+    }
+
+    fn free_fraction(&self) -> f32 {
+        let free: u32 = self.free.iter().map(|&(_, l)| l).sum();
+        free as f32 / self.capacity.max(1) as f32
+    }
+}
 
 fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
     let mem_props = physical_device.get_memory_properties();
@@ -91,22 +159,26 @@ struct FrustumData {
 }
 
 /// One uploaded 16³ section: a self-contained indexed draw plus its tight AABB.
+/// `first_index`/`index_count` are the section's index slice and
+/// `vertex_offset` its vertex slice base; `vtx_len` is the slice length, kept
+/// so the slices can be returned to the free-lists on removal. `uploaded_at`
+/// drives the per-section fade so editing one section never re-fades the rest
+/// of the column.
 struct SectionAlloc {
+    section_index: i32,
     aabb: ChunkAABB,
     first_index: u32,
     index_count: u32,
     vertex_offset: i32,
-}
-
-struct ChunkAlloc {
-    /// Buckets this column occupies, returned to the free list on removal.
-    buckets: Vec<u32>,
-    sections: Vec<SectionAlloc>,
+    vtx_len: u32,
     uploaded_at: std::time::Instant,
 }
 
+struct ChunkAlloc {
+    sections: Vec<SectionAlloc>,
+}
+
 pub struct ChunkBufferStore {
-    total_buckets: u32,
     /// Capacity (in draws) of the per-frame meta/indirect buffers. Grown on
     /// demand because per-section packing yields many more draws than buckets.
     max_meta: usize,
@@ -121,7 +193,9 @@ pub struct ChunkBufferStore {
     transfer_cmd: vk::CommandBuffer,
     use_staging: bool,
 
-    free_buckets: VecDeque<u32>,
+    /// Exact-size sub-allocators over the vertex and index pools (in elements).
+    vtx_free: FreeList,
+    idx_free: FreeList,
     chunks: HashMap<ChunkPos, ChunkAlloc>,
     cached_meta: Vec<ChunkMeta>,
     meta_dirty: bool,
@@ -236,10 +310,8 @@ impl ChunkBufferStore {
             staging_size / 1024,
         );
 
-        let mut free_buckets = VecDeque::with_capacity(total_buckets as usize);
-        for i in 0..total_buckets {
-            free_buckets.push_back(i);
-        }
+        let vtx_free = FreeList::new(total_buckets * BUCKET_VERTICES);
+        let idx_free = FreeList::new(total_buckets * BUCKET_INDICES);
 
         let max_meta = (total_buckets * 2) as usize;
         let meta_size = (max_meta * size_of::<ChunkMeta>()) as u64;
@@ -414,7 +486,6 @@ impl ChunkBufferStore {
         }
 
         Self {
-            total_buckets,
             max_meta,
             vertex_buffer,
             vertex_alloc,
@@ -426,7 +497,8 @@ impl ChunkBufferStore {
             transfer_pool,
             transfer_cmd,
             use_staging,
-            free_buckets,
+            vtx_free,
+            idx_free,
             chunks: HashMap::new(),
             cached_meta: Vec::new(),
             meta_dirty: true,
@@ -478,19 +550,41 @@ impl ChunkBufferStore {
             }
         }
 
-        fn pop_bucket(free: &mut VecDeque<u32>, popped: &mut Vec<u32>) -> Option<u32> {
-            let b = free.pop_front()?;
-            popped.push(b);
-            Some(b)
+        // Free the slices of every section index this job covers (`replaced`): the
+        // re-meshed ones are re-allocated below, the now-empty ones simply vanish.
+        // Remember which were present so a re-meshed section swaps instantly while
+        // a freshly revealed one still fades in.
+        let mut freed: Vec<(u32, u32, u32, u32)> = Vec::new();
+        let mut was_present: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        if let Some(entry) = self.chunks.get_mut(&mesh.pos) {
+            entry.sections.retain(|s| {
+                if mesh.replaced.contains(&s.section_index) {
+                    was_present.insert(s.section_index);
+                    freed.push((
+                        s.vertex_offset as u32,
+                        s.vtx_len,
+                        s.first_index,
+                        s.index_count,
+                    ));
+                    false
+                } else {
+                    true
+                }
+            });
         }
+        self.free_slices(&freed);
 
-        // A chunk already resident at this position is being re-meshed (LOD swap,
-        // block edit, or neighbor remesh) rather than newly streamed in. Re-running
-        // the fade-in on it reads as flashing/reloading, so swap it instantly.
-        let was_present = self.chunks.contains_key(&mesh.pos);
-
-        self.remove(&mesh.pos);
         if mesh.sections.is_empty() {
+            // Every replaced section is now empty (freed above); drop the column
+            // if nothing remains.
+            if self
+                .chunks
+                .get(&mesh.pos)
+                .is_some_and(|c| c.sections.is_empty())
+            {
+                self.chunks.remove(&mesh.pos);
+            }
+            self.meta_dirty = true;
             return;
         }
 
@@ -520,126 +614,51 @@ impl ChunkBufferStore {
             }
         }
 
-        // Per-draw placement: where each (sub-)section lands in the pools.
-        enum IdxData<'a> {
-            Borrowed(&'a [u32]),
-            Owned(Vec<u32>),
-        }
+        // Sub-allocate an exact-size vertex + index slice for each non-empty
+        // section. Indices stay section-local and `vertex_offset` rebases the draw,
+        // so no packing or rebasing is needed — just one slice per section.
         struct Plan<'a> {
+            section_index: i32,
             verts: &'a [ChunkVertex],
-            idx: IdxData<'a>,
-            vpos: usize, // vertex element offset in the pool
-            ipos: usize, // index element offset in the pool
+            indices: &'a [u32],
+            vtx_off: u32,
+            idx_off: u32,
             aabb: ChunkAABB,
         }
-        impl IdxData<'_> {
-            fn slice(&self) -> &[u32] {
-                match self {
-                    IdxData::Borrowed(s) => s,
-                    IdxData::Owned(v) => v,
-                }
-            }
-        }
 
-        let mut popped: Vec<u32> = Vec::new();
-        let mut plans: Vec<Plan> = Vec::new();
-        // Sections pack into a shared bucket until one won't fit; each section is
-        // a self-contained draw (indices stay section-local, vertex_offset points
-        // at its vertices), so multiple sections share a bucket without rebasing.
-        let mut cur_bucket: Option<u32> = None;
-        let mut bucket_verts_used = 0usize;
-        let mut bucket_idx_used = 0usize;
-
+        let mut plans: Vec<Plan> = Vec::with_capacity(mesh.sections.len());
+        // (vtx_off, vtx_len, idx_off, idx_len) taken this call, for rollback if the
+        // pool runs out partway through a column.
+        let mut taken: Vec<(u32, u32, u32, u32)> = Vec::new();
         for sec in &mesh.sections {
-            let vcount = sec.vertices.len();
-            let icount = sec.indices.len();
+            let vcount = sec.vertices.len() as u32;
+            let icount = sec.indices.len() as u32;
             if vcount == 0 || icount == 0 {
                 continue;
             }
-            let aabb = section_aabb(&sec.vertices);
-
-            if vcount > BUCKET_VERTICES as usize || icount > BUCKET_INDICES as usize {
-                // Oversized (pathologically dense) section: give it whole buckets
-                // and split into bucket-sized windows with rebased indices. Quads
-                // are 4 verts / 6 indices and BUCKET_VERTICES is a multiple of 4,
-                // so windows never cut a quad.
-                cur_bucket = None;
-                bucket_verts_used = 0;
-                bucket_idx_used = 0;
-                let verts = &sec.vertices;
-                let indices = &sec.indices;
-                let mut vcur = 0usize;
-                let mut icur = 0usize;
-                while vcur < verts.len() {
-                    let Some(bucket) = pop_bucket(&mut self.free_buckets, &mut popped) else {
-                        for b in popped {
-                            self.free_buckets.push_back(b);
-                        }
-                        tracing::debug!("Bucket pool full, skipping {:?}", mesh.pos);
-                        return;
-                    };
-                    let vend = (vcur + BUCKET_VERTICES as usize).min(verts.len());
-                    let local_base = vcur as u32;
-                    let local_end = vend as u32;
-                    let mut win: Vec<u32> = Vec::new();
-                    while icur + 6 <= indices.len() {
-                        let grp = &indices[icur..icur + 6];
-                        let maxi = grp.iter().copied().max().unwrap_or(0);
-                        if maxi >= local_end {
-                            break;
-                        }
-                        for &i in grp {
-                            win.push(i - local_base);
-                        }
-                        icur += 6;
-                    }
-                    plans.push(Plan {
-                        verts: &verts[vcur..vend],
-                        idx: IdxData::Owned(win),
-                        vpos: bucket as usize * BUCKET_VERTICES as usize,
-                        ipos: bucket as usize * BUCKET_INDICES as usize,
-                        aabb,
-                    });
-                    vcur = vend;
-                }
-                continue;
-            }
-
-            let need_new = match cur_bucket {
-                None => true,
-                Some(_) => {
-                    bucket_verts_used + vcount > BUCKET_VERTICES as usize
-                        || bucket_idx_used + icount > BUCKET_INDICES as usize
-                }
+            let Some(vtx_off) = self.vtx_free.alloc(vcount) else {
+                self.free_slices(&taken);
+                tracing::debug!("Vertex pool full, skipping {:?}", mesh.pos);
+                return;
             };
-            if need_new {
-                let Some(bucket) = pop_bucket(&mut self.free_buckets, &mut popped) else {
-                    for b in popped {
-                        self.free_buckets.push_back(b);
-                    }
-                    tracing::warn!("Bucket pool full, skipping {:?}", mesh.pos);
-                    return;
-                };
-                cur_bucket = Some(bucket);
-                bucket_verts_used = 0;
-                bucket_idx_used = 0;
-            }
-            let bucket = cur_bucket.unwrap();
+            let Some(idx_off) = self.idx_free.alloc(icount) else {
+                self.vtx_free.free_region(vtx_off, vcount);
+                self.free_slices(&taken);
+                tracing::debug!("Index pool full, skipping {:?}", mesh.pos);
+                return;
+            };
+            taken.push((vtx_off, vcount, idx_off, icount));
             plans.push(Plan {
+                section_index: sec.section_index,
                 verts: &sec.vertices,
-                idx: IdxData::Borrowed(&sec.indices),
-                vpos: bucket as usize * BUCKET_VERTICES as usize + bucket_verts_used,
-                ipos: bucket as usize * BUCKET_INDICES as usize + bucket_idx_used,
-                aabb,
+                indices: &sec.indices,
+                vtx_off,
+                idx_off,
+                aabb: section_aabb(&sec.vertices),
             });
-            bucket_verts_used += vcount;
-            bucket_idx_used += icount;
         }
 
         if plans.is_empty() {
-            for b in popped {
-                self.free_buckets.push_back(b);
-            }
             return;
         }
 
@@ -655,17 +674,17 @@ impl ChunkBufferStore {
                     buf[stg_v..stg_v + vb.len()].copy_from_slice(vb);
                     copy_v.push(vk::BufferCopy {
                         src_offset: stg_v as u64,
-                        dst_offset: (p.vpos * VERTEX_SIZE as usize) as u64,
+                        dst_offset: p.vtx_off as u64 * VERTEX_SIZE,
                         size: vb.len() as u64,
                     });
                     stg_v += vb.len();
 
-                    let ib: &[u8] = bytemuck::cast_slice(p.idx.slice());
+                    let ib: &[u8] = bytemuck::cast_slice(p.indices);
                     let off = staging_half + stg_i;
                     buf[off..off + ib.len()].copy_from_slice(ib);
                     copy_i.push(vk::BufferCopy {
                         src_offset: off as u64,
-                        dst_offset: (p.ipos * INDEX_SIZE as usize) as u64,
+                        dst_offset: p.idx_off as u64 * INDEX_SIZE,
                         size: ib.len() as u64,
                     });
                     stg_i += ib.len();
@@ -694,46 +713,44 @@ impl ChunkBufferStore {
                 let vbuf = self.vertex_alloc.mapped_slice_mut().unwrap();
                 for p in &plans {
                     let vb: &[u8] = bytemuck::cast_slice(p.verts);
-                    let off = p.vpos * VERTEX_SIZE as usize;
+                    let off = p.vtx_off as usize * VERTEX_SIZE as usize;
                     vbuf[off..off + vb.len()].copy_from_slice(vb);
                 }
             }
             {
                 let ibuf = self.index_alloc.mapped_slice_mut().unwrap();
                 for p in &plans {
-                    let ib: &[u8] = bytemuck::cast_slice(p.idx.slice());
-                    let off = p.ipos * INDEX_SIZE as usize;
+                    let ib: &[u8] = bytemuck::cast_slice(p.indices);
+                    let off = p.idx_off as usize * INDEX_SIZE as usize;
                     ibuf[off..off + ib.len()].copy_from_slice(ib);
                 }
             }
         }
 
-        let sections: Vec<SectionAlloc> = plans
-            .iter()
-            .map(|p| SectionAlloc {
-                aabb: p.aabb,
-                first_index: p.ipos as u32,
-                index_count: p.idx.slice().len() as u32,
-                vertex_offset: p.vpos as i32,
-            })
-            .collect();
-
-        self.chunks.insert(
-            mesh.pos,
-            ChunkAlloc {
-                buckets: popped,
-                sections,
-                // Re-meshes start already faded-in (instant swap); only genuinely
-                // new chunks play the fade.
-                uploaded_at: if was_present {
-                    std::time::Instant::now()
-                        .checked_sub(std::time::Duration::from_secs(2))
-                        .unwrap_or_else(std::time::Instant::now)
-                } else {
-                    std::time::Instant::now()
-                },
+        let now = std::time::Instant::now();
+        let new_sections = plans.iter().map(|p| SectionAlloc {
+            section_index: p.section_index,
+            aabb: p.aabb,
+            first_index: p.idx_off,
+            index_count: p.indices.len() as u32,
+            vertex_offset: p.vtx_off as i32,
+            vtx_len: p.verts.len() as u32,
+            // A re-meshed section swaps instantly; a freshly revealed one fades in.
+            uploaded_at: if was_present.contains(&p.section_index) {
+                now.checked_sub(std::time::Duration::from_secs(2))
+                    .unwrap_or(now)
+            } else {
+                now
             },
-        );
+        });
+
+        self.chunks
+            .entry(mesh.pos)
+            .or_insert_with(|| ChunkAlloc {
+                sections: Vec::new(),
+            })
+            .sections
+            .extend(new_sections);
         self.meta_dirty = true;
 
         let total_sections: usize = self.chunks.values().map(|c| c.sections.len()).sum();
@@ -822,10 +839,21 @@ impl ChunkBufferStore {
         self.max_meta = new_max;
     }
 
+    /// Return a batch of `(vtx_off, vtx_len, idx_off, idx_len)` slices to the
+    /// pools.
+    fn free_slices(&mut self, slices: &[(u32, u32, u32, u32)]) {
+        for &(vo, vl, io, il) in slices {
+            self.vtx_free.free_region(vo, vl);
+            self.idx_free.free_region(io, il);
+        }
+    }
+
     pub fn remove(&mut self, pos: &ChunkPos) {
         if let Some(alloc) = self.chunks.remove(pos) {
-            for bucket in alloc.buckets {
-                self.free_buckets.push_back(bucket);
+            for sec in &alloc.sections {
+                self.vtx_free
+                    .free_region(sec.vertex_offset as u32, sec.vtx_len);
+                self.idx_free.free_region(sec.first_index, sec.index_count);
             }
             self.meta_dirty = true;
         }
@@ -833,10 +861,8 @@ impl ChunkBufferStore {
 
     pub fn clear(&mut self) {
         self.chunks.clear();
-        self.free_buckets.clear();
-        for i in 0..self.total_buckets {
-            self.free_buckets.push_back(i);
-        }
+        self.vtx_free.reset();
+        self.idx_free.reset();
         self.cached_meta.clear();
         self.meta_dirty = true;
         self.fade_enabled = false;
@@ -846,10 +872,11 @@ impl ChunkBufferStore {
         self.chunks.len() as u32
     }
 
-    /// Whether the pool has spare capacity for discretionary hidden-column
-    /// backfill.
+    /// Whether the pools have spare capacity for discretionary hidden-column
+    /// backfill (both the vertex and index pools must keep a margin free).
     pub fn has_bucket_headroom(&self) -> bool {
-        self.free_buckets.len() as f32 > self.total_buckets as f32 * BACKFILL_HEADROOM_FRACTION
+        self.vtx_free.free_fraction() > BACKFILL_HEADROOM_FRACTION
+            && self.idx_free.free_fraction() > BACKFILL_HEADROOM_FRACTION
     }
 
     /// Point each frame's cull descriptor at the Hi-Z pyramid (binding 4).
@@ -895,33 +922,33 @@ impl ChunkBufferStore {
         const NEARBY_DIST_SQ: f32 = 768.0;
 
         let any_fading = self.fade_enabled
-            && self.chunks.values().any(|alloc| {
-                now.duration_since(alloc.uploaded_at).as_secs_f32() * 1000.0 < FADE_DURATION_MS
+            && self.chunks.values().flat_map(|a| &a.sections).any(|s| {
+                now.duration_since(s.uploaded_at).as_secs_f32() * 1000.0 < FADE_DURATION_MS
             });
 
         if self.meta_dirty || any_fading {
             self.cached_meta.clear();
             for (pos, alloc) in self.chunks.iter() {
-                // Fade is still per-column: distance from the chunk centre in X/Z.
+                // Near columns never fade; otherwise each section fades on its own
+                // timer (X/Z distance is per-column).
                 let dx = pos.x as f32 * 16.0 + 8.0 - camera_pos[0];
                 let dz = pos.z as f32 * 16.0 + 8.0 - camera_pos[2];
-                let dist_sq = dx * dx + dz * dz;
-                let vis = if !self.fade_enabled || dist_sq < NEARBY_DIST_SQ {
-                    1.0
-                } else {
-                    let elapsed_ms = now.duration_since(alloc.uploaded_at).as_secs_f32() * 1000.0;
-                    (elapsed_ms / FADE_DURATION_MS).min(1.0)
-                };
-                let vis_bits = vis.to_bits();
+                let nearby = !self.fade_enabled || dx * dx + dz * dz < NEARBY_DIST_SQ;
 
                 for sec in &alloc.sections {
+                    let vis = if nearby {
+                        1.0
+                    } else {
+                        let elapsed_ms = now.duration_since(sec.uploaded_at).as_secs_f32() * 1000.0;
+                        (elapsed_ms / FADE_DURATION_MS).min(1.0)
+                    };
                     self.cached_meta.push(ChunkMeta {
                         aabb_min: sec.aabb.min,
                         aabb_max: sec.aabb.max,
                         index_count: sec.index_count,
                         first_index: sec.first_index,
                         vertex_offset: sec.vertex_offset,
-                        visibility: vis_bits,
+                        visibility: vis.to_bits(),
                     });
                 }
             }

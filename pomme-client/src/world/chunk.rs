@@ -227,6 +227,12 @@ impl ChunkStore {
         self.chunk_storage.min_y()
     }
 
+    /// Number of 16³ block sections in a column (zero-based section index range
+    /// `0..section_count`).
+    pub fn section_count(&self) -> i32 {
+        (self.height() / 16) as i32
+    }
+
     /// Top non-motion-blocking Y for the column (vanilla MOTION_BLOCKING
     /// surface, i.e. one above the highest solid block). Used to position
     /// weather columns. Returns `min_y` when the chunk or its heightmap is
