@@ -356,8 +356,9 @@ impl InputState {
             let action =
                 azalea_protocol::packets::game::ServerboundSetCarriedItem { slot: slot as u16 };
 
-            self.packet_queue
-                .push(azalea_protocol::packets::game::ServerboundGamePacket::SetCarriedItem(action));
+            self.packet_queue.push(
+                azalea_protocol::packets::game::ServerboundGamePacket::SetCarriedItem(action),
+            );
 
             self.selected_slot = slot;
         }
