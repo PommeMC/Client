@@ -764,7 +764,6 @@ pub fn update_game(
         PauseAction::Options => {
             core.menu.open_options();
             game.options_from_game = true;
-            game.paused = false;
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         PauseAction::Disconnect => {
