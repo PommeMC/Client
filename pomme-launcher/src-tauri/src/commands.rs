@@ -370,7 +370,11 @@ pub async fn launch_game(
     override_version: Option<String>,
     debug_enabled: Option<bool>,
 ) -> Result<String, String> {
-    let exe = find_client_binary()?;
+    // Prefer a local dev build (target/); otherwise download the latest release.
+    let exe = match find_client_binary() {
+        Ok(local) => local,
+        Err(_) => crate::client_updater::ensure_client(&app).await?,
+    };
     let account = uuid.as_deref().and_then(crate::auth::try_restore);
     let username = account
         .as_ref()

@@ -24,6 +24,7 @@ pub fn ensure_dirs() {
     let _ = std::fs::create_dir_all(assets_dir());
     let _ = std::fs::create_dir_all(pomme_assets_dir());
     let _ = std::fs::create_dir_all(versions_dir());
+    let _ = std::fs::create_dir_all(clients_dir());
     let _ = std::fs::create_dir_all(installations_dir());
 
     let _ = std::fs::create_dir_all(indexes_dir());
@@ -70,6 +71,27 @@ pub fn version_extracted_dir(version: &str) -> PathBuf {
 /// `.pomc/versions/{version}/extracted/.extracted`
 pub fn version_extracted_marker(version: &str) -> PathBuf {
     version_extracted_dir(version).join(".extracted")
+}
+
+/// `.pomc/clients/`
+pub fn clients_dir() -> PathBuf {
+    data_dir().join("clients")
+}
+/// `.pomc/clients/{tag}/`
+pub fn client_version_dir(tag: &str) -> PathBuf {
+    clients_dir().join(tag)
+}
+/// `.pomc/clients/{tag}/pomme-client[.exe]`
+pub fn client_binary(tag: &str) -> PathBuf {
+    #[cfg(target_family = "windows")]
+    let name = "pomme-client.exe";
+    #[cfg(not(target_family = "windows"))]
+    let name = "pomme-client";
+    client_version_dir(tag).join(name)
+}
+/// `.pomc/clients/{tag}/.verified`
+pub fn client_marker(tag: &str) -> PathBuf {
+    client_version_dir(tag).join(".verified")
 }
 
 /// `.pomc/installations/`

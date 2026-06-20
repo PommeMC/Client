@@ -59,7 +59,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          tar czf "dist/${{ matrix.name }}.tar.gz" -C "target/${{ matrix.target }}/release" "${{ matrix.artifact }}"
+          zip -j "dist/${{ matrix.name }}.zip" "target/${{ matrix.target }}/release/${{ matrix.artifact }}"
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
@@ -99,6 +99,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.zip > sha256sums.txt
 
       - uses: softprops/action-gh-release@v3
         with:

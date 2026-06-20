@@ -1,4 +1,5 @@
 mod auth;
+mod client_updater;
 mod commands;
 mod downloader;
 mod friends;
