@@ -5,7 +5,7 @@ use azalea_core::position::ChunkPos;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
-use super::mesher::{ChunkMeshData, ChunkVertex};
+use super::mesher::{ChunkMeshData, ChunkVertex, SectionMesh};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
@@ -158,6 +158,9 @@ struct SectionAlloc {
     vertex_offset: i32,
     vtx_len: u32,
     uploaded_at: std::time::Instant,
+    /// Upload epoch this section's geometry came from; an older upload is
+    /// rejected. See [`ChunkMeshData::upload_epoch`].
+    epoch: u64,
 }
 
 struct ChunkAlloc {
@@ -523,13 +526,17 @@ impl ChunkBufferStore {
         self.last_draw_count
     }
 
+    /// Upload a mesh result, replacing the sections in `mesh.replaced`. Returns
+    /// the section indices that were dropped due to pool exhaustion (and so
+    /// need re-meshing); empty on success or for the permanent "too large"
+    /// skip.
     pub fn upload(
         &mut self,
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
         queue: vk::Queue,
         mesh: &ChunkMeshData,
-    ) {
+    ) -> Vec<i32> {
         // Tight AABB over a section's own vertices (better cull granularity than
         // the chunk-column bounds; also robust to LOD cubes that exceed 16 tall).
         fn section_aabb(verts: &[ChunkVertex]) -> ChunkAABB {
@@ -547,15 +554,43 @@ impl ChunkBufferStore {
             }
         }
 
-        // Retire the slices of every section index this job covers (`replaced`):
-        // the re-meshed ones are re-allocated below, the now-empty ones simply
-        // vanish. Remember which were present so a re-meshed section swaps
-        // instantly while a freshly revealed one still fades in.
+        // Retired slices only reclaim in `begin_frame`; if rendering is paused
+        // while meshing continues (e.g. minimized window) the backlog grows
+        // unbounded. Past a sane bound, force a GPU wait and reclaim it all.
+        const PENDING_FREE_DRAIN_THRESHOLD: usize = 8192;
+        if self.pending_free.len() > PENDING_FREE_DRAIN_THRESHOLD {
+            device.wait_idle().ok();
+            while let Some((_, slice)) = self.pending_free.pop_front() {
+                self.free_slice(slice);
+            }
+        }
+
+        // The covered sections this job is authoritative for: reject any where a
+        // newer upload (higher epoch) already landed. See
+        // `ChunkMeshData::upload_epoch`.
+        let accepted: std::collections::HashSet<i32> = mesh
+            .replaced
+            .clone()
+            .filter(|si| {
+                let stored = self
+                    .chunks
+                    .get(&mesh.pos)
+                    .and_then(|c| c.sections.iter().find(|s| s.section_index == *si))
+                    .map(|s| s.epoch)
+                    .unwrap_or(0);
+                mesh.upload_epoch >= stored
+            })
+            .collect();
+
+        // Retire the slices of every accepted covered section: the re-meshed ones
+        // are re-allocated below, the now-empty ones simply vanish. Remember which
+        // were present so a re-meshed section swaps instantly while a freshly
+        // revealed one still fades in. Rejected sections are left untouched.
         let mut freed: Vec<(u32, u32, u32, u32)> = Vec::new();
         let mut was_present: std::collections::HashSet<i32> = std::collections::HashSet::new();
         if let Some(entry) = self.chunks.get_mut(&mesh.pos) {
             entry.sections.retain(|s| {
-                if mesh.replaced.contains(&s.section_index) {
+                if accepted.contains(&s.section_index) {
                     was_present.insert(s.section_index);
                     freed.push((
                         s.vertex_offset as u32,
@@ -570,9 +605,19 @@ impl ChunkBufferStore {
             });
         }
         self.retire_slices(freed.iter().copied());
+        // Sections were removed/replaced, so the draw list must be rebuilt even if
+        // an early return below skips the upload (otherwise it keeps drawing a
+        // retired, soon-reused slice).
+        self.meta_dirty = true;
 
-        if mesh.sections.is_empty() {
-            // Every replaced section is now empty (freed above); drop the column
+        let upload_secs: Vec<&SectionMesh> = mesh
+            .sections
+            .iter()
+            .filter(|s| accepted.contains(&s.section_index))
+            .collect();
+
+        if upload_secs.is_empty() {
+            // Every accepted section is now empty (freed above); drop the column
             // if nothing remains.
             if self
                 .chunks
@@ -581,22 +626,20 @@ impl ChunkBufferStore {
             {
                 self.chunks.remove(&mesh.pos);
             }
-            self.meta_dirty = true;
-            return;
+            return Vec::new();
         }
 
         let staging_half = self.staging_size as usize / 2;
         if self.use_staging {
             // Verts and indices share the staging buffer (two halves), copied in
             // one transfer. A chunk too large for staging is skipped rather than
-            // overflowing the buffer (matches the prior column-sized limit).
-            let v_bytes: usize = mesh
-                .sections
+            // overflowing the buffer (matches the prior column-sized limit). This
+            // is permanent, so it's not reported for retry.
+            let v_bytes: usize = upload_secs
                 .iter()
                 .map(|s| s.vertices.len() * VERTEX_SIZE as usize)
                 .sum();
-            let i_bytes: usize = mesh
-                .sections
+            let i_bytes: usize = upload_secs
                 .iter()
                 .map(|s| s.indices.len() * INDEX_SIZE as usize)
                 .sum();
@@ -607,7 +650,7 @@ impl ChunkBufferStore {
                     v_bytes,
                     i_bytes,
                 );
-                return;
+                return Vec::new();
             }
         }
 
@@ -623,11 +666,14 @@ impl ChunkBufferStore {
             aabb: ChunkAABB,
         }
 
-        let mut plans: Vec<Plan> = Vec::with_capacity(mesh.sections.len());
+        let mut plans: Vec<Plan> = Vec::with_capacity(upload_secs.len());
         // (vtx_off, vtx_len, idx_off, idx_len) taken this call, for rollback if the
         // pool runs out partway through a column.
         let mut taken: Vec<(u32, u32, u32, u32)> = Vec::new();
-        for sec in &mesh.sections {
+        // The accepted sections were retired above; on a pool-full rollback they
+        // need re-meshing, so report them for retry (rescan re-enqueues next frame).
+        let dropped: Vec<i32> = accepted.iter().copied().collect();
+        for sec in &upload_secs {
             let vcount = sec.vertices.len() as u32;
             let icount = sec.indices.len() as u32;
             if vcount == 0 || icount == 0 {
@@ -636,13 +682,13 @@ impl ChunkBufferStore {
             let Some(vtx_off) = self.vtx_free.alloc(vcount) else {
                 self.free_slices(&taken);
                 tracing::debug!("Vertex pool full, skipping {:?}", mesh.pos);
-                return;
+                return dropped;
             };
             let Some(idx_off) = self.idx_free.alloc(icount) else {
                 self.vtx_free.free_region(vtx_off, vcount);
                 self.free_slices(&taken);
                 tracing::debug!("Index pool full, skipping {:?}", mesh.pos);
-                return;
+                return dropped;
             };
             taken.push((vtx_off, vcount, idx_off, icount));
             plans.push(Plan {
@@ -656,7 +702,9 @@ impl ChunkBufferStore {
         }
 
         if plans.is_empty() {
-            return;
+            // Nothing to upload (all accepted sections were empty) — not a
+            // capacity failure, so no retry.
+            return Vec::new();
         }
 
         if self.use_staging {
@@ -739,6 +787,7 @@ impl ChunkBufferStore {
             } else {
                 now
             },
+            epoch: mesh.upload_epoch,
         });
 
         self.chunks
@@ -748,10 +797,10 @@ impl ChunkBufferStore {
             })
             .sections
             .extend(new_sections);
-        self.meta_dirty = true;
 
         let total_sections: usize = self.chunks.values().map(|c| c.sections.len()).sum();
         self.ensure_meta_capacity(device, allocator, total_sections);
+        Vec::new()
     }
 
     /// Grow the per-frame meta and indirect buffers so they can hold `needed`

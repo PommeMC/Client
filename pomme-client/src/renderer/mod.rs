@@ -841,13 +841,15 @@ impl Renderer {
             .wait_for_fences(&self.ctx.in_flight_fences, true, u64::MAX);
     }
 
-    pub fn upload_chunk_mesh(&mut self, mesh: &ChunkMeshData) {
+    /// Returns the section indices dropped due to pool exhaustion (need
+    /// re-mesh); empty on success.
+    pub fn upload_chunk_mesh(&mut self, mesh: &ChunkMeshData) -> Vec<i32> {
         self.chunk_buffers.upload(
             &self.ctx.device,
             &self.ctx.allocator,
             self.ctx.graphics_queue,
             mesh,
-        );
+        )
     }
 
     pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {

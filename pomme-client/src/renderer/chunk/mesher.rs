@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
@@ -110,6 +110,11 @@ pub struct ChunkMeshData {
     /// `GameState::content_gen`). Lets the drain drop a stale result whose
     /// column has since been edited.
     pub content_gen: u64,
+    /// Globally monotonic stamp assigned at enqueue. The buffer keeps the
+    /// highest epoch uploaded per section and rejects any older upload, so an
+    /// in-flight bulk mesh can never clobber a section a newer edit already
+    /// uploaded (the edit always enqueues a higher epoch after its write).
+    pub upload_epoch: u64,
     /// Per-section cave-cull visibility, one entry per index in `replaced`
     /// (including now-empty sections, which connect all faces).
     pub visibility: Vec<(i32, VisibilitySet)>,
@@ -381,6 +386,9 @@ pub struct MeshDispatcher {
     priority_tx: crossbeam_channel::Sender<ChunkMeshData>,
     queue: Arc<MeshQueue>,
     workers: Vec<std::thread::JoinHandle<()>>,
+    // Monotonic per-enqueue stamp; see `ChunkMeshData::upload_epoch`. Starts at 1
+    // so 0 means "never uploaded" on the buffer side.
+    next_epoch: AtomicU64,
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
     grass_colormap: Arc<Colormap>,
@@ -422,6 +430,7 @@ impl MeshDispatcher {
             priority_tx,
             queue,
             workers,
+            next_epoch: AtomicU64::new(1),
             registry: Arc::new(registry),
             uv_map: Arc::new(uv_map),
             grass_colormap: Arc::new(grass_colormap),
@@ -458,6 +467,7 @@ impl MeshDispatcher {
             self.result_tx.clone()
         };
         let enqueued_at = priority.then(std::time::Instant::now);
+        let upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
 
         let chunks_needed = chunk::mesh_neighborhood(pos);
         let chunk_arcs: Vec<_> = chunks_needed
@@ -483,6 +493,7 @@ impl MeshDispatcher {
             pos,
             lod,
             content_gen,
+            upload_epoch,
             sections,
             // An edit re-meshes an already-shown chunk (vanilla's "recompile").
             is_recompile: priority,
@@ -504,12 +515,6 @@ impl MeshDispatcher {
     /// Latest camera position, used to mesh the nearest pending chunk first.
     pub fn set_camera_position(&self, pos: glam::DVec3) {
         self.queue.set_camera(pos);
-    }
-
-    /// Latest per-column meshing tier (0 visible … 2 hidden). `valid` gates the
-    /// signal: when false the queue meshes everything nearest-first as before.
-    pub fn set_visibility(&self, visibility: HashMap<ChunkPos, u8>, valid: bool) {
-        self.queue.set_visibility(visibility, valid);
     }
 
     pub fn drain_results(&self) -> impl Iterator<Item = ChunkMeshData> + '_ {
@@ -538,6 +543,7 @@ struct PendingJob {
     pos: ChunkPos,
     lod: u32,
     content_gen: u64,
+    upload_epoch: u64,
     sections: std::ops::Range<i32>,
     is_recompile: bool,
     enqueued_at: Option<std::time::Instant>,
@@ -579,6 +585,7 @@ impl PendingJob {
             self.sections,
         );
         mesh.content_gen = self.content_gen;
+        mesh.upload_epoch = self.upload_epoch;
         if let (Some(enqueued_at), Some(started_at)) = (self.enqueued_at, started_at) {
             mesh.timing = Some(RemeshTiming {
                 enqueued_at,
@@ -596,23 +603,6 @@ struct QueueState {
     // streaming never starves (vanilla SectionTaskDynamicQueue.MAX_RECOMPILE_QUOTA).
     recompile_quota: i32,
     camera: glam::DVec3,
-    // Per-column meshing tier (0 visible, 1 about-to-be-seen, 2 hidden); bulk
-    // loads are polled tier-then-distance so visible work meshes first. When
-    // `vis_valid` is false (e.g. before the camera is positioned) every column
-    // is treated as tier 0, reverting to plain nearest-first.
-    visibility: HashMap<ChunkPos, u8>,
-    vis_valid: bool,
-}
-
-impl QueueState {
-    /// Meshing tier for a column. Absent entry or invalid signal => tier 0, so
-    /// nothing is ever wrongly deprioritized.
-    fn tier(&self, pos: ChunkPos) -> u8 {
-        if !self.vis_valid {
-            return 0;
-        }
-        self.visibility.get(&pos).copied().unwrap_or(0)
-    }
 }
 
 /// Re-orderable mesh queue, a port of vanilla `SectionTaskDynamicQueue`. The
@@ -631,8 +621,6 @@ impl MeshQueue {
                 tasks: Vec::new(),
                 recompile_quota: MAX_RECOMPILE_QUOTA,
                 camera: glam::DVec3::ZERO,
-                visibility: HashMap::new(),
-                vis_valid: false,
             }),
             available: Condvar::new(),
             closed: AtomicBool::new(false),
@@ -640,18 +628,26 @@ impl MeshQueue {
     }
 
     fn push(&self, job: PendingJob) {
-        self.state.lock().unwrap().tasks.push(job);
+        let mut state = self.state.lock().unwrap();
+        // A re-edit of a still-queued section replaces the queued job in place
+        // instead of duplicating it. Bulk loads can't duplicate (`meshed` gates
+        // them), so only edits need this.
+        if job.is_recompile
+            && let Some(existing) = state
+                .tasks
+                .iter_mut()
+                .find(|t| t.is_recompile && t.pos == job.pos && t.sections == job.sections)
+        {
+            *existing = job;
+        } else {
+            state.tasks.push(job);
+        }
+        drop(state);
         self.available.notify_one();
     }
 
     fn set_camera(&self, camera: glam::DVec3) {
         self.state.lock().unwrap().camera = camera;
-    }
-
-    fn set_visibility(&self, visibility: HashMap<ChunkPos, u8>, valid: bool) {
-        let mut state = self.state.lock().unwrap();
-        state.visibility = visibility;
-        state.vis_valid = valid;
     }
 
     fn close(&self) {
@@ -672,7 +668,11 @@ impl MeshQueue {
                 state = self.available.wait(state).unwrap();
             };
             drop(state);
-            job.run();
+            // A panicking job must not kill the worker thread; its column stays
+            // unmeshed (its `meshed` bit is set), but meshing continues.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run())).is_err() {
+                tracing::error!("chunk mesh job panicked; worker continuing");
+            }
         }
     }
 }
@@ -688,10 +688,10 @@ fn poll(state: &mut QueueState) -> Option<PendingJob> {
         dx * dx + dz * dz
     };
 
-    // Bulk loads are ordered tier-then-distance so visible (tier 0) columns mesh
-    // before about-to-be-seen (1) and hidden (2) ones. Edits (recompiles) keep
-    // vanilla's pure nearest-first and are never gated by visibility.
-    let mut best_initial: Option<(usize, u8, f64)> = None;
+    // Both lanes mesh nearest-first; edits (recompiles) are preferred over initial
+    // loads when closer, bounded by the recompile quota. Occlusion gates drawing,
+    // not meshing, so meshing order is purely distance-based.
+    let mut best_initial: Option<(usize, f64)> = None;
     let mut best_recompile: Option<(usize, f64)> = None;
     for (i, task) in state.tasks.iter().enumerate() {
         let dist = dist_sq(task);
@@ -699,18 +699,15 @@ fn poll(state: &mut QueueState) -> Option<PendingJob> {
             if best_recompile.is_none_or(|(_, d)| dist < d) {
                 best_recompile = Some((i, dist));
             }
-        } else {
-            let tier = state.tier(task.pos);
-            if best_initial.is_none_or(|(_, t, d)| (tier, dist) < (t, d)) {
-                best_initial = Some((i, tier, dist));
-            }
+        } else if best_initial.is_none_or(|(_, d)| dist < d) {
+            best_initial = Some((i, dist));
         }
     }
 
     if let Some((ri, rd)) = best_recompile {
         let take_recompile = match best_initial {
             None => true,
-            Some((_, _, id)) => state.recompile_quota > 0 && rd < id,
+            Some((_, id)) => state.recompile_quota > 0 && rd < id,
         };
         if take_recompile {
             state.recompile_quota -= 1;
@@ -718,7 +715,7 @@ fn poll(state: &mut QueueState) -> Option<PendingJob> {
         }
     }
     state.recompile_quota = MAX_RECOMPILE_QUOTA;
-    best_initial.map(|(ii, _, _)| state.tasks.swap_remove(ii))
+    best_initial.map(|(ii, _)| state.tasks.swap_remove(ii))
 }
 
 struct ChunkStoreSnapshot {
@@ -1266,6 +1263,7 @@ fn mesh_chunk_snapshot(
         sections,
         replaced: range,
         content_gen: 0,
+        upload_epoch: 0,
         visibility,
         timing: None,
     }

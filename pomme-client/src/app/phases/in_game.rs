@@ -99,6 +99,10 @@ pub struct GameState {
     /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
     /// `section_gen`. Fed by mesh results; consumed by the occlusion walk.
     pub section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
+    /// Highest upload epoch each `section_vis` entry was set from; mirrors the
+    /// buffer's per-section geometry gate so a stale bulk can't re-stale an
+    /// edited section's visibility.
+    pub section_vis_epoch: HashMap<(ChunkPos, i32), u64>,
     /// Cached per-column frustum tier (0 in view, 1 margin, 2 behind),
     /// recomputed each time an occlusion walk completes. Only the F3
     /// overlay reads it now.
@@ -180,6 +184,7 @@ impl GameState {
             section_gen: HashMap::new(),
             next_section_gen: 0,
             section_vis: HashMap::new(),
+            section_vis_epoch: HashMap::new(),
             vis_tiers: HashMap::new(),
             vis_valid: false,
             last_vis_cam: (i32::MIN, i32::MIN, i32::MIN),
@@ -268,7 +273,6 @@ impl GameState {
             if self.vis_valid {
                 self.vis_valid = false;
                 self.vis_tiers.clear();
-                self.mesh_dispatcher.set_visibility(HashMap::new(), false);
             }
             return;
         }
@@ -362,8 +366,6 @@ impl GameState {
         self.vis_tiers = tiers;
         self.vis_mask = masks.clone();
         self.vis_valid = true;
-        // Meshing is nearest-first; occlusion gates drawing, not meshing.
-        self.mesh_dispatcher.set_visibility(HashMap::new(), false);
 
         // With occlusion off, push full masks (frustum still applies on the GPU).
         if !self.chunk_occlusion_enabled {
@@ -550,10 +552,23 @@ pub fn update_game(
                 ms(t.enqueued_at.elapsed()),
             );
         }
-        gfx.renderer.upload_chunk_mesh(&mesh);
+        let dropped = gfx.renderer.upload_chunk_mesh(&mesh);
         let pos = mesh.pos;
+        // Sections dropped on pool exhaustion were retired from the buffer; clear
+        // their meshed bit so the next rescan re-enqueues them.
+        if !dropped.is_empty()
+            && let Some(m) = game.meshed.get_mut(&pos)
+        {
+            for si in dropped {
+                m.mask &= !(1u32 << si);
+            }
+        }
         for (si, vis) in mesh.visibility {
-            game.section_vis.insert((pos, si), vis);
+            let e = game.section_vis_epoch.entry((pos, si)).or_insert(0);
+            if mesh.upload_epoch >= *e {
+                *e = mesh.upload_epoch;
+                game.section_vis.insert((pos, si), vis);
+            }
         }
     }
 

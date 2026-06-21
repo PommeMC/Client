@@ -324,6 +324,7 @@ impl AppCore {
                     game.vis_tiers.remove(&pos);
                     game.section_gen.retain(|(p, _), _| *p != pos);
                     game.section_vis.retain(|(p, _), _| *p != pos);
+                    game.section_vis_epoch.retain(|(p, _), _| *p != pos);
 
                     renderer.remove_chunk_mesh(&pos);
                 }
