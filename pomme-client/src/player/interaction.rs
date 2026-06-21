@@ -322,7 +322,14 @@ impl InteractionState {
         if input.action_just_pressed(input::Action::Use)
             || (input.performing_action(input::Action::Use) && self.use_delay == 0)
         {
-            self.use_item_on(sender, chunks, player_pos, place_block, &mut dirty_chunks);
+            self.use_item_on(
+                sender,
+                chunks,
+                audio,
+                player_pos,
+                place_block,
+                &mut dirty_chunks,
+            );
         }
 
         if self.miss_time > 0 {
@@ -428,10 +435,12 @@ impl InteractionState {
         self.swing(sender);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn use_item_on(
         &mut self,
         sender: &PacketSender,
         chunks: &ChunkStore,
+        audio: &AudioEngine,
         player_pos: DVec3,
         place_block: Option<BlockState>,
         dirty_chunks: &mut Vec<BlockPos>,
@@ -461,19 +470,20 @@ impl InteractionState {
             seq: self.seq,
         }));
 
-        self.predict_place(hit, place_block, chunks, player_pos, dirty_chunks);
+        self.predict_place(hit, place_block, chunks, audio, player_pos, dirty_chunks);
     }
 
     /// Predicts placement locally for unambiguous single-state blocks,
     /// mirroring `predict_destroy`: stores air for rollback, writes the
-    /// block, and marks it for remesh. `acknowledge` reverts it if the
-    /// server doesn't confirm. Skips anything not clearly placeable so the
-    /// worst case is just no prediction.
+    /// block, plays the place sound, and marks it for remesh. `acknowledge`
+    /// reverts it if the server doesn't confirm. Skips anything not clearly
+    /// placeable so the worst case is just no prediction.
     fn predict_place(
         &mut self,
         hit: BlockHitResult,
         place_block: Option<BlockState>,
         chunks: &ChunkStore,
+        audio: &AudioEngine,
         player_pos: DVec3,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -497,6 +507,7 @@ impl InteractionState {
 
         self.retain_known_server_state(pos, BlockState::AIR, player_pos);
         chunks.set_block_state(pos.x, pos.y, pos.z, state);
+        play_place_sound(audio, state, pos);
         mark_dirty(&pos, dirty_chunks);
     }
 
@@ -712,6 +723,19 @@ fn play_break_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
     play_block_sound(
         audio,
         &s.break_event,
+        pos,
+        (s.volume + 1.0) / 2.0,
+        s.pitch * 0.8,
+    );
+}
+
+/// Plays a block's place sound, matching vanilla `BlockItem.place`: volume
+/// `(volume + 1) / 2`, pitch `pitch * 0.8`.
+fn play_place_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
+    let s = block_sounds(state);
+    play_block_sound(
+        audio,
+        &s.place_event,
         pos,
         (s.volume + 1.0) / 2.0,
         s.pitch * 0.8,

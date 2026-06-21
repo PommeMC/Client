@@ -1,24 +1,28 @@
-//! Per-block hit and break sounds.
+//! Per-block hit, break, and place sounds.
 //!
 //! Vanilla plays a block's `SoundType` hit sound while it is being mined
-//! (`MultiPlayerGameMode.continueDestroyBlock`) and its break sound when the
-//! block is destroyed (level event 2001). `azalea-block` does not expose sound
-//! type, so the block id -> sounds table was extracted from the decompiled
-//! vanilla `Blocks.java` / `SoundType.java` and is embedded here as
-//! `block_sounds.json`.
+//! (`MultiPlayerGameMode.continueDestroyBlock`), its break sound when the
+//! block is destroyed (level event 2001), and its place sound when a block is
+//! placed (`BlockItem.place`). `azalea-block` does not expose sound type, so
+//! the block id -> sounds table was extracted from the decompiled vanilla
+//! `Blocks.java` / `SoundType.java` and is embedded here as
+//! `block_sounds.json`. The table holds only hit and break events; the place
+//! event is derived from the break event (see `place_event_for`).
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use azalea_block::{BlockState, BlockTrait};
 
-/// A block's vanilla `SoundType` sounds: the `sounds.json` hit and break events
-/// plus the raw volume and pitch (the caller applies the play-time scaling). An
-/// empty event marks an action that is intentionally silent for the block.
+/// A block's vanilla `SoundType` sounds: the `sounds.json` hit, break, and
+/// place events plus the raw volume and pitch (the caller applies the play-time
+/// scaling). An empty event marks an action that is intentionally silent for
+/// the block.
 #[derive(Clone)]
 pub struct BlockSounds {
     pub hit_event: String,
     pub break_event: String,
+    pub place_event: String,
     pub volume: f32,
     pub pitch: f32,
 }
@@ -45,8 +49,23 @@ pub fn block_sounds(state: BlockState) -> BlockSounds {
     BlockSounds {
         hit_event: hit.to_string(),
         break_event: brk.to_string(),
+        place_event: place_event_for(key, brk),
         volume,
         pitch,
+    }
+}
+
+/// Derives a block's place sound event from its break event. Vanilla
+/// `SoundType`s use `block.<family>.place` to match their break sound, so the
+/// place event is the break event with its action swapped to `place`.
+fn place_event_for(id: &str, break_event: &str) -> String {
+    // LILY_PAD breaks with the big_dripleaf family but has its own place sound.
+    if id == "lily_pad" {
+        return "block.lily_pad.place".to_string();
+    }
+    match break_event.rsplit_once('.') {
+        Some((prefix, _)) => format!("{prefix}.place"),
+        None => String::new(),
     }
 }
 
@@ -83,5 +102,22 @@ mod tests {
         // Silent hit, but the break sound is still present.
         assert_eq!(hit("cactus_flower"), Some(""));
         assert_eq!(brk("cactus_flower"), Some("block.cactus_flower.break"));
+    }
+
+    #[test]
+    fn place_event_derives_from_break_family() {
+        assert_eq!(
+            place_event_for("stone", "block.stone.break"),
+            "block.stone.place"
+        );
+        assert_eq!(
+            place_event_for("oak_planks", "block.wood.break"),
+            "block.wood.place"
+        );
+        assert_eq!(
+            place_event_for("lily_pad", "block.big_dripleaf.break"),
+            "block.lily_pad.place"
+        );
+        assert_eq!(place_event_for("anything", ""), "");
     }
 }
