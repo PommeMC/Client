@@ -1,14 +1,13 @@
 use azalea_protocol::address::ServerAddr;
 use azalea_protocol::connect::{Connection, ReadConnection, WriteConnection};
+use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_protocol::packets::handshake::s_intention::ServerboundIntention;
 use azalea_protocol::packets::login::c_hello::ClientboundHello;
 use azalea_protocol::packets::login::s_hello::ServerboundHello;
 use azalea_protocol::packets::login::s_key::ServerboundKey;
 use azalea_protocol::packets::login::s_login_acknowledged::ServerboundLoginAcknowledged;
 use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
-use azalea_protocol::packets::{ClientIntention, PROTOCOL_VERSION};
 use azalea_protocol::read::ReadPacketError;
 use crossbeam_channel::Sender;
 use thiserror::Error;
@@ -40,6 +39,17 @@ pub enum ConnectionError {
 
     #[error("encryption failed: {0}")]
     Encryption(String),
+}
+
+impl From<super::resolve::ConnectError> for ConnectionError {
+    fn from(e: super::resolve::ConnectError) -> Self {
+        use super::resolve::ConnectError;
+        match e {
+            ConnectError::Resolve(e) => Self::InvalidAddress(e.to_string()),
+            ConnectError::Unreachable(e) => Self::Connect(e.into()),
+            ConnectError::Handshake(e) => Self::Connect(e),
+        }
+    }
 }
 
 pub struct ConnectArgs {
@@ -98,21 +108,7 @@ pub async fn connect_to_server(
         .as_str()
         .try_into()
         .map_err(|_| ConnectionError::InvalidAddress(args.server.clone()))?;
-    let addr = azalea_protocol::resolve::resolve_address(&server_addr)
-        .await
-        .map_err(|e| ConnectionError::InvalidAddress(format!("{}: {e}", args.server)))?;
-    tracing::info!("Connecting to {} (resolved: {addr})...", args.server);
-
-    let mut conn: Connection<_, _> = Connection::new(&addr).await?;
-
-    conn.write(ServerboundIntention {
-        protocol_version: PROTOCOL_VERSION,
-        hostname: server_addr.host.clone(),
-        port: server_addr.port,
-        intention: ClientIntention::Login,
-    })
-    .await?;
-
+    let conn = super::resolve::connect(&server_addr, ClientIntention::Login).await?;
     let mut conn = conn.login();
 
     conn.write(ServerboundHello {

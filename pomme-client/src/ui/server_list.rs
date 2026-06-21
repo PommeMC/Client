@@ -96,12 +96,10 @@ pub fn ping_all_servers(
 }
 
 async fn ping_server(address: String, results: PingResults) {
-    use azalea_protocol::connect::Connection;
-    use azalea_protocol::packets::handshake::s_intention::ServerboundIntention;
+    use azalea_protocol::packets::ClientIntention;
     use azalea_protocol::packets::status::ClientboundStatusPacket;
     use azalea_protocol::packets::status::s_ping_request::ServerboundPingRequest;
     use azalea_protocol::packets::status::s_status_request::ServerboundStatusRequest;
-    use azalea_protocol::packets::{ClientIntention, PROTOCOL_VERSION};
 
     let result = async {
         use azalea_protocol::address::ServerAddr;
@@ -110,21 +108,9 @@ async fn ping_server(address: String, results: PingResults) {
             .as_str()
             .try_into()
             .map_err(|_| format!("Invalid address: {address}"))?;
-        let addr = azalea_protocol::resolve::resolve_address(&server_addr)
+        let conn = crate::net::resolve::connect(&server_addr, ClientIntention::Status)
             .await
             .map_err(|e| format!("{address}: {e}"))?;
-        let mut conn: Connection<_, _> = Connection::new(&addr)
-            .await
-            .map_err(|e| format!("Connection failed: {e}"))?;
-
-        conn.write(ServerboundIntention {
-            protocol_version: PROTOCOL_VERSION,
-            hostname: server_addr.host.clone(),
-            port: server_addr.port,
-            intention: ClientIntention::Status,
-        })
-        .await
-        .map_err(|e| format!("Handshake failed: {e}"))?;
 
         let mut conn = conn.status();
 

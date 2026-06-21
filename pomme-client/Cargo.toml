@@ -16,7 +16,7 @@ sha1_smol = { workspace = true }
 open = { workspace = true }
 base64 = { workspace = true }
 zip = { workspace = true }
-tokio = { workspace = true, features = ["tracing"] }
+tokio = { workspace = true, features = ["tracing", "net", "time"] }
 reqwest = { workspace = true, features = ["blocking"] }
 pyronyx = { workspace = true, features = ["rwh_06"] }
 tracing = { workspace = true }

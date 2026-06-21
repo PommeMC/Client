@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod connection;
 pub mod handler;
+pub mod resolve;
 pub mod sender;
 
 use std::sync::Arc;
