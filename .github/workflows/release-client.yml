@@ -20,7 +20,35 @@ permissions:
   contents: write
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check for new commits since last release
+        id: check
+        shell: bash
+        run: |
+          # Only the weekly cron skips an unchanged master; manual/tag runs always release.
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --tags --force
+          last_tag=$(git tag --list 'client-v*' --sort=-v:refname | head -n1)
+          if [ -z "$last_tag" ] || [ -n "$(git rev-list "${last_tag}..HEAD")" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "No new commits on master since ${last_tag}; skipping weekly release."
+          fi
+
   build-client:
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
     strategy:
       matrix:
         include:
@@ -101,7 +129,8 @@ jobs:
           if-no-files-found: error
 
   release-client:
-    needs: build-client
+    needs: [check, build-client]
+    if: needs.check.outputs.should_release == 'true'
 
     runs-on: ubuntu-latest
     steps:
@@ -117,7 +146,6 @@ jobs:
           tags=$(git tag --list 'client-v*')
           if [ "${{ github.event_name }}" = "push" ]; then
             tag="${{ github.ref_name }}"
-            prerelease="false"
           else
             core="${{ inputs.version }}"
             if [ -z "$core" ]; then
@@ -132,11 +160,9 @@ jobs:
               fi
             fi
             tag="client-v${core}+${MC_VERSION}"
-            prerelease="true"
           fi
           prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "prev=$prev" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v8
@@ -152,7 +178,7 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.rel.outputs.tag }}
-          prerelease: ${{ steps.rel.outputs.prerelease }}
+          prerelease: false
           previous_tag: ${{ steps.rel.outputs.prev }}
           files: dist/*
           generate_release_notes: ${{ steps.rel.outputs.prev != '' }}
