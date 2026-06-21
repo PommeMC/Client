@@ -384,6 +384,10 @@ fn extract_biome_climate(
                 .and_then(|e| nbt_color_from_compound(e, "foliage_color"))
                 .map(int_to_rgb);
 
+            let dry_foliage_color_override = effects
+                .and_then(|e| nbt_color_from_compound(e, "dry_foliage_color"))
+                .map(int_to_rgb);
+
             let grass_color_modifier = effects
                 .and_then(|e| nbt_string_from_compound(e, "grass_color_modifier"))
                 .map(|s| match s.as_str() {
@@ -401,6 +405,7 @@ fn extract_biome_climate(
                     grass_color_override,
                     grass_color_modifier,
                     foliage_color_override,
+                    dry_foliage_color_override,
                 },
             );
         }

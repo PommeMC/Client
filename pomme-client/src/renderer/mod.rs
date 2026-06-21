@@ -880,11 +880,18 @@ impl Renderer {
             "minecraft/textures/colormap/foliage.png",
             packs,
         );
+        let dry_foliage_colormap = crate::renderer::chunk::mesher::Colormap::load(
+            &self.jar_assets_dir,
+            &self.asset_index,
+            "minecraft/textures/colormap/dry_foliage.png",
+            packs,
+        );
         MeshDispatcher::new(
             self.registry.clone(),
             self.atlas.uv_map.clone(),
             grass_colormap,
             foliage_colormap,
+            dry_foliage_colormap,
             biome_climate,
         )
     }
