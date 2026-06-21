@@ -51,6 +51,36 @@ fn enqueue_with_neighbors(
     }
 }
 
+/// Mirror of vanilla `LevelExtractor.setBlockDirty`: a block at (x,y,z) dirties
+/// its own 16³ section plus any neighbour section it touches when on a boundary
+/// (the 3×3×3-block cascade → up to a few sections). Pushes deduped
+/// `(column, section_index)` keys.
+fn dirty_sections_for_block(
+    out: &mut Vec<(azalea_core::position::ChunkPos, i32)>,
+    x: i32,
+    y: i32,
+    z: i32,
+    min_y: i32,
+    section_count: i32,
+) {
+    for bz in (z - 1)..=(z + 1) {
+        for bx in (x - 1)..=(x + 1) {
+            for by in (y - 1)..=(y + 1) {
+                let si = (by - min_y).div_euclid(16);
+                if si < 0 || si >= section_count {
+                    continue;
+                }
+                let col =
+                    azalea_core::position::ChunkPos::new(bx.div_euclid(16), bz.div_euclid(16));
+                let key = (col, si);
+                if !out.contains(&key) {
+                    out.push(key);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum DisplayMode {
     Windowed,
@@ -226,6 +256,9 @@ impl AppCore {
         let rx = &connection.event_rx;
 
         let mut chunks_to_mesh = Vec::new();
+        // Block edits go on the priority lane so they apply instantly even while
+        // chunks stream in, instead of starving behind the load backlog.
+        let mut priority_remesh: Vec<(azalea_core::position::ChunkPos, i32)> = Vec::new();
         let mut disconnect_reason: Option<String> = None;
         let mut processed = 0u32;
 
@@ -285,7 +318,13 @@ impl AppCore {
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.chunk_store.unload_chunk(&pos);
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
-                    game.meshed_lod.remove(&pos);
+                    game.content_gen.remove(&pos);
+                    game.meshed.remove(&pos);
+                    game.vis_mask.remove(&pos);
+                    game.vis_tiers.remove(&pos);
+                    game.section_gen.retain(|(p, _), _| *p != pos);
+                    game.section_vis.retain(|(p, _), _| *p != pos);
+                    game.section_vis_epoch.retain(|(p, _), _| *p != pos);
 
                     renderer.remove_chunk_mesh(&pos);
                 }
@@ -422,30 +461,31 @@ impl AppCore {
                         continue;
                     }
                     game.chunk_store.set_block_state(pos.x, pos.y, pos.z, state);
-                    let chunk_pos = azalea_core::position::ChunkPos::new(
-                        pos.x.div_euclid(16),
-                        pos.z.div_euclid(16),
+                    dirty_sections_for_block(
+                        &mut priority_remesh,
+                        pos.x,
+                        pos.y,
+                        pos.z,
+                        game.chunk_store.min_y(),
+                        game.chunk_store.section_count(),
                     );
-                    // TODO(chunk-light): route edge edits through enqueue_with_neighbors so the
-                    // neighbor's border lighting refreshes too (gate on edge-proximity to avoid
-                    // churn).
-                    chunks_to_mesh.push(chunk_pos);
                 }
                 NetworkEvent::SectionBlocksUpdate { updates } => {
+                    let min_y = game.chunk_store.min_y();
+                    let n = game.chunk_store.section_count();
                     for (pos, state) in updates {
                         if game.interaction.update_known_server_state(&pos, state) {
                             continue;
                         }
                         game.chunk_store.set_block_state(pos.x, pos.y, pos.z, state);
-                        let chunk_pos = azalea_core::position::ChunkPos::new(
-                            pos.x.div_euclid(16),
-                            pos.z.div_euclid(16),
+                        dirty_sections_for_block(
+                            &mut priority_remesh,
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                            min_y,
+                            n,
                         );
-                        // TODO(chunk-light): same neighbor re-mesh as BlockUpdate above for edge
-                        // edits.
-                        if !chunks_to_mesh.contains(&chunk_pos) {
-                            chunks_to_mesh.push(chunk_pos);
-                        }
                     }
                 }
                 NetworkEvent::BlockEntitySync { chunk_pos, entries } => {
@@ -545,14 +585,21 @@ impl AppCore {
                     game.server_simulation_distance = distance;
                 }
                 NetworkEvent::BlockChangedAck { seq } => {
-                    if let Some(snap) = game.interaction.acknowledge(
+                    let mut ack_dirty: Vec<azalea_core::position::BlockPos> = Vec::new();
+                    let snap = game.interaction.acknowledge(
                         seq,
                         &game.chunk_store,
                         game.player.position.into(),
-                        &mut chunks_to_mesh,
-                    ) {
+                        &mut ack_dirty,
+                    );
+                    if let Some(snap) = snap {
                         game.player.position = snap.into();
                         game.player.prev_position = game.player.position;
+                    }
+                    let min_y = game.chunk_store.min_y();
+                    let n = game.chunk_store.section_count();
+                    for b in ack_dirty {
+                        dirty_sections_for_block(&mut priority_remesh, b.x, b.y, b.z, min_y, n);
                     }
                 }
                 NetworkEvent::TimeUpdate {
@@ -827,24 +874,25 @@ impl AppCore {
             (game.player.position.x as i32).div_euclid(16),
             (game.player.position.z as i32).div_euclid(16),
         );
-        for pos in chunks_to_mesh {
-            let lod = chunk_lod(pos, player_chunk);
-            game.meshed_lod.insert(pos, lod);
-            game.mesh_dispatcher.enqueue(&game.chunk_store, pos, lod);
+        // Edits mesh the affected section(s) immediately on the priority lane,
+        // ungated by visibility.
+        for &(col, si) in &priority_remesh {
+            game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk));
         }
 
-        if player_chunk != game.last_player_chunk {
-            game.last_player_chunk = player_chunk;
-            for pos in game.chunk_store.loaded_positions() {
-                let new_lod = chunk_lod(pos, player_chunk);
-                let old_lod = game.meshed_lod.get(&pos).copied();
-                if old_lod != Some(new_lod) {
-                    game.meshed_lod.insert(pos, new_lod);
-                    game.mesh_dispatcher
-                        .enqueue(&game.chunk_store, pos, new_lod);
-                }
-            }
+        // New chunk loads (and their neighbours, for border lighting) are only
+        // marked dirty here; the visibility re-scan enqueues them gated by tier so
+        // hidden/behind-camera columns don't waste meshing time.
+        for &pos in &chunks_to_mesh {
+            game.bump_content_gen(pos);
         }
+
+        // Refresh the frustum tiers (throttled to camera movement / new loads),
+        // then enqueue everything that needs meshing — visible-first, with hidden
+        // columns backfilled at a bounded rate so the world still completes.
+        let loads_happened = !chunks_to_mesh.is_empty();
+        game.update_visibility(renderer, player_chunk, loads_happened);
+        game.rescan_mesh_jobs(player_chunk);
 
         disconnect_reason
     }
@@ -907,8 +955,17 @@ impl AppCore {
             game.player.on_ground,
             game.player.game_mode == 1,
         );
-        for pos in dirty {
-            game.mesh_dispatcher.enqueue(&game.chunk_store, pos, 0);
+        if !dirty.is_empty() {
+            let min_y = game.chunk_store.min_y();
+            let n = game.chunk_store.section_count();
+            let mut sections: Vec<(azalea_core::position::ChunkPos, i32)> = Vec::new();
+            for b in dirty {
+                dirty_sections_for_block(&mut sections, b.x, b.y, b.z, min_y, n);
+            }
+            // Player edits are always adjacent (lod 0).
+            for (col, si) in sections {
+                game.enqueue_section_edit(col, si, 0);
+            }
         }
 
         // Menus consume their own clicks later in the frame, so only clear
@@ -1033,7 +1090,10 @@ impl AppCore {
     }
 }
 
-fn chunk_lod(pos: azalea_core::position::ChunkPos, player: azalea_core::position::ChunkPos) -> u32 {
+pub(crate) fn chunk_lod(
+    pos: azalea_core::position::ChunkPos,
+    player: azalea_core::position::ChunkPos,
+) -> u32 {
     let dx = (pos.x - player.x).unsigned_abs();
     let dz = (pos.z - player.z).unsigned_abs();
     let dist = dx.max(dz);

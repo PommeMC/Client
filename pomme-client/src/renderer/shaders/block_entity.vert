@@ -8,19 +8,19 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 fog_color;
 };
 
+// Per-draw model matrix via push constants (vanilla's PoseStack), not the
+// instance attributes the mob pipeline uses.
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    vec4 tint;
+    vec4 overlay_color;
+    // xy = texture-coordinate scroll offset; zw unused.
+    vec4 uv_params;
+};
+
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec2 tex_coords;
 layout(location = 2) in vec4 light_tint;
-
-// Per-instance data (binding 1, vertexInputRate = instance): the 4 model-matrix
-// columns, then tint, overlay color, and uv scroll offset (xy).
-layout(location = 3) in vec4 i_model_0;
-layout(location = 4) in vec4 i_model_1;
-layout(location = 5) in vec4 i_model_2;
-layout(location = 6) in vec4 i_model_3;
-layout(location = 7) in vec4 i_tint;
-layout(location = 8) in vec4 i_overlay;
-layout(location = 9) in vec4 i_uv;
 
 layout(location = 0) out vec2 v_tex_coords;
 layout(location = 1) out vec4 v_tint;
@@ -29,13 +29,12 @@ layout(location = 3) out vec3 v_fog_color;
 layout(location = 4) out vec4 v_overlay;
 
 void main() {
-    mat4 model = mat4(i_model_0, i_model_1, i_model_2, i_model_3);
     vec4 world_pos = model * vec4(position, 1.0);
     vec3 rel = world_pos.xyz - camera_pos.xyz;
     gl_Position = view_proj * vec4(rel, 1.0);
-    v_tex_coords = tex_coords + i_uv.xy;
-    v_tint = i_tint;
-    v_overlay = i_overlay;
+    v_tex_coords = tex_coords + uv_params.xy;
+    v_tint = tint;
+    v_overlay = overlay_color;
     v_fog = fog_factor(rel, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
 }

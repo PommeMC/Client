@@ -113,6 +113,7 @@ impl MainMenu {
             OptRow::Header("Quality"),
             OptRow::Big("Graphics: Fancy"),
             OptRow::Pair("Biome Blend: 5x5", &rd),
+            // TODO: static stub, not wired (see mesher::enqueue).
             OptRow::Pair("Prioritize Chunk Updates: None", &sd),
             OptRow::Pair("Smooth Lighting: ON", &clouds_label),
             OptRow::Pair("Particles: All", "Mipmap Levels: 4"),

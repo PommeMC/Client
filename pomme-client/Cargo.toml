@@ -47,7 +47,6 @@ uuid = { version = "1", features = ["v4"] }
 crossbeam-channel = "0.5"
 png = "0.17"
 image = "0.25"
-rayon = "1.10"
 fontdue = "0.9.3"
 simdnbt = "0.10"
 discord-rich-presence = "1.1"

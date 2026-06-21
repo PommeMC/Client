@@ -1,11 +1,13 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
 use azalea_core::position::ChunkPos;
 use pyronyx::vk;
 
 use super::greedy;
+use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::world::block::model::{BakedModel, Direction};
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
@@ -83,10 +85,47 @@ pub const fn pack_tint_shifted(rgb: [f32; 3]) -> u32 {
 
 pub const PACKED_WHITE_SHIFTED: u32 = pack_tint_shifted([1.0, 1.0, 1.0]);
 
-pub struct ChunkMeshData {
-    pub pos: ChunkPos,
+/// One 16³ section's geometry. Indices are section-local (0-based into
+/// `vertices`) so each section can be uploaded as a self-contained draw with
+/// its own tight AABB, giving per-section cull granularity instead of
+/// per-column.
+pub struct SectionMesh {
+    /// 0-based section index from the column's min_y; stable identity for
+    /// per-section upload/replace.
+    pub section_index: i32,
     pub vertices: Vec<ChunkVertex>,
     pub indices: Vec<u32>,
+}
+
+pub struct ChunkMeshData {
+    pub pos: ChunkPos,
+    /// Non-empty meshed sections (each tagged with its `section_index`).
+    pub sections: Vec<SectionMesh>,
+    /// The section-index range this job (re)meshed. Upload replaces exactly
+    /// these indices: any index in the range with no `SectionMesh` is now
+    /// empty and its slice is freed. `0..section_count` for a whole-column
+    /// (re)mesh.
+    pub replaced: std::ops::Range<i32>,
+    /// Content generation this mesh was built from (see
+    /// `GameState::content_gen`). Lets the drain drop a stale result whose
+    /// column has since been edited.
+    pub content_gen: u64,
+    /// Globally monotonic stamp assigned at enqueue. The buffer keeps the
+    /// highest epoch uploaded per section and rejects any older upload, so an
+    /// in-flight bulk mesh can never clobber a section a newer edit already
+    /// uploaded (the edit always enqueues a higher epoch after its write).
+    pub upload_epoch: u64,
+    /// Per-section cave-cull visibility, one entry per index in `replaced`
+    /// (including now-empty sections, which connect all faces).
+    pub visibility: Vec<(i32, VisibilitySet)>,
+    /// Latency stamps for edit remeshes (diagnostic); `None` for bulk loads.
+    pub timing: Option<RemeshTiming>,
+}
+
+pub struct RemeshTiming {
+    pub enqueued_at: std::time::Instant,
+    pub started_at: std::time::Instant,
+    pub meshed_at: std::time::Instant,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -342,6 +381,14 @@ pub fn int_to_rgb(color: i32) -> [f32; 3] {
 pub struct MeshDispatcher {
     result_rx: crossbeam_channel::Receiver<ChunkMeshData>,
     result_tx: crossbeam_channel::Sender<ChunkMeshData>,
+    // Edits drain ahead of and uncapped by the bulk load lane (see drain_results).
+    priority_rx: crossbeam_channel::Receiver<ChunkMeshData>,
+    priority_tx: crossbeam_channel::Sender<ChunkMeshData>,
+    queue: Arc<MeshQueue>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    // Monotonic per-enqueue stamp; see `ChunkMeshData::upload_epoch`. Starts at 1
+    // so 0 means "never uploaded" on the buffer side.
+    next_epoch: AtomicU64,
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
     grass_colormap: Arc<Colormap>,
@@ -358,9 +405,32 @@ impl MeshDispatcher {
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     ) -> Self {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
+        let (priority_tx, priority_rx) = crossbeam_channel::unbounded();
+
+        let queue = Arc::new(MeshQueue::new());
+        // One worker per core minus one, leaving a core for the main/render thread.
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(1).max(1))
+            .unwrap_or(1);
+        let mut workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let queue = Arc::clone(&queue);
+            workers.push(
+                std::thread::Builder::new()
+                    .name("chunk-mesher".into())
+                    .spawn(move || queue.run_worker())
+                    .expect("spawn chunk-mesher thread"),
+            );
+        }
+
         Self {
             result_rx,
             result_tx,
+            priority_rx,
+            priority_tx,
+            queue,
+            workers,
+            next_epoch: AtomicU64::new(1),
             registry: Arc::new(registry),
             uv_map: Arc::new(uv_map),
             grass_colormap: Arc::new(grass_colormap),
@@ -373,13 +443,31 @@ impl MeshDispatcher {
         self.biome_climate = climate;
     }
 
-    pub fn enqueue(&self, chunk_store: &ChunkStore, pos: ChunkPos, lod: u32) {
+    // Always async, matching vanilla's default `prioritizeChunkUpdates = NONE`.
+    // TODO: the PLAYER_AFFECTED/NEARBY modes add a synchronous same-frame rebuild
+    // (a `mesh_now` path); deferred — pomme meshes whole columns, so it'd hitch
+    // ~200ms.
+    pub fn enqueue(
+        &self,
+        chunk_store: &ChunkStore,
+        pos: ChunkPos,
+        lod: u32,
+        priority: bool,
+        content_gen: u64,
+        sections: std::ops::Range<i32>,
+    ) {
         let registry = Arc::clone(&self.registry);
         let uv_map = Arc::clone(&self.uv_map);
         let grass_colormap = Arc::clone(&self.grass_colormap);
         let foliage_colormap = Arc::clone(&self.foliage_colormap);
         let biome_climate = Arc::clone(&self.biome_climate);
-        let tx = self.result_tx.clone();
+        let tx = if priority {
+            self.priority_tx.clone()
+        } else {
+            self.result_tx.clone()
+        };
+        let enqueued_at = priority.then(std::time::Instant::now);
+        let upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
 
         let chunks_needed = chunk::mesh_neighborhood(pos);
         let chunk_arcs: Vec<_> = chunks_needed
@@ -401,24 +489,233 @@ impl MeshDispatcher {
                 })
                 .collect();
 
-        rayon::spawn(move || {
-            let snapshot = ChunkStoreSnapshot {
-                chunks: chunks_needed.into_iter().zip(chunk_arcs).collect(),
-                light,
-                grass_colormap,
-                foliage_colormap,
-                biome_climate,
-                min_y,
-                height,
-            };
-            let mesh = mesh_chunk_snapshot(&snapshot, pos, &registry, &uv_map, lod);
-            let _ = tx.send(mesh);
+        self.queue.push(PendingJob {
+            pos,
+            lod,
+            content_gen,
+            upload_epoch,
+            sections,
+            // An edit re-meshes an already-shown chunk (vanilla's "recompile").
+            is_recompile: priority,
+            enqueued_at,
+            chunks_needed,
+            chunk_arcs,
+            light,
+            registry,
+            uv_map,
+            grass_colormap,
+            foliage_colormap,
+            biome_climate,
+            min_y,
+            height,
+            tx,
         });
     }
 
-    pub fn drain_results(&self) -> impl Iterator<Item = ChunkMeshData> + '_ {
-        self.result_rx.try_iter().take(MAX_MESH_UPLOADS_PER_FRAME)
+    /// Latest camera position, used to mesh the nearest pending chunk first.
+    pub fn set_camera_position(&self, pos: glam::DVec3) {
+        self.queue.set_camera(pos);
     }
+
+    pub fn drain_results(&self) -> impl Iterator<Item = ChunkMeshData> + '_ {
+        // Edits drain fully and first; bulk chunk loads stay capped per frame.
+        self.priority_rx
+            .try_iter()
+            .chain(self.result_rx.try_iter().take(MAX_MESH_UPLOADS_PER_FRAME))
+    }
+}
+
+impl Drop for MeshDispatcher {
+    fn drop(&mut self) {
+        self.queue.close();
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+const MAX_RECOMPILE_QUOTA: i32 = 2;
+
+/// A pending chunk-mesh job: a point-in-time snapshot of the neighbourhood plus
+/// everything `mesh_chunk_snapshot` needs. Gathered on the calling thread
+/// (chunk data isn't shareable across threads), then meshed by a worker.
+struct PendingJob {
+    pos: ChunkPos,
+    lod: u32,
+    content_gen: u64,
+    upload_epoch: u64,
+    sections: std::ops::Range<i32>,
+    is_recompile: bool,
+    enqueued_at: Option<std::time::Instant>,
+    chunks_needed: [ChunkPos; 5],
+    chunk_arcs: Vec<Option<Arc<parking_lot::RwLock<azalea_world::Chunk>>>>,
+    light: HashMap<(i32, i32), crate::world::chunk::ChunkLightData>,
+    registry: Arc<BlockRegistry>,
+    uv_map: Arc<AtlasUVMap>,
+    grass_colormap: Arc<Colormap>,
+    foliage_colormap: Arc<Colormap>,
+    biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+    min_y: i32,
+    height: u32,
+    tx: crossbeam_channel::Sender<ChunkMeshData>,
+}
+
+impl PendingJob {
+    fn run(self) {
+        let started_at = self.enqueued_at.map(|_| std::time::Instant::now());
+        let snapshot = ChunkStoreSnapshot {
+            chunks: self
+                .chunks_needed
+                .into_iter()
+                .zip(self.chunk_arcs)
+                .collect(),
+            light: self.light,
+            grass_colormap: self.grass_colormap,
+            foliage_colormap: self.foliage_colormap,
+            biome_climate: self.biome_climate,
+            min_y: self.min_y,
+            height: self.height,
+        };
+        let mut mesh = mesh_chunk_snapshot(
+            &snapshot,
+            self.pos,
+            &self.registry,
+            &self.uv_map,
+            self.lod,
+            self.sections,
+        );
+        mesh.content_gen = self.content_gen;
+        mesh.upload_epoch = self.upload_epoch;
+        if let (Some(enqueued_at), Some(started_at)) = (self.enqueued_at, started_at) {
+            mesh.timing = Some(RemeshTiming {
+                enqueued_at,
+                started_at,
+                meshed_at: std::time::Instant::now(),
+            });
+        }
+        let _ = self.tx.send(mesh);
+    }
+}
+
+struct QueueState {
+    tasks: Vec<PendingJob>,
+    // Consecutive edits served ahead of an initial load before one is forced, so
+    // streaming never starves (vanilla SectionTaskDynamicQueue.MAX_RECOMPILE_QUOTA).
+    recompile_quota: i32,
+    camera: glam::DVec3,
+}
+
+/// Re-orderable mesh queue, a port of vanilla `SectionTaskDynamicQueue`. The
+/// best task is chosen at poll time rather than fixed at submission, so a
+/// freshly enqueued edit is taken before the already-queued chunk-load backlog.
+struct MeshQueue {
+    state: Mutex<QueueState>,
+    available: Condvar,
+    closed: AtomicBool,
+}
+
+impl MeshQueue {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(QueueState {
+                tasks: Vec::new(),
+                recompile_quota: MAX_RECOMPILE_QUOTA,
+                camera: glam::DVec3::ZERO,
+            }),
+            available: Condvar::new(),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn push(&self, job: PendingJob) {
+        let mut state = self.state.lock().unwrap();
+        // A re-edit of a still-queued section replaces the queued job in place
+        // instead of duplicating it. Bulk loads can't duplicate (`meshed` gates
+        // them), so only edits need this.
+        if job.is_recompile
+            && let Some(existing) = state
+                .tasks
+                .iter_mut()
+                .find(|t| t.is_recompile && t.pos == job.pos && t.sections == job.sections)
+        {
+            *existing = job;
+        } else {
+            state.tasks.push(job);
+        }
+        drop(state);
+        self.available.notify_one();
+    }
+
+    fn set_camera(&self, camera: glam::DVec3) {
+        self.state.lock().unwrap().camera = camera;
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+        self.available.notify_all();
+    }
+
+    fn run_worker(&self) {
+        loop {
+            let mut state = self.state.lock().unwrap();
+            let job = loop {
+                if self.closed.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Some(job) = poll(&mut state) {
+                    break job;
+                }
+                state = self.available.wait(state).unwrap();
+            };
+            drop(state);
+            // A panicking job must not kill the worker thread; its column stays
+            // unmeshed (its `meshed` bit is set), but meshing continues.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run())).is_err() {
+                tracing::error!("chunk mesh job panicked; worker continuing");
+            }
+        }
+    }
+}
+
+/// Pick the next task: nearest to the camera, preferring edits (recompiles)
+/// over initial loads when the edit is closer, bounded by the recompile quota.
+/// Mirrors vanilla `SectionTaskDynamicQueue.poll`.
+fn poll(state: &mut QueueState) -> Option<PendingJob> {
+    let camera = state.camera;
+    let dist_sq = |task: &PendingJob| {
+        let dx = (task.pos.x as f64 * 16.0 + 8.0) - camera.x;
+        let dz = (task.pos.z as f64 * 16.0 + 8.0) - camera.z;
+        dx * dx + dz * dz
+    };
+
+    // Both lanes mesh nearest-first; edits (recompiles) are preferred over initial
+    // loads when closer, bounded by the recompile quota. Occlusion gates drawing,
+    // not meshing, so meshing order is purely distance-based.
+    let mut best_initial: Option<(usize, f64)> = None;
+    let mut best_recompile: Option<(usize, f64)> = None;
+    for (i, task) in state.tasks.iter().enumerate() {
+        let dist = dist_sq(task);
+        if task.is_recompile {
+            if best_recompile.is_none_or(|(_, d)| dist < d) {
+                best_recompile = Some((i, dist));
+            }
+        } else if best_initial.is_none_or(|(_, d)| dist < d) {
+            best_initial = Some((i, dist));
+        }
+    }
+
+    if let Some((ri, rd)) = best_recompile {
+        let take_recompile = match best_initial {
+            None => true,
+            Some((_, id)) => state.recompile_quota > 0 && rd < id,
+        };
+        if take_recompile {
+            state.recompile_quota -= 1;
+            return Some(state.tasks.swap_remove(ri));
+        }
+    }
+    state.recompile_quota = MAX_RECOMPILE_QUOTA;
+    best_initial.map(|(ii, _)| state.tasks.swap_remove(ii))
 }
 
 struct ChunkStoreSnapshot {
@@ -656,7 +953,7 @@ fn greedy_mesh_section(
     world_x: i32,
     section_y: i32,
     world_z: i32,
-) {
+) -> VisibilitySet {
     type M = greedy::GreedyMesher<SECTION_SIZE>;
     let mut mesher = M::new();
     let mut voxels = vec![0u16; M::CS_P3];
@@ -745,6 +1042,12 @@ fn greedy_mesh_section(
             }
         }
     }
+
+    // Section visibility (cave culling) shares the opacity grid the mesher just
+    // built: the section's 16³ cells sit at padded coords +1.
+    compute_visibility(|x, y, z| {
+        occluders[greedy::pad_linearize::<SECTION_SIZE>(x + 1, y + 1, z + 1)]
+    })
 }
 
 fn mesh_chunk_snapshot(
@@ -753,9 +1056,8 @@ fn mesh_chunk_snapshot(
     registry: &BlockRegistry,
     uv_map: &AtlasUVMap,
     lod: u32,
+    sections_to_mesh: std::ops::Range<i32>,
 ) -> ChunkMeshData {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
     let mut logged_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let step = 1i32 << lod;
@@ -765,20 +1067,38 @@ fn mesh_chunk_snapshot(
     let world_x = pos.x * 16;
     let world_z = pos.z * 16;
 
+    let section_count = ((max_y - min_y) / 16).max(0);
+    // Clamp the request; only these sections are meshed. The Vec still spans the
+    // whole column so blocks route by absolute section index.
+    let range = sections_to_mesh.start.max(0)..sections_to_mesh.end.min(section_count);
+    let by_start = min_y + range.start * 16;
+    let by_end = min_y + range.end * 16;
+
+    let mut sections: Vec<SectionMesh> = (0..section_count)
+        .map(|i| SectionMesh {
+            section_index: i,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        })
+        .collect();
+
+    // The type map is a state->id map, so it only needs the meshed span (+1-block
+    // border for face culling); states outside it are never queried.
     let type_map = if lod == 0 {
         Some(BlockTypeMap::build(
-            snapshot, registry, world_x, world_z, min_y, max_y,
+            snapshot, registry, world_x, world_z, by_start, by_end,
         ))
     } else {
         None
     };
+    let mut visibility: Vec<(i32, VisibilitySet)> = Vec::new();
     if let Some(ref tm) = type_map {
-        let sections = (max_y - min_y) / 16;
-        for section in 0..sections {
-            let section_y = min_y + section * 16;
-            greedy_mesh_section(
-                &mut vertices,
-                &mut indices,
+        for si in range.clone() {
+            let sec = &mut sections[si as usize];
+            let section_y = min_y + si * 16;
+            let vis = greedy_mesh_section(
+                &mut sec.vertices,
+                &mut sec.indices,
                 snapshot,
                 registry,
                 tm,
@@ -787,6 +1107,13 @@ fn mesh_chunk_snapshot(
                 section_y,
                 world_z,
             );
+            visibility.push((si, vis));
+        }
+    } else {
+        // LOD > 0 (distant): treat as fully see-through. Cave culling is a
+        // near-field win; the long-range pass is deferred.
+        for si in range.clone() {
+            visibility.push((si, VisibilitySet::all()));
         }
     }
 
@@ -797,14 +1124,14 @@ fn mesh_chunk_snapshot(
             let bx = world_x + local_x;
             let bz = world_z + local_z;
 
-            let mut by = min_y;
-            while by < max_y {
+            let mut by = by_start;
+            while by < by_end {
                 let mut state = snapshot.get_block_state(bx, by, bz);
                 let mut kind = classify_block(state);
                 // Checks for non air block in the cube region to represent the area if the
                 // picked block is air
                 if lod > 0 && matches!(kind, BlockKind::Air) {
-                    let end_y = (by + step).min(max_y);
+                    let end_y = (by + step).min(by_end);
                     for try_y in (by + 1)..end_y {
                         let s = snapshot.get_block_state(bx, try_y, bz);
                         let k = classify_block(s);
@@ -831,10 +1158,16 @@ fn mesh_chunk_snapshot(
 
                 let block_pos = [bx as f32, by as f32, bz as f32];
 
+                // Route this block's geometry to its 16-tall section. Clamped so
+                // a non-16-aligned world height can't index past the last section.
+                let s =
+                    (((by - min_y) / 16) as usize).min((section_count as usize).saturating_sub(1));
+                let sec = &mut sections[s];
+
                 if lod > 0 {
                     emit_lod_cube(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         state,
                         snapshot,
@@ -847,8 +1180,8 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let BlockKind::Water | BlockKind::Lava = kind {
                     emit_fluid(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         state,
                         snapshot,
@@ -860,8 +1193,8 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(baked) = registry.get_baked_model(state) {
                     emit_baked_model(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         baked,
                         snapshot,
@@ -873,8 +1206,8 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(quads) = registry.get_multipart_quads(state) {
                     emit_multipart(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         &quads,
                         snapshot,
@@ -886,8 +1219,8 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         textures,
                         snapshot,
@@ -904,8 +1237,8 @@ fn mesh_chunk_snapshot(
                         tracing::warn!("Missing model: {id}");
                     }
                     emit_missing_cube(
-                        &mut vertices,
-                        &mut indices,
+                        &mut sec.vertices,
+                        &mut sec.indices,
                         block_pos,
                         snapshot,
                         registry,
@@ -921,10 +1254,18 @@ fn mesh_chunk_snapshot(
         local_z += step;
     }
 
+    // Keep only non-empty sections (untouched out-of-range ones stay empty);
+    // empty indices within `range` are freed by the per-section upload.
+    sections.retain(|s| !s.vertices.is_empty() && !s.indices.is_empty());
+
     ChunkMeshData {
         pos,
-        vertices,
-        indices,
+        sections,
+        replaced: range,
+        content_gen: 0,
+        upload_epoch: 0,
+        visibility,
+        timing: None,
     }
 }
 

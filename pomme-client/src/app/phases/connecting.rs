@@ -35,6 +35,8 @@ pub fn update_connecting(
     }
 
     if matches!(connect_phase, ConnectionPhase::Loading) {
+        game.mesh_dispatcher
+            .set_camera_position(*game.player.position);
         for mesh in game.mesh_dispatcher.drain_results() {
             gfx.renderer.upload_chunk_mesh(&mesh);
         }

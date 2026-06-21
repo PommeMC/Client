@@ -5119,7 +5119,6 @@ dependencies = [
  "pomme-gpu-allocator",
  "pyronyx",
  "raw-window-handle",
- "rayon",
  "reqwest",
  "rodio",
  "scopeguard",

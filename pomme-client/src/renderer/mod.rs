@@ -789,6 +789,18 @@ impl Renderer {
         *self.camera.position + self.camera.third_person_offset().as_dvec3()
     }
 
+    /// Six normalized frustum planes (camera-relative, same convention as the
+    /// GPU cull), for CPU-side visibility classification of
+    /// mesh-scheduling.
+    pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
+        self.camera.frustum_planes()
+    }
+
+    /// Frustum planes widened by `extra_radians` of FOV, for the tier-1 margin.
+    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
+        self.camera.frustum_planes_dilated(extra_radians)
+    }
+
     pub fn cycle_camera_mode(&mut self) {
         self.camera.mode = self.camera.mode.cycle();
     }
@@ -809,6 +821,19 @@ impl Renderer {
         self.chunk_buffers.chunk_count()
     }
 
+    /// Sections actually drawn after frustum culling (lags a few frames). The
+    /// graph's occluded sections are omitted before the cull, so this also
+    /// drops when occlusion hides geometry — useful for the F3 overlay.
+    pub fn sections_drawn(&self) -> u32 {
+        self.chunk_buffers.sections_drawn()
+    }
+
+    /// Push the CPU visibility graph's per-column visible-section masks to the
+    /// chunk buffer store, which omits occluded sections from the GPU cull.
+    pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
+        self.chunk_buffers.set_chunk_visibility(vis);
+    }
+
     pub fn wait_for_all_frames(&self) {
         let _ = self
             .ctx
@@ -816,8 +841,15 @@ impl Renderer {
             .wait_for_fences(&self.ctx.in_flight_fences, true, u64::MAX);
     }
 
-    pub fn upload_chunk_mesh(&mut self, mesh: &ChunkMeshData) {
-        self.chunk_buffers.upload(self.ctx.graphics_queue, mesh);
+    /// Returns the section indices dropped due to pool exhaustion (need
+    /// re-mesh); empty on success.
+    pub fn upload_chunk_mesh(&mut self, mesh: &ChunkMeshData) -> Vec<i32> {
+        self.chunk_buffers.upload(
+            &self.ctx.device,
+            &self.ctx.allocator,
+            self.ctx.graphics_queue,
+            mesh,
+        )
     }
 
     pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {
@@ -890,11 +922,14 @@ impl Renderer {
                 has_3d_model,
             }
         });
-        let fog_col = sky.fog_color();
+        // Clear to the sky color: the strip between the sky disc's edge and the
+        // terrain shows the clear color, so it must match the sky/terrain or it
+        // reads as a horizon band (visible at night).
+        let sky_col = sky.sky_color();
         self.render_frame(
             window,
             hide_cursor,
-            [fog_col[0], fog_col[1], fog_col[2], 1.0],
+            [sky_col[0], sky_col[1], sky_col[2], 1.0],
             RenderMode::World {
                 overlay,
                 swing_progress,
@@ -1107,6 +1142,9 @@ impl Renderer {
         self.ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
         let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
 
+        // Fence signalled: reclaim chunk slices the GPU is now provably done with.
+        self.chunk_buffers.begin_frame();
+
         let t_acquire = std::time::Instant::now();
         let image = match self.ctx.device.acquire_next_image(
             self.swapchain.handle,
@@ -1134,8 +1172,7 @@ impl Renderer {
             ..
         } = mode
         {
-            let fog = sky.fog_color();
-            let uniform = CameraUniform::new(&self.camera, fog, render_distance);
+            let uniform = CameraUniform::new(&self.camera, sky.sky_color(), render_distance);
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
@@ -1159,9 +1196,27 @@ impl Renderer {
         };
         cmd.begin(&begin_info)?;
 
+        let extent = self.swapchain.extent;
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: extent.width as f32,
+            height: extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent,
+        };
+
         if matches!(&mode, RenderMode::World { .. }) {
             let frustum = self.camera.frustum_planes();
-            let cam_pos = self.camera.position.as_vec3().into();
+            // The eye (including the third-person offset) is the origin the chunk
+            // vertex shader renders relative to, so the cull must use it too.
+            let eye = self.camera.position.as_vec3() + self.camera.third_person_offset();
+            let cam_pos: [f32; 3] = eye.into();
+
             self.chunk_buffers
                 .dispatch_cull(cmd, frame, &frustum, cam_pos);
         }
@@ -1298,20 +1353,7 @@ impl Renderer {
 
         cmd.begin_render_pass(&render_pass_info, vk::SubpassContents::Inline);
 
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: self.swapchain.extent.width as f32,
-            height: self.swapchain.extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
         cmd.set_viewport(0, &[viewport]);
-
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: self.swapchain.extent,
-        };
         cmd.set_scissor(0, &[scissor]);
 
         let sw = self.swapchain.extent.width as f32;
@@ -1332,7 +1374,7 @@ impl Renderer {
                 block_entities,
                 weather,
                 cloud_mode,
-                render_distance: _,
+                render_distance,
                 player_preview,
             } => {
                 self.sky_pipeline
@@ -1354,7 +1396,20 @@ impl Renderer {
                     );
                 }
 
-                self.entity_renderer.draw(cmd, frame, entities);
+                let ent_frustum = self.camera.frustum_planes();
+                let ent_eye: [f32; 3] =
+                    (self.camera.position.as_vec3() + self.camera.third_person_offset()).into();
+                // Entities aren't sent beyond the server's tracking range; a
+                // generous render-distance cap just trims anything stray.
+                let ent_cull_dist = (*render_distance * 16) as f32 + 16.0;
+                self.entity_renderer.draw(
+                    cmd,
+                    frame,
+                    entities,
+                    &ent_frustum,
+                    ent_eye,
+                    ent_cull_dist,
+                );
 
                 self.block_entity_pipeline.draw(cmd, frame, block_entities);
 

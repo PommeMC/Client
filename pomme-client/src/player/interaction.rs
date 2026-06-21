@@ -139,7 +139,7 @@ impl InteractionState {
         player_pos: DVec3,
         chunks: &ChunkStore,
         audio: &AudioEngine,
-        dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
+        dirty_chunks: &mut Vec<BlockPos>,
     ) {
         self.retain_known_server_state(pos, state, player_pos);
         chunks.set_block_state(pos.x, pos.y, pos.z, BlockState::AIR);
@@ -157,7 +157,7 @@ impl InteractionState {
         seq: u32,
         chunks: &ChunkStore,
         player_pos: DVec3,
-        dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
+        dirty_chunks: &mut Vec<BlockPos>,
     ) -> Option<DVec3> {
         let snap_allowed = self.last_teleport_seq < seq;
         let player = Aabb::from_center(player_pos, PLAYER_HALF_WIDTH, PLAYER_HEIGHT / 2.0);
@@ -278,7 +278,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
-    ) -> Vec<azalea_core::position::ChunkPos> {
+    ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
 
         // Vanilla `Minecraft.tick` order: attack/use input (which triggers the
@@ -344,7 +344,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
-        dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
+        dirty_chunks: &mut Vec<BlockPos>,
     ) {
         if self.miss_time > 0 {
             return;
@@ -395,7 +395,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
-        dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
+        dirty_chunks: &mut Vec<BlockPos>,
     ) {
         if self.miss_time > 0 {
             return;
@@ -464,7 +464,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
-        dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
+        dirty_chunks: &mut Vec<BlockPos>,
     ) {
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
 
@@ -545,7 +545,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
-        dirty_chunks: &mut Vec<azalea_core::position::ChunkPos>,
+        dirty_chunks: &mut Vec<BlockPos>,
     ) {
         if self.destroy_delay > 0 {
             self.destroy_delay -= 1;
@@ -688,28 +688,12 @@ fn play_block_sound(audio: &AudioEngine, event: &str, pos: BlockPos, volume: f32
     );
 }
 
-fn mark_dirty(pos: &BlockPos, dirty: &mut Vec<azalea_core::position::ChunkPos>) {
-    let chunk_pos =
-        azalea_core::position::ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
-    if !dirty.contains(&chunk_pos) {
-        dirty.push(chunk_pos);
-    }
-
-    let local_x = pos.x.rem_euclid(16);
-    let local_z = pos.z.rem_euclid(16);
-    let neighbors = [
-        (local_x == 0, -1, 0),
-        (local_x == 15, 1, 0),
-        (local_z == 0, 0, -1),
-        (local_z == 15, 0, 1),
-    ];
-    for (on_edge, dx, dz) in neighbors {
-        if on_edge {
-            let np = azalea_core::position::ChunkPos::new(chunk_pos.x + dx, chunk_pos.z + dz);
-            if !dirty.contains(&np) {
-                dirty.push(np);
-            }
-        }
+/// Record an edited block. The caller (`core::dirty_sections_for_block`)
+/// expands it into the affected 16³ sections, including neighbour
+/// sections/columns when the block is on a boundary.
+fn mark_dirty(pos: &BlockPos, dirty: &mut Vec<BlockPos>) {
+    if !dirty.contains(pos) {
+        dirty.push(*pos);
     }
 }
 

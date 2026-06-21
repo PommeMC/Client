@@ -54,6 +54,7 @@ fn main() {
         ("blur.frag", shaderc::ShaderKind::Fragment),
         ("entity.vert", shaderc::ShaderKind::Vertex),
         ("entity.frag", shaderc::ShaderKind::Fragment),
+        ("block_entity.vert", shaderc::ShaderKind::Vertex),
         ("chunk_border.vert", shaderc::ShaderKind::Vertex),
         ("chunk_border.frag", shaderc::ShaderKind::Fragment),
         ("item_entity.vert", shaderc::ShaderKind::Vertex),

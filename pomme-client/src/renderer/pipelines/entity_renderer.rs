@@ -16,6 +16,21 @@ use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
 
 pub const MAX_OVERLAYS: usize = 2;
 
+/// Per-frame instance buffer capacity, in (entity, part) draws. Far above any
+/// realistic on-screen entity count; excess is dropped with a warning.
+const MAX_INSTANCES: usize = 16384;
+
+/// Per-instance data for one (entity, part) draw, fed as instance-rate vertex
+/// attributes (binding 1) — the four model-matrix columns, tint, overlay, uv.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct EntityInstance {
+    model: [[f32; 4]; 4],
+    tint: [f32; 4],
+    overlay_color: [f32; 4],
+    uv_params: [f32; 4],
+}
+
 pub struct EntityRenderInfo {
     pub position: Position,
     pub head_x_rot_deg: f32,
@@ -37,6 +52,9 @@ pub struct EntityRenderInfo {
     pub age_in_ticks: f32,
     /// Arm-swing progress 0..1; drives the zombie attack swing.
     pub attack_time: f32,
+    /// Skip frustum/distance culling (the 3rd-person self entity, which sits at
+    /// the camera and must never blink out).
+    pub skip_cull: bool,
 }
 
 /// How an overlay layer is blended. Base/baby variants are always `Opaque`.
@@ -155,6 +173,10 @@ pub struct EntityRenderer {
     camera_sets: Vec<vk::DescriptorSet>,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Allocation>,
+    /// Per-instance vertex buffer (bound at binding 1), one per frame in
+    /// flight.
+    instance_buffers: Vec<vk::Buffer>,
+    instance_allocations: Vec<Allocation>,
     texture_sampler: vk::Sampler,
     /// REPEAT-wrap sampler for the scrolling swirl overlay.
     texture_sampler_repeat: vk::Sampler,
@@ -373,20 +395,10 @@ impl EntityRenderer {
             vk::DescriptorType::CombinedImageSampler,
             vk::ShaderStageFlags::Fragment,
         );
-
-        let push_constant_range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::Vertex,
-            offset: 0,
-            size: 112,
-        };
-
         let layouts = [camera_layout, texture_layout];
-        let push_range = push_constant_range;
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
-            push_constant_range_count: 1,
-            push_constant_ranges: &push_range,
             ..Default::default()
         };
         let pipeline_layout = device
@@ -434,47 +446,17 @@ impl EntityRenderer {
             .create_descriptor_pool(&pool_info, None)
             .expect("failed to create entity descriptor pool");
 
-        let camera_layouts_vec: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| camera_layout).collect();
-        let camera_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool,
-            descriptor_set_count: camera_layouts_vec.len() as u32,
-            set_layouts: camera_layouts_vec.as_ptr(),
-            ..Default::default()
-        };
-        let mut camera_sets = vec![vk::DescriptorSet::null(); camera_layouts_vec.len()];
-        device
-            .allocate_descriptor_sets(&camera_alloc_info, &mut camera_sets)
-            .expect("failed to allocate entity camera descriptor sets");
-
-        let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-
-        for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
-                device,
-                allocator,
-                size_of::<CameraUniform>() as u64,
-                "entity_camera_uniform",
-            );
-
-            let buffer_info = vk::DescriptorBufferInfo {
-                buffer: buf,
-                offset: 0,
-                range: size_of::<CameraUniform>() as u64,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &buffer_info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-
-            camera_buffers.push(buf);
-            camera_allocations.push(alloc);
-        }
+        let (camera_sets, camera_buffers, camera_allocations) =
+            create_camera_sets(device, allocator, descriptor_pool, camera_layout);
+        // Per-instance data is a vertex buffer (bound at binding 1), not an SSBO:
+        // MoltenVK can't translate a storage-buffer read in a vertex shader.
+        let (instance_buffers, instance_allocations) = create_per_frame_host_buffers(
+            device,
+            allocator,
+            (MAX_INSTANCES * size_of::<EntityInstance>()) as u64,
+            vk::BufferUsageFlags::VertexBuffer,
+            "entity_instances",
+        );
 
         let texture_sampler = unsafe { util::create_nearest_sampler(device) };
         let texture_sampler_repeat = unsafe { util::create_nearest_repeat_sampler(device) };
@@ -538,6 +520,8 @@ impl EntityRenderer {
             camera_sets,
             camera_buffers,
             camera_allocations,
+            instance_buffers,
+            instance_allocations,
             texture_sampler,
             texture_sampler_repeat,
             mobs,
@@ -609,173 +593,134 @@ impl EntityRenderer {
             * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians())
     }
 
-    pub fn draw(&self, cmd: vk::CommandBuffer, frame: usize, entities: &[EntityRenderInfo]) {
+    pub fn draw(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        entities: &[EntityRenderInfo],
+        frustum: &[[f32; 4]; 6],
+        eye: [f32; 3],
+        cull_dist: f32,
+    ) {
         if entities.is_empty() {
             return;
         }
 
-        // Pass 1: opaque base models + opaque overlays (sheep wool).
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
-        let mut last_variant: *const MobVariant = std::ptr::null();
-        for info in entities {
-            let Some(entry) = self.mobs.get(&info.entity_kind) else {
-                continue;
-            };
-            let variant = entry.base_variant(info.is_baby, info.variant_index);
-            let entity_mat = Self::entity_matrix(info);
-            let anim = self.compute_anim(entry.anim, &variant.model, info);
-            let overlay_color = if info.has_red_overlay {
-                HURT_OVERLAY
-            } else {
-                NO_OVERLAY
-            };
-
-            self.draw_variant(
-                cmd,
-                frame,
-                variant,
-                entity_mat,
-                &anim,
-                WHITE_TINT,
-                overlay_color,
-                [0.0, 0.0],
-                &mut last_variant,
-            );
-
-            for (slot, overlay) in entry.overlays(info.is_baby).iter().enumerate() {
-                if overlay.overlay_kind != OverlayKind::Opaque {
-                    continue;
-                }
-                let Some(tint) = info.overlay_tints[slot] else {
+        // Build the per-frame instance buffer + draw records on the CPU
+        // (immutable reads of self.mobs), grouped by variant so each (variant,
+        // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
+        // and are dropped at the end of this block, before the buffer write below.
+        let cull_dist_sq = cull_dist * cull_dist;
+        let mut instances: Vec<EntityInstance> = Vec::new();
+        let (opaque, eyes, swirl) = {
+            let mut vis: Vec<VisEntity> = Vec::new();
+            for info in entities {
+                let Some(entry) = self.mobs.get(&info.entity_kind) else {
                     continue;
                 };
-                self.draw_variant(
-                    cmd,
-                    frame,
-                    overlay,
+                if !info.skip_cull && !entity_visible(info, frustum, eye, cull_dist_sq) {
+                    continue;
+                }
+                let variant = entry.base_variant(info.is_baby, info.variant_index);
+                let entity_mat = Self::entity_matrix(info);
+                let anim = self.compute_anim(entry.anim, &variant.model, info);
+                vis.push(VisEntity {
+                    info,
+                    entry,
                     entity_mat,
-                    &anim,
-                    tint,
-                    overlay_color,
-                    [0.0, 0.0],
-                    &mut last_variant,
-                );
+                    anim,
+                });
             }
-        }
+            if vis.is_empty() {
+                return;
+            }
 
-        // Pass 2: full-bright, depth-write-off emissive overlays.
-        self.draw_emissive_pass(cmd, frame, entities, OverlayKind::EyesTranslucent);
-        self.draw_emissive_pass(cmd, frame, entities, OverlayKind::SwirlAdditive);
-    }
+            // Opaque pass: base model + opaque overlays (sheep wool).
+            let mut opaque = VariantGroups::default();
+            for (vi, v) in vis.iter().enumerate() {
+                let overlay_color = if v.info.has_red_overlay {
+                    HURT_OVERLAY
+                } else {
+                    NO_OVERLAY
+                };
+                let base = v.entry.base_variant(v.info.is_baby, v.info.variant_index);
+                opaque.add(base, (vi, WHITE_TINT, overlay_color, [0.0, 0.0]));
+                for (slot, overlay) in v.entry.overlays(v.info.is_baby).iter().enumerate() {
+                    if overlay.overlay_kind != OverlayKind::Opaque {
+                        continue;
+                    }
+                    if let Some(tint) = v.info.overlay_tints[slot] {
+                        opaque.add(overlay, (vi, tint, overlay_color, [0.0, 0.0]));
+                    }
+                }
+            }
 
-    fn draw_emissive_pass(
-        &self,
-        cmd: vk::CommandBuffer,
-        frame: usize,
-        entities: &[EntityRenderInfo],
-        kind: OverlayKind,
-    ) {
-        let pipeline = match kind {
-            OverlayKind::EyesTranslucent => self.eyes_pipeline,
-            OverlayKind::SwirlAdditive => self.swirl_pipeline,
-            OverlayKind::Opaque => return,
+            let eyes = collect_emissive(&vis, OverlayKind::EyesTranslucent);
+            let swirl = collect_emissive(&vis, OverlayKind::SwirlAdditive);
+
+            (
+                opaque.emit(&vis, &mut instances),
+                eyes.emit(&vis, &mut instances),
+                swirl.emit(&vis, &mut instances),
+            )
         };
-        let mut bound = false;
-        let mut last_variant: *const MobVariant = std::ptr::null();
-        for info in entities {
-            let Some(entry) = self.mobs.get(&info.entity_kind) else {
-                continue;
-            };
-            let overlays = entry.overlays(info.is_baby);
-            let has_visible = overlays
-                .iter()
-                .enumerate()
-                .any(|(slot, ov)| ov.overlay_kind == kind && info.overlay_tints[slot].is_some());
-            if !has_visible {
-                continue;
-            }
-            if !bound {
-                cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
-                bound = true;
-            }
-            let variant = entry.base_variant(info.is_baby, info.variant_index);
-            let entity_mat = Self::entity_matrix(info);
-            let anim = self.compute_anim(entry.anim, &variant.model, info);
-            // Energy swirl scrolls its UVs over time (vanilla `EnergySwirlLayer`).
-            let uv_offset = if kind == OverlayKind::SwirlAdditive {
-                let o = (info.age_in_ticks * 0.01).rem_euclid(1.0);
-                [o, o]
-            } else {
-                [0.0, 0.0]
-            };
-            for (slot, overlay) in overlays.iter().enumerate() {
-                if overlay.overlay_kind != kind {
-                    continue;
-                }
-                let Some(tint) = info.overlay_tints[slot] else {
-                    continue;
-                };
-                self.draw_variant(
-                    cmd,
-                    frame,
-                    overlay,
-                    entity_mat,
-                    &anim,
-                    tint,
-                    NO_OVERLAY,
-                    uv_offset,
-                    &mut last_variant,
-                );
-            }
+
+        // Write the instance buffer (clamped to capacity; the cap is far above any
+        // realistic entity count, so overflow only drops the tail with a warning).
+        let count = instances.len().min(MAX_INSTANCES);
+        if instances.len() > MAX_INSTANCES {
+            tracing::warn!(
+                "Entity instances ({}) exceed cap {}, dropping excess",
+                instances.len(),
+                MAX_INSTANCES
+            );
         }
+        let bytes = bytemuck::cast_slice(&instances[..count]);
+        self.instance_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
+            .copy_from_slice(bytes);
+
+        self.record_pass(cmd, frame, self.pipeline, &opaque, count);
+        self.record_pass(cmd, frame, self.eyes_pipeline, &eyes, count);
+        self.record_pass(cmd, frame, self.swirl_pipeline, &swirl, count);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn draw_variant(
+    fn record_pass(
         &self,
         cmd: vk::CommandBuffer,
         frame: usize,
-        variant: &MobVariant,
-        entity_mat: glam::Mat4,
-        anim: &entity_model::PartAnim,
-        tint: [f32; 4],
-        overlay_color: [f32; 4],
-        uv_offset: [f32; 2],
-        last_variant: &mut *const MobVariant,
+        pipeline: vk::Pipeline,
+        records: &[DrawRecord],
+        count: usize,
     ) {
-        let ptr: *const MobVariant = variant;
-        if *last_variant != ptr {
-            cmd.bind_descriptor_sets(
-                vk::PipelineBindPoint::Graphics,
-                self.pipeline_layout,
-                0,
-                &[self.camera_sets[frame], variant.texture_set],
-                &[],
-            );
-            cmd.bind_vertex_buffers(0, &[variant.vertex_buffer], &[0]);
-            *last_variant = ptr;
+        if records.is_empty() {
+            return;
         }
-
-        let uv_params = [uv_offset[0], uv_offset[1], 0.0, 0.0];
-        let part_transforms = variant.model.compute_part_transforms(anim);
-        for (i, (start, count)) in variant.model.part_ranges.iter().enumerate() {
-            if *count == 0 {
-                continue;
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
+        // Per-instance data (binding 1) is the same buffer for the whole pass;
+        // gl_InstanceIndex (incl. firstInstance) indexes into it.
+        cmd.bind_vertex_buffers(1, &[self.instance_buffers[frame]], &[0]);
+        let mut last_vb = vk::Buffer::null();
+        for r in records {
+            if r.first_instance as usize + r.instance_count as usize > count {
+                continue; // dropped by the capacity clamp above
             }
-            let part_mat = entity_mat * part_transforms[i];
-            let mat_array = part_mat.to_cols_array();
-            let mut bytes = [0u8; 112];
-            bytes[..64].copy_from_slice(bytemuck::cast_slice(&mat_array));
-            bytes[64..80].copy_from_slice(bytemuck::cast_slice(&tint));
-            bytes[80..96].copy_from_slice(bytemuck::cast_slice(&overlay_color));
-            bytes[96..112].copy_from_slice(bytemuck::cast_slice(&uv_params));
-            cmd.push_constants(
-                self.pipeline_layout,
-                vk::ShaderStageFlags::Vertex,
-                0,
-                &bytes,
+            if r.vertex_buffer != last_vb {
+                cmd.bind_descriptor_sets(
+                    vk::PipelineBindPoint::Graphics,
+                    self.pipeline_layout,
+                    0,
+                    &[self.camera_sets[frame], r.texture_set],
+                    &[],
+                );
+                cmd.bind_vertex_buffers(0, &[r.vertex_buffer], &[0]);
+                last_vb = r.vertex_buffer;
+            }
+            cmd.draw(
+                r.part_count,
+                r.instance_count,
+                r.part_start,
+                r.first_instance,
             );
-            cmd.draw(*count, 1, *start, 0);
         }
     }
 
@@ -795,6 +740,13 @@ impl EntityRenderer {
                 .free(std::mem::replace(&mut self.camera_allocations[i], unsafe {
                     std::mem::zeroed()
                 }))
+                .ok();
+            device.destroy_buffer(self.instance_buffers[i], None);
+            alloc
+                .free(std::mem::replace(
+                    &mut self.instance_allocations[i],
+                    unsafe { std::mem::zeroed() },
+                ))
                 .ok();
         }
 
@@ -836,6 +788,219 @@ impl EntityRenderer {
         device.destroy_descriptor_set_layout(self.camera_layout, None);
         device.destroy_descriptor_set_layout(self.texture_layout, None);
     }
+}
+
+/// One host-visible buffer per frame in flight.
+fn create_per_frame_host_buffers(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    size: u64,
+    usage: vk::BufferUsageFlags,
+    name: &str,
+) -> (Vec<vk::Buffer>, Vec<Allocation>) {
+    let mut buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    let mut allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    for _ in 0..MAX_FRAMES_IN_FLIGHT {
+        let (buf, alloc) = util::create_host_buffer(device, allocator, size, usage, name);
+        buffers.push(buf);
+        allocations.push(alloc);
+    }
+    (buffers, allocations)
+}
+
+/// Per-frame camera UBOs, each bound to its own descriptor set at binding 0.
+fn create_camera_sets(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    pool: vk::DescriptorPool,
+    layout: vk::DescriptorSetLayout,
+) -> (Vec<vk::DescriptorSet>, Vec<vk::Buffer>, Vec<Allocation>) {
+    let layouts: Vec<_> = (0..MAX_FRAMES_IN_FLIGHT).map(|_| layout).collect();
+    let alloc_info = vk::DescriptorSetAllocateInfo {
+        descriptor_pool: pool,
+        descriptor_set_count: layouts.len() as u32,
+        set_layouts: layouts.as_ptr(),
+        ..Default::default()
+    };
+    let mut sets = vec![vk::DescriptorSet::null(); layouts.len()];
+    device
+        .allocate_descriptor_sets(&alloc_info, &mut sets)
+        .expect("failed to allocate entity camera descriptor sets");
+
+    let size = size_of::<CameraUniform>() as u64;
+    let (buffers, allocations) = create_per_frame_host_buffers(
+        device,
+        allocator,
+        size,
+        vk::BufferUsageFlags::UniformBuffer,
+        "entity_camera_uniform",
+    );
+    for (&set, &buffer) in sets.iter().zip(&buffers) {
+        let buffer_info = vk::DescriptorBufferInfo {
+            buffer,
+            offset: 0,
+            range: size,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: set,
+            dst_binding: 0,
+            descriptor_type: vk::DescriptorType::UniformBuffer,
+            descriptor_count: 1,
+            buffer_info: &buffer_info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
+    }
+    (sets, buffers, allocations)
+}
+
+/// A culled, drawable entity with its world transform and animation
+/// precomputed.
+struct VisEntity<'a> {
+    info: &'a EntityRenderInfo,
+    entry: &'a MobEntry,
+    entity_mat: glam::Mat4,
+    anim: entity_model::PartAnim,
+}
+
+/// One instanced (variant, part) draw: a run of `instance_count` instances from
+/// `first_instance` in the per-frame instance buffer.
+struct DrawRecord {
+    texture_set: vk::DescriptorSet,
+    vertex_buffer: vk::Buffer,
+    part_start: u32,
+    part_count: u32,
+    first_instance: u32,
+    instance_count: u32,
+}
+
+/// (visible-entity index, tint, overlay color, uv scroll) for one instance.
+type Member = (usize, [f32; 4], [f32; 4], [f32; 2]);
+
+/// Visible entities grouped by variant (geometry), so each variant's parts emit
+/// one instanced draw covering all its entities.
+#[derive(Default)]
+struct VariantGroups<'a> {
+    groups: Vec<(&'a MobVariant, Vec<Member>)>,
+    index: HashMap<usize, usize>,
+}
+
+impl<'a> VariantGroups<'a> {
+    fn add(&mut self, variant: &'a MobVariant, member: Member) {
+        let key = variant as *const MobVariant as usize;
+        let gi = match self.index.get(&key) {
+            Some(&gi) => gi,
+            None => {
+                let gi = self.groups.len();
+                self.groups.push((variant, Vec::new()));
+                self.index.insert(key, gi);
+                gi
+            }
+        };
+        self.groups[gi].1.push(member);
+    }
+
+    fn emit(&self, vis: &[VisEntity], instances: &mut Vec<EntityInstance>) -> Vec<DrawRecord> {
+        let mut records = Vec::new();
+        for (variant, members) in &self.groups {
+            // Part transforms differ per entity (animation), so compute per member.
+            let pts: Vec<Vec<glam::Mat4>> = members
+                .iter()
+                .map(|(vi, ..)| variant.model.compute_part_transforms(&vis[*vi].anim))
+                .collect();
+            for (p, (start, part_count)) in variant.model.part_ranges.iter().enumerate() {
+                if *part_count == 0 {
+                    continue;
+                }
+                let first_instance = instances.len() as u32;
+                for (k, (vi, tint, overlay, uv)) in members.iter().enumerate() {
+                    let model = vis[*vi].entity_mat * pts[k][p];
+                    instances.push(EntityInstance {
+                        model: model.to_cols_array_2d(),
+                        tint: *tint,
+                        overlay_color: *overlay,
+                        uv_params: [uv[0], uv[1], 0.0, 0.0],
+                    });
+                }
+                records.push(DrawRecord {
+                    texture_set: variant.texture_set,
+                    vertex_buffer: variant.vertex_buffer,
+                    part_start: *start,
+                    part_count: *part_count,
+                    first_instance,
+                    instance_count: members.len() as u32,
+                });
+            }
+        }
+        records
+    }
+}
+
+/// Group the emissive overlays of one kind (eyes / swirl) by variant.
+fn collect_emissive<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGroups<'a> {
+    let mut groups = VariantGroups::default();
+    for (vi, v) in vis.iter().enumerate() {
+        // Energy swirl scrolls its UVs over time (vanilla `EnergySwirlLayer`).
+        let uv = if kind == OverlayKind::SwirlAdditive {
+            let o = (v.info.age_in_ticks * 0.01).rem_euclid(1.0);
+            [o, o]
+        } else {
+            [0.0, 0.0]
+        };
+        for (slot, overlay) in v.entry.overlays(v.info.is_baby).iter().enumerate() {
+            if overlay.overlay_kind != kind {
+                continue;
+            }
+            if let Some(tint) = v.info.overlay_tints[slot] {
+                groups.add(overlay, (vi, tint, NO_OVERLAY, uv));
+            }
+        }
+    }
+    groups
+}
+
+const ANIM_MARGIN: f32 = 0.5;
+
+/// Vanilla (width, height) hitbox per supported mob, scaled for babies; used to
+/// build the cull bounding sphere.
+fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
+    let (w, h) = match kind {
+        EntityKind::Pig => (0.9, 0.9),
+        EntityKind::Cow => (0.9, 1.4),
+        EntityKind::Sheep => (0.9, 1.3),
+        EntityKind::Zombie => (0.6, 1.95),
+        EntityKind::Skeleton => (0.6, 1.99),
+        EntityKind::Creeper => (0.6, 1.7),
+        EntityKind::Spider => (1.4, 0.9),
+        EntityKind::Player => (0.6, 1.8),
+        _ => (1.0, 1.0),
+    };
+    let s = if is_baby { 0.5 } else { 1.0 };
+    (w * s, h * s)
+}
+
+/// Bounding-sphere frustum + distance cull. `eye` is the shader's `camera_pos`,
+/// since the frustum planes operate on camera-relative coords (like chunk
+/// cull).
+fn entity_visible(
+    info: &EntityRenderInfo,
+    frustum: &[[f32; 4]; 6],
+    eye: [f32; 3],
+    cull_dist_sq: f32,
+) -> bool {
+    let (w, h) = entity_bounds(info.entity_kind, info.is_baby);
+    let radius = 0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN;
+    let p = info.position.as_vec3();
+    let q = [p.x - eye[0], p.y + h * 0.5 - eye[1], p.z - eye[2]];
+    if q[0] * q[0] + q[1] * q[1] + q[2] * q[2] > cull_dist_sq {
+        return false;
+    }
+    for pl in frustum {
+        if pl[0] * q[0] + pl[1] * q[1] + pl[2] * q[2] + pl[3] < -radius {
+            return false;
+        }
+    }
+    true
 }
 
 fn assert_part_order_matches(base: &[MobVariant], overlays: &[MobVariant]) {
@@ -1010,10 +1175,36 @@ fn create_pipelines(
     layout: vk::PipelineLayout,
 ) -> [vk::Pipeline; 3] {
     [
-        create_pipeline(device, render_pass, layout, BlendMode::Opaque),
-        create_pipeline(device, render_pass, layout, BlendMode::Translucent),
-        create_pipeline(device, render_pass, layout, BlendMode::Additive),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::Opaque,
+            ModelInput::Instanced,
+        ),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::Translucent,
+            ModelInput::Instanced,
+        ),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::Additive,
+            ModelInput::Instanced,
+        ),
     ]
+}
+
+/// Source of a draw's model matrix: mobs are GPU-instanced (binding 1, a perf
+/// divergence from vanilla); block entities keep vanilla's per-draw
+/// push-constant transform (binding 0 only).
+pub(super) enum ModelInput {
+    Instanced,
+    PushConstant,
 }
 
 pub(super) fn create_pipeline(
@@ -1021,8 +1212,12 @@ pub(super) fn create_pipeline(
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
     blend: BlendMode,
+    model_input: ModelInput,
 ) -> vk::Pipeline {
-    let vert_spv = shader::include_spirv!("entity.vert.spv");
+    let vert_spv: &[u8] = match model_input {
+        ModelInput::Instanced => shader::include_spirv!("entity.vert.spv"),
+        ModelInput::PushConstant => shader::include_spirv!("block_entity.vert.spv"),
+    };
     let frag_spv = shader::include_spirv!("entity.frag.spv");
 
     let vert_module = shader::create_shader_module(device, vert_spv);
@@ -1043,14 +1238,32 @@ pub(super) fn create_pipeline(
         },
     ];
 
-    let binding_descs = ChunkVertex::binding_description();
-    let attr_descs = ChunkVertex::attribute_descriptions();
+    // Binding 0: per-vertex mesh data. Instanced pipelines add binding 1 with
+    // per-instance data (model columns + tint + overlay + uv), one EntityInstance
+    // per (entity, part); push-constant ones bind only the mesh.
+    let mut bindings = vec![ChunkVertex::binding_description()];
+    let mut attrs = ChunkVertex::attribute_descriptions().to_vec();
+    if let ModelInput::Instanced = model_input {
+        bindings.push(vk::VertexInputBindingDescription {
+            binding: 1,
+            stride: size_of::<EntityInstance>() as u32,
+            input_rate: vk::VertexInputRate::Instance,
+        });
+        for i in 0..7u32 {
+            attrs.push(vk::VertexInputAttributeDescription {
+                location: 3 + i,
+                binding: 1,
+                format: vk::Format::R32G32B32A32Sfloat,
+                offset: i * 16,
+            });
+        }
+    }
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
-        vertex_binding_description_count: 1,
-        vertex_binding_descriptions: &binding_descs,
-        vertex_attribute_description_count: attr_descs.len() as u32,
-        vertex_attribute_descriptions: attr_descs.as_ptr(),
+        vertex_binding_description_count: bindings.len() as u32,
+        vertex_binding_descriptions: bindings.as_ptr(),
+        vertex_attribute_description_count: attrs.len() as u32,
+        vertex_attribute_descriptions: attrs.as_ptr(),
         ..Default::default()
     };
 

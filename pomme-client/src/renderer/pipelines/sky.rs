@@ -79,13 +79,6 @@ const SUNRISE_COLOR_KEYFRAMES: &[(f32, i32)] = &[
 
 const BASE_SKY_COLOR: [f32; 3] = [0.478, 0.659, 1.0];
 
-const FOG_COLOR_KEYFRAMES: &[(f32, [f32; 3])] = &[
-    (133.0, [1.0, 1.0, 1.0]),
-    (11867.0, [1.0, 1.0, 1.0]),
-    (13670.0, [0.06, 0.06, 0.09]),
-    (22330.0, [0.06, 0.06, 0.09]),
-];
-
 // EasingType.symmetricCubicBezier(0.362, 0.241)
 const SKY_ANGLE_BEZIER: (f32, f32, f32, f32) = (0.362, 0.241, 0.638, 0.759);
 
@@ -154,15 +147,6 @@ impl SkyState {
             base,
             |c| blend_to_gray(c, 0.6, 0.75),
             |c| blend_to_gray(c, 0.24, 0.94),
-        )
-    }
-
-    pub fn fog_color(&self) -> [f32; 3] {
-        let base = self.day_color(FOG_COLOR_KEYFRAMES);
-        self.apply_weather(
-            base,
-            |c| mul_rgb(c, [0.5, 0.5, 0.6]),
-            |c| mul_rgb(c, [0.25, 0.25, 0.3]),
         )
     }
 
@@ -724,10 +708,6 @@ fn lerp_rgb(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
         a[1] + (b[1] - a[1]) * t,
         a[2] + (b[2] - a[2]) * t,
     ]
-}
-
-fn mul_rgb(rgb: [f32; 3], m: [f32; 3]) -> [f32; 3] {
-    [rgb[0] * m[0], rgb[1] * m[1], rgb[2] * m[2]]
 }
 
 /// Vanilla `ColorModifier.BlendToGray`: greyscale the color, scale it by
