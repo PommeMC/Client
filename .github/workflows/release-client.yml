@@ -3,10 +3,18 @@ name: Release client
 on:
   push:
     tags: ["client-v*"]
+  schedule:
+    - cron: "7 18 * * 0" # Sundays 18:07 UTC (weekly pre-alpha snapshot of master)
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version core, e.g. 0.2.0 (blank = bump patch from latest)"
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
+  MC_VERSION: "26.2"
 
 permissions:
   contents: write
@@ -83,17 +91,35 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get previous client tag
-        id: prev
+      - name: Resolve release tag
+        id: rel
         shell: bash
         run: |
           git fetch --tags --force
-          PREV=$(git tag --list "client-v*" --sort=-v:refname | sed -n '2p')
-          if [ -z "$PREV" ]; then
-            echo "tag=" >> $GITHUB_OUTPUT
+          tags=$(git tag --list 'client-v*')
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${{ github.ref_name }}"
+            prerelease="false"
           else
-            echo "tag=$PREV" >> $GITHUB_OUTPUT
+            core="${{ inputs.version }}"
+            if [ -z "$core" ]; then
+              latest=$(echo "$tags" \
+                | sed -nE 's/^client-v([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+                | sort -V | tail -n1)
+              if [ -z "$latest" ]; then
+                core="0.1.0"
+              else
+                IFS=. read -r ma mi pa <<< "$latest"
+                core="$ma.$mi.$((pa + 1))"
+              fi
+            fi
+            tag="client-v${core}+${MC_VERSION}"
+            prerelease="true"
           fi
+          prev=$(echo "$tags" | grep -vFx "$tag" | sort -V | tail -n1 || true)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "prev=$prev" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v8
         with:
@@ -107,7 +133,8 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref_name }}
-          previous_tag: ${{ steps.prev.outputs.tag || '' }}
+          tag_name: ${{ steps.rel.outputs.tag }}
+          prerelease: ${{ steps.rel.outputs.prerelease }}
+          previous_tag: ${{ steps.rel.outputs.prev }}
           files: dist/*
-          generate_release_notes: ${{ steps.prev.outputs.tag != '' }}
+          generate_release_notes: ${{ steps.rel.outputs.prev != '' }}
