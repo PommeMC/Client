@@ -66,8 +66,26 @@ jobs:
         if: matrix.os != 'windows-latest'
         shell: bash
         run: |
-          mkdir -p dist
-          zip -j "dist/${{ matrix.name }}.zip" "target/${{ matrix.target }}/release/${{ matrix.artifact }}"
+          mkdir -p dist bundle
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" bundle/
+
+          # macOS has no system Vulkan, so ship the loader + MoltenVK + ICD next
+          # to the binary (build.rs gives it an @executable_path rpath).
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            findlib() { find "$VULKAN_SDK" -name "$1" | head -n1; }
+            loader=$(findlib libvulkan.1.dylib)
+            mvk=$(findlib libMoltenVK.dylib)
+            icd=$(findlib MoltenVK_icd.json)
+            if [ -z "$loader" ] || [ -z "$mvk" ] || [ -z "$icd" ]; then
+              echo "::error::Vulkan runtime not found under VULKAN_SDK=$VULKAN_SDK (loader='$loader' mvk='$mvk' icd='$icd')"
+              exit 1
+            fi
+            cp "$loader" "$mvk" bundle/
+            sed -E 's#("library_path"[[:space:]]*:[[:space:]]*)"[^"]*"#\1"./libMoltenVK.dylib"#' \
+              "$icd" > bundle/MoltenVK_icd.json
+          fi
+
+          (cd bundle && zip -j "../dist/${{ matrix.name }}.zip" ./*)
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'

@@ -5,7 +5,7 @@
 //! when no local build is present.
 
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -130,8 +130,11 @@ async fn install(
     }
 
     emit(app, 1, 1, "Installing client...");
+    extract_all(&bytes, &dir)?;
     let binary = storage::client_binary(tag);
-    extract_binary(&bytes, &binary)?;
+    if !binary.exists() {
+        return Err("client binary not found in downloaded archive".to_string());
+    }
 
     #[cfg(unix)]
     {
@@ -145,8 +148,9 @@ async fn install(
     Ok(())
 }
 
-/// Extract the single `pomme-client[.exe]` entry from the downloaded zip.
-fn extract_binary(zip_bytes: &[u8], dest: &PathBuf) -> Result<(), String> {
+/// Extract every file in the zip (flat) into `dir`. Releases bundle the binary
+/// plus, on macOS, the Vulkan loader + MoltenVK + ICD next to it.
+fn extract_all(zip_bytes: &[u8], dir: &Path) -> Result<(), String> {
     let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).map_err(|e| e.to_string())?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
@@ -154,13 +158,13 @@ fn extract_binary(zip_bytes: &[u8], dest: &PathBuf) -> Result<(), String> {
             continue;
         }
         let base = entry.name().rsplit('/').next().unwrap_or_default();
-        if base.starts_with("pomme-client") {
-            let mut out = std::fs::File::create(dest).map_err(|e| e.to_string())?;
-            std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
-            return Ok(());
+        if base.is_empty() {
+            continue;
         }
+        let mut out = std::fs::File::create(dir.join(base)).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
     }
-    Err("client binary not found in downloaded archive".to_string())
+    Ok(())
 }
 
 /// Find the sha256 for `asset_name` in `sha256sum`-format text (`<hash>

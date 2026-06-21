@@ -2,6 +2,12 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
+    // Releases bundle the Vulkan loader (libvulkan.1.dylib) next to the binary,
+    // since macOS has no system Vulkan; this rpath lets it be found at runtime.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
+    }
+
     let shader_dir = Path::new("src/renderer/shaders");
     let out_dir = std::env::var("OUT_DIR").unwrap();
 

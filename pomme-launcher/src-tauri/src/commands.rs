@@ -396,6 +396,17 @@ pub async fn launch_game(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
+    // macOS releases bundle MoltenVK next to the client; point the Vulkan loader
+    // at the bundled ICD. Absent for local dev builds, which use system Vulkan.
+    #[cfg(target_os = "macos")]
+    if let Some(icd) = exe
+        .parent()
+        .map(|d| d.join("MoltenVK_icd.json"))
+        .filter(|p| p.exists())
+    {
+        cmd.env("VK_ICD_FILENAMES", &icd);
+    }
+
     if debug_enabled.unwrap_or(false) {
         cmd.env("RUST_LOG", "debug");
         cmd.env("RUST_BACKTRACE", "full");
