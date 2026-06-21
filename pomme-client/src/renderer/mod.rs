@@ -861,6 +861,10 @@ impl Renderer {
         self.chunk_buffers.clear();
     }
 
+    pub fn registry(&self) -> &BlockRegistry {
+        &self.registry
+    }
+
     pub fn create_mesh_dispatcher(
         &self,
         biome_climate: std::sync::Arc<

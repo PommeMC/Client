@@ -66,6 +66,9 @@ pub struct BlockRegistry {
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
     flat_item_texture_keys: HashMap<String, String>,
+    /// Block name -> its single `BlockState`, for one-state blocks (see
+    /// `placeable_block_for_item`).
+    placeable_blocks: HashMap<String, BlockState>,
 }
 
 impl BlockRegistry {
@@ -117,7 +120,15 @@ impl BlockRegistry {
             item_models,
             flat_item_textures,
             flat_item_texture_keys,
+            placeable_blocks: build_placeable_blocks(),
         }
+    }
+
+    /// Resolves a held item's registry name (unprefixed, e.g. `"stone"`) to the
+    /// `BlockState` to predict on placement, or `None` if the item is not a
+    /// single-state block. Item and block share a registry name for this set.
+    pub fn placeable_block_for_item(&self, item_name: &str) -> Option<BlockState> {
+        self.placeable_blocks.get(item_name).copied()
     }
 
     pub fn get_item_model(&self, name: &str) -> Option<&BakedModel> {
@@ -213,6 +224,21 @@ impl BlockRegistry {
             .chain(multipart_textures)
             .chain(item_model_textures)
     }
+}
+
+/// Builds the block-name -> single-`BlockState` map by walking every valid
+/// block state and keeping only names that map to exactly one state.
+fn build_placeable_blocks() -> HashMap<String, BlockState> {
+    let mut seen: HashMap<String, Option<BlockState>> = HashMap::new();
+    for state in (0u32..).map_while(|id| BlockState::try_from(id).ok()) {
+        let block: Box<dyn azalea_block::BlockTrait> = state.into();
+        seen.entry(block.id().to_string())
+            .and_modify(|v| *v = None)
+            .or_insert(Some(state));
+    }
+    seen.into_iter()
+        .filter_map(|(name, state)| state.map(|s| (name, s)))
+        .collect()
 }
 
 fn build_variant_key(block: &dyn azalea_block::BlockTrait) -> String {

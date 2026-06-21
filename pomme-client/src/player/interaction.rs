@@ -278,6 +278,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        place_block: Option<BlockState>,
     ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
 
@@ -321,7 +322,7 @@ impl InteractionState {
         if input.action_just_pressed(input::Action::Use)
             || (input.performing_action(input::Action::Use) && self.use_delay == 0)
         {
-            self.use_item_on(sender);
+            self.use_item_on(sender, chunks, player_pos, place_block, &mut dirty_chunks);
         }
 
         if self.miss_time > 0 {
@@ -427,7 +428,14 @@ impl InteractionState {
         self.swing(sender);
     }
 
-    fn use_item_on(&mut self, sender: &PacketSender) {
+    fn use_item_on(
+        &mut self,
+        sender: &PacketSender,
+        chunks: &ChunkStore,
+        player_pos: DVec3,
+        place_block: Option<BlockState>,
+        dirty_chunks: &mut Vec<BlockPos>,
+    ) {
         if self.is_destroying {
             return;
         }
@@ -452,6 +460,44 @@ impl InteractionState {
             },
             seq: self.seq,
         }));
+
+        self.predict_place(hit, place_block, chunks, player_pos, dirty_chunks);
+    }
+
+    /// Predicts placement locally for unambiguous single-state blocks,
+    /// mirroring `predict_destroy`: stores air for rollback, writes the
+    /// block, and marks it for remesh. `acknowledge` reverts it if the
+    /// server doesn't confirm. Skips anything not clearly placeable so the
+    /// worst case is just no prediction.
+    fn predict_place(
+        &mut self,
+        hit: BlockHitResult,
+        place_block: Option<BlockState>,
+        chunks: &ChunkStore,
+        player_pos: DVec3,
+        dirty_chunks: &mut Vec<BlockPos>,
+    ) {
+        let Some(state) = place_block else {
+            return;
+        };
+        let pos = hit.block_pos.offset_with_direction(hit.face);
+
+        // Only predict into an empty cell; replacing grass/water isn't handled yet.
+        if !chunks.get_block_state(pos.x, pos.y, pos.z).is_air() {
+            return;
+        }
+
+        // Don't predict a solid block overlapping the player; the server denies it.
+        if has_collision(state) {
+            let player = Aabb::from_center(player_pos, PLAYER_HALF_WIDTH, PLAYER_HEIGHT / 2.0);
+            if Aabb::block(pos.x, pos.y, pos.z).intersects(&player) {
+                return;
+            }
+        }
+
+        self.retain_known_server_state(pos, BlockState::AIR, player_pos);
+        chunks.set_block_state(pos.x, pos.y, pos.z, state);
+        mark_dirty(&pos, dirty_chunks);
     }
 
     #[allow(clippy::too_many_arguments)]

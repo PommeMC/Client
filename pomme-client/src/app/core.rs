@@ -946,6 +946,17 @@ impl AppCore {
             game.player.game_mode == 1,
         );
 
+        let place_block = {
+            let slot = input.selected_slot() as usize;
+            match game.player.inventory.hotbar_slots().get(slot) {
+                Some(stack) if !matches!(stack, azalea_inventory::ItemStack::Empty) => {
+                    let name = crate::player::inventory::item_resource_name(stack.kind());
+                    renderer.registry().placeable_block_for_item(&name)
+                }
+                _ => None,
+            }
+        };
+
         let dirty = game.interaction.tick(
             input,
             &game.chunk_store,
@@ -954,6 +965,7 @@ impl AppCore {
             game.player.position.into(),
             game.player.on_ground,
             game.player.game_mode == 1,
+            place_block,
         );
         if !dirty.is_empty() {
             let min_y = game.chunk_store.min_y();
