@@ -2,4 +2,4 @@
 # Pinned so local and CI build identically. Bump deliberately; nightly is only
 # needed for rustfmt's options.
 channel = "nightly-2026-03-21"
-components = ["rustfmt", "rust-analyzer", "rust-src"]
+components = ["clippy", "rustfmt", "rust-analyzer", "rust-src"]
