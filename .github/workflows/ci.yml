@@ -11,6 +11,10 @@ env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   client:
     strategy:
@@ -50,23 +54,6 @@ jobs:
 
       - name: Clippy
         run: cargo clippy -p pomme-client --release --all-targets --all-features -- -D warnings
-
-      - name: Build
-        run: cargo build -p pomme-client --release
-
-      - name: Upload artifact (Windows)
-        if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v7
-        with:
-          name: pomme-client-windows
-          path: target/release/pomme-client.exe
-
-      - name: Upload artifact (Unix)
-        if: matrix.os != 'windows-latest'
-        uses: actions/upload-artifact@v7
-        with:
-          name: pomme-client-${{ matrix.os }}
-          path: target/release/pomme-client
 
   launcher-frontend:
     runs-on: ubuntu-latest
@@ -134,33 +121,3 @@ jobs:
             echo "::error::pomme-launcher/src/bindings is stale. Run 'cargo run -p pomme-launcher --bin generate-bindings' and commit."
             exit 1
           fi
-
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Build launcher
-        run: pnpm --filter pomme-launcher tauri build
-
-      - name: Upload launcher (Windows)
-        if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v7
-        with:
-          name: pomme-launcher-windows
-          path: target/release/pomme-launcher.exe
-
-      - name: Upload launcher (Unix)
-        if: matrix.os != 'windows-latest'
-        uses: actions/upload-artifact@v7
-        with:
-          name: pomme-launcher-${{ matrix.os }}
-          path: target/release/pomme-launcher
