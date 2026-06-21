@@ -57,7 +57,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libvulkan-dev cmake libasound2-dev
+          sudo apt-get install -y libvulkan-dev cmake libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev
 
       - name: Build
         run: cargo build -p pomme-client --release --target ${{ matrix.target }}
