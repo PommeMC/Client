@@ -127,18 +127,19 @@ impl MainMenu {
 
             let icon_size = 32.0 * gs;
             let icon_pad = 2.0 * gs;
+            let icon_x = rect[0] + icon_pad;
             let icon_y = rect[1] + icon_pad;
-            let text_x = rect[0] + icon_size + 3.0 * gs;
+            let text_x = icon_x + icon_size + 3.0 * gs;
             let name_y = icon_y + 1.0 * gs;
 
             elements.push(MenuElement::Favicon {
-                x: rect[0],
+                x: icon_x,
                 y: icon_y,
                 size: icon_size,
                 address: server.address.clone(),
             });
 
-            let rel_x = cursor.0 - rect[0];
+            let rel_x = cursor.0 - icon_x;
             let rel_y = cursor.1 - icon_y;
             let on_icon =
                 hovered && rel_x >= 0.0 && rel_x < icon_size && rel_y >= 0.0 && rel_y < icon_size;
@@ -148,7 +149,7 @@ impl MainMenu {
 
             if hovered {
                 elements.push(MenuElement::Rect {
-                    x: rect[0],
+                    x: icon_x,
                     y: icon_y,
                     w: icon_size,
                     h: icon_size,
@@ -157,49 +158,33 @@ impl MainMenu {
                 });
 
                 if on_icon {
-                    let join_sprite = if right_half {
+                    let mut push_icon = |sprite| {
+                        elements.push(MenuElement::Image {
+                            x: icon_x,
+                            y: icon_y,
+                            w: icon_size,
+                            h: icon_size,
+                            sprite,
+                            tint: WHITE,
+                        });
+                    };
+                    push_icon(if right_half {
                         SpriteId::ServerJoinHighlighted
                     } else {
                         SpriteId::ServerJoin
-                    };
-                    elements.push(MenuElement::Image {
-                        x: rect[0],
-                        y: icon_y,
-                        w: icon_size,
-                        h: icon_size,
-                        sprite: join_sprite,
-                        tint: WHITE,
                     });
-
                     if i > 0 {
-                        let up_sprite = if top_left {
+                        push_icon(if top_left {
                             SpriteId::ServerMoveUpHighlighted
                         } else {
                             SpriteId::ServerMoveUp
-                        };
-                        elements.push(MenuElement::Image {
-                            x: rect[0],
-                            y: icon_y,
-                            w: icon_size,
-                            h: icon_size,
-                            sprite: up_sprite,
-                            tint: WHITE,
                         });
                     }
-
                     if i < self.server_list.servers.len() - 1 {
-                        let down_sprite = if bottom_left {
+                        push_icon(if bottom_left {
                             SpriteId::ServerMoveDownHighlighted
                         } else {
                             SpriteId::ServerMoveDown
-                        };
-                        elements.push(MenuElement::Image {
-                            x: rect[0],
-                            y: icon_y,
-                            w: icon_size,
-                            h: icon_size,
-                            sprite: down_sprite,
-                            tint: WHITE,
                         });
                     }
                 }
