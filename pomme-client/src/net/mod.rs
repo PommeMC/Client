@@ -121,6 +121,9 @@ pub enum NetworkEvent {
     GameModeChanged {
         game_mode: u8,
     },
+    PlayerAbilitiesChanged {
+        flying: bool,
+    },
     ServerViewDistance {
         distance: u32,
     },

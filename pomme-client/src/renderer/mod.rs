@@ -779,6 +779,14 @@ impl Renderer {
         self.camera.update_fov_modifier(modifier);
     }
 
+    pub fn set_fluid_fov_factor(&mut self, factor: f32) {
+        self.camera.set_fluid_fov_factor(factor);
+    }
+
+    pub fn set_render_partial_tick(&mut self, partial_tick: f32) {
+        self.camera.set_render_partial_tick(partial_tick);
+    }
+
     pub fn set_base_fov(&mut self, degrees: f32) {
         self.camera.base_fov_degrees = degrees;
     }
