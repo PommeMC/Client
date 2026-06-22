@@ -5,7 +5,7 @@ pub mod state_slot;
 
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use winit::application::ApplicationHandler;
@@ -45,6 +45,64 @@ const POSITION_THRESHOLD_SQ: f64 = 4.0e-8;
 pub struct App {
     phase: StateSlot<AppPhase>,
     core: AppCore,
+    minimized: bool,
+    fps_limiter: FramerateLimiter,
+}
+
+/// Port of vanilla `FramerateLimiter`: paces to a target fps by sleeping most
+/// of the wait (with an adaptive margin for oversleep) then spinning the rest.
+struct FramerateLimiter {
+    last_frame: Instant,
+    average_overshoot_ns: u64,
+    last_limit: u32,
+}
+
+impl FramerateLimiter {
+    const MAX_CURRENT_OVERSHOOT_NS: u64 = 25_000_000;
+    const MAX_AVERAGE_OVERSHOOT_NS: u64 = 2_000_000;
+    const SPIN_SAFETY_BUFFER_NS: u64 = 500_000;
+
+    fn new() -> Self {
+        Self {
+            last_frame: Instant::now(),
+            average_overshoot_ns: 0,
+            last_limit: 0,
+        }
+    }
+
+    fn limit_display_fps(&mut self, framerate_limit: u32) {
+        let target_time =
+            self.last_frame + Duration::from_nanos(1_000_000_000 / framerate_limit as u64);
+        if framerate_limit != self.last_limit {
+            self.average_overshoot_ns = 0;
+            self.last_limit = framerate_limit;
+        }
+        loop {
+            let now = Instant::now();
+            if now >= target_time {
+                break;
+            }
+            let remaining_ns = (target_time - now).as_nanos() as u64;
+            if remaining_ns > self.average_overshoot_ns + Self::SPIN_SAFETY_BUFFER_NS {
+                let expected_ns =
+                    remaining_ns - self.average_overshoot_ns - Self::SPIN_SAFETY_BUFFER_NS;
+                let sleep_start = Instant::now();
+                std::thread::sleep(Duration::from_nanos(expected_ns));
+                let overshoot_ns =
+                    (sleep_start.elapsed().as_nanos() as u64).saturating_sub(expected_ns);
+                if overshoot_ns > 0 && overshoot_ns < Self::MAX_CURRENT_OVERSHOOT_NS {
+                    self.average_overshoot_ns =
+                        (0.1 * overshoot_ns as f64 + 0.9 * self.average_overshoot_ns as f64) as u64;
+                    self.average_overshoot_ns = self
+                        .average_overshoot_ns
+                        .min(Self::MAX_AVERAGE_OVERSHOOT_NS);
+                }
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+        self.last_frame = Instant::now();
+    }
 }
 
 impl App {
@@ -62,6 +120,8 @@ impl App {
                 pending_skin_uuid: Some(user.uuid),
             }),
             core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
+            minimized: false,
+            fps_limiter: FramerateLimiter::new(),
         }
     }
 
@@ -69,6 +129,20 @@ impl App {
         let event_loop = EventLoop::new()?;
         event_loop.run_app(self)?;
         Ok(())
+    }
+
+    /// The effective framerate cap, or `None` for uncapped, matching vanilla
+    /// `FramerateLimitTracker`: iconified → 10, the title/menu (no world) → 60,
+    /// otherwise the Max Framerate setting (uncapped at its top).
+    fn effective_framerate_limit(&self) -> Option<u32> {
+        if self.minimized {
+            Some(10)
+        } else if !matches!(self.phase.get(), AppPhase::InGame { .. }) {
+            Some(60)
+        } else {
+            let max = self.core.menu.max_framerate;
+            (max < crate::ui::menu::MAX_FRAMERATE_UNLIMITED).then_some(max)
+        }
     }
 }
 
@@ -380,6 +454,10 @@ impl ApplicationHandler for App {
                 self.core.input.on_mouse_button(button, state);
             }
 
+            WindowEvent::Occluded(occluded) => {
+                self.minimized = occluded;
+            }
+
             WindowEvent::RedrawRequested => {
                 if matches!(self.phase.get(), AppPhase::Setup { .. }) {
                     return;
@@ -542,11 +620,15 @@ impl ApplicationHandler for App {
                     }
                 });
 
+                let limit = self.effective_framerate_limit();
                 if let Some(gfx) = self.phase.gfx_mut() {
                     if !gfx.window.is_visible().unwrap_or(true) {
                         gfx.window.set_visible(true);
                     }
                     gfx.window.request_redraw();
+                }
+                if let Some(fps) = limit {
+                    self.fps_limiter.limit_display_fps(fps);
                 }
             }
             _ => {}
