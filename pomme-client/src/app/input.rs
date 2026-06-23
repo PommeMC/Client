@@ -143,11 +143,28 @@ impl InputState {
                     self.recent_actions.remove(&Action::ToggleInventory);
                 }
                 if self.action_just_pressed(Action::OpenMenu) {
-                    if !game.dead && !game.options_from_game {
+                    if game.chunk_load_bench.is_some() {
+                        // Cancel a running benchmark instead of opening the menu;
+                        // update_game restores the render distance next frame.
+                        game.chunk_load_abort = true;
+                        should_apply_cursor_grab = true;
+                    } else if !game.dead && !game.options_from_game {
+                        use crate::ui::pause::PauseScreen;
                         if game.inventory_open {
                             game.inventory_open = false;
+                        } else if game.paused {
+                            // Step back through the benchmark sub-screens; close
+                            // the menu from the main screen.
+                            match game.pause_screen {
+                                PauseScreen::ChunkLoader => {
+                                    game.pause_screen = PauseScreen::Benchmark
+                                }
+                                PauseScreen::Benchmark => game.pause_screen = PauseScreen::Main,
+                                PauseScreen::Main => game.paused = false,
+                            }
                         } else {
-                            game.paused = !game.paused;
+                            game.paused = true;
+                            game.pause_screen = PauseScreen::Main;
                         }
 
                         should_apply_cursor_grab = true;

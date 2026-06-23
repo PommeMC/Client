@@ -82,6 +82,9 @@ pub struct Camera {
     pub look_dir: LookDirection,
     pub mode: CameraMode,
     pub third_person_dist: f32,
+    /// When set, render straight down from this many blocks above the pivot,
+    /// ignoring `mode`/`look_dir`. Used by the chunk-load benchmark.
+    top_down: Option<f32>,
     aspect_ratio: f32,
     pub base_fov_degrees: f32,
     fov_modifier: f32,
@@ -98,6 +101,7 @@ impl Camera {
             look_dir: LookDirection::default(),
             mode: CameraMode::FirstPerson,
             third_person_dist: THIRD_PERSON_DISTANCE,
+            top_down: None,
             aspect_ratio,
             base_fov_degrees: DEFAULT_FOV_DEGREES,
             fov_modifier: 1.0,
@@ -123,7 +127,11 @@ impl Camera {
     /// Replicates vanilla `GameRenderer.bobView`. Identity when disabled, not
     /// in first person, or at rest.
     fn bob_matrix(&self) -> Mat4 {
-        if !self.bob_enabled || self.mode != CameraMode::FirstPerson || self.bob_amount == 0.0 {
+        if !self.bob_enabled
+            || self.mode != CameraMode::FirstPerson
+            || self.bob_amount == 0.0
+            || self.top_down.is_some()
+        {
             return Mat4::IDENTITY;
         }
         use std::f32::consts::PI;
@@ -219,6 +227,9 @@ impl Camera {
     }
 
     pub fn third_person_offset(&self) -> Vec3 {
+        if let Some(height) = self.top_down {
+            return Vec3::new(0.0, height, 0.0);
+        }
         let fwd = self.look_dir.as_vec();
         match self.mode {
             CameraMode::FirstPerson => Vec3::ZERO,
@@ -227,19 +238,47 @@ impl Camera {
         }
     }
 
-    pub fn view_projection(&self) -> Mat4 {
-        self.view_projection_with_fov(self.fov_radians(1.0))
-    }
-
-    pub fn sky_view_projection(&self) -> Mat4 {
+    /// Forward and up vectors for the view matrix, accounting for the top-down
+    /// override and front-facing third person.
+    fn view_basis(&self) -> (Vec3, Vec3) {
+        if self.top_down.is_some() {
+            // Looking straight down Y; Y can't be the up hint, so use -Z (north up).
+            return (Vec3::NEG_Y, Vec3::NEG_Z);
+        }
         let look_dir = self.look_dir.as_vec();
         let forward = if self.mode == CameraMode::ThirdPersonFront {
             -look_dir
         } else {
             look_dir
         };
+        (forward, UP)
+    }
 
-        let view = Mat4::look_to_rh(Vec3::ZERO, forward, UP);
+    pub fn top_down(&self) -> Option<f32> {
+        self.top_down
+    }
+
+    /// Frame a straight-down view roughly fitting `radius_blocks` vertically
+    /// under the current FOV, sitting just inside the far plane. The factor
+    /// pulls in a bit closer than an exact fit so the load area fills more
+    /// of the screen.
+    pub fn frame_top_down(&mut self, radius_blocks: f32) {
+        let half_fov = self.fov_radians(1.0) / 2.0;
+        let height = (radius_blocks / half_fov.tan() * 0.8).min(FAR - 64.0);
+        self.top_down = Some(height);
+    }
+
+    pub fn clear_top_down(&mut self) {
+        self.top_down = None;
+    }
+
+    pub fn view_projection(&self) -> Mat4 {
+        self.view_projection_with_fov(self.fov_radians(1.0))
+    }
+
+    pub fn sky_view_projection(&self) -> Mat4 {
+        let (forward, up) = self.view_basis();
+        let view = Mat4::look_to_rh(Vec3::ZERO, forward, up);
         let mut proj = Mat4::perspective_rh(self.fov_radians(1.0), self.aspect_ratio, NEAR, FAR);
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
@@ -247,14 +286,8 @@ impl Camera {
 
     pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
         let offset = self.third_person_offset();
-        let look_dir = self.look_dir.as_vec();
-        let forward = if self.mode == CameraMode::ThirdPersonFront {
-            -look_dir
-        } else {
-            look_dir
-        };
-
-        let view = self.bob_matrix() * Mat4::look_to_rh(offset, forward, UP);
+        let (forward, up) = self.view_basis();
+        let view = self.bob_matrix() * Mat4::look_to_rh(offset, forward, up);
         let mut proj = Mat4::perspective_rh(fov, self.aspect_ratio, NEAR, FAR);
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
@@ -274,10 +307,15 @@ impl CameraUniform {
         let offset = camera.third_person_offset();
         let pos = camera.position.as_vec3() + offset;
         // Vanilla render-distance fog band: the last clamp(blocks / 10, 4, 64) blocks.
-        let blocks = (render_distance_chunks * 16) as f32;
-        let span = (blocks / 10.0).clamp(4.0, 64.0);
-        let fog_start = blocks - span;
-        let fog_end = blocks;
+        // The top-down benchmark view sits hundreds of blocks up, so push fog past the
+        // far plane to keep the whole loaded area visible.
+        let (fog_start, fog_end) = if camera.top_down().is_some() {
+            (FAR, FAR)
+        } else {
+            let blocks = (render_distance_chunks * 16) as f32;
+            let span = (blocks / 10.0).clamp(4.0, 64.0);
+            (blocks - span, blocks)
+        };
         // Fade distant terrain to the sky color so it melts into the flat sky disc
         // with no horizon edge (at night both go dark).
         Self {

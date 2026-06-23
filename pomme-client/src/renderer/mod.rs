@@ -714,12 +714,20 @@ impl Renderer {
         self.camera.reset(position, look_dir);
     }
 
+    pub fn set_top_down_radius(&mut self, radius_blocks: f32) {
+        self.camera.frame_top_down(radius_blocks);
+    }
+
+    pub fn clear_top_down(&mut self) {
+        self.camera.clear_top_down();
+    }
+
     pub fn update_third_person_distance(
         &mut self,
         eye_pos: Position,
         chunks: &crate::world::chunk::ChunkStore,
     ) {
-        if self.camera.mode == camera::CameraMode::FirstPerson {
+        if self.camera.mode == camera::CameraMode::FirstPerson || self.camera.top_down().is_some() {
             return;
         }
         let max = camera::THIRD_PERSON_DISTANCE as f64;
@@ -1487,7 +1495,9 @@ impl Renderer {
                 };
                 cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
 
-                if self.camera.mode == camera::CameraMode::FirstPerson {
+                if self.camera.mode == camera::CameraMode::FirstPerson
+                    && self.camera.top_down().is_none()
+                {
                     let aspect = sw / sh.max(1.0);
                     // Same view-bob the world uses, so the arm/item bob in lockstep
                     // (vanilla applies bobView to the hand pose stack too).

@@ -514,6 +514,12 @@ impl SkyPipeline {
         push_mode(cmd, 0);
         cmd.draw(self.top_disc_count, 1, self.top_disc_offset, 0);
 
+        // The chunk-load benchmark's top-down view keeps the sky backdrop but drops
+        // the sun, moon, stars, and sunrise glow so only terrain reads.
+        if camera.top_down().is_some() {
+            return;
+        }
+
         if sunrise_argb[3] > 0.001 {
             push_mode(cmd, 5);
             cmd.draw(self.sunrise_count, 1, self.sunrise_offset, 0);

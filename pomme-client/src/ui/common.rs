@@ -1,5 +1,6 @@
 use azalea_inventory::ItemStack;
 
+use crate::benchmark::UploadStatus;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
@@ -57,6 +58,122 @@ pub fn push_gradient_overlay(
         color_top,
         color_bottom,
     });
+}
+
+/// What the caller should do after a result overlay handled this frame's input.
+pub enum ResultAction {
+    None,
+    Dismiss,
+    StartUpload,
+    /// Re-copy the already-uploaded link to the clipboard.
+    Recopy,
+}
+
+/// A centered results panel: dimmed backdrop, a large title, a column of detail
+/// lines, an upload status line, and an "upload & copy link" button. Shared by
+/// the benchmark result overlays. Returns what the caller should do based on
+/// the click / escape this frame.
+#[allow(clippy::too_many_arguments)]
+pub fn push_results_overlay(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    title_y: f32,
+    title: &str,
+    lines: &[String],
+    upload: Option<&UploadStatus>,
+    cursor: (f32, f32),
+    clicked: bool,
+    escape: bool,
+) -> ResultAction {
+    let fs = FONT_SIZE * gs;
+    let cx = screen_w / 2.0;
+    push_overlay(elements, screen_w, screen_h, 0.5);
+    elements.push(MenuElement::Text {
+        x: cx,
+        y: title_y,
+        text: title.into(),
+        scale: fs * 2.0,
+        color: WHITE,
+        centered: true,
+    });
+    for (i, line) in lines.iter().enumerate() {
+        elements.push(MenuElement::Text {
+            x: cx,
+            y: title_y + fs * 2.0 + 10.0 + i as f32 * (fs + 4.0),
+            text: line.clone(),
+            scale: fs,
+            color: [0.8, 0.85, 0.9, 1.0],
+            centered: true,
+        });
+    }
+    let lines_bottom = title_y + fs * 2.0 + 10.0 + lines.len() as f32 * (fs + 4.0);
+
+    let status = match upload {
+        None => None,
+        Some(UploadStatus::Uploading) => Some(("Uploading...".to_string(), [0.8, 0.85, 0.9, 1.0])),
+        Some(UploadStatus::Done { url, copied }) => Some(if *copied {
+            (format!("Link copied: {url}"), [0.6, 0.9, 0.6, 1.0])
+        } else {
+            (
+                format!("Uploaded (copy failed): {url}"),
+                [0.9, 0.85, 0.5, 1.0],
+            )
+        }),
+        Some(UploadStatus::Failed(e)) => Some((e.clone(), [0.95, 0.5, 0.5, 1.0])),
+    };
+    if let Some((text, color)) = status {
+        elements.push(MenuElement::Text {
+            x: cx,
+            y: lines_bottom + 6.0,
+            text,
+            scale: fs,
+            color,
+            centered: true,
+        });
+    }
+
+    // Debug builds produce unrepresentative timings, so don't let them be shared.
+    let debug_build = crate::benchmark::is_debug_build();
+    let (label, enabled) = if debug_build {
+        ("Upload disabled (debug build)", false)
+    } else {
+        match upload {
+            Some(UploadStatus::Uploading) => ("Uploading...", false),
+            Some(UploadStatus::Done { .. }) => ("Copy link again", true),
+            _ => ("Upload & copy link", true),
+        }
+    };
+    let btn_w = 180.0 * gs;
+    let btn_h = BTN_H * gs;
+    let btn_x = cx - btn_w / 2.0;
+    let btn_y = lines_bottom + fs + 12.0;
+    push_button(
+        elements, cursor, btn_x, btn_y, btn_w, btn_h, gs, fs, label, enabled,
+    );
+
+    if clicked && hit_test(cursor, [btn_x, btn_y, btn_w, btn_h]) {
+        if debug_build {
+            return ResultAction::None;
+        }
+        return match upload {
+            Some(UploadStatus::Uploading) => ResultAction::None,
+            Some(UploadStatus::Done { .. }) => ResultAction::Recopy,
+            _ => ResultAction::StartUpload,
+        };
+    }
+    if escape || clicked {
+        return ResultAction::Dismiss;
+    }
+    ResultAction::None
+}
+
+/// Copy `text` to the system clipboard, returning whether it succeeded.
+pub(crate) fn set_clipboard(text: &str) -> bool {
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text.to_string()))
+        .is_ok()
 }
 
 const DIGIT_WIDTH: f32 = 6.0;

@@ -1021,7 +1021,5 @@ fn push_undo(stack: &mut Vec<(u8, String)>, field_idx: u8, prev: String) {
 }
 
 pub(super) fn write_clipboard(text: &str) -> bool {
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.set_text(text.to_string()))
-        .is_ok()
+    crate::ui::common::set_clipboard(text)
 }
