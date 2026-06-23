@@ -1792,25 +1792,6 @@ async fn fetch_skin_image(skin_url: &str) -> Result<(Vec<u8>, u32, u32), String>
     Ok((rgba.into_raw(), w, h))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decodes_skin_url_from_textures_property() {
-        use base64::Engine;
-
-        let payload =
-            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#;
-        let value = base64::engine::general_purpose::STANDARD.encode(payload);
-
-        assert_eq!(
-            skin_url_from_texture_property(&value).unwrap(),
-            "https://textures.minecraft.net/texture/testskin"
-        );
-    }
-}
-
 impl Drop for Renderer {
     fn drop(&mut self) {
         let _ = self.ctx.device.wait_idle();
@@ -1859,5 +1840,24 @@ impl Drop for Renderer {
 
         self.swapchain
             .destroy(&self.ctx.device, &self.ctx.allocator);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_skin_url_from_textures_property() {
+        use base64::Engine;
+
+        let payload =
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#;
+        let value = base64::engine::general_purpose::STANDARD.encode(payload);
+
+        assert_eq!(
+            skin_url_from_texture_property(&value).unwrap(),
+            "https://textures.minecraft.net/texture/testskin"
+        );
     }
 }

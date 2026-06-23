@@ -259,7 +259,7 @@ impl AppCore {
     }
 
     fn queue_player_skin(&mut self, uuid: uuid::Uuid, textures: Option<String>) {
-        if !self.requested_player_skins.insert(uuid.clone()) {
+        if !self.requested_player_skins.insert(uuid) {
             return;
         }
 
@@ -683,7 +683,6 @@ impl AppCore {
                             position,
                             LookDirection::new(head_y_rot_deg, x_rot_deg),
                             y_rot_deg,
-                            head_y_rot_deg,
                             (entity_type == azalea_registry::builtin::EntityKind::Player)
                                 .then_some(uuid),
                         );

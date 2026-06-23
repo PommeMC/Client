@@ -394,7 +394,6 @@ impl EntityStore {
         position: Position,
         look_dir: LookDirection,
         body_y_rot_deg: f32,
-        head_y_rot_deg: f32,
         player_uuid: Option<uuid::Uuid>,
     ) {
         self.living.insert(
@@ -403,7 +402,7 @@ impl EntityStore {
                 entity_type,
                 position,
                 look_dir,
-                head_y_rot_deg,
+                look_dir.y_rot_deg(),
                 body_y_rot_deg,
                 player_uuid,
             ),
