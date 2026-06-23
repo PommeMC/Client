@@ -126,7 +126,7 @@ impl MainMenu {
             }
 
             let icon_size = 32.0 * gs;
-            let icon_pad = 2.0 * gs;
+            let icon_pad = SERVER_ENTRY_PAD * gs;
             let icon_x = rect[0] + icon_pad;
             let icon_y = rect[1] + icon_pad;
             let text_x = icon_x + icon_size + 3.0 * gs;

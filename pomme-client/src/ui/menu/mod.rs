@@ -206,6 +206,8 @@ pub struct MenuInput {
 
 const HEADER_H: f32 = 33.0;
 const ENTRY_H: f32 = 36.0;
+/// Inset (GUI units) keeping server-list entry content off the raw row edges.
+const SERVER_ENTRY_PAD: f32 = 2.0;
 const ROW_W: f32 = 305.0;
 const FORM_W: f32 = 200.0;
 const BTN_GAP: f32 = 4.0;

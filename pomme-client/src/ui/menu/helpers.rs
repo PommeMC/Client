@@ -218,7 +218,7 @@ pub(super) fn push_server_status(
         return;
     };
 
-    let content_pad = 2.0 * gs;
+    let content_pad = SERVER_ENTRY_PAD * gs;
     let icon_w = 10.0 * gs;
     let icon_h = 8.0 * gs;
     let icon_x = entry_rect[0] + entry_rect[2] - content_pad - icon_w - 5.0 * gs;
