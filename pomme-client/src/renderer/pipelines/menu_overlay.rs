@@ -2548,10 +2548,17 @@ fn push_nine_slice(
     let bu = (tex_border / region.src_w) * uv_w;
     let bv = (tex_border / region.src_h) * uv_h;
 
-    let bx = border.min(w / 2.0);
-    let by = border.min(h / 2.0);
-    let xs = [x, x + bx, x + w - bx, x + w];
-    let ys = [y, y + by, y + h - by, y + h];
+    // Snap to integer pixels; fractional edges let NEAREST sampling bleed into
+    // the neighbouring atlas sprite (no gutter between sprites).
+    let x0 = x.round();
+    let y0 = y.round();
+    let x1 = (x + w).round();
+    let y1 = (y + h).round();
+    let border = border.round().max(0.0);
+    let bx = border.min(((x1 - x0) / 2.0).floor());
+    let by = border.min(((y1 - y0) / 2.0).floor());
+    let xs = [x0, x0 + bx, x1 - bx, x1];
+    let ys = [y0, y0 + by, y1 - by, y1];
     let us = [region.u0, region.u0 + bu, region.u1 - bu, region.u1];
     let vs = [region.v0, region.v0 + bv, region.v1 - bv, region.v1];
 
