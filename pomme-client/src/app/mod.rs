@@ -463,7 +463,8 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                // `dt` is clamped for physics; `raw_dt` is the unclamped interval the benchmarks need.
+                // `dt` is clamped for physics; `raw_dt` is the unclamped interval the
+                // benchmarks need.
                 let (dt, raw_dt) = if let Some(app_rt) = self.phase.gfx_mut() {
                     let now = Instant::now();
                     let raw_dt = now.duration_since(app_rt.last_frame).as_secs_f32();
