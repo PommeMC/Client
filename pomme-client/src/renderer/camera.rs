@@ -218,7 +218,12 @@ impl Camera {
     /// 180°), giving an "about to be seen" margin for occlusion-gated mesh
     /// scheduling.
     pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
-        let fov = (self.fov_radians(self.render_partial_tick) + extra_radians).min(2.96);
+        // Vanilla createProjectionMatrixForCulling never culls narrower than the
+        // base FOV, so a narrowing modifier (underwater) can't clip visible edges.
+        let cull_fov = self
+            .fov_radians(self.render_partial_tick)
+            .max(self.base_fov_degrees.to_radians());
+        let fov = (cull_fov + extra_radians).min(2.96);
         Self::planes_from_view_projection(self.view_projection_with_fov(fov))
     }
 

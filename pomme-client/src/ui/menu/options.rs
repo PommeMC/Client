@@ -219,7 +219,7 @@ impl MainMenu {
         let fov_effect_label = if self.fov_effect_scale <= 0.0 {
             "FOV Effects: OFF".to_string()
         } else {
-            format!("FOV Effects: {}%", (self.fov_effect_scale * 100.0).round())
+            format!("FOV Effects: {}%", (self.fov_effect() * 100.0).round())
         };
         let rows: Vec<OptRow> = vec![
             OptRow::Pair("Narrator: OFF", "Show Subtitles: OFF"),
