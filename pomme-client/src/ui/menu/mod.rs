@@ -28,6 +28,8 @@ struct Settings {
     view_bobbing: bool,
     #[serde(default = "default_true")]
     vsync: bool,
+    #[serde(default = "default_max_framerate")]
+    max_framerate: u32,
     #[serde(default = "default_true")]
     show_online_status: bool,
     #[serde(default = "default_true")]
@@ -78,6 +80,14 @@ fn default_fov() -> u32 {
     70
 }
 
+fn default_max_framerate() -> u32 {
+    120
+}
+
+/// Top of the Max Framerate slider, where the cap is disabled (matching
+/// vanilla, which treats the slider's max as unlimited).
+pub const MAX_FRAMERATE_UNLIMITED: u32 = 260;
+
 fn default_cloud_mode() -> u8 {
     2
 }
@@ -99,6 +109,7 @@ impl Default for Settings {
             fov: 70,
             view_bobbing: true,
             vsync: true,
+            max_framerate: 120,
             show_online_status: true,
             show_current_server: true,
             skin_cape: true,
@@ -337,6 +348,7 @@ pub struct MainMenu {
     pub fov: u32,
     pub view_bobbing: bool,
     pub vsync: bool,
+    pub max_framerate: u32,
     pub show_online_status: bool,
     pub show_current_server: bool,
     pub master_volume: f32,
@@ -424,6 +436,7 @@ impl MainMenu {
             fov: settings.fov,
             view_bobbing: settings.view_bobbing,
             vsync: settings.vsync,
+            max_framerate: settings.max_framerate,
             show_online_status: settings.show_online_status,
             show_current_server: settings.show_current_server,
             master_volume: settings.master_volume,
@@ -505,6 +518,7 @@ impl MainMenu {
                 fov: self.fov,
                 view_bobbing: self.view_bobbing,
                 vsync: self.vsync,
+                max_framerate: self.max_framerate,
                 show_online_status: self.show_online_status,
                 show_current_server: self.show_current_server,
                 master_volume: self.master_volume,

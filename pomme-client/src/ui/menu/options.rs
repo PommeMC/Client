@@ -91,7 +91,11 @@ impl MainMenu {
         };
         let rd = format!("Render Distance: {} chunks", self.render_distance);
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
-        let mf = format!("Max Framerate: {} fps", 120);
+        let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
+            "Max Framerate: Unlimited".to_string()
+        } else {
+            format!("Max Framerate: {} fps", self.max_framerate)
+        };
         let gui_label = if self.gui_scale_setting == 0 {
             "GUI Scale: Auto".to_string()
         } else {
@@ -128,9 +132,11 @@ impl MainMenu {
         ];
         let rd_frac = (self.render_distance as f32 - 2.0) / 30.0;
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
+        let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
             ("Simulation Distance:", sd_frac),
+            ("Max Framerate:", mf_frac),
         ];
         self.build_options_grid(
             sw,
@@ -721,6 +727,9 @@ impl MainMenu {
                 "Render Distance:" => self.render_distance = (2.0 + v * 30.0).round() as u32,
                 "Simulation Distance:" => {
                     self.simulation_distance = (5.0 + v * 27.0).round() as u32
+                }
+                "Max Framerate:" => {
+                    self.max_framerate = (((10.0 + v * 250.0) / 10.0).round() * 10.0) as u32
                 }
                 "FOV:" => self.fov = (30.0 + v * 80.0).round() as u32,
                 "Master Volume:" => self.master_volume = v,
