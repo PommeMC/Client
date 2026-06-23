@@ -59,6 +59,40 @@ pub fn push_gradient_overlay(
     });
 }
 
+/// A centered results panel: dimmed backdrop, a large title, then a column of
+/// detail lines below it. Shared by the benchmark result overlays.
+pub fn push_results_overlay(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    title_y: f32,
+    title: &str,
+    lines: &[String],
+) {
+    let fs = FONT_SIZE * gs;
+    let cx = screen_w / 2.0;
+    push_overlay(elements, screen_w, screen_h, 0.5);
+    elements.push(MenuElement::Text {
+        x: cx,
+        y: title_y,
+        text: title.into(),
+        scale: fs * 2.0,
+        color: WHITE,
+        centered: true,
+    });
+    for (i, line) in lines.iter().enumerate() {
+        elements.push(MenuElement::Text {
+            x: cx,
+            y: title_y + fs * 2.0 + 10.0 + i as f32 * (fs + 4.0),
+            text: line.clone(),
+            scale: fs,
+            color: [0.8, 0.85, 0.9, 1.0],
+            centered: true,
+        });
+    }
+}
+
 const DIGIT_WIDTH: f32 = 6.0;
 
 pub fn push_item_count(

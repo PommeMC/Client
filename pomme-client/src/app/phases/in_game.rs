@@ -10,7 +10,9 @@ use glam::FloatExt as _;
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
 use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE, input};
-use crate::benchmark::{Benchmark, BenchmarkResult};
+use crate::benchmark::{
+    Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep,
+};
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
@@ -27,7 +29,7 @@ use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::ChatState;
 use crate::ui::death::{self, DeathAction};
-use crate::ui::pause::{self, PauseAction};
+use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
@@ -76,6 +78,10 @@ pub struct GameState {
     pub block_entity_anim: BlockEntityAnimStore,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
+    /// Which pause screen is showing (main / benchmark submenu / chunk loader).
+    pub pause_screen: PauseScreen,
+    pub chunk_load_bench: Option<ChunkLoadBench>,
+    pub chunk_load_result: Option<ChunkLoadResult>,
     /// Monotonic content generation per column, bumped on every edit (and chunk
     /// load). This is the dirty marker: a column needs (re)meshing whenever its
     /// `content_gen` outruns what was last enqueued, regardless of visibility,
@@ -178,6 +184,9 @@ impl GameState {
             position_send_counter: 0,
             benchmark: None,
             benchmark_result: None,
+            pause_screen: PauseScreen::Main,
+            chunk_load_bench: None,
+            chunk_load_result: None,
             content_gen: HashMap::new(),
             meshed: HashMap::new(),
             vis_mask: HashMap::new(),
@@ -773,18 +782,6 @@ pub fn update_game(
     }
 
     if let Some(ref result) = game.benchmark_result {
-        let fs = 8.0 * gs;
-        let cx = sw / 2.0;
-        let by = sh / 2.0 - 90.0;
-        common::push_overlay(&mut elements, sw, sh, 0.5);
-        elements.push(MenuElement::Text {
-            x: cx,
-            y: by,
-            text: "Benchmark Complete".into(),
-            scale: fs * 2.0,
-            color: [1.0, 1.0, 1.0, 1.0],
-            centered: true,
-        });
         let lines = [
             format!("GPU: {}", result.gpu),
             format!(
@@ -810,18 +807,119 @@ pub fn update_game(
                 result.spike_count, 8.0
             ),
         ];
-        for (i, line) in lines.iter().enumerate() {
-            elements.push(MenuElement::Text {
-                x: cx,
-                y: by + fs * 2.0 + 10.0 + i as f32 * (fs + 4.0),
-                text: line.clone(),
-                scale: fs,
-                color: [0.8, 0.85, 0.9, 1.0],
-                centered: true,
-            });
-        }
+        common::push_results_overlay(
+            &mut elements,
+            sw,
+            sh,
+            gs,
+            sh / 2.0 - 90.0,
+            "Benchmark Complete",
+            &lines,
+        );
         if core.input.escape_pressed() || core.input.left_just_pressed() {
             game.benchmark_result = None;
+        }
+    }
+
+    if let Some(mut bench) = game.chunk_load_bench.take() {
+        let count = gfx.renderer.loaded_chunk_count();
+        match bench.update(count, dt * 1000.0) {
+            ChunkLoadStep::Wait => {
+                game.chunk_load_bench = Some(bench);
+            }
+            ChunkLoadStep::Load(rd) => {
+                core.menu.render_distance = rd;
+                game.sync_render_distance(connection, rd);
+                game.chunk_load_bench = Some(bench);
+            }
+            ChunkLoadStep::Done(result) => {
+                let restore = bench.original_rd();
+                core.menu.render_distance = restore;
+                game.sync_render_distance(connection, restore);
+                tracing::info!(
+                    "Chunk load RD {} (effective {}): {} chunks in {:.2}s ({:.0} chunks/s), \
+                     first chunk {:.2}s, frame avg {:.1}ms / worst {:.1}ms",
+                    result.target_rd,
+                    result.effective_rd,
+                    result.chunk_count,
+                    result.load_secs,
+                    result.chunks_per_sec,
+                    result.time_to_first_secs,
+                    result.avg_frame_ms,
+                    result.worst_frame_ms,
+                );
+                result.save(&core.data_dirs.game_dir);
+                game.chunk_load_result = Some(result);
+            }
+        }
+    }
+
+    if let Some(ref bench) = game.chunk_load_bench {
+        let label = if bench.resetting() {
+            "Resetting world...".to_string()
+        } else {
+            format!(
+                "Loading RD {}... {} chunks",
+                bench.target_rd(),
+                bench.loaded()
+            )
+        };
+        elements.push(MenuElement::Text {
+            x: sw / 2.0,
+            y: 28.0,
+            text: label,
+            scale: 8.0 * gs,
+            color: [1.0, 1.0, 1.0, 1.0],
+            centered: true,
+        });
+    }
+
+    if let Some(ref result) = game.chunk_load_result {
+        let rd_line = if result.effective_rd != result.target_rd {
+            format!(
+                "Render Distance: {} (server-capped to {})",
+                result.target_rd, result.effective_rd
+            )
+        } else {
+            format!("Render Distance: {}", result.target_rd)
+        };
+        let lines = [
+            rd_line,
+            format!(
+                "Loaded {} chunks in {:.2}s",
+                result.chunk_count, result.load_secs
+            ),
+            format!(
+                "{:.0} chunks/sec - first chunk in {:.2}s",
+                result.chunks_per_sec, result.time_to_first_secs
+            ),
+            format!(
+                "Frame while loading: avg {:.1}ms / worst {:.1}ms",
+                result.avg_frame_ms, result.worst_frame_ms
+            ),
+            format!("GPU: {} / Vulkan {}", result.gpu, result.vulkan),
+            format!(
+                "{} {} / {} threads / v{} / {}x{}",
+                result.os,
+                result.arch,
+                result.cpu_threads,
+                result.version,
+                result.resolution[0],
+                result.resolution[1],
+            ),
+            "Saved to chunk_load.json".to_string(),
+        ];
+        common::push_results_overlay(
+            &mut elements,
+            sw,
+            sh,
+            gs,
+            sh / 2.0 - 100.0,
+            "Chunk Load Complete",
+            &lines,
+        );
+        if core.input.escape_pressed() || core.input.left_just_pressed() {
+            game.chunk_load_result = None;
         }
     }
 
@@ -867,7 +965,16 @@ pub fn update_game(
     } else if game.paused {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
-        pause_action = pause::build_pause_menu(&mut elements, sw, sh, cursor, clicked, gs);
+        pause_action = pause::build_pause_menu(
+            &mut elements,
+            sw,
+            sh,
+            cursor,
+            clicked,
+            gs,
+            game.pause_screen,
+            game.server_render_distance,
+        );
         core.input.clear_just_pressed_actions();
     }
 
@@ -1154,7 +1261,19 @@ pub fn update_game(
         PauseAction::Disconnect => {
             return GameUpdateResult::ManualDisconnect;
         }
-        PauseAction::Benchmark => {
+        PauseAction::OpenBenchmark => {
+            game.pause_screen = PauseScreen::Benchmark;
+        }
+        PauseAction::OpenChunkLoader => {
+            game.pause_screen = PauseScreen::ChunkLoader;
+        }
+        PauseAction::Back => {
+            game.pause_screen = match game.pause_screen {
+                PauseScreen::ChunkLoader => PauseScreen::Benchmark,
+                _ => PauseScreen::Main,
+            };
+        }
+        PauseAction::StartFpsBenchmark => {
             game.benchmark = Some(Benchmark::new(
                 gfx.renderer.gpu_name(),
                 gfx.renderer.screen_width(),
@@ -1162,7 +1281,27 @@ pub fn update_game(
                 core.menu.render_distance,
             ));
             game.benchmark_result = None;
+            game.pause_screen = PauseScreen::Main;
             game.paused = false;
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
+        PauseAction::StartChunkLoad(rd) => {
+            game.chunk_load_bench = Some(ChunkLoadBench::new(
+                rd,
+                core.menu.render_distance,
+                game.server_render_distance,
+                gfx.renderer.gpu_name(),
+                gfx.renderer.vulkan_version(),
+                gfx.renderer.screen_width(),
+                gfx.renderer.screen_height(),
+            ));
+            game.chunk_load_result = None;
+            game.pause_screen = PauseScreen::Main;
+            game.paused = false;
+            // Drop to the minimum render distance so the server unloads the far
+            // chunks; the driver raises it to the target once the reset settles.
+            core.menu.render_distance = crate::benchmark::CHUNK_LOAD_MIN_RD;
+            game.sync_render_distance(connection, crate::benchmark::CHUNK_LOAD_MIN_RD);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         PauseAction::ReportBugs => {
