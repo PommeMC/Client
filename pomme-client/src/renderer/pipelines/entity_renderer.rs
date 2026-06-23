@@ -563,8 +563,15 @@ impl EntityRenderer {
             return;
         }
 
-        let (image, view, allocation) =
-            upload_texture_pixels(device, queue, command_pool, allocator, pixels, width, height);
+        let (image, view, allocation) = upload_texture_pixels(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            pixels,
+            width,
+            height,
+        );
         let set = if let Some(old) = self.player_skins.get(uuid) {
             old.set
         } else {
@@ -739,7 +746,11 @@ impl EntityRenderer {
                 };
                 let base = v.entry.base_variant(v.info.is_baby, v.info.variant_index);
                 let texture_set = self.player_texture_set(v.info, base.texture_set);
-                opaque.add(base, texture_set, (vi, WHITE_TINT, overlay_color, [0.0, 0.0]));
+                opaque.add(
+                    base,
+                    texture_set,
+                    (vi, WHITE_TINT, overlay_color, [0.0, 0.0]),
+                );
                 for (slot, overlay) in v.entry.overlays(v.info.is_baby).iter().enumerate() {
                     if overlay.overlay_kind != OverlayKind::Opaque {
                         continue;
@@ -997,15 +1008,16 @@ struct VariantGroups<'a> {
 impl<'a> VariantGroups<'a> {
     fn add(&mut self, variant: &'a MobVariant, texture_set: vk::DescriptorSet, member: Member) {
         let key = variant as *const MobVariant as usize;
-        let gi = match self.groups.iter().position(|(v, set, _)| {
-            *v as *const MobVariant as usize == key && *set == texture_set
-        }) {
-            Some(gi) => gi,
-            None => {
-                self.groups.push((variant, texture_set, Vec::new()));
-                self.groups.len() - 1
-            }
-        };
+        let gi =
+            match self.groups.iter().position(|(v, set, _)| {
+                *v as *const MobVariant as usize == key && *set == texture_set
+            }) {
+                Some(gi) => gi,
+                None => {
+                    self.groups.push((variant, texture_set, Vec::new()));
+                    self.groups.len() - 1
+                }
+            };
         self.groups[gi].2.push(member);
     }
 
