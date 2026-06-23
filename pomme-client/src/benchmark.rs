@@ -7,23 +7,12 @@ const DURATION_SECS: f32 = 10.0;
 const WARMUP_FRAMES: u32 = 30;
 const SPIKE_THRESHOLD_MS: f32 = 8.0;
 
-/// A rough UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) for stamping benchmark
-/// results that get reported back.
+/// A UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) for stamping benchmark results that
+/// get reported back.
 fn iso8601_utc_now() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| {
-            let secs = d.as_secs();
-            let h = (secs / 3600) % 24;
-            let m = (secs / 60) % 60;
-            let s = secs % 60;
-            format!(
-                "{:04}-{:02}-{:02}T{h:02}:{m:02}:{s:02}Z",
-                1970 + secs / 31557600,
-                (secs % 31557600) / 2629800 + 1,
-                (secs % 2629800) / 86400 + 1,
-            )
-        })
+    let fmt = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+    time::OffsetDateTime::now_utc()
+        .format(&fmt)
         .unwrap_or_default()
 }
 
