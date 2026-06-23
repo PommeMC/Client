@@ -218,10 +218,11 @@ pub(super) fn push_server_status(
         return;
     };
 
+    let content_pad = SERVER_ENTRY_PAD * gs;
     let icon_w = 10.0 * gs;
     let icon_h = 8.0 * gs;
-    let icon_x = entry_rect[0] + entry_rect[2] - icon_w - 5.0 * gs;
-    let icon_y = entry_rect[1];
+    let icon_x = entry_rect[0] + entry_rect[2] - content_pad - icon_w - 5.0 * gs;
+    let icon_y = entry_rect[1] + content_pad;
 
     match state {
         PingState::Pinging => {
@@ -267,7 +268,7 @@ pub(super) fn push_server_status(
             player_names,
             ..
         } => {
-            let motd_max_w = entry_rect[2] - 32.0 * gs - 2.0 * gs;
+            let motd_max_w = entry_rect[2] - content_pad * 2.0 - 32.0 * gs - 2.0 * gs;
             let line_h = fs * 1.2;
             let lines = wrap_motd_spans(motd, motd_max_w, fs, text_width_fn);
             for (i, line) in lines.iter().take(2).enumerate() {
@@ -308,7 +309,7 @@ pub(super) fn push_server_status(
             let status_x = icon_x - pw - 5.0 * gs;
             elements.push(MenuElement::Text {
                 x: status_x,
-                y: entry_rect[1] + 1.0 * gs,
+                y: icon_y + 1.0 * gs,
                 text: status_text,
                 scale: fs,
                 color: status_color,
@@ -322,7 +323,7 @@ pub(super) fn push_server_status(
                     format!("{latency_ms} ms")
                 };
                 common::push_tooltip(elements, cursor, screen_w, screen_h, gs, &tip);
-            } else if common::hit_test(cursor, [status_x, entry_rect[1], pw, fs])
+            } else if common::hit_test(cursor, [status_x, icon_y, pw, fs])
                 && !player_names.is_empty()
             {
                 let tip = player_names.join("\n");
