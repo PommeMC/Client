@@ -1777,6 +1777,7 @@ fn skin_url_from_texture_property(value: &str) -> Result<String, String> {
     use base64::Engine;
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(value)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
         .map_err(|e| e.to_string())?;
     let payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(|e| e.to_string())?;
 
@@ -1867,6 +1868,21 @@ mod tests {
 
         assert_eq!(
             skin_url_from_texture_property(&value).unwrap(),
+            "https://textures.minecraft.net/texture/testskin"
+        );
+    }
+
+    #[test]
+    fn decodes_unpadded_skin_url_from_textures_property() {
+        use base64::Engine;
+
+        let payload =
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#;
+        let value = base64::engine::general_purpose::STANDARD.encode(payload);
+        let value = value.trim_end_matches('=');
+
+        assert_eq!(
+            skin_url_from_texture_property(value).unwrap(),
             "https://textures.minecraft.net/texture/testskin"
         );
     }
