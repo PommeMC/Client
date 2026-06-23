@@ -275,6 +275,7 @@ pub fn handle_game_packet(
             let head_y_rot_deg = (p.y_head_rot as f32) * 360.0 / 256.0;
             let _ = event_tx.try_send(NetworkEvent::EntitySpawned {
                 id: p.id.0,
+                uuid: p.uuid,
                 entity_type: p.entity_type,
                 position: p.position.into(),
                 y_rot_deg,
@@ -509,6 +510,12 @@ pub fn handle_game_packet(
                 .map(|e| PlayerInfoEntry {
                     uuid: e.profile.uuid,
                     name: e.profile.name.clone(),
+                    textures: e
+                        .profile
+                        .properties
+                        .map
+                        .get("textures")
+                        .map(|p| p.value.clone()),
                     game_mode: e.game_mode.to_id(),
                     listed: e.listed,
                     latency: e.latency,

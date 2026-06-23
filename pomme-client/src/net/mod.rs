@@ -129,6 +129,7 @@ pub enum NetworkEvent {
     },
     EntitySpawned {
         id: i32,
+        uuid: uuid::Uuid,
         entity_type: EntityKind,
         position: Position,
         y_rot_deg: f32,

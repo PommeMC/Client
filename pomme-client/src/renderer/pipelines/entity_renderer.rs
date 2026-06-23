@@ -19,6 +19,7 @@ pub const MAX_OVERLAYS: usize = 2;
 /// Per-frame instance buffer capacity, in (entity, part) draws. Far above any
 /// realistic on-screen entity count; excess is dropped with a warning.
 const MAX_INSTANCES: usize = 16384;
+const MAX_PLAYER_SKINS: usize = 128;
 
 /// Per-instance data for one (entity, part) draw, fed as instance-rate vertex
 /// attributes (binding 1) — the four model-matrix columns, tint, overlay, uv.
@@ -41,6 +42,7 @@ pub struct EntityRenderInfo {
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
     pub entity_kind: EntityKind,
+    pub player_uuid: Option<uuid::Uuid>,
     pub variant_index: u32,
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
     pub head_y_offset: f32,
@@ -86,6 +88,13 @@ struct MobEntry {
     adult_overlays: Vec<MobVariant>,
     baby_overlays: Vec<MobVariant>,
     anim: AnimationType,
+}
+
+struct PlayerSkinTexture {
+    image: vk::Image,
+    view: vk::ImageView,
+    allocation: Allocation,
+    set: vk::DescriptorSet,
 }
 
 impl MobEntry {
@@ -181,6 +190,7 @@ pub struct EntityRenderer {
     /// REPEAT-wrap sampler for the scrolling swirl overlay.
     texture_sampler_repeat: vk::Sampler,
     mobs: HashMap<EntityKind, MobEntry>,
+    player_skins: HashMap<uuid::Uuid, PlayerSkinTexture>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -425,6 +435,7 @@ impl EntityRenderer {
                 n
             })
             .sum();
+        let tex_count = tex_count + MAX_PLAYER_SKINS as u32;
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -525,6 +536,7 @@ impl EntityRenderer {
             texture_sampler,
             texture_sampler_repeat,
             mobs,
+            player_skins: HashMap::new(),
         }
     }
 
@@ -532,6 +544,88 @@ impl EntityRenderer {
         let bytes = bytemuck::bytes_of(uniform);
         self.camera_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
             .copy_from_slice(bytes);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_player_skin(
+        &mut self,
+        device: &vk::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        allocator: &Arc<Mutex<Allocator>>,
+        uuid: &uuid::Uuid,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        if !self.player_skins.contains_key(uuid) && self.player_skins.len() >= MAX_PLAYER_SKINS {
+            tracing::warn!("Player skin cache full; keeping fallback texture for {uuid}");
+            return;
+        }
+
+        let (image, view, allocation) =
+            upload_texture_pixels(device, queue, command_pool, allocator, pixels, width, height);
+        let set = if let Some(old) = self.player_skins.get(uuid) {
+            old.set
+        } else {
+            let tex_alloc_info = vk::DescriptorSetAllocateInfo {
+                descriptor_pool: self.descriptor_pool,
+                descriptor_set_count: 1,
+                set_layouts: &self.texture_layout,
+                ..Default::default()
+            };
+            let mut texture_set = vk::DescriptorSet::null();
+            device
+                .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut texture_set))
+                .expect("failed to allocate player skin texture descriptor set");
+            texture_set
+        };
+
+        let image_info = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let tex_write = vk::WriteDescriptorSet {
+            dst_set: set,
+            dst_binding: 0,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            descriptor_count: 1,
+            image_info: &image_info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[tex_write], &[]);
+
+        if let Some(old) = self.player_skins.insert(
+            uuid.to_owned(),
+            PlayerSkinTexture {
+                image,
+                view,
+                allocation,
+                set,
+            },
+        ) {
+            device.destroy_image_view(old.view, None);
+            device.destroy_image(old.image, None);
+            allocator.lock().unwrap().free(old.allocation).ok();
+        }
+
+        tracing::info!("Player skin loaded for {uuid}: {width}x{height}");
+    }
+
+    fn player_texture_set(
+        &self,
+        info: &EntityRenderInfo,
+        fallback: vk::DescriptorSet,
+    ) -> vk::DescriptorSet {
+        if info.entity_kind == EntityKind::Player
+            && let Some(uuid) = &info.player_uuid
+            && let Some(skin) = self.player_skins.get(uuid)
+        {
+            skin.set
+        } else {
+            fallback
+        }
     }
 
     fn compute_anim(
@@ -644,13 +738,18 @@ impl EntityRenderer {
                     NO_OVERLAY
                 };
                 let base = v.entry.base_variant(v.info.is_baby, v.info.variant_index);
-                opaque.add(base, (vi, WHITE_TINT, overlay_color, [0.0, 0.0]));
+                let texture_set = self.player_texture_set(v.info, base.texture_set);
+                opaque.add(base, texture_set, (vi, WHITE_TINT, overlay_color, [0.0, 0.0]));
                 for (slot, overlay) in v.entry.overlays(v.info.is_baby).iter().enumerate() {
                     if overlay.overlay_kind != OverlayKind::Opaque {
                         continue;
                     }
                     if let Some(tint) = v.info.overlay_tints[slot] {
-                        opaque.add(overlay, (vi, tint, overlay_color, [0.0, 0.0]));
+                        opaque.add(
+                            overlay,
+                            overlay.texture_set,
+                            (vi, tint, overlay_color, [0.0, 0.0]),
+                        );
                     }
                 }
             }
@@ -700,11 +799,12 @@ impl EntityRenderer {
         // gl_InstanceIndex (incl. firstInstance) indexes into it.
         cmd.bind_vertex_buffers(1, &[self.instance_buffers[frame]], &[0]);
         let mut last_vb = vk::Buffer::null();
+        let mut last_texture_set = vk::DescriptorSet::null();
         for r in records {
             if r.first_instance as usize + r.instance_count as usize > count {
                 continue; // dropped by the capacity clamp above
             }
-            if r.vertex_buffer != last_vb {
+            if r.vertex_buffer != last_vb || r.texture_set != last_texture_set {
                 cmd.bind_descriptor_sets(
                     vk::PipelineBindPoint::Graphics,
                     self.pipeline_layout,
@@ -714,6 +814,7 @@ impl EntityRenderer {
                 );
                 cmd.bind_vertex_buffers(0, &[r.vertex_buffer], &[0]);
                 last_vb = r.vertex_buffer;
+                last_texture_set = r.texture_set;
             }
             cmd.draw(
                 r.part_count,
@@ -776,6 +877,15 @@ impl EntityRenderer {
                     .ok();
                 device.destroy_image(v.texture_image, None);
             }
+        }
+        for skin in self.player_skins.values_mut() {
+            device.destroy_image_view(skin.view, None);
+            alloc
+                .free(std::mem::replace(&mut skin.allocation, unsafe {
+                    std::mem::zeroed()
+                }))
+                .ok();
+            device.destroy_image(skin.image, None);
         }
 
         drop(alloc);
@@ -881,28 +991,27 @@ type Member = (usize, [f32; 4], [f32; 4], [f32; 2]);
 /// one instanced draw covering all its entities.
 #[derive(Default)]
 struct VariantGroups<'a> {
-    groups: Vec<(&'a MobVariant, Vec<Member>)>,
-    index: HashMap<usize, usize>,
+    groups: Vec<(&'a MobVariant, vk::DescriptorSet, Vec<Member>)>,
 }
 
 impl<'a> VariantGroups<'a> {
-    fn add(&mut self, variant: &'a MobVariant, member: Member) {
+    fn add(&mut self, variant: &'a MobVariant, texture_set: vk::DescriptorSet, member: Member) {
         let key = variant as *const MobVariant as usize;
-        let gi = match self.index.get(&key) {
-            Some(&gi) => gi,
+        let gi = match self.groups.iter().position(|(v, set, _)| {
+            *v as *const MobVariant as usize == key && *set == texture_set
+        }) {
+            Some(gi) => gi,
             None => {
-                let gi = self.groups.len();
-                self.groups.push((variant, Vec::new()));
-                self.index.insert(key, gi);
-                gi
+                self.groups.push((variant, texture_set, Vec::new()));
+                self.groups.len() - 1
             }
         };
-        self.groups[gi].1.push(member);
+        self.groups[gi].2.push(member);
     }
 
     fn emit(&self, vis: &[VisEntity], instances: &mut Vec<EntityInstance>) -> Vec<DrawRecord> {
         let mut records = Vec::new();
-        for (variant, members) in &self.groups {
+        for (variant, texture_set, members) in &self.groups {
             // Part transforms differ per entity (animation), so compute per member.
             let pts: Vec<Vec<glam::Mat4>> = members
                 .iter()
@@ -923,7 +1032,7 @@ impl<'a> VariantGroups<'a> {
                     });
                 }
                 records.push(DrawRecord {
-                    texture_set: variant.texture_set,
+                    texture_set: *texture_set,
                     vertex_buffer: variant.vertex_buffer,
                     part_start: *start,
                     part_count: *part_count,
@@ -952,7 +1061,7 @@ fn collect_emissive<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
                 continue;
             }
             if let Some(tint) = v.info.overlay_tints[slot] {
-                groups.add(overlay, (vi, tint, NO_OVERLAY, uv));
+                groups.add(overlay, overlay.texture_set, (vi, tint, NO_OVERLAY, uv));
             }
         }
     }
@@ -1145,6 +1254,33 @@ fn load_entity_texture(
         util::create_gpu_image(device, allocator, width, height, "entity_texture");
     let (staging_buf, staging_alloc) =
         util::create_staging_buffer(device, allocator, &pixels, "entity_texture_staging");
+    util::upload_image(
+        device,
+        queue,
+        command_pool,
+        staging_buf,
+        image,
+        width,
+        height,
+    );
+    device.destroy_buffer(staging_buf, None);
+    allocator.lock().unwrap().free(staging_alloc).ok();
+    (image, view, allocation)
+}
+
+fn upload_texture_pixels(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> (vk::Image, vk::ImageView, Allocation) {
+    let (image, view, allocation) =
+        util::create_gpu_image(device, allocator, width, height, "player_skin_texture");
+    let (staging_buf, staging_alloc) =
+        util::create_staging_buffer(device, allocator, pixels, "player_skin_texture_staging");
     util::upload_image(
         device,
         queue,

@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub struct PlayerInfoEntry {
     pub uuid: Uuid,
     pub name: String,
+    pub textures: Option<String>,
     /// 0 survival, 1 creative, 2 adventure, 3 spectator.
     pub game_mode: u8,
     pub listed: bool,
@@ -29,6 +30,7 @@ pub struct TabListPlayer {
     #[allow(dead_code)]
     pub uuid: Uuid,
     pub name: String,
+    pub textures: Option<String>,
     pub display_name: Option<String>,
     pub game_mode: u8,
     pub latency: i32,
@@ -62,6 +64,7 @@ impl TabList {
                     TabListPlayer {
                         uuid: e.uuid,
                         name: e.name.clone(),
+                        textures: e.textures.clone(),
                         display_name: e.display_name.clone(),
                         game_mode: e.game_mode,
                         latency: e.latency,
@@ -70,6 +73,9 @@ impl TabList {
                     },
                 );
             } else if let Some(p) = self.players.get_mut(&e.uuid) {
+                if let Some(textures) = &e.textures {
+                    p.textures = Some(textures.clone());
+                }
                 if actions.update_game_mode {
                     p.game_mode = e.game_mode;
                 }

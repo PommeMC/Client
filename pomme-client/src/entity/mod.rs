@@ -24,6 +24,7 @@ pub struct LivingEntity {
     pub body_y_rot_deg: f32,
     pub prev_body_y_rot_deg: f32,
     pub entity_type: EntityKind,
+    pub player_uuid: Option<uuid::Uuid>,
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
     pub prev_walk_anim_speed: f32,
@@ -61,6 +62,7 @@ impl LivingEntity {
         look_dir: LookDirection,
         head_y_rot_deg: f32,
         body_y_rot_deg: f32,
+        player_uuid: Option<uuid::Uuid>,
     ) -> Self {
         Self {
             position,
@@ -72,6 +74,7 @@ impl LivingEntity {
             body_y_rot_deg,
             prev_body_y_rot_deg: body_y_rot_deg,
             entity_type,
+            player_uuid,
             walk_anim_pos: 0.0,
             walk_anim_speed: 0.0,
             prev_walk_anim_speed: 0.0,
@@ -392,6 +395,7 @@ impl EntityStore {
         look_dir: LookDirection,
         body_y_rot_deg: f32,
         head_y_rot_deg: f32,
+        player_uuid: Option<uuid::Uuid>,
     ) {
         self.living.insert(
             id,
@@ -401,6 +405,7 @@ impl EntityStore {
                 look_dir,
                 head_y_rot_deg,
                 body_y_rot_deg,
+                player_uuid,
             ),
         );
     }

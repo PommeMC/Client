@@ -1054,9 +1054,29 @@ impl Renderer {
                     self.hand_pipeline.skin_view(),
                     self.hand_pipeline.skin_sampler(),
                 );
+                self.update_player_entity_skin(uuid, &pixels, w, h);
             }
             Err(e) => tracing::warn!("Failed to load player skin: {e}"),
         }
+    }
+
+    pub fn update_player_entity_skin(
+        &mut self,
+        uuid: &uuid::Uuid,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        self.entity_renderer.update_player_skin(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            uuid,
+            pixels,
+            width,
+            height,
+        );
     }
 
     pub fn update_favicon_atlas(&mut self, favicons: &[(String, Vec<u8>, u32)]) {
@@ -1699,8 +1719,37 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<(Vec<u8>, u32, u32)
     }
     #[derive(serde::Deserialize)]
     struct ProfileProperty {
+        name: Option<String>,
         value: String,
     }
+
+    let url = format!("https://sessionserver.mojang.com/session/minecraft/profile/{uuid}");
+    let profile: SessionProfile = reqwest::get(&url)
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let value = &profile
+        .properties
+        .iter()
+        .find(|p| p.name.as_deref() == Some("textures"))
+        .or_else(|| profile.properties.first())
+        .ok_or("No properties")?
+        .value;
+
+    fetch_skin_texture_from_profile_property(value).await
+}
+
+pub(crate) async fn fetch_skin_texture_from_profile_property(
+    value: &str,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let skin_url = skin_url_from_texture_property(value)?;
+    fetch_skin_image(&skin_url).await
+}
+
+fn skin_url_from_texture_property(value: &str) -> Result<String, String> {
     #[derive(serde::Deserialize)]
     struct TexturesPayload {
         textures: Textures,
@@ -1715,29 +1764,21 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<(Vec<u8>, u32, u32)
         url: String,
     }
 
-    let url = format!("https://sessionserver.mojang.com/session/minecraft/profile/{uuid}");
-    let profile: SessionProfile = reqwest::get(&url)
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let value = &profile.properties.first().ok_or("No properties")?.value;
-
     use base64::Engine;
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(value)
         .map_err(|e| e.to_string())?;
     let payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(|e| e.to_string())?;
 
-    let skin_url = payload
+    payload
         .textures
         .skin
         .map(|s| s.url)
-        .ok_or("No skin texture")?;
+        .ok_or_else(|| "No skin texture".to_string())
+}
 
-    let skin_bytes = reqwest::get(&skin_url)
+async fn fetch_skin_image(skin_url: &str) -> Result<(Vec<u8>, u32, u32), String> {
+    let skin_bytes = reqwest::get(skin_url)
         .await
         .map_err(|e| e.to_string())?
         .bytes()
@@ -1749,6 +1790,25 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<(Vec<u8>, u32, u32)
     let w = rgba.width();
     let h = rgba.height();
     Ok((rgba.into_raw(), w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_skin_url_from_textures_property() {
+        use base64::Engine;
+
+        let payload =
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin"}}}"#;
+        let value = base64::engine::general_purpose::STANDARD.encode(payload);
+
+        assert_eq!(
+            skin_url_from_texture_property(&value).unwrap(),
+            "https://textures.minecraft.net/texture/testskin"
+        );
+    }
 }
 
 impl Drop for Renderer {

@@ -977,6 +977,7 @@ pub fn update_game(
                     + (e.walk_anim_speed - e.prev_walk_anim_speed) * partial_tick)
                     .min(1.0),
                 entity_kind: e.entity_type,
+                player_uuid: e.player_uuid.clone(),
                 variant_index: extras.variant_index,
                 overlay_tints: extras.overlay_tints,
                 head_y_offset: extras.head_y_offset,
@@ -1014,6 +1015,7 @@ pub fn update_game(
                 + (game.player_walk_speed - game.player_prev_walk_speed) * partial_tick)
                 .min(1.0),
             entity_kind: EntityKind::Player,
+            player_uuid: Some(core.user.uuid.clone()),
             variant_index: 0,
             overlay_tints: [None, None],
             head_y_offset: 0.0,
