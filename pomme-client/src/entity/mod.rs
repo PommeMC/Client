@@ -512,8 +512,8 @@ impl EntityStore {
         }
     }
 
-    pub fn remove_living(&mut self, id: i32) {
-        self.living.remove(&id);
+    pub fn remove_living(&mut self, id: i32) -> Option<LivingEntity> {
+        self.living.remove(&id)
     }
 
     pub fn tick_living(&mut self) {

@@ -1079,6 +1079,16 @@ impl Renderer {
         );
     }
 
+    pub fn remove_player_entity_skin(&mut self, uuid: &uuid::Uuid) {
+        self.entity_renderer
+            .remove_player_skin(&self.ctx.device, &self.ctx.allocator, uuid);
+    }
+
+    pub fn clear_player_entity_skins(&mut self) {
+        self.entity_renderer
+            .clear_player_skins(&self.ctx.device, &self.ctx.allocator);
+    }
+
     pub fn update_favicon_atlas(&mut self, favicons: &[(String, Vec<u8>, u32)]) {
         self.menu_pipeline.update_favicon_atlas(
             &self.ctx.device,

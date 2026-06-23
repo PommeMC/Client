@@ -448,6 +448,7 @@ impl EntityRenderer {
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
+            flags: vk::DescriptorPoolCreateFlags::FreeDescriptorSet,
             max_sets: MAX_FRAMES_IN_FLIGHT as u32 + tex_count,
             pool_size_count: pool_sizes.len() as u32,
             pool_sizes: pool_sizes.as_ptr(),
@@ -617,7 +618,25 @@ impl EntityRenderer {
             allocator.lock().unwrap().free(old.allocation).ok();
         }
 
-        tracing::info!("Player skin loaded for {uuid}: {width}x{height}");
+        tracing::debug!("Player skin loaded for {uuid}: {width}x{height}");
+    }
+
+    pub fn remove_player_skin(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        uuid: &uuid::Uuid,
+    ) {
+        if let Some(skin) = self.player_skins.remove(uuid) {
+            free_player_skin_texture(device, allocator, self.descriptor_pool, skin);
+        }
+    }
+
+    pub fn clear_player_skins(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        let descriptor_pool = self.descriptor_pool;
+        for (_, skin) in self.player_skins.drain() {
+            free_player_skin_texture(device, allocator, descriptor_pool, skin);
+        }
     }
 
     fn player_texture_set(
@@ -889,14 +908,8 @@ impl EntityRenderer {
                 device.destroy_image(v.texture_image, None);
             }
         }
-        for skin in self.player_skins.values_mut() {
-            device.destroy_image_view(skin.view, None);
-            alloc
-                .free(std::mem::replace(&mut skin.allocation, unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-            device.destroy_image(skin.image, None);
+        for (_, skin) in self.player_skins.drain() {
+            destroy_player_skin_texture(device, &mut alloc, skin);
         }
 
         drop(alloc);
@@ -1305,6 +1318,29 @@ fn upload_texture_pixels(
     device.destroy_buffer(staging_buf, None);
     allocator.lock().unwrap().free(staging_alloc).ok();
     (image, view, allocation)
+}
+
+fn free_player_skin_texture(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    descriptor_pool: vk::DescriptorPool,
+    skin: PlayerSkinTexture,
+) {
+    device
+        .free_descriptor_sets(descriptor_pool, &[skin.set])
+        .ok();
+    let mut alloc = allocator.lock().unwrap();
+    destroy_player_skin_texture(device, &mut alloc, skin);
+}
+
+fn destroy_player_skin_texture(
+    device: &vk::Device,
+    allocator: &mut Allocator,
+    skin: PlayerSkinTexture,
+) {
+    device.destroy_image_view(skin.view, None);
+    allocator.free(skin.allocation).ok();
+    device.destroy_image(skin.image, None);
 }
 
 pub(super) fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
