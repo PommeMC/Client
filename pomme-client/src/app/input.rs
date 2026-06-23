@@ -1,14 +1,20 @@
 use std::collections::{HashMap, HashSet};
 
+use gilrs::ff::{BaseEffect, Effect, EffectBuilder, Repeat, Replay};
 use gilrs::{Button, GamepadId, Gilrs};
 use winit::event::{ElementState, Modifiers, MouseButton};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+use crate::app::TICK_RATE_MS;
 use crate::app::phases::AppPhase;
 use crate::app::state_slot::StateSlot;
 
 /// Left-stick deflection past which a direction counts as a digital press.
 pub const STICK_MOVEMENT_THRESHOLD: f32 = 0.25;
+
+/// Value in milliseconds for how long the controller should rumble to be only
+/// an "instant".
+pub const SHORT_RUMBLE_TIME: u32 = 5;
 
 #[derive(Hash, PartialEq, Eq, Clone)]
 pub enum Action {
@@ -21,6 +27,9 @@ pub enum Action {
     OpenMenu,
     ViewPlayerList,
     ChangePerspective,
+    OpenChat,
+    OpenCommands,
+    Close,
 }
 
 pub struct InputState {
@@ -44,7 +53,9 @@ pub struct InputState {
     copy_pressed: bool,
     cut_pressed: bool,
     undo_pressed: bool,
-    controller_manager: Option<Gilrs>,
+    gamepad_manager: Option<Gilrs>,
+    weak_rumble_effect: Option<Effect>,
+    strong_rumble_effect: Option<Effect>,
     active_gamepad_id: Option<GamepadId>,
     recent_actions: HashMap<Action, bool>,
 }
@@ -77,7 +88,25 @@ impl InputState {
         }
     }
 
-    fn with_controller(controller_manager: Option<Gilrs>) -> Self {
+    fn with_controller(mut gamepad_manager: Option<Gilrs>) -> Self {
+        // `Weak`/`Strong` pick the motor, not the intensity, so the weak motor
+        // at a higher `magnitude` is intentional.
+        let (weak_effect, strong_effect) = match gamepad_manager.as_mut() {
+            Some(manager) => (
+                build_rumble_effect(
+                    manager,
+                    gilrs::ff::BaseEffectType::Weak { magnitude: 60_000 },
+                    gilrs::ff::Ticks::from_ms(SHORT_RUMBLE_TIME),
+                ),
+                build_rumble_effect(
+                    manager,
+                    gilrs::ff::BaseEffectType::Strong { magnitude: 30_000 },
+                    gilrs::ff::Ticks::from_ms(TICK_RATE_MS + 50),
+                ),
+            ),
+            None => (None, None),
+        };
+
         Self {
             pressed: HashSet::new(),
             modifiers: Modifiers::default(),
@@ -99,14 +128,16 @@ impl InputState {
             copy_pressed: false,
             cut_pressed: false,
             undo_pressed: false,
-            controller_manager,
+            gamepad_manager,
+            weak_rumble_effect: weak_effect,
+            strong_rumble_effect: strong_effect,
             active_gamepad_id: None,
             recent_actions: HashMap::new(),
         }
     }
 
     pub fn update(&mut self, phase: &mut StateSlot<AppPhase>) -> bool {
-        let events: Vec<gilrs::Event> = match self.controller_manager.as_mut() {
+        let events: Vec<gilrs::Event> = match self.gamepad_manager.as_mut() {
             Some(manager) => std::iter::from_fn(|| manager.next_event()).collect(),
             None => Vec::new(),
         };
@@ -172,10 +203,39 @@ impl InputState {
 
                     self.recent_actions.remove(&Action::OpenMenu);
                 }
+                if self.action_just_pressed(Action::Close) {
+                    if !game.dead && game.inventory_open {
+                        game.inventory_open = false;
+                        should_apply_cursor_grab = true;
+                    }
+
+                    if game.chat.is_open() {
+                        game.chat.close();
+                        should_apply_cursor_grab = true;
+                    }
+
+                    self.recent_actions.remove(&Action::Close);
+                }
                 if self.action_just_pressed(Action::ChangePerspective) {
                     gfx.renderer.cycle_camera_mode();
 
                     self.recent_actions.remove(&Action::ChangePerspective);
+                }
+                if self.action_just_pressed(Action::OpenChat) {
+                    if !game.paused && !game.gui_open() {
+                        game.chat.open();
+                        should_apply_cursor_grab = true;
+                    }
+
+                    self.recent_actions.remove(&Action::OpenChat);
+                }
+                if self.action_just_pressed(Action::OpenCommands) {
+                    if !game.paused && !game.gui_open() {
+                        game.chat.open_with_slash();
+                        should_apply_cursor_grab = true;
+                    }
+
+                    self.recent_actions.remove(&Action::OpenCommands);
                 }
             }
 
@@ -186,7 +246,7 @@ impl InputState {
     }
 
     pub fn get_active_gamepad(&self) -> Option<gilrs::Gamepad<'_>> {
-        let manager = self.controller_manager.as_ref()?;
+        let manager = self.gamepad_manager.as_ref()?;
         self.active_gamepad_id.map(|id| manager.gamepad(id))
     }
 
@@ -230,6 +290,14 @@ impl InputState {
                     self.recent_actions.insert(Action::ChangePerspective, true);
                 }
 
+                Button::DPadRight => {
+                    self.recent_actions.insert(Action::OpenChat, true);
+                }
+
+                Button::East => {
+                    self.recent_actions.insert(Action::Close, true);
+                }
+
                 _ => {}
             },
             gilrs::EventType::ButtonReleased(button, _) => match button {
@@ -249,6 +317,14 @@ impl InputState {
 
                 Button::DPadUp => {
                     self.recent_actions.insert(Action::ChangePerspective, false);
+                }
+
+                Button::DPadRight => {
+                    self.recent_actions.insert(Action::OpenChat, false);
+                }
+
+                Button::East => {
+                    self.recent_actions.insert(Action::Close, false);
                 }
 
                 _ => {}
@@ -276,7 +352,7 @@ impl InputState {
                     || self.gamepad_button_down(Button::North)
             }
             Action::OpenMenu => {
-                self.key_pressed(KeyCode::Escape) || self.gamepad_button_down(Button::East)
+                self.key_pressed(KeyCode::Escape) || self.gamepad_button_down(Button::Start)
             }
             Action::ViewPlayerList => {
                 self.key_pressed(KeyCode::Tab) || self.gamepad_button_down(Button::Select)
@@ -284,6 +360,12 @@ impl InputState {
             Action::ChangePerspective => {
                 self.key_pressed(KeyCode::F5) || self.gamepad_button_down(Button::DPadUp)
             }
+            Action::OpenChat => {
+                self.key_pressed(KeyCode::KeyT) || self.gamepad_button_down(Button::DPadRight)
+            }
+            Action::OpenCommands => self.key_pressed(KeyCode::Slash),
+            // Controller-only; keyboard Escape closes via OpenMenu and the chat path.
+            Action::Close => self.gamepad_button_down(Button::East),
         }
     }
 
@@ -332,6 +414,18 @@ impl InputState {
         self.pressed.contains(&key)
     }
 
+    pub fn weak_rumble_for_instant(&self) -> Result<(), gilrs::ff::Error> {
+        self.weak_rumble_effect
+            .as_ref()
+            .map_or(Ok(()), Effect::play)
+    }
+
+    pub fn strong_rumble_for_tick(&self) -> Result<(), gilrs::ff::Error> {
+        self.strong_rumble_effect
+            .as_ref()
+            .map_or(Ok(()), Effect::play)
+    }
+
     pub fn on_key_event(&mut self, event: &winit::event::KeyEvent) {
         if let PhysicalKey::Code(code) = event.physical_key {
             match event.state {
@@ -350,6 +444,13 @@ impl InputState {
                         KeyCode::F5 => {
                             self.recent_actions.insert(Action::ChangePerspective, true);
                         }
+                        KeyCode::KeyT => {
+                            self.recent_actions.insert(Action::OpenChat, true);
+                        }
+                        KeyCode::Slash => {
+                            self.recent_actions.insert(Action::OpenCommands, true);
+                        }
+
                         _ => {}
                     }
                 }
@@ -568,4 +669,39 @@ fn hotbar_slot(code: KeyCode) -> Option<u8> {
         KeyCode::Digit9 => Some(8),
         _ => None,
     }
+}
+
+/// Build a single-motor force-feedback effect targeting the FF-capable gamepads
+/// connected right now. Rumble is best-effort: returns `None` if no controller
+/// supports it or the effect can't be created.
+///
+/// TODO: the effect is bound to the gamepads present when this runs (startup);
+/// a controller connected later won't rumble until this is rebuilt on hotplug.
+fn build_rumble_effect(
+    manager: &mut Gilrs,
+    kind: gilrs::ff::BaseEffectType,
+    duration: gilrs::ff::Ticks,
+) -> Option<Effect> {
+    let ff_supported = manager
+        .gamepads()
+        .filter_map(|(id, gp)| gp.is_ff_supported().then_some(id))
+        .collect::<Vec<_>>();
+    if ff_supported.is_empty() {
+        return None;
+    }
+
+    EffectBuilder::new()
+        .add_effect(BaseEffect {
+            kind,
+            scheduling: Replay {
+                play_for: duration,
+                ..Default::default()
+            },
+            envelope: Default::default(),
+        })
+        .repeat(Repeat::For(duration))
+        .gamepads(&ff_supported)
+        .finish(manager)
+        .map_err(|e| tracing::warn!("Failed to create rumble effect: {e}"))
+        .ok()
 }

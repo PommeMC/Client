@@ -297,6 +297,7 @@ impl InteractionState {
                 chunks,
                 sender,
                 audio,
+                input,
                 player_pos,
                 on_ground,
                 creative,
@@ -319,10 +320,18 @@ impl InteractionState {
             self.stop_destroying(sender);
         }
 
+        if self.is_destroying {
+            let _ = input.strong_rumble_for_tick();
+        }
+
         if input.action_just_pressed(input::Action::Use)
             || (input.performing_action(input::Action::Use) && self.use_delay == 0)
         {
-            self.use_item_on(sender, chunks, player_pos, place_block, &mut dirty_chunks);
+            let success =
+                self.use_item_on(sender, chunks, player_pos, place_block, &mut dirty_chunks);
+            if success {
+                let _ = input.weak_rumble_for_instant();
+            }
         }
 
         if self.miss_time > 0 {
@@ -342,6 +351,7 @@ impl InteractionState {
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
+        input: &InputState,
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
@@ -362,6 +372,7 @@ impl InteractionState {
                     entity_id: MinecraftEntityId(hit.entity_id),
                 }));
                 self.swing(sender);
+                let _ = input.weak_rumble_for_instant();
                 return;
             }
             Some(HitResult::Block(hit)) => hit,
@@ -428,6 +439,9 @@ impl InteractionState {
         self.swing(sender);
     }
 
+    /// Uses the currently selected item on the targeted block.
+    /// Returns `true` if a use interaction was sent, `false` if there was
+    /// nothing to act on (currently destroying, or no block target).
     fn use_item_on(
         &mut self,
         sender: &PacketSender,
@@ -435,15 +449,15 @@ impl InteractionState {
         player_pos: DVec3,
         place_block: Option<BlockState>,
         dirty_chunks: &mut Vec<BlockPos>,
-    ) {
+    ) -> bool {
         if self.is_destroying {
-            return;
+            return false;
         }
 
         self.use_delay = USE_DELAY;
 
         let Some(HitResult::Block(hit)) = self.target else {
-            return;
+            return false;
         };
 
         self.swing(sender);
@@ -462,6 +476,7 @@ impl InteractionState {
         }));
 
         self.predict_place(hit, place_block, chunks, player_pos, dirty_chunks);
+        true
     }
 
     /// Predicts placement locally for unambiguous single-state blocks,

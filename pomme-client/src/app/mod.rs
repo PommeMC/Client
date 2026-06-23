@@ -38,6 +38,7 @@ pub enum WindowError {
 }
 
 const TICK_RATE: f32 = 1.0 / 20.0;
+const TICK_RATE_MS: u32 = 1000 / 20;
 const DEFAULT_RENDER_DISTANCE: u32 = 12;
 const POSITION_SEND_INTERVAL: u32 = 20;
 const POSITION_THRESHOLD_SQ: f64 = 4.0e-8;
@@ -374,16 +375,6 @@ impl ApplicationHandler for App {
                                         {
                                             game.death_confirm = false;
                                             self.core.send_respawn(&connection, &mut game);
-                                        }
-                                        KeyCode::KeyT if !game.paused && !game.gui_open() => {
-                                            game.chat.open();
-                                            self.core
-                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
-                                        }
-                                        KeyCode::Slash if !game.paused && !game.gui_open() => {
-                                            game.chat.open_with_slash();
-                                            self.core
-                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
                                         KeyCode::F3 => {
                                             game.show_debug = !game.show_debug;
