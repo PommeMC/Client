@@ -203,7 +203,7 @@ fn apply_collision(
         chunk_store,
         &aabb,
         *player.velocity,
-        input.key_pressed(KeyCode::ShiftLeft),
+        input.performing_action(input::Action::Sneak),
         player.on_ground,
     );
     let step_height = if player.on_ground { STEP_HEIGHT } else { 0.0 };
@@ -252,7 +252,7 @@ fn update_sprint_state(
     if player.sprint_toggle_timer > 0 {
         player.sprint_toggle_timer -= 1;
     }
-    if input.key_pressed(KeyCode::ShiftLeft) {
+    if input.performing_action(input::Action::Sneak) {
         player.sprint_toggle_timer = 0;
     }
 
@@ -281,7 +281,7 @@ fn update_crouch_state(player: &mut LocalPlayer, input: &InputState, chunk_store
     player.crouching = player.game_mode != 3
         && !player.swimming
         && can_fit_with_height(chunk_store, player.position.into(), CROUCH_HEIGHT)
-        && (input.key_pressed(KeyCode::ShiftLeft)
+        && (input.performing_action(input::Action::Sneak)
             || !can_fit_with_height(chunk_store, player.position.into(), STANDING_HEIGHT));
 }
 
