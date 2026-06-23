@@ -45,7 +45,7 @@ const POSITION_THRESHOLD_SQ: f64 = 4.0e-8;
 pub struct App {
     phase: StateSlot<AppPhase>,
     core: AppCore,
-    minimized: bool,
+    occluded: bool,
     fps_limiter: FramerateLimiter,
 }
 
@@ -72,7 +72,7 @@ impl FramerateLimiter {
 
     fn limit_display_fps(&mut self, framerate_limit: u32) {
         let target_time =
-            self.last_frame + Duration::from_nanos(1_000_000_000 / framerate_limit as u64);
+            self.last_frame + Duration::from_nanos(1_000_000_000 / framerate_limit.max(1) as u64);
         if framerate_limit != self.last_limit {
             self.average_overshoot_ns = 0;
             self.last_limit = framerate_limit;
@@ -120,7 +120,7 @@ impl App {
                 pending_skin_uuid: Some(user.uuid),
             }),
             core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
-            minimized: false,
+            occluded: false,
             fps_limiter: FramerateLimiter::new(),
         }
     }
@@ -132,10 +132,10 @@ impl App {
     }
 
     /// The effective framerate cap, or `None` for uncapped, matching vanilla
-    /// `FramerateLimitTracker`: iconified → 10, the title/menu (no world) → 60,
-    /// otherwise the Max Framerate setting (uncapped at its top).
+    /// `FramerateLimitTracker`: occluded/iconified → 10, the title/menu (no
+    /// world) → 60, otherwise the Max Framerate setting (uncapped at its top).
     fn effective_framerate_limit(&self) -> Option<u32> {
-        if self.minimized {
+        if self.occluded {
             Some(10)
         } else if !matches!(self.phase.get(), AppPhase::InGame { .. }) {
             Some(60)
@@ -455,7 +455,7 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Occluded(occluded) => {
-                self.minimized = occluded;
+                self.occluded = occluded;
             }
 
             WindowEvent::RedrawRequested => {
