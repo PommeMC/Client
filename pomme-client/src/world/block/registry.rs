@@ -15,6 +15,7 @@ pub enum Tint {
     None,
     Grass,
     Foliage,
+    DryFoliage,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -171,10 +172,12 @@ impl BlockRegistry {
         let mut quads = Vec::new();
         for entry in entries {
             if entry.when.is_empty()
-                || entry
-                    .when
-                    .iter()
-                    .all(|(k, v)| props.get(k.as_str()).map(|pv| pv == v).unwrap_or(false))
+                || entry.when.iter().all(|(k, v)| {
+                    props
+                        .get(k.as_str())
+                        .map(|pv| v.split('|').any(|opt| opt == *pv))
+                        .unwrap_or(false)
+                })
             {
                 quads.extend(entry.quads.iter());
             }
