@@ -105,6 +105,9 @@ pub struct GameState {
     /// In-flight/finished upload of the chunk-load result, while its overlay is
     /// shown.
     pub chunk_load_upload: Option<UploadHandle>,
+    /// Last frame's `update_game` CPU phase timings, for the chunk-load
+    /// benchmark's worst-frame breakdown.
+    pub last_update_phases: crate::benchmark::UpdatePhases,
     /// Monotonic content generation per column, bumped on every edit (and chunk
     /// load). This is the dirty marker: a column needs (re)meshing whenever its
     /// `content_gen` outruns what was last enqueued, regardless of visibility,
@@ -229,6 +232,7 @@ impl GameState {
             chunk_load_result: None,
             chunk_load_abort: false,
             chunk_load_upload: None,
+            last_update_phases: crate::benchmark::UpdatePhases::default(),
             content_gen: HashMap::new(),
             meshed: HashMap::new(),
             vis_mask: HashMap::new(),
@@ -346,28 +350,38 @@ impl GameState {
         self.next_section_gen
     }
 
-    /// Upload a finished mesh and apply its bookkeeping: re-arm the rescan
-    /// for sections dropped on pool exhaustion, and adopt the per-section
-    /// visibility sets.
-    fn apply_mesh_upload(&mut self, renderer: &mut Renderer, mesh: ChunkMeshData) {
-        let dropped = renderer.upload_chunk_mesh(&mesh);
+    /// Adopt a mesh's per-section visibility sets, epoch-guarded so a stale
+    /// result can't overwrite a newer edit's visibility.
+    fn apply_mesh_visibility(&mut self, mesh: &mut ChunkMeshData) {
         let pos = mesh.pos;
-        // Sections dropped on pool exhaustion were retired from the buffer;
-        // clear their meshed bit so the next rescan re-enqueues them.
-        if !dropped.is_empty()
-            && let Some(m) = self.meshed.get_mut(&pos)
-        {
-            for si in dropped {
-                m.mask &= !(1u32 << si);
-            }
-        }
-        for (si, vis) in mesh.visibility {
+        for (si, vis) in std::mem::take(&mut mesh.visibility) {
             let e = self.section_vis_epoch.entry((pos, si)).or_insert(0);
             if mesh.upload_epoch >= *e {
                 *e = mesh.upload_epoch;
                 self.section_vis.insert((pos, si), vis);
             }
         }
+    }
+
+    /// Sections dropped on pool exhaustion were retired from the buffer; clear
+    /// their meshed bit so the next rescan re-enqueues them.
+    fn clear_dropped_meshed(&mut self, dropped: Vec<(ChunkPos, Vec<i32>)>) {
+        for (pos, sections) in dropped {
+            if let Some(m) = self.meshed.get_mut(&pos) {
+                for si in sections {
+                    m.mask &= !(1u32 << si);
+                }
+            }
+        }
+    }
+
+    /// Upload a finished mesh and apply its bookkeeping. The sync edit path;
+    /// the frame drain batches uploads instead.
+    fn apply_mesh_upload(&mut self, renderer: &mut Renderer, mut mesh: ChunkMeshData) {
+        self.apply_mesh_visibility(&mut mesh);
+        let dropped = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
+        self.clear_dropped_meshed(dropped);
+        self.mesh_dispatcher.recycle(mesh);
     }
 
     /// Drive the cave-cull occlusion walk: apply a finished async walk to the
@@ -761,6 +775,11 @@ pub fn update_game(
     connection: &ConnectionHandle,
     game: &mut GameState,
 ) -> GameUpdateResult {
+    // Snapshot last frame's phase timings before this frame overwrites them: they
+    // align with `raw_dt`, which measures the previous frame's full duration.
+    let frame_start = std::time::Instant::now();
+    let prev_phases = game.last_update_phases;
+
     // Position the audio listener at the player's head and push current
     // volumes before draining sound packets this frame.
     let listener_pos = game.player.eye_pos();
@@ -776,8 +795,13 @@ pub fn update_game(
         return GameUpdateResult::Disconnected { reason };
     }
 
-    let meshes: Vec<_> = game.mesh_dispatcher.drain_results().collect();
-    for mesh in meshes {
+    // Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
+    // upload them in one coalesced GPU transfer (one fence wait, not one per
+    // mesh) to avoid the streaming stutter from per-mesh `queue.wait_idle`.
+    let drain_start = std::time::Instant::now();
+    let results: Vec<_> = game.mesh_dispatcher.drain_results().collect();
+    let mut batch = Vec::with_capacity(results.len());
+    for mut mesh in results {
         // Drop a mesh built from an out-of-date snapshot. Edits (priority lane,
         // single section) are keyed per section so editing one section never
         // drops a sibling's in-flight result; bulk loads keep the column key.
@@ -789,6 +813,7 @@ pub fn update_game(
             mesh.content_gen < game.content_gen.get(&mesh.pos).copied().unwrap_or(0)
         };
         if stale {
+            game.mesh_dispatcher.recycle(mesh);
             continue;
         }
         if let Some(t) = &mesh.timing {
@@ -803,7 +828,19 @@ pub fn update_game(
                 ms(t.enqueued_at.elapsed()),
             );
         }
-        game.apply_mesh_upload(&mut gfx.renderer, mesh);
+        // Visibility updates are independent of the GPU upload; apply them now so
+        // the mesh can move into the upload batch.
+        game.apply_mesh_visibility(&mut mesh);
+        batch.push(mesh);
+    }
+    game.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
+    let upload_start = std::time::Instant::now();
+    let dropped = gfx.renderer.upload_chunk_meshes(&batch);
+    game.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
+    game.clear_dropped_meshed(dropped);
+    // Return the uploaded meshes' buffers to the worker pool for reuse.
+    for mesh in batch {
+        game.mesh_dispatcher.recycle(mesh);
     }
 
     game.mesh_dispatcher
@@ -1080,7 +1117,12 @@ pub fn update_game(
 
     if let Some(mut bench) = game.chunk_load_bench.take() {
         let count = gfx.renderer.loaded_chunk_count();
-        match bench.update(count, raw_dt * 1000.0) {
+        match bench.update(
+            count,
+            raw_dt * 1000.0,
+            gfx.renderer.last_timings(),
+            prev_phases,
+        ) {
             ChunkLoadStep::Wait => {
                 game.chunk_load_bench = Some(bench);
             }
@@ -1562,6 +1604,8 @@ pub fn update_game(
     ) {
         tracing::error!("Render error: {e}");
     }
+    // Whole-frame wall time (incl. render), read next frame to align with `raw_dt`.
+    game.last_update_phases.update_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
 
     if close_inventory {
         game.inventory_open = false;

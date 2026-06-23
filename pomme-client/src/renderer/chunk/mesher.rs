@@ -171,7 +171,12 @@ fn tint_color(tint: Tint, grass: [f32; 3], foliage: [f32; 3], dry_foliage: [f32;
     }
 }
 
-const MAX_MESH_UPLOADS_PER_FRAME: usize = 16;
+const MAX_MESH_UPLOADS_PER_FRAME: usize = 32;
+
+/// Bound on un-drained bulk results: past this, workers block on send (back-
+/// pressure) rather than piling finished meshes — and their pooled buffers —
+/// into an unbounded queue, which would starve the buffer pool.
+const MAX_PENDING_RESULTS: usize = 256;
 
 pub struct Colormap {
     pixels: Vec<[u8; 3]>,
@@ -420,6 +425,60 @@ pub fn int_to_rgb(color: i32) -> [f32; 3] {
     [r, g, b]
 }
 
+/// Pre-allocation hints sized to a typical section so a fresh buffer fills
+/// without reallocating (indices run ~1.5x vertices: 6 per quad vs 4).
+const SECTION_VERTEX_HINT: usize = 2048;
+const SECTION_INDEX_HINT: usize = 3072;
+
+/// Recycles section vertex/index `Vec`s so workers reuse them instead of
+/// allocating/freeing through the OS each mesh (vanilla reuses its
+/// `ByteBufferBuilder`s the same way). Bounded: returns past capacity are
+/// dropped, takes past it allocate.
+struct BufferPool {
+    vtx_tx: crossbeam_channel::Sender<Vec<ChunkVertex>>,
+    vtx_rx: crossbeam_channel::Receiver<Vec<ChunkVertex>>,
+    idx_tx: crossbeam_channel::Sender<Vec<u32>>,
+    idx_rx: crossbeam_channel::Receiver<Vec<u32>>,
+}
+
+impl BufferPool {
+    fn new(capacity: usize) -> Self {
+        let (vtx_tx, vtx_rx) = crossbeam_channel::bounded(capacity);
+        let (idx_tx, idx_rx) = crossbeam_channel::bounded(capacity);
+        Self {
+            vtx_tx,
+            vtx_rx,
+            idx_tx,
+            idx_rx,
+        }
+    }
+
+    // A fresh buffer is pre-sized so filling it doesn't realloc-grow; recycled
+    // buffers keep their capacity, so the pool self-tunes to real section sizes.
+    fn take_vertices(&self) -> Vec<ChunkVertex> {
+        self.vtx_rx
+            .try_recv()
+            .unwrap_or_else(|_| Vec::with_capacity(SECTION_VERTEX_HINT))
+    }
+
+    fn take_indices(&self) -> Vec<u32> {
+        self.idx_rx
+            .try_recv()
+            .unwrap_or_else(|_| Vec::with_capacity(SECTION_INDEX_HINT))
+    }
+
+    fn recycle(&self, mut vertices: Vec<ChunkVertex>, mut indices: Vec<u32>) {
+        if vertices.capacity() > 0 {
+            vertices.clear();
+            let _ = self.vtx_tx.try_send(vertices);
+        }
+        if indices.capacity() > 0 {
+            indices.clear();
+            let _ = self.idx_tx.try_send(indices);
+        }
+    }
+}
+
 pub struct MeshDispatcher {
     result_rx: crossbeam_channel::Receiver<ChunkMeshData>,
     result_tx: crossbeam_channel::Sender<ChunkMeshData>,
@@ -437,6 +496,7 @@ pub struct MeshDispatcher {
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
     biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+    pool: Arc<BufferPool>,
 }
 
 impl MeshDispatcher {
@@ -448,13 +508,17 @@ impl MeshDispatcher {
         dry_foliage_colormap: Colormap,
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     ) -> Self {
-        let (result_tx, result_rx) = crossbeam_channel::unbounded();
+        // Bulk results are bounded for back-pressure; edits stay unbounded so a
+        // block edit never blocks a worker behind the load backlog.
+        let (result_tx, result_rx) = crossbeam_channel::bounded(MAX_PENDING_RESULTS);
         let (priority_tx, priority_rx) = crossbeam_channel::unbounded();
 
         let queue = Arc::new(MeshQueue::new());
-        // One worker per core minus one, leaving a core for the main/render thread.
+        // Half the cores, capped: more saturated workers starve the main/render
+        // thread during a load burst (frame spikes), and pooling makes load
+        // network-bound so they wouldn't speed it up anyway.
         let worker_count = std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(1).max(1))
+            .map(|n| (n.get() / 2).clamp(2, 12))
             .unwrap_or(1);
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
@@ -462,7 +526,10 @@ impl MeshDispatcher {
             workers.push(
                 std::thread::Builder::new()
                     .name("chunk-mesher".into())
-                    .spawn(move || queue.run_worker())
+                    .spawn(move || {
+                        lower_current_thread_priority();
+                        queue.run_worker()
+                    })
                     .expect("spawn chunk-mesher thread"),
             );
         }
@@ -481,6 +548,15 @@ impl MeshDispatcher {
             foliage_colormap: Arc::new(foliage_colormap),
             dry_foliage_colormap: Arc::new(dry_foliage_colormap),
             biome_climate,
+            pool: Arc::new(BufferPool::new(1024)),
+        }
+    }
+
+    /// Return an uploaded (or stale) mesh's section buffers to the pool for
+    /// reuse.
+    pub fn recycle(&self, mesh: ChunkMeshData) {
+        for sec in mesh.sections {
+            self.pool.recycle(sec.vertices, sec.indices);
         }
     }
 
@@ -530,6 +606,7 @@ impl MeshDispatcher {
             registry: Arc::clone(&self.registry),
             uv_map: Arc::clone(&self.uv_map),
             tx,
+            pool: Arc::clone(&self.pool),
         });
     }
 
@@ -545,8 +622,15 @@ impl MeshDispatcher {
         content_gen: u64,
     ) -> ChunkMeshData {
         let snapshot = self.build_snapshot(chunk_store, pos);
-        let mut mesh =
-            mesh_chunk_snapshot(&snapshot, pos, &self.registry, &self.uv_map, 0, sections);
+        let mut mesh = mesh_chunk_snapshot(
+            &snapshot,
+            pos,
+            &self.registry,
+            &self.uv_map,
+            0,
+            sections,
+            &self.pool,
+        );
         mesh.content_gen = content_gen;
         mesh.upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
         mesh
@@ -618,6 +702,7 @@ struct PendingJob {
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
     tx: crossbeam_channel::Sender<ChunkMeshData>,
+    pool: Arc<BufferPool>,
 }
 
 impl PendingJob {
@@ -630,6 +715,7 @@ impl PendingJob {
             &self.uv_map,
             self.lod,
             self.sections,
+            &self.pool,
         );
         mesh.content_gen = self.content_gen;
         mesh.upload_epoch = self.upload_epoch;
@@ -763,6 +849,26 @@ fn poll(state: &mut QueueState) -> Option<PendingJob> {
     }
     state.recompile_quota = MAX_RECOMPILE_QUOTA;
     best_initial.map(|(ii, _)| state.tasks.swap_remove(ii))
+}
+
+/// Run mesh workers below normal priority so the OS preempts them for the
+/// main/render thread during a load burst, while they still use idle cores.
+#[cfg(windows)]
+fn lower_current_thread_priority() {
+    const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThread() -> isize;
+        fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+    }
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+#[cfg(not(windows))]
+fn lower_current_thread_priority() {
+    // TODO: lower priority on non-Windows (libc::nice / pthread_setschedparam).
 }
 
 struct ChunkStoreSnapshot {
@@ -1091,6 +1197,7 @@ fn mesh_chunk_snapshot(
     uv_map: &AtlasUVMap,
     lod: u32,
     sections_to_mesh: std::ops::Range<i32>,
+    pool: &BufferPool,
 ) -> ChunkMeshData {
     let mut logged_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1116,6 +1223,13 @@ fn mesh_chunk_snapshot(
             water_indices: Vec::new(),
         })
         .collect();
+    // In-range sections get recycled buffers (capacity retained from earlier
+    // meshes) so the worker fills them without going through the OS allocator.
+    for si in range.clone() {
+        let sec = &mut sections[si as usize];
+        sec.vertices = pool.take_vertices();
+        sec.indices = pool.take_indices();
+    }
 
     // The type map is a state->id map, so it only needs the meshed span (+1-block
     // border for face culling); states outside it are never queried.
@@ -1295,11 +1409,17 @@ fn mesh_chunk_snapshot(
         local_z += step;
     }
 
-    // Keep only non-empty sections (untouched out-of-range ones stay empty);
-    // empty indices within `range` are freed by the per-section upload.
-    sections.retain(|s| {
-        !s.vertices.is_empty() && (!s.indices.is_empty() || !s.water_indices.is_empty())
-    });
+    // Keep only non-empty sections; recycle the buffers of in-range sections that
+    // ended up empty (rather than dropping their retained capacity).
+    let mut kept = Vec::with_capacity(sections.len());
+    for s in sections {
+        if s.vertices.is_empty() || (s.indices.is_empty() && s.water_indices.is_empty()) {
+            pool.recycle(s.vertices, s.indices);
+        } else {
+            kept.push(s);
+        }
+    }
+    let sections = kept;
 
     ChunkMeshData {
         pos,

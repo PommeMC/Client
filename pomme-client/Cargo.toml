@@ -23,6 +23,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 tracing-appender = "0.2"
+# Per-thread-heap allocator: the chunk-mesh worker pool churns vertex/index Vecs
+# across threads, and the default system heap's global lock serializes that and
+# stalls the main thread. Mirrors vanilla (JVM TLABs + LWJGL's jemalloc).
+mimalloc = "0.1"
 pomme-gpu-allocator = { path = "../pomme-gpu-allocator" }
 winit = { version = "0.30", features = ["rwh_06"] }
 raw-window-handle = "0.6"

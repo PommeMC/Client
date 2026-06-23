@@ -871,14 +871,15 @@ impl Renderer {
             .wait_for_fences(&self.ctx.in_flight_fences, true, u64::MAX);
     }
 
-    /// Returns the section indices dropped due to pool exhaustion (need
+    /// Upload a batch of chunk meshes in a single coalesced transfer. Returns,
+    /// per mesh that hit pool exhaustion, the section indices dropped (need
     /// re-mesh); empty on success.
-    pub fn upload_chunk_mesh(&mut self, mesh: &ChunkMeshData) -> Vec<i32> {
-        self.chunk_buffers.upload(
+    pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> Vec<(ChunkPos, Vec<i32>)> {
+        self.chunk_buffers.upload_batch(
             &self.ctx.device,
             &self.ctx.allocator,
             self.ctx.graphics_queue,
-            mesh,
+            meshes,
         )
     }
 
