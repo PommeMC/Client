@@ -710,6 +710,8 @@ pub fn update_game(
             .prev_eye_pos()
             .lerp(game.player.eye_pos(), partial_tick as f64),
     );
+    // Per-frame FOV interpolation; set before the frustum/view-projection reads.
+    gfx.renderer.set_render_partial_tick(partial_tick);
     // Plain lerp (vanilla getInterpolatedWalkDistance); the forward-extrapolating
     // camera variant judders across tick boundaries when per-tick speed varies.
     let bob_walk = game

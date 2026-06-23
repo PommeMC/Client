@@ -89,6 +89,11 @@ pub struct Camera {
     pub base_fov_degrees: f32,
     fov_modifier: f32,
     old_fov_modifier: f32,
+    /// Unsmoothed multiplier for the death/fluid FOV effect (vanilla
+    /// `modifyFovBasedOnDeathOrFluid`). 1.0 = no effect.
+    fluid_fov_factor: f32,
+    /// Render-frame partial tick used to interpolate `fov_modifier` per frame.
+    render_partial_tick: f32,
     bob_walk_dist: f32,
     bob_amount: f32,
     bob_enabled: bool,
@@ -106,6 +111,8 @@ impl Camera {
             base_fov_degrees: DEFAULT_FOV_DEGREES,
             fov_modifier: 1.0,
             old_fov_modifier: 1.0,
+            fluid_fov_factor: 1.0,
+            render_partial_tick: 1.0,
             bob_walk_dist: 0.0,
             bob_amount: 0.0,
             bob_enabled: false,
@@ -190,9 +197,17 @@ impl Camera {
         self.fov_modifier = self.fov_modifier.clamp(0.1, 1.5);
     }
 
+    pub fn set_fluid_fov_factor(&mut self, factor: f32) {
+        self.fluid_fov_factor = factor;
+    }
+
+    pub fn set_render_partial_tick(&mut self, partial_tick: f32) {
+        self.render_partial_tick = partial_tick;
+    }
+
     pub fn fov_radians(&self, partial_tick: f32) -> f32 {
         let modifier = self.old_fov_modifier.lerp(self.fov_modifier, partial_tick);
-        (self.base_fov_degrees * modifier).to_radians()
+        (self.base_fov_degrees * modifier * self.fluid_fov_factor).to_radians()
     }
 
     pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
@@ -203,7 +218,12 @@ impl Camera {
     /// 180°), giving an "about to be seen" margin for occlusion-gated mesh
     /// scheduling.
     pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
-        let fov = (self.fov_radians(1.0) + extra_radians).min(2.96);
+        // Vanilla createProjectionMatrixForCulling never culls narrower than the
+        // base FOV, so a narrowing modifier (underwater) can't clip visible edges.
+        let cull_fov = self
+            .fov_radians(self.render_partial_tick)
+            .max(self.base_fov_degrees.to_radians());
+        let fov = (cull_fov + extra_radians).min(2.96);
         Self::planes_from_view_projection(self.view_projection_with_fov(fov))
     }
 
@@ -273,13 +293,18 @@ impl Camera {
     }
 
     pub fn view_projection(&self) -> Mat4 {
-        self.view_projection_with_fov(self.fov_radians(1.0))
+        self.view_projection_with_fov(self.fov_radians(self.render_partial_tick))
     }
 
     pub fn sky_view_projection(&self) -> Mat4 {
         let (forward, up) = self.view_basis();
         let view = Mat4::look_to_rh(Vec3::ZERO, forward, up);
-        let mut proj = Mat4::perspective_rh(self.fov_radians(1.0), self.aspect_ratio, NEAR, FAR);
+        let mut proj = Mat4::perspective_rh(
+            self.fov_radians(self.render_partial_tick),
+            self.aspect_ratio,
+            NEAR,
+            FAR,
+        );
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
     }

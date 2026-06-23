@@ -6,7 +6,7 @@ use std::time::Instant;
 use azalea_protocol::packets::game::{
     ServerboundClientCommand, ServerboundGamePacket, s_client_command,
 };
-use glam::dvec3;
+use glam::{FloatExt, dvec3};
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
 
@@ -635,6 +635,9 @@ impl AppCore {
                         }
                     }
                 }
+                NetworkEvent::PlayerAbilitiesChanged { flying } => {
+                    game.player.flying = flying;
+                }
                 NetworkEvent::ServerViewDistance { distance } => {
                     tracing::info!("Server view distance: {distance}");
                     game.server_render_distance = distance;
@@ -1028,7 +1031,15 @@ impl AppCore {
         game.player.tick_bob(dx, dz);
 
         renderer.set_base_fov(self.menu.fov as f32);
-        renderer.update_fov_mod(compute_fov_modifier(&game.player));
+        let fov_effect_scale = self.menu.fov_effect();
+        renderer.update_fov_mod(compute_fov_modifier(&game.player, fov_effect_scale));
+        // Vanilla modifyFovBasedOnDeathOrFluid: narrow FOV underwater, unsmoothed.
+        // TODO: lava camera fluid (no eyes_in_lava) and the death-animation factor.
+        renderer.set_fluid_fov_factor(if game.player.eyes_in_water {
+            1.0_f32.lerp(0.857_142_87, fov_effect_scale)
+        } else {
+            1.0
+        });
 
         Self::send_input_packet(input, connection, game);
         self.send_sprint_command(connection, game);
@@ -1215,18 +1226,19 @@ pub(crate) fn chunk_lod(
     }
 }
 
-fn compute_fov_modifier(player: &LocalPlayer) -> f32 {
-    let base_walk_speed = 0.1;
-    let mut speed = base_walk_speed;
-    if player.sprinting {
-        speed *= 1.3;
-    }
-
-    let mut modifier = (speed / base_walk_speed + 1.0) / 2.0;
-
-    if player.game_mode == 1 && player.sprinting {
+/// Vanilla `AbstractClientPlayer.getFieldOfViewModifier`. `effect_scale` is the
+/// `fovEffectScale` accessibility value (1.0 = full effect).
+fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
+    let mut modifier = 1.0;
+    if player.flying {
         modifier *= 1.1;
     }
-
-    modifier
+    // Vanilla's speedFactor is MOVEMENT_SPEED / walkingSpeed; with Pomme's
+    // client-side speed model that reduces to sprint ? 1.3 : 1.0.
+    // TODO: drive from the MOVEMENT_SPEED attribute so Speed/Slowness potions
+    // and gear modifiers affect FOV too.
+    // TODO: bow-draw narrowing and spyglass scoping (need item-use-duration state).
+    let speed_factor: f32 = if player.sprinting { 1.3 } else { 1.0 };
+    modifier *= (speed_factor + 1.0) / 2.0;
+    1.0_f32.lerp(modifier, effect_scale)
 }

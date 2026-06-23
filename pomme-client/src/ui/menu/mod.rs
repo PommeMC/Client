@@ -24,6 +24,8 @@ struct Settings {
     simulation_distance: u32,
     #[serde(default = "default_fov")]
     fov: u32,
+    #[serde(default = "default_fov_effect_scale")]
+    fov_effect_scale: f32,
     #[serde(default = "default_true")]
     view_bobbing: bool,
     #[serde(default = "default_true")]
@@ -88,6 +90,10 @@ fn default_max_framerate() -> u32 {
 /// vanilla, which treats the slider's max as unlimited).
 pub const MAX_FRAMERATE_UNLIMITED: u32 = 260;
 
+fn default_fov_effect_scale() -> f32 {
+    1.0
+}
+
 fn default_cloud_mode() -> u8 {
     2
 }
@@ -107,6 +113,7 @@ impl Default for Settings {
             render_distance: 12,
             simulation_distance: 12,
             fov: 70,
+            fov_effect_scale: 1.0,
             view_bobbing: true,
             vsync: true,
             max_framerate: 120,
@@ -348,6 +355,8 @@ pub struct MainMenu {
     pub render_distance: u32,
     pub simulation_distance: u32,
     pub fov: u32,
+    /// FOV Effects slider fraction (0..1); squared by `fov_effect()`.
+    pub fov_effect_scale: f32,
     pub view_bobbing: bool,
     pub vsync: bool,
     pub max_framerate: u32,
@@ -436,6 +445,7 @@ impl MainMenu {
             render_distance: settings.render_distance,
             simulation_distance: settings.simulation_distance,
             fov: settings.fov,
+            fov_effect_scale: settings.fov_effect_scale,
             view_bobbing: settings.view_bobbing,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
@@ -492,6 +502,13 @@ impl MainMenu {
         self.face_dirty_since = None;
     }
 
+    /// FOV-effect scale used by the camera: the stored slider fraction squared
+    /// (vanilla `fovEffectScale` xmaps the slider position through
+    /// `Mth::square`).
+    pub fn fov_effect(&self) -> f32 {
+        self.fov_effect_scale * self.fov_effect_scale
+    }
+
     /// Per-category volumes in `SoundCategory` order
     /// (master, music, records, weather, blocks, hostile, neutral, players,
     /// ambient, voice) for the audio engine.
@@ -518,6 +535,7 @@ impl MainMenu {
                 render_distance: self.render_distance,
                 simulation_distance: self.simulation_distance,
                 fov: self.fov,
+                fov_effect_scale: self.fov_effect_scale,
                 view_bobbing: self.view_bobbing,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,

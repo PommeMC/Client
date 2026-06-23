@@ -195,6 +195,11 @@ pub fn handle_game_packet(
                 break;
             }
         }
+        ClientboundGamePacket::PlayerAbilities(p) => {
+            let _ = event_tx.try_send(NetworkEvent::PlayerAbilitiesChanged {
+                flying: p.flags.flying,
+            });
+        }
         ClientboundGamePacket::SystemChat(p) if !p.overlay => {
             send_chat(event_tx, format_text_spans(&p.content));
         }
