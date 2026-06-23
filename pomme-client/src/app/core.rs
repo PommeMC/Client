@@ -999,8 +999,10 @@ impl AppCore {
             return;
         }
 
-        // Open menus only release the keys; the simulation keeps ticking.
-        let input_live = game.input_live();
+        // Open menus only release the keys; the simulation keeps ticking. The
+        // chunk-load benchmark also freezes the player so every run measures the
+        // same fixed origin.
+        let input_live = game.input_live() && game.chunk_load_bench.is_none();
         let neutral = InputState::released();
         let input = if input_live { &self.input } else { &neutral };
 
@@ -1008,6 +1010,9 @@ impl AppCore {
         game.player.look_dir = renderer.camera_look_dir();
 
         game.player.prev_position = game.player.position;
+        if game.chunk_load_bench.is_some() {
+            game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
+        }
         movement::tick(&mut game.player, input, &game.chunk_store);
         game.entity_store.tick_living();
 

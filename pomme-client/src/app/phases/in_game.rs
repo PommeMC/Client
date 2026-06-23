@@ -11,7 +11,8 @@ use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
 use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE, input};
 use crate::benchmark::{
-    Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep,
+    Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep, UploadHandle,
+    UploadStatus, upload_result,
 };
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
@@ -78,10 +79,18 @@ pub struct GameState {
     pub block_entity_anim: BlockEntityAnimStore,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
+    /// In-flight/finished upload of the FPS result, while its overlay is shown.
+    pub benchmark_upload: Option<UploadHandle>,
     /// Which pause screen is showing (main / benchmark submenu / chunk loader).
     pub pause_screen: PauseScreen,
     pub chunk_load_bench: Option<ChunkLoadBench>,
     pub chunk_load_result: Option<ChunkLoadResult>,
+    /// Set by Esc while a chunk-load benchmark runs; consumed next frame to
+    /// cancel it.
+    pub chunk_load_abort: bool,
+    /// In-flight/finished upload of the chunk-load result, while its overlay is
+    /// shown.
+    pub chunk_load_upload: Option<UploadHandle>,
     /// Monotonic content generation per column, bumped on every edit (and chunk
     /// load). This is the dirty marker: a column needs (re)meshing whenever its
     /// `content_gen` outruns what was last enqueued, regardless of visibility,
@@ -184,9 +193,12 @@ impl GameState {
             position_send_counter: 0,
             benchmark: None,
             benchmark_result: None,
+            benchmark_upload: None,
             pause_screen: PauseScreen::Main,
             chunk_load_bench: None,
             chunk_load_result: None,
+            chunk_load_abort: false,
+            chunk_load_upload: None,
             content_gen: HashMap::new(),
             meshed: HashMap::new(),
             vis_mask: HashMap::new(),
@@ -208,7 +220,11 @@ impl GameState {
 
     /// No menu (pause, inventory, chat) is capturing input.
     pub fn input_live(&self) -> bool {
-        !self.paused && !self.gui_open() && !self.chat.is_open()
+        !self.paused
+            && !self.gui_open()
+            && !self.chat.is_open()
+            && self.benchmark_result.is_none()
+            && self.chunk_load_result.is_none()
     }
 
     pub fn sync_render_distance(&mut self, connection: &ConnectionHandle, render_distance: u32) {
@@ -513,9 +529,69 @@ pub enum GameUpdateResult {
     Disconnected { reason: String },
 }
 
+enum ResultKind {
+    Fps,
+    ChunkLoad,
+}
+
+/// Carry out the button/dismiss action a benchmark result overlay reported,
+/// targeting the matching benchmark's result/upload fields.
+fn apply_result_action(
+    action: common::ResultAction,
+    kind: ResultKind,
+    status: Option<UploadStatus>,
+    json: String,
+    core: &AppCore,
+    gfx: &Gfx,
+    game: &mut GameState,
+) {
+    match action {
+        common::ResultAction::StartUpload => {
+            let handle = Some(upload_result(&core.tokio_rt, json));
+            match kind {
+                ResultKind::Fps => game.benchmark_upload = handle,
+                ResultKind::ChunkLoad => game.chunk_load_upload = handle,
+            }
+        }
+        common::ResultAction::Recopy => {
+            if let Some(UploadStatus::Done { url, .. }) = status {
+                common::set_clipboard(&url);
+            }
+        }
+        common::ResultAction::Dismiss => {
+            match kind {
+                ResultKind::Fps => {
+                    game.benchmark_result = None;
+                    game.benchmark_upload = None;
+                }
+                ResultKind::ChunkLoad => {
+                    game.chunk_load_result = None;
+                    game.chunk_load_upload = None;
+                }
+            }
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
+        common::ResultAction::None => {}
+    }
+}
+
+/// Set the active render distance (the persisted menu value) and push it to the
+/// server — used by the chunk-load benchmark as it ramps the distance up and
+/// down.
+fn apply_render_distance(
+    core: &mut AppCore,
+    game: &mut GameState,
+    connection: &ConnectionHandle,
+    rd: u32,
+) {
+    core.menu.render_distance = rd;
+    game.sync_render_distance(connection, rd);
+}
+
 pub fn update_game(
     core: &mut AppCore,
     dt: f32,
+    raw_dt: f32,
     gfx: &mut Gfx,
     connection: &ConnectionHandle,
     game: &mut GameState,
@@ -593,7 +669,7 @@ pub fn update_game(
         core.time_tick_accumulator -= TICK_RATE;
     }
 
-    if game.input_live() {
+    if game.input_live() && game.chunk_load_bench.is_none() {
         gfx.renderer.update_camera(&mut core.input, dt);
     }
 
@@ -649,13 +725,27 @@ pub fn update_game(
             .lerp(game.player.eye_pos(), partial_tick as f64),
         &game.chunk_store,
     );
+    // Esc cancels a running benchmark: restore the render distance it changed.
+    if std::mem::take(&mut game.chunk_load_abort)
+        && let Some(bench) = game.chunk_load_bench.take()
+    {
+        apply_render_distance(core, game, connection, bench.original_rd());
+    }
+    // Watch the chunk-load benchmark from straight above, framed to its load
+    // radius.
+    match &game.chunk_load_bench {
+        Some(bench) => {
+            let radius = bench.effective_rd().max(1) as f32 * 16.0;
+            gfx.renderer.set_top_down_radius(radius);
+        }
+        None => gfx.renderer.clear_top_down(),
+    }
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
     let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
 
     let mut elements: Vec<MenuElement> = Vec::new();
-    let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
 
     let debug = if game.show_debug {
         Some(hud::DebugInfo {
@@ -707,24 +797,30 @@ pub fn update_game(
     } else {
         None
     };
-    hud::build_hud(
-        &mut elements,
-        sw,
-        sh,
-        core.input.selected_slot(),
-        game.player.health,
-        game.player.food,
-        game.player.armor,
-        game.player.air_supply,
-        game.player.eyes_in_water,
-        game.player.experience_level,
-        game.player.experience_progress,
-        game.player.game_mode,
-        game.player.inventory.hotbar_slots(),
-        gfx.renderer.is_first_person(),
-        debug.as_ref(),
-        core.menu.gui_scale_setting,
-    );
+    // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
+    // entities/player, held item, clouds, or weather — and skipping them also keeps
+    // the measured frame times honest.
+    let benchmark_running = game.chunk_load_bench.is_some();
+    if !benchmark_running {
+        hud::build_hud(
+            &mut elements,
+            sw,
+            sh,
+            core.input.selected_slot(),
+            game.player.health,
+            game.player.food,
+            game.player.armor,
+            game.player.air_supply,
+            game.player.eyes_in_water,
+            game.player.experience_level,
+            game.player.experience_progress,
+            game.player.game_mode,
+            game.player.inventory.hotbar_slots(),
+            gfx.renderer.is_first_person(),
+            debug.as_ref(),
+            core.menu.gui_scale_setting,
+        );
+    }
 
     if core.input.performing_action(input::Action::ViewPlayerList)
         && !game.paused
@@ -745,7 +841,7 @@ pub fn update_game(
     if let Some(ref mut bench) = game.benchmark {
         let entity_count = game.entity_store.living.len() as u32;
         let done = bench.record_frame(
-            dt * 1000.0,
+            raw_dt * 1000.0,
             gfx.renderer.last_timings(),
             gfx.renderer.loaded_chunk_count(),
             entity_count,
@@ -778,6 +874,8 @@ pub fn update_game(
         if done {
             let bench = game.benchmark.take().unwrap();
             game.benchmark_result = Some(bench.finish(&core.data_dirs.game_dir));
+            game.benchmark_upload = None;
+            core.apply_cursor_grab(&gfx.window, Some(game));
         }
     }
 
@@ -807,7 +905,12 @@ pub fn update_game(
                 result.spike_count, 8.0
             ),
         ];
-        common::push_results_overlay(
+        let json = serde_json::to_string_pretty(result).unwrap_or_default();
+        let status = game
+            .benchmark_upload
+            .as_ref()
+            .map(|h| h.lock().unwrap().clone());
+        let action = common::push_results_overlay(
             &mut elements,
             sw,
             sh,
@@ -815,27 +918,26 @@ pub fn update_game(
             sh / 2.0 - 90.0,
             "Benchmark Complete",
             &lines,
+            status.as_ref(),
+            core.input.cursor_pos(),
+            core.input.left_just_pressed(),
+            core.input.escape_pressed(),
         );
-        if core.input.escape_pressed() || core.input.left_just_pressed() {
-            game.benchmark_result = None;
-        }
+        apply_result_action(action, ResultKind::Fps, status, json, core, gfx, game);
     }
 
     if let Some(mut bench) = game.chunk_load_bench.take() {
         let count = gfx.renderer.loaded_chunk_count();
-        match bench.update(count, dt * 1000.0) {
+        match bench.update(count, raw_dt * 1000.0) {
             ChunkLoadStep::Wait => {
                 game.chunk_load_bench = Some(bench);
             }
             ChunkLoadStep::Load(rd) => {
-                core.menu.render_distance = rd;
-                game.sync_render_distance(connection, rd);
+                apply_render_distance(core, game, connection, rd);
                 game.chunk_load_bench = Some(bench);
             }
             ChunkLoadStep::Done(result) => {
-                let restore = bench.original_rd();
-                core.menu.render_distance = restore;
-                game.sync_render_distance(connection, restore);
+                apply_render_distance(core, game, connection, bench.original_rd());
                 tracing::info!(
                     "Chunk load RD {} (effective {}): {} chunks in {:.2}s ({:.0} chunks/s), \
                      first chunk {:.2}s, frame avg {:.1}ms / worst {:.1}ms",
@@ -849,17 +951,20 @@ pub fn update_game(
                     result.worst_frame_ms,
                 );
                 result.save(&core.data_dirs.game_dir);
-                game.chunk_load_result = Some(result);
+                game.chunk_load_result = Some(*result);
+                game.chunk_load_upload = None;
+                core.apply_cursor_grab(&gfx.window, Some(game));
             }
         }
     }
 
     if let Some(ref bench) = game.chunk_load_bench {
+        let progress = format!("run {}/{}", bench.current_run(), bench.total_runs());
         let label = if bench.resetting() {
-            "Resetting world...".to_string()
+            format!("Resetting world... ({progress})")
         } else {
             format!(
-                "Loading RD {}... {} chunks",
+                "Loading RD {}... {} chunks ({progress})",
                 bench.target_rd(),
                 bench.loaded()
             )
@@ -880,14 +985,19 @@ pub fn update_game(
                 "Render Distance: {} (server-capped to {})",
                 result.target_rd, result.effective_rd
             )
+        } else if result.achieved_rd < result.target_rd {
+            format!(
+                "Render Distance: {} (server loaded ~{})",
+                result.target_rd, result.achieved_rd
+            )
         } else {
             format!("Render Distance: {}", result.target_rd)
         };
-        let lines = [
+        let mut lines = vec![
             rd_line,
             format!(
-                "Loaded {} chunks in {:.2}s",
-                result.chunk_count, result.load_secs
+                "Loaded {} chunks in {:.2}s (avg of {} runs)",
+                result.chunk_count, result.load_secs, result.runs
             ),
             format!(
                 "{:.0} chunks/sec - first chunk in {:.2}s",
@@ -909,7 +1019,15 @@ pub fn update_game(
             ),
             "Saved to chunk_load.json".to_string(),
         ];
-        common::push_results_overlay(
+        if crate::benchmark::is_debug_build() {
+            lines.push("Debug build - frame times are not representative".to_string());
+        }
+        let json = serde_json::to_string_pretty(result).unwrap_or_default();
+        let status = game
+            .chunk_load_upload
+            .as_ref()
+            .map(|h| h.lock().unwrap().clone());
+        let action = common::push_results_overlay(
             &mut elements,
             sw,
             sh,
@@ -917,10 +1035,12 @@ pub fn update_game(
             sh / 2.0 - 100.0,
             "Chunk Load Complete",
             &lines,
+            status.as_ref(),
+            core.input.cursor_pos(),
+            core.input.left_just_pressed(),
+            core.input.escape_pressed(),
         );
-        if core.input.escape_pressed() || core.input.left_just_pressed() {
-            game.chunk_load_result = None;
-        }
+        apply_result_action(action, ResultKind::ChunkLoad, status, json, core, gfx, game);
     }
 
     if game.options_from_game {
@@ -1058,47 +1178,58 @@ pub fn update_game(
         (pos, stage, state)
     });
 
-    let mut entity_renders: Vec<EntityRenderInfo> = game
-        .entity_store
-        .living
-        .iter()
-        .map(|(&entity_id, e)| {
-            let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
-            let extras = entity_extras(entity_id, e, partial_tick);
+    let mut entity_renders: Vec<EntityRenderInfo> = if benchmark_running {
+        Vec::new()
+    } else {
+        game.entity_store
+            .living
+            .iter()
+            .map(|(&entity_id, e)| {
+                let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
+                let extras = entity_extras(entity_id, e, partial_tick);
 
-            EntityRenderInfo {
-                position: interp_pos,
-                head_y_rot_deg: lerp_angle(e.prev_head_y_rot_deg, e.head_y_rot_deg, partial_tick),
-                head_x_rot_deg: e
-                    .prev_look_dir
-                    .x_rot_deg()
-                    .lerp(e.look_dir.x_rot_deg(), partial_tick),
-                body_y_rot_deg: lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick),
-                is_baby: e.is_baby,
-                is_crouching: e.is_crouching,
-                walk_anim_pos: {
-                    let scale = if e.is_baby { 3.0 } else { 1.0 };
-                    (e.walk_anim_pos - e.walk_anim_speed * (1.0 - partial_tick)) * scale
-                },
-                walk_anim_speed: (e.prev_walk_anim_speed
-                    + (e.walk_anim_speed - e.prev_walk_anim_speed) * partial_tick)
-                    .min(1.0),
-                entity_kind: e.entity_type,
-                player_uuid: e.player_uuid,
-                variant_index: extras.variant_index,
-                overlay_tints: extras.overlay_tints,
-                head_y_offset: extras.head_y_offset,
-                head_x_rot_deg_override: extras.head_x_rot_deg_override,
-                has_red_overlay: e.hurt_time > 0,
-                aggressive: e.aggressive,
-                age_in_ticks: e.age_in_ticks as f32 + partial_tick,
-                attack_time: e.swing_progress(partial_tick),
-                skip_cull: false,
-            }
-        })
-        .collect();
+                EntityRenderInfo {
+                    position: interp_pos,
+                    head_y_rot_deg: lerp_angle(
+                        e.prev_head_y_rot_deg,
+                        e.head_y_rot_deg,
+                        partial_tick,
+                    ),
+                    head_x_rot_deg: e
+                        .prev_look_dir
+                        .x_rot_deg()
+                        .lerp(e.look_dir.x_rot_deg(), partial_tick),
+                    body_y_rot_deg: lerp_angle(
+                        e.prev_body_y_rot_deg,
+                        e.body_y_rot_deg,
+                        partial_tick,
+                    ),
+                    is_baby: e.is_baby,
+                    is_crouching: e.is_crouching,
+                    walk_anim_pos: {
+                        let scale = if e.is_baby { 3.0 } else { 1.0 };
+                        (e.walk_anim_pos - e.walk_anim_speed * (1.0 - partial_tick)) * scale
+                    },
+                    walk_anim_speed: (e.prev_walk_anim_speed
+                        + (e.walk_anim_speed - e.prev_walk_anim_speed) * partial_tick)
+                        .min(1.0),
+                    entity_kind: e.entity_type,
+                    player_uuid: e.player_uuid,
+                    variant_index: extras.variant_index,
+                    overlay_tints: extras.overlay_tints,
+                    head_y_offset: extras.head_y_offset,
+                    head_x_rot_deg_override: extras.head_x_rot_deg_override,
+                    has_red_overlay: e.hurt_time > 0,
+                    aggressive: e.aggressive,
+                    age_in_ticks: e.age_in_ticks as f32 + partial_tick,
+                    attack_time: e.swing_progress(partial_tick),
+                    skip_cull: false,
+                }
+            })
+            .collect()
+    };
 
-    if !gfx.renderer.is_first_person() {
+    if !benchmark_running && !gfx.renderer.is_first_person() {
         let interp_pos = game
             .player
             .prev_position
@@ -1150,63 +1281,82 @@ pub fn update_game(
         );
     }
 
-    let item_renders = build_item_render_infos(
-        &game.item_entity_store,
-        &game.chunk_store,
-        *gfx.renderer.camera_pivot_position(),
-        partial_tick,
-    );
+    let item_renders = if benchmark_running {
+        Vec::new()
+    } else {
+        build_item_render_infos(
+            &game.item_entity_store,
+            &game.chunk_store,
+            *gfx.renderer.camera_pivot_position(),
+            partial_tick,
+        )
+    };
 
-    let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = game
-        .chunk_store
-        .block_entities
-        .iter()
-        .map(|(pos, be)| {
-            let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
-            let block: Box<dyn azalea_block::BlockTrait> = state.into();
-            let props = block.property_map();
-            let variant =
-                crate::renderer::pipelines::block_entity::variant_for_block(be.kind, block.id());
-            let yaw = crate::renderer::pipelines::block_entity::yaw_for_block(be.kind, &props);
-            let lid_open = game
-                .block_entity_anim
-                .container(pos)
-                .map(|a| a.openness)
-                .unwrap_or(0.0);
-            crate::renderer::BlockEntityRenderInfo {
-                pos: *pos,
-                kind: be.kind,
-                yaw,
-                variant,
-                lid_open,
-            }
-        })
-        .collect();
+    let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running {
+        Vec::new()
+    } else {
+        game.chunk_store
+            .block_entities
+            .iter()
+            .map(|(pos, be)| {
+                let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+                let block: Box<dyn azalea_block::BlockTrait> = state.into();
+                let props = block.property_map();
+                let variant = crate::renderer::pipelines::block_entity::variant_for_block(
+                    be.kind,
+                    block.id(),
+                );
+                let yaw = crate::renderer::pipelines::block_entity::yaw_for_block(be.kind, &props);
+                let lid_open = game
+                    .block_entity_anim
+                    .container(pos)
+                    .map(|a| a.openness)
+                    .unwrap_or(0.0);
+                crate::renderer::BlockEntityRenderInfo {
+                    pos: *pos,
+                    kind: be.kind,
+                    yaw,
+                    variant,
+                    lid_open,
+                }
+            })
+            .collect()
+    };
 
-    let weather_columns = build_weather_columns(
-        &game.chunk_store,
-        &game.biome_climate,
-        gfx.renderer.camera_render_position(),
-        sky.rain(),
-    );
+    let weather_columns = if benchmark_running {
+        Vec::new()
+    } else {
+        build_weather_columns(
+            &game.chunk_store,
+            &game.biome_climate,
+            gfx.renderer.camera_render_position(),
+            sky.rain(),
+        )
+    };
 
     let effective_rd = if game.server_render_distance > 0 {
         core.menu.render_distance.min(game.server_render_distance)
     } else {
         core.menu.render_distance
     };
-    let held_item = match game.player.inventory.hotbar_slots()[core.input.selected_slot() as usize]
-    {
-        azalea_inventory::ItemStack::Present(ref data) => {
-            let name = crate::player::inventory::item_resource_name(data.kind);
-            (name != "air").then(|| {
-                let light =
-                    get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
-                (name, light)
-            })
+    let held_item = if benchmark_running {
+        None
+    } else {
+        match game.player.inventory.hotbar_slots()[core.input.selected_slot() as usize] {
+            azalea_inventory::ItemStack::Present(ref data) => {
+                let name = crate::player::inventory::item_resource_name(data.kind);
+                (name != "air").then(|| {
+                    let light =
+                        get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
+                    (name, light)
+                })
+            }
+            _ => None,
         }
-        _ => None,
     };
+    // Recompute after this frame's state changes (a finished benchmark releases
+    // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
+    let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
@@ -1220,7 +1370,11 @@ pub fn update_game(
         &item_renders,
         &block_entity_renders,
         &weather_columns,
-        core.menu.cloud_mode,
+        if benchmark_running {
+            crate::renderer::CloudMode::Off
+        } else {
+            core.menu.cloud_mode
+        },
         effective_rd,
         player_preview,
     ) {
@@ -1294,14 +1448,18 @@ pub fn update_game(
                 gfx.renderer.vulkan_version(),
                 gfx.renderer.screen_width(),
                 gfx.renderer.screen_height(),
+                [
+                    game.player.position.x,
+                    game.player.position.y,
+                    game.player.position.z,
+                ],
             ));
             game.chunk_load_result = None;
             game.pause_screen = PauseScreen::Main;
             game.paused = false;
             // Drop to the minimum render distance so the server unloads the far
             // chunks; the driver raises it to the target once the reset settles.
-            core.menu.render_distance = crate::benchmark::CHUNK_LOAD_MIN_RD;
-            game.sync_render_distance(connection, crate::benchmark::CHUNK_LOAD_MIN_RD);
+            apply_render_distance(core, game, connection, crate::benchmark::CHUNK_LOAD_MIN_RD);
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         PauseAction::ReportBugs => {

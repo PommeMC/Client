@@ -463,16 +463,18 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                let dt = if let Some(app_rt) = self.phase.gfx_mut() {
+                // `dt` is clamped for physics; `raw_dt` is the unclamped interval the benchmarks need.
+                let (dt, raw_dt) = if let Some(app_rt) = self.phase.gfx_mut() {
                     let now = Instant::now();
-                    let dt = now.duration_since(app_rt.last_frame).as_secs_f32().min(0.1);
+                    let raw_dt = now.duration_since(app_rt.last_frame).as_secs_f32();
+                    let dt = raw_dt.min(0.1);
 
                     app_rt.last_frame = now;
                     app_rt.fps_counter.update(dt);
 
-                    dt
+                    (dt, raw_dt)
                 } else {
-                    0.0
+                    (0.0, 0.0)
                 };
 
                 let core = &mut self.core;
@@ -581,7 +583,8 @@ impl ApplicationHandler for App {
                         connection,
                         mut game,
                     } => {
-                        let update_result = update_game(core, dt, &mut gfx, &connection, &mut game);
+                        let update_result =
+                            update_game(core, dt, raw_dt, &mut gfx, &connection, &mut game);
 
                         match update_result {
                             GameUpdateResult::None => AppPhase::InGame {
