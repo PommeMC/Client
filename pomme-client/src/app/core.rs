@@ -748,6 +748,7 @@ impl AppCore {
                     for id in &ids {
                         if let Some(entity) = game.entity_store.remove_living(*id)
                             && let Some(uuid) = entity.player_uuid
+                            && !game.entity_store.has_player_uuid(&uuid)
                         {
                             self.remove_player_skin(renderer, &uuid);
                         }
@@ -904,7 +905,9 @@ impl AppCore {
                 }
                 NetworkEvent::PlayerInfoRemove { uuids } => {
                     for uuid in &uuids {
-                        self.remove_player_skin(renderer, uuid);
+                        if !game.entity_store.has_player_uuid(uuid) {
+                            self.remove_player_skin(renderer, uuid);
+                        }
                     }
                     game.tab_list.remove(&uuids);
                 }

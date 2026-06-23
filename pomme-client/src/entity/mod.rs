@@ -516,6 +516,12 @@ impl EntityStore {
         self.living.remove(&id)
     }
 
+    pub fn has_player_uuid(&self, uuid: &uuid::Uuid) -> bool {
+        self.living
+            .values()
+            .any(|entity| entity.player_uuid == Some(*uuid))
+    }
+
     pub fn tick_living(&mut self) {
         for entity in self.living.values_mut() {
             entity.tick_interpolation();
