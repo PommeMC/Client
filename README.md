@@ -133,3 +133,5 @@ See [THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md) for details.
    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=PommeMC/Client&type=date&logscale&legend=top-left" />
  </picture>
 </a>
+
+![Alt](https://repobeats.axiom.co/api/embed/9b6b8da951feefbf933a80a50c2a606bb7e55a8c.svg "Repobeats analytics image")
