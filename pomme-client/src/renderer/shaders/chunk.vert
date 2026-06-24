@@ -8,9 +8,18 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 fog_color;
 };
 
-layout(location = 0) in vec3 position;
-layout(location = 1) in vec2 tex_coords;
-layout(location = 2) in vec4 light_tint;
+// Position is quantized section-local (unorm); rebased to world via the
+// per-instance origin. Must match POS_RANGE / POS_BIAS in buffer.rs.
+const float POS_RANGE = 24.0;
+const float POS_BIAS = 4.0;
+
+layout(location = 0) in vec2 in_pos_xy;
+layout(location = 1) in float in_pos_z;
+layout(location = 2) in vec2 tex_coords;
+layout(location = 3) in vec4 light_tint;
+// Per-instance (from the meta buffer):
+layout(location = 4) in vec3 in_origin;
+layout(location = 5) in float in_fade;
 
 layout(location = 0) out vec2 v_tex_coords;
 layout(location = 1) out float v_light;
@@ -20,12 +29,14 @@ layout(location = 4) out vec3 v_fog_color;
 layout(location = 5) out float v_fog;
 
 void main() {
-    vec3 rel = position - camera_pos.xyz;
+    vec3 local = vec3(in_pos_xy, in_pos_z) * POS_RANGE - POS_BIAS;
+    vec3 world = in_origin + local;
+    vec3 rel = world - camera_pos.xyz;
     gl_Position = view_proj * vec4(rel, 1.0);
     v_tex_coords = tex_coords;
     v_light = light_tint.r;
     v_tint = light_tint.gba;
-    v_visibility = uintBitsToFloat(gl_InstanceIndex);
+    v_visibility = in_fade;
     v_fog_color = fog_color.rgb;
     v_fog = fog_factor(rel, camera_pos.w, fog_color.w);
 }

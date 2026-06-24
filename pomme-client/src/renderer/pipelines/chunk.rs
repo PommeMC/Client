@@ -336,9 +336,9 @@ fn build_pipeline(
     color_blend: &vk::PipelineColorBlendStateCreateInfo,
     depth_write: bool,
 ) -> vk::Pipeline {
-    use crate::renderer::chunk::mesher::ChunkVertex;
-    let binding_descs = [ChunkVertex::binding_description()];
-    let attr_descs = ChunkVertex::attribute_descriptions();
+    use crate::renderer::chunk::buffer::{chunk_vertex_attributes, chunk_vertex_bindings};
+    let binding_descs = chunk_vertex_bindings();
+    let attr_descs = chunk_vertex_attributes();
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
         vertex_binding_description_count: binding_descs.len() as u32,
         vertex_binding_descriptions: binding_descs.as_ptr(),

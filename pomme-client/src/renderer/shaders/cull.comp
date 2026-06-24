@@ -9,6 +9,7 @@ struct ChunkMeta {
     uint first_index;
     int vertex_offset;
     uint visibility;
+    vec4 origin;
 };
 
 struct DrawCmd {
@@ -64,5 +65,7 @@ void main() {
     draws[slot].instance_count = 1u;
     draws[slot].first_index = m.first_index;
     draws[slot].vertex_offset = m.vertex_offset;
-    draws[slot].first_instance = m.visibility;
+    // first_instance routes the draw to its meta entry (origin + fade) which the
+    // vertex shader reads as a per-instance attribute.
+    draws[slot].first_instance = idx;
 }

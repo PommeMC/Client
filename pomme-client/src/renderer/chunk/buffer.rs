@@ -10,14 +10,20 @@ use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
 const BUCKET_INDICES: u32 = 49152;
-const VERTEX_SIZE: u64 = size_of::<ChunkVertex>() as u64;
+const VERTEX_SIZE: u64 = size_of::<PackedVertex>() as u64;
+/// Section-local position quantization: local coords (block 0..16 plus model
+/// overhang) map into `[-POS_BIAS, POS_RANGE - POS_BIAS]` across a u16. Chosen
+/// so a 16-block shift is an exact integer number of u16 steps (16/24*65535 =
+/// 43690), so the same world position encodes identically in adjacent sections
+/// — no seams. Must match `chunk.vert`.
+const POS_RANGE: f32 = 24.0;
+const POS_BIAS: f32 = 4.0;
 const INDEX_SIZE: u64 = size_of::<u32>() as u64;
 const BYTES_PER_BUCKET: u64 =
     BUCKET_VERTICES as u64 * VERTEX_SIZE + BUCKET_INDICES as u64 * INDEX_SIZE;
 const MIN_BUCKETS: u32 = 128;
 const MAX_BUCKETS: u32 = 2048;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
-
 /// Per-section fade-in length and the near-column radius (squared) within which
 /// sections appear instantly. Shared by the opaque indirect path and water.
 const FADE_DURATION_MS: f32 = 1000.0;
@@ -129,6 +135,111 @@ struct ChunkMeta {
     first_index: u32,
     vertex_offset: i32,
     visibility: u32,
+    /// Section world origin; bound as a per-instance vertex attribute so the
+    /// vertex shader rebases the quantized local position. `[3]` is padding.
+    origin: [f32; 4],
+}
+
+/// Compact GPU vertex (14 bytes): position quantized to section-local u16 (see
+/// `POS_RANGE`), rebased to world in `chunk.vert` via the per-instance origin.
+/// `light_tint` is `[u8; 4]` (not `u32`) so the struct packs to 14 bytes with
+/// no alignment padding; byte order matches the old `R8G8B8A8_UNORM` (light,
+/// r,g,b).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedVertex {
+    pos: [u16; 3],
+    uv: [u16; 2],
+    light_tint: [u8; 4],
+}
+
+fn quantize_coord(world: f32, origin: f32) -> u16 {
+    let unorm = ((world - origin + POS_BIAS) / POS_RANGE).clamp(0.0, 1.0);
+    (unorm * 65535.0 + 0.5) as u16
+}
+
+fn pack_vertex(v: &ChunkVertex, origin: [f32; 3]) -> PackedVertex {
+    PackedVertex {
+        pos: [
+            quantize_coord(v.position[0], origin[0]),
+            quantize_coord(v.position[1], origin[1]),
+            quantize_coord(v.position[2], origin[2]),
+        ],
+        uv: v.tex_coords,
+        light_tint: v.light_tint.to_le_bytes(),
+    }
+}
+
+/// Pack `verts` (rebased against `origin`) into `dst` starting at byte `off`.
+fn write_packed_verts(dst: &mut [u8], off: usize, verts: &[ChunkVertex], origin: [f32; 3]) {
+    let vsize = VERTEX_SIZE as usize;
+    for (k, v) in verts.iter().enumerate() {
+        let o = off + k * vsize;
+        dst[o..o + vsize].copy_from_slice(bytemuck::bytes_of(&pack_vertex(v, origin)));
+    }
+}
+
+/// Vertex input for the chunk pipeline: binding 0 is the packed per-vertex
+/// pool, binding 1 is the meta buffer read per-instance (origin + fade),
+/// indexed by the `first_instance` the cull shader writes.
+pub fn chunk_vertex_bindings() -> [vk::VertexInputBindingDescription; 2] {
+    [
+        vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: size_of::<PackedVertex>() as u32,
+            input_rate: vk::VertexInputRate::Vertex,
+        },
+        vk::VertexInputBindingDescription {
+            binding: 1,
+            stride: size_of::<ChunkMeta>() as u32,
+            input_rate: vk::VertexInputRate::Instance,
+        },
+    ]
+}
+
+pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 6] {
+    let origin_off = std::mem::offset_of!(ChunkMeta, origin) as u32;
+    let vis_off = std::mem::offset_of!(ChunkMeta, visibility) as u32;
+    [
+        // binding 0 — packed vertex
+        vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R16G16Unorm,
+            offset: 0,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: vk::Format::R16Unorm,
+            offset: 4,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 2,
+            binding: 0,
+            format: vk::Format::R16G16Unorm,
+            offset: 6,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 3,
+            binding: 0,
+            format: vk::Format::R8G8B8A8Unorm,
+            offset: 10,
+        },
+        // binding 1 — per-instance meta (origin + fade)
+        vk::VertexInputAttributeDescription {
+            location: 4,
+            binding: 1,
+            format: vk::Format::R32G32B32Sfloat,
+            offset: origin_off,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 5,
+            binding: 1,
+            format: vk::Format::R32Sfloat,
+            offset: vis_off,
+        },
+    ]
 }
 
 #[repr(C)]
@@ -183,6 +294,9 @@ struct FrustumData {
 struct SectionAlloc {
     section_index: i32,
     aabb: ChunkAABB,
+    /// Section world origin (`chunk*16`, `min_y + si*16`), used to rebase the
+    /// quantized vertices and passed to the GPU via `ChunkMeta.origin`.
+    origin: [f32; 3],
     first_index: u32,
     /// Opaque index count (the GPU-culled draw); water is excluded.
     index_count: u32,
@@ -232,6 +346,17 @@ pub struct ChunkBufferStore {
     chunk_visibility: HashMap<ChunkPos, u32>,
     cached_meta: Vec<ChunkMeta>,
     meta_dirty: bool,
+    /// End of the current fade-in window. While `now < fade_until` the
+    /// per-section fade values change each frame, so `cached_meta` must be
+    /// rebuilt; an O(1) check replacing the old all-sections scan.
+    fade_until: std::time::Instant,
+    /// Camera position at the last front-to-back sort; the sort (an early-Z
+    /// optimization) is only redone once the camera moves past a threshold.
+    last_sort_cam: [f32; 3],
+    /// Frame slots still needing the latest `cached_meta` uploaded. Set to
+    /// `MAX_FRAMES_IN_FLIGHT` whenever the draw list changes, decremented per
+    /// frame; at steady state the per-frame meta copy stops.
+    meta_upload_pending: u32,
 
     compute_pipeline: vk::Pipeline,
     compute_layout: vk::PipelineLayout,
@@ -389,7 +514,7 @@ impl ChunkBufferStore {
                 device,
                 allocator,
                 meta_size,
-                vk::BufferUsageFlags::StorageBuffer,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::VertexBuffer,
                 "chunk_meta",
             );
             meta_buffers.push(b);
@@ -556,6 +681,9 @@ impl ChunkBufferStore {
             chunk_visibility: HashMap::new(),
             cached_meta: Vec::new(),
             meta_dirty: true,
+            fade_until: std::time::Instant::now(),
+            last_sort_cam: [f32::MAX; 3],
+            meta_upload_pending: 0,
             compute_pipeline,
             compute_layout,
             compute_desc_layout,
@@ -669,6 +797,7 @@ impl ChunkBufferStore {
             vtx_off: u32,
             idx_off: u32,
             aabb: ChunkAABB,
+            origin: [f32; 3],
         }
 
         // Retired slices only reclaim in `begin_frame`; if rendering is paused
@@ -808,6 +937,11 @@ impl ChunkBufferStore {
                     vtx_off,
                     idx_off,
                     aabb: section_aabb(&sec.vertices),
+                    origin: [
+                        (mesh.pos.x * 16) as f32,
+                        (mesh.min_y + sec.section_index * 16) as f32,
+                        (mesh.pos.z * 16) as f32,
+                    ],
                 });
             }
             if pool_full {
@@ -841,14 +975,14 @@ impl ChunkBufferStore {
                 }
                 let buf = self.staging_alloc.mapped_slice_mut().unwrap();
                 for p in &plans {
-                    let vb: &[u8] = bytemuck::cast_slice(p.verts);
-                    buf[stg_v..stg_v + vb.len()].copy_from_slice(vb);
+                    write_packed_verts(buf, stg_v, p.verts, p.origin);
+                    let vbytes = p.verts.len() * VERTEX_SIZE as usize;
                     copy_v.push(vk::BufferCopy {
                         src_offset: stg_v as u64,
                         dst_offset: p.vtx_off as u64 * VERTEX_SIZE,
-                        size: vb.len() as u64,
+                        size: vbytes as u64,
                     });
-                    stg_v += vb.len();
+                    stg_v += vbytes;
 
                     let opaque: &[u8] = bytemuck::cast_slice(p.indices);
                     let water: &[u8] = bytemuck::cast_slice(p.water_indices);
@@ -867,9 +1001,8 @@ impl ChunkBufferStore {
                 {
                     let vbuf = self.vertex_alloc.mapped_slice_mut().unwrap();
                     for p in &plans {
-                        let vb: &[u8] = bytemuck::cast_slice(p.verts);
-                        let off = p.vtx_off as usize * VERTEX_SIZE as usize;
-                        vbuf[off..off + vb.len()].copy_from_slice(vb);
+                        let base = p.vtx_off as usize * VERTEX_SIZE as usize;
+                        write_packed_verts(vbuf, base, p.verts, p.origin);
                     }
                 }
                 {
@@ -889,6 +1022,7 @@ impl ChunkBufferStore {
             let new_sections = plans.iter().map(|p| SectionAlloc {
                 section_index: p.section_index,
                 aabb: p.aabb,
+                origin: p.origin,
                 first_index: p.idx_off,
                 index_count: p.indices.len() as u32,
                 water_first_index: p.idx_off + p.indices.len() as u32,
@@ -905,6 +1039,16 @@ impl ChunkBufferStore {
                 },
                 epoch: mesh.upload_epoch,
             });
+
+            // Freshly revealed sections fade in, so extend the fade window the
+            // cull's O(1) check reads; re-meshed-only uploads swap instantly.
+            if plans
+                .iter()
+                .any(|p| !was_present.contains(&p.section_index))
+            {
+                let dur = std::time::Duration::from_secs_f32(FADE_DURATION_MS / 1000.0);
+                self.fade_until = self.fade_until.max(now + dur);
+            }
 
             self.chunks
                 .entry(mesh.pos)
@@ -970,7 +1114,7 @@ impl ChunkBufferStore {
                 device,
                 allocator,
                 meta_size,
-                vk::BufferUsageFlags::StorageBuffer,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::VertexBuffer,
                 "chunk_meta",
             );
             self.meta_buffers[i] = b;
@@ -1099,13 +1243,17 @@ impl ChunkBufferStore {
         }
 
         let now = std::time::Instant::now();
+        // Re-sort only once the camera moves ~8 blocks; front-to-back order is an
+        // early-Z optimization, so finer staleness is harmless.
+        const SORT_RECAM_SQ: f32 = 64.0;
 
-        let any_fading = self.fade_enabled
-            && self.chunks.values().flat_map(|a| &a.sections).any(|s| {
-                now.duration_since(s.uploaded_at).as_secs_f32() * 1000.0 < FADE_DURATION_MS
-            });
+        // A fade in flight changes per-section visibility every frame, so the draw
+        // list must rebuild; otherwise it only changes on edits/loads/visibility
+        // (`meta_dirty`). The fade check is O(1) against `fade_until`.
+        let any_fading = self.fade_enabled && now < self.fade_until;
+        let content_changed = self.meta_dirty || any_fading;
 
-        if self.meta_dirty || any_fading {
+        if content_changed {
             self.cached_meta.clear();
             for (pos, alloc) in self.chunks.iter() {
                 // CPU omission: the visibility graph's mask skips sections proven
@@ -1125,36 +1273,55 @@ impl ChunkBufferStore {
                         first_index: sec.first_index,
                         vertex_offset: sec.vertex_offset,
                         visibility: vis.to_bits(),
+                        origin: [sec.origin[0], sec.origin[1], sec.origin[2], 0.0],
                     });
                 }
             }
             self.meta_dirty = false;
         }
 
-        self.cached_meta.sort_unstable_by(|a, b| {
-            let center_a = [
-                (a.aabb_min[0] + a.aabb_max[0]) * 0.5 - camera_pos[0],
-                (a.aabb_min[1] + a.aabb_max[1]) * 0.5 - camera_pos[1],
-                (a.aabb_min[2] + a.aabb_max[2]) * 0.5 - camera_pos[2],
-            ];
-            let center_b = [
-                (b.aabb_min[0] + b.aabb_max[0]) * 0.5 - camera_pos[0],
-                (b.aabb_min[1] + b.aabb_max[1]) * 0.5 - camera_pos[1],
-                (b.aabb_min[2] + b.aabb_max[2]) * 0.5 - camera_pos[2],
-            ];
-            let dist_a =
-                center_a[0] * center_a[0] + center_a[1] * center_a[1] + center_a[2] * center_a[2];
-            let dist_b =
-                center_b[0] * center_b[0] + center_b[1] * center_b[1] + center_b[2] * center_b[2];
-            dist_a
-                .partial_cmp(&dist_b)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let cam_moved = {
+            let dx = camera_pos[0] - self.last_sort_cam[0];
+            let dy = camera_pos[1] - self.last_sort_cam[1];
+            let dz = camera_pos[2] - self.last_sort_cam[2];
+            dx * dx + dy * dy + dz * dz > SORT_RECAM_SQ
+        };
+        if content_changed || cam_moved {
+            self.cached_meta.sort_unstable_by(|a, b| {
+                let center_a = [
+                    (a.aabb_min[0] + a.aabb_max[0]) * 0.5 - camera_pos[0],
+                    (a.aabb_min[1] + a.aabb_max[1]) * 0.5 - camera_pos[1],
+                    (a.aabb_min[2] + a.aabb_max[2]) * 0.5 - camera_pos[2],
+                ];
+                let center_b = [
+                    (b.aabb_min[0] + b.aabb_max[0]) * 0.5 - camera_pos[0],
+                    (b.aabb_min[1] + b.aabb_max[1]) * 0.5 - camera_pos[1],
+                    (b.aabb_min[2] + b.aabb_max[2]) * 0.5 - camera_pos[2],
+                ];
+                let dist_a = center_a[0] * center_a[0]
+                    + center_a[1] * center_a[1]
+                    + center_a[2] * center_a[2];
+                let dist_b = center_b[0] * center_b[0]
+                    + center_b[1] * center_b[1]
+                    + center_b[2] * center_b[2];
+                dist_a
+                    .partial_cmp(&dist_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            self.last_sort_cam = camera_pos;
+            // Draw list reordered: every frame slot's meta buffer needs the refresh.
+            self.meta_upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
+        }
 
         let count = self.cached_meta.len() as u32;
-        let meta_bytes = bytemuck::cast_slice(&self.cached_meta);
-        self.meta_allocs[frame].mapped_slice_mut().unwrap()[..meta_bytes.len()]
-            .copy_from_slice(meta_bytes);
+        // Each frame slot has its own meta buffer; copy only into slots that
+        // haven't yet seen the current draw list. Steady state stops copying.
+        if self.meta_upload_pending > 0 {
+            let meta_bytes = bytemuck::cast_slice(&self.cached_meta);
+            self.meta_allocs[frame].mapped_slice_mut().unwrap()[..meta_bytes.len()]
+                .copy_from_slice(meta_bytes);
+            self.meta_upload_pending -= 1;
+        }
 
         let frustum_data = FrustumData {
             planes: *frustum,
@@ -1223,7 +1390,9 @@ impl ChunkBufferStore {
             .map(|c| c.sections.len() as u32)
             .sum::<u32>();
 
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+        // Binding 0: packed vertex pool. Binding 1: the meta buffer, read per
+        // instance for the section origin + fade (indexed by `first_instance`).
+        cmd.bind_vertex_buffers(0, &[self.vertex_buffer, self.meta_buffers[frame]], &[0, 0]);
         cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
         if cfg!(target_os = "macos") {
             cmd.draw_indexed_indirect(

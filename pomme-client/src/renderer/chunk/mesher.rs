@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -102,6 +102,9 @@ pub struct SectionMesh {
 
 pub struct ChunkMeshData {
     pub pos: ChunkPos,
+    /// World Y of section index 0, so the buffer can derive each section's
+    /// origin (`min_y + section_index * 16`) for vertex quantization.
+    pub min_y: i32,
     /// Non-empty meshed sections (each tagged with its `section_index`).
     pub sections: Vec<SectionMesh>,
     /// The section-index range this job (re)meshed. Upload replaces exactly
@@ -514,11 +517,11 @@ impl MeshDispatcher {
         let (priority_tx, priority_rx) = crossbeam_channel::unbounded();
 
         let queue = Arc::new(MeshQueue::new());
-        // Half the cores, capped: more saturated workers starve the main/render
-        // thread during a load burst (frame spikes), and pooling makes load
-        // network-bound so they wouldn't speed it up anyway.
+        // Half the cores, capped. Too many saturated workers starve the
+        // main/render thread during a load burst (frame spikes); the cap trades
+        // some load throughput for that.
         let worker_count = std::thread::available_parallelism()
-            .map(|n| (n.get() / 2).clamp(2, 12))
+            .map(|n| (n.get() / 2).clamp(2, 16))
             .unwrap_or(1);
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
@@ -637,7 +640,7 @@ impl MeshDispatcher {
     }
 
     /// Point-in-time snapshot of `pos`'s mesh neighbourhood: chunk arcs plus
-    /// a deep copy of their light data.
+    /// shared handles to their light data.
     fn build_snapshot(&self, chunk_store: &ChunkStore, pos: ChunkPos) -> ChunkStoreSnapshot {
         let chunks_needed = chunk::mesh_neighborhood(pos);
         ChunkStoreSnapshot {
@@ -651,7 +654,7 @@ impl MeshDispatcher {
                     chunk_store
                         .light_data
                         .get(&(p.x, p.z))
-                        .map(|ld| ((p.x, p.z), ld.clone()))
+                        .map(|ld| ((p.x, p.z), Arc::clone(ld)))
                 })
                 .collect(),
             grass_colormap: Arc::clone(&self.grass_colormap),
@@ -730,12 +733,52 @@ impl PendingJob {
     }
 }
 
+/// X/Z (column) distance from `cam` to a chunk's centre. Meshing order is
+/// purely horizontal distance; occlusion gates drawing, not meshing.
+fn column_dist_sq(pos: ChunkPos, cam: glam::DVec3) -> f64 {
+    let dx = (pos.x as f64 * 16.0 + 8.0) - cam.x;
+    let dz = (pos.z as f64 * 16.0 + 8.0) - cam.z;
+    dx * dx + dz * dz
+}
+
+/// A queued bulk-load job keyed by its column distance for the load heap.
+struct LoadEntry {
+    dist: f64,
+    job: PendingJob,
+}
+
+impl PartialEq for LoadEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.dist == other.dist
+    }
+}
+impl Eq for LoadEntry {}
+impl PartialOrd for LoadEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for LoadEntry {
+    // Reversed so `BinaryHeap` (a max-heap) pops the nearest (smallest dist).
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.dist.total_cmp(&self.dist)
+    }
+}
+
 struct QueueState {
-    tasks: Vec<PendingJob>,
+    /// Edits, kept small (a handful in flight) so a linear scan + in-place
+    /// replace stays cheap.
+    recompiles: Vec<PendingJob>,
+    /// Bulk loads, a min-by-distance heap so dequeue is `O(log n)` under the
+    /// lock instead of an `O(n)` scan (the old contention point).
+    loads: BinaryHeap<LoadEntry>,
     // Consecutive edits served ahead of an initial load before one is forced, so
     // streaming never starves (vanilla SectionTaskDynamicQueue.MAX_RECOMPILE_QUOTA).
     recompile_quota: i32,
     camera: glam::DVec3,
+    /// Camera the load heap is keyed against; re-keyed only when the camera
+    /// crosses a bucket, so push/pop stay cheap between rebuilds.
+    sort_cam: glam::DVec3,
 }
 
 /// Re-orderable mesh queue, a port of vanilla `SectionTaskDynamicQueue`. The
@@ -751,9 +794,11 @@ impl MeshQueue {
     fn new() -> Self {
         Self {
             state: Mutex::new(QueueState {
-                tasks: Vec::new(),
+                recompiles: Vec::new(),
+                loads: BinaryHeap::new(),
                 recompile_quota: MAX_RECOMPILE_QUOTA,
                 camera: glam::DVec3::ZERO,
+                sort_cam: glam::DVec3::ZERO,
             }),
             available: Condvar::new(),
             closed: AtomicBool::new(false),
@@ -762,25 +807,44 @@ impl MeshQueue {
 
     fn push(&self, job: PendingJob) {
         let mut state = self.state.lock().unwrap();
-        // A re-edit of a still-queued section replaces the queued job in place
-        // instead of duplicating it. Bulk loads can't duplicate (`meshed` gates
-        // them), so only edits need this.
-        if job.is_recompile
-            && let Some(existing) = state
-                .tasks
+        if job.is_recompile {
+            // A re-edit of a still-queued section replaces the queued job in
+            // place instead of duplicating it. Bulk loads can't duplicate
+            // (`meshed` gates them), so only edits need this.
+            if let Some(existing) = state
+                .recompiles
                 .iter_mut()
-                .find(|t| t.is_recompile && t.pos == job.pos && t.sections == job.sections)
-        {
-            *existing = job;
+                .find(|t| t.pos == job.pos && t.sections == job.sections)
+            {
+                *existing = job;
+            } else {
+                state.recompiles.push(job);
+            }
         } else {
-            state.tasks.push(job);
+            let dist = column_dist_sq(job.pos, state.sort_cam);
+            state.loads.push(LoadEntry { dist, job });
         }
         drop(state);
         self.available.notify_one();
     }
 
     fn set_camera(&self, camera: glam::DVec3) {
-        self.state.lock().unwrap().camera = camera;
+        const BUCKET: f64 = 8.0;
+        let mut state = self.state.lock().unwrap();
+        state.camera = camera;
+        let crossed = (camera.x / BUCKET).floor() != (state.sort_cam.x / BUCKET).floor()
+            || (camera.z / BUCKET).floor() != (state.sort_cam.z / BUCKET).floor();
+        if crossed {
+            state.sort_cam = camera;
+            // Re-key the load heap to the new bucket (pop still gives the nearest).
+            state.loads = std::mem::take(&mut state.loads)
+                .into_iter()
+                .map(|e| LoadEntry {
+                    dist: column_dist_sq(e.job.pos, camera),
+                    job: e.job,
+                })
+                .collect();
+        }
     }
 
     fn close(&self) {
@@ -814,41 +878,28 @@ impl MeshQueue {
 /// over initial loads when the edit is closer, bounded by the recompile quota.
 /// Mirrors vanilla `SectionTaskDynamicQueue.poll`.
 fn poll(state: &mut QueueState) -> Option<PendingJob> {
-    let camera = state.camera;
-    let dist_sq = |task: &PendingJob| {
-        let dx = (task.pos.x as f64 * 16.0 + 8.0) - camera.x;
-        let dz = (task.pos.z as f64 * 16.0 + 8.0) - camera.z;
-        dx * dx + dz * dz
-    };
-
-    // Both lanes mesh nearest-first; edits (recompiles) are preferred over initial
-    // loads when closer, bounded by the recompile quota. Occlusion gates drawing,
-    // not meshing, so meshing order is purely distance-based.
-    let mut best_initial: Option<(usize, f64)> = None;
-    let mut best_recompile: Option<(usize, f64)> = None;
-    for (i, task) in state.tasks.iter().enumerate() {
-        let dist = dist_sq(task);
-        if task.is_recompile {
-            if best_recompile.is_none_or(|(_, d)| dist < d) {
-                best_recompile = Some((i, dist));
-            }
-        } else if best_initial.is_none_or(|(_, d)| dist < d) {
-            best_initial = Some((i, dist));
-        }
-    }
+    let cam = state.sort_cam;
+    // Nearest queued recompile (edits are few, so the linear scan is cheap).
+    let best_recompile = state
+        .recompiles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, column_dist_sq(t.pos, cam)))
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    let load_dist = state.loads.peek().map(|e| e.dist);
 
     if let Some((ri, rd)) = best_recompile {
-        let take_recompile = match best_initial {
+        let take_recompile = match load_dist {
             None => true,
-            Some((_, id)) => state.recompile_quota > 0 && rd < id,
+            Some(ld) => state.recompile_quota > 0 && rd < ld,
         };
         if take_recompile {
             state.recompile_quota -= 1;
-            return Some(state.tasks.swap_remove(ri));
+            return Some(state.recompiles.swap_remove(ri));
         }
     }
     state.recompile_quota = MAX_RECOMPILE_QUOTA;
-    best_initial.map(|(ii, _)| state.tasks.swap_remove(ii))
+    state.loads.pop().map(|e| e.job)
 }
 
 /// Run mesh workers below normal priority so the OS preempts them for the
@@ -876,7 +927,7 @@ struct ChunkStoreSnapshot {
         ChunkPos,
         Option<Arc<parking_lot::RwLock<azalea_world::Chunk>>>,
     )>,
-    light: std::collections::HashMap<(i32, i32), crate::world::chunk::ChunkLightData>,
+    light: std::collections::HashMap<(i32, i32), Arc<crate::world::chunk::ChunkLightData>>,
     grass_colormap: Arc<Colormap>,
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
@@ -1423,6 +1474,7 @@ fn mesh_chunk_snapshot(
 
     ChunkMeshData {
         pos,
+        min_y,
         sections,
         replaced: range,
         content_gen: 0,

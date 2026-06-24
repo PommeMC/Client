@@ -76,7 +76,7 @@ impl ChunkLightData {
 pub struct ChunkStore {
     pub chunk_storage: ChunkStorage,
     pub partial_storage: PartialChunkStorage,
-    pub light_data: std::collections::HashMap<(i32, i32), ChunkLightData>,
+    pub light_data: std::collections::HashMap<(i32, i32), Arc<ChunkLightData>>,
     pub block_entities: std::collections::HashMap<BlockPos, StoredBlockEntity>,
 }
 
@@ -94,11 +94,8 @@ impl ChunkStore {
         }
     }
 
-    pub fn loaded_positions(&self) -> Vec<ChunkPos> {
-        self.light_data
-            .keys()
-            .map(|&(x, z)| ChunkPos::new(x, z))
-            .collect()
+    pub fn loaded_positions(&self) -> impl Iterator<Item = ChunkPos> + '_ {
+        self.light_data.keys().map(|&(x, z)| ChunkPos::new(x, z))
     }
 
     pub fn load_chunk(
@@ -151,11 +148,11 @@ impl ChunkStore {
 
         self.light_data.insert(
             (pos.x, pos.z),
-            ChunkLightData {
+            Arc::new(ChunkLightData {
                 sky_sections,
                 block_sections,
                 min_y: self.chunk_storage.min_y(),
-            },
+            }),
         );
     }
 

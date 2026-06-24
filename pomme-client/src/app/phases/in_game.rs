@@ -434,7 +434,6 @@ impl GameState {
             let rd = self
                 .chunk_store
                 .loaded_positions()
-                .iter()
                 .map(|p| {
                     (p.x - player_chunk.x)
                         .abs()
