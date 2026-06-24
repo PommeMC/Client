@@ -212,6 +212,9 @@ pub struct BakedQuad {
 pub struct BakedModel {
     pub quads: Vec<BakedQuad>,
     pub is_full_cube: bool,
+    /// Vanilla `canOcclude`: full cubes occlude, but cutout blocks like leaves
+    /// don't, so neighbor faces against them still render.
+    pub occludes: bool,
 }
 
 #[derive(Clone)]
@@ -305,9 +308,12 @@ pub fn bake_all_models(
                         &mut model_cache,
                         packs,
                     );
-                    if let Some(baked) =
+                    if let Some(mut baked) =
                         bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
                     {
+                        if is_non_occluding(block_name) {
+                            baked.occludes = false;
+                        }
                         variants_map.insert(variant_key.clone(), baked);
                     }
                 }
@@ -500,6 +506,7 @@ pub fn bake_chest_item_model() -> BakedModel {
     BakedModel {
         quads,
         is_full_cube: false,
+        occludes: false,
     }
 }
 
@@ -1001,6 +1008,7 @@ fn bake_resolved_model(
     Some(BakedModel {
         quads,
         is_full_cube,
+        occludes: is_full_cube,
     })
 }
 
@@ -1261,6 +1269,12 @@ fn build_face_textures(
     }
 
     None
+}
+
+/// Leaves bake as a full cube but mustn't cull adjacent faces, or the cutout
+/// texture lets you see through them (vanilla `noOcclusion`).
+fn is_non_occluding(block_name: &str) -> bool {
+    block_name.ends_with("_leaves")
 }
 
 fn determine_tint(block_name: &str) -> Tint {

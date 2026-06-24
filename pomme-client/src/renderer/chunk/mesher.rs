@@ -1310,7 +1310,7 @@ fn emit_baked_model(
         if let Some(cullface) = quad.cullface {
             let offset = cullface.offset();
             let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
-            if registry.is_opaque_full_cube(neighbor) {
+            if registry.occludes_neighbor(neighbor) {
                 continue;
             }
         }
@@ -1363,7 +1363,7 @@ fn emit_cube_faces(
     for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
         let offset = dir.offset();
         let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
-        if registry.is_opaque_full_cube(neighbor) {
+        if registry.occludes_neighbor(neighbor) {
             continue;
         }
 
@@ -1508,7 +1508,7 @@ fn emit_fluid(
         let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
 
         if matches!(classify_block(neighbor), BlockKind::Water | BlockKind::Lava)
-            || registry.is_opaque_full_cube(neighbor)
+            || registry.occludes_neighbor(neighbor)
         {
             continue;
         }
@@ -1550,7 +1550,7 @@ fn emit_multipart(
         if let Some(cullface) = quad.cullface {
             let offset = cullface.offset();
             let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
-            if registry.is_opaque_full_cube(neighbor) {
+            if registry.occludes_neighbor(neighbor) {
                 continue;
             }
         }
@@ -1608,7 +1608,7 @@ fn emit_lod_cube(
         let ny = by + offset[1] * step;
         let nz = bz + offset[2] * step;
         let neighbor = snapshot.get_block_state(nx, ny, nz);
-        if registry.is_opaque_full_cube(neighbor) {
+        if registry.occludes_neighbor(neighbor) {
             continue;
         }
         if is_fluid && matches!(classify_block(neighbor), BlockKind::Water | BlockKind::Lava) {
@@ -1656,7 +1656,7 @@ fn emit_missing_cube(
     for dir in &CUBE_FACE_DIRS {
         let offset = dir.offset();
         let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
-        if registry.is_opaque_full_cube(neighbor) {
+        if registry.occludes_neighbor(neighbor) {
             continue;
         }
 

@@ -186,13 +186,22 @@ impl BlockRegistry {
         if quads.is_empty() { None } else { Some(quads) }
     }
 
-    pub fn is_opaque_full_cube(&self, state: BlockState) -> bool {
+    fn baked_model_flag(&self, state: BlockState, f: impl Fn(&BakedModel) -> bool) -> bool {
         if state.is_air() {
             return false;
         }
-        self.get_baked_model(state)
-            .map(|m| m.is_full_cube)
-            .unwrap_or(false)
+        self.get_baked_model(state).map(f).unwrap_or(false)
+    }
+
+    pub fn is_opaque_full_cube(&self, state: BlockState) -> bool {
+        self.baked_model_flag(state, |m| m.is_full_cube)
+    }
+
+    /// Whether `state` culls a neighbor's adjacent face. Unlike
+    /// [`Self::is_opaque_full_cube`], non-occluding blocks like leaves return
+    /// false even though they bake as full cubes.
+    pub fn occludes_neighbor(&self, state: BlockState) -> bool {
+        self.baked_model_flag(state, |m| m.occludes)
     }
 
     pub fn texture_names(&self) -> impl Iterator<Item = &str> + '_ {
