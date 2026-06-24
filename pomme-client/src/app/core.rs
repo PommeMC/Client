@@ -1073,6 +1073,7 @@ impl AppCore {
             game.player.position.into(),
             game.player.on_ground,
             game.player.game_mode == 1,
+            input.selected_slot(),
             place_block,
         );
         if !dirty.is_empty() {

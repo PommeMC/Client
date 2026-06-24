@@ -9,6 +9,7 @@ use azalea_protocol::packets::game::ServerboundGamePacket;
 use azalea_protocol::packets::game::s_attack::ServerboundAttack;
 use azalea_protocol::packets::game::s_interact::InteractionHand;
 use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerAction};
+use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
 use glam::{DVec3, Vec3, dvec3};
 
@@ -61,6 +62,7 @@ struct ServerVerifiedState {
 pub struct InteractionState {
     pub target: Option<HitResult>,
     seq: u32,
+    carried_slot: u8,
     last_teleport_seq: u32,
     pending_predictions: HashMap<BlockPos, ServerVerifiedState>,
     is_destroying: bool,
@@ -81,6 +83,7 @@ impl InteractionState {
         Self {
             target: None,
             seq: 0,
+            carried_slot: u8::MAX,
             last_teleport_seq: 0,
             pending_predictions: HashMap::new(),
             is_destroying: false,
@@ -278,9 +281,12 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        selected_slot: u8,
         place_block: Option<BlockState>,
     ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
+
+        self.ensure_has_sent_carried_item(sender, selected_slot);
 
         // Vanilla `Minecraft.tick` order: attack/use input (which triggers the
         // swing) runs first, then `--missTime`, then the player entity advances
@@ -660,6 +666,20 @@ impl InteractionState {
             self.is_destroying = false;
             self.destroy_progress = 0.0;
             self.destroy_ticks = 0.0;
+        }
+    }
+
+    /// Ports vanilla `MultiPlayerGameMode.ensureHasSentCarriedItem`: tell the
+    /// server which hotbar slot is selected whenever it changes, so it resolves
+    /// interactions against the item we're actually holding.
+    fn ensure_has_sent_carried_item(&mut self, sender: &PacketSender, selected_slot: u8) {
+        if selected_slot != self.carried_slot {
+            self.carried_slot = selected_slot;
+            sender.send(ServerboundGamePacket::SetCarriedItem(
+                ServerboundSetCarriedItem {
+                    slot: selected_slot as u16,
+                },
+            ));
         }
     }
 
