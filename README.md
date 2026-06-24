@@ -2,7 +2,7 @@
   <h1 align="center">Pomme</h1>
   <p align="center">A high-performance Minecraft client written in Rust</p>
   <p align="center">
-    <a href="https://discord.gg/ucBA55bHPR">Discord</a> · <a href="https://github.com/PommeMC/Pomme-Client/issues">Issues</a> · <a href="https://github.com/PommeMC/Pomme-Client/releases">Releases</a>
+    <a href="https://discord.gg/ucBA55bHPR">Discord</a> · <a href="https://github.com/PommeMC/Client/issues">Issues</a> · <a href="https://github.com/PommeMC/Client/releases">Releases</a>
   </p>
 </p>
 
@@ -19,26 +19,12 @@ The goal is a lightweight, performant alternative to the official Java client.
 
 ## Features
 
-- **Vulkan rendering**
--chunk meshing, frustum culling, water/lava, sky, block overlays, hand animation
-
-- **Vanilla-exact physics**
--sprinting, swimming, drowning, collision, all matched against decompiled source
-
-- **Full protocol support**
--connects to 26.1.1 servers via azalea-protocol, handles chunk streaming,
-block updates, chat
-
-- **Microsoft authentication**
--sign in with your Microsoft account, tokens stored in the OS keyring
-
-- **HUD & menus**
--health, hunger, air bubbles, hotbar, F3 debug, chat, pause menu,
-options, server list
-
-- **Launcher**
--Tauri-based launcher with frosted glass UI, multi-account management,
-Mojang patch notes, installation manager
+- **Vulkan rendering**: chunk meshing, GPU frustum and cave-occlusion culling, smooth lighting, water/lava, entities and mobs, block entities, weather, clouds, sky, block overlays, hand animation
+- **Vanilla-exact physics**: sprinting, swimming, drowning, collision, all matched against decompiled source
+- **Full protocol support**: connects to 26.2 servers via azalea-protocol, handles chunk streaming, block updates, chat
+- **Microsoft authentication**: sign in with your Microsoft account, tokens stored in the OS keyring
+- **HUD & menus**: health, hunger, air bubbles, hotbar, F3 debug, chat, pause menu, options, server list
+- **Launcher**: Tauri-based launcher with frosted glass UI, multi-account management, Mojang patch notes, installation manager
 
 ## Architecture
 
@@ -91,25 +77,25 @@ Running the standalone client requires minecraft assets, for which you have 2 op
    just client-dev -- --username Steve
    ```
 
-2. If you're on linux, extract the vanilla 26.1.1 assets from `.minecraft/` to `reference/`:
+2. If you're on linux, extract the vanilla 26.2 assets from `.minecraft/` to `reference/`:
 
    ```bash
    mkdir -p reference/assets/indexes
    mkdir -p reference/assets/objects
-   mkdir -p reference/versions/26.1.1/extracted
+   mkdir -p reference/versions/26.2/extracted
    mkdir -p reference/game-dir
 
-   # 30 is the asset index id for 26.1.1
-   cp ~/.minecraft/assets/indexes/30.json reference/assets/indexes/26.1.1.json
+   # 32 is the asset index id for 26.2
+   cp ~/.minecraft/assets/indexes/32.json reference/assets/indexes/26.2.json
    cp -r ~/.minecraft/assets/objects/. reference/assets/objects/
-   cp ~/.minecraft/versions/26.1.1/26.1.1.jar reference/versions/26.1.1/
-   unzip reference/versions/26.1.1/26.1.1.jar 'assets/*' -d reference/versions/26.1.1/extracted/
+   cp ~/.minecraft/versions/26.2/26.2.jar reference/versions/26.2/
+   unzip reference/versions/26.2/26.2.jar 'assets/*' -d reference/versions/26.2/extracted/
    ```
 
    Then you can run the client with:
 
    ```bash
-   just client-dev -- --version 26.1.1 \
+   just client-dev -- --version 26.2 \
      --assets-dir $PWD/reference/assets \
      --versions-dir $PWD/reference/versions \
      --game-dir $PWD/reference/game-dir
@@ -140,10 +126,10 @@ See [THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md) for details.
 [![Discord](https://img.shields.io/discord/1483578136544280618?color=5865F2&label=Discord&logo=discord&logoColor=white)](https://discord.gg/ucBA55bHPR)
 [![Sponsor](https://img.shields.io/badge/Sponsor-Purdze-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Purdze)
 
-<a href="https://www.star-history.com/?repos=PommeMC%2FPomme-Client&type=date&logscale&legend=top-left">
+<a href="https://www.star-history.com/?repos=PommeMC%2FClient&type=date&logscale&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=PommeMC/Pomme-Client&type=date&theme=dark&logscale&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=PommeMC/Pomme-Client&type=date&logscale&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=PommeMC/Pomme-Client&type=date&logscale&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=PommeMC/Client&type=date&theme=dark&logscale&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=PommeMC/Client&type=date&logscale&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=PommeMC/Client&type=date&logscale&legend=top-left" />
  </picture>
 </a>
