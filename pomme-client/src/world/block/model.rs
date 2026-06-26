@@ -1271,10 +1271,12 @@ fn build_face_textures(
     None
 }
 
-/// Leaves bake as a full cube but mustn't cull adjacent faces, or the cutout
-/// texture lets you see through them (vanilla `noOcclusion`).
+/// Full-cube blocks that mustn't cull adjacent faces (vanilla `noOcclusion`).
+/// Solid `packed_ice`/`blue_ice` still occlude, so `ice` is matched exactly.
 fn is_non_occluding(block_name: &str) -> bool {
     block_name.ends_with("_leaves")
+        || block_name.ends_with("_stained_glass")
+        || matches!(block_name, "glass" | "tinted_glass" | "ice" | "frosted_ice")
 }
 
 fn determine_tint(block_name: &str) -> Tint {

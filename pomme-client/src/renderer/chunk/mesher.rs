@@ -1724,6 +1724,8 @@ fn emit_face(
 }
 
 fn shade_brightness(state: azalea_block::BlockState, registry: &BlockRegistry) -> f32 {
+    // TODO: non-occluding full cubes (leaves, glass, ice) still darken adjacent
+    // faces here. Vanilla's are `isViewBlocking=never` and don't contribute AO.
     if registry.is_opaque_full_cube(state) {
         0.2
     } else {
