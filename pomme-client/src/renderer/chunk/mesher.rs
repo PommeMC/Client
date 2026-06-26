@@ -511,8 +511,8 @@ impl MeshDispatcher {
         dry_foliage_colormap: Colormap,
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     ) -> Self {
-        // Bulk results are bounded for back-pressure; edits stay unbounded so a
-        // block edit never blocks a worker behind the load backlog.
+        // Bulk results are bounded for back-pressure; edit results use the
+        // unbounded priority channel so they never queue behind the load backlog.
         let (result_tx, result_rx) = crossbeam_channel::bounded(MAX_PENDING_RESULTS);
         let (priority_tx, priority_rx) = crossbeam_channel::unbounded();
 
@@ -522,7 +522,7 @@ impl MeshDispatcher {
         // some load throughput for that.
         let worker_count = std::thread::available_parallelism()
             .map(|n| (n.get() / 2).clamp(2, 16))
-            .unwrap_or(1);
+            .unwrap_or(2);
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let queue = Arc::clone(&queue);

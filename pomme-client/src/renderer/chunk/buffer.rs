@@ -24,9 +24,10 @@ const BYTES_PER_BUCKET: u64 =
 const MIN_BUCKETS: u32 = 128;
 const MAX_BUCKETS: u32 = 2048;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
-/// Per-section fade-in length and the near-column radius (squared) within which
-/// sections appear instantly. Shared by the opaque indirect path and water.
+/// Per-section fade-in length, shared by the opaque indirect path and water.
 const FADE_DURATION_MS: f32 = 1000.0;
+/// Columns within this squared X/Z distance of the camera render opaque
+/// immediately and never fade in.
 const NEARBY_DIST_SQ: f32 = 768.0;
 
 /// First-fit free-list sub-allocator over a fixed element range, coalescing on
@@ -710,6 +711,14 @@ impl ChunkBufferStore {
         self.last_draw_count
     }
 
+    /// Whether `pos`'s column is near enough to `cam` to render opaque
+    /// immediately (a nearby column never fades in).
+    fn column_nearby(&self, pos: ChunkPos, cam: [f32; 3]) -> bool {
+        let dx = pos.x as f32 * 16.0 + 8.0 - cam[0];
+        let dz = pos.z as f32 * 16.0 + 8.0 - cam[2];
+        !self.fade_enabled || dx * dx + dz * dz < NEARBY_DIST_SQ
+    }
+
     /// Submit the accumulated staging copies as a single transfer and block on
     /// a fence until it completes. One fence wait per call replaces the old
     /// per-mesh `queue.wait_idle`, so a frame's uploads synchronize once
@@ -1042,10 +1051,13 @@ impl ChunkBufferStore {
 
             // Freshly revealed sections fade in, so extend the fade window the
             // cull's O(1) check reads; re-meshed-only uploads swap instantly.
-            if plans
+            // Nearby columns never fade, so extending for them only forces
+            // redundant rebuilds — skip them. `last_sort_cam` is the camera the
+            // draw list is keyed to (unset => far, the safe default).
+            let revealed = plans
                 .iter()
-                .any(|p| !was_present.contains(&p.section_index))
-            {
+                .any(|p| !was_present.contains(&p.section_index));
+            if revealed && !self.column_nearby(mesh.pos, self.last_sort_cam) {
                 let dur = std::time::Duration::from_secs_f32(FADE_DURATION_MS / 1000.0);
                 self.fade_until = self.fade_until.max(now + dur);
             }
@@ -1256,6 +1268,10 @@ impl ChunkBufferStore {
         if content_changed {
             self.cached_meta.clear();
             for (pos, alloc) in self.chunks.iter() {
+                // Near columns never fade; otherwise each section fades on its own
+                // timer (X/Z distance is per-column).
+                let nearby = self.column_nearby(*pos, camera_pos);
+
                 // CPU omission: the visibility graph's mask skips sections proven
                 // occluded, so they never reach the GPU cull (absent => all draw).
                 let col_vis = self.chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
@@ -1264,8 +1280,7 @@ impl ChunkBufferStore {
                     if col_vis & (1u32 << sec.section_index) == 0 {
                         continue;
                     }
-                    let vis =
-                        Self::section_visibility(self.fade_enabled, *pos, sec, now, camera_pos);
+                    let vis = Self::section_visibility(nearby, sec, now);
                     self.cached_meta.push(ChunkMeta {
                         aabb_min: sec.aabb.min,
                         aabb_max: sec.aabb.max,
@@ -1417,16 +1432,8 @@ impl ChunkBufferStore {
     /// the rest ramp over [`FADE_DURATION_MS`] from their upload time. Drives
     /// both the opaque indirect meta and the water pass so they fade in
     /// together.
-    fn section_visibility(
-        fade_enabled: bool,
-        pos: ChunkPos,
-        sec: &SectionAlloc,
-        now: std::time::Instant,
-        camera_pos: [f32; 3],
-    ) -> f32 {
-        let dx = pos.x as f32 * 16.0 + 8.0 - camera_pos[0];
-        let dz = pos.z as f32 * 16.0 + 8.0 - camera_pos[2];
-        if !fade_enabled || dx * dx + dz * dz < NEARBY_DIST_SQ {
+    fn section_visibility(nearby: bool, sec: &SectionAlloc, now: std::time::Instant) -> f32 {
+        if nearby {
             return 1.0;
         }
         let elapsed_ms = now.duration_since(sec.uploaded_at).as_secs_f32() * 1000.0;
@@ -1459,6 +1466,7 @@ impl ChunkBufferStore {
         let now = std::time::Instant::now();
         for (pos, alloc) in self.chunks.iter() {
             let col_vis = self.chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
+            let nearby = self.column_nearby(*pos, camera_pos);
             for sec in &alloc.sections {
                 if sec.water_index_count == 0
                     || col_vis & (1u32 << sec.section_index) == 0
@@ -1466,7 +1474,7 @@ impl ChunkBufferStore {
                 {
                     continue;
                 }
-                let vis = Self::section_visibility(self.fade_enabled, *pos, sec, now, camera_pos);
+                let vis = Self::section_visibility(nearby, sec, now);
                 cmd.draw_indexed(
                     sec.water_index_count,
                     1,
