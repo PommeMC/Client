@@ -1093,6 +1093,15 @@ impl AppCore {
         if input_live {
             self.input.clear_just_pressed_actions();
         }
+
+        // Marks the end of the client tick (1.21.2+). Must be the last packet of
+        // the tick: servers and anti-cheat batch our movement between these to
+        // tick-align it, so omitting it makes them reject/rubber-band movement.
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::ClientTickEnd(
+                azalea_protocol::packets::game::s_client_tick_end::ServerboundClientTickEnd,
+            ));
     }
 
     fn send_input_packet(input: &InputState, connection: &ConnectionHandle, game: &mut GameState) {
