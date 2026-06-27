@@ -3,11 +3,9 @@
 //! `StairBlock`, etc.). Boxes are block-local (0..1); the caller offsets them
 //! to the block position.
 //!
-//! `partial_shape` returns:
-//! - `None` for blocks that use the default full cube (the common case),
-//! - `Some(vec![])` for blocks with collision but an empty shape this version
-//!   doesn't special-case yet (none currently),
-//! - `Some(boxes)` for the partial shapes below.
+//! `partial_shape` returns `None` for blocks that use the default full cube
+//! (the common case) and `Some(boxes)` otherwise; an empty `Vec` means the
+//! block has no collision.
 //!
 //! TODO: walls, fences, fence gates, panes, trapdoors, doors, beds, chests,
 //! cake, etc. still fall back to a full cube.
@@ -39,7 +37,6 @@ pub fn partial_shape(state: azalea_block::BlockState) -> Option<Vec<LocalBox>> {
 
     match id {
         "dirt_path" | "farmland" => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.9375, 1.0]]),
-        "moss_carpet" | "pale_moss_carpet" => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.0625, 1.0]]),
         _ if id.ends_with("_carpet") => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.0625, 1.0]]),
         // Snow's collision shape is one layer shorter than its outline; a single
         // layer has no collision at all.
