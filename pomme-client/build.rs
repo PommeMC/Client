@@ -37,6 +37,7 @@ fn main() {
     let shaders = [
         ("chunk.vert", shaderc::ShaderKind::Vertex),
         ("chunk.frag", shaderc::ShaderKind::Fragment),
+        ("water.frag", shaderc::ShaderKind::Fragment),
         ("cube.vert", shaderc::ShaderKind::Vertex),
         ("cube.frag", shaderc::ShaderKind::Fragment),
         ("panorama.vert", shaderc::ShaderKind::Vertex),

@@ -1447,11 +1447,20 @@ impl Renderer {
                 cloud_mode,
                 render_distance,
                 player_preview,
-                // TODO: suppress the sky dome / clouds underwater (vanilla water fog hides them).
-                eyes_in_water: _,
+                eyes_in_water,
             } => {
-                self.sky_pipeline
-                    .update_and_draw(&self.ctx.device, cmd, frame, &self.camera, sky);
+                // Vanilla water fog hides the sky dome and clouds; the framebuffer
+                // is cleared to the water fog color, so skipping them tints the view
+                // when looking up out of geometry.
+                if !*eyes_in_water {
+                    self.sky_pipeline.update_and_draw(
+                        &self.ctx.device,
+                        cmd,
+                        frame,
+                        &self.camera,
+                        sky,
+                    );
+                }
 
                 let t_cull = std::time::Instant::now();
                 self.chunk_pipeline.bind(cmd, frame);
@@ -1488,10 +1497,19 @@ impl Renderer {
 
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
 
+                // Translucent water draws after opaque terrain and entities so it
+                // blends over them; depth-tested (occluded by geometry in front)
+                // but doesn't write depth. CPU frustum-culled, reusing the entity
+                // frustum/eye.
+                self.chunk_pipeline.bind_water(cmd, frame);
+                self.chunk_buffers.draw_water(cmd, &ent_frustum, ent_eye);
+
                 // Clouds draw after opaque world geometry (so terrain occludes
                 // them) and before weather, depth-tested against the scene.
-                self.cloud_pipeline
-                    .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
+                if !*eyes_in_water {
+                    self.cloud_pipeline
+                        .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
+                }
 
                 // Weather draws after opaque world geometry (depth-tested against
                 // terrain) but before the depth clear for the hand pass.

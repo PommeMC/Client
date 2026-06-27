@@ -136,6 +136,31 @@ struct DrawCommand {
     first_instance: u32,
 }
 
+/// Camera-relative frustum/AABB test mirroring `cull.comp` (the GPU opaque
+/// path), used by the CPU-driven water pass.
+fn aabb_in_frustum(aabb: &ChunkAABB, planes: &[[f32; 4]; 6], cam: [f32; 3]) -> bool {
+    let mn = [
+        aabb.min[0] - cam[0],
+        aabb.min[1] - cam[1],
+        aabb.min[2] - cam[2],
+    ];
+    let mx = [
+        aabb.max[0] - cam[0],
+        aabb.max[1] - cam[1],
+        aabb.max[2] - cam[2],
+    ];
+    for p in planes {
+        let d = p[0] * if p[0] >= 0.0 { mx[0] } else { mn[0] }
+            + p[1] * if p[1] >= 0.0 { mx[1] } else { mn[1] }
+            + p[2] * if p[2] >= 0.0 { mx[2] } else { mn[2] }
+            + p[3];
+        if d < 0.0 {
+            return false;
+        }
+    }
+    true
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrustumData {
@@ -154,7 +179,14 @@ struct SectionAlloc {
     section_index: i32,
     aabb: ChunkAABB,
     first_index: u32,
+    /// Opaque index count (the GPU-culled draw); water is excluded.
     index_count: u32,
+    /// Translucent water index slice, stored right after the opaque indices in
+    /// the same index allocation. Drawn in a separate blended pass.
+    water_first_index: u32,
+    water_index_count: u32,
+    /// Total allocated index slice length (opaque + water), for freeing.
+    idx_len: u32,
     vertex_offset: i32,
     vtx_len: u32,
     uploaded_at: std::time::Instant,
@@ -592,12 +624,7 @@ impl ChunkBufferStore {
             entry.sections.retain(|s| {
                 if accepted.contains(&s.section_index) {
                     was_present.insert(s.section_index);
-                    freed.push((
-                        s.vertex_offset as u32,
-                        s.vtx_len,
-                        s.first_index,
-                        s.index_count,
-                    ));
+                    freed.push((s.vertex_offset as u32, s.vtx_len, s.first_index, s.idx_len));
                     false
                 } else {
                     true
@@ -641,7 +668,7 @@ impl ChunkBufferStore {
                 .sum();
             let i_bytes: usize = upload_secs
                 .iter()
-                .map(|s| s.indices.len() * INDEX_SIZE as usize)
+                .map(|s| (s.indices.len() + s.water_indices.len()) * INDEX_SIZE as usize)
                 .sum();
             if v_bytes > staging_half || i_bytes > staging_half {
                 tracing::warn!(
@@ -661,6 +688,7 @@ impl ChunkBufferStore {
             section_index: i32,
             verts: &'a [ChunkVertex],
             indices: &'a [u32],
+            water_indices: &'a [u32],
             vtx_off: u32,
             idx_off: u32,
             aabb: ChunkAABB,
@@ -675,7 +703,8 @@ impl ChunkBufferStore {
         let dropped: Vec<i32> = accepted.iter().copied().collect();
         for sec in &upload_secs {
             let vcount = sec.vertices.len() as u32;
-            let icount = sec.indices.len() as u32;
+            // Opaque and water indices share one slice (opaque first, water after).
+            let icount = (sec.indices.len() + sec.water_indices.len()) as u32;
             if vcount == 0 || icount == 0 {
                 continue;
             }
@@ -695,6 +724,7 @@ impl ChunkBufferStore {
                 section_index: sec.section_index,
                 verts: &sec.vertices,
                 indices: &sec.indices,
+                water_indices: &sec.water_indices,
                 vtx_off,
                 idx_off,
                 aabb: section_aabb(&sec.vertices),
@@ -724,15 +754,18 @@ impl ChunkBufferStore {
                     });
                     stg_v += vb.len();
 
-                    let ib: &[u8] = bytemuck::cast_slice(p.indices);
+                    let opaque: &[u8] = bytemuck::cast_slice(p.indices);
+                    let water: &[u8] = bytemuck::cast_slice(p.water_indices);
                     let off = staging_half + stg_i;
-                    buf[off..off + ib.len()].copy_from_slice(ib);
+                    buf[off..off + opaque.len()].copy_from_slice(opaque);
+                    buf[off + opaque.len()..off + opaque.len() + water.len()]
+                        .copy_from_slice(water);
                     copy_i.push(vk::BufferCopy {
                         src_offset: off as u64,
                         dst_offset: p.idx_off as u64 * INDEX_SIZE,
-                        size: ib.len() as u64,
+                        size: (opaque.len() + water.len()) as u64,
                     });
-                    stg_i += ib.len();
+                    stg_i += opaque.len() + water.len();
                 }
             }
 
@@ -765,9 +798,12 @@ impl ChunkBufferStore {
             {
                 let ibuf = self.index_alloc.mapped_slice_mut().unwrap();
                 for p in &plans {
-                    let ib: &[u8] = bytemuck::cast_slice(p.indices);
+                    let opaque: &[u8] = bytemuck::cast_slice(p.indices);
+                    let water: &[u8] = bytemuck::cast_slice(p.water_indices);
                     let off = p.idx_off as usize * INDEX_SIZE as usize;
-                    ibuf[off..off + ib.len()].copy_from_slice(ib);
+                    ibuf[off..off + opaque.len()].copy_from_slice(opaque);
+                    ibuf[off + opaque.len()..off + opaque.len() + water.len()]
+                        .copy_from_slice(water);
                 }
             }
         }
@@ -778,6 +814,9 @@ impl ChunkBufferStore {
             aabb: p.aabb,
             first_index: p.idx_off,
             index_count: p.indices.len() as u32,
+            water_first_index: p.idx_off + p.indices.len() as u32,
+            water_index_count: p.water_indices.len() as u32,
+            idx_len: (p.indices.len() + p.water_indices.len()) as u32,
             vertex_offset: p.vtx_off as i32,
             vtx_len: p.verts.len() as u32,
             // A re-meshed section swaps instantly; a freshly revealed one fades in.
@@ -935,7 +974,7 @@ impl ChunkBufferStore {
                     sec.vertex_offset as u32,
                     sec.vtx_len,
                     sec.first_index,
-                    sec.index_count,
+                    sec.idx_len,
                 )
             }));
             self.meta_dirty = true;
@@ -1130,6 +1169,44 @@ impl ChunkBufferStore {
                 max_draws,
                 size_of::<DrawCommand>() as u32,
             );
+        }
+    }
+
+    /// Draw the translucent water of every section that survives a CPU frustum
+    /// cull. Reuses the shared vertex/index buffers (water indices live right
+    /// after the opaque ones in each section's slice); the caller binds the
+    /// blended water pipeline first. Not GPU-culled — water sections are a
+    /// small subset, so a per-section draw is cheap and keeps the opaque
+    /// indirect path untouched.
+    pub fn draw_water(
+        &self,
+        cmd: vk::CommandBuffer,
+        frustum: &[[f32; 4]; 6],
+        camera_pos: [f32; 3],
+    ) {
+        if self.chunks.is_empty() {
+            return;
+        }
+
+        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+        cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
+
+        // Full visibility (no fade); chunk.vert reads gl_InstanceIndex as the
+        // packed visibility float.
+        let first_instance = 1.0f32.to_bits();
+        for alloc in self.chunks.values() {
+            for sec in &alloc.sections {
+                if sec.water_index_count == 0 || !aabb_in_frustum(&sec.aabb, frustum, camera_pos) {
+                    continue;
+                }
+                cmd.draw_indexed(
+                    sec.water_index_count,
+                    1,
+                    sec.water_first_index,
+                    sec.vertex_offset,
+                    first_instance,
+                );
+            }
         }
     }
 
