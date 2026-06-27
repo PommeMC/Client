@@ -1485,8 +1485,12 @@ impl Renderer {
                 }
 
                 let t_cull = std::time::Instant::now();
-                self.chunk_pipeline.bind(cmd, frame);
-                self.chunk_buffers.draw_indirect(cmd, frame);
+                // Solid (no discard) first so it lays down depth and early-Z lets
+                // the front-to-back order reject occluded fragments; cutout after.
+                self.chunk_pipeline.bind(cmd, frame, false);
+                self.chunk_buffers.draw_indirect(cmd, frame, false);
+                self.chunk_pipeline.bind(cmd, frame, true);
+                self.chunk_buffers.draw_indirect(cmd, frame, true);
                 let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
                 if let Some((block_pos, stage, state)) = destroy_info {

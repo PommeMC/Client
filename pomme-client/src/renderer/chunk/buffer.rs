@@ -136,8 +136,10 @@ struct ChunkMeta {
     first_index: u32,
     vertex_offset: i32,
     visibility: u32,
-    /// Section world origin; bound as a per-instance vertex attribute so the
-    /// vertex shader rebases the quantized local position. `[3]` is padding.
+    /// `[0..3]`: section world origin, bound as a per-instance vertex attribute
+    /// so the vertex shader rebases the quantized local position (it reads only
+    /// xyz). `[3]`: the section's `solid_index_count` reinterpreted as float
+    /// bits, read by the cull shader to split the solid/cutout draws.
     origin: [f32; 4],
 }
 
@@ -301,6 +303,9 @@ struct SectionAlloc {
     first_index: u32,
     /// Opaque index count (the GPU-culled draw); water is excluded.
     index_count: u32,
+    /// Leading indices belonging to the solid (no-discard) pass; the rest are
+    /// cutout. Passed to the GPU via `ChunkMeta.origin[3]`.
+    solid_index_count: u32,
     /// Translucent water index slice, stored right after the opaque indices in
     /// the same index allocation. Drawn in a separate blended pass.
     water_first_index: u32,
@@ -367,10 +372,17 @@ pub struct ChunkBufferStore {
 
     meta_buffers: Vec<vk::Buffer>,
     meta_allocs: Vec<Allocation>,
+    // Solid (no-discard, early-Z) draw list, written by the cull shader.
     indirect_buffers: Vec<vk::Buffer>,
     indirect_allocs: Vec<Allocation>,
     count_buffers: Vec<vk::Buffer>,
     count_allocs: Vec<Allocation>,
+    // Cutout (discard) draw list. Same sections, the back of each section's
+    // index slice; drawn in a second pass after solid lays down depth.
+    indirect_cutout_buffers: Vec<vk::Buffer>,
+    indirect_cutout_allocs: Vec<Allocation>,
+    count_cutout_buffers: Vec<vk::Buffer>,
+    count_cutout_allocs: Vec<Allocation>,
     frustum_buffers: Vec<vk::Buffer>,
     frustum_allocs: Vec<Allocation>,
     fade_enabled: bool,
@@ -507,6 +519,10 @@ impl ChunkBufferStore {
         let mut indirect_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut count_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut count_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut indirect_cutout_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut indirect_cutout_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut count_cutout_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut count_cutout_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut frustum_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut frustum_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
@@ -540,6 +556,26 @@ impl ChunkBufferStore {
             );
             count_buffers.push(b);
             count_allocs.push(a);
+
+            let (b, a) = util::create_host_buffer(
+                device,
+                allocator,
+                indirect_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "indirect_cmds_cutout",
+            );
+            indirect_cutout_buffers.push(b);
+            indirect_cutout_allocs.push(a);
+
+            let (b, a) = util::create_host_buffer(
+                device,
+                allocator,
+                count_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "draw_count_cutout",
+            );
+            count_cutout_buffers.push(b);
+            count_cutout_allocs.push(a);
 
             let (b, a) = util::create_host_buffer(
                 device,
@@ -589,7 +625,8 @@ impl ChunkBufferStore {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::StorageBuffer,
-                descriptor_count: 3 * MAX_FRAMES_IN_FLIGHT as u32,
+                // meta + solid indirect/count + cutout indirect/count = 5 per frame.
+                descriptor_count: 5 * MAX_FRAMES_IN_FLIGHT as u32,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UniformBuffer,
@@ -653,12 +690,37 @@ impl ChunkBufferStore {
                 count_size,
             );
 
+            let (indirect_c_info, mut indirect_c_write) = desc_write(
+                compute_sets[i],
+                4,
+                vk::DescriptorType::StorageBuffer,
+                indirect_cutout_buffers[i],
+                indirect_size,
+            );
+
+            let (count_c_info, mut count_c_write) = desc_write(
+                compute_sets[i],
+                5,
+                vk::DescriptorType::StorageBuffer,
+                count_cutout_buffers[i],
+                count_size,
+            );
+
             meta_write.buffer_info = meta_info.as_ptr();
             frustum_write.buffer_info = frustum_info.as_ptr();
             indirect_write.buffer_info = indirect_info.as_ptr();
             count_write.buffer_info = count_info.as_ptr();
+            indirect_c_write.buffer_info = indirect_c_info.as_ptr();
+            count_c_write.buffer_info = count_c_info.as_ptr();
 
-            let writes = [meta_write, frustum_write, indirect_write, count_write];
+            let writes = [
+                meta_write,
+                frustum_write,
+                indirect_write,
+                count_write,
+                indirect_c_write,
+                count_c_write,
+            ];
 
             device.update_descriptor_sets(&writes, &[]);
         }
@@ -696,6 +758,10 @@ impl ChunkBufferStore {
             indirect_allocs,
             count_buffers,
             count_allocs,
+            indirect_cutout_buffers,
+            indirect_cutout_allocs,
+            count_cutout_buffers,
+            count_cutout_allocs,
             frustum_buffers,
             frustum_allocs,
             fade_enabled: false,
@@ -805,6 +871,7 @@ impl ChunkBufferStore {
             water_indices: &'a [u32],
             vtx_off: u32,
             idx_off: u32,
+            solid_index_count: u32,
             aabb: ChunkAABB,
             origin: [f32; 3],
         }
@@ -945,6 +1012,7 @@ impl ChunkBufferStore {
                     water_indices: &sec.water_indices,
                     vtx_off,
                     idx_off,
+                    solid_index_count: sec.solid_index_count,
                     aabb: section_aabb(&sec.vertices),
                     origin: [
                         (mesh.pos.x * 16) as f32,
@@ -1034,6 +1102,7 @@ impl ChunkBufferStore {
                 origin: p.origin,
                 first_index: p.idx_off,
                 index_count: p.indices.len() as u32,
+                solid_index_count: p.solid_index_count,
                 water_first_index: p.idx_off + p.indices.len() as u32,
                 water_index_count: p.water_indices.len() as u32,
                 idx_len: (p.indices.len() + p.water_indices.len()) as u32,
@@ -1116,6 +1185,13 @@ impl ChunkBufferStore {
                         std::mem::zeroed()
                     }))
                     .ok();
+                device.destroy_buffer(self.indirect_cutout_buffers[i], None);
+                alloc
+                    .free(std::mem::replace(
+                        &mut self.indirect_cutout_allocs[i],
+                        unsafe { std::mem::zeroed() },
+                    ))
+                    .ok();
             }
         }
 
@@ -1142,6 +1218,16 @@ impl ChunkBufferStore {
             self.indirect_buffers[i] = b;
             self.indirect_allocs[i] = a;
 
+            let (b, a) = util::create_host_buffer(
+                device,
+                allocator,
+                indirect_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "indirect_cmds_cutout",
+            );
+            self.indirect_cutout_buffers[i] = b;
+            self.indirect_cutout_allocs[i] = a;
+
             let (meta_info, mut meta_write) = desc_write(
                 self.compute_sets[i],
                 0,
@@ -1156,9 +1242,17 @@ impl ChunkBufferStore {
                 self.indirect_buffers[i],
                 indirect_size,
             );
+            let (indirect_c_info, mut indirect_c_write) = desc_write(
+                self.compute_sets[i],
+                4,
+                vk::DescriptorType::StorageBuffer,
+                self.indirect_cutout_buffers[i],
+                indirect_size,
+            );
             meta_write.buffer_info = meta_info.as_ptr();
             indirect_write.buffer_info = indirect_info.as_ptr();
-            device.update_descriptor_sets(&[meta_write, indirect_write], &[]);
+            indirect_c_write.buffer_info = indirect_c_info.as_ptr();
+            device.update_descriptor_sets(&[meta_write, indirect_write, indirect_c_write], &[]);
         }
 
         self.max_meta = new_max;
@@ -1288,7 +1382,12 @@ impl ChunkBufferStore {
                         first_index: sec.first_index,
                         vertex_offset: sec.vertex_offset,
                         visibility: vis.to_bits(),
-                        origin: [sec.origin[0], sec.origin[1], sec.origin[2], 0.0],
+                        origin: [
+                            sec.origin[0],
+                            sec.origin[1],
+                            sec.origin[2],
+                            f32::from_bits(sec.solid_index_count),
+                        ],
                     });
                 }
             }
@@ -1348,22 +1447,28 @@ impl ChunkBufferStore {
             .copy_from_slice(frustum_bytes);
 
         // This frame slot's GPU work has completed (fence-waited at frame start),
-        // so the count buffer still holds its previous cull result; capture it for
-        // the debug overlay before clearing it for this dispatch.
+        // so the count buffers still hold their previous cull result; capture the
+        // total (solid + cutout draws) for the debug overlay before clearing them.
         {
-            let s = self.count_allocs[frame].mapped_slice_mut().unwrap();
-            self.last_draw_count = u32::from_ne_bytes([s[0], s[1], s[2], s[3]]);
+            let read_and_clear = |a: &mut Allocation| {
+                let s = a.mapped_slice_mut().unwrap();
+                let n = u32::from_ne_bytes([s[0], s[1], s[2], s[3]]);
+                s[..4].copy_from_slice(&0u32.to_ne_bytes());
+                n
+            };
+            self.last_draw_count = read_and_clear(&mut self.count_allocs[frame])
+                + read_and_clear(&mut self.count_cutout_allocs[frame]);
         }
-        self.count_allocs[frame].mapped_slice_mut().unwrap()[..4]
-            .copy_from_slice(&0u32.to_ne_bytes());
 
         // macOS draws the whole indirect buffer (no drawIndirectCount), so slots
         // the cull shader leaves unfilled must read as no-op draws, not stale data.
         #[cfg(target_os = "macos")]
-        self.indirect_allocs[frame]
-            .mapped_slice_mut()
-            .unwrap()
-            .fill(0);
+        for a in [
+            &mut self.indirect_allocs[frame],
+            &mut self.indirect_cutout_allocs[frame],
+        ] {
+            a.mapped_slice_mut().unwrap().fill(0);
+        }
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Compute, self.compute_pipeline);
         cmd.bind_descriptor_sets(
@@ -1394,7 +1499,11 @@ impl ChunkBufferStore {
         }
     }
 
-    pub fn draw_indirect(&self, cmd: vk::CommandBuffer, frame: usize) {
+    /// Issue one render layer's indirect draws. `cutout` selects the discard
+    /// pass's draw list (drawn after `solid`, which lays down depth); the
+    /// caller binds the matching pipeline first. Both layers share the
+    /// vertex/index/meta buffers and the cull-written draw lists.
+    pub fn draw_indirect(&self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
         if self.chunks.is_empty() {
             return;
         }
@@ -1404,23 +1513,26 @@ impl ChunkBufferStore {
             .values()
             .map(|c| c.sections.len() as u32)
             .sum::<u32>();
+        let (indirect, count) = if cutout {
+            (
+                self.indirect_cutout_buffers[frame],
+                self.count_cutout_buffers[frame],
+            )
+        } else {
+            (self.indirect_buffers[frame], self.count_buffers[frame])
+        };
 
         // Binding 0: packed vertex pool. Binding 1: the meta buffer, read per
         // instance for the section origin + fade (indexed by `first_instance`).
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer, self.meta_buffers[frame]], &[0, 0]);
         cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
         if cfg!(target_os = "macos") {
-            cmd.draw_indexed_indirect(
-                self.indirect_buffers[frame],
-                0,
-                max_draws,
-                size_of::<DrawCommand>() as u32,
-            );
+            cmd.draw_indexed_indirect(indirect, 0, max_draws, size_of::<DrawCommand>() as u32);
         } else {
             cmd.draw_indexed_indirect_count(
-                self.indirect_buffers[frame],
+                indirect,
                 0,
-                self.count_buffers[frame],
+                count,
                 0,
                 max_draws,
                 size_of::<DrawCommand>() as u32,
@@ -1507,6 +1619,8 @@ impl ChunkBufferStore {
             device.destroy_buffer(self.meta_buffers[i], None);
             device.destroy_buffer(self.indirect_buffers[i], None);
             device.destroy_buffer(self.count_buffers[i], None);
+            device.destroy_buffer(self.indirect_cutout_buffers[i], None);
+            device.destroy_buffer(self.count_cutout_buffers[i], None);
             device.destroy_buffer(self.frustum_buffers[i], None);
 
             alloc
@@ -1523,6 +1637,18 @@ impl ChunkBufferStore {
                 .free(std::mem::replace(&mut self.count_allocs[i], unsafe {
                     std::mem::zeroed()
                 }))
+                .ok();
+            alloc
+                .free(std::mem::replace(
+                    &mut self.indirect_cutout_allocs[i],
+                    unsafe { std::mem::zeroed() },
+                ))
+                .ok();
+            alloc
+                .free(std::mem::replace(
+                    &mut self.count_cutout_allocs[i],
+                    unsafe { std::mem::zeroed() },
+                ))
                 .ok();
             alloc
                 .free(std::mem::replace(&mut self.frustum_allocs[i], unsafe {
@@ -1572,6 +1698,20 @@ fn create_cull_desc_layout(device: &vk::Device) -> vk::DescriptorSetLayout {
         },
         vk::DescriptorSetLayoutBinding {
             binding: 3,
+            descriptor_type: vk::DescriptorType::StorageBuffer,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::Compute,
+            ..Default::default()
+        },
+        vk::DescriptorSetLayoutBinding {
+            binding: 4,
+            descriptor_type: vk::DescriptorType::StorageBuffer,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::Compute,
+            ..Default::default()
+        },
+        vk::DescriptorSetLayoutBinding {
+            binding: 5,
             descriptor_type: vk::DescriptorType::StorageBuffer,
             descriptor_count: 1,
             stage_flags: vk::ShaderStageFlags::Compute,

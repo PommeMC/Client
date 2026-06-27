@@ -94,10 +94,39 @@ pub struct SectionMesh {
     /// per-section upload/replace.
     pub section_index: i32,
     pub vertices: Vec<ChunkVertex>,
+    /// Solid (opaque) indices first, then cutout indices. `solid_index_count`
+    /// splits the two so each renders in its own pass.
     pub indices: Vec<u32>,
+    /// Number of leading `indices` that belong to the solid (no-discard) pass;
+    /// the rest are cutout (discard) geometry.
+    pub solid_index_count: u32,
     /// Translucent (water) indices into the same `vertices`, drawn in a
     /// separate blended pass after opaque geometry.
     pub water_indices: Vec<u32>,
+}
+
+/// Per-section meshing accumulator: one shared vertex pool plus separate
+/// solid, cutout, and water index lists. Finalized into a [`SectionMesh`]
+/// with solid and cutout concatenated solid-first; water stays separate for
+/// the blended pass.
+#[derive(Default)]
+struct MeshSink {
+    vertices: Vec<ChunkVertex>,
+    solid: Vec<u32>,
+    cutout: Vec<u32>,
+    water: Vec<u32>,
+}
+
+impl MeshSink {
+    /// Index list a quad's triangles go in: solid sprites render in the
+    /// no-discard pass, everything else in the discard (cutout) pass.
+    fn indices_for(&mut self, opaque: bool) -> &mut Vec<u32> {
+        if opaque {
+            &mut self.solid
+        } else {
+            &mut self.cutout
+        }
+    }
 }
 
 pub struct ChunkMeshData {
@@ -1266,20 +1295,14 @@ fn mesh_chunk_snapshot(
     let by_start = min_y + range.start * 16;
     let by_end = min_y + range.end * 16;
 
-    let mut sections: Vec<SectionMesh> = (0..section_count)
-        .map(|i| SectionMesh {
-            section_index: i,
-            vertices: Vec::new(),
-            indices: Vec::new(),
-            water_indices: Vec::new(),
-        })
-        .collect();
+    let mut sinks: Vec<MeshSink> = (0..section_count).map(|_| MeshSink::default()).collect();
     // In-range sections get recycled buffers (capacity retained from earlier
     // meshes) so the worker fills them without going through the OS allocator.
+    // The cutout list stays un-pooled (empty for the common all-solid section).
     for si in range.clone() {
-        let sec = &mut sections[si as usize];
-        sec.vertices = pool.take_vertices();
-        sec.indices = pool.take_indices();
+        let sink = &mut sinks[si as usize];
+        sink.vertices = pool.take_vertices();
+        sink.solid = pool.take_indices();
     }
 
     // The type map is a state->id map, so it only needs the meshed span (+1-block
@@ -1294,11 +1317,11 @@ fn mesh_chunk_snapshot(
     let mut visibility: Vec<(i32, VisibilitySet)> = Vec::new();
     if let Some(ref tm) = type_map {
         for si in range.clone() {
-            let sec = &mut sections[si as usize];
+            let sink = &mut sinks[si as usize];
             let section_y = min_y + si * 16;
             let vis = greedy_mesh_section(
-                &mut sec.vertices,
-                &mut sec.indices,
+                &mut sink.vertices,
+                &mut sink.solid,
                 snapshot,
                 registry,
                 tm,
@@ -1362,79 +1385,27 @@ fn mesh_chunk_snapshot(
                 // a non-16-aligned world height can't index past the last section.
                 let s =
                     (((by - min_y) / 16) as usize).min((section_count as usize).saturating_sub(1));
-                let sec = &mut sections[s];
+                let sink = &mut sinks[s];
 
                 if lod > 0 {
                     emit_lod_cube(
-                        &mut sec.vertices,
-                        &mut sec.indices,
-                        block_pos,
-                        state,
-                        snapshot,
-                        registry,
-                        uv_map,
-                        bx,
-                        by,
-                        bz,
-                        step,
+                        sink, block_pos, state, snapshot, registry, uv_map, bx, by, bz, step,
                     );
                 } else if let BlockKind::Water | BlockKind::Lava = kind {
-                    // Water is translucent (separate blended pass); lava is opaque.
-                    let fluid_indices = if matches!(kind, BlockKind::Water) {
-                        &mut sec.water_indices
-                    } else {
-                        &mut sec.indices
-                    };
                     emit_fluid(
-                        &mut sec.vertices,
-                        fluid_indices,
-                        block_pos,
-                        state,
-                        snapshot,
-                        registry,
-                        uv_map,
-                        bx,
-                        by,
-                        bz,
+                        sink, kind, block_pos, state, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(baked) = registry.get_baked_model(state) {
                     emit_baked_model(
-                        &mut sec.vertices,
-                        &mut sec.indices,
-                        block_pos,
-                        baked,
-                        snapshot,
-                        registry,
-                        uv_map,
-                        bx,
-                        by,
-                        bz,
+                        sink, block_pos, baked, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(quads) = registry.get_multipart_quads(state) {
                     emit_multipart(
-                        &mut sec.vertices,
-                        &mut sec.indices,
-                        block_pos,
-                        &quads,
-                        snapshot,
-                        registry,
-                        uv_map,
-                        bx,
-                        by,
-                        bz,
+                        sink, block_pos, &quads, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
-                        &mut sec.vertices,
-                        &mut sec.indices,
-                        block_pos,
-                        textures,
-                        snapshot,
-                        registry,
-                        uv_map,
-                        bx,
-                        by,
-                        bz,
+                        sink, block_pos, textures, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else {
                     let block: Box<dyn azalea_block::BlockTrait> = state.into();
@@ -1442,16 +1413,7 @@ fn mesh_chunk_snapshot(
                     if logged_missing.insert(id.clone()) {
                         tracing::warn!("Missing model: {id}");
                     }
-                    emit_missing_cube(
-                        &mut sec.vertices,
-                        &mut sec.indices,
-                        block_pos,
-                        snapshot,
-                        registry,
-                        bx,
-                        by,
-                        bz,
-                    );
+                    emit_missing_cube(sink, block_pos, snapshot, registry, bx, by, bz);
                 }
                 by += step;
             }
@@ -1460,17 +1422,25 @@ fn mesh_chunk_snapshot(
         local_z += step;
     }
 
-    // Keep only non-empty sections; recycle the buffers of in-range sections that
-    // ended up empty (rather than dropping their retained capacity).
-    let mut kept = Vec::with_capacity(sections.len());
-    for s in sections {
-        if s.vertices.is_empty() || (s.indices.is_empty() && s.water_indices.is_empty()) {
-            pool.recycle(s.vertices, s.indices);
-        } else {
-            kept.push(s);
+    // Finalize each non-empty section: concatenate cutout indices after solid
+    // (recording the split), keep the result. Empty in-range sections recycle
+    // their buffers rather than dropping the retained capacity.
+    let mut sections = Vec::with_capacity(sinks.len());
+    for (i, mut sink) in sinks.into_iter().enumerate() {
+        if sink.solid.is_empty() && sink.cutout.is_empty() && sink.water.is_empty() {
+            pool.recycle(sink.vertices, sink.solid);
+            continue;
         }
+        let solid_index_count = sink.solid.len() as u32;
+        sink.solid.extend_from_slice(&sink.cutout);
+        sections.push(SectionMesh {
+            section_index: i as i32,
+            vertices: sink.vertices,
+            indices: sink.solid,
+            solid_index_count,
+            water_indices: sink.water,
+        });
     }
-    let sections = kept;
 
     ChunkMeshData {
         pos,
@@ -1486,8 +1456,7 @@ fn mesh_chunk_snapshot(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_baked_model(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
     block_pos: [f32; 3],
     model: &BakedModel,
     snapshot: &ChunkStoreSnapshot,
@@ -1519,8 +1488,7 @@ fn emit_baked_model(
             [quad.shade_light; 4]
         };
         emit_face(
-            vertices,
-            indices,
+            sink,
             block_pos,
             &quad.positions,
             &quad.uvs,
@@ -1533,8 +1501,7 @@ fn emit_baked_model(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_cube_faces(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
     block_pos: [f32; 3],
     textures: &crate::world::block::registry::FaceTextures,
     snapshot: &ChunkStoreSnapshot,
@@ -1573,8 +1540,7 @@ fn emit_cube_faces(
         let is_side = i >= 2;
         if let Some(overlay) = textures.side_overlay.as_deref().filter(|_| is_side) {
             emit_face(
-                vertices,
-                indices,
+                sink,
                 block_pos,
                 &positions,
                 &uvs,
@@ -1584,8 +1550,7 @@ fn emit_cube_faces(
             );
             let overlay_region = uv_map.get_region(overlay);
             emit_face(
-                vertices,
-                indices,
+                sink,
                 block_pos,
                 &positions,
                 &uvs,
@@ -1601,9 +1566,7 @@ fn emit_cube_faces(
             } else {
                 PACKED_WHITE_SHIFTED
             };
-            emit_face(
-                vertices, indices, block_pos, &positions, &uvs, lights, region, face_tint,
-            );
+            emit_face(sink, block_pos, &positions, &uvs, lights, region, face_tint);
         }
     }
 }
@@ -1680,8 +1643,8 @@ fn block_face_tex_tint(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_fluid(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
+    kind: BlockKind,
     block_pos: [f32; 3],
     state: azalea_block::BlockState,
     snapshot: &ChunkStoreSnapshot,
@@ -1693,6 +1656,19 @@ fn emit_fluid(
 ) {
     let (region, tint) =
         block_face_tex_tint(state, Direction::Up, uv_map, snapshot, registry, bx, by, bz);
+
+    // Water is translucent (separate blended pass); lava is opaque.
+    let MeshSink {
+        vertices,
+        solid,
+        water,
+        ..
+    } = sink;
+    let indices = if matches!(kind, BlockKind::Water) {
+        water
+    } else {
+        solid
+    };
 
     for dir in &CUBE_FACE_DIRS {
         let offset = dir.offset();
@@ -1713,7 +1689,7 @@ fn emit_fluid(
                 p[1] = FLUID_MAX_HEIGHT;
             }
 
-            emit_face(
+            emit_face_into(
                 vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
             );
 
@@ -1721,7 +1697,7 @@ fn emit_fluid(
             // looking up). Reversed winding so it survives back-face culling.
             let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
             let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
-            emit_face(
+            emit_face_into(
                 vertices,
                 indices,
                 block_pos,
@@ -1734,7 +1710,7 @@ fn emit_fluid(
             continue;
         }
 
-        emit_face(
+        emit_face_into(
             vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
         );
     }
@@ -1742,8 +1718,7 @@ fn emit_fluid(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_multipart(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
     block_pos: [f32; 3],
     quads: &[&crate::world::block::model::BakedQuad],
     snapshot: &ChunkStoreSnapshot,
@@ -1770,8 +1745,7 @@ fn emit_multipart(
             snapshot.dry_foliage_tint(bx, by, bz),
         );
         emit_face(
-            vertices,
-            indices,
+            sink,
             block_pos,
             &quad.positions,
             &quad.uvs,
@@ -1784,8 +1758,7 @@ fn emit_multipart(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_lod_cube(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
     block_pos: [f32; 3],
     state: azalea_block::BlockState,
     snapshot: &ChunkStoreSnapshot,
@@ -1828,9 +1801,9 @@ fn emit_lod_cube(
         let (positions, uvs, light) = cube_face_geometry(*dir);
         let s = step as f32;
         let sy = if is_fluid { fluid_top } else { s };
-        let base = vertices.len() as u32;
+        let base = sink.vertices.len() as u32;
         for i in 0..4 {
-            vertices.push(ChunkVertex {
+            sink.vertices.push(ChunkVertex {
                 position: [
                     block_pos[0] + positions[i][0] * s,
                     block_pos[1] + positions[i][1] * sy,
@@ -1843,7 +1816,14 @@ fn emit_lod_cube(
                 light_tint: pack_light_tint(light, tint),
             });
         }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+        sink.indices_for(region.opaque).extend_from_slice(&[
+            base,
+            base + 1,
+            base + 2,
+            base + 2,
+            base + 3,
+            base,
+        ]);
     }
 }
 
@@ -1851,8 +1831,7 @@ const MISSING_TINT: u32 = pack_tint_shifted([1.0, 0.0, 1.0]);
 
 #[allow(clippy::too_many_arguments)]
 fn emit_missing_cube(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
     block_pos: [f32; 3],
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -1868,9 +1847,9 @@ fn emit_missing_cube(
         }
 
         let (positions, _, light) = cube_face_geometry(*dir);
-        let base = vertices.len() as u32;
+        let base = sink.vertices.len() as u32;
         for pos in &positions {
-            vertices.push(ChunkVertex {
+            sink.vertices.push(ChunkVertex {
                 position: [
                     block_pos[0] + pos[0],
                     block_pos[1] + pos[1],
@@ -1880,7 +1859,9 @@ fn emit_missing_cube(
                 light_tint: pack_light_tint(light, MISSING_TINT),
             });
         }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+        // The missing tile is a solid checker, so the cube goes in the solid pass.
+        sink.solid
+            .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
     }
 }
 
@@ -1893,8 +1874,33 @@ pub(crate) const CUBE_FACE_DIRS: [Direction; 6] = [
     Direction::West,
 ];
 
+/// Emit a face into the index list picked by the quad's sprite opacity
+/// (solid vs cutout pass). Fluids route explicitly via [`emit_face_into`].
 #[allow(clippy::too_many_arguments)]
 fn emit_face(
+    sink: &mut MeshSink,
+    block_pos: [f32; 3],
+    positions: &[[f32; 3]; 4],
+    uvs: &[[f32; 2]; 4],
+    lights: [f32; 4],
+    region: AtlasRegion,
+    tint: u32,
+) {
+    let opaque = region.opaque;
+    let MeshSink {
+        vertices,
+        solid,
+        cutout,
+        ..
+    } = sink;
+    let indices = if opaque { solid } else { cutout };
+    emit_face_into(
+        vertices, indices, block_pos, positions, uvs, lights, region, tint,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_face_into(
     vertices: &mut Vec<ChunkVertex>,
     indices: &mut Vec<u32>,
     block_pos: [f32; 3],
