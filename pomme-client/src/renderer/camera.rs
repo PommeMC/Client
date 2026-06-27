@@ -327,26 +327,41 @@ pub struct CameraUniform {
     fog_color: [f32; 4],
 }
 
+// Vanilla FogType.WATER defaults (EnvironmentAttributes): color 0xFF050533,
+// start -8, end 96. Vanilla scales end by getWaterVision() (min 0.25); we use
+// vision = 1.0. TODO: water-vision ramp (fog brightens as the eyes adjust) and
+// lava fog.
+pub const WATER_FOG_COLOR: [f32; 3] = [5.0 / 255.0, 5.0 / 255.0, 51.0 / 255.0];
+const WATER_FOG_START: f32 = -8.0;
+const WATER_FOG_END: f32 = 96.0;
+
 impl CameraUniform {
-    pub fn new(camera: &Camera, sky_color: [f32; 3], render_distance_chunks: u32) -> Self {
+    pub fn new(
+        camera: &Camera,
+        sky_color: [f32; 3],
+        render_distance_chunks: u32,
+        eyes_in_water: bool,
+    ) -> Self {
         let offset = camera.third_person_offset();
         let pos = camera.position.as_vec3() + offset;
         // Vanilla render-distance fog band: the last clamp(blocks / 10, 4, 64) blocks.
         // The top-down benchmark view sits hundreds of blocks up, so push fog past the
         // far plane to keep the whole loaded area visible.
-        let (fog_start, fog_end) = if camera.top_down().is_some() {
-            (FAR, FAR)
+        let (fog_start, fog_end, fog_rgb) = if camera.top_down().is_some() {
+            (FAR, FAR, sky_color)
+        } else if eyes_in_water {
+            (WATER_FOG_START, WATER_FOG_END, WATER_FOG_COLOR)
         } else {
             let blocks = (render_distance_chunks * 16) as f32;
             let span = (blocks / 10.0).clamp(4.0, 64.0);
-            (blocks - span, blocks)
+            // Fade distant terrain to the sky color so it melts into the flat sky disc
+            // with no horizon edge (at night both go dark).
+            (blocks - span, blocks, sky_color)
         };
-        // Fade distant terrain to the sky color so it melts into the flat sky disc
-        // with no horizon edge (at night both go dark).
         Self {
             view_proj: camera.view_projection().to_cols_array_2d(),
             camera_pos: [pos.x, pos.y, pos.z, fog_start],
-            fog_color: [sky_color[0], sky_color[1], sky_color[2], fog_end],
+            fog_color: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_end],
         }
     }
 

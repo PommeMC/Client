@@ -81,6 +81,7 @@ enum RenderMode<'a> {
         cloud_mode: CloudMode,
         render_distance: u32,
         player_preview: Option<PlayerPreview>,
+        eyes_in_water: bool,
     },
     MainMenu {
         scroll: f32,
@@ -940,6 +941,7 @@ impl Renderer {
         cloud_mode: CloudMode,
         render_distance: u32,
         player_preview: Option<PlayerPreview>,
+        eyes_in_water: bool,
     ) -> Result<(), RendererError> {
         let held_item = held_item.map(|(name, light)| {
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
@@ -951,12 +953,17 @@ impl Renderer {
         });
         // Clear to the sky color: the strip between the sky disc's edge and the
         // terrain shows the clear color, so it must match the sky/terrain or it
-        // reads as a horizon band (visible at night).
-        let sky_col = sky.sky_color();
+        // reads as a horizon band (visible at night). Underwater, clear to the
+        // water fog color so background gaps read as water rather than sky.
+        let clear_col = if eyes_in_water {
+            camera::WATER_FOG_COLOR
+        } else {
+            sky.sky_color()
+        };
         self.render_frame(
             window,
             hide_cursor,
-            [sky_col[0], sky_col[1], sky_col[2], 1.0],
+            [clear_col[0], clear_col[1], clear_col[2], 1.0],
             RenderMode::World {
                 overlay,
                 swing_progress,
@@ -971,6 +978,7 @@ impl Renderer {
                 cloud_mode,
                 render_distance,
                 player_preview,
+                eyes_in_water,
             },
         )
     }
@@ -1226,10 +1234,16 @@ impl Renderer {
         if let RenderMode::World {
             ref sky,
             render_distance,
+            eyes_in_water,
             ..
         } = mode
         {
-            let uniform = CameraUniform::new(&self.camera, sky.sky_color(), render_distance);
+            let uniform = CameraUniform::new(
+                &self.camera,
+                sky.sky_color(),
+                render_distance,
+                eyes_in_water,
+            );
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
@@ -1433,6 +1447,8 @@ impl Renderer {
                 cloud_mode,
                 render_distance,
                 player_preview,
+                // TODO: suppress the sky dome / clouds underwater (vanilla water fog hides them).
+                eyes_in_water: _,
             } => {
                 self.sky_pipeline
                     .update_and_draw(&self.ctx.device, cmd, frame, &self.camera, sky);
