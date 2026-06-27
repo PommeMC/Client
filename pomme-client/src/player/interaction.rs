@@ -83,6 +83,10 @@ impl InteractionState {
         Self {
             target: None,
             seq: 0,
+            // Vanilla inits `carriedIndex` to 0 and relies on the server also
+            // defaulting to slot 0; we init to a sentinel so the first
+            // interaction always sends the slot, syncing the server even if its
+            // default isn't assumed to match.
             carried_slot: u8::MAX,
             last_teleport_seq: 0,
             pending_predictions: HashMap::new(),
