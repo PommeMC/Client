@@ -250,7 +250,12 @@ impl MainMenu {
         }
 
         if !to_ping.is_empty() {
-            ping_all_servers(&self.rt, &to_ping, &self.ping_results);
+            ping_all_servers(
+                &self.rt,
+                &to_ping,
+                &self.ping_results,
+                &self.ping_generation,
+            );
         }
 
         if let Some((a, b)) = pending_swap {

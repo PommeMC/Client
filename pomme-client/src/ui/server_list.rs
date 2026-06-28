@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use parking_lot::RwLock;
@@ -36,6 +37,10 @@ pub struct ServerList {
 }
 
 pub type PingResults = Arc<RwLock<HashMap<String, PingState>>>;
+
+/// Monotonic refresh counter. A ping discards its result if this advanced while
+/// it was in flight (mirrors vanilla's `pinger.removeAll()` on refresh).
+pub type PingGeneration = Arc<AtomicU64>;
 
 impl ServerList {
     pub fn load(game_dir: &Path) -> Self {
@@ -86,16 +91,27 @@ pub fn ping_all_servers(
     rt: &tokio::runtime::Runtime,
     servers: &[ServerEntry],
     results: &PingResults,
+    generation: &PingGeneration,
 ) {
+    let spawned_gen = generation.load(Ordering::Acquire);
     for server in servers {
         let address = server.address.clone();
         results.write().insert(address.clone(), PingState::Pinging);
-        let results = Arc::clone(results);
-        rt.spawn(ping_server(address, results));
+        rt.spawn(ping_server(
+            address,
+            Arc::clone(results),
+            Arc::clone(generation),
+            spawned_gen,
+        ));
     }
 }
 
-async fn ping_server(address: String, results: PingResults) {
+async fn ping_server(
+    address: String,
+    results: PingResults,
+    generation: PingGeneration,
+    spawned_gen: u64,
+) {
     use azalea_protocol::packets::ClientIntention;
     use azalea_protocol::packets::status::ClientboundStatusPacket;
     use azalea_protocol::packets::status::s_ping_request::ServerboundPingRequest;
@@ -167,7 +183,9 @@ async fn ping_server(address: String, results: PingResults) {
         Ok(s) => s,
         Err(e) => PingState::Failed(e),
     };
-    results.write().insert(address, state);
+    if generation.load(Ordering::Acquire) == spawned_gen {
+        results.write().insert(address, state);
+    }
 }
 
 fn decode_favicon(data: &str) -> Option<Vec<u8>> {
