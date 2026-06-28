@@ -1472,7 +1472,7 @@ fn generate_cube_vertices(
 /// Like [`generate_cube_vertices`] but with explicit per-face UV rects (face
 /// order -Z, +Z, +Y, -Y, -X, +X) instead of the entity box-unwrap, for block
 /// models whose texture layout isn't a box-unwrap (e.g. signs).
-pub fn generate_cube_vertices_faces(
+pub(crate) fn generate_cube_vertices_faces(
     cube: &ModelCube,
     face_uvs: &[[f32; 4]; 6],
     tex_w: u32,

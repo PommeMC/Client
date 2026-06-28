@@ -88,7 +88,8 @@ pub fn bake_sign_model() -> BakedEntityModel {
             name: name.into(),
             offset: Vec3::new(0.0, 24.0, 0.0),
             default_rotation: Vec3::ZERO,
-            cubes: vec![cube],
+            // Vertices were emitted above with explicit UVs, so no cubes to bake.
+            cubes: Vec::new(),
             parent: None,
         });
     }
