@@ -5,6 +5,7 @@ use azalea_registry::builtin::BlockKind;
 use glam::{DVec3, dvec3};
 
 use super::aabb::Aabb;
+use super::block_shape;
 use crate::entity::components::Velocity;
 use crate::world::chunk::ChunkStore;
 
@@ -271,8 +272,19 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
         for bz in min_z..max_z {
             for bx in min_x..max_x {
                 let state = chunk_store.get_block_state(bx, by, bz);
-                if has_collision(state) {
-                    aabbs.push(Aabb::block(bx, by, bz));
+                if !has_collision(state) {
+                    continue;
+                }
+                match block_shape::partial_shape(state) {
+                    Some(boxes) => {
+                        for &[lx0, ly0, lz0, lx1, ly1, lz1] in boxes {
+                            aabbs.push(Aabb::new(
+                                dvec3(bx as f64 + lx0, by as f64 + ly0, bz as f64 + lz0),
+                                dvec3(bx as f64 + lx1, by as f64 + ly1, bz as f64 + lz1),
+                            ));
+                        }
+                    }
+                    None => aabbs.push(Aabb::block(bx, by, bz)),
                 }
             }
         }
