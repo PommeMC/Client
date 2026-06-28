@@ -109,7 +109,11 @@ pub struct AudioEngine {
 impl AudioEngine {
     pub fn new(jar_assets_dir: &Path, asset_index: Option<AssetIndex>, volumes: [f32; 10]) -> Self {
         let output = match DeviceSinkBuilder::open_default_sink() {
-            Ok(sink) => Some(Output { sink }),
+            Ok(mut sink) => {
+                // Only dropped at shutdown, so silence rodio's stderr drop warning.
+                sink.log_on_drop(false);
+                Some(Output { sink })
+            }
             Err(e) => {
                 tracing::warn!("audio disabled: no output device ({e})");
                 None
