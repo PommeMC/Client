@@ -3,18 +3,33 @@
 //! `StairBlock`, etc.). Boxes are block-local (0..1); the caller offsets them
 //! to the block position.
 //!
-//! `partial_shape` returns `None` for blocks that use the default full cube
-//! (the common case) and `Some(boxes)` otherwise; an empty `Vec` means the
-//! block has no collision.
-//!
 //! TODO: walls, fences, fence gates, panes, trapdoors, doors, beds, chests,
 //! cake, etc. still fall back to a full cube.
+
+use std::sync::LazyLock;
+
+use azalea_block::BlockState;
 
 /// A block-local axis-aligned box: `[min_x, min_y, min_z, max_x, max_y,
 /// max_z]`.
 pub type LocalBox = [f64; 6];
 
-pub fn partial_shape(state: azalea_block::BlockState) -> Option<Vec<LocalBox>> {
+/// Collision shape per block state, indexed by `BlockState::id`. Built once on
+/// first use; block states are a small contiguous id space (~24k).
+static SHAPES: LazyLock<Vec<Option<Vec<LocalBox>>>> = LazyLock::new(|| {
+    (0u32..)
+        .map_while(|id| BlockState::try_from(id).ok())
+        .map(compute_shape)
+        .collect()
+});
+
+/// Cached collision boxes for `state`: `None` for a full cube, `Some(&[])` for
+/// no collision, `Some(boxes)` for a partial shape.
+pub fn partial_shape(state: BlockState) -> Option<&'static [LocalBox]> {
+    SHAPES[state.id() as usize].as_deref()
+}
+
+fn compute_shape(state: BlockState) -> Option<Vec<LocalBox>> {
     let block: Box<dyn azalea_block::BlockTrait> = state.into();
     let id = block.id();
     let props = block.property_map();

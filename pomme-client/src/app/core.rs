@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_protocol::packets::game::{
-    ServerboundClientCommand, ServerboundGamePacket, s_client_command,
+    ServerboundClientCommand, ServerboundGamePacket, s_client_command, s_client_tick_end,
 };
 use glam::{FloatExt, dvec3};
 use winit::keyboard::KeyCode;
@@ -1100,7 +1100,7 @@ impl AppCore {
         connection
             .packet_tx
             .send(ServerboundGamePacket::ClientTickEnd(
-                azalea_protocol::packets::game::s_client_tick_end::ServerboundClientTickEnd,
+                s_client_tick_end::ServerboundClientTickEnd,
             ));
     }
 
