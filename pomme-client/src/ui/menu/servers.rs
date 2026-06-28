@@ -95,10 +95,16 @@ impl MainMenu {
         });
 
         let mut pending_swap: Option<(usize, usize)> = None;
+        // Ping each entry the first frame its row is visible (absent = INITIAL),
+        // deferred past the loop to keep the `servers` borrow off `self.rt`.
+        let mut to_ping: Vec<ServerEntry> = Vec::new();
         for (i, server) in self.server_list.servers.iter().enumerate() {
             let ey = list_top + list_pad + i as f32 * entry_h - self.scroll_offset;
             if ey + entry_h < list_top || ey > list_bottom {
                 continue;
+            }
+            if !ping_results.contains_key(&server.address) {
+                to_ping.push(server.clone());
             }
 
             let selected = self.selected_server == Some(i);
@@ -241,6 +247,15 @@ impl MainMenu {
                     }
                 }
             }
+        }
+
+        if !to_ping.is_empty() {
+            ping_all_servers(
+                &self.rt,
+                &to_ping,
+                &self.ping_results,
+                &self.ping_generation,
+            );
         }
 
         if let Some((a, b)) = pending_swap {
@@ -795,24 +810,16 @@ impl MainMenu {
             } else {
                 self.edit_name.clone()
             };
-            let addr = self.edit_address.clone();
             let entry = ServerEntry {
                 name,
-                address: addr.clone(),
+                address: self.edit_address.clone(),
             };
             if let Screen::EditServer(idx) = self.screen {
                 self.server_list.update(idx, entry);
             } else {
                 self.server_list.add(entry);
             }
-            ping_all_servers(
-                &self.rt,
-                &[ServerEntry {
-                    name: String::new(),
-                    address: addr,
-                }],
-                &self.ping_results,
-            );
+            // Absent from the results map, so it pings on draw back on the list.
             self.set_screen(Screen::ServerList);
         }
         y += btn_h + gap;

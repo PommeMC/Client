@@ -164,7 +164,8 @@ use super::common;
 use super::common::WHITE;
 use super::friends::{self, ActionError, FaceCache, FriendsData};
 use super::server_list::{
-    PingResults, PingState, ServerEntry, ServerList, is_valid_address, ping_all_servers,
+    PingGeneration, PingResults, PingState, ServerEntry, ServerList, is_valid_address,
+    ping_all_servers,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -325,6 +326,7 @@ pub struct MainMenu {
     edit_address: String,
     last_mp_ip: String,
     ping_results: PingResults,
+    ping_generation: PingGeneration,
     access_token: Option<String>,
     friends_data: FriendsData,
     face_cache: FaceCache,
@@ -405,8 +407,8 @@ impl MainMenu {
         access_token: Option<String>,
     ) -> Self {
         let server_list = ServerList::load(game_dir);
+        // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
-        ping_all_servers(&rt, &server_list.servers, &ping_results);
         let settings = load_settings(game_dir);
         Self {
             username,
@@ -417,6 +419,7 @@ impl MainMenu {
             edit_address: String::new(),
             last_mp_ip: String::new(),
             ping_results,
+            ping_generation: Default::default(),
             access_token,
             friends_data: Default::default(),
             face_cache: Default::default(),
@@ -741,6 +744,10 @@ impl MainMenu {
     }
 
     fn refresh_servers(&self) {
-        ping_all_servers(&self.rt, &self.server_list.servers, &self.ping_results);
+        // Bump first so pings still in flight discard their stale results, then
+        // clear so visible rows re-ping on the next draw (matches vanilla refresh).
+        self.ping_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.ping_results.write().clear();
     }
 }
