@@ -184,3 +184,38 @@ jobs:
           previous_tag: ${{ steps.rel.outputs.prev }}
           files: dist/*
           generate_release_notes: ${{ steps.rel.outputs.prev != '' }}
+
+      - name: Announce release on Discord
+        if: steps.rel.outputs.prev != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        shell: bash
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "No DISCORD_WEBHOOK_URL secret set; skipping Discord announcement."
+            exit 0
+          fi
+          body=$(gh release view "$TAG" --json body --jq .body)
+          url=$(gh release view "$TAG" --json url --jq .url)
+          # Discord embed descriptions cap at 4096 chars; trim and link to the full notes.
+          max=3900
+          if [ "${#body}" -gt "$max" ]; then
+            body="${body:0:$max}"$'\n\n'"…[full changelog]($url)"
+          fi
+          role_id="1513130412367675523"
+          payload=$(jq -n \
+            --arg title "Pomme $TAG" \
+            --arg desc "$body" \
+            --arg url "$url" \
+            --arg content "<@&$role_id> New Pomme release is out!" \
+            --arg role "$role_id" \
+            '{
+              username: "Pomme Releases",
+              content: $content,
+              allowed_mentions: { roles: [$role] },
+              embeds: [{ title: $title, url: $url, description: $desc, color: 5763719 }]
+            }')
+          curl -fsS -X POST -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
