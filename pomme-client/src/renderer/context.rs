@@ -33,7 +33,9 @@ const VK_APP_NAME: &CStr = c"Pomme";
 const VK_APP_VERSION: u32 = vk::make_api_version(0, 0, 1, 0);
 const VK_ENGINE_NAME: &CStr = c"Pomme Engine";
 const VK_ENGINE_VERSION: u32 = vk::make_api_version(0, 0, 1, 0);
-const VK_API_VERSION: u32 = vk::API_VERSION_1_4;
+// 1.2 is the highest feature set used; requesting higher makes injected layers
+// (e.g. VK_LAYER_OBS_HOOK, capped at 1.3) warn about a version mismatch.
+const VK_API_VERSION: u32 = vk::API_VERSION_1_2;
 
 #[cfg(debug_assertions)]
 const VALIDATION_LAYERS: &[&CStr] = &[c"VK_LAYER_KHRONOS_validation"];
