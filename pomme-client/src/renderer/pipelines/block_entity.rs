@@ -77,18 +77,18 @@ const SIGN_WOOD_NAMES: [&str; 12] = [
 ];
 
 const SIGN_TEXTURES: &[&[&str]] = &[
-    &["minecraft/textures/entity/signs/oak.png"],
-    &["minecraft/textures/entity/signs/spruce.png"],
-    &["minecraft/textures/entity/signs/birch.png"],
-    &["minecraft/textures/entity/signs/jungle.png"],
-    &["minecraft/textures/entity/signs/acacia.png"],
-    &["minecraft/textures/entity/signs/dark_oak.png"],
-    &["minecraft/textures/entity/signs/mangrove.png"],
-    &["minecraft/textures/entity/signs/cherry.png"],
-    &["minecraft/textures/entity/signs/pale_oak.png"],
-    &["minecraft/textures/entity/signs/bamboo.png"],
-    &["minecraft/textures/entity/signs/crimson.png"],
-    &["minecraft/textures/entity/signs/warped.png"],
+    &["minecraft/textures/block/oak_sign.png"],
+    &["minecraft/textures/block/spruce_sign.png"],
+    &["minecraft/textures/block/birch_sign.png"],
+    &["minecraft/textures/block/jungle_sign.png"],
+    &["minecraft/textures/block/acacia_sign.png"],
+    &["minecraft/textures/block/dark_oak_sign.png"],
+    &["minecraft/textures/block/mangrove_sign.png"],
+    &["minecraft/textures/block/cherry_sign.png"],
+    &["minecraft/textures/block/pale_oak_sign.png"],
+    &["minecraft/textures/block/bamboo_sign.png"],
+    &["minecraft/textures/block/crimson_sign.png"],
+    &["minecraft/textures/block/warped_sign.png"],
 ];
 
 const SHULKER_TEXTURES: &[&[&str]] = &[
@@ -172,6 +172,9 @@ pub fn yaw_for_block(kind: BlockEntityKind, props: &HashMap<&str, &str>) -> f32 
             Some("east") => 270.0,
             _ => 0.0,
         },
+        // TODO: wall signs have no `rotation` (they use `facing`) and vanilla
+        // renders them with a postless model offset against the wall; they
+        // currently fall back to the standing model facing south.
         BlockEntityKind::Sign => props
             .get("rotation")
             .and_then(|s| s.parse::<f32>().ok())
@@ -199,7 +202,7 @@ fn kind_definitions() -> Vec<KindDef> {
             kind: BlockEntityKind::Sign,
             model: block_entity_model::bake_sign_model(),
             tex_variants: SIGN_TEXTURES,
-            tex_size: 64,
+            tex_size: 32,
         },
     ]
 }

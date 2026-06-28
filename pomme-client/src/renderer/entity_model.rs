@@ -66,6 +66,21 @@ pub struct PartAnim {
 }
 
 impl BakedEntityModel {
+    /// Assemble baked parts, defaulting every part's scale to 1.0.
+    pub(crate) fn new(
+        parts: Vec<EntityPart>,
+        vertices: Vec<ChunkVertex>,
+        part_ranges: Vec<(u32, u32)>,
+    ) -> Self {
+        let part_scales = vec![1.0; parts.len()];
+        Self {
+            parts,
+            vertices,
+            part_ranges,
+            part_scales,
+        }
+    }
+
     pub fn compute_part_transforms(&self, anim: &PartAnim) -> Vec<Mat4> {
         let mut transforms = Vec::with_capacity(self.parts.len());
 
@@ -139,13 +154,7 @@ pub fn bake_model(parts: Vec<EntityPart>, tex_w: u32, tex_h: u32) -> BakedEntity
         part_ranges.push((start, count));
     }
 
-    let part_scales = vec![1.0; parts.len()];
-    BakedEntityModel {
-        parts,
-        vertices,
-        part_ranges,
-        part_scales,
-    }
+    BakedEntityModel::new(parts, vertices, part_ranges)
 }
 
 pub fn bake_pig_model() -> BakedEntityModel {
@@ -1358,16 +1367,9 @@ pub fn compute_spider_anim(
     anim
 }
 
-fn generate_cube_vertices(
-    cube: &ModelCube,
-    tex_w: u32,
-    tex_h: u32,
-    vertices: &mut Vec<ChunkVertex>,
-) {
-    let tw = tex_w as f32;
-    let th = tex_h as f32;
-    let u0 = cube.tex_offset.0 as f32;
-    let v0 = cube.tex_offset.1 as f32;
+/// The four corner positions of each cube face, in render space (Y already
+/// flipped). Face order: 0 -Z, 1 +Z, 2 +Y, 3 -Y, 4 -X, 5 +X.
+fn cube_face_positions(cube: &ModelCube) -> [[[f32; 3]; 4]; 6] {
     let w = cube.size.x;
     let h = cube.size.y;
     let d = cube.size.z;
@@ -1383,71 +1385,111 @@ fn generate_cube_vertices(
     let yb = -y1;
     let yt = -y0;
 
-    struct Face {
-        positions: [[f32; 3]; 4],
-        uv: [f32; 4],
-    }
+    [
+        [[x1, yb, z0], [x0, yb, z0], [x0, yt, z0], [x1, yt, z0]],
+        [[x0, yb, z1], [x1, yb, z1], [x1, yt, z1], [x0, yt, z1]],
+        [[x0, yt, z0], [x0, yt, z1], [x1, yt, z1], [x1, yt, z0]],
+        [[x0, yb, z1], [x0, yb, z0], [x1, yb, z0], [x1, yb, z1]],
+        [[x0, yb, z1], [x0, yb, z0], [x0, yt, z0], [x0, yt, z1]],
+        [[x1, yb, z0], [x1, yb, z1], [x1, yt, z1], [x1, yt, z0]],
+    ]
+}
 
-    let faces = [
-        Face {
-            positions: [[x1, yb, z0], [x0, yb, z0], [x0, yt, z0], [x1, yt, z0]],
-            uv: [u0 + d, v0 + d, u0 + d + w, v0 + d + h],
-        },
-        Face {
-            positions: [[x0, yb, z1], [x1, yb, z1], [x1, yt, z1], [x0, yt, z1]],
-            uv: [u0 + d + w + d, v0 + d, u0 + d + w + d + w, v0 + d + h],
-        },
-        Face {
-            positions: [[x0, yt, z0], [x0, yt, z1], [x1, yt, z1], [x1, yt, z0]],
-            uv: [u0 + d, v0, u0 + d + w, v0 + d],
-        },
-        Face {
-            positions: [[x0, yb, z1], [x0, yb, z0], [x1, yb, z0], [x1, yb, z1]],
-            uv: [u0 + d + w, v0, u0 + d + w + w, v0 + d],
-        },
-        Face {
-            positions: [[x0, yb, z1], [x0, yb, z0], [x0, yt, z0], [x0, yt, z1]],
-            uv: [u0, v0 + d, u0 + d, v0 + d + h],
-        },
-        Face {
-            positions: [[x1, yb, z0], [x1, yb, z1], [x1, yt, z1], [x1, yt, z0]],
-            uv: [u0 + d + w, v0 + d, u0 + d + w + d, v0 + d + h],
-        },
+/// Emit two triangles for one quad face, mapping the normalized UV rect onto
+/// its corners (`u_min`/`v_min` is the texture's top-left).
+fn push_face(
+    positions: &[[f32; 3]; 4],
+    u_min: f32,
+    u_max: f32,
+    v_min: f32,
+    v_max: f32,
+    vertices: &mut Vec<ChunkVertex>,
+) {
+    let uvs = [
+        [u_min, v_max],
+        [u_max, v_max],
+        [u_max, v_min],
+        [u_min, v_min],
     ];
+    for &i in &[0usize, 1, 2, 0, 2, 3] {
+        vertices.push(ChunkVertex {
+            position: positions[i],
+            tex_coords: crate::renderer::chunk::mesher::pack_uv(uvs[i][0], uvs[i][1]),
+            light_tint: crate::renderer::chunk::mesher::pack_light_tint(
+                1.0,
+                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+            ),
+        });
+    }
+}
+
+fn generate_cube_vertices(
+    cube: &ModelCube,
+    tex_w: u32,
+    tex_h: u32,
+    vertices: &mut Vec<ChunkVertex>,
+) {
+    let tw = tex_w as f32;
+    let th = tex_h as f32;
+    let u0 = cube.tex_offset.0 as f32;
+    let v0 = cube.tex_offset.1 as f32;
+    let w = cube.size.x;
+    let h = cube.size.y;
+    let d = cube.size.z;
+
+    // Entity box-unwrap UV rects, face order matching `cube_face_positions`.
+    let face_uv = [
+        [u0 + d, v0 + d, u0 + d + w, v0 + d + h],
+        [u0 + d + w + d, v0 + d, u0 + d + w + d + w, v0 + d + h],
+        [u0 + d, v0, u0 + d + w, v0 + d],
+        [u0 + d + w, v0, u0 + d + w + w, v0 + d],
+        [u0, v0 + d, u0 + d, v0 + d + h],
+        [u0 + d + w, v0 + d, u0 + d + w + d, v0 + d + h],
+    ];
+
+    let positions = cube_face_positions(cube);
 
     // Indices 4 (-X) and 5 (+X) are the side faces. When mirror is set, vanilla's
     // minX/maxX swap effectively exchanges their UV regions; every face also has
     // its U flipped.
-    for (idx, face) in faces.iter().enumerate() {
-        let uv_source = match (cube.mirror, idx) {
-            (true, 4) => &faces[5].uv,
-            (true, 5) => &faces[4].uv,
-            _ => &face.uv,
+    for (idx, pos) in positions.iter().enumerate() {
+        let src = match (cube.mirror, idx) {
+            (true, 4) => &face_uv[5],
+            (true, 5) => &face_uv[4],
+            _ => &face_uv[idx],
         };
-        let v_min = uv_source[1] / th;
-        let v_max = uv_source[3] / th;
+        let v_min = src[1] / th;
+        let v_max = src[3] / th;
         let (u_min, u_max) = if cube.mirror {
-            (uv_source[2] / tw, uv_source[0] / tw)
+            (src[2] / tw, src[0] / tw)
         } else {
-            (uv_source[0] / tw, uv_source[2] / tw)
+            (src[0] / tw, src[2] / tw)
         };
+        push_face(pos, u_min, u_max, v_min, v_max, vertices);
+    }
+}
 
-        let uvs = [
-            [u_min, v_max],
-            [u_max, v_max],
-            [u_max, v_min],
-            [u_min, v_min],
-        ];
-
-        for &i in &[0usize, 1, 2, 0, 2, 3] {
-            vertices.push(ChunkVertex {
-                position: face.positions[i],
-                tex_coords: crate::renderer::chunk::mesher::pack_uv(uvs[i][0], uvs[i][1]),
-                light_tint: crate::renderer::chunk::mesher::pack_light_tint(
-                    1.0,
-                    crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
-                ),
-            });
-        }
+/// Like [`generate_cube_vertices`] but with explicit per-face UV rects (face
+/// order -Z, +Z, +Y, -Y, -X, +X) instead of the entity box-unwrap, for block
+/// models whose texture layout isn't a box-unwrap (e.g. signs).
+pub fn generate_cube_vertices_faces(
+    cube: &ModelCube,
+    face_uvs: &[[f32; 4]; 6],
+    tex_w: u32,
+    tex_h: u32,
+    vertices: &mut Vec<ChunkVertex>,
+) {
+    let tw = tex_w as f32;
+    let th = tex_h as f32;
+    let positions = cube_face_positions(cube);
+    for (pos, uv) in positions.iter().zip(face_uvs) {
+        push_face(
+            pos,
+            uv[0] / tw,
+            uv[2] / tw,
+            uv[1] / th,
+            uv[3] / th,
+            vertices,
+        );
     }
 }
