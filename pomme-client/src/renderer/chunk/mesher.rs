@@ -1528,14 +1528,10 @@ fn emit_fluid(
         let (mut positions, uvs, light) = cube_face_geometry(*dir);
 
         if matches!(dir, Direction::Up) {
-            let above = snapshot.get_block_state(bx, by + 1, bz);
-            let top = if matches!(classify_block(above), BlockKind::Water | BlockKind::Lava) {
-                1.0
-            } else {
-                FLUID_MAX_HEIGHT
-            };
+            // A water/lava block above would have culled this face already, so
+            // the surface always sits at the lowered fluid height.
             for p in &mut positions {
-                p[1] = top;
+                p[1] = FLUID_MAX_HEIGHT;
             }
 
             emit_face(

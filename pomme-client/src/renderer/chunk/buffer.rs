@@ -18,6 +18,11 @@ const MIN_BUCKETS: u32 = 128;
 const MAX_BUCKETS: u32 = 2048;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
 
+/// Per-section fade-in length and the near-column radius (squared) within which
+/// sections appear instantly. Shared by the opaque indirect path and water.
+const FADE_DURATION_MS: f32 = 1000.0;
+const NEARBY_DIST_SQ: f32 = 768.0;
+
 /// First-fit free-list sub-allocator over a fixed element range, coalescing on
 /// free. Each section gets an exact-size vertex (and index) slice instead of
 /// whole fixed buckets — vanilla's `UberGpuBuffer` model — so re-uploading one
@@ -1015,8 +1020,6 @@ impl ChunkBufferStore {
         }
 
         let now = std::time::Instant::now();
-        const FADE_DURATION_MS: f32 = 1000.0;
-        const NEARBY_DIST_SQ: f32 = 768.0;
 
         let any_fading = self.fade_enabled
             && self.chunks.values().flat_map(|a| &a.sections).any(|s| {
@@ -1026,12 +1029,6 @@ impl ChunkBufferStore {
         if self.meta_dirty || any_fading {
             self.cached_meta.clear();
             for (pos, alloc) in self.chunks.iter() {
-                // Near columns never fade; otherwise each section fades on its own
-                // timer (X/Z distance is per-column).
-                let dx = pos.x as f32 * 16.0 + 8.0 - camera_pos[0];
-                let dz = pos.z as f32 * 16.0 + 8.0 - camera_pos[2];
-                let nearby = !self.fade_enabled || dx * dx + dz * dz < NEARBY_DIST_SQ;
-
                 // CPU omission: the visibility graph's mask skips sections proven
                 // occluded, so they never reach the GPU cull (absent => all draw).
                 let col_vis = self.chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
@@ -1040,12 +1037,8 @@ impl ChunkBufferStore {
                     if col_vis & (1u32 << sec.section_index) == 0 {
                         continue;
                     }
-                    let vis = if nearby {
-                        1.0
-                    } else {
-                        let elapsed_ms = now.duration_since(sec.uploaded_at).as_secs_f32() * 1000.0;
-                        (elapsed_ms / FADE_DURATION_MS).min(1.0)
-                    };
+                    let vis =
+                        Self::section_visibility(self.fade_enabled, *pos, sec, now, camera_pos);
                     self.cached_meta.push(ChunkMeta {
                         aabb_min: sec.aabb.min,
                         aabb_max: sec.aabb.max,
@@ -1172,12 +1165,36 @@ impl ChunkBufferStore {
         }
     }
 
+    /// Per-section fade-in factor in `[0, 1]`: near columns appear instantly,
+    /// the rest ramp over [`FADE_DURATION_MS`] from their upload time. Drives
+    /// both the opaque indirect meta and the water pass so they fade in
+    /// together.
+    fn section_visibility(
+        fade_enabled: bool,
+        pos: ChunkPos,
+        sec: &SectionAlloc,
+        now: std::time::Instant,
+        camera_pos: [f32; 3],
+    ) -> f32 {
+        let dx = pos.x as f32 * 16.0 + 8.0 - camera_pos[0];
+        let dz = pos.z as f32 * 16.0 + 8.0 - camera_pos[2];
+        if !fade_enabled || dx * dx + dz * dz < NEARBY_DIST_SQ {
+            return 1.0;
+        }
+        let elapsed_ms = now.duration_since(sec.uploaded_at).as_secs_f32() * 1000.0;
+        (elapsed_ms / FADE_DURATION_MS).min(1.0)
+    }
+
     /// Draw the translucent water of every section that survives a CPU frustum
     /// cull. Reuses the shared vertex/index buffers (water indices live right
     /// after the opaque ones in each section's slice); the caller binds the
     /// blended water pipeline first. Not GPU-culled — water sections are a
     /// small subset, so a per-section draw is cheap and keeps the opaque
     /// indirect path untouched.
+    ///
+    /// TODO: water isn't depth-sorted, so overlapping translucent surfaces
+    /// (oceans at grazing angles, water seen through water) can blend out of
+    /// order.
     pub fn draw_water(
         &self,
         cmd: vk::CommandBuffer,
@@ -1191,20 +1208,23 @@ impl ChunkBufferStore {
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
         cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
 
-        // Full visibility (no fade); chunk.vert reads gl_InstanceIndex as the
-        // packed visibility float.
-        let first_instance = 1.0f32.to_bits();
-        for alloc in self.chunks.values() {
+        let now = std::time::Instant::now();
+        for (pos, alloc) in self.chunks.iter() {
+            let col_vis = self.chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
             for sec in &alloc.sections {
-                if sec.water_index_count == 0 || !aabb_in_frustum(&sec.aabb, frustum, camera_pos) {
+                if sec.water_index_count == 0
+                    || col_vis & (1u32 << sec.section_index) == 0
+                    || !aabb_in_frustum(&sec.aabb, frustum, camera_pos)
+                {
                     continue;
                 }
+                let vis = Self::section_visibility(self.fade_enabled, *pos, sec, now, camera_pos);
                 cmd.draw_indexed(
                     sec.water_index_count,
                     1,
                     sec.water_first_index,
                     sec.vertex_offset,
-                    first_instance,
+                    vis.to_bits(),
                 );
             }
         }
