@@ -405,8 +405,8 @@ impl MainMenu {
         access_token: Option<String>,
     ) -> Self {
         let server_list = ServerList::load(game_dir);
+        // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
-        ping_all_servers(&rt, &server_list.servers, &ping_results);
         let settings = load_settings(game_dir);
         Self {
             username,
@@ -741,6 +741,7 @@ impl MainMenu {
     }
 
     fn refresh_servers(&self) {
-        ping_all_servers(&self.rt, &self.server_list.servers, &self.ping_results);
+        // Reset to INITIAL; visible rows re-ping on the next draw.
+        self.ping_results.write().clear();
     }
 }
