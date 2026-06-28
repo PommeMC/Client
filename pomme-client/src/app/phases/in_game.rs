@@ -1379,6 +1379,7 @@ pub fn update_game(
         },
         effective_rd,
         player_preview,
+        game.player.eyes_in_water,
     ) {
         tracing::error!("Render error: {e}");
     }

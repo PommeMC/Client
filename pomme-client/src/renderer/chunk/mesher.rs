@@ -95,6 +95,9 @@ pub struct SectionMesh {
     pub section_index: i32,
     pub vertices: Vec<ChunkVertex>,
     pub indices: Vec<u32>,
+    /// Translucent (water) indices into the same `vertices`, drawn in a
+    /// separate blended pass after opaque geometry.
+    pub water_indices: Vec<u32>,
 }
 
 pub struct ChunkMeshData {
@@ -1103,6 +1106,7 @@ fn mesh_chunk_snapshot(
             section_index: i,
             vertices: Vec::new(),
             indices: Vec::new(),
+            water_indices: Vec::new(),
         })
         .collect();
 
@@ -1203,9 +1207,15 @@ fn mesh_chunk_snapshot(
                         step,
                     );
                 } else if let BlockKind::Water | BlockKind::Lava = kind {
+                    // Water is translucent (separate blended pass); lava is opaque.
+                    let fluid_indices = if matches!(kind, BlockKind::Water) {
+                        &mut sec.water_indices
+                    } else {
+                        &mut sec.indices
+                    };
                     emit_fluid(
                         &mut sec.vertices,
-                        &mut sec.indices,
+                        fluid_indices,
                         block_pos,
                         state,
                         snapshot,
@@ -1280,7 +1290,9 @@ fn mesh_chunk_snapshot(
 
     // Keep only non-empty sections (untouched out-of-range ones stay empty);
     // empty indices within `range` are freed by the per-section upload.
-    sections.retain(|s| !s.vertices.is_empty() && !s.indices.is_empty());
+    sections.retain(|s| {
+        !s.vertices.is_empty() && (!s.indices.is_empty() || !s.water_indices.is_empty())
+    });
 
     ChunkMeshData {
         pos,
@@ -1516,15 +1528,31 @@ fn emit_fluid(
         let (mut positions, uvs, light) = cube_face_geometry(*dir);
 
         if matches!(dir, Direction::Up) {
-            let above = snapshot.get_block_state(bx, by + 1, bz);
-            let top = if matches!(classify_block(above), BlockKind::Water | BlockKind::Lava) {
-                1.0
-            } else {
-                FLUID_MAX_HEIGHT
-            };
+            // A water/lava block above would have culled this face already, so
+            // the surface always sits at the lowered fluid height.
             for p in &mut positions {
-                p[1] = top;
+                p[1] = FLUID_MAX_HEIGHT;
             }
+
+            emit_face(
+                vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
+            );
+
+            // Vanilla's backward up-face: the surface seen from below (underwater
+            // looking up). Reversed winding so it survives back-face culling.
+            let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
+            let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
+            emit_face(
+                vertices,
+                indices,
+                block_pos,
+                &rev_positions,
+                &rev_uvs,
+                [light; 4],
+                region,
+                tint,
+            );
+            continue;
         }
 
         emit_face(

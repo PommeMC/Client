@@ -10,6 +10,9 @@ use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 pub struct ChunkPipeline {
     pub pipeline: vk::Pipeline,
+    /// Translucent water variant: alpha blending on, depth write off. Shares
+    /// the opaque pipeline's layout and descriptor sets.
+    pub water_pipeline: vk::Pipeline,
     pub pipeline_layout: vk::PipelineLayout,
     pub descriptor_set_layout_camera: vk::DescriptorSetLayout,
     pub descriptor_set_layout_atlas: vk::DescriptorSetLayout,
@@ -49,6 +52,7 @@ impl ChunkPipeline {
             .expect("failed to create pipeline layout");
 
         let pipeline = create_pipeline(device, render_pass, pipeline_layout);
+        let water_pipeline = create_water_pipeline(device, render_pass, pipeline_layout);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -140,6 +144,7 @@ impl ChunkPipeline {
 
         Self {
             pipeline,
+            water_pipeline,
             pipeline_layout,
             descriptor_set_layout_camera: camera_layout,
             descriptor_set_layout_atlas: atlas_layout,
@@ -185,6 +190,18 @@ impl ChunkPipeline {
         );
     }
 
+    /// Bind the translucent water pipeline (same descriptor sets as `bind`).
+    pub fn bind_water(&self, cmd: vk::CommandBuffer, frame: usize) {
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.water_pipeline);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.camera_sets[frame], self.atlas_set],
+            &[],
+        );
+    }
+
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
         for i in 0..MAX_FRAMES_IN_FLIGHT {
@@ -198,6 +215,7 @@ impl ChunkPipeline {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.water_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.descriptor_set_layout_camera, None);
@@ -222,15 +240,6 @@ fn create_pipeline(
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
 ) -> vk::Pipeline {
-    let vert_module =
-        shader::create_shader_module(device, shader::include_spirv!("chunk.vert.spv"));
-    let frag_module =
-        shader::create_shader_module(device, shader::include_spirv!("chunk.frag.spv"));
-
-    let stages = [
-        shader_stage(vk::ShaderStageFlags::Vertex, vert_module),
-        shader_stage(vk::ShaderStageFlags::Fragment, frag_module),
-    ];
     let blend_attachment = [vk::PipelineColorBlendAttachmentState {
         blend_enable: vk::FALSE,
         color_write_mask: vk::ColorComponentFlags::RGBA,
@@ -242,7 +251,76 @@ fn create_pipeline(
         ..Default::default()
     };
 
-    let pipeline = build_pipeline(device, render_pass, layout, &stages, &color_blend);
+    create_chunk_variant(
+        device,
+        render_pass,
+        layout,
+        shader::include_spirv!("chunk.frag.spv"),
+        &color_blend,
+        true,
+    )
+}
+
+/// Translucent water: standard alpha blending, depth test on but depth write
+/// off (so it never occludes geometry behind it).
+fn create_water_pipeline(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+) -> vk::Pipeline {
+    let blend_attachment = [vk::PipelineColorBlendAttachmentState {
+        blend_enable: vk::TRUE,
+        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
+        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        color_blend_op: vk::BlendOp::Add,
+        src_alpha_blend_factor: vk::BlendFactor::One,
+        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        alpha_blend_op: vk::BlendOp::Add,
+        color_write_mask: vk::ColorComponentFlags::RGBA,
+    }];
+    let color_blend = vk::PipelineColorBlendStateCreateInfo {
+        attachment_count: blend_attachment.len() as u32,
+        attachments: blend_attachment.as_ptr(),
+        ..Default::default()
+    };
+
+    create_chunk_variant(
+        device,
+        render_pass,
+        layout,
+        shader::include_spirv!("water.frag.spv"),
+        &color_blend,
+        false,
+    )
+}
+
+/// Build a chunk pipeline sharing `chunk.vert`, given the fragment SPIR-V,
+/// color-blend, and whether it writes depth.
+fn create_chunk_variant(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+    frag_spirv: &[u8],
+    color_blend: &vk::PipelineColorBlendStateCreateInfo,
+    depth_write: bool,
+) -> vk::Pipeline {
+    let vert_module =
+        shader::create_shader_module(device, shader::include_spirv!("chunk.vert.spv"));
+    let frag_module = shader::create_shader_module(device, frag_spirv);
+
+    let stages = [
+        shader_stage(vk::ShaderStageFlags::Vertex, vert_module),
+        shader_stage(vk::ShaderStageFlags::Fragment, frag_module),
+    ];
+
+    let pipeline = build_pipeline(
+        device,
+        render_pass,
+        layout,
+        &stages,
+        color_blend,
+        depth_write,
+    );
     device.destroy_shader_module(vert_module, None);
     device.destroy_shader_module(frag_module, None);
     pipeline
@@ -256,6 +334,7 @@ fn build_pipeline(
     layout: vk::PipelineLayout,
     stages: &[vk::PipelineShaderStageCreateInfo],
     color_blend: &vk::PipelineColorBlendStateCreateInfo,
+    depth_write: bool,
 ) -> vk::Pipeline {
     use crate::renderer::chunk::mesher::ChunkVertex;
     let binding_descs = [ChunkVertex::binding_description()];
@@ -295,7 +374,7 @@ fn build_pipeline(
 
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
-        depth_write_enable: vk::TRUE,
+        depth_write_enable: if depth_write { vk::TRUE } else { vk::FALSE },
         depth_compare_op: vk::CompareOp::LessOrEqual,
         ..Default::default()
     };

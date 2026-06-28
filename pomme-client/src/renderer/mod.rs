@@ -81,6 +81,7 @@ enum RenderMode<'a> {
         cloud_mode: CloudMode,
         render_distance: u32,
         player_preview: Option<PlayerPreview>,
+        eyes_in_water: bool,
     },
     MainMenu {
         scroll: f32,
@@ -940,6 +941,7 @@ impl Renderer {
         cloud_mode: CloudMode,
         render_distance: u32,
         player_preview: Option<PlayerPreview>,
+        eyes_in_water: bool,
     ) -> Result<(), RendererError> {
         let held_item = held_item.map(|(name, light)| {
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
@@ -951,12 +953,17 @@ impl Renderer {
         });
         // Clear to the sky color: the strip between the sky disc's edge and the
         // terrain shows the clear color, so it must match the sky/terrain or it
-        // reads as a horizon band (visible at night).
-        let sky_col = sky.sky_color();
+        // reads as a horizon band (visible at night). Underwater, clear to the
+        // water fog color so background gaps read as water rather than sky.
+        let clear_col = if eyes_in_water {
+            camera::WATER_FOG_COLOR
+        } else {
+            sky.sky_color()
+        };
         self.render_frame(
             window,
             hide_cursor,
-            [sky_col[0], sky_col[1], sky_col[2], 1.0],
+            [clear_col[0], clear_col[1], clear_col[2], 1.0],
             RenderMode::World {
                 overlay,
                 swing_progress,
@@ -971,6 +978,7 @@ impl Renderer {
                 cloud_mode,
                 render_distance,
                 player_preview,
+                eyes_in_water,
             },
         )
     }
@@ -1226,10 +1234,16 @@ impl Renderer {
         if let RenderMode::World {
             ref sky,
             render_distance,
+            eyes_in_water,
             ..
         } = mode
         {
-            let uniform = CameraUniform::new(&self.camera, sky.sky_color(), render_distance);
+            let uniform = CameraUniform::new(
+                &self.camera,
+                sky.sky_color(),
+                render_distance,
+                eyes_in_water,
+            );
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
@@ -1433,9 +1447,20 @@ impl Renderer {
                 cloud_mode,
                 render_distance,
                 player_preview,
+                eyes_in_water,
             } => {
-                self.sky_pipeline
-                    .update_and_draw(&self.ctx.device, cmd, frame, &self.camera, sky);
+                // Vanilla water fog hides the sky dome and clouds; the framebuffer
+                // is cleared to the water fog color, so skipping them tints the view
+                // when looking up out of geometry.
+                if !*eyes_in_water {
+                    self.sky_pipeline.update_and_draw(
+                        &self.ctx.device,
+                        cmd,
+                        frame,
+                        &self.camera,
+                        sky,
+                    );
+                }
 
                 let t_cull = std::time::Instant::now();
                 self.chunk_pipeline.bind(cmd, frame);
@@ -1472,10 +1497,19 @@ impl Renderer {
 
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
 
+                // Translucent water draws after opaque terrain and entities so it
+                // blends over them; depth-tested (occluded by geometry in front)
+                // but doesn't write depth. CPU frustum-culled, reusing the entity
+                // frustum/eye.
+                self.chunk_pipeline.bind_water(cmd, frame);
+                self.chunk_buffers.draw_water(cmd, &ent_frustum, ent_eye);
+
                 // Clouds draw after opaque world geometry (so terrain occludes
                 // them) and before weather, depth-tested against the scene.
-                self.cloud_pipeline
-                    .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
+                if !*eyes_in_water {
+                    self.cloud_pipeline
+                        .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
+                }
 
                 // Weather draws after opaque world geometry (depth-tested against
                 // terrain) but before the depth clear for the hand pass.
