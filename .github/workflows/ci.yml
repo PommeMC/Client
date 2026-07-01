@@ -35,7 +35,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@b394a1abed9cb019d8e637eeadac93d73e0853da
+        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
         with:
           vulkan_version: 1.4.341.0
           install_runtime: false
