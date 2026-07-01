@@ -1121,6 +1121,7 @@ pub fn update_game(
     if game.creative_inventory_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
+        let middle_clicked = core.input.middle_just_pressed();
         let scroll_delta = core.input.consume_menu_scroll();
         let typed = core.input.drain_typed_chars();
         let backspace = core.input.backspace_pressed();
@@ -1131,6 +1132,7 @@ pub fn update_game(
             sh,
             cursor,
             clicked,
+            middle_clicked,
             scroll_delta,
             &typed,
             backspace,

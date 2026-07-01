@@ -295,6 +295,7 @@ pub fn build_creative_inventory(
     screen_h: f32,
     cursor: (f32, f32),
     clicked: bool,
+    middle_clicked: bool,
     scroll_delta: f32,
     typed_chars: &[char],
     backspace: bool,
@@ -431,7 +432,14 @@ pub fn build_creative_inventory(
                 let hovered = push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
                 if hovered {
                     push_item_tooltip(elements, &item, &tt);
-                    if grid_clicked {
+                    if middle_clicked
+                        && matches!(state.cursor_item, ItemStack::Empty)
+                        && let ItemStack::Present(data) = &item
+                    {
+                        let mut cloned = data.clone();
+                        cloned.count = max_stack_size(cloned.kind);
+                        state.cursor_item = ItemStack::Present(cloned);
+                    } else if grid_clicked {
                         match std::mem::replace(&mut state.cursor_item, ItemStack::Empty) {
                             // Same item: grow the carried stack up to its max and keep it.
                             // A different item or an empty cell leaves the cursor empty (discard).

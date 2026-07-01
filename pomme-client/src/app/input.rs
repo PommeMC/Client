@@ -40,6 +40,7 @@ pub struct InputState {
     selected_slot: u8,
     left_click: ClickState,
     right_click: ClickState,
+    middle_click: ClickState,
     cursor_pos: (f32, f32),
     cursor_moved: bool,
     typed_chars: Vec<char>,
@@ -115,6 +116,7 @@ impl InputState {
             selected_slot: 0,
             left_click: ClickState::default(),
             right_click: ClickState::default(),
+            middle_click: ClickState::default(),
             cursor_pos: (0.0, 0.0),
             cursor_moved: false,
             typed_chars: Vec::new(),
@@ -386,6 +388,8 @@ impl InputState {
         self.left_click.just_released = false;
         self.right_click.just_pressed = false;
         self.right_click.just_released = false;
+        self.middle_click.just_pressed = false;
+        self.middle_click.just_released = false;
         self.cursor_moved = false;
     }
 
@@ -622,6 +626,14 @@ impl InputState {
                     self.recent_actions.insert(Action::Use, false);
                 }
             }
+            MouseButton::Middle => {
+                self.middle_click.held = was_pressed;
+                if was_pressed {
+                    self.middle_click.just_pressed = true;
+                } else {
+                    self.middle_click.just_released = true;
+                }
+            }
             _ => (),
         }
     }
@@ -636,6 +648,10 @@ impl InputState {
 
     pub fn right_held(&self) -> bool {
         self.right_click.held
+    }
+
+    pub fn middle_just_pressed(&self) -> bool {
+        self.middle_click.just_pressed
     }
 
     pub fn on_cursor_moved(&mut self, x: f32, y: f32) {
