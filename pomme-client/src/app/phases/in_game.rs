@@ -1142,25 +1142,34 @@ pub fn update_game(
             gs,
             game.advanced_item_tooltips,
             core.input.left_held(),
+            core.input.right_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+        use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+        let mut set_creative_slot = |slot_num: u16, item: azalea_inventory::ItemStack| {
+            if game.player.game_mode == 1 {
+                connection
+                    .packet_tx
+                    .send(ServerboundGamePacket::SetCreativeModeSlot(
+                        ServerboundSetCreativeModeSlot {
+                            slot_num,
+                            item_stack: item.clone(),
+                        },
+                    ));
+                // Optimistic local update; the server echoes via ContainerSetSlot.
+                game.player.inventory.set_slot(slot_num as usize, item);
+            }
+        };
         match action {
             crate::ui::creative_inventory::CreativeAction::Close => {
                 close_inventory = true;
             }
             crate::ui::creative_inventory::CreativeAction::SetSlot(slot_num, item) => {
-                use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
-                if game.player.game_mode == 1 {
-                    connection
-                        .packet_tx
-                        .send(ServerboundGamePacket::SetCreativeModeSlot(
-                            ServerboundSetCreativeModeSlot {
-                                slot_num,
-                                item_stack: item.clone(),
-                            },
-                        ));
-                    // Optimistic local update; the server echoes via ContainerSetSlot.
-                    game.player.inventory.set_slot(slot_num as usize, item);
+                set_creative_slot(slot_num, item);
+            }
+            crate::ui::creative_inventory::CreativeAction::SetSlots(items) => {
+                for (slot_num, item) in items {
+                    set_creative_slot(slot_num, item);
                 }
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
