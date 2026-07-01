@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use azalea_inventory::components::{Damage, Enchantments, MaxDamage, Rarity};
+use azalea_inventory::components::{Damage, Enchantments, MaxDamage, MaxStackSize, Rarity};
 use azalea_inventory::default_components::get_default_component;
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
@@ -432,11 +432,24 @@ pub fn build_creative_inventory(
                 if hovered {
                     push_item_tooltip(elements, &item, &tt);
                     if grid_clicked {
-                        if matches!(state.cursor_item, ItemStack::Present(_)) {
-                            // Carrying an item: clicking the creative list discards it.
-                            state.cursor_item = ItemStack::Empty;
-                        } else if matches!(item, ItemStack::Present(_)) {
-                            state.cursor_item = item.clone();
+                        match std::mem::replace(&mut state.cursor_item, ItemStack::Empty) {
+                            // Same item: grow the carried stack up to its max and keep it.
+                            // A different item or an empty cell leaves the cursor empty (discard).
+                            ItemStack::Present(mut carried) => {
+                                if let ItemStack::Present(clicked) = &item
+                                    && carried.is_same_item_and_components(clicked)
+                                {
+                                    if carried.count < max_stack_size(carried.kind) {
+                                        carried.count += 1;
+                                    }
+                                    state.cursor_item = ItemStack::Present(carried);
+                                }
+                            }
+                            ItemStack::Empty => {
+                                if let ItemStack::Present(data) = &item {
+                                    state.cursor_item = ItemStack::Present(data.clone());
+                                }
+                            }
                         }
                     }
                 }
@@ -601,6 +614,12 @@ const TOOLTIP_LORE_COLOR: [f32; 4] = rgb(0xAAAAAA);
 const RARITY_UNCOMMON: [f32; 4] = rgb(0xFFFF55);
 const RARITY_RARE: [f32; 4] = rgb(0x55FFFF);
 const RARITY_EPIC: [f32; 4] = rgb(0xFF55FF);
+
+fn max_stack_size(kind: ItemKind) -> i32 {
+    get_default_component::<MaxStackSize>(kind)
+        .map(|m| m.count)
+        .unwrap_or(64)
+}
 
 fn rarity_color(kind: ItemKind) -> [f32; 4] {
     match get_default_component::<Rarity>(kind) {
