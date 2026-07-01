@@ -251,6 +251,8 @@ pub struct CreativeState {
     pub tab: CreativeTab,
     pub scroll: f32,
     pub search: String,
+    /// Client-side carried stack (the item riding the cursor). Creative-only.
+    pub cursor_item: ItemStack,
     cursor_blink: Instant,
     scroll_dragging: bool,
 }
@@ -261,6 +263,7 @@ impl CreativeState {
             tab: CreativeTab::BuildingBlocks,
             scroll: 0.0,
             search: String::new(),
+            cursor_item: ItemStack::Empty,
             cursor_blink: Instant::now(),
             scroll_dragging: false,
         }
@@ -280,7 +283,8 @@ impl Default for CreativeState {
 pub enum CreativeAction {
     None,
     Close,
-    Place(ItemStack, u16),
+    /// Set a real player-inventory slot to the given stack (creative set-slot).
+    SetSlot(u16, ItemStack),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -295,7 +299,6 @@ pub fn build_creative_inventory(
     typed_chars: &[char],
     backspace: bool,
     inventory: &Inventory,
-    selected_hotbar: u8,
     gs: f32,
     advanced_tooltips: bool,
     mouse_held: bool,
@@ -368,7 +371,11 @@ pub fn build_creative_inventory(
 
     if state.tab.is_inventory_tab() {
         if let Some(slot) = draw_inventory_layout(elements, ox, oy, scale, inventory, &tt) {
-            action = CreativeAction::Place(ItemStack::Empty, slot);
+            if slot == SLOT_TRASH {
+                state.cursor_item = ItemStack::Empty;
+            } else {
+                action = apply_slot_click(state, inventory, slot);
+            }
         }
     } else {
         let items = visible_items(state);
@@ -423,12 +430,13 @@ pub fn build_creative_inventory(
                 let hovered = push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
                 if hovered {
                     push_item_tooltip(elements, &item, &tt);
-                    if grid_clicked
-                        && scrollable
-                        && let ItemStack::Present(data) = item
-                    {
-                        let slot_num = 36 + selected_hotbar as u16;
-                        action = CreativeAction::Place(ItemStack::Present(data), slot_num);
+                    if grid_clicked {
+                        if matches!(state.cursor_item, ItemStack::Present(_)) {
+                            // Carrying an item: clicking the creative list discards it.
+                            state.cursor_item = ItemStack::Empty;
+                        } else if matches!(item, ItemStack::Present(_)) {
+                            state.cursor_item = item.clone();
+                        }
                     }
                 }
             }
@@ -437,7 +445,7 @@ pub fn build_creative_inventory(
         if let Some(slot) = draw_player_hotbar(elements, ox, oy, scale, inventory, &tt)
             && matches!(action, CreativeAction::None)
         {
-            action = CreativeAction::Place(ItemStack::Empty, slot);
+            action = apply_slot_click(state, inventory, slot);
         }
 
         if scrollable {
@@ -449,7 +457,25 @@ pub fn build_creative_inventory(
 
     let outside = !hit_test(cursor, [ox, oy, inv_w, inv_h]);
     if clicked && outside && tab_hit.is_none() && matches!(action, CreativeAction::None) {
-        action = CreativeAction::Close;
+        if matches!(state.cursor_item, ItemStack::Present(_)) {
+            // TODO: drop the carried item into the world; for now just discard it.
+            state.cursor_item = ItemStack::Empty;
+        } else {
+            action = CreativeAction::Close;
+        }
+    }
+
+    // Draw the carried item on top of everything, centred on the cursor.
+    if let ItemStack::Present(data) = &state.cursor_item {
+        let size = SLOT_SIZE * scale;
+        common::push_item_icon(
+            elements,
+            cursor.0 - size / 2.0,
+            cursor.1 - size / 2.0,
+            size,
+            scale,
+            data,
+        );
     }
 
     action
@@ -794,7 +820,8 @@ fn push_tab_tooltip(
     }
 }
 
-/// Returns the slot number when a present item is clicked.
+/// Returns the slot number when the slot is clicked (empty or not), so a
+/// carried item can be placed into an empty slot.
 #[allow(clippy::too_many_arguments)]
 fn slot_with_tooltip(
     elements: &mut Vec<MenuElement>,
@@ -811,7 +838,6 @@ fn slot_with_tooltip(
     if hovered {
         push_item_tooltip(elements, item, tt);
         if tt.clicked
-            && matches!(item, ItemStack::Present(_))
             && let Some(slot) = slot_num
         {
             return Some(slot);
@@ -820,11 +846,38 @@ fn slot_with_tooltip(
     None
 }
 
+/// Left-click on a real player-inventory slot: pick up, place, or swap the
+/// carried item, updating the cursor stack and emitting the set-slot action.
+fn apply_slot_click(
+    state: &mut CreativeState,
+    inventory: &Inventory,
+    slot_num: u16,
+) -> CreativeAction {
+    let slot_item = inventory.slot(slot_num as usize).clone();
+    match std::mem::replace(&mut state.cursor_item, ItemStack::Empty) {
+        ItemStack::Empty => {
+            if matches!(slot_item, ItemStack::Present(_)) {
+                state.cursor_item = slot_item;
+                CreativeAction::SetSlot(slot_num, ItemStack::Empty)
+            } else {
+                CreativeAction::None
+            }
+        }
+        // TODO: merge stacks when the carried and slot items are the same.
+        carried => {
+            state.cursor_item = slot_item;
+            CreativeAction::SetSlot(slot_num, carried)
+        }
+    }
+}
+
 // Vanilla `PlayerInventory` slot indices.
 const SLOT_ARMOR_BASE: u16 = 5;
 const SLOT_MAIN_BASE: u16 = 9;
 const SLOT_HOTBAR_BASE: u16 = 36;
 const SLOT_OFFHAND: u16 = 45;
+/// Sentinel for the inventory-tab trash slot (not a real inventory index).
+const SLOT_TRASH: u16 = u16::MAX;
 
 fn draw_player_hotbar(
     elements: &mut Vec<MenuElement>,
@@ -939,16 +992,17 @@ fn draw_inventory_layout(
     clicked_slot = clicked_slot.or(draw_player_hotbar(elements, ox, oy, scale, inventory, tt));
 
     let (trash_x, trash_y) = slot_xy(ox, oy, scale, INV_TRASH_X, INV_TRASH_Y);
-    push_slot(
+    clicked_slot = clicked_slot.or(slot_with_tooltip(
         elements,
         trash_x,
         trash_y,
         size,
         scale,
-        tt.cursor,
         &ItemStack::Empty,
         None,
-    );
+        tt,
+        Some(SLOT_TRASH),
+    ));
 
     clicked_slot
 }
