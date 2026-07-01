@@ -1164,8 +1164,8 @@ fn rotate_positions(mut positions: [[f32; 3]; 4], rot_x: i32, rot_y: i32) -> [[f
         for pos in &mut positions {
             let dy = pos[1] - center;
             let dz = pos[2] - center;
-            pos[1] = center + cos * dy - sin * dz;
-            pos[2] = center + sin * dy + cos * dz;
+            pos[1] = center + cos * dy + sin * dz;
+            pos[2] = center - sin * dy + cos * dz;
         }
     }
 
@@ -1176,8 +1176,8 @@ fn rotate_positions(mut positions: [[f32; 3]; 4], rot_x: i32, rot_y: i32) -> [[f
         for pos in &mut positions {
             let dx = pos[0] - center;
             let dz = pos[2] - center;
-            pos[0] = center + cos * dx + sin * dz;
-            pos[2] = center - sin * dx + cos * dz;
+            pos[0] = center + cos * dx - sin * dz;
+            pos[2] = center + sin * dx + cos * dz;
         }
     }
 
