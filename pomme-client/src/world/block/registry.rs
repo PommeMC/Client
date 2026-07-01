@@ -157,10 +157,16 @@ impl BlockRegistry {
             return variants.values().next();
         }
 
-        let variant_key = build_variant_key(&*block);
+        // Vanilla variant keys only list the properties that affect the model, so
+        // match by subset rather than exact string equality (an empty key matches
+        // any state, serving as the default variant).
+        let props = block.property_map();
         variants
-            .get(&variant_key)
-            .or_else(|| variants.get(""))
+            .iter()
+            .find(|(key, _)| {
+                constraints_match(&props, key.split(',').filter_map(|p| p.split_once('=')))
+            })
+            .map(|(_, model)| model)
             .or_else(|| variants.values().next())
     }
 
@@ -171,14 +177,8 @@ impl BlockRegistry {
 
         let mut quads = Vec::new();
         for entry in entries {
-            if entry.when.is_empty()
-                || entry.when.iter().all(|(k, v)| {
-                    props
-                        .get(k.as_str())
-                        .map(|pv| v.split('|').any(|opt| opt == *pv))
-                        .unwrap_or(false)
-                })
-            {
+            let when = entry.when.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+            if constraints_match(&props, when) {
                 quads.extend(entry.quads.iter());
             }
         }
@@ -253,18 +253,17 @@ fn build_placeable_blocks() -> HashMap<String, BlockState> {
         .collect()
 }
 
-fn build_variant_key(block: &dyn azalea_block::BlockTrait) -> String {
-    let props = block.property_map();
-    if props.is_empty() {
-        return String::new();
-    }
-    let mut entries: Vec<_> = props.iter().collect();
-    entries.sort_by_key(|(k, _)| *k);
-    entries
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(",")
+/// Whether every `key=value` constraint holds for `props`. A value may list
+/// alternatives separated by `|`, as vanilla multipart `when` clauses do.
+fn constraints_match<'a>(
+    props: &HashMap<&str, &str>,
+    mut constraints: impl Iterator<Item = (&'a str, &'a str)>,
+) -> bool {
+    constraints.all(|(k, v)| {
+        props
+            .get(k)
+            .is_some_and(|pv| v.split('|').any(|opt| opt == *pv))
+    })
 }
 
 fn load_cache(path: &Path) -> Option<HashMap<String, FaceTextures>> {
