@@ -255,6 +255,8 @@ pub struct CreativeState {
     pub cursor_item: ItemStack,
     /// Active click-drag distribution, if a button is held across slots.
     drag: Option<DragState>,
+    /// Last left-click (slot, time) for double-click detection.
+    last_left_click: Option<(u16, Instant)>,
     cursor_blink: Instant,
     scroll_dragging: bool,
 }
@@ -272,6 +274,7 @@ impl CreativeState {
             search: String::new(),
             cursor_item: ItemStack::Empty,
             drag: None,
+            last_left_click: None,
             cursor_blink: Instant::now(),
             scroll_dragging: false,
         }
@@ -533,21 +536,34 @@ pub fn build_creative_inventory(
     } else if let Some(hit) = &real_hit
         && let Some(kind) = hit.click
     {
+        let double = matches!(kind, ClickKind::Left) && is_double_click(state, hit.slot);
         if hit.slot == SLOT_TRASH {
             state.cursor_item = ItemStack::Empty;
-        } else if let ItemStack::Present(carried) = state.cursor_item.clone() {
-            // Carrying: start a drag on an eligible slot, else swap immediately.
-            if drag_slot_eligible(&carried, inventory, hit.slot) {
-                state.drag = Some(DragState {
-                    button: kind,
-                    slots: vec![hit.slot],
-                });
+        } else if double && matches!(state.cursor_item, ItemStack::Present(_)) {
+            // Double-click: gather matching items into the cursor.
+            let items = double_click_gather(state, inventory);
+            if !items.is_empty() {
+                action = CreativeAction::SetSlots(items);
+            }
+            state.last_left_click = None;
+        } else {
+            if matches!(kind, ClickKind::Left) {
+                state.last_left_click = Some((hit.slot, Instant::now()));
+            }
+            if let ItemStack::Present(carried) = state.cursor_item.clone() {
+                // Carrying: start a drag on an eligible slot, else swap immediately.
+                if drag_slot_eligible(&carried, inventory, hit.slot) {
+                    state.drag = Some(DragState {
+                        button: kind,
+                        slots: vec![hit.slot],
+                    });
+                } else {
+                    action = apply_slot_action(state, inventory, hit.slot, kind);
+                }
             } else {
+                // Empty cursor: pick up / take half immediately.
                 action = apply_slot_action(state, inventory, hit.slot, kind);
             }
-        } else {
-            // Empty cursor: pick up / take half immediately.
-            action = apply_slot_action(state, inventory, hit.slot, kind);
         }
     }
 
@@ -1027,6 +1043,49 @@ fn stack_with_count(item: &ItemStackData, count: i32) -> ItemStack {
     } else {
         ItemStack::Empty
     }
+}
+
+const DOUBLE_CLICK_MS: u128 = 250;
+
+fn is_double_click(state: &CreativeState, slot: u16) -> bool {
+    matches!(state.last_left_click, Some((s, t)) if s == slot && t.elapsed().as_millis() <= DOUBLE_CLICK_MS)
+}
+
+/// Double-click gather: fill the carried stack to its max by pulling matching
+/// items from the real player inventory (partial stacks first, then full),
+/// matching vanilla `PICKUP_ALL`. Returns the drained slots.
+fn double_click_gather(state: &mut CreativeState, inventory: &Inventory) -> Vec<(u16, ItemStack)> {
+    let ItemStack::Present(mut carried) = state.cursor_item.clone() else {
+        return Vec::new();
+    };
+    let max = max_stack_size(carried.kind);
+    let mut changed: HashMap<u16, ItemStack> = HashMap::new();
+    for pass in 0..2 {
+        for slot in SLOT_MAIN_BASE..=SLOT_OFFHAND {
+            if carried.count >= max {
+                break;
+            }
+            let existing = match changed.get(&slot) {
+                Some(ItemStack::Present(d)) => d.clone(),
+                Some(ItemStack::Empty) => continue,
+                None => match inventory.slot(slot as usize) {
+                    ItemStack::Present(d) => d.clone(),
+                    ItemStack::Empty => continue,
+                },
+            };
+            if !carried.is_same_item_and_components(&existing) {
+                continue;
+            }
+            if pass == 0 && existing.count >= max_stack_size(existing.kind) {
+                continue;
+            }
+            let take = (max - carried.count).min(existing.count);
+            carried.count += take;
+            changed.insert(slot, stack_with_count(&existing, existing.count - take));
+        }
+    }
+    state.cursor_item = ItemStack::Present(carried);
+    changed.into_iter().collect()
 }
 
 /// A drag can cover a slot only if it's empty or holds the same item as the
