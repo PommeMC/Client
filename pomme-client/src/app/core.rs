@@ -229,6 +229,7 @@ impl AppCore {
     }
 
     pub fn apply_cursor_grab(&self, window: &Window, game: Option<&mut GameState>) {
+        let in_game = game.is_some();
         let captured =
             game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
         if captured {
@@ -239,6 +240,11 @@ impl AppCore {
         } else {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
+            if in_game {
+                // In-game screens (inventory, chat, pause) use the plain arrow like
+                // vanilla, not the pointer the branded menu may have left set.
+                window.set_cursor(winit::window::CursorIcon::Default);
+            }
         }
     }
 
