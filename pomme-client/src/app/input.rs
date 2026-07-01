@@ -654,6 +654,10 @@ impl InputState {
         self.middle_click.just_pressed
     }
 
+    pub fn right_just_pressed(&self) -> bool {
+        self.right_click.just_pressed
+    }
+
     pub fn on_cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor_pos = (x, y);
         self.cursor_moved = true;

@@ -296,6 +296,7 @@ pub fn build_creative_inventory(
     cursor: (f32, f32),
     clicked: bool,
     middle_clicked: bool,
+    right_clicked: bool,
     scroll_delta: f32,
     typed_chars: &[char],
     backspace: bool,
@@ -368,15 +369,16 @@ pub fn build_creative_inventory(
         gs,
         advanced: advanced_tooltips,
         clicked,
+        right_clicked,
         carrying: matches!(state.cursor_item, ItemStack::Present(_)),
     };
 
     if state.tab.is_inventory_tab() {
-        if let Some(slot) = draw_inventory_layout(elements, ox, oy, scale, inventory, &tt) {
+        if let Some((slot, kind)) = draw_inventory_layout(elements, ox, oy, scale, inventory, &tt) {
             if slot == SLOT_TRASH {
                 state.cursor_item = ItemStack::Empty;
             } else {
-                action = apply_slot_click(state, inventory, slot);
+                action = apply_slot_action(state, inventory, slot, kind);
             }
         }
     } else {
@@ -439,14 +441,21 @@ pub fn build_creative_inventory(
                         let mut cloned = data.clone();
                         cloned.count = max_stack_size(cloned.kind);
                         state.cursor_item = ItemStack::Present(cloned);
-                    } else if grid_clicked {
+                    } else if grid_clicked || right_clicked {
                         match std::mem::replace(&mut state.cursor_item, ItemStack::Empty) {
-                            // Same item: grow the carried stack up to its max and keep it.
-                            // A different item or an empty cell leaves the cursor empty (discard).
                             ItemStack::Present(mut carried) => {
-                                if let ItemStack::Present(clicked) = &item
+                                if right_clicked {
+                                    // Drop one from the carried stack.
+                                    carried.count -= 1;
+                                    if carried.count > 0 {
+                                        state.cursor_item = ItemStack::Present(carried);
+                                    }
+                                } else if let ItemStack::Present(clicked) = &item
                                     && carried.is_same_item_and_components(clicked)
                                 {
+                                    // Left-click the same item: grow the carried stack up to its
+                                    // max. A different item or empty cell discards it (stays
+                                    // empty).
                                     if carried.count < max_stack_size(carried.kind) {
                                         carried.count += 1;
                                     }
@@ -464,10 +473,10 @@ pub fn build_creative_inventory(
             }
         }
 
-        if let Some(slot) = draw_player_hotbar(elements, ox, oy, scale, inventory, &tt)
+        if let Some((slot, kind)) = draw_player_hotbar(elements, ox, oy, scale, inventory, &tt)
             && matches!(action, CreativeAction::None)
         {
-            action = apply_slot_click(state, inventory, slot);
+            action = apply_slot_action(state, inventory, slot, kind);
         }
 
         if scrollable {
@@ -603,7 +612,14 @@ struct TooltipCtx {
     gs: f32,
     advanced: bool,
     clicked: bool,
+    right_clicked: bool,
     carrying: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ClickKind {
+    Left,
+    Right,
 }
 
 const fn rgb(hex: u32) -> [f32; 4] {
@@ -855,8 +871,8 @@ fn push_tab_tooltip(
     }
 }
 
-/// Returns the slot number when the slot is clicked (empty or not), so a
-/// carried item can be placed into an empty slot.
+/// Returns the clicked slot and which button, whether the slot is empty or not,
+/// so a carried item can be placed into an empty slot.
 #[allow(clippy::too_many_arguments)]
 fn slot_with_tooltip(
     elements: &mut Vec<MenuElement>,
@@ -868,14 +884,17 @@ fn slot_with_tooltip(
     empty_sprite: Option<SpriteId>,
     tt: &TooltipCtx,
     slot_num: Option<u16>,
-) -> Option<u16> {
+) -> Option<(u16, ClickKind)> {
     let hovered = push_slot(elements, x, y, size, scale, tt.cursor, item, empty_sprite);
     if hovered {
         push_item_tooltip(elements, item, tt);
-        if tt.clicked
-            && let Some(slot) = slot_num
-        {
-            return Some(slot);
+        if let Some(slot) = slot_num {
+            if tt.clicked {
+                return Some((slot, ClickKind::Left));
+            }
+            if tt.right_clicked {
+                return Some((slot, ClickKind::Right));
+            }
         }
     }
     None
@@ -906,6 +925,73 @@ fn apply_slot_click(
     }
 }
 
+/// Right-click on a real player-inventory slot: take half with an empty cursor,
+/// else place one (or swap on a different item).
+fn apply_slot_right_click(
+    state: &mut CreativeState,
+    inventory: &Inventory,
+    slot_num: u16,
+) -> CreativeAction {
+    let slot_item = inventory.slot(slot_num as usize).clone();
+    match std::mem::replace(&mut state.cursor_item, ItemStack::Empty) {
+        ItemStack::Empty => {
+            let ItemStack::Present(mut data) = slot_item else {
+                return CreativeAction::None;
+            };
+            let take = (data.count + 1) / 2;
+            data.count -= take;
+            let mut taken = data.clone();
+            taken.count = take;
+            state.cursor_item = ItemStack::Present(taken);
+            let remainder = if data.count > 0 {
+                ItemStack::Present(data)
+            } else {
+                ItemStack::Empty
+            };
+            CreativeAction::SetSlot(slot_num, remainder)
+        }
+        ItemStack::Present(mut carried) => {
+            let placed = match slot_item {
+                ItemStack::Present(mut existing) => {
+                    if !carried.is_same_item_and_components(&existing) {
+                        // Different item: swap the whole stacks.
+                        state.cursor_item = ItemStack::Present(existing);
+                        return CreativeAction::SetSlot(slot_num, ItemStack::Present(carried));
+                    }
+                    if existing.count >= max_stack_size(existing.kind) {
+                        state.cursor_item = ItemStack::Present(carried);
+                        return CreativeAction::None;
+                    }
+                    existing.count += 1;
+                    existing
+                }
+                ItemStack::Empty => {
+                    let mut one = carried.clone();
+                    one.count = 1;
+                    one
+                }
+            };
+            carried.count -= 1;
+            if carried.count > 0 {
+                state.cursor_item = ItemStack::Present(carried);
+            }
+            CreativeAction::SetSlot(slot_num, ItemStack::Present(placed))
+        }
+    }
+}
+
+fn apply_slot_action(
+    state: &mut CreativeState,
+    inventory: &Inventory,
+    slot_num: u16,
+    kind: ClickKind,
+) -> CreativeAction {
+    match kind {
+        ClickKind::Left => apply_slot_click(state, inventory, slot_num),
+        ClickKind::Right => apply_slot_right_click(state, inventory, slot_num),
+    }
+}
+
 // Vanilla `PlayerInventory` slot indices.
 const SLOT_ARMOR_BASE: u16 = 5;
 const SLOT_MAIN_BASE: u16 = 9;
@@ -921,7 +1007,7 @@ fn draw_player_hotbar(
     scale: f32,
     inventory: &Inventory,
     tt: &TooltipCtx,
-) -> Option<u16> {
+) -> Option<(u16, ClickKind)> {
     let size = SLOT_SIZE * scale;
     let hotbar = inventory.hotbar_slots();
     let mut clicked_slot = None;
@@ -956,7 +1042,7 @@ fn draw_inventory_layout(
     scale: f32,
     inventory: &Inventory,
     tt: &TooltipCtx,
-) -> Option<u16> {
+) -> Option<(u16, ClickKind)> {
     let size = SLOT_SIZE * scale;
     let mut clicked_slot = None;
 
