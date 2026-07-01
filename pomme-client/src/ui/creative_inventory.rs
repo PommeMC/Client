@@ -367,6 +367,7 @@ pub fn build_creative_inventory(
         gs,
         advanced: advanced_tooltips,
         clicked,
+        carrying: matches!(state.cursor_item, ItemStack::Present(_)),
     };
 
     if state.tab.is_inventory_tab() {
@@ -581,6 +582,7 @@ struct TooltipCtx {
     gs: f32,
     advanced: bool,
     clicked: bool,
+    carrying: bool,
 }
 
 const fn rgb(hex: u32) -> [f32; 4] {
@@ -776,6 +778,9 @@ fn build_item_tooltip_lines(data: &ItemStackData, advanced: bool) -> Vec<Tooltip
 }
 
 fn push_item_tooltip(elements: &mut Vec<MenuElement>, item: &ItemStack, tt: &TooltipCtx) {
+    if tt.carrying {
+        return;
+    }
     if let ItemStack::Present(data) = item {
         elements.push(MenuElement::TooltipLines {
             x: tt.cursor.0,
@@ -795,6 +800,9 @@ fn push_tab_tooltip(
     scale: f32,
     tt: &TooltipCtx,
 ) {
+    if tt.carrying {
+        return;
+    }
     let inset_w = 21.0 * scale;
     let inset_h = 27.0 * scale;
     for &tab in TABS.iter() {
