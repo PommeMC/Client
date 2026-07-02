@@ -17,6 +17,7 @@ use crate::entity::components::Position;
 
 pub enum NetworkEvent {
     Connected,
+    Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
     },
@@ -59,9 +60,15 @@ pub enum NetworkEvent {
     },
     InventoryContent {
         items: Vec<ItemStack>,
+        carried: ItemStack,
+        state_id: u32,
     },
     InventorySlot {
         index: u16,
+        item: ItemStack,
+        state_id: u32,
+    },
+    CursorItem {
         item: ItemStack,
     },
     ChatMessage {

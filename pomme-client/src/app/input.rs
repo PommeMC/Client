@@ -630,6 +630,10 @@ impl InputState {
         self.left_click.just_pressed
     }
 
+    pub fn right_just_pressed(&self) -> bool {
+        self.right_click.just_pressed
+    }
+
     pub fn left_held(&self) -> bool {
         self.left_click.held
     }

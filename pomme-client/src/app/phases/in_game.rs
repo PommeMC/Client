@@ -56,6 +56,19 @@ pub struct GameState {
     pub inventory_open: bool,
     pub creative_inventory_open: bool,
     pub creative_state: crate::ui::creative_inventory::CreativeState,
+    /// Latest container state id from the server, echoed in container clicks.
+    pub container_state_id: u32,
+    /// Carried (cursor) stack for the survival inventory, driven by the server.
+    pub cursor_item: azalea_inventory::ItemStack,
+    /// Whether the survival inventory was open last frame, to detect the close
+    /// transition and send a container-close packet.
+    pub inventory_was_open: bool,
+    /// Active survival click-drag (button + slots covered), if any.
+    pub inv_drag: Option<(azalea_inventory::operations::QuickCraftKind, Vec<u16>)>,
+    /// Last survival left click (slot, time) for double-click detection.
+    pub inv_last_click: Option<(u16, Instant)>,
+    /// Server registries, for hashing predicted container clicks.
+    pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
     pub chat: ChatState,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
@@ -176,6 +189,12 @@ impl GameState {
             inventory_open: false,
             creative_inventory_open: false,
             creative_state: crate::ui::creative_inventory::CreativeState::new(),
+            container_state_id: 0,
+            cursor_item: azalea_inventory::ItemStack::Empty,
+            inventory_was_open: false,
+            inv_drag: None,
+            inv_last_click: None,
+            registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
             chat: ChatState::new(),
             command_tree: None,
             tab_list: TabList::new(),
@@ -586,6 +605,82 @@ fn apply_render_distance(
 ) {
     core.menu.render_distance = rd;
     game.sync_render_distance(connection, rd);
+}
+
+/// Predict each survival container click locally (instant UI + drag preview),
+/// then send the predicted diff as `HashedStack`es so the server suppresses
+/// corrections when the prediction is right (vanilla lockstep).
+fn send_container_clicks(
+    game: &mut GameState,
+    connection: &ConnectionHandle,
+    ops: Vec<azalea_inventory::operations::ClickOperation>,
+) {
+    use azalea_inventory::ItemStack;
+    use azalea_inventory::operations::{
+        ClickOperation, QuickCraftClick, QuickCraftKind, QuickCraftStatus,
+    };
+    use azalea_protocol::packets::game::s_container_click::{
+        HashedStack, ServerboundContainerClick,
+    };
+
+    use crate::player::menu_click;
+
+    let mut drag_kind = QuickCraftKind::Left;
+    let mut drag_slots: Vec<u16> = Vec::new();
+    for op in &ops {
+        let (changed, carried): (Vec<(u16, ItemStack)>, ItemStack) = match op {
+            ClickOperation::QuickCraft(QuickCraftClick { kind, status }) => match status {
+                QuickCraftStatus::Start => {
+                    drag_kind = kind.clone();
+                    drag_slots.clear();
+                    (Vec::new(), game.cursor_item.clone())
+                }
+                QuickCraftStatus::Add { slot } => {
+                    drag_slots.push(*slot);
+                    (Vec::new(), game.cursor_item.clone())
+                }
+                QuickCraftStatus::End => {
+                    let (changed, remainder) = menu_click::drag_distribution(
+                        &game.player.inventory,
+                        &game.cursor_item,
+                        &drag_kind,
+                        &drag_slots,
+                    );
+                    for (s, item) in &changed {
+                        game.player.inventory.set_slot(*s as usize, item.clone());
+                    }
+                    game.cursor_item = remainder.clone();
+                    (changed, remainder)
+                }
+            },
+            other => {
+                let changed = menu_click::apply_click(
+                    &mut game.player.inventory,
+                    &mut game.cursor_item,
+                    other,
+                );
+                (changed, game.cursor_item.clone())
+            }
+        };
+
+        let mut click = ServerboundContainerClick {
+            container_id: 0,
+            state_id: game.container_state_id,
+            slot_num: op.slot_num().map(|s| s as i16).unwrap_or(-999),
+            button_num: op.button_num(),
+            click_type: op.click_type(),
+            changed_slots: Default::default(),
+            carried_item: HashedStack::from_item_stack(&carried, &game.registries),
+        };
+        for (s, item) in &changed {
+            click
+                .changed_slots
+                .insert(*s, HashedStack::from_item_stack(item, &game.registries));
+        }
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::ContainerClick(click));
+    }
 }
 
 pub fn update_game(
@@ -1102,18 +1197,27 @@ pub fn update_game(
 
     let mut player_preview = None;
     if game.inventory_open {
-        let cursor = core.input.cursor_pos();
-        let clicked = core.input.left_just_pressed();
+        let input = crate::ui::inventory::InventoryInput {
+            left_pressed: core.input.left_just_pressed(),
+            right_pressed: core.input.right_just_pressed(),
+            left_held: core.input.left_held(),
+            right_held: core.input.right_held(),
+            shift: core.input.shift_held(),
+        };
         let result = crate::ui::inventory::build_inventory(
             &mut elements,
             sw,
             sh,
-            cursor,
-            clicked,
+            core.input.cursor_pos(),
+            &input,
             &game.player.inventory,
+            &game.cursor_item,
+            &mut game.inv_drag,
+            &mut game.inv_last_click,
             gs,
         );
         close_inventory = result.clicked_outside;
+        send_container_clicks(game, connection, result.ops);
         player_preview = Some(result.player_preview);
         core.input.clear_just_pressed_actions();
     }
@@ -1389,6 +1493,18 @@ pub fn update_game(
         game.creative_inventory_open = false;
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
+
+    // Tell the server when the survival inventory closes so it returns/drops the
+    // cursor stack.
+    if game.inventory_was_open && !game.inventory_open {
+        use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::ContainerClose(
+                ServerboundContainerClose { container_id: 0 },
+            ));
+    }
+    game.inventory_was_open = game.inventory_open;
 
     match death_action {
         DeathAction::Respawn => {

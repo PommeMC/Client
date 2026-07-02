@@ -503,10 +503,27 @@ impl AppCore {
                         game.player.armor = armor;
                     }
                 }
-                NetworkEvent::InventoryContent { items } => {
+                NetworkEvent::InventoryContent {
+                    items,
+                    carried,
+                    state_id,
+                } => {
                     game.player.inventory.set_contents(items);
+                    game.cursor_item = carried;
+                    game.container_state_id = game.container_state_id.max(state_id);
                 }
-                NetworkEvent::InventorySlot { index, item } => {
+                NetworkEvent::CursorItem { item } => {
+                    game.cursor_item = item;
+                }
+                NetworkEvent::Registries(registries) => {
+                    game.registries = registries;
+                }
+                NetworkEvent::InventorySlot {
+                    index,
+                    item,
+                    state_id,
+                } => {
+                    game.container_state_id = game.container_state_id.max(state_id);
                     game.player.inventory.set_slot(index as usize, item);
                 }
                 NetworkEvent::ChatMessage { spans } => {

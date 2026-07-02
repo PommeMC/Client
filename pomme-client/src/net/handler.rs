@@ -145,6 +145,13 @@ pub fn handle_game_packet(
         ClientboundGamePacket::ContainerSetContent(p) if p.container_id == 0 => {
             let _ = event_tx.try_send(NetworkEvent::InventoryContent {
                 items: p.items.clone(),
+                carried: p.carried_item.clone(),
+                state_id: p.state_id,
+            });
+        }
+        ClientboundGamePacket::SetCursorItem(p) => {
+            let _ = event_tx.try_send(NetworkEvent::CursorItem {
+                item: p.contents.clone(),
             });
         }
         ClientboundGamePacket::ContainerSetSlot(p)
@@ -153,6 +160,7 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::InventorySlot {
                 index: p.slot,
                 item: p.item_stack.clone(),
+                state_id: p.state_id,
             });
         }
         ClientboundGamePacket::SetHealth(p) => {
