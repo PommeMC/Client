@@ -143,45 +143,46 @@ pub fn build_hud(
     }
 
     let status_bar_y = (hotbar_y - (XP_BAR_H + 1.0 + 2.0) * gs).round();
-    build_status_bar(
-        elements,
-        hotbar_x,
-        status_bar_y,
-        health,
-        false,
-        SpriteId::HeartContainer,
-        SpriteId::HeartFull,
-        SpriteId::HeartHalf,
-        gs,
-    );
-    build_status_bar(
-        elements,
-        hotbar_x + hotbar_w,
-        status_bar_y,
-        food as f32,
-        true,
-        SpriteId::FoodEmpty,
-        SpriteId::FoodFull,
-        SpriteId::FoodHalf,
-        gs,
-    );
-
-    if armor > 0 {
-        let armor_y = (status_bar_y - (ICON_SIZE + 1.0) * gs).round();
+    let is_survival = crate::player::is_survival(game_mode);
+    if is_survival {
         build_status_bar(
             elements,
             hotbar_x,
-            armor_y,
-            armor as f32,
+            status_bar_y,
+            health,
             false,
-            SpriteId::ArmorEmpty,
-            SpriteId::ArmorFull,
-            SpriteId::ArmorHalf,
+            SpriteId::HeartContainer,
+            SpriteId::HeartFull,
+            SpriteId::HeartHalf,
             gs,
         );
-    }
+        build_status_bar(
+            elements,
+            hotbar_x + hotbar_w,
+            status_bar_y,
+            food as f32,
+            true,
+            SpriteId::FoodEmpty,
+            SpriteId::FoodFull,
+            SpriteId::FoodHalf,
+            gs,
+        );
 
-    if game_mode == 0 || game_mode == 2 {
+        if armor > 0 {
+            let armor_y = (status_bar_y - (ICON_SIZE + 1.0) * gs).round();
+            build_status_bar(
+                elements,
+                hotbar_x,
+                armor_y,
+                armor as f32,
+                false,
+                SpriteId::ArmorEmpty,
+                SpriteId::ArmorFull,
+                SpriteId::ArmorHalf,
+                gs,
+            );
+        }
+
         let xp_w = XP_BAR_W * gs;
         let xp_h = XP_BAR_H * gs;
         let xp_x = (cx - xp_w / 2.0).round();
@@ -253,7 +254,7 @@ pub fn build_hud(
     }
 
     let max_air = crate::player::MAX_AIR_SUPPLY;
-    if eyes_in_water || air_supply < max_air {
+    if is_survival && (eyes_in_water || air_supply < max_air) {
         let air = air_supply.clamp(0, max_air);
         let bubble_count =
             |offset: i32| -> i32 { (((air + offset) * 10 + max_air - 1) / max_air).clamp(0, 10) };
