@@ -166,6 +166,11 @@ pub enum NetworkEvent {
         y_rot_deg: f32,
         x_rot_deg: f32,
     },
+    LevelEvent {
+        event_type: u32,
+        pos: BlockPos,
+        data: u32,
+    },
     EntitiesRemoved {
         ids: Vec<i32>,
     },

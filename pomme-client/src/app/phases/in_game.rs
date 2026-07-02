@@ -89,6 +89,7 @@ pub struct GameState {
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
+    pub particle_store: crate::particle::ParticleStore,
     pub block_entity_anim: BlockEntityAnimStore,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
@@ -172,6 +173,15 @@ impl GameState {
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
+            particle_store: {
+                let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
+                crate::particle::ParticleStore::new(
+                    renderer.atlas_uv_map().clone(),
+                    grass,
+                    foliage,
+                    dry_foliage,
+                )
+            },
             block_entity_anim: BlockEntityAnimStore::default(),
             player: LocalPlayer::new(),
             biome_climate: Arc::new(HashMap::new()),
@@ -778,6 +788,7 @@ pub fn update_game(
     while core.tick_accumulator >= TICK_RATE {
         core.tick_physics(&mut gfx.renderer, connection, game);
         game.item_entity_store.tick();
+        game.particle_store.tick(&game.chunk_store);
         game.block_entity_anim.tick();
         core.tick_accumulator -= TICK_RATE;
     }
@@ -1458,6 +1469,12 @@ pub fn update_game(
         )
     };
 
+    let particle_quads = if benchmark_running {
+        Vec::new()
+    } else {
+        game.particle_store.extract(partial_tick)
+    };
+
     let effective_rd = if game.server_render_distance > 0 {
         core.menu.render_distance.min(game.server_render_distance)
     } else {
@@ -1493,6 +1510,7 @@ pub fn update_game(
         &entity_renders,
         &item_renders,
         &block_entity_renders,
+        &particle_quads,
         &weather_columns,
         if benchmark_running {
             crate::renderer::CloudMode::Off
@@ -1637,14 +1655,12 @@ fn stack_render_count(count: i32) -> usize {
 }
 
 fn get_entity_light(chunk_store: &ChunkStore, pos: Position) -> f32 {
-    use crate::renderer::chunk::mesher::LIGHT_TABLE;
-    let bx = pos.x.floor() as i32;
-    let by = pos.y.floor() as i32;
-    let bz = pos.z.floor() as i32;
-    let level = chunk_store
-        .get_sky_light(bx, by, bz)
-        .max(chunk_store.get_block_light(bx, by, bz));
-    LIGHT_TABLE[level as usize]
+    crate::renderer::chunk::mesher::world_brightness(
+        chunk_store,
+        pos.x.floor() as i32,
+        pos.y.floor() as i32,
+        pos.z.floor() as i32,
+    )
 }
 
 /// Builds the rain/snow columns in a square around the camera (vanilla

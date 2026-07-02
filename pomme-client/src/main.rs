@@ -9,6 +9,7 @@ mod entity;
 mod lang;
 mod logging;
 mod net;
+mod particle;
 mod physics;
 mod player;
 mod renderer;

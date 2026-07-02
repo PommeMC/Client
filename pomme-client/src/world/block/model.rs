@@ -1188,6 +1188,18 @@ fn build_face_textures(
     block_name: &str,
     textures: &HashMap<String, String>,
 ) -> Option<FaceTextures> {
+    let mut faces = face_textures_base(block_name, textures)?;
+    faces.particle = textures
+        .get("particle")
+        .and_then(|v| texture_to_name(v))
+        .map(Into::into);
+    Some(faces)
+}
+
+fn face_textures_base(
+    block_name: &str,
+    textures: &HashMap<String, String>,
+) -> Option<FaceTextures> {
     let get = |key: &str| -> Option<&str> { textures.get(key).and_then(|v| texture_to_name(v)) };
 
     let (up, down, north, south, east, west) = (

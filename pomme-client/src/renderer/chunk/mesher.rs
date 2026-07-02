@@ -212,6 +212,25 @@ impl Colormap {
     }
 }
 
+pub fn grass_color(climate: &BiomeClimate, colormap: &Colormap, x: i32, z: i32) -> [f32; 3] {
+    let base = climate
+        .grass_color_override
+        .unwrap_or_else(|| colormap.lookup(climate.temperature, climate.downfall));
+    apply_grass_modifier(climate.grass_color_modifier, base, x, z)
+}
+
+pub fn foliage_color(climate: &BiomeClimate, colormap: &Colormap) -> [f32; 3] {
+    climate
+        .foliage_color_override
+        .unwrap_or_else(|| colormap.lookup(climate.temperature, climate.downfall))
+}
+
+pub fn dry_foliage_color(climate: &BiomeClimate, colormap: &Colormap) -> [f32; 3] {
+    climate
+        .dry_foliage_color_override
+        .unwrap_or_else(|| colormap.lookup(climate.temperature, climate.downfall))
+}
+
 fn apply_grass_modifier(modifier: GrassColorModifier, base: [f32; 3], x: i32, z: i32) -> [f32; 3] {
     match modifier {
         GrassColorModifier::None => base,
@@ -450,6 +469,16 @@ impl MeshDispatcher {
 
     pub fn set_biome_climate(&mut self, climate: Arc<HashMap<u32, BiomeClimate>>) {
         self.biome_climate = climate;
+    }
+
+    /// (grass, foliage, dry foliage) colormaps, shared with the particle
+    /// store for break-particle tinting.
+    pub fn colormaps(&self) -> (Arc<Colormap>, Arc<Colormap>, Arc<Colormap>) {
+        (
+            Arc::clone(&self.grass_colormap),
+            Arc::clone(&self.foliage_colormap),
+            Arc::clone(&self.dry_foliage_colormap),
+        )
     }
 
     // Always async, matching vanilla's default `prioritizeChunkUpdates = NONE`.
@@ -798,28 +827,15 @@ impl ChunkStoreSnapshot {
     }
 
     fn grass_color_at(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
-        let climate = self.climate_at(x, y, z);
-        let base = climate.grass_color_override.unwrap_or_else(|| {
-            self.grass_colormap
-                .lookup(climate.temperature, climate.downfall)
-        });
-        apply_grass_modifier(climate.grass_color_modifier, base, x, z)
+        grass_color(&self.climate_at(x, y, z), &self.grass_colormap, x, z)
     }
 
     fn foliage_color_at(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
-        let climate = self.climate_at(x, y, z);
-        climate.foliage_color_override.unwrap_or_else(|| {
-            self.foliage_colormap
-                .lookup(climate.temperature, climate.downfall)
-        })
+        foliage_color(&self.climate_at(x, y, z), &self.foliage_colormap)
     }
 
     fn dry_foliage_color_at(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
-        let climate = self.climate_at(x, y, z);
-        climate.dry_foliage_color_override.unwrap_or_else(|| {
-            self.dry_foliage_colormap
-                .lookup(climate.temperature, climate.downfall)
-        })
+        dry_foliage_color(&self.climate_at(x, y, z), &self.dry_foliage_colormap)
     }
 
     fn grass_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
@@ -877,6 +893,15 @@ pub const LIGHT_TABLE: [f32; 16] = [
     0.05, 0.067, 0.085, 0.106, 0.129, 0.156, 0.188, 0.227, 0.272, 0.328, 0.393, 0.472, 0.566,
     0.679, 0.815, 1.0,
 ];
+
+/// Brightness at a block position from the chunk store's light data:
+/// `LIGHT_TABLE[max(sky, block)]`.
+pub fn world_brightness(chunks: &ChunkStore, x: i32, y: i32, z: i32) -> f32 {
+    let level = chunks
+        .get_sky_light(x, y, z)
+        .max(chunks.get_block_light(x, y, z));
+    LIGHT_TABLE[level as usize]
+}
 
 struct GreedyBlockInfo {
     textures: FaceTextures,

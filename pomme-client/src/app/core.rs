@@ -764,6 +764,30 @@ impl AppCore {
                         .update_living_rotation(id, y_rot_deg, x_rot_deg);
                     game.item_entity_store.teleport(id, position);
                 }
+                NetworkEvent::LevelEvent {
+                    event_type,
+                    pos,
+                    data,
+                } => {
+                    // Vanilla `LevelEventHandler` case 2001 (block break).
+                    // The server excludes the breaking player from the
+                    // broadcast; the local break's effects come from
+                    // `predict_destroy`. TODO: the other level events.
+                    if event_type == 2001
+                        && let Ok(state) = azalea_block::BlockState::try_from(data)
+                    {
+                        if !state.is_air() {
+                            crate::player::interaction::play_break_sound(&self.audio, state, pos);
+                        }
+                        game.particle_store.add_destroy_block_effect(
+                            pos,
+                            state,
+                            renderer.registry(),
+                            &game.chunk_store,
+                            &game.biome_climate,
+                        );
+                    }
+                }
                 NetworkEvent::EntitiesRemoved { ids } => {
                     for id in &ids {
                         if let Some(entity) = game.entity_store.remove_living(*id)
@@ -1092,6 +1116,11 @@ impl AppCore {
             game.player.game_mode == 1,
             input.selected_slot(),
             place_block,
+            &mut crate::player::interaction::BreakEffects {
+                particles: &mut game.particle_store,
+                registry: renderer.registry(),
+                biome_climate: &game.biome_climate,
+            },
         );
         if !dirty.is_empty() {
             let min_y = game.chunk_store.min_y();

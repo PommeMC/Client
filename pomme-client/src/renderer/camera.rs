@@ -258,6 +258,27 @@ impl Camera {
         }
     }
 
+    /// Screen-space right/up axes for camera-facing particle billboards.
+    /// Equivalent to rotating quad corners by vanilla's roll-free camera
+    /// quaternion; derived from yaw/pitch analytically so there's no
+    /// degeneracy looking straight up or down.
+    pub fn billboard_axes(&self) -> (Vec3, Vec3) {
+        if self.top_down.is_some() {
+            // Looking straight down with north up.
+            return (Vec3::X, Vec3::NEG_Z);
+        }
+        let (sin_yaw, cos_yaw) = self.look_dir.y_rot_rad().sin_cos();
+        let (sin_pitch, cos_pitch) = self.look_dir.x_rot_rad().sin_cos();
+        let right = Vec3::new(-cos_yaw, 0.0, -sin_yaw);
+        let up = Vec3::new(-sin_yaw * sin_pitch, cos_pitch, cos_yaw * sin_pitch);
+        if self.mode == CameraMode::ThirdPersonFront {
+            // The camera faces the opposite way: right flips, up stays.
+            (-right, up)
+        } else {
+            (right, up)
+        }
+    }
+
     /// Forward and up vectors for the view matrix, accounting for the top-down
     /// override and front-facing third person.
     fn view_basis(&self) -> (Vec3, Vec3) {

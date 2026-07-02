@@ -33,6 +33,7 @@ use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
 use pipelines::hand::HandPipeline;
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
 use pipelines::panorama::PanoramaPipeline;
+pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
@@ -77,6 +78,7 @@ enum RenderMode<'a> {
         entities: &'a [EntityRenderInfo],
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: &'a [BlockEntityRenderInfo],
+        particles: &'a [ParticleQuad],
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -123,6 +125,7 @@ pub struct Renderer {
     item_entity_pipeline: ItemEntityPipeline,
     held_item_pipeline: pipelines::held_item::HeldItemPipeline,
     weather_pipeline: WeatherPipeline,
+    particle_pipeline: ParticlePipeline,
     cloud_pipeline: CloudPipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
@@ -262,6 +265,13 @@ impl Renderer {
             &ctx.allocator,
             jar_assets_dir,
             asset_index,
+        );
+
+        let particle_pipeline = ParticlePipeline::new(
+            &ctx.device,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            &atlas,
         );
 
         let cloud_pipeline = CloudPipeline::new(
@@ -415,6 +425,7 @@ impl Renderer {
             item_entity_pipeline,
             held_item_pipeline,
             weather_pipeline,
+            particle_pipeline,
             cloud_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
@@ -659,6 +670,8 @@ impl Renderer {
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.weather_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.particle_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.cloud_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.blur_pipeline.resize(
@@ -882,6 +895,10 @@ impl Renderer {
         &self.registry
     }
 
+    pub fn atlas_uv_map(&self) -> &crate::renderer::chunk::atlas::AtlasUVMap {
+        &self.atlas.uv_map
+    }
+
     pub fn create_mesh_dispatcher(
         &self,
         biome_climate: std::sync::Arc<
@@ -937,6 +954,7 @@ impl Renderer {
         entities: &[EntityRenderInfo],
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: &[BlockEntityRenderInfo],
+        particles: &[ParticleQuad],
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -974,6 +992,7 @@ impl Renderer {
                 entities,
                 item_entities,
                 block_entities,
+                particles,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -1251,6 +1270,7 @@ impl Renderer {
             self.chunk_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
             self.weather_pipeline.update_camera(frame, &uniform);
+            self.particle_pipeline.update_camera(frame, &uniform);
             self.cloud_pipeline.update_camera(frame, &uniform);
         }
 
@@ -1443,6 +1463,7 @@ impl Renderer {
                 entities,
                 item_entities,
                 block_entities,
+                particles,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -1496,6 +1517,14 @@ impl Renderer {
                 self.block_entity_pipeline.draw(cmd, frame, block_entities);
 
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
+
+                // Break particles draw after entities but before translucent
+                // water: they write depth, and pomme's water doesn't, so this
+                // lets water blend over particles behind it (vanilla draws
+                // particles after all translucents into a depth-sharing
+                // target).
+                self.particle_pipeline
+                    .update_and_draw(cmd, frame, &self.camera, particles);
 
                 // Translucent water draws after opaque terrain and entities so it
                 // blends over them; depth-tested (occluded by geometry in front)
@@ -1899,6 +1928,8 @@ impl Drop for Renderer {
         self.held_item_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.weather_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.particle_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.cloud_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);

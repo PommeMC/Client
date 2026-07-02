@@ -13,6 +13,7 @@ pub mod item_display;
 pub mod item_entity;
 pub mod menu_overlay;
 pub mod panorama;
+pub mod particle;
 pub mod skin_preview;
 pub mod sky;
 pub mod weather;

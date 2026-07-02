@@ -4,7 +4,7 @@ use std::path::Path;
 use azalea_block::BlockState;
 use serde::{Deserialize, Serialize};
 
-pub const BLOCK_CACHE_FILE: &str = "block_cache.json";
+pub const BLOCK_CACHE_FILE: &str = "block_cache_v2.json";
 
 use super::model;
 use super::model::BakedModel;
@@ -28,6 +28,10 @@ pub struct FaceTextures {
     pub west: String,
     pub side_overlay: Option<String>,
     pub tint: Tint,
+    /// The model's `particle` texture slot (vanilla `getParticleMaterial`),
+    /// used for block-break particles.
+    #[serde(default)]
+    pub particle: Option<String>,
 }
 
 impl FaceTextures {
@@ -51,6 +55,7 @@ impl FaceTextures {
             west: west.into(),
             side_overlay: side_overlay.map(Into::into),
             tint,
+            particle: None,
         }
     }
 

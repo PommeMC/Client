@@ -337,6 +337,13 @@ pub fn handle_game_packet(
                 x_rot_deg: p.values.look_direction.x_rot(),
             });
         }
+        ClientboundGamePacket::LevelEvent(p) => {
+            let _ = event_tx.try_send(NetworkEvent::LevelEvent {
+                event_type: p.event_type,
+                pos: p.pos,
+                data: p.data,
+            });
+        }
         ClientboundGamePacket::RemoveEntities(p) => {
             let ids: Vec<i32> = p.entity_ids.iter().map(|id| id.0).collect();
             let _ = event_tx.try_send(NetworkEvent::EntitiesRemoved { ids });

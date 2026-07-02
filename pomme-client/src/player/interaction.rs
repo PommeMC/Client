@@ -18,9 +18,11 @@ use crate::audio::{AudioEngine, CATEGORY_BLOCKS, SoundRef};
 use crate::entity::EntityStore;
 use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
+use crate::particle::ParticleStore;
 use crate::physics::aabb::Aabb;
 use crate::physics::collision::has_collision;
 use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
+use crate::world::block::registry::BlockRegistry;
 use crate::world::block::sound::block_sounds;
 use crate::world::chunk::ChunkStore;
 
@@ -31,6 +33,14 @@ const DESTROY_COOLDOWN: u32 = 5;
 const MISS_COOLDOWN: u32 = 10;
 const USE_DELAY: u32 = 4;
 const SWING_DURATION: i32 = 6;
+
+/// Handles the predicted-break effects need (vanilla level event 2001 spawns
+/// break particles alongside the sound).
+pub struct BreakEffects<'a> {
+    pub particles: &'a mut ParticleStore,
+    pub registry: &'a BlockRegistry,
+    pub biome_climate: &'a HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct BlockHitResult {
@@ -139,6 +149,7 @@ impl InteractionState {
 
     /// Applies a predicted break locally: remembers the server state for
     /// rollback, clears the block, and plays the break effects.
+    #[allow(clippy::too_many_arguments)]
     fn predict_destroy(
         &mut self,
         pos: BlockPos,
@@ -146,12 +157,20 @@ impl InteractionState {
         player_pos: DVec3,
         chunks: &ChunkStore,
         audio: &AudioEngine,
+        effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
         self.retain_known_server_state(pos, state, player_pos);
         chunks.set_block_state(pos.x, pos.y, pos.z, BlockState::AIR);
         mark_dirty(&pos, dirty_chunks);
         play_break_sound(audio, state, pos);
+        effects.particles.add_destroy_block_effect(
+            pos,
+            state,
+            effects.registry,
+            chunks,
+            effects.biome_climate,
+        );
         self.destroy_delay = DESTROY_COOLDOWN;
     }
 
@@ -276,6 +295,7 @@ impl InteractionState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn tick(
         &mut self,
         input: &InputState,
@@ -287,6 +307,7 @@ impl InteractionState {
         creative: bool,
         selected_slot: u8,
         place_block: Option<BlockState>,
+        effects: &mut BreakEffects,
     ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
 
@@ -311,6 +332,7 @@ impl InteractionState {
                 player_pos,
                 on_ground,
                 creative,
+                effects,
                 &mut dirty_chunks,
             );
         }
@@ -323,6 +345,7 @@ impl InteractionState {
                 player_pos,
                 on_ground,
                 creative,
+                effects,
                 &mut dirty_chunks,
             );
         } else {
@@ -365,6 +388,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
         if self.miss_time > 0 {
@@ -403,6 +427,7 @@ impl InteractionState {
             player_pos,
             on_ground,
             creative,
+            effects,
             dirty_chunks,
         );
         self.swing(sender);
@@ -417,6 +442,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
         if self.miss_time > 0 {
@@ -444,6 +470,7 @@ impl InteractionState {
             player_pos,
             on_ground,
             creative,
+            effects,
             dirty_chunks,
         );
         self.swing(sender);
@@ -535,6 +562,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
@@ -571,6 +599,7 @@ impl InteractionState {
                 player_pos,
                 chunks,
                 audio,
+                effects,
                 dirty_chunks,
             );
             return;
@@ -616,6 +645,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
         if self.destroy_delay > 0 {
@@ -632,6 +662,7 @@ impl InteractionState {
                 player_pos,
                 on_ground,
                 creative,
+                effects,
                 dirty_chunks,
             );
             return;
@@ -665,6 +696,7 @@ impl InteractionState {
                 player_pos,
                 chunks,
                 audio,
+                effects,
                 dirty_chunks,
             );
             self.is_destroying = false;
@@ -746,7 +778,7 @@ fn play_hit_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
 
 /// Plays a block's break sound, matching vanilla `LevelEventHandler` event
 /// 2001: volume `(volume + 1) / 2`, pitch `pitch * 0.8`.
-fn play_break_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
+pub fn play_break_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
     let s = block_sounds(state);
     play_block_sound(
         audio,
