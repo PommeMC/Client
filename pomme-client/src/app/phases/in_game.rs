@@ -218,6 +218,11 @@ impl GameState {
         self.inventory_open || self.creative_inventory_open
     }
 
+    pub fn close_creative_inventory(&mut self) {
+        self.creative_inventory_open = false;
+        self.creative_state.reset_interaction();
+    }
+
     /// No menu (pause, inventory, chat) is capturing input.
     pub fn input_live(&self) -> bool {
         !self.paused
@@ -1399,7 +1404,7 @@ pub fn update_game(
 
     if close_inventory {
         game.inventory_open = false;
-        game.creative_inventory_open = false;
+        game.close_creative_inventory();
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 

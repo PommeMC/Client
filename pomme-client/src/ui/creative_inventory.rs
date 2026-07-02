@@ -2,8 +2,11 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use azalea_inventory::components::{Damage, Enchantments, MaxDamage, MaxStackSize, Rarity};
+use azalea_inventory::components::{
+    Damage, Enchantments, EquipmentSlot, Equippable, MaxDamage, Rarity,
+};
 use azalea_inventory::default_components::get_default_component;
+use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
 
@@ -283,6 +286,15 @@ impl CreativeState {
     fn reset_blink(&mut self) {
         self.cursor_blink = Instant::now();
     }
+
+    /// Discards the carried stack and any pending drag/double-click state.
+    /// Must run whenever the screen closes, or a stale drag would re-commit on
+    /// reopen.
+    pub fn reset_interaction(&mut self) {
+        self.cursor_item = ItemStack::Empty;
+        self.drag = None;
+        self.last_left_click = None;
+    }
 }
 
 impl Default for CreativeState {
@@ -316,7 +328,7 @@ pub fn build_creative_inventory(
     inventory: &Inventory,
     gs: f32,
     advanced_tooltips: bool,
-    mouse_held: bool,
+    left_held: bool,
     right_held: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> CreativeAction {
@@ -384,7 +396,7 @@ pub fn build_creative_inventory(
         advanced: advanced_tooltips,
         clicked,
         right_clicked,
-        carrying: matches!(state.cursor_item, ItemStack::Present(_)),
+        carrying: state.cursor_item.is_present(),
     };
 
     let drag_preview: Option<DragPreview> = match (&state.drag, &state.cursor_item) {
@@ -417,7 +429,7 @@ pub fn build_creative_inventory(
                 let step = 1.0 / max_scroll_rows as f32;
                 state.scroll = (state.scroll - scroll_delta.signum() * step).clamp(0.0, 1.0);
             }
-            if update_scroll_drag(state, ox, oy, scale, cursor, clicked, mouse_held) {
+            if update_scroll_drag(state, ox, oy, scale, cursor, clicked, left_held) {
                 grid_clicked = false;
             }
         } else {
@@ -455,15 +467,14 @@ pub fn build_creative_inventory(
                 if hovered {
                     push_item_tooltip(elements, &item, &tt);
                     if middle_clicked
-                        && matches!(state.cursor_item, ItemStack::Empty)
+                        && state.cursor_item.is_empty()
                         && let ItemStack::Present(data) = &item
                     {
-                        state.cursor_item = stack_with_count(data, max_stack_size(data.kind));
+                        state.cursor_item = stack_with_count(data, data.kind.max_stack_size());
                     } else if grid_clicked || right_clicked {
                         match std::mem::replace(&mut state.cursor_item, ItemStack::Empty) {
                             ItemStack::Present(mut carried) => {
                                 if right_clicked {
-                                    // Drop one from the carried stack.
                                     carried.count -= 1;
                                     if carried.count > 0 {
                                         state.cursor_item = ItemStack::Present(carried);
@@ -474,7 +485,7 @@ pub fn build_creative_inventory(
                                     // Left-click the same item: grow the carried stack up to its
                                     // max. A different item or empty cell discards it (stays
                                     // empty).
-                                    if carried.count < max_stack_size(carried.kind) {
+                                    if carried.count < carried.kind.max_stack_size() {
                                         carried.count += 1;
                                     }
                                     state.cursor_item = ItemStack::Present(carried);
@@ -500,24 +511,21 @@ pub fn build_creative_inventory(
     };
 
     // Real-slot clicks and click-drag distribution.
-    if let Some(button) = state.drag.as_ref().map(|d| d.button) {
-        let held = match button {
-            ClickKind::Left => mouse_held,
+    if let Some(drag) = &mut state.drag {
+        let held = match drag.button {
+            ClickKind::Left => left_held,
             ClickKind::Right => right_held,
         };
         if held {
             // Extend the drag onto a newly hovered, eligible slot.
             if let Some(hit) = &real_hit
                 && hit.slot != SLOT_TRASH
-                && let ItemStack::Present(carried) = state.cursor_item.clone()
+                && let ItemStack::Present(carried) = &state.cursor_item
+                && !drag.slots.contains(&hit.slot)
+                && carried.count as usize > drag.slots.len()
+                && drag_slot_eligible(carried, inventory, hit.slot)
             {
-                let drag = state.drag.as_mut().unwrap();
-                if !drag.slots.contains(&hit.slot)
-                    && carried.count as usize > drag.slots.len()
-                    && drag_slot_eligible(&carried, inventory, hit.slot)
-                {
-                    drag.slots.push(hit.slot);
-                }
+                drag.slots.push(hit.slot);
             }
         } else {
             // Released: commit the split and keep the remainder on the cursor.
@@ -539,8 +547,7 @@ pub fn build_creative_inventory(
         let double = matches!(kind, ClickKind::Left) && is_double_click(state, hit.slot);
         if hit.slot == SLOT_TRASH {
             state.cursor_item = ItemStack::Empty;
-        } else if double && matches!(state.cursor_item, ItemStack::Present(_)) {
-            // Double-click: gather matching items into the cursor.
+        } else if double && state.cursor_item.is_present() {
             let items = double_click_gather(state, inventory);
             if !items.is_empty() {
                 action = CreativeAction::SetSlots(items);
@@ -550,9 +557,9 @@ pub fn build_creative_inventory(
             if matches!(kind, ClickKind::Left) {
                 state.last_left_click = Some((hit.slot, Instant::now()));
             }
-            if let ItemStack::Present(carried) = state.cursor_item.clone() {
+            if let ItemStack::Present(carried) = &state.cursor_item {
                 // Carrying: start a drag on an eligible slot, else swap immediately.
-                if drag_slot_eligible(&carried, inventory, hit.slot) {
+                if drag_slot_eligible(carried, inventory, hit.slot) {
                     state.drag = Some(DragState {
                         button: kind,
                         slots: vec![hit.slot],
@@ -571,7 +578,7 @@ pub fn build_creative_inventory(
 
     let outside = !hit_test(cursor, [ox, oy, inv_w, inv_h]);
     if clicked && outside && tab_hit.is_none() && matches!(action, CreativeAction::None) {
-        if matches!(state.cursor_item, ItemStack::Present(_)) {
+        if state.cursor_item.is_present() {
             // TODO: drop the carried item into the world; for now just discard it.
             state.cursor_item = ItemStack::Empty;
         } else {
@@ -739,12 +746,6 @@ const TOOLTIP_LORE_COLOR: [f32; 4] = rgb(0xAAAAAA);
 const RARITY_UNCOMMON: [f32; 4] = rgb(0xFFFF55);
 const RARITY_RARE: [f32; 4] = rgb(0x55FFFF);
 const RARITY_EPIC: [f32; 4] = rgb(0xFF55FF);
-
-fn max_stack_size(kind: ItemKind) -> i32 {
-    get_default_component::<MaxStackSize>(kind)
-        .map(|m| m.count)
-        .unwrap_or(64)
-}
 
 fn rarity_color(kind: ItemKind) -> [f32; 4] {
     match get_default_component::<Rarity>(kind) {
@@ -1006,7 +1007,7 @@ fn slot_with_tooltip(
 /// A single (non-drag) click on a real player-inventory slot. With an empty
 /// cursor it picks up the slot (left = whole, right = half); while carrying it
 /// swaps — reachable only for a different item, since empty/same-item slots go
-/// through the drag path.
+/// through the drag path — unless the slot rejects the item (armor).
 fn apply_slot_action(
     state: &mut CreativeState,
     inventory: &Inventory,
@@ -1027,9 +1028,13 @@ fn apply_slot_action(
                 CreativeAction::SetSlot(slot_num, stack_with_count(data, data.count - take))
             }
         },
-        carried => {
+        ItemStack::Present(carried) => {
+            if !may_place(slot_num, &carried) {
+                state.cursor_item = ItemStack::Present(carried);
+                return CreativeAction::None;
+            }
             state.cursor_item = slot_item;
-            CreativeAction::SetSlot(slot_num, carried)
+            CreativeAction::SetSlot(slot_num, ItemStack::Present(carried))
         }
     }
 }
@@ -1058,7 +1063,7 @@ fn double_click_gather(state: &mut CreativeState, inventory: &Inventory) -> Vec<
     let ItemStack::Present(mut carried) = state.cursor_item.clone() else {
         return Vec::new();
     };
-    let max = max_stack_size(carried.kind);
+    let max = carried.kind.max_stack_size();
     let mut changed: HashMap<u16, ItemStack> = HashMap::new();
     for pass in 0..2 {
         for slot in SLOT_MAIN_BASE..=SLOT_OFFHAND {
@@ -1076,7 +1081,7 @@ fn double_click_gather(state: &mut CreativeState, inventory: &Inventory) -> Vec<
             if !carried.is_same_item_and_components(&existing) {
                 continue;
             }
-            if pass == 0 && existing.count >= max_stack_size(existing.kind) {
+            if pass == 0 && existing.count >= existing.kind.max_stack_size() {
                 continue;
             }
             let take = (max - carried.count).min(existing.count);
@@ -1088,9 +1093,26 @@ fn double_click_gather(state: &mut CreativeState, inventory: &Inventory) -> Vec<
     changed.into_iter().collect()
 }
 
-/// A drag can cover a slot only if it's empty or holds the same item as the
-/// carried stack.
+/// Vanilla `ArmorSlot.mayPlace`: armor slots only accept items whose
+/// Equippable component targets that slot; anything goes elsewhere.
+fn may_place(slot_num: u16, item: &ItemStackData) -> bool {
+    // Vanilla InventoryMenu.SLOT_IDS: armor menu slots 5..=8 are head..feet.
+    let required = match slot_num {
+        5 => EquipmentSlot::Head,
+        6 => EquipmentSlot::Chest,
+        7 => EquipmentSlot::Legs,
+        8 => EquipmentSlot::Feet,
+        _ => return true,
+    };
+    get_default_component::<Equippable>(item.kind).is_some_and(|e| e.slot == required)
+}
+
+/// A drag can cover a slot only if the item may go there and the slot is empty
+/// or holds the same item as the carried stack.
 fn drag_slot_eligible(carried: &ItemStackData, inventory: &Inventory, slot_num: u16) -> bool {
+    if !may_place(slot_num, carried) {
+        return false;
+    }
     match inventory.slot(slot_num as usize) {
         ItemStack::Empty => true,
         ItemStack::Present(existing) => carried.is_same_item_and_components(existing),
@@ -1110,7 +1132,7 @@ fn compute_drag_preview(
         ClickKind::Left => carried.count / n.max(1),
         ClickKind::Right => 1,
     };
-    let max = max_stack_size(carried.kind);
+    let max = carried.kind.max_stack_size();
     let mut remainder = carried.count;
     let mut slots = HashMap::new();
     for &slot in &drag.slots {

@@ -353,7 +353,7 @@ impl ApplicationHandler for App {
                                 } else if game.creative_inventory_open {
                                     match code {
                                         KeyCode::Escape => {
-                                            game.creative_inventory_open = false;
+                                            game.close_creative_inventory();
                                             self.core
                                                 .input
                                                 .clear_action(crate::app::input::Action::OpenMenu);
@@ -560,6 +560,9 @@ impl ApplicationHandler for App {
                                 if let Some(p) = &mut core.presence {
                                     p.playing_multiplayer(&core.version);
                                 }
+                                // In-game screens use the plain arrow like vanilla, not
+                                // the pointer the branded menu may have left set.
+                                gfx.window.set_cursor(winit::window::CursorIcon::Default);
                                 core.apply_cursor_grab(&gfx.window, Some(&mut game));
 
                                 AppPhase::InGame {

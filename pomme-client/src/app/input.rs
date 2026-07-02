@@ -158,7 +158,7 @@ impl InputState {
             {
                 if self.action_just_pressed(Action::ToggleInventory) {
                     if game.creative_inventory_open {
-                        game.creative_inventory_open = false;
+                        game.close_creative_inventory();
                         should_apply_cursor_grab = true;
                     } else if !game.paused
                         && !game.dead
