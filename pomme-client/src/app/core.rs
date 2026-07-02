@@ -707,6 +707,7 @@ impl AppCore {
                     uuid,
                     entity_type,
                     position,
+                    velocity,
                     y_rot_deg,
                     x_rot_deg,
                     head_y_rot_deg,
@@ -733,12 +734,18 @@ impl AppCore {
                         }
                     }
                     if entity_type == azalea_registry::builtin::EntityKind::Item {
-                        game.item_entity_store.spawn_item(id, position);
+                        game.item_entity_store.spawn_item(id, position, velocity);
                     }
                 }
-                NetworkEvent::EntityMoved { id, dx, dy, dz } => {
+                NetworkEvent::EntityMoved {
+                    id,
+                    dx,
+                    dy,
+                    dz,
+                    on_ground,
+                } => {
                     game.entity_store.move_living_delta(id, dx, dy, dz);
-                    game.item_entity_store.move_delta(id, dx, dy, dz);
+                    game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
                 }
                 NetworkEvent::EntityMovedRotated {
                     id,
@@ -747,22 +754,29 @@ impl AppCore {
                     dz,
                     y_rot_deg,
                     x_rot_deg,
+                    on_ground,
                 } => {
                     game.entity_store.move_living_delta(id, dx, dy, dz);
                     game.entity_store
                         .update_living_rotation(id, y_rot_deg, x_rot_deg);
-                    game.item_entity_store.move_delta(id, dx, dy, dz);
+                    game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                }
+                NetworkEvent::EntityMotion { id, velocity } => {
+                    game.item_entity_store.set_motion(id, velocity);
                 }
                 NetworkEvent::EntityTeleported {
                     id,
                     position,
+                    velocity,
                     y_rot_deg,
                     x_rot_deg,
+                    on_ground,
                 } => {
                     game.entity_store.teleport_living(id, position);
                     game.entity_store
                         .update_living_rotation(id, y_rot_deg, x_rot_deg);
-                    game.item_entity_store.teleport(id, position);
+                    game.item_entity_store
+                        .teleport(id, position, velocity, on_ground);
                 }
                 NetworkEvent::LevelEvent {
                     event_type,

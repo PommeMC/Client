@@ -787,7 +787,7 @@ pub fn update_game(
     core.tick_accumulator += dt;
     while core.tick_accumulator >= TICK_RATE {
         core.tick_physics(&mut gfx.renderer, connection, game);
-        game.item_entity_store.tick();
+        game.item_entity_store.tick(&game.chunk_store);
         game.particle_store.tick(&game.chunk_store);
         game.block_entity_anim.tick();
         core.tick_accumulator -= TICK_RATE;

@@ -291,6 +291,7 @@ pub fn handle_game_packet(
                 uuid: p.uuid,
                 entity_type: p.entity_type,
                 position: p.position.into(),
+                velocity: lp_to_dvec3(&p.movement),
                 y_rot_deg,
                 x_rot_deg,
                 head_y_rot_deg,
@@ -307,7 +308,7 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::MoveEntityPos(p) => {
-            send_entity_moved(event_tx, p.entity_id.0, &p.delta);
+            send_entity_moved(event_tx, p.entity_id.0, &p.delta, p.on_ground);
         }
         ClientboundGamePacket::MoveEntityPosRot(p) => {
             use azalea_core::delta::PositionDeltaTrait;
@@ -319,22 +320,34 @@ pub fn handle_game_packet(
                 dz: p.delta.z(),
                 y_rot_deg: look.y_rot(),
                 x_rot_deg: look.x_rot(),
+                on_ground: p.on_ground,
             });
         }
         ClientboundGamePacket::TeleportEntity(p) => {
+            let delta = p.change.delta;
             let _ = event_tx.try_send(NetworkEvent::EntityTeleported {
                 id: p.id.0,
                 position: p.change.pos.into(),
+                velocity: Some(glam::DVec3::new(delta.x, delta.y, delta.z)),
                 y_rot_deg: p.change.look_direction.y_rot(),
                 x_rot_deg: p.change.look_direction.x_rot(),
+                on_ground: p.on_ground,
             });
         }
         ClientboundGamePacket::EntityPositionSync(p) => {
             let _ = event_tx.try_send(NetworkEvent::EntityTeleported {
                 id: p.id.0,
                 position: p.values.pos.into(),
+                velocity: None,
                 y_rot_deg: p.values.look_direction.y_rot(),
                 x_rot_deg: p.values.look_direction.x_rot(),
+                on_ground: p.on_ground,
+            });
+        }
+        ClientboundGamePacket::SetEntityMotion(p) => {
+            let _ = event_tx.try_send(NetworkEvent::EntityMotion {
+                id: p.id.0,
+                velocity: lp_to_dvec3(&p.delta),
             });
         }
         ClientboundGamePacket::LevelEvent(p) => {
@@ -608,15 +621,22 @@ fn resolve_sound(
     }
 }
 
+fn lp_to_dvec3(v: &azalea_core::delta::LpVec3) -> glam::DVec3 {
+    let v = v.to_vec3();
+    glam::DVec3::new(v.x, v.y, v.z)
+}
+
 fn send_entity_moved(
     event_tx: &Sender<NetworkEvent>,
     id: i32,
     delta: &azalea_core::delta::PositionDelta8,
+    on_ground: bool,
 ) {
     let _ = event_tx.try_send(NetworkEvent::EntityMoved {
         id,
         dx: delta.xa as f64 / 4096.0,
         dy: delta.ya as f64 / 4096.0,
         dz: delta.za as f64 / 4096.0,
+        on_ground,
     });
 }

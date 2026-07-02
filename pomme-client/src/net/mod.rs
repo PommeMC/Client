@@ -11,6 +11,7 @@ use azalea_core::heightmap_kind::HeightmapKind;
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_inventory::ItemStack;
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
+use glam::DVec3;
 use simdnbt::owned::NbtCompound;
 
 use crate::entity::components::Position;
@@ -142,6 +143,7 @@ pub enum NetworkEvent {
         uuid: uuid::Uuid,
         entity_type: EntityKind,
         position: Position,
+        velocity: DVec3,
         y_rot_deg: f32,
         x_rot_deg: f32,
         head_y_rot_deg: f32,
@@ -151,6 +153,7 @@ pub enum NetworkEvent {
         dx: f64,
         dy: f64,
         dz: f64,
+        on_ground: bool,
     },
     EntityMovedRotated {
         id: i32,
@@ -159,12 +162,22 @@ pub enum NetworkEvent {
         dz: f64,
         y_rot_deg: f32,
         x_rot_deg: f32,
+        on_ground: bool,
+    },
+    EntityMotion {
+        id: i32,
+        velocity: DVec3,
     },
     EntityTeleported {
         id: i32,
         position: Position,
+        /// `TeleportEntity` applies the packet's velocity; `EntityPositionSync`
+        /// doesn't (vanilla `setValuesFromPositionPacket` vs
+        /// `handleEntityPositionSync`).
+        velocity: Option<DVec3>,
         y_rot_deg: f32,
         x_rot_deg: f32,
+        on_ground: bool,
     },
     LevelEvent {
         event_type: u32,
