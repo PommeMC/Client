@@ -1,4 +1,4 @@
-use azalea_inventory::ItemStack;
+use azalea_inventory::{ItemStack, ItemStackData};
 
 use crate::benchmark::UploadStatus;
 use crate::player::inventory::item_resource_name;
@@ -243,24 +243,34 @@ pub fn push_slot(
                 });
             }
         }
-        ItemStack::Present(data) => {
-            elements.push(MenuElement::ItemIcon {
-                x,
-                y,
-                w: size,
-                h: size,
-                item_name: item_resource_name(data.kind),
-                tint: WHITE,
-            });
-            if data.count > 1 {
-                push_item_count(elements, x, y, size, scale, data.count);
-            }
-        }
+        ItemStack::Present(data) => push_item_icon(elements, x, y, size, scale, data),
     }
     if hovered {
         elements.push(highlight(SpriteId::SlotHighlightFront));
     }
     hovered
+}
+
+/// Draws an item icon (and its stack count when > 1) at the given position.
+pub fn push_item_icon(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    scale: f32,
+    data: &ItemStackData,
+) {
+    elements.push(MenuElement::ItemIcon {
+        x,
+        y,
+        w: size,
+        h: size,
+        item_name: item_resource_name(data.kind),
+        tint: WHITE,
+    });
+    if data.count > 1 {
+        push_item_count(elements, x, y, size, scale, data.count);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

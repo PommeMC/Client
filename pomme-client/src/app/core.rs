@@ -625,12 +625,12 @@ impl AppCore {
                             }
                             3 => {
                                 game.inventory_open = false;
-                                game.creative_inventory_open = false;
+                                game.close_creative_inventory();
                                 self.apply_cursor_grab(window, Some(game));
                             }
                             _ => {
                                 game.inventory_open = true;
-                                game.creative_inventory_open = false;
+                                game.close_creative_inventory();
                             }
                         }
                     }

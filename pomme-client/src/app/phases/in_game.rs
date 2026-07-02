@@ -218,6 +218,11 @@ impl GameState {
         self.inventory_open || self.creative_inventory_open
     }
 
+    pub fn close_creative_inventory(&mut self) {
+        self.creative_inventory_open = false;
+        self.creative_state.reset_interaction();
+    }
+
     /// No menu (pause, inventory, chat) is capturing input.
     pub fn input_live(&self) -> bool {
         !self.paused
@@ -1121,10 +1126,11 @@ pub fn update_game(
     if game.creative_inventory_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
+        let middle_clicked = core.input.middle_just_pressed();
+        let right_clicked = core.input.right_just_pressed();
         let scroll_delta = core.input.consume_menu_scroll();
         let typed = core.input.drain_typed_chars();
         let backspace = core.input.backspace_pressed();
-        let selected_hotbar = core.input.selected_slot();
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,
@@ -1132,31 +1138,43 @@ pub fn update_game(
             sh,
             cursor,
             clicked,
+            middle_clicked,
+            right_clicked,
             scroll_delta,
             &typed,
             backspace,
             &game.player.inventory,
-            selected_hotbar,
             gs,
             game.advanced_item_tooltips,
             core.input.left_held(),
+            core.input.right_held(),
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+        use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+        let mut set_creative_slot = |slot_num: u16, item: azalea_inventory::ItemStack| {
+            if game.player.game_mode == 1 {
+                connection
+                    .packet_tx
+                    .send(ServerboundGamePacket::SetCreativeModeSlot(
+                        ServerboundSetCreativeModeSlot {
+                            slot_num,
+                            item_stack: item.clone(),
+                        },
+                    ));
+                // Optimistic local update; the server echoes via ContainerSetSlot.
+                game.player.inventory.set_slot(slot_num as usize, item);
+            }
+        };
         match action {
             crate::ui::creative_inventory::CreativeAction::Close => {
                 close_inventory = true;
             }
-            crate::ui::creative_inventory::CreativeAction::Place(item, slot_num) => {
-                use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
-                if game.player.game_mode == 1 {
-                    connection
-                        .packet_tx
-                        .send(ServerboundGamePacket::SetCreativeModeSlot(
-                            ServerboundSetCreativeModeSlot {
-                                slot_num,
-                                item_stack: item,
-                            },
-                        ));
+            crate::ui::creative_inventory::CreativeAction::SetSlot(slot_num, item) => {
+                set_creative_slot(slot_num, item);
+            }
+            crate::ui::creative_inventory::CreativeAction::SetSlots(items) => {
+                for (slot_num, item) in items {
+                    set_creative_slot(slot_num, item);
                 }
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
@@ -1386,7 +1404,7 @@ pub fn update_game(
 
     if close_inventory {
         game.inventory_open = false;
-        game.creative_inventory_open = false;
+        game.close_creative_inventory();
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
