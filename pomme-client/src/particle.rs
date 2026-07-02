@@ -13,10 +13,10 @@ use crate::physics::block_shape::{self, LocalBox};
 use crate::physics::collision::resolve_collision;
 use crate::renderer::ParticleQuad;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
-use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
 use crate::renderer::chunk::mesher::{
     BiomeClimate, Colormap, dry_foliage_color, foliage_color, grass_color, world_brightness,
 };
+use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
 use crate::world::block::registry::{BlockRegistry, Tint};
 use crate::world::chunk::ChunkStore;
 

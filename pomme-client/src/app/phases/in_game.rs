@@ -20,7 +20,7 @@ use crate::net::connection::ConnectionHandle;
 use crate::player::LocalPlayer;
 use crate::player::interaction::{HitResult, InteractionState};
 use crate::player::tab_list::TabList;
-use crate::renderer::chunk::mesher::{BiomeClimate, MeshDispatcher};
+use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::pipelines::entity_renderer::{
     EntityRenderInfo, WHITE_TINT, jeb_sheep_tint, wool_color_tint,
@@ -308,11 +308,54 @@ impl GameState {
     /// visibility. Bumps that section's generation so the result is dropped
     /// only if the same section is edited again before it lands.
     pub fn enqueue_section_edit(&mut self, col: ChunkPos, si: i32, lod: u32) {
-        self.next_section_gen += 1;
-        let g = self.next_section_gen;
-        self.section_gen.insert((col, si), g);
+        let g = self.bump_section_gen(col, si);
         self.mesh_dispatcher
             .enqueue(&self.chunk_store, col, lod, true, g, si..si + 1);
+    }
+
+    /// Vanilla `compileSync` under `PrioritizeChunkUpdates.PLAYER_AFFECTED`:
+    /// mesh and upload a player-edited section on the spot so the edit shows
+    /// the same frame. (Vanilla defaults to NONE/async, but pomme's async
+    /// round-trip is several frames, which leaves a broken block visibly
+    /// lingering after its crack overlay completes.)
+    pub fn mesh_section_edit_now(&mut self, renderer: &mut Renderer, col: ChunkPos, si: i32) {
+        // The gen bump also invalidates any in-flight async result for this
+        // section, so it can't clobber the sync upload at drain time.
+        let g = self.bump_section_gen(col, si);
+        let mesh = self
+            .mesh_dispatcher
+            .mesh_section_now(&self.chunk_store, col, si, g);
+        self.apply_mesh_upload(renderer, mesh);
+    }
+
+    fn bump_section_gen(&mut self, col: ChunkPos, si: i32) -> u64 {
+        self.next_section_gen += 1;
+        self.section_gen.insert((col, si), self.next_section_gen);
+        self.next_section_gen
+    }
+
+    /// Upload a finished mesh and apply its bookkeeping: re-arm the rescan
+    /// for sections dropped on pool exhaustion, and adopt the per-section
+    /// visibility sets.
+    fn apply_mesh_upload(&mut self, renderer: &mut Renderer, mesh: ChunkMeshData) {
+        let dropped = renderer.upload_chunk_mesh(&mesh);
+        let pos = mesh.pos;
+        // Sections dropped on pool exhaustion were retired from the buffer;
+        // clear their meshed bit so the next rescan re-enqueues them.
+        if !dropped.is_empty()
+            && let Some(m) = self.meshed.get_mut(&pos)
+        {
+            for si in dropped {
+                m.mask &= !(1u32 << si);
+            }
+        }
+        for (si, vis) in mesh.visibility {
+            let e = self.section_vis_epoch.entry((pos, si)).or_insert(0);
+            if mesh.upload_epoch >= *e {
+                *e = mesh.upload_epoch;
+                self.section_vis.insert((pos, si), vis);
+            }
+        }
     }
 
     /// Drive the cave-cull occlusion walk: apply a finished async walk to the
@@ -721,7 +764,8 @@ pub fn update_game(
         return GameUpdateResult::Disconnected { reason };
     }
 
-    for mesh in game.mesh_dispatcher.drain_results() {
+    let meshes: Vec<_> = game.mesh_dispatcher.drain_results().collect();
+    for mesh in meshes {
         // Drop a mesh built from an out-of-date snapshot. Edits (priority lane,
         // single section) are keyed per section so editing one section never
         // drops a sibling's in-flight result; bulk loads keep the column key.
@@ -747,24 +791,7 @@ pub fn update_game(
                 ms(t.enqueued_at.elapsed()),
             );
         }
-        let dropped = gfx.renderer.upload_chunk_mesh(&mesh);
-        let pos = mesh.pos;
-        // Sections dropped on pool exhaustion were retired from the buffer; clear
-        // their meshed bit so the next rescan re-enqueues them.
-        if !dropped.is_empty()
-            && let Some(m) = game.meshed.get_mut(&pos)
-        {
-            for si in dropped {
-                m.mask &= !(1u32 << si);
-            }
-        }
-        for (si, vis) in mesh.visibility {
-            let e = game.section_vis_epoch.entry((pos, si)).or_insert(0);
-            if mesh.upload_epoch >= *e {
-                *e = mesh.upload_epoch;
-                game.section_vis.insert((pos, si), vis);
-            }
-        }
+        game.apply_mesh_upload(&mut gfx.renderer, mesh);
     }
 
     game.mesh_dispatcher

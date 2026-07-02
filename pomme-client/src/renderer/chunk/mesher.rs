@@ -481,10 +481,8 @@ impl MeshDispatcher {
         )
     }
 
-    // Always async, matching vanilla's default `prioritizeChunkUpdates = NONE`.
-    // TODO: the PLAYER_AFFECTED/NEARBY modes add a synchronous same-frame rebuild
-    // (a `mesh_now` path); deferred — pomme meshes whole columns, so it'd hitch
-    // ~200ms.
+    // Async worker path, vanilla's default `prioritizeChunkUpdates = NONE`.
+    // Player edits use `mesh_section_now` instead.
     pub fn enqueue(
         &self,
         chunk_store: &ChunkStore,
@@ -494,12 +492,6 @@ impl MeshDispatcher {
         content_gen: u64,
         sections: std::ops::Range<i32>,
     ) {
-        let registry = Arc::clone(&self.registry);
-        let uv_map = Arc::clone(&self.uv_map);
-        let grass_colormap = Arc::clone(&self.grass_colormap);
-        let foliage_colormap = Arc::clone(&self.foliage_colormap);
-        let dry_foliage_colormap = Arc::clone(&self.dry_foliage_colormap);
-        let biome_climate = Arc::clone(&self.biome_climate);
         let tx = if priority {
             self.priority_tx.clone()
         } else {
@@ -507,26 +499,6 @@ impl MeshDispatcher {
         };
         let enqueued_at = priority.then(std::time::Instant::now);
         let upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
-
-        let chunks_needed = chunk::mesh_neighborhood(pos);
-        let chunk_arcs: Vec<_> = chunks_needed
-            .iter()
-            .map(|p| chunk_store.get_chunk(p))
-            .collect();
-
-        let min_y = chunk_store.min_y();
-        let height = chunk_store.height();
-
-        let light: std::collections::HashMap<(i32, i32), crate::world::chunk::ChunkLightData> =
-            chunks_needed
-                .iter()
-                .filter_map(|p| {
-                    chunk_store
-                        .light_data
-                        .get(&(p.x, p.z))
-                        .map(|ld| ((p.x, p.z), ld.clone()))
-                })
-                .collect();
 
         self.queue.push(PendingJob {
             pos,
@@ -537,19 +509,56 @@ impl MeshDispatcher {
             // An edit re-meshes an already-shown chunk (vanilla's "recompile").
             is_recompile: priority,
             enqueued_at,
-            chunks_needed,
-            chunk_arcs,
-            light,
-            registry,
-            uv_map,
-            grass_colormap,
-            foliage_colormap,
-            dry_foliage_colormap,
-            biome_climate,
-            min_y,
-            height,
+            snapshot: self.build_snapshot(chunk_store, pos),
+            registry: Arc::clone(&self.registry),
+            uv_map: Arc::clone(&self.uv_map),
             tx,
         });
+    }
+
+    /// Vanilla `compileSync` (`PrioritizeChunkUpdates.PLAYER_AFFECTED`): mesh
+    /// one section on the calling thread so a player edit is renderable the
+    /// same frame, skipping the worker round-trip.
+    pub fn mesh_section_now(
+        &self,
+        chunk_store: &ChunkStore,
+        pos: ChunkPos,
+        si: i32,
+        content_gen: u64,
+    ) -> ChunkMeshData {
+        let snapshot = self.build_snapshot(chunk_store, pos);
+        let mut mesh =
+            mesh_chunk_snapshot(&snapshot, pos, &self.registry, &self.uv_map, 0, si..si + 1);
+        mesh.content_gen = content_gen;
+        mesh.upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+        mesh
+    }
+
+    /// Point-in-time snapshot of `pos`'s mesh neighbourhood: chunk arcs plus
+    /// a deep copy of their light data.
+    fn build_snapshot(&self, chunk_store: &ChunkStore, pos: ChunkPos) -> ChunkStoreSnapshot {
+        let chunks_needed = chunk::mesh_neighborhood(pos);
+        ChunkStoreSnapshot {
+            chunks: chunks_needed
+                .iter()
+                .map(|p| (*p, chunk_store.get_chunk(p)))
+                .collect(),
+            light: chunks_needed
+                .iter()
+                .filter_map(|p| {
+                    chunk_store
+                        .light_data
+                        .get(&(p.x, p.z))
+                        .map(|ld| ((p.x, p.z), ld.clone()))
+                })
+                .collect(),
+            grass_colormap: Arc::clone(&self.grass_colormap),
+            foliage_colormap: Arc::clone(&self.foliage_colormap),
+            dry_foliage_colormap: Arc::clone(&self.dry_foliage_colormap),
+            biome_climate: Arc::clone(&self.biome_climate),
+            min_y: chunk_store.min_y(),
+            height: chunk_store.height(),
+        }
     }
 
     /// Latest camera position, used to mesh the nearest pending chunk first.
@@ -587,39 +596,17 @@ struct PendingJob {
     sections: std::ops::Range<i32>,
     is_recompile: bool,
     enqueued_at: Option<std::time::Instant>,
-    chunks_needed: [ChunkPos; 5],
-    chunk_arcs: Vec<Option<Arc<parking_lot::RwLock<azalea_world::Chunk>>>>,
-    light: HashMap<(i32, i32), crate::world::chunk::ChunkLightData>,
+    snapshot: ChunkStoreSnapshot,
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
-    grass_colormap: Arc<Colormap>,
-    foliage_colormap: Arc<Colormap>,
-    dry_foliage_colormap: Arc<Colormap>,
-    biome_climate: Arc<HashMap<u32, BiomeClimate>>,
-    min_y: i32,
-    height: u32,
     tx: crossbeam_channel::Sender<ChunkMeshData>,
 }
 
 impl PendingJob {
     fn run(self) {
         let started_at = self.enqueued_at.map(|_| std::time::Instant::now());
-        let snapshot = ChunkStoreSnapshot {
-            chunks: self
-                .chunks_needed
-                .into_iter()
-                .zip(self.chunk_arcs)
-                .collect(),
-            light: self.light,
-            grass_colormap: self.grass_colormap,
-            foliage_colormap: self.foliage_colormap,
-            dry_foliage_colormap: self.dry_foliage_colormap,
-            biome_climate: self.biome_climate,
-            min_y: self.min_y,
-            height: self.height,
-        };
         let mut mesh = mesh_chunk_snapshot(
-            &snapshot,
+            &self.snapshot,
             self.pos,
             &self.registry,
             &self.uv_map,

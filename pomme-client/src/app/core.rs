@@ -1143,9 +1143,8 @@ impl AppCore {
             for b in dirty {
                 dirty_sections_for_block(&mut sections, b.x, b.y, b.z, min_y, n);
             }
-            // Player edits are always adjacent (lod 0).
             for (col, si) in sections {
-                game.enqueue_section_edit(col, si, 0);
+                game.mesh_section_edit_now(renderer, col, si);
             }
         }
 
