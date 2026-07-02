@@ -143,8 +143,7 @@ pub fn build_hud(
     }
 
     let status_bar_y = (hotbar_y - (XP_BAR_H + 1.0 + 2.0) * gs).round();
-    // Vanilla shows the status/air/xp bars only in Survival (0) and Adventure (2).
-    let is_survival = game_mode == 0 || game_mode == 2;
+    let is_survival = crate::player::is_survival(game_mode);
     if is_survival {
         build_status_bar(
             elements,
@@ -183,9 +182,7 @@ pub fn build_hud(
                 gs,
             );
         }
-    }
 
-    if is_survival {
         let xp_w = XP_BAR_W * gs;
         let xp_h = XP_BAR_H * gs;
         let xp_x = (cx - xp_w / 2.0).round();
