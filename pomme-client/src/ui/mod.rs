@@ -1,5 +1,7 @@
 pub mod chat;
 pub mod common;
+pub mod container;
+pub mod crafting_table;
 pub mod creative_inventory;
 pub mod creative_tab_data;
 pub mod death;

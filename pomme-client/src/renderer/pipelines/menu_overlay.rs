@@ -1542,6 +1542,7 @@ pub enum SpriteId {
     ExperienceBarBackground,
     ExperienceBarProgress,
     InventoryBackground,
+    CraftingTableBackground,
     CreativeItemsBackground,
     CreativeSearchBackground,
     CreativeInventoryBackground,
@@ -2104,51 +2105,37 @@ fn build_sprite_atlas(
         }
     }
 
-    let inv_path = resolve_asset_path(
-        jar_assets_dir,
-        asset_index,
-        "minecraft/textures/gui/container/inventory.png",
-    );
-    match crate::assets::load_image(&inv_path) {
-        Ok(img) => {
-            let rgba = img.to_rgba8();
-            let full_w = rgba.width();
-            let crop_w = INV_TEX_W.min(full_w);
-            let crop_h = INV_TEX_H.min(rgba.height());
-            let mut cropped = vec![0u8; (crop_w * crop_h * 4) as usize];
-            for y in 0..crop_h {
-                let src_off = (y * full_w * 4) as usize;
-                let dst_off = (y * crop_w * 4) as usize;
-                let row_bytes = (crop_w * 4) as usize;
-                cropped[dst_off..dst_off + row_bytes]
-                    .copy_from_slice(&rgba.as_raw()[src_off..src_off + row_bytes]);
-            }
-            images.push((SpriteId::InventoryBackground, cropped, crop_w, crop_h, 0.0));
-        }
-        Err(e) => {
-            tracing::warn!("Failed to load inventory background: {e}");
-            images.push((
-                SpriteId::InventoryBackground,
-                vec![255, 0, 255, 255],
-                1,
-                1,
-                0.0,
-            ));
-        }
-    }
-
-    for (id, path) in [
+    // Container backgrounds live in a 256x256 atlas; crop out the used region.
+    for (id, path, max_w, max_h) in [
+        (
+            SpriteId::InventoryBackground,
+            "minecraft/textures/gui/container/inventory.png",
+            INV_TEX_W,
+            INV_TEX_H,
+        ),
+        (
+            SpriteId::CraftingTableBackground,
+            "minecraft/textures/gui/container/crafting_table.png",
+            INV_TEX_W,
+            INV_TEX_H,
+        ),
         (
             SpriteId::CreativeItemsBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_items.png",
+            195,
+            136,
         ),
         (
             SpriteId::CreativeSearchBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_item_search.png",
+            195,
+            136,
         ),
         (
             SpriteId::CreativeInventoryBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_inventory.png",
+            195,
+            136,
         ),
     ] {
         let path = resolve_asset_path(jar_assets_dir, asset_index, path);
@@ -2156,8 +2143,8 @@ fn build_sprite_atlas(
             Ok(img) => {
                 let rgba = img.to_rgba8();
                 let full_w = rgba.width();
-                let crop_w = 195u32.min(full_w);
-                let crop_h = 136u32.min(rgba.height());
+                let crop_w = max_w.min(full_w);
+                let crop_h = max_h.min(rgba.height());
                 let mut cropped = vec![0u8; (crop_w * crop_h * 4) as usize];
                 for y in 0..crop_h {
                     let src_off = (y * full_w * 4) as usize;
@@ -2169,7 +2156,7 @@ fn build_sprite_atlas(
                 images.push((id, cropped, crop_w, crop_h, 0.0));
             }
             Err(e) => {
-                tracing::warn!("Failed to load creative background {id:?}: {e}");
+                tracing::warn!("Failed to load container background {id:?}: {e}");
                 images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
             }
         }

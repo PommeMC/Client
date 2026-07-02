@@ -506,12 +506,22 @@ impl AppCore {
                         game.player.armor = armor;
                     }
                 }
-                NetworkEvent::InventoryContent {
+                NetworkEvent::ContainerContent {
+                    container_id,
                     items,
                     carried,
                     state_id,
                 } => {
-                    game.player.inventory.set_contents(items);
+                    if container_id == 0 {
+                        game.player.inventory.set_contents(items);
+                        game.sync_container_from_inventory();
+                    } else if game.open_menu_id() == Some(container_id) {
+                        for (i, item) in items.into_iter().enumerate() {
+                            game.set_menu_slot(i, item);
+                        }
+                    } else {
+                        continue;
+                    }
                     game.cursor_item = carried;
                     game.container_state_id = state_id;
                 }
@@ -521,13 +531,64 @@ impl AppCore {
                 NetworkEvent::Registries(registries) => {
                     game.registries = registries;
                 }
-                NetworkEvent::InventorySlot {
+                NetworkEvent::ContainerSlot {
+                    container_id,
                     index,
                     item,
                     state_id,
                 } => {
+                    if container_id == 0 || container_id == -2 {
+                        game.player.inventory.set_slot(index as usize, item);
+                        game.sync_container_from_inventory();
+                    } else if game.open_menu_id() == Some(container_id) {
+                        game.set_menu_slot(index as usize, item);
+                    } else {
+                        continue;
+                    }
                     game.container_state_id = state_id;
-                    game.player.inventory.set_slot(index as usize, item);
+                }
+                NetworkEvent::OpenScreen {
+                    container_id,
+                    menu_type,
+                    title,
+                } => {
+                    use azalea_inventory::ItemStack;
+                    use azalea_registry::builtin::MenuKind;
+                    if menu_type == MenuKind::Crafting {
+                        game.inventory_open = false;
+                        game.close_creative_inventory();
+                        game.inv_drag = None;
+                        game.inv_last_click = None;
+                        game.open_container = Some(crate::app::phases::in_game::OpenContainer {
+                            id: container_id,
+                            title,
+                            slots: vec![ItemStack::Empty; crate::ui::crafting_table::SLOT_COUNT],
+                        });
+                        game.sync_container_from_inventory();
+                        // The new menu replaces any previous one server-side;
+                        // don't send a close for the replaced menu (the server
+                        // would apply it to this one).
+                        game.container_was_open = Some(container_id);
+                        self.apply_cursor_grab(window, Some(game));
+                    } else {
+                        // Menus we don't render yet: tell the server we closed
+                        // it so its container state stays consistent.
+                        use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
+                        connection
+                            .packet_tx
+                            .send(ServerboundGamePacket::ContainerClose(
+                                ServerboundContainerClose { container_id },
+                            ));
+                    }
+                }
+                NetworkEvent::ContainerClosed { container_id } => {
+                    if game.open_menu_id() == Some(container_id) || container_id == 0 {
+                        game.inventory_open = false;
+                        game.open_container = None;
+                        // The server initiated the close; don't echo one back.
+                        game.container_was_open = None;
+                        self.apply_cursor_grab(window, Some(game));
+                    }
                 }
                 NetworkEvent::ChatMessage { spans } => {
                     game.chat.push_message(spans);

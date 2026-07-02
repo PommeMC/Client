@@ -9,7 +9,6 @@ const MAIN_END: usize = 36;
 pub const ARMOR_START: usize = 5;
 const ARMOR_END: usize = 9;
 pub const CRAFT_INPUT_START: usize = 1;
-const CRAFT_INPUT_END: usize = 5;
 pub const CRAFT_OUTPUT: usize = 0;
 pub const OFFHAND: usize = 45;
 
@@ -39,6 +38,10 @@ impl Inventory {
         self.slots.get(index).unwrap_or(&ItemStack::Empty)
     }
 
+    pub fn slots(&self) -> &[ItemStack] {
+        &self.slots
+    }
+
     pub fn main_slots(&self) -> &[ItemStack] {
         &self.slots[MAIN_START..MAIN_END]
     }
@@ -49,10 +52,6 @@ impl Inventory {
 
     pub fn armor_slots(&self) -> &[ItemStack] {
         &self.slots[ARMOR_START..ARMOR_END]
-    }
-
-    pub fn craft_input_slots(&self) -> &[ItemStack] {
-        &self.slots[CRAFT_INPUT_START..CRAFT_INPUT_END]
     }
 
     pub fn craft_output(&self) -> &ItemStack {
