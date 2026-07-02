@@ -1495,7 +1495,8 @@ pub fn update_game(
     }
 
     // Tell the server when the survival inventory closes so it returns/drops the
-    // cursor stack.
+    // cursor stack, and forget any in-flight gesture so a stale drag can't
+    // commit on reopen.
     if game.inventory_was_open && !game.inventory_open {
         use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
         connection
@@ -1503,6 +1504,8 @@ pub fn update_game(
             .send(ServerboundGamePacket::ContainerClose(
                 ServerboundContainerClose { container_id: 0 },
             ));
+        game.inv_drag = None;
+        game.inv_last_click = None;
     }
     game.inventory_was_open = game.inventory_open;
 

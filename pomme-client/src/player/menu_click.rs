@@ -5,17 +5,10 @@
 
 use azalea_inventory::components::{EquipmentSlot, Equippable};
 use azalea_inventory::item::MaxStackSizeExt;
-use azalea_inventory::operations::{
-    ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
-};
+use azalea_inventory::operations::{ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick};
 use azalea_inventory::{ItemStack, ItemStackData, Menu, Player};
 
-use crate::player::inventory::Inventory;
-
-const SLOTS: usize = 46;
-const CRAFT_RESULT: u16 = 0;
-const HOTBAR_BASE: usize = 36;
-const OFFHAND: usize = 45;
+use crate::player::inventory::{CRAFT_OUTPUT, Inventory, PLAYER_SLOTS};
 
 /// Apply a non-drag click to the local player menu, returning the changed
 /// slots. Returns empty (mutating nothing) for ops we don't predict, leaving
@@ -26,10 +19,10 @@ pub fn apply_click(
     op: &ClickOperation,
 ) -> Vec<(u16, ItemStack)> {
     // Crafting-result clicks need recipe logic; leave them to the server.
-    if op.slot_num() == Some(CRAFT_RESULT) {
+    if op.slot_num() == Some(CRAFT_OUTPUT as u16) {
         return Vec::new();
     }
-    let pre: Vec<ItemStack> = (0..SLOTS).map(|i| inv.slot(i).clone()).collect();
+    let pre: Vec<ItemStack> = (0..PLAYER_SLOTS).map(|i| inv.slot(i).clone()).collect();
     let mut menu = build_menu(&pre);
     apply_op(&mut menu, cursor, op);
 
@@ -86,10 +79,14 @@ pub fn drag_distribution(
     (changed, with_count(carried.clone(), remaining))
 }
 
-/// A drag can cover a slot only if it's empty or holds the same item as the
-/// carried stack.
+/// A drag can cover a slot only if the item may go there (vanilla gates
+/// quick-craft slots on `mayPlace`) and it's empty or holds the same item as
+/// the carried stack.
 pub fn drag_slot_eligible(inv: &Inventory, cursor: &ItemStack, slot: u16) -> bool {
-    if cursor.is_empty() {
+    let ItemStack::Present(carried) = cursor else {
+        return false;
+    };
+    if !may_place(slot as usize, carried) {
         return false;
     }
     let it = inv.slot(slot as usize);
@@ -122,14 +119,12 @@ fn apply_op(menu: &mut Menu, cursor: &mut ItemStack, op: &ClickOperation) {
             };
             quick_move(menu, s);
         }
-        ClickOperation::Swap(sw) => swap_hotbar(menu, sw.source_slot as usize, sw.target_slot),
-        ClickOperation::Throw(t) => match t {
-            ThrowClick::Single { slot } => shrink_slot(menu, *slot as usize, 1),
-            ThrowClick::All { slot } => put_slot(menu, *slot as usize, ItemStack::Empty),
-        },
         ClickOperation::PickupAll(_) => pickup_all(menu, cursor),
-        // Drag is handled at the send site; clone is creative-only.
-        ClickOperation::QuickCraft(_) | ClickOperation::Clone(_) => {}
+        // Drag is handled at the send site; the rest have no UI path yet.
+        ClickOperation::Swap(_)
+        | ClickOperation::Throw(_)
+        | ClickOperation::QuickCraft(_)
+        | ClickOperation::Clone(_) => {}
     }
 }
 
@@ -153,7 +148,11 @@ fn pickup_click(menu: &mut Menu, cursor: &mut ItemStack, s: usize, primary: bool
         if same_item(&carried, &slot_item) {
             let amount = if primary { carried.count() } else { 1 };
             safe_insert(&mut slot_item, &mut carried, amount);
-        } else {
+        } else if carried
+            .as_present()
+            .is_some_and(|c| c.count <= c.kind.max_stack_size())
+        {
+            // Vanilla swaps only when the carried stack fits the slot's limit.
             std::mem::swap(&mut carried, &mut slot_item);
         }
     } else if same_item(&carried, &slot_item) {
@@ -211,7 +210,7 @@ fn safe_insert(slot: &mut ItemStack, carried: &mut ItemStack, amount: i32) {
 /// Shift-click: let azalea's `quick_move_stack` move the stack to its
 /// destination, repeating until it stops making progress (vanilla loops too).
 fn quick_move(menu: &mut Menu, s: usize) {
-    for _ in 0..SLOTS {
+    for _ in 0..PLAYER_SLOTS {
         let before = menu.slot(s).map(ItemStack::count).unwrap_or(0);
         if before == 0 {
             break;
@@ -223,30 +222,16 @@ fn quick_move(menu: &mut Menu, s: usize) {
     }
 }
 
-fn swap_hotbar(menu: &mut Menu, source: usize, target_slot: u8) {
-    let target = match target_slot {
-        0..=8 => HOTBAR_BASE + target_slot as usize,
-        40 => OFFHAND,
-        _ => return,
-    };
-    if source >= SLOTS {
-        return;
-    }
-    let a = take_slot(menu, source);
-    let b = take_slot(menu, target);
-    put_slot(menu, source, b);
-    put_slot(menu, target, a);
-}
-
-/// Double-click: gather matching items from the player inventory onto the
-/// cursor up to a full stack, partial stacks first (vanilla `PICKUP_ALL`).
+/// Double-click: gather matching items from every slot but the craft result
+/// onto the cursor up to a full stack, partial stacks first (vanilla
+/// `PICKUP_ALL` + `InventoryMenu.canTakeItemForPickAll`).
 fn pickup_all(menu: &mut Menu, cursor: &mut ItemStack) {
     let ItemStack::Present(carried) = cursor else {
         return;
     };
     let max = carried.kind.max_stack_size();
     for pass in 0..2 {
-        for s in 9..OFFHAND {
+        for s in (0..PLAYER_SLOTS).filter(|&s| s != CRAFT_OUTPUT) {
             if cursor.count() >= max {
                 break;
             }

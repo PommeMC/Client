@@ -510,7 +510,7 @@ impl AppCore {
                 } => {
                     game.player.inventory.set_contents(items);
                     game.cursor_item = carried;
-                    game.container_state_id = game.container_state_id.max(state_id);
+                    game.container_state_id = state_id;
                 }
                 NetworkEvent::CursorItem { item } => {
                     game.cursor_item = item;
@@ -523,7 +523,7 @@ impl AppCore {
                     item,
                     state_id,
                 } => {
-                    game.container_state_id = game.container_state_id.max(state_id);
+                    game.container_state_id = state_id;
                     game.player.inventory.set_slot(index as usize, item);
                 }
                 NetworkEvent::ChatMessage { spans } => {

@@ -11,7 +11,7 @@ use super::common::{
     FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_gradient_overlay,
     push_item_icon, push_slot,
 };
-use crate::player::inventory::Inventory;
+use crate::player::inventory::{self, Inventory};
 use crate::player::menu_click;
 use crate::renderer::PlayerPreview;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -20,13 +20,13 @@ const INV_TEX_W: f32 = 176.0;
 const INV_TEX_H: f32 = 166.0;
 const DOUBLE_CLICK_MS: u128 = 250;
 
-// Vanilla player-menu slot indices.
-const SLOT_CRAFT_RESULT: u16 = 0;
-const SLOT_CRAFT_BASE: u16 = 1;
-const SLOT_ARMOR_BASE: u16 = 5;
-const SLOT_MAIN_BASE: u16 = 9;
-const SLOT_HOTBAR_BASE: u16 = 36;
-const SLOT_OFFHAND: u16 = 45;
+// Vanilla player-menu slot indices, as u16 for click ops.
+const SLOT_CRAFT_RESULT: u16 = inventory::CRAFT_OUTPUT as u16;
+const SLOT_CRAFT_BASE: u16 = inventory::CRAFT_INPUT_START as u16;
+const SLOT_ARMOR_BASE: u16 = inventory::ARMOR_START as u16;
+const SLOT_MAIN_BASE: u16 = inventory::MAIN_START as u16;
+const SLOT_HOTBAR_BASE: u16 = inventory::HOTBAR_START as u16;
+const SLOT_OFFHAND: u16 = inventory::OFFHAND as u16;
 
 /// Active click-drag: which button, and the slots covered so far.
 pub type DragState = (QuickCraftKind, Vec<u16>);
@@ -225,10 +225,12 @@ pub fn build_inventory(
         );
     }
 
-    let carrying = matches!(cursor_item, ItemStack::Present(_));
+    let carrying = cursor_item.is_present();
+    let outside = !hit_test(cursor, [ox, oy, inv_w, inv_h]);
     let (ops, clicked_outside) = resolve_gesture(
         input,
         hovered,
+        outside,
         carrying,
         inventory,
         cursor_item,
@@ -259,6 +261,7 @@ pub fn build_inventory(
 fn resolve_gesture(
     input: &InventoryInput,
     hovered: Option<u16>,
+    outside: bool,
     carrying: bool,
     inventory: &Inventory,
     cursor_item: &ItemStack,
@@ -284,7 +287,9 @@ fn resolve_gesture(
             }
             return (ops, false);
         }
-        // Released: distribute across 2+ slots, else treat as a single click.
+        // Released: distribute across 2+ slots; one covered slot converts to a
+        // normal click (vanilla quickCraftToSlots), none falls back to a click
+        // wherever the cursor is now (vanilla mouseReleased, -999 outside).
         let kind = kind.clone();
         let slots = std::mem::take(slots);
         *drag = None;
@@ -296,6 +301,13 @@ fn resolve_gesture(
             ops.push(quick_craft(&kind, QuickCraftStatus::End));
         } else if let Some(&s) = slots.first() {
             ops.push(pickup(&kind, Some(s)));
+        } else if carrying {
+            // Vanilla only falls back to a click while still carrying.
+            if let Some(s) = hovered {
+                ops.push(pickup(&kind, Some(s)));
+            } else if outside {
+                ops.push(pickup(&kind, None));
+            }
         }
         return (ops, false);
     }
@@ -309,16 +321,22 @@ fn resolve_gesture(
         QuickCraftKind::Right
     };
 
-    let Some(slot) = hovered else {
+    if outside {
         // Outside click: drop the cursor stack, else request a close.
         if carrying {
-            ops.push(ClickOperation::Pickup(match kind {
-                QuickCraftKind::Left => PickupClick::LeftOutside,
-                _ => PickupClick::RightOutside,
-            }));
+            ops.push(pickup(&kind, None));
             return (ops, false);
         }
         return (ops, input.left_pressed);
+    }
+
+    let Some(slot) = hovered else {
+        // Panel background: no-op, but a carrying press still enters the drag
+        // state machine like vanilla (with no slots covered yet).
+        if carrying {
+            *drag = Some((kind, Vec::new()));
+        }
+        return (ops, false);
     };
 
     // Timing-based like vanilla; the server only gathers if it has a cursor item
@@ -337,14 +355,20 @@ fn resolve_gesture(
             reversed: false,
         }));
         *last_click = None;
-    } else if carrying {
-        // Start a drag; a single-slot release becomes a normal click.
-        *drag = Some((kind, vec![slot]));
-        if input.left_pressed {
-            *last_click = Some((slot, Instant::now()));
-        }
     } else {
-        ops.push(pickup(&kind, Some(slot)));
+        if carrying {
+            // Start a drag; only an eligible slot joins the covered set (vanilla
+            // gates every quick-craft slot on mayPlace). A single-slot or empty
+            // set resolves to a normal click on release.
+            let slots = if menu_click::drag_slot_eligible(inventory, cursor_item, slot) {
+                vec![slot]
+            } else {
+                Vec::new()
+            };
+            *drag = Some((kind, slots));
+        } else {
+            ops.push(pickup(&kind, Some(slot)));
+        }
         if input.left_pressed {
             *last_click = Some((slot, Instant::now()));
         }
