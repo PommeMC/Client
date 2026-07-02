@@ -2,8 +2,11 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use azalea_inventory::components::{Damage, Enchantments, MaxDamage, Rarity};
+use azalea_inventory::components::{
+    Damage, Enchantments, EquipmentSlot, Equippable, MaxDamage, Rarity,
+};
 use azalea_inventory::default_components::get_default_component;
+use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
 
@@ -251,8 +254,19 @@ pub struct CreativeState {
     pub tab: CreativeTab,
     pub scroll: f32,
     pub search: String,
+    /// Client-side carried stack (the item riding the cursor). Creative-only.
+    pub cursor_item: ItemStack,
+    /// Active click-drag distribution, if a button is held across slots.
+    drag: Option<DragState>,
+    /// Last left-click (slot, time) for double-click detection.
+    last_left_click: Option<(u16, Instant)>,
     cursor_blink: Instant,
     scroll_dragging: bool,
+}
+
+struct DragState {
+    button: ClickKind,
+    slots: Vec<u16>,
 }
 
 impl CreativeState {
@@ -261,6 +275,9 @@ impl CreativeState {
             tab: CreativeTab::BuildingBlocks,
             scroll: 0.0,
             search: String::new(),
+            cursor_item: ItemStack::Empty,
+            drag: None,
+            last_left_click: None,
             cursor_blink: Instant::now(),
             scroll_dragging: false,
         }
@@ -268,6 +285,15 @@ impl CreativeState {
 
     fn reset_blink(&mut self) {
         self.cursor_blink = Instant::now();
+    }
+
+    /// Discards the carried stack and any pending drag/double-click state.
+    /// Must run whenever the screen closes, or a stale drag would re-commit on
+    /// reopen.
+    pub fn reset_interaction(&mut self) {
+        self.cursor_item = ItemStack::Empty;
+        self.drag = None;
+        self.last_left_click = None;
     }
 }
 
@@ -280,7 +306,10 @@ impl Default for CreativeState {
 pub enum CreativeAction {
     None,
     Close,
-    Place(ItemStack, u16),
+    /// Set a real player-inventory slot to the given stack (creative set-slot).
+    SetSlot(u16, ItemStack),
+    /// Set several slots at once (drag distribution).
+    SetSlots(Vec<(u16, ItemStack)>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -291,14 +320,16 @@ pub fn build_creative_inventory(
     screen_h: f32,
     cursor: (f32, f32),
     clicked: bool,
+    middle_clicked: bool,
+    right_clicked: bool,
     scroll_delta: f32,
     typed_chars: &[char],
     backspace: bool,
     inventory: &Inventory,
-    selected_hotbar: u8,
     gs: f32,
     advanced_tooltips: bool,
-    mouse_held: bool,
+    left_held: bool,
+    right_held: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> CreativeAction {
     if state.tab.captures_typing() {
@@ -364,12 +395,24 @@ pub fn build_creative_inventory(
         gs,
         advanced: advanced_tooltips,
         clicked,
+        right_clicked,
+        carrying: state.cursor_item.is_present(),
     };
 
-    if state.tab.is_inventory_tab() {
-        if let Some(slot) = draw_inventory_layout(elements, ox, oy, scale, inventory, &tt) {
-            action = CreativeAction::Place(ItemStack::Empty, slot);
+    let drag_preview: Option<DragPreview> = match (&state.drag, &state.cursor_item) {
+        (Some(drag), ItemStack::Present(carried)) => {
+            Some(compute_drag_preview(carried, drag, inventory))
         }
+        _ => None,
+    };
+    let empty_preview = HashMap::new();
+    let preview_map = drag_preview
+        .as_ref()
+        .map(|p| &p.slots)
+        .unwrap_or(&empty_preview);
+
+    let real_hit: Option<SlotHit> = if state.tab.is_inventory_tab() {
+        draw_inventory_layout(elements, ox, oy, scale, inventory, &tt, preview_map)
     } else {
         let items = visible_items(state);
         let scrollable = state.tab.scrollable();
@@ -386,7 +429,7 @@ pub fn build_creative_inventory(
                 let step = 1.0 / max_scroll_rows as f32;
                 state.scroll = (state.scroll - scroll_delta.signum() * step).clamp(0.0, 1.0);
             }
-            if update_scroll_drag(state, ox, oy, scale, cursor, clicked, mouse_held) {
+            if update_scroll_drag(state, ox, oy, scale, cursor, clicked, left_held) {
                 grid_clicked = false;
             }
         } else {
@@ -423,25 +466,111 @@ pub fn build_creative_inventory(
                 let hovered = push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
                 if hovered {
                     push_item_tooltip(elements, &item, &tt);
-                    if grid_clicked
-                        && scrollable
-                        && let ItemStack::Present(data) = item
+                    if middle_clicked
+                        && state.cursor_item.is_empty()
+                        && let ItemStack::Present(data) = &item
                     {
-                        let slot_num = 36 + selected_hotbar as u16;
-                        action = CreativeAction::Place(ItemStack::Present(data), slot_num);
+                        state.cursor_item = stack_with_count(data, data.kind.max_stack_size());
+                    } else if grid_clicked || right_clicked {
+                        match std::mem::replace(&mut state.cursor_item, ItemStack::Empty) {
+                            ItemStack::Present(mut carried) => {
+                                if right_clicked {
+                                    carried.count -= 1;
+                                    if carried.count > 0 {
+                                        state.cursor_item = ItemStack::Present(carried);
+                                    }
+                                } else if let ItemStack::Present(clicked) = &item
+                                    && carried.is_same_item_and_components(clicked)
+                                {
+                                    // Left-click the same item: grow the carried stack up to its
+                                    // max. A different item or empty cell discards it (stays
+                                    // empty).
+                                    if carried.count < carried.kind.max_stack_size() {
+                                        carried.count += 1;
+                                    }
+                                    state.cursor_item = ItemStack::Present(carried);
+                                }
+                            }
+                            ItemStack::Empty => {
+                                if let ItemStack::Present(data) = &item {
+                                    state.cursor_item = ItemStack::Present(data.clone());
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
-        if let Some(slot) = draw_player_hotbar(elements, ox, oy, scale, inventory, &tt)
-            && matches!(action, CreativeAction::None)
-        {
-            action = CreativeAction::Place(ItemStack::Empty, slot);
-        }
+        let hit = draw_player_hotbar(elements, ox, oy, scale, inventory, &tt, preview_map);
 
         if scrollable {
             draw_scrollbar(elements, ox, oy, scale, state.scroll, max_scroll_rows == 0);
+        }
+        hit
+    };
+
+    // Real-slot clicks and click-drag distribution.
+    if let Some(drag) = &mut state.drag {
+        let held = match drag.button {
+            ClickKind::Left => left_held,
+            ClickKind::Right => right_held,
+        };
+        if held {
+            // Extend the drag onto a newly hovered, eligible slot.
+            if let Some(hit) = &real_hit
+                && hit.slot != SLOT_TRASH
+                && let ItemStack::Present(carried) = &state.cursor_item
+                && !drag.slots.contains(&hit.slot)
+                && carried.count as usize > drag.slots.len()
+                && drag_slot_eligible(carried, inventory, hit.slot)
+            {
+                drag.slots.push(hit.slot);
+            }
+        } else {
+            // Released: commit the split and keep the remainder on the cursor.
+            if let Some(preview) = &drag_preview {
+                if let ItemStack::Present(carried) = state.cursor_item.clone() {
+                    state.cursor_item = stack_with_count(&carried, preview.remainder);
+                }
+                let items: Vec<(u16, ItemStack)> =
+                    preview.slots.iter().map(|(k, v)| (*k, v.clone())).collect();
+                if !items.is_empty() {
+                    action = CreativeAction::SetSlots(items);
+                }
+            }
+            state.drag = None;
+        }
+    } else if let Some(hit) = &real_hit
+        && let Some(kind) = hit.click
+    {
+        let double = matches!(kind, ClickKind::Left) && is_double_click(state, hit.slot);
+        if hit.slot == SLOT_TRASH {
+            state.cursor_item = ItemStack::Empty;
+        } else if double && state.cursor_item.is_present() {
+            let items = double_click_gather(state, inventory);
+            if !items.is_empty() {
+                action = CreativeAction::SetSlots(items);
+            }
+            state.last_left_click = None;
+        } else {
+            if matches!(kind, ClickKind::Left) {
+                state.last_left_click = Some((hit.slot, Instant::now()));
+            }
+            if let ItemStack::Present(carried) = &state.cursor_item {
+                // Carrying: start a drag on an eligible slot, else swap immediately.
+                if drag_slot_eligible(carried, inventory, hit.slot) {
+                    state.drag = Some(DragState {
+                        button: kind,
+                        slots: vec![hit.slot],
+                    });
+                } else {
+                    action = apply_slot_action(state, inventory, hit.slot, kind);
+                }
+            } else {
+                // Empty cursor: pick up / take half immediately.
+                action = apply_slot_action(state, inventory, hit.slot, kind);
+            }
         }
     }
 
@@ -449,7 +578,30 @@ pub fn build_creative_inventory(
 
     let outside = !hit_test(cursor, [ox, oy, inv_w, inv_h]);
     if clicked && outside && tab_hit.is_none() && matches!(action, CreativeAction::None) {
-        action = CreativeAction::Close;
+        if state.cursor_item.is_present() {
+            // TODO: drop the carried item into the world; for now just discard it.
+            state.cursor_item = ItemStack::Empty;
+        } else {
+            action = CreativeAction::Close;
+        }
+    }
+
+    // Draw the carried item on the cursor; while dragging, show the remainder.
+    let cursor_stack = match (state.drag.is_some(), &state.cursor_item, &drag_preview) {
+        (true, ItemStack::Present(carried), Some(preview)) => {
+            stack_with_count(carried, preview.remainder)
+        }
+        _ => state.cursor_item.clone(),
+    };
+    if let ItemStack::Present(data) = &cursor_stack {
+        common::push_item_icon(
+            elements,
+            cursor.0 - size / 2.0,
+            cursor.1 - size / 2.0,
+            size,
+            scale,
+            data,
+        );
     }
 
     action
@@ -555,6 +707,27 @@ struct TooltipCtx {
     gs: f32,
     advanced: bool,
     clicked: bool,
+    right_clicked: bool,
+    carrying: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ClickKind {
+    Left,
+    Right,
+}
+
+/// A hovered real slot, plus which button (if any) was just pressed on it.
+struct SlotHit {
+    slot: u16,
+    click: Option<ClickKind>,
+}
+
+/// Pending click-drag distribution: the stack each covered slot would receive
+/// and the count left on the cursor.
+struct DragPreview {
+    slots: HashMap<u16, ItemStack>,
+    remainder: i32,
 }
 
 const fn rgb(hex: u32) -> [f32; 4] {
@@ -750,6 +923,9 @@ fn build_item_tooltip_lines(data: &ItemStackData, advanced: bool) -> Vec<Tooltip
 }
 
 fn push_item_tooltip(elements: &mut Vec<MenuElement>, item: &ItemStack, tt: &TooltipCtx) {
+    if tt.carrying {
+        return;
+    }
     if let ItemStack::Present(data) = item {
         elements.push(MenuElement::TooltipLines {
             x: tt.cursor.0,
@@ -769,6 +945,9 @@ fn push_tab_tooltip(
     scale: f32,
     tt: &TooltipCtx,
 ) {
+    if tt.carrying {
+        return;
+    }
     let inset_w = 21.0 * scale;
     let inset_h = 27.0 * scale;
     for &tab in TABS.iter() {
@@ -794,7 +973,8 @@ fn push_tab_tooltip(
     }
 }
 
-/// Returns the slot number when a present item is clicked.
+/// Reports the hovered slot (and which button, if any, was just pressed) so the
+/// caller can drive clicks and drag accumulation. Returns for empty slots too.
 #[allow(clippy::too_many_arguments)]
 fn slot_with_tooltip(
     elements: &mut Vec<MenuElement>,
@@ -806,18 +986,165 @@ fn slot_with_tooltip(
     empty_sprite: Option<SpriteId>,
     tt: &TooltipCtx,
     slot_num: Option<u16>,
-) -> Option<u16> {
+) -> Option<SlotHit> {
     let hovered = push_slot(elements, x, y, size, scale, tt.cursor, item, empty_sprite);
     if hovered {
         push_item_tooltip(elements, item, tt);
-        if tt.clicked
-            && matches!(item, ItemStack::Present(_))
-            && let Some(slot) = slot_num
-        {
-            return Some(slot);
+        if let Some(slot) = slot_num {
+            let click = if tt.clicked {
+                Some(ClickKind::Left)
+            } else if tt.right_clicked {
+                Some(ClickKind::Right)
+            } else {
+                None
+            };
+            return Some(SlotHit { slot, click });
         }
     }
     None
+}
+
+/// A single (non-drag) click on a real player-inventory slot. With an empty
+/// cursor it picks up the slot (left = whole, right = half); while carrying it
+/// swaps — reachable only for a different item, since empty/same-item slots go
+/// through the drag path — unless the slot rejects the item (armor).
+fn apply_slot_action(
+    state: &mut CreativeState,
+    inventory: &Inventory,
+    slot_num: u16,
+    kind: ClickKind,
+) -> CreativeAction {
+    let slot_item = inventory.slot(slot_num as usize).clone();
+    match std::mem::replace(&mut state.cursor_item, ItemStack::Empty) {
+        ItemStack::Empty => match (&slot_item, kind) {
+            (ItemStack::Empty, _) => CreativeAction::None,
+            (ItemStack::Present(_), ClickKind::Left) => {
+                state.cursor_item = slot_item;
+                CreativeAction::SetSlot(slot_num, ItemStack::Empty)
+            }
+            (ItemStack::Present(data), ClickKind::Right) => {
+                let take = (data.count + 1) / 2;
+                state.cursor_item = stack_with_count(data, take);
+                CreativeAction::SetSlot(slot_num, stack_with_count(data, data.count - take))
+            }
+        },
+        ItemStack::Present(carried) => {
+            if !may_place(slot_num, &carried) {
+                state.cursor_item = ItemStack::Present(carried);
+                return CreativeAction::None;
+            }
+            state.cursor_item = slot_item;
+            CreativeAction::SetSlot(slot_num, ItemStack::Present(carried))
+        }
+    }
+}
+
+/// A copy of `item` at `count`, or `Empty` when `count` drops to zero or below.
+fn stack_with_count(item: &ItemStackData, count: i32) -> ItemStack {
+    if count > 0 {
+        let mut s = item.clone();
+        s.count = count;
+        ItemStack::Present(s)
+    } else {
+        ItemStack::Empty
+    }
+}
+
+const DOUBLE_CLICK_MS: u128 = 250;
+
+fn is_double_click(state: &CreativeState, slot: u16) -> bool {
+    matches!(state.last_left_click, Some((s, t)) if s == slot && t.elapsed().as_millis() <= DOUBLE_CLICK_MS)
+}
+
+/// Double-click gather: fill the carried stack to its max by pulling matching
+/// items from the real player inventory (partial stacks first, then full),
+/// matching vanilla `PICKUP_ALL`. Returns the drained slots.
+fn double_click_gather(state: &mut CreativeState, inventory: &Inventory) -> Vec<(u16, ItemStack)> {
+    let ItemStack::Present(mut carried) = state.cursor_item.clone() else {
+        return Vec::new();
+    };
+    let max = carried.kind.max_stack_size();
+    let mut changed: HashMap<u16, ItemStack> = HashMap::new();
+    for pass in 0..2 {
+        for slot in SLOT_MAIN_BASE..=SLOT_OFFHAND {
+            if carried.count >= max {
+                break;
+            }
+            let existing = match changed.get(&slot) {
+                Some(ItemStack::Present(d)) => d.clone(),
+                Some(ItemStack::Empty) => continue,
+                None => match inventory.slot(slot as usize) {
+                    ItemStack::Present(d) => d.clone(),
+                    ItemStack::Empty => continue,
+                },
+            };
+            if !carried.is_same_item_and_components(&existing) {
+                continue;
+            }
+            if pass == 0 && existing.count >= existing.kind.max_stack_size() {
+                continue;
+            }
+            let take = (max - carried.count).min(existing.count);
+            carried.count += take;
+            changed.insert(slot, stack_with_count(&existing, existing.count - take));
+        }
+    }
+    state.cursor_item = ItemStack::Present(carried);
+    changed.into_iter().collect()
+}
+
+/// Vanilla `ArmorSlot.mayPlace`: armor slots only accept items whose
+/// Equippable component targets that slot; anything goes elsewhere.
+fn may_place(slot_num: u16, item: &ItemStackData) -> bool {
+    // Vanilla InventoryMenu.SLOT_IDS: armor menu slots 5..=8 are head..feet.
+    let required = match slot_num {
+        5 => EquipmentSlot::Head,
+        6 => EquipmentSlot::Chest,
+        7 => EquipmentSlot::Legs,
+        8 => EquipmentSlot::Feet,
+        _ => return true,
+    };
+    get_default_component::<Equippable>(item.kind).is_some_and(|e| e.slot == required)
+}
+
+/// A drag can cover a slot only if the item may go there and the slot is empty
+/// or holds the same item as the carried stack.
+fn drag_slot_eligible(carried: &ItemStackData, inventory: &Inventory, slot_num: u16) -> bool {
+    if !may_place(slot_num, carried) {
+        return false;
+    }
+    match inventory.slot(slot_num as usize) {
+        ItemStack::Empty => true,
+        ItemStack::Present(existing) => carried.is_same_item_and_components(existing),
+    }
+}
+
+/// Distribute the carried stack across the dragged slots: left splits it
+/// evenly, right places one each. Returns each slot's resulting stack and the
+/// remainder.
+fn compute_drag_preview(
+    carried: &ItemStackData,
+    drag: &DragState,
+    inventory: &Inventory,
+) -> DragPreview {
+    let n = drag.slots.len() as i32;
+    let place = match drag.button {
+        ClickKind::Left => carried.count / n.max(1),
+        ClickKind::Right => 1,
+    };
+    let max = carried.kind.max_stack_size();
+    let mut remainder = carried.count;
+    let mut slots = HashMap::new();
+    for &slot in &drag.slots {
+        let existing = match inventory.slot(slot as usize) {
+            ItemStack::Present(d) if carried.is_same_item_and_components(d) => d.count,
+            _ => 0,
+        };
+        let new_count = (place + existing).min(max);
+        remainder -= new_count - existing;
+        slots.insert(slot, stack_with_count(carried, new_count));
+    }
+    DragPreview { slots, remainder }
 }
 
 // Vanilla `PlayerInventory` slot indices.
@@ -825,6 +1152,8 @@ const SLOT_ARMOR_BASE: u16 = 5;
 const SLOT_MAIN_BASE: u16 = 9;
 const SLOT_HOTBAR_BASE: u16 = 36;
 const SLOT_OFFHAND: u16 = 45;
+/// Sentinel for the inventory-tab trash slot (not a real inventory index).
+const SLOT_TRASH: u16 = u16::MAX;
 
 fn draw_player_hotbar(
     elements: &mut Vec<MenuElement>,
@@ -833,7 +1162,8 @@ fn draw_player_hotbar(
     scale: f32,
     inventory: &Inventory,
     tt: &TooltipCtx,
-) -> Option<u16> {
+    preview: &HashMap<u16, ItemStack>,
+) -> Option<SlotHit> {
     let size = SLOT_SIZE * scale;
     let hotbar = inventory.hotbar_slots();
     let mut clicked_slot = None;
@@ -845,7 +1175,8 @@ fn draw_player_hotbar(
             GRID_ORIGIN_X + col as f32 * SLOT_STRIDE,
             HOTBAR_Y,
         );
-        let item = item_or_empty(hotbar, col);
+        let slot_num = SLOT_HOTBAR_BASE + col as u16;
+        let item = slot_display(preview, slot_num, item_or_empty(hotbar, col));
         clicked_slot = clicked_slot.or(slot_with_tooltip(
             elements,
             x,
@@ -855,10 +1186,15 @@ fn draw_player_hotbar(
             &item,
             None,
             tt,
-            Some(SLOT_HOTBAR_BASE + col as u16),
+            Some(slot_num),
         ));
     }
     clicked_slot
+}
+
+/// Overrides a slot's drawn stack with its drag preview, when one is pending.
+fn slot_display(preview: &HashMap<u16, ItemStack>, slot_num: u16, actual: ItemStack) -> ItemStack {
+    preview.get(&slot_num).cloned().unwrap_or(actual)
 }
 
 fn draw_inventory_layout(
@@ -868,7 +1204,8 @@ fn draw_inventory_layout(
     scale: f32,
     inventory: &Inventory,
     tt: &TooltipCtx,
-) -> Option<u16> {
+    preview: &HashMap<u16, ItemStack>,
+) -> Option<SlotHit> {
     let size = SLOT_SIZE * scale;
     let mut clicked_slot = None;
 
@@ -883,7 +1220,8 @@ fn draw_inventory_layout(
             INV_ARMOR_X + col * INV_ARMOR_COL_STRIDE,
             INV_ARMOR_Y + row * INV_ARMOR_ROW_STRIDE,
         );
-        let item = item_or_empty(armor, i);
+        let slot_num = SLOT_ARMOR_BASE + i as u16;
+        let item = slot_display(preview, slot_num, item_or_empty(armor, i));
         clicked_slot = clicked_slot.or(slot_with_tooltip(
             elements,
             x,
@@ -893,18 +1231,19 @@ fn draw_inventory_layout(
             &item,
             None,
             tt,
-            Some(SLOT_ARMOR_BASE + i as u16),
+            Some(slot_num),
         ));
     }
 
     let (x, y) = slot_xy(ox, oy, scale, INV_OFFHAND_X, INV_OFFHAND_Y);
+    let offhand = slot_display(preview, SLOT_OFFHAND, inventory.offhand().clone());
     clicked_slot = clicked_slot.or(slot_with_tooltip(
         elements,
         x,
         y,
         size,
         scale,
-        inventory.offhand(),
+        &offhand,
         None,
         tt,
         Some(SLOT_OFFHAND),
@@ -921,7 +1260,8 @@ fn draw_inventory_layout(
                 GRID_ORIGIN_X + col as f32 * SLOT_STRIDE,
                 INV_MAIN_Y + row as f32 * SLOT_STRIDE,
             );
-            let item = item_or_empty(main, idx);
+            let slot_num = SLOT_MAIN_BASE + idx as u16;
+            let item = slot_display(preview, slot_num, item_or_empty(main, idx));
             clicked_slot = clicked_slot.or(slot_with_tooltip(
                 elements,
                 x,
@@ -931,24 +1271,27 @@ fn draw_inventory_layout(
                 &item,
                 None,
                 tt,
-                Some(SLOT_MAIN_BASE + idx as u16),
+                Some(slot_num),
             ));
         }
     }
 
-    clicked_slot = clicked_slot.or(draw_player_hotbar(elements, ox, oy, scale, inventory, tt));
+    clicked_slot = clicked_slot.or(draw_player_hotbar(
+        elements, ox, oy, scale, inventory, tt, preview,
+    ));
 
     let (trash_x, trash_y) = slot_xy(ox, oy, scale, INV_TRASH_X, INV_TRASH_Y);
-    push_slot(
+    clicked_slot = clicked_slot.or(slot_with_tooltip(
         elements,
         trash_x,
         trash_y,
         size,
         scale,
-        tt.cursor,
         &ItemStack::Empty,
         None,
-    );
+        tt,
+        Some(SLOT_TRASH),
+    ));
 
     clicked_slot
 }

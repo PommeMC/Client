@@ -17,6 +17,13 @@ const DROWN_DAMAGE_THRESHOLD: i32 = -20;
 const DROWN_DAMAGE: f32 = 2.0;
 const AIR_RECOVERY_RATE: i32 = 4;
 
+// TODO: migrate the remaining raw `game_mode == N` checks to shared constants
+// or an enum.
+/// Matches vanilla GameType.isSurvival(): Survival (0) or Adventure (2).
+pub fn is_survival(game_mode: u8) -> bool {
+    game_mode == 0 || game_mode == 2
+}
+
 fn is_water_block(state: azalea_block::BlockState) -> bool {
     if state.is_air() {
         return false;
