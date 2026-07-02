@@ -1,5 +1,6 @@
 pub mod interaction;
 pub mod inventory;
+pub mod menu_click;
 pub mod tab_list;
 
 use glam::{dvec2, dvec3};

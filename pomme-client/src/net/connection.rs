@@ -517,6 +517,11 @@ async fn game_loop(
         }
     });
 
+    // Share the registries with the game loop for hashing predicted container
+    // clicks.
+    let registry_holder = std::sync::Arc::new(registry_holder);
+    let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
+
     loop {
         match reader.read().await {
             Ok(packet) => {
