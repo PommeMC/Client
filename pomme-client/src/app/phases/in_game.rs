@@ -801,6 +801,10 @@ pub fn update_game(
     let results: Vec<_> = game.mesh_dispatcher.drain_results().collect();
     let mut batch = Vec::with_capacity(results.len());
     for mut mesh in results {
+        // Stale meshes count too: worker time spent is worker time spent.
+        if let Some(bench) = &mut game.chunk_load_bench {
+            bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
+        }
         // Drop a mesh built from an out-of-date snapshot. Edits (priority lane,
         // single section) are keyed per section so editing one section never
         // drops a sibling's in-flight result; bulk loads keep the column key.

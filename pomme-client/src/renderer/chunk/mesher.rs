@@ -154,7 +154,12 @@ pub struct ChunkMeshData {
     /// (including now-empty sections, which connect all faces).
     pub visibility: Vec<(i32, VisibilitySet)>,
     /// Latency stamps for edit remeshes (diagnostic); `None` for bulk loads.
+    /// Also the drain's edit-vs-bulk discriminator, so it stays edit-only.
     pub timing: Option<RemeshTiming>,
+    /// Worker-side stamps, set for every job: time spent waiting in the mesh
+    /// queue and time spent meshing. Aggregated by the chunk-load benchmark.
+    pub queue_ms: f32,
+    pub mesh_ms: f32,
 }
 
 pub struct RemeshTiming {
@@ -622,7 +627,7 @@ impl MeshDispatcher {
         } else {
             self.result_tx.clone()
         };
-        let enqueued_at = priority.then(std::time::Instant::now);
+        let enqueued_at = std::time::Instant::now();
         let upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
 
         self.queue.push(PendingJob {
@@ -653,6 +658,7 @@ impl MeshDispatcher {
         sections: std::ops::Range<i32>,
         content_gen: u64,
     ) -> ChunkMeshData {
+        let started_at = std::time::Instant::now();
         let snapshot = self.build_snapshot(chunk_store, pos);
         let mut mesh = mesh_chunk_snapshot(
             &snapshot,
@@ -665,6 +671,7 @@ impl MeshDispatcher {
         );
         mesh.content_gen = content_gen;
         mesh.upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+        mesh.mesh_ms = started_at.elapsed().as_secs_f32() * 1000.0;
         mesh
     }
 
@@ -729,7 +736,7 @@ struct PendingJob {
     upload_epoch: u64,
     sections: std::ops::Range<i32>,
     is_recompile: bool,
-    enqueued_at: Option<std::time::Instant>,
+    enqueued_at: std::time::Instant,
     snapshot: ChunkStoreSnapshot,
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
@@ -739,7 +746,7 @@ struct PendingJob {
 
 impl PendingJob {
     fn run(self) {
-        let started_at = self.enqueued_at.map(|_| std::time::Instant::now());
+        let started_at = std::time::Instant::now();
         let mut mesh = mesh_chunk_snapshot(
             &self.snapshot,
             self.pos,
@@ -749,13 +756,16 @@ impl PendingJob {
             self.sections,
             &self.pool,
         );
+        let meshed_at = std::time::Instant::now();
         mesh.content_gen = self.content_gen;
         mesh.upload_epoch = self.upload_epoch;
-        if let (Some(enqueued_at), Some(started_at)) = (self.enqueued_at, started_at) {
+        mesh.queue_ms = (started_at - self.enqueued_at).as_secs_f32() * 1000.0;
+        mesh.mesh_ms = (meshed_at - started_at).as_secs_f32() * 1000.0;
+        if self.is_recompile {
             mesh.timing = Some(RemeshTiming {
-                enqueued_at,
+                enqueued_at: self.enqueued_at,
                 started_at,
-                meshed_at: std::time::Instant::now(),
+                meshed_at,
             });
         }
         let _ = self.tx.send(mesh);
@@ -1451,6 +1461,8 @@ fn mesh_chunk_snapshot(
         upload_epoch: 0,
         visibility,
         timing: None,
+        queue_ms: 0.0,
+        mesh_ms: 0.0,
     }
 }
 
