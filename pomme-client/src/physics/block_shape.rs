@@ -6,37 +6,25 @@
 //! TODO: walls, fences, fence gates, panes, trapdoors, doors, beds, chests,
 //! cake, etc. still fall back to a full cube.
 
-use std::sync::LazyLock;
-
 use azalea_block::BlockState;
 
-use crate::world::block::{block_id, block_properties};
+use crate::world::block::PropMap;
 
 /// A block-local axis-aligned box: `[min_x, min_y, min_z, max_x, max_y,
 /// max_z]`.
 pub type LocalBox = [f64; 6];
 
-/// Collision shape per block state, indexed by `BlockState::id`. Built once on
-/// first use; block states are a small contiguous id space (~24k).
-static SHAPES: LazyLock<Vec<Option<Vec<LocalBox>>>> = LazyLock::new(|| {
-    (0u32..)
-        .map_while(|id| BlockState::try_from(id).ok())
-        .map(compute_shape)
-        .collect()
-});
-
 /// Cached collision boxes for `state`: `None` for a full cube, `Some(&[])` for
 /// no collision, `Some(boxes)` for a partial shape.
 pub fn partial_shape(state: BlockState) -> Option<&'static [LocalBox]> {
-    SHAPES[state.id() as usize].as_deref()
+    crate::world::block::block_shape(state)
 }
 
-fn compute_shape(state: BlockState) -> Option<Vec<LocalBox>> {
-    let id = block_id(state);
-    let props = block_properties(state);
-
+/// Computes one state's shape. Takes id/props rather than a `BlockState` so
+/// the block-table build can call it without re-entering the table.
+pub(crate) fn compute_shape(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> {
     if id.ends_with("_slab") {
-        return Some(match props.get("type").copied() {
+        return Some(match props.get("type") {
             Some("top") => vec![[0.0, 0.5, 0.0, 1.0, 1.0, 1.0]],
             Some("double") => return None,             // full cube
             _ => vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]], // bottom
@@ -45,9 +33,9 @@ fn compute_shape(state: BlockState) -> Option<Vec<LocalBox>> {
 
     if id.ends_with("_stairs") {
         return Some(stair_boxes(
-            props.get("half").copied().unwrap_or("bottom"),
-            props.get("facing").copied().unwrap_or("north"),
-            props.get("shape").copied().unwrap_or("straight"),
+            props.get("half").unwrap_or("bottom"),
+            props.get("facing").unwrap_or("north"),
+            props.get("shape").unwrap_or("straight"),
         ));
     }
 

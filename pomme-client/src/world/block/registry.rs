@@ -69,7 +69,7 @@ pub struct BlockRegistry {
     flat_item_texture_keys: HashMap<String, String>,
     /// Block name -> its single `BlockState`, for one-state blocks (see
     /// `placeable_block_for_item`).
-    placeable_blocks: HashMap<String, BlockState>,
+    placeable_blocks: HashMap<&'static str, BlockState>,
 }
 
 impl BlockRegistry {
@@ -235,12 +235,12 @@ impl BlockRegistry {
     }
 }
 
-/// Builds the block-name -> single-`BlockState` map by walking every valid
-/// block state and keeping only names that map to exactly one state.
-fn build_placeable_blocks() -> HashMap<String, BlockState> {
-    let mut seen: HashMap<String, Option<BlockState>> = HashMap::new();
-    for state in (0u32..).map_while(|id| BlockState::try_from(id).ok()) {
-        seen.entry(super::block_id(state).to_string())
+/// Builds the block-name -> single-`BlockState` map from the block table,
+/// keeping only names that map to exactly one state.
+fn build_placeable_blocks() -> HashMap<&'static str, BlockState> {
+    let mut seen: HashMap<&'static str, Option<BlockState>> = HashMap::new();
+    for (state, data) in super::all_states() {
+        seen.entry(data.id)
             .and_modify(|v| *v = None)
             .or_insert(Some(state));
     }
@@ -252,13 +252,13 @@ fn build_placeable_blocks() -> HashMap<String, BlockState> {
 /// Whether every `key=value` constraint holds for `props`. A value may list
 /// alternatives separated by `|`, as vanilla multipart `when` clauses do.
 fn constraints_match<'a>(
-    props: &HashMap<&str, &str>,
+    props: &super::PropMap,
     mut constraints: impl Iterator<Item = (&'a str, &'a str)>,
 ) -> bool {
     constraints.all(|(k, v)| {
         props
             .get(k)
-            .is_some_and(|pv| v.split('|').any(|opt| opt == *pv))
+            .is_some_and(|pv| v.split('|').any(|opt| opt == pv))
     })
 }
 

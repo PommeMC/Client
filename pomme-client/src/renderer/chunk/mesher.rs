@@ -1085,7 +1085,8 @@ fn mesh_chunk_snapshot(
     lod: u32,
     sections_to_mesh: std::ops::Range<i32>,
 ) -> ChunkMeshData {
-    let mut logged_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut logged_missing: std::collections::HashSet<&'static str> =
+        std::collections::HashSet::new();
 
     let step = 1i32 << lod;
 
@@ -1265,8 +1266,8 @@ fn mesh_chunk_snapshot(
                         bz,
                     );
                 } else {
-                    let id = crate::world::block::block_id(state).to_string();
-                    if logged_missing.insert(id.clone()) {
+                    let id = crate::world::block::block_id(state);
+                    if logged_missing.insert(id) {
                         tracing::warn!("Missing model: {id}");
                     }
                     emit_missing_cube(

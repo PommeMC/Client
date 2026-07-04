@@ -35,7 +35,7 @@ fn is_water_block(state: azalea_block::BlockState) -> bool {
     }
     block_properties(state)
         .get("waterlogged")
-        .is_some_and(|v| *v == "true")
+        .is_some_and(|v| v == "true")
 }
 
 pub struct LocalPlayer {
