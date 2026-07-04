@@ -1017,6 +1017,7 @@ pub fn update_game(
             gfx.renderer.is_first_person(),
             debug.as_ref(),
             core.menu.gui_scale_setting,
+            &|t, s| gfx.renderer.menu_text_width(t, s),
         );
     }
 

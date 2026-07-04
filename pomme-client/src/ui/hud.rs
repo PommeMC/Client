@@ -83,6 +83,7 @@ pub fn build_hud(
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) {
     let gs = gui_scale(screen_w, screen_h, gui_scale_setting);
     let cx = screen_w / 2.0;
@@ -93,7 +94,7 @@ pub fn build_hud(
     }
 
     if let Some(info) = debug {
-        build_debug_overlay(elements, info, gs);
+        build_debug_overlay(elements, info, gs, text_width_fn);
     }
 
     let hotbar_w = HOTBAR_W * gs;
@@ -365,7 +366,12 @@ fn build_status_bar(
     }
 }
 
-fn build_debug_overlay(elements: &mut Vec<MenuElement>, info: &DebugInfo<'_>, gs: f32) {
+fn build_debug_overlay(
+    elements: &mut Vec<MenuElement>,
+    info: &DebugInfo<'_>,
+    gs: f32,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
+) {
     let fs = super::common::FONT_SIZE * gs;
     let pad = 4.0 * gs;
 
@@ -417,7 +423,7 @@ fn build_debug_overlay(elements: &mut Vec<MenuElement>, info: &DebugInfo<'_>, gs
         left_lines.push(format!("Face: {:?}", face));
     }
 
-    push_debug_lines(elements, &left_lines, pad, pad, fs, true);
+    push_debug_lines(elements, &left_lines, pad, pad, fs, true, text_width_fn);
 
     let mut right_lines: Vec<String> = vec![
         info.vulkan_version.to_string(),
@@ -435,7 +441,15 @@ fn build_debug_overlay(elements: &mut Vec<MenuElement>, info: &DebugInfo<'_>, gs
         right_lines.push(format!("  Present: {:.2}ms", t.present_ms));
     }
     let right_x = info.screen_w as f32 - pad;
-    push_debug_lines(elements, &right_lines, right_x, pad, fs, false);
+    push_debug_lines(
+        elements,
+        &right_lines,
+        right_x,
+        pad,
+        fs,
+        false,
+        text_width_fn,
+    );
 }
 
 fn push_debug_lines(
@@ -445,6 +459,7 @@ fn push_debug_lines(
     start_y: f32,
     fs: f32,
     left_align: bool,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) {
     let line_h = fs * 1.25;
     for (i, line) in lines.iter().enumerate() {
@@ -455,7 +470,7 @@ fn push_debug_lines(
         let tx = if left_align {
             x
         } else {
-            x - line.len() as f32 * fs * 0.6
+            x - text_width_fn(line, fs)
         };
         elements.push(MenuElement::Text {
             x: tx,
