@@ -5,19 +5,12 @@ use azalea_core::position::ChunkPos;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
-use super::mesher::{ChunkMeshData, ChunkVertex, SectionMesh};
+use super::mesher::{ChunkAABB, ChunkMeshData, PackedVertex, SectionMesh};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
 const BUCKET_INDICES: u32 = 49152;
 const VERTEX_SIZE: u64 = size_of::<PackedVertex>() as u64;
-/// Section-local position quantization: local coords (block 0..16 plus model
-/// overhang) map into `[-POS_BIAS, POS_RANGE - POS_BIAS]` across a u16. Chosen
-/// so a 16-block shift is an exact integer number of u16 steps (16/24*65535 =
-/// 43690), so the same world position encodes identically in adjacent sections
-/// — no seams. Must match `chunk.vert`.
-const POS_RANGE: f32 = 24.0;
-const POS_BIAS: f32 = 4.0;
 const INDEX_SIZE: u64 = size_of::<u32>() as u64;
 const BYTES_PER_BUCKET: u64 =
     BUCKET_VERTICES as u64 * VERTEX_SIZE + BUCKET_INDICES as u64 * INDEX_SIZE;
@@ -122,13 +115,6 @@ fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ChunkAABB {
-    pub min: [f32; 4],
-    pub max: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ChunkMeta {
     aabb_min: [f32; 4],
     aabb_max: [f32; 4],
@@ -136,50 +122,18 @@ struct ChunkMeta {
     first_index: u32,
     vertex_offset: i32,
     visibility: u32,
-    /// `[0..3]`: section world origin, bound as a per-instance vertex attribute
-    /// so the vertex shader rebases the quantized local position (it reads only
-    /// xyz). `[3]`: the section's `solid_index_count` reinterpreted as float
-    /// bits, read by the cull shader to split the solid/cutout draws.
-    origin: [f32; 4],
+    /// Section world origin, bound as a per-instance vertex attribute so the
+    /// vertex shader rebases the quantized local position.
+    origin: [f32; 3],
+    /// Read by the cull shader to split the solid/cutout draws; fills the
+    /// fourth lane of `origin`'s 16-byte slot, keeping the struct at 64 bytes.
+    solid_index_count: u32,
 }
 
-/// Compact GPU vertex (14 bytes): position quantized to section-local u16 (see
-/// `POS_RANGE`), rebased to world in `chunk.vert` via the per-instance origin.
-/// `light_tint` is `[u8; 4]` (not `u32`) so the struct packs to 14 bytes with
-/// no alignment padding; byte order matches the old `R8G8B8A8_UNORM` (light,
-/// r,g,b).
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct PackedVertex {
-    pos: [u16; 3],
-    uv: [u16; 2],
-    light_tint: [u8; 4],
-}
-
-fn quantize_coord(world: f32, origin: f32) -> u16 {
-    let unorm = ((world - origin + POS_BIAS) / POS_RANGE).clamp(0.0, 1.0);
-    (unorm * 65535.0 + 0.5) as u16
-}
-
-fn pack_vertex(v: &ChunkVertex, origin: [f32; 3]) -> PackedVertex {
-    PackedVertex {
-        pos: [
-            quantize_coord(v.position[0], origin[0]),
-            quantize_coord(v.position[1], origin[1]),
-            quantize_coord(v.position[2], origin[2]),
-        ],
-        uv: v.tex_coords,
-        light_tint: v.light_tint.to_le_bytes(),
-    }
-}
-
-/// Pack `verts` (rebased against `origin`) into `dst` starting at byte `off`.
-fn write_packed_verts(dst: &mut [u8], off: usize, verts: &[ChunkVertex], origin: [f32; 3]) {
-    let vsize = VERTEX_SIZE as usize;
-    for (k, v) in verts.iter().enumerate() {
-        let o = off + k * vsize;
-        dst[o..o + vsize].copy_from_slice(bytemuck::bytes_of(&pack_vertex(v, origin)));
-    }
+/// Copy already-packed `verts` into `dst` starting at byte `off`.
+fn write_verts(dst: &mut [u8], off: usize, verts: &[PackedVertex]) {
+    let bytes: &[u8] = bytemuck::cast_slice(verts);
+    dst[off..off + bytes.len()].copy_from_slice(bytes);
 }
 
 /// Vertex input for the chunk pipeline: binding 0 is the packed per-vertex
@@ -201,33 +155,36 @@ pub fn chunk_vertex_bindings() -> [vk::VertexInputBindingDescription; 2] {
 }
 
 pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 6] {
+    let pos_off = std::mem::offset_of!(PackedVertex, pos) as u32;
+    let uv_off = std::mem::offset_of!(PackedVertex, uv) as u32;
+    let light_tint_off = std::mem::offset_of!(PackedVertex, light_tint) as u32;
     let origin_off = std::mem::offset_of!(ChunkMeta, origin) as u32;
     let vis_off = std::mem::offset_of!(ChunkMeta, visibility) as u32;
     [
-        // binding 0 — packed vertex
+        // binding 0 — packed vertex (pos split into xy + z lanes)
         vk::VertexInputAttributeDescription {
             location: 0,
             binding: 0,
             format: vk::Format::R16G16Unorm,
-            offset: 0,
+            offset: pos_off,
         },
         vk::VertexInputAttributeDescription {
             location: 1,
             binding: 0,
             format: vk::Format::R16Unorm,
-            offset: 4,
+            offset: pos_off + 4,
         },
         vk::VertexInputAttributeDescription {
             location: 2,
             binding: 0,
             format: vk::Format::R16G16Unorm,
-            offset: 6,
+            offset: uv_off,
         },
         vk::VertexInputAttributeDescription {
             location: 3,
             binding: 0,
             format: vk::Format::R8G8B8A8Unorm,
-            offset: 10,
+            offset: light_tint_off,
         },
         // binding 1 — per-instance meta (origin + fade)
         vk::VertexInputAttributeDescription {
@@ -844,29 +801,12 @@ impl ChunkBufferStore {
             return needs_remesh;
         }
 
-        // Tight AABB over a section's own vertices (better cull granularity than
-        // the chunk-column bounds; also robust to LOD cubes that exceed 16 tall).
-        fn section_aabb(verts: &[ChunkVertex]) -> ChunkAABB {
-            let mut mn = [f32::MAX; 3];
-            let mut mx = [f32::MIN; 3];
-            for v in verts {
-                for k in 0..3 {
-                    mn[k] = mn[k].min(v.position[k]);
-                    mx[k] = mx[k].max(v.position[k]);
-                }
-            }
-            ChunkAABB {
-                min: [mn[0], mn[1], mn[2], 0.0],
-                max: [mx[0], mx[1], mx[2], 0.0],
-            }
-        }
-
         // Sub-allocate an exact-size vertex + index slice for each non-empty
         // section. Indices stay section-local and `vertex_offset` rebases the draw,
         // so no packing or rebasing is needed — just one slice per section.
         struct Plan<'a> {
             section_index: i32,
-            verts: &'a [ChunkVertex],
+            verts: &'a [PackedVertex],
             indices: &'a [u32],
             water_indices: &'a [u32],
             vtx_off: u32,
@@ -1013,7 +953,7 @@ impl ChunkBufferStore {
                     vtx_off,
                     idx_off,
                     solid_index_count: sec.solid_index_count,
-                    aabb: section_aabb(&sec.vertices),
+                    aabb: sec.aabb,
                     origin: [
                         (mesh.pos.x * 16) as f32,
                         (mesh.min_y + sec.section_index * 16) as f32,
@@ -1052,7 +992,7 @@ impl ChunkBufferStore {
                 }
                 let buf = self.staging_alloc.mapped_slice_mut().unwrap();
                 for p in &plans {
-                    write_packed_verts(buf, stg_v, p.verts, p.origin);
+                    write_verts(buf, stg_v, p.verts);
                     let vbytes = p.verts.len() * VERTEX_SIZE as usize;
                     copy_v.push(vk::BufferCopy {
                         src_offset: stg_v as u64,
@@ -1079,7 +1019,7 @@ impl ChunkBufferStore {
                     let vbuf = self.vertex_alloc.mapped_slice_mut().unwrap();
                     for p in &plans {
                         let base = p.vtx_off as usize * VERTEX_SIZE as usize;
-                        write_packed_verts(vbuf, base, p.verts, p.origin);
+                        write_verts(vbuf, base, p.verts);
                     }
                 }
                 {
@@ -1382,12 +1322,8 @@ impl ChunkBufferStore {
                         first_index: sec.first_index,
                         vertex_offset: sec.vertex_offset,
                         visibility: vis.to_bits(),
-                        origin: [
-                            sec.origin[0],
-                            sec.origin[1],
-                            sec.origin[2],
-                            f32::from_bits(sec.solid_index_count),
-                        ],
+                        origin: sec.origin,
+                        solid_index_count: sec.solid_index_count,
                     });
                 }
             }
@@ -1565,6 +1501,7 @@ impl ChunkBufferStore {
     pub fn draw_water(
         &self,
         cmd: vk::CommandBuffer,
+        layout: vk::PipelineLayout,
         frustum: &[[f32; 4]; 6],
         camera_pos: [f32; 3],
     ) {
@@ -1587,12 +1524,19 @@ impl ChunkBufferStore {
                     continue;
                 }
                 let vis = Self::section_visibility(nearby, sec, now);
+                let origin_fade = [sec.origin[0], sec.origin[1], sec.origin[2], vis];
+                cmd.push_constants(
+                    layout,
+                    vk::ShaderStageFlags::Vertex,
+                    0,
+                    bytemuck::bytes_of(&origin_fade),
+                );
                 cmd.draw_indexed(
                     sec.water_index_count,
                     1,
                     sec.water_first_index,
                     sec.vertex_offset,
-                    vis.to_bits(),
+                    0,
                 );
             }
         }

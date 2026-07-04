@@ -1536,7 +1536,12 @@ impl Renderer {
                 // but doesn't write depth. CPU frustum-culled, reusing the entity
                 // frustum/eye.
                 self.chunk_pipeline.bind_water(cmd, frame);
-                self.chunk_buffers.draw_water(cmd, &ent_frustum, ent_eye);
+                self.chunk_buffers.draw_water(
+                    cmd,
+                    self.chunk_pipeline.pipeline_layout,
+                    &ent_frustum,
+                    ent_eye,
+                );
 
                 // Clouds draw after opaque world geometry (so terrain occludes
                 // them) and before weather, depth-tested against the scene.

@@ -805,16 +805,19 @@ pub fn update_game(
         if let Some(bench) = &mut game.chunk_load_bench {
             bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
         }
-        // Drop a mesh built from an out-of-date snapshot. Edits (priority lane,
-        // single section) are keyed per section so editing one section never
-        // drops a sibling's in-flight result; bulk loads keep the column key.
-        let stale = if mesh.timing.is_some() {
-            mesh.replaced
-                .clone()
-                .any(|si| game.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen))
-        } else {
-            mesh.content_gen < game.content_gen.get(&mesh.pos).copied().unwrap_or(0)
-        };
+        // Drop a mesh built from an out-of-date snapshot. A mesh for a chunk
+        // that has since unloaded is always stale (uploading it would resurrect
+        // a column nothing cleans up). Edits (priority lane, single section)
+        // are keyed per section so editing one section never drops a sibling's
+        // in-flight result; bulk loads keep the column key.
+        let stale = game.chunk_store.get_chunk(&mesh.pos).is_none()
+            || if mesh.timing.is_some() {
+                mesh.replaced.clone().any(|si| {
+                    game.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen)
+                })
+            } else {
+                mesh.content_gen < game.content_gen.get(&mesh.pos).copied().unwrap_or(0)
+            };
         if stale {
             game.mesh_dispatcher.recycle(mesh);
             continue;

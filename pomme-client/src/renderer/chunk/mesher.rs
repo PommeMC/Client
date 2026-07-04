@@ -57,11 +57,65 @@ impl ChunkVertex {
     }
 }
 
+include!("packing_consts.rs");
+
+/// Compact GPU vertex (14 bytes): position quantized to section-local u16 (see
+/// `POS_RANGE`), rebased to world in the vertex shader via the section origin.
+/// `light_tint` is `[u8; 4]` (not `u32`) so the struct packs to 14 bytes with
+/// no alignment padding; byte order matches the old `R8G8B8A8_UNORM` (light,
+/// r,g,b).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PackedVertex {
+    pub pos: [u16; 3],
+    pub uv: [u16; 2],
+    pub light_tint: [u8; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ChunkAABB {
+    pub min: [f32; 4],
+    pub max: [f32; 4],
+}
+
+fn unorm_to_u16(x: f32) -> u16 {
+    (x.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
+}
+
+fn quantize_coord(world: f32, origin: f32) -> u16 {
+    unorm_to_u16((world - origin + POS_BIAS) / POS_RANGE)
+}
+
+fn pack_vertex(v: &ChunkVertex, origin: [f32; 3]) -> PackedVertex {
+    PackedVertex {
+        pos: [
+            quantize_coord(v.position[0], origin[0]),
+            quantize_coord(v.position[1], origin[1]),
+            quantize_coord(v.position[2], origin[2]),
+        ],
+        uv: v.tex_coords,
+        light_tint: v.light_tint.to_le_bytes(),
+    }
+}
+
+fn section_aabb(verts: &[ChunkVertex]) -> ChunkAABB {
+    let mut mn = [f32::MAX; 3];
+    let mut mx = [f32::MIN; 3];
+    for v in verts {
+        for k in 0..3 {
+            mn[k] = mn[k].min(v.position[k]);
+            mx[k] = mx[k].max(v.position[k]);
+        }
+    }
+    ChunkAABB {
+        min: [mn[0], mn[1], mn[2], 0.0],
+        max: [mx[0], mx[1], mx[2], 0.0],
+    }
+}
+
 pub fn pack_uv(u: f32, v: f32) -> [u16; 2] {
-    [
-        (u.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16,
-        (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16,
-    ]
+    [unorm_to_u16(u), unorm_to_u16(v)]
 }
 
 pub fn pack_light_tint(light: f32, tint: u32) -> u32 {
@@ -93,7 +147,11 @@ pub struct SectionMesh {
     /// 0-based section index from the column's min_y; stable identity for
     /// per-section upload/replace.
     pub section_index: i32,
-    pub vertices: Vec<ChunkVertex>,
+    /// Vertices already quantized against the section origin in the worker, so
+    /// upload is a plain memcpy.
+    pub vertices: Vec<PackedVertex>,
+    /// Bounds of the un-quantized vertex positions, for culling.
+    pub aabb: ChunkAABB,
     /// Solid (opaque) indices first, then cutout indices. `solid_index_count`
     /// splits the two so each renders in its own pass.
     pub indices: Vec<u32>,
@@ -472,17 +530,24 @@ const SECTION_INDEX_HINT: usize = 3072;
 /// `ByteBufferBuilder`s the same way). Bounded: returns past capacity are
 /// dropped, takes past it allocate.
 struct BufferPool {
-    vtx_tx: crossbeam_channel::Sender<Vec<ChunkVertex>>,
-    vtx_rx: crossbeam_channel::Receiver<Vec<ChunkVertex>>,
+    // Float scratch the workers mesh into; never leaves the worker (packed at
+    // section finalize).
+    scratch_tx: crossbeam_channel::Sender<Vec<ChunkVertex>>,
+    scratch_rx: crossbeam_channel::Receiver<Vec<ChunkVertex>>,
+    vtx_tx: crossbeam_channel::Sender<Vec<PackedVertex>>,
+    vtx_rx: crossbeam_channel::Receiver<Vec<PackedVertex>>,
     idx_tx: crossbeam_channel::Sender<Vec<u32>>,
     idx_rx: crossbeam_channel::Receiver<Vec<u32>>,
 }
 
 impl BufferPool {
     fn new(capacity: usize) -> Self {
+        let (scratch_tx, scratch_rx) = crossbeam_channel::bounded(capacity);
         let (vtx_tx, vtx_rx) = crossbeam_channel::bounded(capacity);
         let (idx_tx, idx_rx) = crossbeam_channel::bounded(capacity);
         Self {
+            scratch_tx,
+            scratch_rx,
             vtx_tx,
             vtx_rx,
             idx_tx,
@@ -492,27 +557,39 @@ impl BufferPool {
 
     // A fresh buffer is pre-sized so filling it doesn't realloc-grow; recycled
     // buffers keep their capacity, so the pool self-tunes to real section sizes.
-    fn take_vertices(&self) -> Vec<ChunkVertex> {
-        self.vtx_rx
-            .try_recv()
-            .unwrap_or_else(|_| Vec::with_capacity(SECTION_VERTEX_HINT))
+    fn take<T>(rx: &crossbeam_channel::Receiver<Vec<T>>, hint: usize) -> Vec<T> {
+        rx.try_recv().unwrap_or_else(|_| Vec::with_capacity(hint))
+    }
+
+    fn give<T>(tx: &crossbeam_channel::Sender<Vec<T>>, mut buf: Vec<T>) {
+        if buf.capacity() > 0 {
+            buf.clear();
+            let _ = tx.try_send(buf);
+        }
+    }
+
+    fn take_scratch(&self) -> Vec<ChunkVertex> {
+        Self::take(&self.scratch_rx, SECTION_VERTEX_HINT)
+    }
+
+    fn take_vertices(&self) -> Vec<PackedVertex> {
+        Self::take(&self.vtx_rx, SECTION_VERTEX_HINT)
     }
 
     fn take_indices(&self) -> Vec<u32> {
-        self.idx_rx
-            .try_recv()
-            .unwrap_or_else(|_| Vec::with_capacity(SECTION_INDEX_HINT))
+        Self::take(&self.idx_rx, SECTION_INDEX_HINT)
     }
 
-    fn recycle(&self, mut vertices: Vec<ChunkVertex>, mut indices: Vec<u32>) {
-        if vertices.capacity() > 0 {
-            vertices.clear();
-            let _ = self.vtx_tx.try_send(vertices);
-        }
-        if indices.capacity() > 0 {
-            indices.clear();
-            let _ = self.idx_tx.try_send(indices);
-        }
+    fn recycle_scratch(&self, vertices: Vec<ChunkVertex>) {
+        Self::give(&self.scratch_tx, vertices);
+    }
+
+    fn recycle_vertices(&self, vertices: Vec<PackedVertex>) {
+        Self::give(&self.vtx_tx, vertices);
+    }
+
+    fn recycle_indices(&self, indices: Vec<u32>) {
+        Self::give(&self.idx_tx, indices);
     }
 }
 
@@ -593,7 +670,8 @@ impl MeshDispatcher {
     /// reuse.
     pub fn recycle(&self, mesh: ChunkMeshData) {
         for sec in mesh.sections {
-            self.pool.recycle(sec.vertices, sec.indices);
+            self.pool.recycle_vertices(sec.vertices);
+            self.pool.recycle_indices(sec.indices);
         }
     }
 
@@ -718,6 +796,10 @@ impl MeshDispatcher {
 impl Drop for MeshDispatcher {
     fn drop(&mut self) {
         self.queue.close();
+        // Drop the result receiver so a worker blocked in a full bounded send
+        // unblocks with a disconnect error instead of deadlocking the joins.
+        let (_tx, rx) = crossbeam_channel::bounded(0);
+        drop(std::mem::replace(&mut self.result_rx, rx));
         for handle in self.workers.drain(..) {
             let _ = handle.join();
         }
@@ -873,17 +955,25 @@ impl MeshQueue {
         state.camera = camera;
         let crossed = (camera.x / BUCKET).floor() != (state.sort_cam.x / BUCKET).floor()
             || (camera.z / BUCKET).floor() != (state.sort_cam.z / BUCKET).floor();
-        if crossed {
-            state.sort_cam = camera;
-            // Re-key the load heap to the new bucket (pop still gives the nearest).
-            state.loads = std::mem::take(&mut state.loads)
-                .into_iter()
-                .map(|e| LoadEntry {
-                    dist: column_dist_sq(e.job.pos, camera),
-                    job: e.job,
-                })
-                .collect();
+        if !crossed {
+            return;
         }
+        // Re-key the load heap to the new bucket (pop still gives the nearest).
+        // The O(n) rebuild happens off-lock so workers aren't blocked; sort_cam
+        // is updated first so concurrent pushes key against the new camera, and
+        // workers that find the heap empty meanwhile just condvar-wait.
+        state.sort_cam = camera;
+        let taken = std::mem::take(&mut state.loads);
+        drop(state);
+        let rekeyed: Vec<LoadEntry> = taken
+            .into_iter()
+            .map(|e| LoadEntry {
+                dist: column_dist_sq(e.job.pos, camera),
+                job: e.job,
+            })
+            .collect();
+        self.state.lock().unwrap().loads.extend(rekeyed);
+        self.available.notify_all();
     }
 
     fn close(&self) {
@@ -1311,7 +1401,7 @@ fn mesh_chunk_snapshot(
     // The cutout list stays un-pooled (empty for the common all-solid section).
     for si in range.clone() {
         let sink = &mut sinks[si as usize];
-        sink.vertices = pool.take_vertices();
+        sink.vertices = pool.take_scratch();
         sink.solid = pool.take_indices();
     }
 
@@ -1433,19 +1523,32 @@ fn mesh_chunk_snapshot(
     }
 
     // Finalize each non-empty section: concatenate cutout indices after solid
-    // (recording the split), keep the result. Empty in-range sections recycle
-    // their buffers rather than dropping the retained capacity.
+    // (recording the split), take the AABB from the float positions, then
+    // quantize against the section origin so upload is a plain memcpy. Empty
+    // in-range sections recycle their buffers rather than dropping the
+    // retained capacity.
     let mut sections = Vec::with_capacity(sinks.len());
     for (i, mut sink) in sinks.into_iter().enumerate() {
         if sink.solid.is_empty() && sink.cutout.is_empty() && sink.water.is_empty() {
-            pool.recycle(sink.vertices, sink.solid);
+            pool.recycle_scratch(sink.vertices);
+            pool.recycle_indices(sink.solid);
             continue;
         }
         let solid_index_count = sink.solid.len() as u32;
         sink.solid.extend_from_slice(&sink.cutout);
+        let aabb = section_aabb(&sink.vertices);
+        let origin = [
+            (pos.x * 16) as f32,
+            (min_y + i as i32 * 16) as f32,
+            (pos.z * 16) as f32,
+        ];
+        let mut packed = pool.take_vertices();
+        packed.extend(sink.vertices.iter().map(|v| pack_vertex(v, origin)));
+        pool.recycle_scratch(sink.vertices);
         sections.push(SectionMesh {
             section_index: i as i32,
-            vertices: sink.vertices,
+            vertices: packed,
+            aabb,
             indices: sink.solid,
             solid_index_count,
             water_indices: sink.water,

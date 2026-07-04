@@ -22,15 +22,7 @@ layout(location = 0) out vec4 out_color;
 
 void main() {
     vec4 color = texture(atlas_texture, v_tex_coords);
-    vec3 linear_tint = pow(v_tint, vec3(2.2));
-    float linear_light = pow(v_light, 2.2);
-    vec3 tinted = color.rgb * linear_tint * linear_light;
-
-    if (v_visibility < 1.0) {
-        tinted = mix(v_fog_color, tinted, v_visibility);
-    }
-
-    tinted = apply_fog(tinted, v_fog, v_fog_color);
-
-    out_color = vec4(tinted, 1.0);
+    vec3 shaded =
+        shade_chunk_surface(color.rgb, v_tint, v_light, v_visibility, v_fog_color, v_fog);
+    out_color = vec4(shaded, 1.0);
 }

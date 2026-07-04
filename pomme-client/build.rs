@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::Path;
 
+// Single source of truth for the vertex packing constants, shared with the
+// shaders via the generated packing.glsl.
+include!("src/renderer/chunk/packing_consts.rs");
+
 fn main() {
     // Releases bundle the Vulkan loader (libvulkan.1.dylib) next to the binary,
     // since macOS has no system Vulkan; this rpath lets it be found at runtime.
@@ -11,6 +15,13 @@ fn main() {
     let shader_dir = Path::new("src/renderer/shaders");
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
+    println!("cargo:rerun-if-changed=src/renderer/chunk/packing_consts.rs");
+    fs::write(
+        Path::new(&out_dir).join("packing.glsl"),
+        format!("const float POS_RANGE = {POS_RANGE:?};\nconst float POS_BIAS = {POS_BIAS:?};\n"),
+    )
+    .expect("failed to write packing.glsl");
+
     let compiler = shaderc::Compiler::new().expect("failed to create shaderc compiler");
     let mut options = shaderc::CompileOptions::new().expect("failed to create compile options");
     options.set_target_env(
@@ -19,9 +30,15 @@ fn main() {
     );
     options.set_source_language(shaderc::SourceLanguage::GLSL);
 
+    // Includes resolve from the shader dir, falling back to OUT_DIR for
+    // generated headers (packing.glsl).
     let include_dir = shader_dir.to_path_buf();
+    let generated_dir = Path::new(&out_dir).to_path_buf();
     options.set_include_callback(move |requested, _ty, _requesting, _depth| {
-        let path = include_dir.join(requested);
+        let mut path = include_dir.join(requested);
+        if !path.exists() {
+            path = generated_dir.join(requested);
+        }
         let content = fs::read_to_string(&path)
             .map_err(|e| format!("failed to read shader include {requested}: {e}"))?;
         Ok(shaderc::ResolvedInclude {
@@ -38,6 +55,7 @@ fn main() {
         ("chunk.vert", shaderc::ShaderKind::Vertex),
         ("chunk.frag", shaderc::ShaderKind::Fragment),
         ("chunk_solid.frag", shaderc::ShaderKind::Fragment),
+        ("water.vert", shaderc::ShaderKind::Vertex),
         ("water.frag", shaderc::ShaderKind::Fragment),
         ("cube.vert", shaderc::ShaderKind::Vertex),
         ("cube.frag", shaderc::ShaderKind::Fragment),
