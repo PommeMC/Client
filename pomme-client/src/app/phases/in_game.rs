@@ -912,8 +912,11 @@ pub fn update_game(
                 let state =
                     game.chunk_store
                         .get_block_state(t.block_pos.x, t.block_pos.y, t.block_pos.z);
-                let block: Box<dyn azalea_block::BlockTrait> = state.into();
-                Some((t.block_pos, t.face, block.id().to_string()))
+                Some((
+                    t.block_pos,
+                    t.face,
+                    crate::world::block::block_id(state).to_string(),
+                ))
             }),
             chunk_count: gfx.renderer.loaded_chunk_count(),
             sections_drawn: gfx.renderer.sections_drawn(),
@@ -1474,13 +1477,12 @@ pub fn update_game(
             .iter()
             .map(|(pos, be)| {
                 let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
-                let block: Box<dyn azalea_block::BlockTrait> = state.into();
-                let props = block.property_map();
+                let props = crate::world::block::block_properties(state);
                 let variant = crate::renderer::pipelines::block_entity::variant_for_block(
                     be.kind,
-                    block.id(),
+                    crate::world::block::block_id(state),
                 );
-                let yaw = crate::renderer::pipelines::block_entity::yaw_for_block(be.kind, &props);
+                let yaw = crate::renderer::pipelines::block_entity::yaw_for_block(be.kind, props);
                 let lid_open = game
                     .block_entity_anim
                     .container(pos)

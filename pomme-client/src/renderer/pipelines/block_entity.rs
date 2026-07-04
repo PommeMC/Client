@@ -160,12 +160,12 @@ pub fn variant_for_block(kind: BlockEntityKind, name: &str) -> u32 {
 
 /// Values mirror vanilla's `direction.asRotation()` offset, since the draw
 /// code applies `from_rotation_y((180 - yaw).to_radians())`.
-pub fn yaw_for_block(kind: BlockEntityKind, props: &HashMap<&str, &str>) -> f32 {
+pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap) -> f32 {
     match kind {
         BlockEntityKind::Chest
         | BlockEntityKind::TrappedChest
         | BlockEntityKind::EnderChest
-        | BlockEntityKind::ShulkerBox => match props.get("facing").copied() {
+        | BlockEntityKind::ShulkerBox => match props.get("facing") {
             Some("south") => 0.0,
             Some("west") => 90.0,
             Some("north") => 180.0,
