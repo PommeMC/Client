@@ -9,9 +9,12 @@ use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 pub struct ChunkPipeline {
-    pub pipeline: vk::Pipeline,
+    /// Opaque terrain: no discard, early-Z. Drawn first (front-to-back).
+    pub pipeline_solid: vk::Pipeline,
+    /// Cutout terrain: alpha-test discard. Drawn after solid.
+    pub pipeline_cutout: vk::Pipeline,
     /// Translucent water variant: alpha blending on, depth write off. Shares
-    /// the opaque pipeline's layout and descriptor sets.
+    /// the terrain pipelines' layout and descriptor sets.
     pub water_pipeline: vk::Pipeline,
     pub pipeline_layout: vk::PipelineLayout,
     pub descriptor_set_layout_camera: vk::DescriptorSetLayout,
@@ -42,16 +45,26 @@ impl ChunkPipeline {
         );
 
         let layouts = [camera_layout, atlas_layout];
+        // Water pushes its section origin + fade per draw (water.vert); the
+        // indirect passes read them per-instance and ignore the range.
+        let push_range = vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::Vertex,
+            offset: 0,
+            size: 16,
+        };
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
+            push_constant_range_count: 1,
+            push_constant_ranges: &push_range,
             ..Default::default()
         };
         let pipeline_layout = device
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create pipeline layout");
 
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
+        let (pipeline_solid, pipeline_cutout) =
+            create_pipelines(device, render_pass, pipeline_layout);
         let water_pipeline = create_water_pipeline(device, render_pass, pipeline_layout);
 
         let pool_sizes = [
@@ -143,7 +156,8 @@ impl ChunkPipeline {
         device.update_descriptor_sets(&[atlas_write], &[]);
 
         Self {
-            pipeline,
+            pipeline_solid,
+            pipeline_cutout,
             water_pipeline,
             pipeline_layout,
             descriptor_set_layout_camera: camera_layout,
@@ -179,8 +193,13 @@ impl ChunkPipeline {
         device.update_descriptor_sets(&[write], &[]);
     }
 
-    pub fn bind(&self, cmd: vk::CommandBuffer, frame: usize) {
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+    pub fn bind(&self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
+        let pipeline = if cutout {
+            self.pipeline_cutout
+        } else {
+            self.pipeline_solid
+        };
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
@@ -214,7 +233,8 @@ impl ChunkPipeline {
         }
         drop(alloc);
 
-        device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.pipeline_solid, None);
+        device.destroy_pipeline(self.pipeline_cutout, None);
         device.destroy_pipeline(self.water_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
@@ -235,11 +255,14 @@ fn shader_stage(
     }
 }
 
-fn create_pipeline(
+/// Builds the two chunk pipelines: `solid` (chunk_solid.frag, no discard,
+/// early-Z) and `cutout` (chunk.frag, alpha-test discard). Identical state
+/// otherwise; both share the vertex shader and layout.
+fn create_pipelines(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-) -> vk::Pipeline {
+) -> (vk::Pipeline, vk::Pipeline) {
     let blend_attachment = [vk::PipelineColorBlendAttachmentState {
         blend_enable: vk::FALSE,
         color_write_mask: vk::ColorComponentFlags::RGBA,
@@ -251,14 +274,27 @@ fn create_pipeline(
         ..Default::default()
     };
 
-    create_chunk_variant(
+    let solid = create_chunk_variant(
         device,
         render_pass,
         layout,
+        shader::include_spirv!("chunk.vert.spv"),
+        shader::include_spirv!("chunk_solid.frag.spv"),
+        &color_blend,
+        true,
+        true,
+    );
+    let cutout = create_chunk_variant(
+        device,
+        render_pass,
+        layout,
+        shader::include_spirv!("chunk.vert.spv"),
         shader::include_spirv!("chunk.frag.spv"),
         &color_blend,
         true,
-    )
+        true,
+    );
+    (solid, cutout)
 }
 
 /// Translucent water: standard alpha blending, depth test on but depth write
@@ -288,24 +324,29 @@ fn create_water_pipeline(
         device,
         render_pass,
         layout,
+        shader::include_spirv!("water.vert.spv"),
         shader::include_spirv!("water.frag.spv"),
         &color_blend,
+        false,
         false,
     )
 }
 
-/// Build a chunk pipeline sharing `chunk.vert`, given the fragment SPIR-V,
-/// color-blend, and whether it writes depth.
+/// Build a chunk pipeline given the shader SPIR-V, color-blend, whether it
+/// writes depth, and whether it reads the per-instance meta binding
+/// (`chunk.vert`) or only the packed vertices (`water.vert`).
+#[allow(clippy::too_many_arguments)]
 fn create_chunk_variant(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
+    vert_spirv: &[u8],
     frag_spirv: &[u8],
     color_blend: &vk::PipelineColorBlendStateCreateInfo,
     depth_write: bool,
+    instanced: bool,
 ) -> vk::Pipeline {
-    let vert_module =
-        shader::create_shader_module(device, shader::include_spirv!("chunk.vert.spv"));
+    let vert_module = shader::create_shader_module(device, vert_spirv);
     let frag_module = shader::create_shader_module(device, frag_spirv);
 
     let stages = [
@@ -320,6 +361,7 @@ fn create_chunk_variant(
         &stages,
         color_blend,
         depth_write,
+        instanced,
     );
     device.destroy_shader_module(vert_module, None);
     device.destroy_shader_module(frag_module, None);
@@ -328,6 +370,7 @@ fn create_chunk_variant(
 
 /// Shared chunk pipeline state; callers supply the shader stages and
 /// color-blend.
+#[allow(clippy::too_many_arguments)]
 fn build_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
@@ -335,10 +378,18 @@ fn build_pipeline(
     stages: &[vk::PipelineShaderStageCreateInfo],
     color_blend: &vk::PipelineColorBlendStateCreateInfo,
     depth_write: bool,
+    instanced: bool,
 ) -> vk::Pipeline {
-    use crate::renderer::chunk::mesher::ChunkVertex;
-    let binding_descs = [ChunkVertex::binding_description()];
-    let attr_descs = ChunkVertex::attribute_descriptions();
+    use crate::renderer::chunk::buffer::{chunk_vertex_attributes, chunk_vertex_bindings};
+    let binding_descs = chunk_vertex_bindings();
+    let attr_descs = chunk_vertex_attributes();
+    // Binding 0 / attributes 0-3 are the packed vertices; binding 1 /
+    // attributes 4-5 the per-instance meta only the indirect passes use.
+    let (binding_descs, attr_descs): (&[_], &[_]) = if instanced {
+        (&binding_descs, &attr_descs)
+    } else {
+        (&binding_descs[..1], &attr_descs[..4])
+    };
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
         vertex_binding_description_count: binding_descs.len() as u32,
         vertex_binding_descriptions: binding_descs.as_ptr(),

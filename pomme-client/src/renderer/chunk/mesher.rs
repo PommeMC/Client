@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -57,11 +57,65 @@ impl ChunkVertex {
     }
 }
 
+include!("packing_consts.rs");
+
+/// Compact GPU vertex (14 bytes): position quantized to section-local u16 (see
+/// `POS_RANGE`), rebased to world in the vertex shader via the section origin.
+/// `light_tint` is `[u8; 4]` (not `u32`) so the struct packs to 14 bytes with
+/// no alignment padding; byte order matches the old `R8G8B8A8_UNORM` (light,
+/// r,g,b).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PackedVertex {
+    pub pos: [u16; 3],
+    pub uv: [u16; 2],
+    pub light_tint: [u8; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ChunkAABB {
+    pub min: [f32; 4],
+    pub max: [f32; 4],
+}
+
+fn unorm_to_u16(x: f32) -> u16 {
+    (x.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
+}
+
+fn quantize_coord(world: f32, origin: f32) -> u16 {
+    unorm_to_u16((world - origin + POS_BIAS) / POS_RANGE)
+}
+
+fn pack_vertex(v: &ChunkVertex, origin: [f32; 3]) -> PackedVertex {
+    PackedVertex {
+        pos: [
+            quantize_coord(v.position[0], origin[0]),
+            quantize_coord(v.position[1], origin[1]),
+            quantize_coord(v.position[2], origin[2]),
+        ],
+        uv: v.tex_coords,
+        light_tint: v.light_tint.to_le_bytes(),
+    }
+}
+
+fn section_aabb(verts: &[ChunkVertex]) -> ChunkAABB {
+    let mut mn = [f32::MAX; 3];
+    let mut mx = [f32::MIN; 3];
+    for v in verts {
+        for k in 0..3 {
+            mn[k] = mn[k].min(v.position[k]);
+            mx[k] = mx[k].max(v.position[k]);
+        }
+    }
+    ChunkAABB {
+        min: [mn[0], mn[1], mn[2], 0.0],
+        max: [mx[0], mx[1], mx[2], 0.0],
+    }
+}
+
 pub fn pack_uv(u: f32, v: f32) -> [u16; 2] {
-    [
-        (u.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16,
-        (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16,
-    ]
+    [unorm_to_u16(u), unorm_to_u16(v)]
 }
 
 pub fn pack_light_tint(light: f32, tint: u32) -> u32 {
@@ -93,15 +147,51 @@ pub struct SectionMesh {
     /// 0-based section index from the column's min_y; stable identity for
     /// per-section upload/replace.
     pub section_index: i32,
-    pub vertices: Vec<ChunkVertex>,
+    /// Vertices already quantized against the section origin in the worker, so
+    /// upload is a plain memcpy.
+    pub vertices: Vec<PackedVertex>,
+    /// Bounds of the un-quantized vertex positions, for culling.
+    pub aabb: ChunkAABB,
+    /// Solid (opaque) indices first, then cutout indices. `solid_index_count`
+    /// splits the two so each renders in its own pass.
     pub indices: Vec<u32>,
+    /// Number of leading `indices` that belong to the solid (no-discard) pass;
+    /// the rest are cutout (discard) geometry.
+    pub solid_index_count: u32,
     /// Translucent (water) indices into the same `vertices`, drawn in a
     /// separate blended pass after opaque geometry.
     pub water_indices: Vec<u32>,
 }
 
+/// Per-section meshing accumulator: one shared vertex pool plus separate
+/// solid, cutout, and water index lists. Finalized into a [`SectionMesh`]
+/// with solid and cutout concatenated solid-first; water stays separate for
+/// the blended pass.
+#[derive(Default)]
+struct MeshSink {
+    vertices: Vec<ChunkVertex>,
+    solid: Vec<u32>,
+    cutout: Vec<u32>,
+    water: Vec<u32>,
+}
+
+impl MeshSink {
+    /// Index list a quad's triangles go in: solid sprites render in the
+    /// no-discard pass, everything else in the discard (cutout) pass.
+    fn indices_for(&mut self, opaque: bool) -> &mut Vec<u32> {
+        if opaque {
+            &mut self.solid
+        } else {
+            &mut self.cutout
+        }
+    }
+}
+
 pub struct ChunkMeshData {
     pub pos: ChunkPos,
+    /// World Y of section index 0, so the buffer can derive each section's
+    /// origin (`min_y + section_index * 16`) for vertex quantization.
+    pub min_y: i32,
     /// Non-empty meshed sections (each tagged with its `section_index`).
     pub sections: Vec<SectionMesh>,
     /// The section-index range this job (re)meshed. Upload replaces exactly
@@ -122,7 +212,12 @@ pub struct ChunkMeshData {
     /// (including now-empty sections, which connect all faces).
     pub visibility: Vec<(i32, VisibilitySet)>,
     /// Latency stamps for edit remeshes (diagnostic); `None` for bulk loads.
+    /// Also the drain's edit-vs-bulk discriminator, so it stays edit-only.
     pub timing: Option<RemeshTiming>,
+    /// Worker-side stamps, set for every job: time spent waiting in the mesh
+    /// queue and time spent meshing. Aggregated by the chunk-load benchmark.
+    pub queue_ms: f32,
+    pub mesh_ms: f32,
 }
 
 pub struct RemeshTiming {
@@ -171,7 +266,12 @@ fn tint_color(tint: Tint, grass: [f32; 3], foliage: [f32; 3], dry_foliage: [f32;
     }
 }
 
-const MAX_MESH_UPLOADS_PER_FRAME: usize = 16;
+const MAX_MESH_UPLOADS_PER_FRAME: usize = 32;
+
+/// Bound on un-drained bulk results: past this, workers block on send (back-
+/// pressure) rather than piling finished meshes — and their pooled buffers —
+/// into an unbounded queue, which would starve the buffer pool.
+const MAX_PENDING_RESULTS: usize = 256;
 
 pub struct Colormap {
     pixels: Vec<[u8; 3]>,
@@ -420,6 +520,79 @@ pub fn int_to_rgb(color: i32) -> [f32; 3] {
     [r, g, b]
 }
 
+/// Pre-allocation hints sized to a typical section so a fresh buffer fills
+/// without reallocating (indices run ~1.5x vertices: 6 per quad vs 4).
+const SECTION_VERTEX_HINT: usize = 2048;
+const SECTION_INDEX_HINT: usize = 3072;
+
+/// Recycles section vertex/index `Vec`s so workers reuse them instead of
+/// allocating/freeing through the OS each mesh (vanilla reuses its
+/// `ByteBufferBuilder`s the same way). Bounded: returns past capacity are
+/// dropped, takes past it allocate.
+struct BufferPool {
+    // Float scratch the workers mesh into; never leaves the worker (packed at
+    // section finalize).
+    scratch_tx: crossbeam_channel::Sender<Vec<ChunkVertex>>,
+    scratch_rx: crossbeam_channel::Receiver<Vec<ChunkVertex>>,
+    vtx_tx: crossbeam_channel::Sender<Vec<PackedVertex>>,
+    vtx_rx: crossbeam_channel::Receiver<Vec<PackedVertex>>,
+    idx_tx: crossbeam_channel::Sender<Vec<u32>>,
+    idx_rx: crossbeam_channel::Receiver<Vec<u32>>,
+}
+
+impl BufferPool {
+    fn new(capacity: usize) -> Self {
+        let (scratch_tx, scratch_rx) = crossbeam_channel::bounded(capacity);
+        let (vtx_tx, vtx_rx) = crossbeam_channel::bounded(capacity);
+        let (idx_tx, idx_rx) = crossbeam_channel::bounded(capacity);
+        Self {
+            scratch_tx,
+            scratch_rx,
+            vtx_tx,
+            vtx_rx,
+            idx_tx,
+            idx_rx,
+        }
+    }
+
+    // A fresh buffer is pre-sized so filling it doesn't realloc-grow; recycled
+    // buffers keep their capacity, so the pool self-tunes to real section sizes.
+    fn take<T>(rx: &crossbeam_channel::Receiver<Vec<T>>, hint: usize) -> Vec<T> {
+        rx.try_recv().unwrap_or_else(|_| Vec::with_capacity(hint))
+    }
+
+    fn give<T>(tx: &crossbeam_channel::Sender<Vec<T>>, mut buf: Vec<T>) {
+        if buf.capacity() > 0 {
+            buf.clear();
+            let _ = tx.try_send(buf);
+        }
+    }
+
+    fn take_scratch(&self) -> Vec<ChunkVertex> {
+        Self::take(&self.scratch_rx, SECTION_VERTEX_HINT)
+    }
+
+    fn take_vertices(&self) -> Vec<PackedVertex> {
+        Self::take(&self.vtx_rx, SECTION_VERTEX_HINT)
+    }
+
+    fn take_indices(&self) -> Vec<u32> {
+        Self::take(&self.idx_rx, SECTION_INDEX_HINT)
+    }
+
+    fn recycle_scratch(&self, vertices: Vec<ChunkVertex>) {
+        Self::give(&self.scratch_tx, vertices);
+    }
+
+    fn recycle_vertices(&self, vertices: Vec<PackedVertex>) {
+        Self::give(&self.vtx_tx, vertices);
+    }
+
+    fn recycle_indices(&self, indices: Vec<u32>) {
+        Self::give(&self.idx_tx, indices);
+    }
+}
+
 pub struct MeshDispatcher {
     result_rx: crossbeam_channel::Receiver<ChunkMeshData>,
     result_tx: crossbeam_channel::Sender<ChunkMeshData>,
@@ -437,6 +610,7 @@ pub struct MeshDispatcher {
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
     biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+    pool: Arc<BufferPool>,
 }
 
 impl MeshDispatcher {
@@ -448,21 +622,28 @@ impl MeshDispatcher {
         dry_foliage_colormap: Colormap,
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     ) -> Self {
-        let (result_tx, result_rx) = crossbeam_channel::unbounded();
+        // Bulk results are bounded for back-pressure; edit results use the
+        // unbounded priority channel so they never queue behind the load backlog.
+        let (result_tx, result_rx) = crossbeam_channel::bounded(MAX_PENDING_RESULTS);
         let (priority_tx, priority_rx) = crossbeam_channel::unbounded();
 
         let queue = Arc::new(MeshQueue::new());
-        // One worker per core minus one, leaving a core for the main/render thread.
+        // Half the cores, capped. Too many saturated workers starve the
+        // main/render thread during a load burst (frame spikes); the cap trades
+        // some load throughput for that.
         let worker_count = std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(1).max(1))
-            .unwrap_or(1);
+            .map(|n| (n.get() / 2).clamp(2, 16))
+            .unwrap_or(2);
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let queue = Arc::clone(&queue);
             workers.push(
                 std::thread::Builder::new()
                     .name("chunk-mesher".into())
-                    .spawn(move || queue.run_worker())
+                    .spawn(move || {
+                        lower_current_thread_priority();
+                        queue.run_worker()
+                    })
                     .expect("spawn chunk-mesher thread"),
             );
         }
@@ -481,6 +662,16 @@ impl MeshDispatcher {
             foliage_colormap: Arc::new(foliage_colormap),
             dry_foliage_colormap: Arc::new(dry_foliage_colormap),
             biome_climate,
+            pool: Arc::new(BufferPool::new(1024)),
+        }
+    }
+
+    /// Return an uploaded (or stale) mesh's section buffers to the pool for
+    /// reuse.
+    pub fn recycle(&self, mesh: ChunkMeshData) {
+        for sec in mesh.sections {
+            self.pool.recycle_vertices(sec.vertices);
+            self.pool.recycle_indices(sec.indices);
         }
     }
 
@@ -514,7 +705,7 @@ impl MeshDispatcher {
         } else {
             self.result_tx.clone()
         };
-        let enqueued_at = priority.then(std::time::Instant::now);
+        let enqueued_at = std::time::Instant::now();
         let upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
 
         self.queue.push(PendingJob {
@@ -530,6 +721,7 @@ impl MeshDispatcher {
             registry: Arc::clone(&self.registry),
             uv_map: Arc::clone(&self.uv_map),
             tx,
+            pool: Arc::clone(&self.pool),
         });
     }
 
@@ -544,16 +736,25 @@ impl MeshDispatcher {
         sections: std::ops::Range<i32>,
         content_gen: u64,
     ) -> ChunkMeshData {
+        let started_at = std::time::Instant::now();
         let snapshot = self.build_snapshot(chunk_store, pos);
-        let mut mesh =
-            mesh_chunk_snapshot(&snapshot, pos, &self.registry, &self.uv_map, 0, sections);
+        let mut mesh = mesh_chunk_snapshot(
+            &snapshot,
+            pos,
+            &self.registry,
+            &self.uv_map,
+            0,
+            sections,
+            &self.pool,
+        );
         mesh.content_gen = content_gen;
         mesh.upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
+        mesh.mesh_ms = started_at.elapsed().as_secs_f32() * 1000.0;
         mesh
     }
 
     /// Point-in-time snapshot of `pos`'s mesh neighbourhood: chunk arcs plus
-    /// a deep copy of their light data.
+    /// shared handles to their light data.
     fn build_snapshot(&self, chunk_store: &ChunkStore, pos: ChunkPos) -> ChunkStoreSnapshot {
         let chunks_needed = chunk::mesh_neighborhood(pos);
         ChunkStoreSnapshot {
@@ -567,7 +768,7 @@ impl MeshDispatcher {
                     chunk_store
                         .light_data
                         .get(&(p.x, p.z))
-                        .map(|ld| ((p.x, p.z), ld.clone()))
+                        .map(|ld| ((p.x, p.z), Arc::clone(ld)))
                 })
                 .collect(),
             grass_colormap: Arc::clone(&self.grass_colormap),
@@ -595,6 +796,10 @@ impl MeshDispatcher {
 impl Drop for MeshDispatcher {
     fn drop(&mut self) {
         self.queue.close();
+        // Drop the result receiver so a worker blocked in a full bounded send
+        // unblocks with a disconnect error instead of deadlocking the joins.
+        let (_tx, rx) = crossbeam_channel::bounded(0);
+        drop(std::mem::replace(&mut self.result_rx, rx));
         for handle in self.workers.drain(..) {
             let _ = handle.join();
         }
@@ -613,16 +818,17 @@ struct PendingJob {
     upload_epoch: u64,
     sections: std::ops::Range<i32>,
     is_recompile: bool,
-    enqueued_at: Option<std::time::Instant>,
+    enqueued_at: std::time::Instant,
     snapshot: ChunkStoreSnapshot,
     registry: Arc<BlockRegistry>,
     uv_map: Arc<AtlasUVMap>,
     tx: crossbeam_channel::Sender<ChunkMeshData>,
+    pool: Arc<BufferPool>,
 }
 
 impl PendingJob {
     fn run(self) {
-        let started_at = self.enqueued_at.map(|_| std::time::Instant::now());
+        let started_at = std::time::Instant::now();
         let mut mesh = mesh_chunk_snapshot(
             &self.snapshot,
             self.pos,
@@ -630,26 +836,70 @@ impl PendingJob {
             &self.uv_map,
             self.lod,
             self.sections,
+            &self.pool,
         );
+        let meshed_at = std::time::Instant::now();
         mesh.content_gen = self.content_gen;
         mesh.upload_epoch = self.upload_epoch;
-        if let (Some(enqueued_at), Some(started_at)) = (self.enqueued_at, started_at) {
+        mesh.queue_ms = (started_at - self.enqueued_at).as_secs_f32() * 1000.0;
+        mesh.mesh_ms = (meshed_at - started_at).as_secs_f32() * 1000.0;
+        if self.is_recompile {
             mesh.timing = Some(RemeshTiming {
-                enqueued_at,
+                enqueued_at: self.enqueued_at,
                 started_at,
-                meshed_at: std::time::Instant::now(),
+                meshed_at,
             });
         }
         let _ = self.tx.send(mesh);
     }
 }
 
+/// X/Z (column) distance from `cam` to a chunk's centre. Meshing order is
+/// purely horizontal distance; occlusion gates drawing, not meshing.
+fn column_dist_sq(pos: ChunkPos, cam: glam::DVec3) -> f64 {
+    let dx = (pos.x as f64 * 16.0 + 8.0) - cam.x;
+    let dz = (pos.z as f64 * 16.0 + 8.0) - cam.z;
+    dx * dx + dz * dz
+}
+
+/// A queued bulk-load job keyed by its column distance for the load heap.
+struct LoadEntry {
+    dist: f64,
+    job: PendingJob,
+}
+
+impl PartialEq for LoadEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.dist == other.dist
+    }
+}
+impl Eq for LoadEntry {}
+impl PartialOrd for LoadEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for LoadEntry {
+    // Reversed so `BinaryHeap` (a max-heap) pops the nearest (smallest dist).
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.dist.total_cmp(&self.dist)
+    }
+}
+
 struct QueueState {
-    tasks: Vec<PendingJob>,
+    /// Edits, kept small (a handful in flight) so a linear scan + in-place
+    /// replace stays cheap.
+    recompiles: Vec<PendingJob>,
+    /// Bulk loads, a min-by-distance heap so dequeue is `O(log n)` under the
+    /// lock instead of an `O(n)` scan (the old contention point).
+    loads: BinaryHeap<LoadEntry>,
     // Consecutive edits served ahead of an initial load before one is forced, so
     // streaming never starves (vanilla SectionTaskDynamicQueue.MAX_RECOMPILE_QUOTA).
     recompile_quota: i32,
     camera: glam::DVec3,
+    /// Camera the load heap is keyed against; re-keyed only when the camera
+    /// crosses a bucket, so push/pop stay cheap between rebuilds.
+    sort_cam: glam::DVec3,
 }
 
 /// Re-orderable mesh queue, a port of vanilla `SectionTaskDynamicQueue`. The
@@ -665,9 +915,11 @@ impl MeshQueue {
     fn new() -> Self {
         Self {
             state: Mutex::new(QueueState {
-                tasks: Vec::new(),
+                recompiles: Vec::new(),
+                loads: BinaryHeap::new(),
                 recompile_quota: MAX_RECOMPILE_QUOTA,
                 camera: glam::DVec3::ZERO,
+                sort_cam: glam::DVec3::ZERO,
             }),
             available: Condvar::new(),
             closed: AtomicBool::new(false),
@@ -676,25 +928,52 @@ impl MeshQueue {
 
     fn push(&self, job: PendingJob) {
         let mut state = self.state.lock().unwrap();
-        // A re-edit of a still-queued section replaces the queued job in place
-        // instead of duplicating it. Bulk loads can't duplicate (`meshed` gates
-        // them), so only edits need this.
-        if job.is_recompile
-            && let Some(existing) = state
-                .tasks
+        if job.is_recompile {
+            // A re-edit of a still-queued section replaces the queued job in
+            // place instead of duplicating it. Bulk loads can't duplicate
+            // (`meshed` gates them), so only edits need this.
+            if let Some(existing) = state
+                .recompiles
                 .iter_mut()
-                .find(|t| t.is_recompile && t.pos == job.pos && t.sections == job.sections)
-        {
-            *existing = job;
+                .find(|t| t.pos == job.pos && t.sections == job.sections)
+            {
+                *existing = job;
+            } else {
+                state.recompiles.push(job);
+            }
         } else {
-            state.tasks.push(job);
+            let dist = column_dist_sq(job.pos, state.sort_cam);
+            state.loads.push(LoadEntry { dist, job });
         }
         drop(state);
         self.available.notify_one();
     }
 
     fn set_camera(&self, camera: glam::DVec3) {
-        self.state.lock().unwrap().camera = camera;
+        const BUCKET: f64 = 8.0;
+        let mut state = self.state.lock().unwrap();
+        state.camera = camera;
+        let crossed = (camera.x / BUCKET).floor() != (state.sort_cam.x / BUCKET).floor()
+            || (camera.z / BUCKET).floor() != (state.sort_cam.z / BUCKET).floor();
+        if !crossed {
+            return;
+        }
+        // Re-key the load heap to the new bucket (pop still gives the nearest).
+        // The O(n) rebuild happens off-lock so workers aren't blocked; sort_cam
+        // is updated first so concurrent pushes key against the new camera, and
+        // workers that find the heap empty meanwhile just condvar-wait.
+        state.sort_cam = camera;
+        let taken = std::mem::take(&mut state.loads);
+        drop(state);
+        let rekeyed: Vec<LoadEntry> = taken
+            .into_iter()
+            .map(|e| LoadEntry {
+                dist: column_dist_sq(e.job.pos, camera),
+                job: e.job,
+            })
+            .collect();
+        self.state.lock().unwrap().loads.extend(rekeyed);
+        self.available.notify_all();
     }
 
     fn close(&self) {
@@ -728,41 +1007,48 @@ impl MeshQueue {
 /// over initial loads when the edit is closer, bounded by the recompile quota.
 /// Mirrors vanilla `SectionTaskDynamicQueue.poll`.
 fn poll(state: &mut QueueState) -> Option<PendingJob> {
-    let camera = state.camera;
-    let dist_sq = |task: &PendingJob| {
-        let dx = (task.pos.x as f64 * 16.0 + 8.0) - camera.x;
-        let dz = (task.pos.z as f64 * 16.0 + 8.0) - camera.z;
-        dx * dx + dz * dz
-    };
-
-    // Both lanes mesh nearest-first; edits (recompiles) are preferred over initial
-    // loads when closer, bounded by the recompile quota. Occlusion gates drawing,
-    // not meshing, so meshing order is purely distance-based.
-    let mut best_initial: Option<(usize, f64)> = None;
-    let mut best_recompile: Option<(usize, f64)> = None;
-    for (i, task) in state.tasks.iter().enumerate() {
-        let dist = dist_sq(task);
-        if task.is_recompile {
-            if best_recompile.is_none_or(|(_, d)| dist < d) {
-                best_recompile = Some((i, dist));
-            }
-        } else if best_initial.is_none_or(|(_, d)| dist < d) {
-            best_initial = Some((i, dist));
-        }
-    }
+    let cam = state.sort_cam;
+    // Nearest queued recompile (edits are few, so the linear scan is cheap).
+    let best_recompile = state
+        .recompiles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, column_dist_sq(t.pos, cam)))
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    let load_dist = state.loads.peek().map(|e| e.dist);
 
     if let Some((ri, rd)) = best_recompile {
-        let take_recompile = match best_initial {
+        let take_recompile = match load_dist {
             None => true,
-            Some((_, id)) => state.recompile_quota > 0 && rd < id,
+            Some(ld) => state.recompile_quota > 0 && rd < ld,
         };
         if take_recompile {
             state.recompile_quota -= 1;
-            return Some(state.tasks.swap_remove(ri));
+            return Some(state.recompiles.swap_remove(ri));
         }
     }
     state.recompile_quota = MAX_RECOMPILE_QUOTA;
-    best_initial.map(|(ii, _)| state.tasks.swap_remove(ii))
+    state.loads.pop().map(|e| e.job)
+}
+
+/// Run mesh workers below normal priority so the OS preempts them for the
+/// main/render thread during a load burst, while they still use idle cores.
+#[cfg(windows)]
+fn lower_current_thread_priority() {
+    const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThread() -> isize;
+        fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+    }
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+#[cfg(not(windows))]
+fn lower_current_thread_priority() {
+    // TODO: lower priority on non-Windows (libc::nice / pthread_setschedparam).
 }
 
 struct ChunkStoreSnapshot {
@@ -770,7 +1056,7 @@ struct ChunkStoreSnapshot {
         ChunkPos,
         Option<Arc<parking_lot::RwLock<azalea_world::Chunk>>>,
     )>,
-    light: std::collections::HashMap<(i32, i32), crate::world::chunk::ChunkLightData>,
+    light: std::collections::HashMap<(i32, i32), Arc<crate::world::chunk::ChunkLightData>>,
     grass_colormap: Arc<Colormap>,
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
@@ -1091,6 +1377,7 @@ fn mesh_chunk_snapshot(
     uv_map: &AtlasUVMap,
     lod: u32,
     sections_to_mesh: std::ops::Range<i32>,
+    pool: &BufferPool,
 ) -> ChunkMeshData {
     let mut logged_missing: std::collections::HashSet<&'static str> =
         std::collections::HashSet::new();
@@ -1109,14 +1396,15 @@ fn mesh_chunk_snapshot(
     let by_start = min_y + range.start * 16;
     let by_end = min_y + range.end * 16;
 
-    let mut sections: Vec<SectionMesh> = (0..section_count)
-        .map(|i| SectionMesh {
-            section_index: i,
-            vertices: Vec::new(),
-            indices: Vec::new(),
-            water_indices: Vec::new(),
-        })
-        .collect();
+    let mut sinks: Vec<MeshSink> = (0..section_count).map(|_| MeshSink::default()).collect();
+    // In-range sections get recycled buffers (capacity retained from earlier
+    // meshes) so the worker fills them without going through the OS allocator.
+    // The cutout list stays un-pooled (empty for the common all-solid section).
+    for si in range.clone() {
+        let sink = &mut sinks[si as usize];
+        sink.vertices = pool.take_scratch();
+        sink.solid = pool.take_indices();
+    }
 
     // The type map is a state->id map, so it only needs the meshed span (+1-block
     // border for face culling); states outside it are never queried.
@@ -1130,11 +1418,11 @@ fn mesh_chunk_snapshot(
     let mut visibility: Vec<(i32, VisibilitySet)> = Vec::new();
     if let Some(ref tm) = type_map {
         for si in range.clone() {
-            let sec = &mut sections[si as usize];
+            let sink = &mut sinks[si as usize];
             let section_y = min_y + si * 16;
             let vis = greedy_mesh_section(
-                &mut sec.vertices,
-                &mut sec.indices,
+                &mut sink.vertices,
+                &mut sink.solid,
                 snapshot,
                 registry,
                 tm,
@@ -1198,95 +1486,34 @@ fn mesh_chunk_snapshot(
                 // a non-16-aligned world height can't index past the last section.
                 let s =
                     (((by - min_y) / 16) as usize).min((section_count as usize).saturating_sub(1));
-                let sec = &mut sections[s];
+                let sink = &mut sinks[s];
 
                 if lod > 0 {
                     emit_lod_cube(
-                        &mut sec.vertices,
-                        &mut sec.indices,
-                        block_pos,
-                        state,
-                        snapshot,
-                        registry,
-                        uv_map,
-                        bx,
-                        by,
-                        bz,
-                        step,
+                        sink, block_pos, state, snapshot, registry, uv_map, bx, by, bz, step,
                     );
                 } else if let BlockKind::Water | BlockKind::Lava = kind {
-                    // Water is translucent (separate blended pass); lava is opaque.
-                    let fluid_indices = if matches!(kind, BlockKind::Water) {
-                        &mut sec.water_indices
-                    } else {
-                        &mut sec.indices
-                    };
                     emit_fluid(
-                        &mut sec.vertices,
-                        fluid_indices,
-                        block_pos,
-                        state,
-                        snapshot,
-                        registry,
-                        uv_map,
-                        bx,
-                        by,
-                        bz,
+                        sink, kind, block_pos, state, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(baked) = registry.get_baked_model(state) {
                     emit_baked_model(
-                        &mut sec.vertices,
-                        &mut sec.indices,
-                        block_pos,
-                        baked,
-                        snapshot,
-                        registry,
-                        uv_map,
-                        bx,
-                        by,
-                        bz,
+                        sink, block_pos, baked, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(quads) = registry.get_multipart_quads(state) {
                     emit_multipart(
-                        &mut sec.vertices,
-                        &mut sec.indices,
-                        block_pos,
-                        &quads,
-                        snapshot,
-                        registry,
-                        uv_map,
-                        bx,
-                        by,
-                        bz,
+                        sink, block_pos, &quads, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
-                        &mut sec.vertices,
-                        &mut sec.indices,
-                        block_pos,
-                        textures,
-                        snapshot,
-                        registry,
-                        uv_map,
-                        bx,
-                        by,
-                        bz,
+                        sink, block_pos, textures, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else {
                     let id = crate::world::block::block_id(state);
                     if logged_missing.insert(id) {
                         tracing::warn!("Missing model: {id}");
                     }
-                    emit_missing_cube(
-                        &mut sec.vertices,
-                        &mut sec.indices,
-                        block_pos,
-                        snapshot,
-                        registry,
-                        bx,
-                        by,
-                        bz,
-                    );
+                    emit_missing_cube(sink, block_pos, snapshot, registry, bx, by, bz);
                 }
                 by += step;
             }
@@ -1295,27 +1522,56 @@ fn mesh_chunk_snapshot(
         local_z += step;
     }
 
-    // Keep only non-empty sections (untouched out-of-range ones stay empty);
-    // empty indices within `range` are freed by the per-section upload.
-    sections.retain(|s| {
-        !s.vertices.is_empty() && (!s.indices.is_empty() || !s.water_indices.is_empty())
-    });
+    // Finalize each non-empty section: concatenate cutout indices after solid
+    // (recording the split), take the AABB from the float positions, then
+    // quantize against the section origin so upload is a plain memcpy. Empty
+    // in-range sections recycle their buffers rather than dropping the
+    // retained capacity.
+    let mut sections = Vec::with_capacity(sinks.len());
+    for (i, mut sink) in sinks.into_iter().enumerate() {
+        if sink.solid.is_empty() && sink.cutout.is_empty() && sink.water.is_empty() {
+            pool.recycle_scratch(sink.vertices);
+            pool.recycle_indices(sink.solid);
+            continue;
+        }
+        let solid_index_count = sink.solid.len() as u32;
+        sink.solid.extend_from_slice(&sink.cutout);
+        let aabb = section_aabb(&sink.vertices);
+        let origin = [
+            (pos.x * 16) as f32,
+            (min_y + i as i32 * 16) as f32,
+            (pos.z * 16) as f32,
+        ];
+        let mut packed = pool.take_vertices();
+        packed.extend(sink.vertices.iter().map(|v| pack_vertex(v, origin)));
+        pool.recycle_scratch(sink.vertices);
+        sections.push(SectionMesh {
+            section_index: i as i32,
+            vertices: packed,
+            aabb,
+            indices: sink.solid,
+            solid_index_count,
+            water_indices: sink.water,
+        });
+    }
 
     ChunkMeshData {
         pos,
+        min_y,
         sections,
         replaced: range,
         content_gen: 0,
         upload_epoch: 0,
         visibility,
         timing: None,
+        queue_ms: 0.0,
+        mesh_ms: 0.0,
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn emit_baked_model(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
     block_pos: [f32; 3],
     model: &BakedModel,
     snapshot: &ChunkStoreSnapshot,
@@ -1347,8 +1603,7 @@ fn emit_baked_model(
             [quad.shade_light; 4]
         };
         emit_face(
-            vertices,
-            indices,
+            sink,
             block_pos,
             &quad.positions,
             &quad.uvs,
@@ -1361,8 +1616,7 @@ fn emit_baked_model(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_cube_faces(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
     block_pos: [f32; 3],
     textures: &crate::world::block::registry::FaceTextures,
     snapshot: &ChunkStoreSnapshot,
@@ -1401,8 +1655,7 @@ fn emit_cube_faces(
         let is_side = i >= 2;
         if let Some(overlay) = textures.side_overlay.as_deref().filter(|_| is_side) {
             emit_face(
-                vertices,
-                indices,
+                sink,
                 block_pos,
                 &positions,
                 &uvs,
@@ -1412,8 +1665,7 @@ fn emit_cube_faces(
             );
             let overlay_region = uv_map.get_region(overlay);
             emit_face(
-                vertices,
-                indices,
+                sink,
                 block_pos,
                 &positions,
                 &uvs,
@@ -1429,9 +1681,7 @@ fn emit_cube_faces(
             } else {
                 PACKED_WHITE_SHIFTED
             };
-            emit_face(
-                vertices, indices, block_pos, &positions, &uvs, lights, region, face_tint,
-            );
+            emit_face(sink, block_pos, &positions, &uvs, lights, region, face_tint);
         }
     }
 }
@@ -1507,8 +1757,8 @@ fn block_face_tex_tint(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_fluid(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
+    kind: BlockKind,
     block_pos: [f32; 3],
     state: azalea_block::BlockState,
     snapshot: &ChunkStoreSnapshot,
@@ -1520,6 +1770,19 @@ fn emit_fluid(
 ) {
     let (region, tint) =
         block_face_tex_tint(state, Direction::Up, uv_map, snapshot, registry, bx, by, bz);
+
+    // Water is translucent (separate blended pass); lava is opaque.
+    let MeshSink {
+        vertices,
+        solid,
+        water,
+        ..
+    } = sink;
+    let indices = if matches!(kind, BlockKind::Water) {
+        water
+    } else {
+        solid
+    };
 
     for dir in &CUBE_FACE_DIRS {
         let offset = dir.offset();
@@ -1540,7 +1803,7 @@ fn emit_fluid(
                 p[1] = FLUID_MAX_HEIGHT;
             }
 
-            emit_face(
+            emit_face_into(
                 vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
             );
 
@@ -1548,7 +1811,7 @@ fn emit_fluid(
             // looking up). Reversed winding so it survives back-face culling.
             let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
             let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
-            emit_face(
+            emit_face_into(
                 vertices,
                 indices,
                 block_pos,
@@ -1561,7 +1824,7 @@ fn emit_fluid(
             continue;
         }
 
-        emit_face(
+        emit_face_into(
             vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
         );
     }
@@ -1569,8 +1832,7 @@ fn emit_fluid(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_multipart(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
     block_pos: [f32; 3],
     quads: &[&crate::world::block::model::BakedQuad],
     snapshot: &ChunkStoreSnapshot,
@@ -1597,8 +1859,7 @@ fn emit_multipart(
             snapshot.dry_foliage_tint(bx, by, bz),
         );
         emit_face(
-            vertices,
-            indices,
+            sink,
             block_pos,
             &quad.positions,
             &quad.uvs,
@@ -1611,8 +1872,7 @@ fn emit_multipart(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_lod_cube(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
     block_pos: [f32; 3],
     state: azalea_block::BlockState,
     snapshot: &ChunkStoreSnapshot,
@@ -1655,9 +1915,9 @@ fn emit_lod_cube(
         let (positions, uvs, light) = cube_face_geometry(*dir);
         let s = step as f32;
         let sy = if is_fluid { fluid_top } else { s };
-        let base = vertices.len() as u32;
+        let base = sink.vertices.len() as u32;
         for i in 0..4 {
-            vertices.push(ChunkVertex {
+            sink.vertices.push(ChunkVertex {
                 position: [
                     block_pos[0] + positions[i][0] * s,
                     block_pos[1] + positions[i][1] * sy,
@@ -1670,7 +1930,14 @@ fn emit_lod_cube(
                 light_tint: pack_light_tint(light, tint),
             });
         }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+        sink.indices_for(region.opaque).extend_from_slice(&[
+            base,
+            base + 1,
+            base + 2,
+            base + 2,
+            base + 3,
+            base,
+        ]);
     }
 }
 
@@ -1678,8 +1945,7 @@ const MISSING_TINT: u32 = pack_tint_shifted([1.0, 0.0, 1.0]);
 
 #[allow(clippy::too_many_arguments)]
 fn emit_missing_cube(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    sink: &mut MeshSink,
     block_pos: [f32; 3],
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -1695,9 +1961,9 @@ fn emit_missing_cube(
         }
 
         let (positions, _, light) = cube_face_geometry(*dir);
-        let base = vertices.len() as u32;
+        let base = sink.vertices.len() as u32;
         for pos in &positions {
-            vertices.push(ChunkVertex {
+            sink.vertices.push(ChunkVertex {
                 position: [
                     block_pos[0] + pos[0],
                     block_pos[1] + pos[1],
@@ -1707,7 +1973,9 @@ fn emit_missing_cube(
                 light_tint: pack_light_tint(light, MISSING_TINT),
             });
         }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+        // The missing tile is a solid checker, so the cube goes in the solid pass.
+        sink.solid
+            .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
     }
 }
 
@@ -1720,8 +1988,33 @@ pub(crate) const CUBE_FACE_DIRS: [Direction; 6] = [
     Direction::West,
 ];
 
+/// Emit a face into the index list picked by the quad's sprite opacity
+/// (solid vs cutout pass). Fluids route explicitly via [`emit_face_into`].
 #[allow(clippy::too_many_arguments)]
 fn emit_face(
+    sink: &mut MeshSink,
+    block_pos: [f32; 3],
+    positions: &[[f32; 3]; 4],
+    uvs: &[[f32; 2]; 4],
+    lights: [f32; 4],
+    region: AtlasRegion,
+    tint: u32,
+) {
+    let opaque = region.opaque;
+    let MeshSink {
+        vertices,
+        solid,
+        cutout,
+        ..
+    } = sink;
+    let indices = if opaque { solid } else { cutout };
+    emit_face_into(
+        vertices, indices, block_pos, positions, uvs, lights, region, tint,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_face_into(
     vertices: &mut Vec<ChunkVertex>,
     indices: &mut Vec<u32>,
     block_pos: [f32; 3],

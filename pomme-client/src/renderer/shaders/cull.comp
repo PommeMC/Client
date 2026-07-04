@@ -9,6 +9,9 @@ struct ChunkMeta {
     uint first_index;
     int vertex_offset;
     uint visibility;
+    // vec3 + uint pack into one 16-byte slot, matching the Rust layout.
+    vec3 origin;
+    uint solid_index_count;
 };
 
 struct DrawCmd {
@@ -39,6 +42,32 @@ layout(set = 0, binding = 3) buffer CountBuf {
     uint draw_count;
 };
 
+layout(set = 0, binding = 4) writeonly buffer IndirectCutoutBuf {
+    DrawCmd cutout_draws[];
+};
+
+layout(set = 0, binding = 5) buffer CutoutCountBuf {
+    uint cutout_draw_count;
+};
+
+// Emit one indexed draw covering [first..first+count) for this section. The
+// per-instance attributes (origin + fade) come from meta entry `idx`, routed via
+// first_instance.
+void emit(uint count, uint first, int vertex_offset, uint idx, bool cutout) {
+    if (count == 0u) return;
+    DrawCmd d;
+    d.index_count = count;
+    d.instance_count = 1u;
+    d.first_index = first;
+    d.vertex_offset = vertex_offset;
+    d.first_instance = idx;
+    if (cutout) {
+        cutout_draws[atomicAdd(cutout_draw_count, 1u)] = d;
+    } else {
+        draws[atomicAdd(draw_count, 1u)] = d;
+    }
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= chunk_count) return;
@@ -59,10 +88,8 @@ void main() {
         if (d < 0.0) return;
     }
 
-    uint slot = atomicAdd(draw_count, 1u);
-    draws[slot].index_count = m.index_count;
-    draws[slot].instance_count = 1u;
-    draws[slot].first_index = m.first_index;
-    draws[slot].vertex_offset = m.vertex_offset;
-    draws[slot].first_instance = m.visibility;
+    // Indices split solid-first.
+    uint solid_count = m.solid_index_count;
+    emit(solid_count, m.first_index, m.vertex_offset, idx, false);
+    emit(m.index_count - solid_count, m.first_index + solid_count, m.vertex_offset, idx, true);
 }

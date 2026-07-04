@@ -871,14 +871,15 @@ impl Renderer {
             .wait_for_fences(&self.ctx.in_flight_fences, true, u64::MAX);
     }
 
-    /// Returns the section indices dropped due to pool exhaustion (need
+    /// Upload a batch of chunk meshes in a single coalesced transfer. Returns,
+    /// per mesh that hit pool exhaustion, the section indices dropped (need
     /// re-mesh); empty on success.
-    pub fn upload_chunk_mesh(&mut self, mesh: &ChunkMeshData) -> Vec<i32> {
-        self.chunk_buffers.upload(
+    pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> Vec<(ChunkPos, Vec<i32>)> {
+        self.chunk_buffers.upload_batch(
             &self.ctx.device,
             &self.ctx.allocator,
             self.ctx.graphics_queue,
-            mesh,
+            meshes,
         )
     }
 
@@ -1484,8 +1485,12 @@ impl Renderer {
                 }
 
                 let t_cull = std::time::Instant::now();
-                self.chunk_pipeline.bind(cmd, frame);
-                self.chunk_buffers.draw_indirect(cmd, frame);
+                // Solid (no discard) first so it lays down depth and early-Z lets
+                // the front-to-back order reject occluded fragments; cutout after.
+                self.chunk_pipeline.bind(cmd, frame, false);
+                self.chunk_buffers.draw_indirect(cmd, frame, false);
+                self.chunk_pipeline.bind(cmd, frame, true);
+                self.chunk_buffers.draw_indirect(cmd, frame, true);
                 let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
                 if let Some((block_pos, stage, state)) = destroy_info {
@@ -1531,7 +1536,12 @@ impl Renderer {
                 // but doesn't write depth. CPU frustum-culled, reusing the entity
                 // frustum/eye.
                 self.chunk_pipeline.bind_water(cmd, frame);
-                self.chunk_buffers.draw_water(cmd, &ent_frustum, ent_eye);
+                self.chunk_buffers.draw_water(
+                    cmd,
+                    self.chunk_pipeline.pipeline_layout,
+                    &ent_frustum,
+                    ent_eye,
+                );
 
                 // Clouds draw after opaque world geometry (so terrain occludes
                 // them) and before weather, depth-tested against the scene.

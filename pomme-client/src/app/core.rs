@@ -313,6 +313,9 @@ impl AppCore {
     ) -> Option<String> {
         let rx = &connection.event_rx;
 
+        // Phase timers for the chunk-load benchmark's worst-frame breakdown.
+        let t_net = std::time::Instant::now();
+
         let mut chunks_to_mesh = Vec::new();
         // Block edits go on the priority lane so they apply instantly even while
         // chunks stream in, instead of starving behind the load backlog.
@@ -1041,8 +1044,16 @@ impl AppCore {
         // then enqueue everything that needs meshing — visible-first, with hidden
         // columns backfilled at a bounded rate so the world still completes.
         let loads_happened = !chunks_to_mesh.is_empty();
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1000.0;
+        game.last_update_phases.net_decode_ms = ms(t_net);
+
+        let t_vis = std::time::Instant::now();
         game.update_visibility(renderer, player_chunk, loads_happened);
+        game.last_update_phases.visibility_ms = ms(t_vis);
+
+        let t_rescan = std::time::Instant::now();
         game.rescan_mesh_jobs(player_chunk);
+        game.last_update_phases.rescan_ms = ms(t_rescan);
 
         disconnect_reason
     }

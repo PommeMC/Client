@@ -1,3 +1,9 @@
+// Per-thread-heap allocator (see Cargo.toml): keeps the chunk-mesh worker
+// pool's cross-thread Vec churn from serializing on the system heap's global
+// lock and stalling the main thread.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod app;
 mod args;
 mod assets;
@@ -97,7 +103,16 @@ fn main() {
     data_dirs.ensure_game_dir().ok();
     tracing::info!("Installation directory: {}", data_dirs.game_dir.display());
 
-    let rt = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"));
+    // A single connection needs only a few async workers; the default runtime
+    // spawns one per core and floods them decoding the chunk-load burst, starving
+    // the render/mesh threads. Cap it so those cores stay free.
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime"),
+    );
 
     let user = UserData::from_args(args.username, args.uuid, args.access_token);
 

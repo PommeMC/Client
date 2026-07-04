@@ -14,6 +14,10 @@ pub struct AtlasRegion {
     pub v_min: f32,
     pub u_max: f32,
     pub v_max: f32,
+    /// Every level-0 texel is fully opaque (alpha 255), so quads using this
+    /// sprite can render in the no-discard solid pass (early-Z). Sprites with
+    /// any transparent texel are cutout and stay in the discard pass.
+    pub opaque: bool,
 }
 
 #[derive(Clone)]
@@ -149,7 +153,8 @@ impl TextureAtlas {
         for src in &sources {
             match placements.get(src.name.as_str()) {
                 Some(Some((cx, cy))) => {
-                    let region = pixel_region(*cx, *cy, src.w, src.h, atlas_size);
+                    let mut region = pixel_region(*cx, *cy, src.w, src.h, atlas_size);
+                    region.opaque = sprite_is_opaque(&src.data);
                     for py in 0..src.h {
                         for px in 0..src.w {
                             let s = ((py * src.w + px) * 4) as usize;
@@ -321,7 +326,17 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion 
         v_min: (y as f32 + INSET) / s,
         u_max: ((x + w) as f32 - INSET) / s,
         v_max: ((y + h) as f32 - INSET) / s,
+        // Filled in by the caller from the sprite's texels; the missing tile is a
+        // solid checker, so the geometric default is opaque.
+        opaque: true,
     }
+}
+
+/// Whether every level-0 texel of an RGBA sprite is fully opaque (alpha 255).
+/// Conservative: any transparency (or unknown) routes the sprite to the cutout
+/// pass, so a hole never renders solid.
+fn sprite_is_opaque(data: &[u8]) -> bool {
+    data.chunks_exact(4).all(|px| px[3] == 255)
 }
 
 type PackResult = (HashMap<String, Option<(u32, u32)>>, AtlasRegion);
