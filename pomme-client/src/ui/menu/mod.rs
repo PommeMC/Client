@@ -352,6 +352,8 @@ pub struct MainMenu {
     field_undo_stack: Vec<(u8, String)>,
     cursor_blink: Instant,
     last_click_time: Instant,
+    /// Steady clock for label scroll animation.
+    created: Instant,
     last_click_index: Option<usize>,
     pub gui_scale_setting: u32,
     pub render_distance: u32,
@@ -443,6 +445,7 @@ impl MainMenu {
             field_undo_stack: Vec::new(),
             cursor_blink: Instant::now(),
             last_click_time: Instant::now(),
+            created: Instant::now(),
             last_click_index: None,
             gui_scale_setting: settings.gui_scale,
             render_distance: settings.render_distance,
@@ -702,12 +705,22 @@ impl MainMenu {
             Screen::Disconnected(_) => {
                 self.build_disconnected(screen_w, screen_h, input, &text_width_fn)
             }
-            Screen::Options => self.build_options(screen_w, screen_h, input),
-            Screen::OptionsOnline => self.build_options_online(screen_w, screen_h, input),
-            Screen::OptionsVideo => self.build_options_video(screen_w, screen_h, input),
-            Screen::OptionsSkinCustomization => self.build_options_skin(screen_w, screen_h, input),
-            Screen::OptionsMusicSounds => self.build_options_music(screen_w, screen_h, input),
-            Screen::OptionsControls => self.build_options_controls(screen_w, screen_h, input),
+            Screen::Options => self.build_options(screen_w, screen_h, input, &text_width_fn),
+            Screen::OptionsOnline => {
+                self.build_options_online(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::OptionsVideo => {
+                self.build_options_video(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::OptionsSkinCustomization => {
+                self.build_options_skin(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::OptionsMusicSounds => {
+                self.build_options_music(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::OptionsControls => {
+                self.build_options_controls(screen_w, screen_h, input, &text_width_fn)
+            }
             Screen::OptionsKeybinds => self.build_options_stub(
                 screen_w,
                 screen_h,
@@ -719,12 +732,14 @@ impl MainMenu {
                 let back = self.settings_back.clone_screen();
                 self.build_options_stub(screen_w, screen_h, input, "Language", back)
             }
-            Screen::OptionsChatSettings => self.build_options_chat(screen_w, screen_h, input),
+            Screen::OptionsChatSettings => {
+                self.build_options_chat(screen_w, screen_h, input, &text_width_fn)
+            }
             Screen::OptionsResourcePacks => {
                 self.build_options_resource_packs(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::OptionsAccessibility => {
-                self.build_options_accessibility(screen_w, screen_h, input)
+                self.build_options_accessibility(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::OptionsTelemetry => self.build_options_stub(
                 screen_w,
