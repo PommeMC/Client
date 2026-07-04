@@ -14,7 +14,8 @@ use crate::physics::collision::resolve_collision;
 use crate::renderer::ParticleQuad;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::mesher::{
-    BiomeClimate, Colormap, dry_foliage_color, foliage_color, grass_color, world_brightness,
+    BiomeClimate, Colormap, blend_color, dry_foliage_color, foliage_color, grass_color,
+    world_brightness,
 };
 use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
 use crate::world::block::registry::{BlockRegistry, Tint};
@@ -255,8 +256,7 @@ impl ParticleStore {
         }
     }
 
-    /// The block's biome tint averaged over the vanilla 5x5 biome blend
-    /// (`BiomeColors` with the default blend radius of 2).
+    /// The block's biome tint averaged over the vanilla 5x5 biome blend.
     fn blend_tint(
         &self,
         tint: Tint,
@@ -264,28 +264,18 @@ impl ParticleStore {
         chunks: &ChunkStore,
         biome_climate: &HashMap<u32, BiomeClimate>,
     ) -> [f32; 3] {
-        const RADIUS: i32 = 2;
-        const COUNT: f32 = ((RADIUS * 2 + 1) * (RADIUS * 2 + 1)) as f32;
-        let mut sum = [0.0f32; 3];
-        for dz in -RADIUS..=RADIUS {
-            for dx in -RADIUS..=RADIUS {
-                let (x, z) = (pos.x + dx, pos.z + dz);
-                let climate = biome_climate
-                    .get(&chunks.biome_id(x, pos.y, z))
-                    .copied()
-                    .unwrap_or_default();
-                let c = match tint {
-                    Tint::Grass => grass_color(&climate, &self.grass_colormap, x, z),
-                    Tint::Foliage => foliage_color(&climate, &self.foliage_colormap),
-                    Tint::DryFoliage => dry_foliage_color(&climate, &self.dry_foliage_colormap),
-                    Tint::None => [1.0; 3],
-                };
-                for (s, v) in sum.iter_mut().zip(c) {
-                    *s += v;
-                }
+        blend_color(pos.x, pos.z, |x, z| {
+            let climate = biome_climate
+                .get(&chunks.biome_id(x, pos.y, z))
+                .copied()
+                .unwrap_or_default();
+            match tint {
+                Tint::Grass => grass_color(&climate, &self.grass_colormap, x, z),
+                Tint::Foliage => foliage_color(&climate, &self.foliage_colormap),
+                Tint::DryFoliage => dry_foliage_color(&climate, &self.dry_foliage_colormap),
+                Tint::None => [1.0; 3],
             }
-        }
-        sum.map(|s| s / COUNT)
+        })
     }
 
     /// Vanilla `ParticleGroup` caps: hard limit plus probabilistic rejection

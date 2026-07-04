@@ -24,7 +24,7 @@ pub fn is_survival(game_mode: u8) -> bool {
     game_mode == 0 || game_mode == 2
 }
 
-pub fn is_water_block(state: azalea_block::BlockState) -> bool {
+fn is_water_block(state: azalea_block::BlockState) -> bool {
     if state.is_air() {
         return false;
     }
@@ -37,14 +37,6 @@ pub fn is_water_block(state: azalea_block::BlockState) -> bool {
         .property_map()
         .get("waterlogged")
         .is_some_and(|v| *v == "true")
-}
-
-pub fn is_lava_block(state: azalea_block::BlockState) -> bool {
-    if state.is_air() {
-        return false;
-    }
-    let block: Box<dyn azalea_block::BlockTrait> = state.into();
-    block.id() == "lava"
 }
 
 pub struct LocalPlayer {

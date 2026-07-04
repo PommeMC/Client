@@ -295,7 +295,6 @@ impl InteractionState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn tick(
         &mut self,
         input: &InputState,

@@ -123,6 +123,7 @@ pub struct GameState {
     /// `content_gen` above). Bumped per edited section so a result is
     /// dropped only when *that* section was edited again — editing one
     /// section never invalidates a sibling section's in-flight result.
+    /// Sections meshed together as one edit span share one gen value.
     pub section_gen: HashMap<(ChunkPos, i32), u64>,
     pub next_section_gen: u64,
     /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
@@ -308,29 +309,40 @@ impl GameState {
     /// visibility. Bumps that section's generation so the result is dropped
     /// only if the same section is edited again before it lands.
     pub fn enqueue_section_edit(&mut self, col: ChunkPos, si: i32, lod: u32) {
-        let g = self.bump_section_gen(col, si);
+        let g = self.bump_section_gen(col, si..si + 1);
         self.mesh_dispatcher
             .enqueue(&self.chunk_store, col, lod, true, g, si..si + 1);
     }
 
     /// Vanilla `compileSync` under `PrioritizeChunkUpdates.PLAYER_AFFECTED`:
-    /// mesh and upload a player-edited section on the spot so the edit shows
-    /// the same frame. (Vanilla defaults to NONE/async, but pomme's async
-    /// round-trip is several frames, which leaves a broken block visibly
-    /// lingering after its crack overlay completes.)
-    pub fn mesh_section_edit_now(&mut self, renderer: &mut Renderer, col: ChunkPos, si: i32) {
-        // The gen bump also invalidates any in-flight async result for this
-        // section, so it can't clobber the sync upload at drain time.
-        let g = self.bump_section_gen(col, si);
+    /// mesh and upload a column's player-edited sections on the spot so the
+    /// edit shows the same frame. (Vanilla defaults to NONE/async, but
+    /// pomme's async round-trip is several frames, which leaves a broken
+    /// block visibly lingering after its crack overlay completes.)
+    pub fn mesh_sections_edit_now(
+        &mut self,
+        renderer: &mut Renderer,
+        col: ChunkPos,
+        sections: std::ops::Range<i32>,
+    ) {
+        // The gen bump drops any in-flight priority result for these
+        // sections at drain time; stale bulk results are rejected by the
+        // buffer's per-section epoch gate (`ChunkMeshData::upload_epoch`).
+        let g = self.bump_section_gen(col, sections.clone());
         let mesh = self
             .mesh_dispatcher
-            .mesh_section_now(&self.chunk_store, col, si, g);
+            .mesh_sections_now(&self.chunk_store, col, sections, g);
         self.apply_mesh_upload(renderer, mesh);
     }
 
-    fn bump_section_gen(&mut self, col: ChunkPos, si: i32) -> u64 {
+    /// One gen for the whole span: the drain stale-check compares every
+    /// section in a mesh's `replaced` range against its single
+    /// `content_gen`, so grouped sections must share a value.
+    fn bump_section_gen(&mut self, col: ChunkPos, sections: std::ops::Range<i32>) -> u64 {
         self.next_section_gen += 1;
-        self.section_gen.insert((col, si), self.next_section_gen);
+        for si in sections {
+            self.section_gen.insert((col, si), self.next_section_gen);
+        }
         self.next_section_gen
     }
 

@@ -231,6 +231,23 @@ pub fn dry_foliage_color(climate: &BiomeClimate, colormap: &Colormap) -> [f32; 3
         .unwrap_or_else(|| colormap.lookup(climate.temperature, climate.downfall))
 }
 
+/// Average a biome color over the vanilla 5x5 horizontal blend
+/// (`BiomeColors` with the default blend radius of 2).
+pub fn blend_color(x: i32, z: i32, mut color_at: impl FnMut(i32, i32) -> [f32; 3]) -> [f32; 3] {
+    const RADIUS: i32 = 2;
+    const COUNT: f32 = ((RADIUS * 2 + 1) * (RADIUS * 2 + 1)) as f32;
+    let mut sum = [0.0f32; 3];
+    for dz in -RADIUS..=RADIUS {
+        for dx in -RADIUS..=RADIUS {
+            let c = color_at(x + dx, z + dz);
+            for (s, v) in sum.iter_mut().zip(c) {
+                *s += v;
+            }
+        }
+    }
+    sum.map(|s| s / COUNT)
+}
+
 fn apply_grass_modifier(modifier: GrassColorModifier, base: [f32; 3], x: i32, z: i32) -> [f32; 3] {
     match modifier {
         GrassColorModifier::None => base,
@@ -517,18 +534,19 @@ impl MeshDispatcher {
     }
 
     /// Vanilla `compileSync` (`PrioritizeChunkUpdates.PLAYER_AFFECTED`): mesh
-    /// one section on the calling thread so a player edit is renderable the
-    /// same frame, skipping the worker round-trip.
-    pub fn mesh_section_now(
+    /// a column's edited sections on the calling thread so a player edit is
+    /// renderable the same frame, skipping the worker round-trip. One
+    /// snapshot serves the whole span.
+    pub fn mesh_sections_now(
         &self,
         chunk_store: &ChunkStore,
         pos: ChunkPos,
-        si: i32,
+        sections: std::ops::Range<i32>,
         content_gen: u64,
     ) -> ChunkMeshData {
         let snapshot = self.build_snapshot(chunk_store, pos);
         let mut mesh =
-            mesh_chunk_snapshot(&snapshot, pos, &self.registry, &self.uv_map, 0, si..si + 1);
+            mesh_chunk_snapshot(&snapshot, pos, &self.registry, &self.uv_map, 0, sections);
         mesh.content_gen = content_gen;
         mesh.upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
         mesh
@@ -826,38 +844,15 @@ impl ChunkStoreSnapshot {
     }
 
     fn grass_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
-        self.blend_color(x, y, z, Self::grass_color_at)
+        blend_color(x, z, |bx, bz| self.grass_color_at(bx, y, bz))
     }
 
     fn foliage_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
-        self.blend_color(x, y, z, Self::foliage_color_at)
+        blend_color(x, z, |bx, bz| self.foliage_color_at(bx, y, bz))
     }
 
     fn dry_foliage_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
-        self.blend_color(x, y, z, Self::dry_foliage_color_at)
-    }
-
-    fn blend_color(
-        &self,
-        x: i32,
-        y: i32,
-        z: i32,
-        color_fn: fn(&Self, i32, i32, i32) -> [f32; 3],
-    ) -> [f32; 3] {
-        const RADIUS: i32 = 2;
-        const COUNT: f32 = ((RADIUS * 2 + 1) * (RADIUS * 2 + 1)) as f32;
-        let mut r = 0.0f32;
-        let mut g = 0.0f32;
-        let mut b = 0.0f32;
-        for dz in -RADIUS..=RADIUS {
-            for dx in -RADIUS..=RADIUS {
-                let c = color_fn(self, x + dx, y, z + dz);
-                r += c[0];
-                g += c[1];
-                b += c[2];
-            }
-        }
-        [r / COUNT, g / COUNT, b / COUNT]
+        blend_color(x, z, |bx, bz| self.dry_foliage_color_at(bx, y, bz))
     }
 
     fn get_light(&self, x: i32, y: i32, z: i32) -> f32 {

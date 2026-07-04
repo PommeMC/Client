@@ -1143,8 +1143,20 @@ impl AppCore {
             for b in dirty {
                 dirty_sections_for_block(&mut sections, b.x, b.y, b.z, min_y, n);
             }
+            // One span per column so each column builds its mesh snapshot
+            // once (the sections of an edit are contiguous per column).
+            let mut spans: Vec<(azalea_core::position::ChunkPos, i32, i32)> = Vec::new();
             for (col, si) in sections {
-                game.mesh_section_edit_now(renderer, col, si);
+                match spans.iter_mut().find(|(c, ..)| *c == col) {
+                    Some((_, lo, hi)) => {
+                        *lo = (*lo).min(si);
+                        *hi = (*hi).max(si);
+                    }
+                    None => spans.push((col, si, si)),
+                }
+            }
+            for (col, lo, hi) in spans {
+                game.mesh_sections_edit_now(renderer, col, lo..hi + 1);
             }
         }
 

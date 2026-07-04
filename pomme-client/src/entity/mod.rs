@@ -2,6 +2,7 @@ pub mod components;
 
 use std::collections::HashMap;
 
+use azalea_block::fluid_state::{FluidKind, FluidState};
 use azalea_core::position::ChunkPos;
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
@@ -9,7 +10,6 @@ use glam::DVec3;
 use crate::entity::components::{LookDirection, Position};
 use crate::physics::aabb::Aabb;
 use crate::physics::collision::resolve_collision;
-use crate::player::{is_lava_block, is_water_block};
 use crate::world::chunk::ChunkStore;
 
 const INTERPOLATION_STEPS: i32 = 3;
@@ -426,19 +426,22 @@ fn tick_item_physics(id: i32, entity: &mut ItemEntity, chunk_store: &ChunkStore)
     }
 
     let state = chunk_store.get_block_state(block_x, block_y, block_z);
-    if is_water_block(state) {
-        apply_item_fluid_movement(entity, 0.99);
-    } else if is_lava_block(state) {
-        apply_item_fluid_movement(entity, 0.95);
-    } else {
-        entity.velocity.y -= ITEM_GRAVITY;
+    let fluid = FluidState::from(state);
+    // Vanilla `getFluidHeight(...) > 0.1`: how far the fluid surface sits
+    // above the item's feet, sampled at the position block.
+    let fluid_height = block_y as f64 + fluid.height() as f64 - entity.position.y;
+    match fluid.kind {
+        FluidKind::Water if fluid_height > 0.1 => apply_item_fluid_movement(entity, 0.99),
+        FluidKind::Lava if fluid_height > 0.1 => apply_item_fluid_movement(entity, 0.95),
+        _ => entity.velocity.y -= ITEM_GRAVITY,
     }
 
     // Vanilla rest throttle: a settled item only re-runs collision every
-    // 4th tick.
+    // 4th tick. `age` increments after this runs; vanilla's `tickCount`
+    // increments before, hence the +1.
     let horizontal_sq =
         entity.velocity.x * entity.velocity.x + entity.velocity.z * entity.velocity.z;
-    if entity.on_ground && horizontal_sq <= 1e-5 && (entity.age as i64 + id as i64) % 4 != 0 {
+    if entity.on_ground && horizontal_sq <= 1e-5 && (entity.age as i64 + 1 + id as i64) % 4 != 0 {
         return;
     }
 
