@@ -1265,8 +1265,7 @@ fn mesh_chunk_snapshot(
                         bz,
                     );
                 } else {
-                    let block: Box<dyn azalea_block::BlockTrait> = state.into();
-                    let id = block.id().to_string();
+                    let id = crate::world::block::block_id(state).to_string();
                     if logged_missing.insert(id.clone()) {
                         tracing::warn!("Missing model: {id}");
                     }
@@ -1440,8 +1439,7 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
     if state.is_air() {
         return BlockKind::Air;
     }
-    let block: Box<dyn azalea_block::BlockTrait> = state.into();
-    match block.id() {
+    match crate::world::block::block_id(state) {
         "cave_air" | "void_air" | "light" | "barrier" | "structure_void" | "moving_piston" => {
             BlockKind::Air
         }

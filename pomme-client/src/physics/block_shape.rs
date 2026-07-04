@@ -10,6 +10,8 @@ use std::sync::LazyLock;
 
 use azalea_block::BlockState;
 
+use crate::world::block::{block_id, block_properties};
+
 /// A block-local axis-aligned box: `[min_x, min_y, min_z, max_x, max_y,
 /// max_z]`.
 pub type LocalBox = [f64; 6];
@@ -30,9 +32,8 @@ pub fn partial_shape(state: BlockState) -> Option<&'static [LocalBox]> {
 }
 
 fn compute_shape(state: BlockState) -> Option<Vec<LocalBox>> {
-    let block: Box<dyn azalea_block::BlockTrait> = state.into();
-    let id = block.id();
-    let props = block.property_map();
+    let id = block_id(state);
+    let props = block_properties(state);
 
     if id.ends_with("_slab") {
         return Some(match props.get("type").copied() {
