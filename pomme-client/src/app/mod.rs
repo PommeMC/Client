@@ -337,6 +337,8 @@ impl ApplicationHandler for App {
                                 if code == KeyCode::KeyH && self.core.input.key_pressed(KeyCode::F3)
                                 {
                                     game.advanced_item_tooltips = !game.advanced_item_tooltips;
+                                } else if game.options_from_game {
+                                    self.core.input.on_menu_key_event(&event);
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
@@ -421,11 +423,14 @@ impl ApplicationHandler for App {
                     AppPhase::InMenu { .. } | AppPhase::Connecting { .. } => {
                         self.core.input.on_menu_scroll(scroll);
                     }
-                    AppPhase::InGame { game, .. } if !game.gui_open() => {
-                        self.core.input.on_scroll(scroll)
-                    }
-                    AppPhase::InGame { game, .. } if game.creative_inventory_open => {
+                    AppPhase::InGame { game, .. }
+                        if game.options_from_game || game.creative_inventory_open =>
+                    {
                         self.core.input.on_menu_scroll(scroll);
+                    }
+                    // TODO: open chat should capture scroll (chat history scrolling)
+                    AppPhase::InGame { game, .. } if !game.gui_open() && !game.paused => {
+                        self.core.input.on_scroll(scroll)
                     }
                     _ => {}
                 }
