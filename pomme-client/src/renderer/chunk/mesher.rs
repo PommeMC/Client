@@ -862,10 +862,15 @@ fn column_dist_sq(pos: ChunkPos, cam: glam::DVec3) -> f64 {
     dx * dx + dz * dz
 }
 
-/// A queued bulk-load job keyed by its column distance for the load heap.
+/// Column + section range identifying a queued bulk-load job. The range is
+/// part of the key so full-column and partial jobs never coalesce.
+type LoadKey = (ChunkPos, i32, i32);
+
+/// A load-heap entry keyed by column distance; the job itself lives in
+/// `QueueState::load_jobs`.
 struct LoadEntry {
     dist: f64,
-    job: PendingJob,
+    key: LoadKey,
 }
 
 impl PartialEq for LoadEntry {
@@ -893,6 +898,9 @@ struct QueueState {
     /// Bulk loads, a min-by-distance heap so dequeue is `O(log n)` under the
     /// lock instead of an `O(n)` scan (the old contention point).
     loads: BinaryHeap<LoadEntry>,
+    /// Queued (not yet started) bulk jobs by key. Invariant: 1:1 with `loads`
+    /// entries — a duplicate push replaces the job here and adds no heap entry.
+    load_jobs: HashMap<LoadKey, PendingJob>,
     // Consecutive edits served ahead of an initial load before one is forced, so
     // streaming never starves (vanilla SectionTaskDynamicQueue.MAX_RECOMPILE_QUOTA).
     recompile_quota: i32,
@@ -917,6 +925,7 @@ impl MeshQueue {
             state: Mutex::new(QueueState {
                 recompiles: Vec::new(),
                 loads: BinaryHeap::new(),
+                load_jobs: HashMap::new(),
                 recompile_quota: MAX_RECOMPILE_QUOTA,
                 camera: glam::DVec3::ZERO,
                 sort_cam: glam::DVec3::ZERO,
@@ -930,8 +939,7 @@ impl MeshQueue {
         let mut state = self.state.lock().unwrap();
         if job.is_recompile {
             // A re-edit of a still-queued section replaces the queued job in
-            // place instead of duplicating it. Bulk loads can't duplicate
-            // (`meshed` gates them), so only edits need this.
+            // place instead of duplicating it.
             if let Some(existing) = state
                 .recompiles
                 .iter_mut()
@@ -942,8 +950,14 @@ impl MeshQueue {
                 state.recompiles.push(job);
             }
         } else {
-            let dist = column_dist_sq(job.pos, state.sort_cam);
-            state.loads.push(LoadEntry { dist, job });
+            // Same for bulk loads (neighbor `content_gen` bumps re-enqueue
+            // still-queued columns): replace, never drop — the newer job
+            // carries the newer snapshot/content_gen/upload_epoch.
+            let key = (job.pos, job.sections.start, job.sections.end);
+            let dist = column_dist_sq(key.0, state.sort_cam);
+            if state.load_jobs.insert(key, job).is_none() {
+                state.loads.push(LoadEntry { dist, key });
+            }
         }
         drop(state);
         self.available.notify_one();
@@ -968,8 +982,8 @@ impl MeshQueue {
         let rekeyed: Vec<LoadEntry> = taken
             .into_iter()
             .map(|e| LoadEntry {
-                dist: column_dist_sq(e.job.pos, camera),
-                job: e.job,
+                dist: column_dist_sq(e.key.0, camera),
+                key: e.key,
             })
             .collect();
         self.state.lock().unwrap().loads.extend(rekeyed);
@@ -1028,7 +1042,12 @@ fn poll(state: &mut QueueState) -> Option<PendingJob> {
         }
     }
     state.recompile_quota = MAX_RECOMPILE_QUOTA;
-    state.loads.pop().map(|e| e.job)
+    while let Some(e) = state.loads.pop() {
+        if let Some(job) = state.load_jobs.remove(&e.key) {
+            return Some(job);
+        }
+    }
+    None
 }
 
 /// Run mesh workers below normal priority so the OS preempts them for the
