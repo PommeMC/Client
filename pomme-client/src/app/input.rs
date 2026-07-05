@@ -161,7 +161,7 @@ impl InputState {
                         game.close_creative_inventory();
                         should_apply_cursor_grab = true;
                     } else if game.open_container.is_some() {
-                        game.open_container = None;
+                        game.close_menu();
                         should_apply_cursor_grab = true;
                     } else if !game.paused
                         && !game.dead
@@ -187,8 +187,7 @@ impl InputState {
                     } else if !game.dead && !game.options_from_game {
                         use crate::ui::pause::PauseScreen;
                         if game.inventory_open || game.open_container.is_some() {
-                            game.inventory_open = false;
-                            game.open_container = None;
+                            game.close_menu();
                         } else if game.paused {
                             // Step back through the benchmark sub-screens; close
                             // the menu from the main screen.
@@ -211,8 +210,7 @@ impl InputState {
                 }
                 if self.action_just_pressed(Action::Close) {
                     if !game.dead && (game.inventory_open || game.open_container.is_some()) {
-                        game.inventory_open = false;
-                        game.open_container = None;
+                        game.close_menu();
                         should_apply_cursor_grab = true;
                     }
 

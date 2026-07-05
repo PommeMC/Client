@@ -512,18 +512,23 @@ impl AppCore {
                     carried,
                     state_id,
                 } => {
+                    // The carried stack and state id are per-menu (vanilla
+                    // scopes them to the menu the packet addresses), so an
+                    // inventory sync must not clobber an open container's.
                     if container_id == 0 {
                         game.player.inventory.set_contents(items);
                         game.sync_container_from_inventory();
+                        if game.open_container.is_none() {
+                            game.cursor_item = carried;
+                            game.container_state_id = state_id;
+                        }
                     } else if game.open_menu_id() == Some(container_id) {
                         for (i, item) in items.into_iter().enumerate() {
                             game.set_menu_slot(i, item);
                         }
-                    } else {
-                        continue;
+                        game.cursor_item = carried;
+                        game.container_state_id = state_id;
                     }
-                    game.cursor_item = carried;
-                    game.container_state_id = state_id;
                 }
                 NetworkEvent::CursorItem { item } => {
                     game.cursor_item = item;
@@ -537,15 +542,19 @@ impl AppCore {
                     item,
                     state_id,
                 } => {
+                    // Direct inventory updates (-2) carry no menu state id;
+                    // an id-0 update only owns the state id while no container
+                    // is open (see ContainerContent above).
                     if container_id == 0 || container_id == -2 {
                         game.player.inventory.set_slot(index as usize, item);
                         game.sync_container_from_inventory();
+                        if container_id == 0 && game.open_container.is_none() {
+                            game.container_state_id = state_id;
+                        }
                     } else if game.open_menu_id() == Some(container_id) {
                         game.set_menu_slot(index as usize, item);
-                    } else {
-                        continue;
+                        game.container_state_id = state_id;
                     }
-                    game.container_state_id = state_id;
                 }
                 NetworkEvent::OpenScreen {
                     container_id,
@@ -555,6 +564,9 @@ impl AppCore {
                     use azalea_inventory::ItemStack;
                     use azalea_registry::builtin::MenuKind;
                     if menu_type == MenuKind::Crafting {
+                        // Vanilla setScreen replaces whatever screen is up,
+                        // including the pause menu.
+                        game.paused = false;
                         game.inventory_open = false;
                         game.close_creative_inventory();
                         game.inv_drag = None;
@@ -583,8 +595,7 @@ impl AppCore {
                 }
                 NetworkEvent::ContainerClosed { container_id } => {
                     if game.open_menu_id() == Some(container_id) || container_id == 0 {
-                        game.inventory_open = false;
-                        game.open_container = None;
+                        game.close_menu();
                         // The server initiated the close; don't echo one back.
                         game.container_was_open = None;
                         self.apply_cursor_grab(window, Some(game));

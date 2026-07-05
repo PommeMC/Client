@@ -330,6 +330,18 @@ impl GameState {
         self.creative_state.reset_interaction();
     }
 
+    /// Close whichever container menu is open. Clears the carried stack
+    /// (vanilla switches to the inventory menu, whose carried stack is empty;
+    /// the server returns the items via inventory sync) and any in-flight
+    /// gesture so a stale drag can't commit on reopen.
+    pub fn close_menu(&mut self) {
+        self.inventory_open = false;
+        self.open_container = None;
+        self.cursor_item = azalea_inventory::ItemStack::Empty;
+        self.inv_drag = None;
+        self.inv_last_click = None;
+    }
+
     /// No menu (pause, inventory, chat) is capturing input.
     pub fn input_live(&self) -> bool {
         !self.paused
@@ -1741,15 +1753,13 @@ pub fn update_game(
     game.last_update_phases.update_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
 
     if close_inventory {
-        game.inventory_open = false;
-        game.open_container = None;
+        game.close_menu();
         game.close_creative_inventory();
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
     // Tell the server when a container menu closes so it returns/drops the
-    // cursor stack (and a crafting grid's contents), and forget any in-flight
-    // gesture so a stale drag can't commit on reopen.
+    // cursor stack (and a crafting grid's contents).
     let open_menu = game.open_menu_id();
     if let Some(prev) = game.container_was_open
         && open_menu != Some(prev)
@@ -1760,8 +1770,6 @@ pub fn update_game(
             .send(ServerboundGamePacket::ContainerClose(
                 ServerboundContainerClose { container_id: prev },
             ));
-        game.inv_drag = None;
-        game.inv_last_click = None;
     }
     game.container_was_open = open_menu;
 

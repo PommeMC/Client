@@ -753,8 +753,7 @@ impl InteractionState {
 /// Whether right-clicking this block opens a menu we render (so a use
 /// interaction won't place a block).
 fn opens_menu(state: BlockState) -> bool {
-    use azalea_block::BlockTrait;
-    Box::<dyn BlockTrait>::from(state).id() == "crafting_table"
+    crate::world::block::block_id(state) == "crafting_table"
 }
 
 fn destroy_progress(state: BlockState, on_ground: bool, creative: bool) -> f32 {
