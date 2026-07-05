@@ -352,8 +352,12 @@ impl ApplicationHandler for App {
                                             self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
-                                        KeyCode::F3 => game.show_debug = !game.show_debug,
-                                        _ => self.core.input.on_menu_key_event(&event),
+                                        _ => {
+                                            let f3_held = self.core.input.key_pressed(KeyCode::F3);
+                                            if !game.handle_debug_key(code, f3_held) {
+                                                self.core.input.on_menu_key_event(&event);
+                                            }
+                                        }
                                     }
                                 } else if game.creative_inventory_open {
                                     match code {
@@ -365,8 +369,12 @@ impl ApplicationHandler for App {
                                             self.core
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
-                                        KeyCode::F3 => game.show_debug = !game.show_debug,
-                                        _ => self.core.input.on_menu_key_event(&event),
+                                        _ => {
+                                            let f3_held = self.core.input.key_pressed(KeyCode::F3);
+                                            if !game.handle_debug_key(code, f3_held) {
+                                                self.core.input.on_menu_key_event(&event);
+                                            }
+                                        }
                                     }
                                 } else {
                                     match code {
