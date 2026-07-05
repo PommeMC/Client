@@ -273,6 +273,73 @@ pub fn push_item_icon(
     }
 }
 
+/// Measures rendered text width in framebuffer px at the given font size.
+pub type TextWidthFn<'a> = &'a dyn Fn(&str, f32) -> f32;
+
+/// Inputs for the vanilla scrolling-label treatment: labels wider than the
+/// widget are clipped to it and slide back and forth over time.
+pub struct LabelScroll<'a> {
+    pub text_width_fn: TextWidthFn<'a>,
+    pub time_secs: f64,
+}
+
+/// Widget label: centered when it fits, otherwise (with `scroll`) clipped and
+/// oscillated like vanilla's ActiveTextCollector.defaultScrollingHelper.
+#[allow(clippy::too_many_arguments)]
+fn push_widget_label(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    gs: f32,
+    fs: f32,
+    label: &str,
+    color: [f32; 4],
+    scroll: Option<&LabelScroll<'_>>,
+) {
+    let ty = y + (h - fs) / 2.0 + 1.0;
+    if let Some(s) = scroll {
+        let margin = 2.0 * gs;
+        let avail = w - 2.0 * margin;
+        let lw = (s.text_width_fn)(label, fs);
+        if lw > avail {
+            let max_pos = lw - avail;
+            let period = ((max_pos / gs) as f64 * 0.5).max(3.0);
+            let alpha = (std::f64::consts::FRAC_PI_2
+                * (std::f64::consts::TAU * s.time_secs / period).cos())
+            .sin()
+                / 2.0
+                + 0.5;
+            let pos = alpha as f32 * max_pos;
+            elements.push(MenuElement::ScissorPush {
+                x: x + margin,
+                y,
+                w: avail,
+                h,
+            });
+            elements.push(MenuElement::Text {
+                x: x + margin - pos,
+                y: ty,
+                text: label.into(),
+                scale: fs,
+                color,
+                centered: false,
+            });
+            elements.push(MenuElement::ScissorPop);
+            return;
+        }
+    }
+    elements.push(MenuElement::Text {
+        x: x + w / 2.0,
+        y: ty,
+        text: label.into(),
+        scale: fs,
+        color,
+        centered: true,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn push_button(
     elements: &mut Vec<MenuElement>,
@@ -285,6 +352,52 @@ pub fn push_button(
     fs: f32,
     label: &str,
     enabled: bool,
+) -> bool {
+    push_button_inner(elements, cursor, x, y, w, h, gs, fs, label, enabled, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn push_button_scrolling(
+    elements: &mut Vec<MenuElement>,
+    cursor: (f32, f32),
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    gs: f32,
+    fs: f32,
+    label: &str,
+    enabled: bool,
+    scroll: &LabelScroll<'_>,
+) -> bool {
+    push_button_inner(
+        elements,
+        cursor,
+        x,
+        y,
+        w,
+        h,
+        gs,
+        fs,
+        label,
+        enabled,
+        Some(scroll),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_button_inner(
+    elements: &mut Vec<MenuElement>,
+    cursor: (f32, f32),
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    gs: f32,
+    fs: f32,
+    label: &str,
+    enabled: bool,
+    scroll: Option<&LabelScroll<'_>>,
 ) -> bool {
     let hovered = enabled && hit_test(cursor, [x, y, w, h]);
 
@@ -307,14 +420,7 @@ pub fn push_button(
         tint: WHITE,
     });
 
-    elements.push(MenuElement::Text {
-        x: x + w / 2.0,
-        y: y + (h - fs) / 2.0 + 1.0,
-        text: label.into(),
-        scale: fs,
-        color: text_col,
-        centered: true,
-    });
+    push_widget_label(elements, x, y, w, h, gs, fs, label, text_col, scroll);
 
     hovered
 }
@@ -333,6 +439,7 @@ pub fn push_slider(
     label: &str,
     value: f32,
     dragging: bool,
+    scroll: &LabelScroll<'_>,
 ) -> SliderResult {
     let hovered = hit_test(cursor, [x, y, w, h]);
     let handle_w = 8.0 * gs;
@@ -374,14 +481,7 @@ pub fn push_slider(
         tint: WHITE,
     });
 
-    elements.push(MenuElement::Text {
-        x: x + w / 2.0,
-        y: y + (h - fs) / 2.0 + 1.0,
-        text: label.into(),
-        scale: fs,
-        color: WHITE,
-        centered: true,
-    });
+    push_widget_label(elements, x, y, w, h, gs, fs, label, WHITE, Some(scroll));
 
     SliderResult {
         hovered,

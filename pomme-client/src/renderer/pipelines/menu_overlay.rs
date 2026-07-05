@@ -643,7 +643,7 @@ impl MenuOverlayPipeline {
         let mut vertices: Vec<Vertex> = Vec::with_capacity(elements.len() * 24);
         let mut deferred_tooltips: Vec<&MenuElement> = Vec::new();
         let mut draw_ops: Vec<DrawOp> = Vec::new();
-        let mut current_scissor: Option<[f32; 4]> = None;
+        let mut scissor_stack: Vec<[f32; 4]> = Vec::new();
         let mut cmd_start: u32 = 0;
 
         for elem in elements {
@@ -663,15 +663,26 @@ impl MenuOverlayPipeline {
                     draw_ops.push(DrawOp {
                         start: cmd_start,
                         count,
-                        scissor: current_scissor,
+                        scissor: scissor_stack.last().copied(),
                     });
                 }
                 cmd_start = vertices.len() as u32;
-                current_scissor = if let MenuElement::ScissorPush { x, y, w, h } = elem {
-                    Some([*x, *y, *w, *h])
+                if let MenuElement::ScissorPush { x, y, w, h } = elem {
+                    // Nested regions clip to the intersection with the enclosing one.
+                    let rect = match scissor_stack.last() {
+                        Some(outer) => {
+                            let x0 = x.max(outer[0]);
+                            let y0 = y.max(outer[1]);
+                            let x1 = (x + w).min(outer[0] + outer[2]);
+                            let y1 = (y + h).min(outer[1] + outer[3]);
+                            [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]
+                        }
+                        None => [*x, *y, *w, *h],
+                    };
+                    scissor_stack.push(rect);
                 } else {
-                    None
-                };
+                    scissor_stack.pop();
+                }
                 continue;
             }
             match elem {
@@ -1083,7 +1094,7 @@ impl MenuOverlayPipeline {
             draw_ops.push(DrawOp {
                 start: cmd_start,
                 count: final_count,
-                scissor: current_scissor,
+                scissor: scissor_stack.last().copied(),
             });
         }
 
