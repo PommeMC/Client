@@ -1,12 +1,12 @@
-//! Block-break particles: a port of vanilla `TerrainParticle`,
-//! `Particle`, and `ClientLevel.addDestroyBlockEffect`.
+//! Block-break and item particles: a port of vanilla `TerrainParticle`,
+//! `BreakingItemParticle`, `Particle`, and `ClientLevel.addDestroyBlockEffect`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
 use azalea_core::position::BlockPos;
-use glam::DVec3;
+use glam::{DVec3, dvec3};
 
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::{self, LocalBox};
@@ -92,6 +92,15 @@ impl Particle {
             color,
             light,
         }
+    }
+
+    /// Vanilla `BreakingItemParticle`: the base-constructor velocity (zero
+    /// argument, jitter only) scaled to 10%, plus the spawn velocity. Shares
+    /// the halved quad size and quarter sub-tile sampling with terrain.
+    fn breaking_item(pos: DVec3, velocity: DVec3, region: AtlasRegion, light: f32) -> Self {
+        let mut p = Self::terrain(pos, DVec3::ZERO, region, [1.0; 3], light);
+        p.vel = p.vel * 0.1 + velocity;
+        p
     }
 
     /// Vanilla `Particle.tick` (gravity 1.0, friction 0.98). Returns false
@@ -256,6 +265,51 @@ impl ParticleStore {
         }
     }
 
+    /// Vanilla `LivingEntity.spawnItemParticles`: item crumbs thrown from the
+    /// mouth along the look direction while eating.
+    pub fn add_item_use_particles(
+        &mut self,
+        count: u32,
+        texture: &str,
+        eye_pos: DVec3,
+        x_rot_deg: f32,
+        y_rot_deg: f32,
+        chunks: &ChunkStore,
+    ) {
+        if !self.uv_map.has_region(texture) {
+            return;
+        }
+        let region = self.uv_map.get_region(texture);
+        let x_rot = -(x_rot_deg as f64).to_radians();
+        let y_rot = -(y_rot_deg as f64).to_radians();
+        let light = world_brightness(
+            chunks,
+            eye_pos.x.floor() as i32,
+            eye_pos.y.floor() as i32,
+            eye_pos.z.floor() as i32,
+        );
+        for _ in 0..count {
+            let d = dvec3(
+                (fastrand::f64() - 0.5) * 0.1,
+                fastrand::f64() * 0.1 + 0.1,
+                0.0,
+            );
+            let d = rot_y(rot_x(d, x_rot), y_rot);
+            let p = dvec3(
+                (fastrand::f64() - 0.5) * 0.3,
+                -fastrand::f64() * 0.6 - 0.3,
+                0.6,
+            );
+            let p = rot_y(rot_x(p, x_rot), y_rot) + eye_pos;
+            self.push(Particle::breaking_item(
+                p,
+                dvec3(d.x, d.y + 0.05, d.z),
+                region,
+                light,
+            ));
+        }
+    }
+
     /// The block's biome tint averaged over the vanilla 5x5 biome blend.
     fn blend_tint(
         &self,
@@ -322,4 +376,16 @@ impl ParticleStore {
             })
             .collect()
     }
+}
+
+/// Vanilla `Vec3.xRot`: rotation about the X axis.
+fn rot_x(v: DVec3, angle: f64) -> DVec3 {
+    let (sin, cos) = angle.sin_cos();
+    dvec3(v.x, v.y * cos - v.z * sin, v.y * sin + v.z * cos)
+}
+
+/// Vanilla `Vec3.yRot`: rotation about the Y axis.
+fn rot_y(v: DVec3, angle: f64) -> DVec3 {
+    let (sin, cos) = angle.sin_cos();
+    dvec3(v.x * cos + v.z * sin, v.y, -v.x * sin + v.z * cos)
 }

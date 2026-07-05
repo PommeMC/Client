@@ -1545,6 +1545,7 @@ pub fn update_game(
     }
 
     let swing_progress = game.interaction.get_swing_progress(partial_tick);
+    let use_anim = game.interaction.use_animation(partial_tick);
     let destroy_info = game.interaction.destroy_stage().map(|(pos, stage)| {
         let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
         (pos, stage, state)
@@ -1739,6 +1740,7 @@ pub fn update_game(
         hide_cursor,
         elements,
         swing_progress,
+        use_anim,
         held_item,
         destroy_info,
         game.show_chunk_borders,

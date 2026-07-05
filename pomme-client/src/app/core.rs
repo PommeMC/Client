@@ -924,6 +924,19 @@ impl AppCore {
                 NetworkEvent::SheepEatStart { id } => {
                     game.entity_store.start_sheep_eat(id);
                 }
+                NetworkEvent::FinishUseItem { id } => {
+                    // TODO: remote players once third-person held items exist.
+                    if id == game.player.entity_id {
+                        game.interaction.complete_using(
+                            &self.audio,
+                            &mut game.particle_store,
+                            &game.chunk_store,
+                            game.player.position.into(),
+                            game.player.eye_pos().into(),
+                            game.player.look_dir,
+                        );
+                    }
+                }
                 NetworkEvent::CowVariant { id, variant } => {
                     game.entity_store.set_cow_variant(id, variant);
                 }
@@ -1154,7 +1167,13 @@ impl AppCore {
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         }
-        movement::tick(&mut game.player, input, &game.chunk_store);
+        movement::tick(
+            &mut game.player,
+            input,
+            &game.chunk_store,
+            game.interaction.use_speed_multiplier(),
+            game.interaction.slow_due_to_using_item(),
+        );
         game.entity_store.tick_living();
 
         let dx = game.player.position.x - game.player.prev_position.x;
@@ -1192,20 +1211,20 @@ impl AppCore {
             game.player.game_mode == 1,
         );
 
-        let main_hand = game
+        let held_stack = match game
             .player
             .inventory
             .hotbar_slots()
-            .get(input.selected_slot() as usize);
-        let place_block = match main_hand {
-            Some(stack) if !stack.is_empty() => {
-                let name = crate::player::inventory::item_resource_name(stack.kind());
-                renderer.registry().placeable_block_for_item(&name)
-            }
+            .get(input.selected_slot() as usize)
+        {
+            Some(azalea_inventory::ItemStack::Present(data)) if data.count > 0 => Some(data),
             _ => None,
         };
-        let hands_empty =
-            main_hand.is_none_or(|s| s.is_empty()) && game.player.inventory.offhand().is_empty();
+        let place_block = held_stack.and_then(|data| {
+            let name = crate::player::inventory::item_resource_name(data.kind);
+            renderer.registry().placeable_block_for_item(&name)
+        });
+        let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
 
         let dirty = game.interaction.tick(
             input,
@@ -1213,9 +1232,13 @@ impl AppCore {
             &connection.packet_tx,
             &self.audio,
             game.player.position.into(),
+            game.player.eye_pos().into(),
+            game.player.look_dir,
             game.player.on_ground,
             game.player.game_mode == 1,
+            game.player.food,
             input.selected_slot(),
+            held_stack,
             place_block,
             hands_empty,
             &mut crate::player::interaction::BreakEffects {

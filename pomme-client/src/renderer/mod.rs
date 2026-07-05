@@ -67,10 +67,13 @@ pub struct PlayerPreview {
     pub cursor: (f32, f32),
 }
 
+// Constructed once per frame and consumed immediately, never stored.
+#[allow(clippy::large_enum_variant)]
 enum RenderMode<'a> {
     World {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
+        use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: Option<pipelines::held_item::HeldItemInfo>,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
@@ -948,6 +951,7 @@ impl Renderer {
         hide_cursor: bool,
         overlay: Vec<MenuElement>,
         swing_progress: f32,
+        use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: Option<(String, f32)>,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
@@ -986,6 +990,7 @@ impl Renderer {
             RenderMode::World {
                 overlay,
                 swing_progress,
+                use_anim,
                 held_item,
                 destroy_info,
                 show_chunk_borders,
@@ -1457,6 +1462,7 @@ impl Renderer {
             RenderMode::World {
                 overlay,
                 swing_progress,
+                use_anim,
                 held_item,
                 destroy_info,
                 show_chunk_borders,
@@ -1591,6 +1597,7 @@ impl Renderer {
                             frame,
                             aspect,
                             *swing_progress,
+                            *use_anim,
                             item,
                             &self.item_entity_pipeline,
                             bob,

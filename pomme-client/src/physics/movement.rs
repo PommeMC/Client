@@ -38,19 +38,37 @@ const SPRINT_HUNGER_THRESHOLD: u32 = 6;
 const DEFAULT_SPRINT_WINDOW: u32 = 7;
 const MINOR_COLLISION_ANGLE: f64 = 0.13962634;
 
-pub fn tick(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkStore) {
+pub fn tick(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunk_store: &ChunkStore,
+    use_speed_multiplier: f64,
+    slow_due_to_using_item: bool,
+) {
     player.update_water_state(chunk_store);
     update_crouch_state(player, input, chunk_store);
     player.tick_eye_height();
 
+    // Vanilla `LocalPlayer.modifyInput`: an in-use item scales the movement
+    // input by its `UseEffects` speed multiplier (0.2 for food).
     let (forward, strafe) = movement_input(input, player.crouching);
+    let (forward, strafe) = (
+        forward * use_speed_multiplier,
+        strafe * use_speed_multiplier,
+    );
     let forward_pressed = input.key_pressed(KeyCode::KeyW)
         || input
             .get_gamepad_left_analog()
             .map(|vec| vec.y > input::STICK_MOVEMENT_THRESHOLD)
             .unwrap_or(false);
 
-    update_sprint_state(player, input, forward, forward_pressed);
+    update_sprint_state(
+        player,
+        input,
+        forward,
+        forward_pressed,
+        slow_due_to_using_item,
+    );
 
     let (sin_y_rot, cos_y_rot) = (player.look_dir.y_rot_rad() as f64).sin_cos();
 
@@ -248,16 +266,22 @@ fn update_sprint_state(
     input: &InputState,
     forward: f64,
     forward_pressed: bool,
+    slow_due_to_using_item: bool,
 ) {
     if player.sprint_toggle_timer > 0 {
         player.sprint_toggle_timer -= 1;
     }
-    if input.performing_action(input::Action::Sneak) {
+    if input.performing_action(input::Action::Sneak) || slow_due_to_using_item {
         player.sprint_toggle_timer = 0;
     }
 
     // Crouching blocks starting a sprint but doesn't stop one in progress.
-    let can_sprint = forward > 0.0 && player.food > SPRINT_HUNGER_THRESHOLD && !player.crouching;
+    // Vanilla `canStartSprinting` also denies it while slowed by an item use,
+    // and the slowed input impulse (< 0.8) stops a sprint in progress.
+    let can_sprint = forward > 0.0
+        && player.food > SPRINT_HUNGER_THRESHOLD
+        && !player.crouching
+        && !slow_due_to_using_item;
 
     if input.performing_action(input::Action::Sprint) && can_sprint {
         player.sprinting = true;
@@ -270,7 +294,9 @@ fn update_sprint_state(
         player.sprint_toggle_timer = DEFAULT_SPRINT_WINDOW;
     }
 
-    if player.sprinting && (forward <= 0.0 || player.food <= SPRINT_HUNGER_THRESHOLD) {
+    if player.sprinting
+        && (forward <= 0.0 || player.food <= SPRINT_HUNGER_THRESHOLD || slow_due_to_using_item)
+    {
         player.sprinting = false;
     }
 }
