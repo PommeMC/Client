@@ -338,7 +338,10 @@ impl ApplicationHandler for App {
                                 {
                                     game.advanced_item_tooltips = !game.advanced_item_tooltips;
                                 } else if game.options_from_game {
-                                    self.core.input.on_menu_key_event(&event);
+                                    let f3_held = self.core.input.key_pressed(KeyCode::F3);
+                                    if !game.handle_debug_key(code, f3_held) {
+                                        self.core.input.on_menu_key_event(&event);
+                                    }
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
@@ -378,28 +381,10 @@ impl ApplicationHandler for App {
                                             game.death_confirm = false;
                                             self.core.send_respawn(&connection, &mut game);
                                         }
-                                        KeyCode::F3 => {
-                                            game.show_debug = !game.show_debug;
+                                        _ => {
+                                            let f3_held = self.core.input.key_pressed(KeyCode::F3);
+                                            game.handle_debug_key(code, f3_held);
                                         }
-                                        KeyCode::KeyG
-                                            if self.core.input.key_pressed(KeyCode::F3) =>
-                                        {
-                                            game.show_chunk_borders = !game.show_chunk_borders;
-                                        }
-                                        KeyCode::KeyO
-                                            if self.core.input.key_pressed(KeyCode::F3) =>
-                                        {
-                                            game.chunk_occlusion_enabled =
-                                                !game.chunk_occlusion_enabled;
-                                            // Force the throttled recompute to run
-                                            // next frame so the toggle takes effect.
-                                            game.vis_valid = false;
-                                            tracing::info!(
-                                                "Chunk occlusion: {}",
-                                                game.chunk_occlusion_enabled
-                                            );
-                                        }
-                                        _ => {}
                                     }
                                 }
                             }
@@ -429,7 +414,7 @@ impl ApplicationHandler for App {
                         self.core.input.on_menu_scroll(scroll);
                     }
                     // TODO: open chat should capture scroll (chat history scrolling)
-                    AppPhase::InGame { game, .. } if !game.gui_open() && !game.paused => {
+                    AppPhase::InGame { game, .. } if game.input_live() => {
                         self.core.input.on_scroll(scroll)
                     }
                     _ => {}

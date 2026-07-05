@@ -2,7 +2,7 @@ use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
 use glam::DVec3;
 
-use super::common::{FONT_SIZE, WHITE, push_item_count};
+use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
@@ -83,7 +83,7 @@ pub fn build_hud(
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
-    text_width_fn: &dyn Fn(&str, f32) -> f32,
+    text_width_fn: TextWidthFn,
 ) {
     let gs = gui_scale(screen_w, screen_h, gui_scale_setting);
     let cx = screen_w / 2.0;
@@ -370,7 +370,7 @@ fn build_debug_overlay(
     elements: &mut Vec<MenuElement>,
     info: &DebugInfo<'_>,
     gs: f32,
-    text_width_fn: &dyn Fn(&str, f32) -> f32,
+    text_width_fn: TextWidthFn,
 ) {
     let fs = super::common::FONT_SIZE * gs;
     let pad = 4.0 * gs;
@@ -459,7 +459,7 @@ fn push_debug_lines(
     start_y: f32,
     fs: f32,
     left_align: bool,
-    text_width_fn: &dyn Fn(&str, f32) -> f32,
+    text_width_fn: TextWidthFn,
 ) {
     let line_h = fs * 1.25;
     for (i, line) in lines.iter().enumerate() {

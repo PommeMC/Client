@@ -266,6 +266,29 @@ impl GameState {
             && self.chunk_load_result.is_none()
     }
 
+    /// F3-family debug toggles; these fire even while a menu is open,
+    /// matching vanilla KeyboardHandler. Returns true if handled.
+    pub fn handle_debug_key(&mut self, code: winit::keyboard::KeyCode, f3_held: bool) -> bool {
+        use winit::keyboard::KeyCode;
+        match code {
+            KeyCode::F3 => {
+                self.show_debug = !self.show_debug;
+            }
+            KeyCode::KeyG if f3_held => {
+                self.show_chunk_borders = !self.show_chunk_borders;
+            }
+            KeyCode::KeyO if f3_held => {
+                self.chunk_occlusion_enabled = !self.chunk_occlusion_enabled;
+                // Force the throttled recompute to run next frame so the
+                // toggle takes effect.
+                self.vis_valid = false;
+                tracing::info!("Chunk occlusion: {}", self.chunk_occlusion_enabled);
+            }
+            _ => return false,
+        }
+        true
+    }
+
     pub fn sync_render_distance(&mut self, connection: &ConnectionHandle, render_distance: u32) {
         self.last_render_distance = render_distance;
         tracing::info!("Render distance changed to {render_distance}");

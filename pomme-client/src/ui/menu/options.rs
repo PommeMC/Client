@@ -24,7 +24,7 @@ impl MainMenu {
         sw: f32,
         sh: f32,
         input: &MenuInput,
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         // Sub-screens reached from here (Language/Accessibility) return to Options.
         self.settings_back = Screen::Options;
@@ -90,7 +90,7 @@ impl MainMenu {
         sw: f32,
         sh: f32,
         input: &MenuInput,
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         let fullscreen_label = match self.display_mode {
             DisplayMode::Windowed => "Fullscreen: Windowed",
@@ -166,7 +166,7 @@ impl MainMenu {
         sw: f32,
         sh: f32,
         input: &MenuInput,
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         let rows: Vec<OptRow> = vec![
             OptRow::Pair("Sensitivity: 100%", "Invert Mouse: OFF"),
@@ -195,7 +195,7 @@ impl MainMenu {
         sw: f32,
         sh: f32,
         input: &MenuInput,
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         let rows: Vec<OptRow> = vec![
             OptRow::Pair("Chat: Shown", "Chat Colors: ON"),
@@ -228,7 +228,7 @@ impl MainMenu {
         sw: f32,
         sh: f32,
         input: &MenuInput,
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         let fov_effect_label = if self.fov_effect_scale <= 0.0 {
             "FOV Effects: OFF".to_string()
@@ -274,7 +274,7 @@ impl MainMenu {
         sw: f32,
         sh: f32,
         input: &MenuInput,
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         let pct = |v: f32| -> String {
             let p = (v * 100.0).round() as u32;
@@ -339,7 +339,7 @@ impl MainMenu {
         sw: f32,
         sh: f32,
         input: &MenuInput,
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         let cape = if self.skin_cape {
             "Cape: ON"
@@ -403,7 +403,7 @@ impl MainMenu {
         sw: f32,
         sh: f32,
         input: &MenuInput,
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         let online_status_label = if self.show_online_status {
             "Show Online Status: ON"
@@ -465,7 +465,7 @@ impl MainMenu {
         sliders: &[(&'static str, f32)],
         header_footer: bool,
         tooltips: &[(&str, &str)],
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         if input.escape {
             self.set_screen(back.clone_screen());
@@ -783,7 +783,9 @@ impl MainMenu {
             self.save_settings();
         }
 
-        elements.push(MenuElement::ScissorPop);
+        if header_footer {
+            elements.push(MenuElement::ScissorPop);
+        }
 
         if scrollable {
             let max_scroll = (grid_h + content_pad - content_h).max(0.001);
@@ -846,7 +848,7 @@ impl MainMenu {
         sw: f32,
         sh: f32,
         input: &MenuInput,
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
         use crate::resource_pack::PackSource;
 

@@ -644,7 +644,6 @@ impl MenuOverlayPipeline {
         let mut deferred_tooltips: Vec<&MenuElement> = Vec::new();
         let mut draw_ops: Vec<DrawOp> = Vec::new();
         let mut scissor_stack: Vec<[f32; 4]> = Vec::new();
-        let mut current_scissor: Option<[f32; 4]> = None;
         let mut cmd_start: u32 = 0;
 
         for elem in elements {
@@ -664,7 +663,7 @@ impl MenuOverlayPipeline {
                     draw_ops.push(DrawOp {
                         start: cmd_start,
                         count,
-                        scissor: current_scissor,
+                        scissor: scissor_stack.last().copied(),
                     });
                 }
                 cmd_start = vertices.len() as u32;
@@ -684,7 +683,6 @@ impl MenuOverlayPipeline {
                 } else {
                     scissor_stack.pop();
                 }
-                current_scissor = scissor_stack.last().copied();
                 continue;
             }
             match elem {
@@ -1096,7 +1094,7 @@ impl MenuOverlayPipeline {
             draw_ops.push(DrawOp {
                 start: cmd_start,
                 count: final_count,
-                scissor: current_scissor,
+                scissor: scissor_stack.last().copied(),
             });
         }
 

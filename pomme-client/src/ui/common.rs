@@ -273,10 +273,13 @@ pub fn push_item_icon(
     }
 }
 
+/// Measures rendered text width in framebuffer px at the given font size.
+pub type TextWidthFn<'a> = &'a dyn Fn(&str, f32) -> f32;
+
 /// Inputs for the vanilla scrolling-label treatment: labels wider than the
 /// widget are clipped to it and slide back and forth over time.
 pub struct LabelScroll<'a> {
-    pub text_width_fn: &'a dyn Fn(&str, f32) -> f32,
+    pub text_width_fn: TextWidthFn<'a>,
     pub time_secs: f64,
 }
 
