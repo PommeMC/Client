@@ -221,6 +221,10 @@ pub enum NetworkEvent {
     SheepEatStart {
         id: i32,
     },
+    /// Entity event 9: the entity finished using its item (eating complete).
+    FinishUseItem {
+        id: i32,
+    },
     CowVariant {
         id: i32,
         variant: u8,

@@ -79,7 +79,7 @@ pub fn handle_game_packet(
         ClientboundGamePacket::Sound(p) => {
             // Coordinates are fixed-point: block position times 8.
             let _ = event_tx.try_send(NetworkEvent::PlaySound {
-                sound: resolve_sound(&p.sound),
+                sound: crate::audio::SoundRef::resolve(&p.sound),
                 category: p.source as u8,
                 pos: Position::new(p.x as f64 / 8.0, p.y as f64 / 8.0, p.z as f64 / 8.0),
                 volume: p.volume,
@@ -89,7 +89,7 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::SoundEntity(p) => {
             let _ = event_tx.try_send(NetworkEvent::PlayEntitySound {
-                sound: resolve_sound(&p.sound),
+                sound: crate::audio::SoundRef::resolve(&p.sound),
                 category: p.source as u8,
                 entity_id: p.id.0,
                 volume: p.volume,
@@ -475,6 +475,10 @@ pub fn handle_game_packet(
                 }
             }
         }
+        // Event id 9 = finished using an item (vanilla `completeUsingItem`).
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 9 => {
+            let _ = event_tx.try_send(NetworkEvent::FinishUseItem { id: p.entity_id.0 });
+        }
         // Event id 10 = sheep eat-grass animation start (40-tick head-dip).
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 10 => {
             let _ = event_tx.try_send(NetworkEvent::SheepEatStart { id: p.entity_id.0 });
@@ -607,28 +611,6 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, spans: Vec<TextSpan>) {
     let text: String = spans.iter().map(|s| s.text.as_str()).collect();
     tracing::info!("Chat: {text}");
     let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
-}
-
-/// Resolves a sound holder into either a `sounds.json` event name (registry
-/// reference) or a direct sound-file path (inline custom sound).
-fn resolve_sound(
-    holder: &azalea_registry::Holder<
-        azalea_registry::builtin::SoundEvent,
-        azalea_core::sound::CustomSound,
-    >,
-) -> crate::audio::SoundRef {
-    match holder {
-        azalea_registry::Holder::Reference(event) => {
-            // `to_str` yields e.g. `minecraft:block.stone.break`; sounds.json is
-            // keyed by the path without the namespace.
-            let id = event.to_str();
-            let name = id.strip_prefix("minecraft:").unwrap_or(id);
-            crate::audio::SoundRef::Event(name.to_string())
-        }
-        azalea_registry::Holder::Direct(custom) => {
-            crate::audio::SoundRef::Direct(custom.sound_id.to_string())
-        }
-    }
 }
 
 fn lp_to_dvec3(v: &azalea_core::delta::LpVec3) -> glam::DVec3 {

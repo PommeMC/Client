@@ -80,6 +80,30 @@ pub enum SoundRef {
     Direct(String),
 }
 
+impl SoundRef {
+    /// Resolves a sound holder into either a `sounds.json` event name
+    /// (registry reference) or a direct sound-file path (inline custom sound).
+    pub fn resolve(
+        holder: &azalea_registry::Holder<
+            azalea_registry::builtin::SoundEvent,
+            azalea_core::sound::CustomSound,
+        >,
+    ) -> Self {
+        match holder {
+            azalea_registry::Holder::Reference(event) => {
+                // `to_str` yields e.g. `minecraft:block.stone.break`;
+                // sounds.json is keyed by the path without the namespace.
+                let id = event.to_str();
+                let name = id.strip_prefix("minecraft:").unwrap_or(id);
+                SoundRef::Event(name.to_string())
+            }
+            azalea_registry::Holder::Direct(custom) => {
+                SoundRef::Direct(custom.sound_id.to_string())
+            }
+        }
+    }
+}
+
 /// The rodio output device. The `MixerDeviceSink` must be kept alive for the
 /// whole program; sounds play by connecting `Player`s to its mixer.
 struct Output {

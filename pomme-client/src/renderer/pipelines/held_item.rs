@@ -19,6 +19,15 @@ pub struct HeldItemInfo {
     pub has_3d_model: bool,
 }
 
+/// First-person use-animation state (eat/drink), the inputs to vanilla
+/// `ItemInHandRenderer.applyEatTransform`.
+#[derive(Clone, Copy)]
+pub struct UseAnim {
+    /// Vanilla `useItemRemaining - partialTick + 1`.
+    pub curr_usage_time: f32,
+    pub duration: f32,
+}
+
 pub struct HeldItemPipeline {
     pipeline: vk::Pipeline,
     shared: ItemPipelineShared,
@@ -53,6 +62,7 @@ impl HeldItemPipeline {
         frame: usize,
         aspect: f32,
         swing_progress: f32,
+        use_anim: Option<UseAnim>,
         item: &HeldItemInfo,
         meshes: &ItemEntityPipeline,
         bob: Mat4,
@@ -67,7 +77,11 @@ impl HeldItemPipeline {
         let display = self
             .display
             .resolve(&item.name, default_first_person(item.has_3d_model));
-        let model = first_person_item_matrix(swing_progress) * display.to_matrix();
+        let arm = match use_anim {
+            Some(anim) => eat_item_matrix(anim),
+            None => first_person_item_matrix(swing_progress),
+        };
+        let model = arm * display.to_matrix();
 
         self.shared.bind(cmd, frame, self.pipeline);
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
@@ -104,6 +118,26 @@ fn first_person_item_matrix(swing_progress: f32) -> Mat4 {
         * Mat4::from_rotation_z(((sq * pi).sin() * -20.0).to_radians())
         * Mat4::from_rotation_x(((sq * pi).sin() * -80.0).to_radians())
         * Mat4::from_rotation_y((-45.0_f32).to_radians())
+}
+
+// Vanilla ItemInHandRenderer: applyEatTransform then applyItemArmTransform
+// (EAT/DRINK skip the usual pre-transform; right hand, inverseArmHeight = 0).
+fn eat_item_matrix(anim: UseAnim) -> Mat4 {
+    let scaled = anim.curr_usage_time / anim.duration;
+    // The chew bob runs after the first 20% of the eat, oscillating every 4
+    // ticks; the jiggle shoves the item into the mouth over the last bite.
+    let bob = if scaled < 0.8 {
+        ((anim.curr_usage_time / 4.0 * std::f32::consts::PI).cos() * 0.1).abs()
+    } else {
+        0.0
+    };
+    let jiggle = 1.0 - (scaled as f64).powf(27.0) as f32;
+
+    Mat4::from_translation(Vec3::new(jiggle * 0.6, bob + jiggle * -0.5, 0.0))
+        * Mat4::from_rotation_y((jiggle * 90.0).to_radians())
+        * Mat4::from_rotation_x((jiggle * 10.0).to_radians())
+        * Mat4::from_rotation_z((jiggle * 30.0).to_radians())
+        * Mat4::from_translation(Vec3::new(0.56, -0.52, -0.72))
 }
 
 fn default_first_person(has_3d_model: bool) -> DisplayTransform {

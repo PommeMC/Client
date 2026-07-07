@@ -5,16 +5,21 @@ use azalea_core::direction::Direction;
 use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::position::BlockPos;
 use azalea_entity::dimensions::EntityDimensions;
+use azalea_inventory::ItemStackData;
+use azalea_inventory::components::{Consumable, Food, ItemUseAnimation, UseEffects};
+use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
 use azalea_protocol::packets::game::s_attack::ServerboundAttack;
 use azalea_protocol::packets::game::s_interact::InteractionHand;
 use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerAction};
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
+use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
+use azalea_registry::builtin::ItemKind;
 use glam::{DVec3, Vec3, dvec3};
 
 use crate::app::input::{self, InputState};
-use crate::audio::{AudioEngine, CATEGORY_BLOCKS, SoundRef};
+use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::EntityStore;
 use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
@@ -22,6 +27,8 @@ use crate::particle::ParticleStore;
 use crate::physics::aabb::Aabb;
 use crate::physics::collision::has_collision;
 use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
+use crate::player::inventory::item_resource_name;
+use crate::renderer::pipelines::held_item::UseAnim;
 use crate::world::block::registry::BlockRegistry;
 use crate::world::block::sound::block_sounds;
 use crate::world::chunk::ChunkStore;
@@ -33,6 +40,11 @@ const DESTROY_COOLDOWN: u32 = 5;
 const MISS_COOLDOWN: u32 = 10;
 const USE_DELAY: u32 = 4;
 const SWING_DURATION: i32 = 6;
+/// Vanilla `Consumable`: no bite effects during the first ~22% of the use,
+/// then a burst every 4 ticks.
+const CONSUME_EFFECTS_START_FRACTION: f32 = 0.21875;
+const CONSUME_EFFECTS_INTERVAL: i32 = 4;
+const MAX_FOOD_LEVEL: u32 = 20;
 
 /// Handles the predicted-break effects need (vanilla level event 2001 spawns
 /// break particles alongside the sound).
@@ -69,6 +81,23 @@ struct ServerVerifiedState {
     player_pos: DVec3,
 }
 
+/// An in-progress main-hand item use (eating/drinking), vanilla
+/// `LivingEntity.useItem` + `useItemRemaining` plus the `Consumable`
+/// component data resolved at start.
+struct ActiveUse {
+    kind: ItemKind,
+    anim: ItemUseAnimation,
+    sound: SoundRef,
+    has_particles: bool,
+    /// Atlas key for the crumb particles, e.g. `item/cooked_beef`.
+    texture: String,
+    use_effects: UseEffects,
+    duration: i32,
+    /// Counts down from `duration`; vanilla lets it run negative until the
+    /// server completes the use.
+    remaining: i32,
+}
+
 pub struct InteractionState {
     pub target: Option<HitResult>,
     seq: u32,
@@ -82,6 +111,7 @@ pub struct InteractionState {
     destroy_delay: u32,
     miss_time: u32,
     use_delay: u32,
+    using_item: Option<ActiveUse>,
     swinging: bool,
     swing_time: i32,
     attack_anim: f32,
@@ -111,6 +141,7 @@ impl InteractionState {
             destroy_delay: 0,
             miss_time: 0,
             use_delay: 0,
+            using_item: None,
             swinging: false,
             swing_time: 0,
             attack_anim: 0.0,
@@ -302,9 +333,13 @@ impl InteractionState {
         sender: &PacketSender,
         audio: &AudioEngine,
         player_pos: DVec3,
+        eye_pos: DVec3,
+        look: LookDirection,
         on_ground: bool,
         creative: bool,
+        food: u32,
         selected_slot: u8,
+        held_stack: Option<&ItemStackData>,
         place_block: Option<BlockState>,
         hands_empty: bool,
         effects: &mut BreakEffects,
@@ -315,15 +350,24 @@ impl InteractionState {
 
         // Vanilla `Minecraft.tick` order: attack/use input (which triggers the
         // swing) runs first, then `--missTime`, then the player entity advances
-        // `updateSwingTime`. Running `update_swing` last keeps the swing
-        // animation cadence in lockstep with vanilla.
+        // `updateSwingTime` and `updatingUsingItem`. Running `update_swing`
+        // last keeps the swing animation cadence in lockstep with vanilla.
         if !input.is_cursor_captured() {
             self.stop_destroying(sender);
+            // No screen-open release in vanilla either: an in-flight use keeps
+            // ticking (and completing) while a menu is up.
+            self.update_using_item(
+                held_stack, audio, chunks, player_pos, eye_pos, look, effects,
+            );
             self.update_swing();
             return dirty_chunks;
         }
 
-        if input.action_just_pressed(input::Action::Destroy) {
+        // Vanilla `handleKeybinds` drains attack clicks while an item is in
+        // use, and `continueAttack` early-returns on `isUsingItem`.
+        let using = self.using_item.is_some();
+
+        if !using && input.action_just_pressed(input::Action::Destroy) {
             self.start_attack(
                 chunks,
                 sender,
@@ -337,7 +381,7 @@ impl InteractionState {
             );
         }
 
-        if input.performing_action(input::Action::Destroy) {
+        if !using && input.performing_action(input::Action::Destroy) {
             self.continue_attack(
                 chunks,
                 sender,
@@ -357,16 +401,31 @@ impl InteractionState {
             let _ = input.strong_rumble_for_tick();
         }
 
-        if input.action_just_pressed(input::Action::Use)
+        // Vanilla `handleKeybinds`: while an item is in use, holding the use
+        // key continues it and releasing sends RELEASE_USE_ITEM (an early
+        // cancel; consumables finish on the server's own timer, never on
+        // release).
+        if using {
+            if !input.performing_action(input::Action::Use) {
+                self.release_using_item(sender);
+            }
+        } else if input.action_just_pressed(input::Action::Use)
             || (input.performing_action(input::Action::Use) && self.use_delay == 0)
         {
             let suppress_block_use = input.performing_action(input::Action::Sneak) && !hands_empty;
-            let success = self.use_item_on(
+            let success = self.start_use_item(
                 sender,
+                audio,
                 chunks,
                 player_pos,
+                eye_pos,
+                look,
                 place_block,
+                held_stack,
+                food,
+                creative,
                 suppress_block_use,
+                effects,
                 &mut dirty_chunks,
             );
             if success {
@@ -380,6 +439,9 @@ impl InteractionState {
         if self.use_delay > 0 {
             self.use_delay -= 1;
         }
+        self.update_using_item(
+            held_stack, audio, chunks, player_pos, eye_pos, look, effects,
+        );
         self.update_swing();
 
         dirty_chunks
@@ -483,16 +545,24 @@ impl InteractionState {
         self.swing(sender);
     }
 
-    /// Uses the currently selected item on the targeted block.
-    /// Returns `true` if a use interaction was sent, `false` if there was
-    /// nothing to act on (currently destroying, or no block target).
-    fn use_item_on(
+    /// Vanilla `Minecraft.startUseItem`: the block interaction goes first,
+    /// falling through to `use_item` when nothing on the block consumed the
+    /// click. Returns `true` if a use interaction was sent.
+    #[allow(clippy::too_many_arguments)]
+    fn start_use_item(
         &mut self,
         sender: &PacketSender,
+        audio: &AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
+        eye_pos: DVec3,
+        look: LookDirection,
         place_block: Option<BlockState>,
+        held_stack: Option<&ItemStackData>,
+        food: u32,
+        creative: bool,
         suppress_block_use: bool,
+        effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> bool {
         if self.is_destroying {
@@ -501,37 +571,227 @@ impl InteractionState {
 
         self.use_delay = USE_DELAY;
 
-        let Some(HitResult::Block(hit)) = self.target else {
+        // TODO: entity targets should send ServerboundInteract (feeding,
+        // leads etc.) before falling through to `use_item`.
+        let hit_block = if let Some(HitResult::Block(hit)) = self.target {
+            self.seq += 1;
+            sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
+                hand: InteractionHand::MainHand,
+                block_hit: BlockHit {
+                    block_pos: hit.block_pos,
+                    direction: hit.face,
+                    location: azalea_vec3(hit.hit_point),
+                    inside: false,
+                    world_border: false,
+                },
+                seq: self.seq,
+            }));
+            // A menu-opening block consumes the click (vanilla `useWithoutItem`)
+            // unless sneaking with something in hand.
+            // TODO: other interactive blocks (chests etc.) should consume the
+            // click here too once their menus render.
+            if !suppress_block_use {
+                let target =
+                    chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
+                if opens_menu(target) {
+                    return true;
+                }
+            }
+            if place_block.is_some() {
+                self.swing(sender);
+                self.predict_place(hit, place_block, chunks, player_pos, dirty_chunks);
+                return true;
+            }
+            true
+        } else {
+            false
+        };
+
+        // A non-block item passes the block interaction, so vanilla falls
+        // through to `useItem` (this is how eating at the ground works).
+        self.use_item(
+            sender, audio, chunks, player_pos, eye_pos, look, held_stack, food, creative, effects,
+        ) || hit_block
+    }
+
+    /// Vanilla `MultiPlayerGameMode.useItem` + `Consumable.startConsuming`:
+    /// sends `ServerboundUseItem` for any held item (the server decides what
+    /// it does; pearls and snowballs work through this too) and begins the
+    /// local use timer when the item is consumable and edible right now.
+    #[allow(clippy::too_many_arguments)]
+    fn use_item(
+        &mut self,
+        sender: &PacketSender,
+        audio: &AudioEngine,
+        chunks: &ChunkStore,
+        player_pos: DVec3,
+        eye_pos: DVec3,
+        look: LookDirection,
+        held_stack: Option<&ItemStackData>,
+        food: u32,
+        creative: bool,
+        effects: &mut BreakEffects,
+    ) -> bool {
+        let Some(stack) = held_stack else {
             return false;
         };
 
-        self.swing(sender);
         self.seq += 1;
-
-        sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
+        sender.send(ServerboundGamePacket::UseItem(ServerboundUseItem {
             hand: InteractionHand::MainHand,
-            block_hit: BlockHit {
-                block_pos: hit.block_pos,
-                direction: hit.face,
-                location: azalea_vec3(hit.hit_point),
-                inside: false,
-                world_border: false,
-            },
             seq: self.seq,
+            y_rot: look.y_rot_deg(),
+            x_rot: look.x_rot_deg(),
         }));
 
-        // Clicking a menu-opening block uses it instead of placing (unless
-        // sneaking with something in hand, vanilla `isSecondaryUseActive`),
-        // so don't predict a placement the server won't do.
-        if !suppress_block_use {
-            let target = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
-            if opens_menu(target) {
-                return true;
-            }
+        let Some(consumable) = stack_component::<Consumable>(stack) else {
+            return true;
+        };
+        // Vanilla `Consumable.canConsume` → `Player.canEat`: food needs
+        // hunger unless it can always be eaten; creative players (vanilla
+        // invulnerable) always can. Non-food consumables have no gate.
+        if let Some(f) = stack_component::<Food>(stack)
+            && !(creative || f.can_always_eat || food < MAX_FOOD_LEVEL)
+        {
+            return true;
         }
 
-        self.predict_place(hit, place_block, chunks, player_pos, dirty_chunks);
+        let duration = (consumable.consume_seconds * 20.0) as i32;
+        let active = ActiveUse {
+            kind: stack.kind,
+            anim: consumable.animation,
+            sound: SoundRef::resolve(&consumable.sound),
+            has_particles: consumable.has_consume_particles,
+            texture: format!("item/{}", item_resource_name(stack.kind)),
+            use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
+            duration,
+            remaining: duration,
+        };
+        if duration > 0 {
+            self.using_item = Some(active);
+        } else {
+            // Vanilla `Consumable.startConsuming`: a zero-duration consumable
+            // skips the use timer and consumes on the spot (`onConsume`).
+            emit_consume_effects(
+                &active,
+                16,
+                audio,
+                effects.particles,
+                chunks,
+                player_pos,
+                eye_pos,
+                look,
+            );
+        }
         true
+    }
+
+    /// Per-tick item-use heartbeat, vanilla `LivingEntity.updatingUsingItem`
+    /// / `updateUsingItem`: stop silently if the held stack changed, emit the
+    /// periodic bite sound/particles, count the timer down. Completion is
+    /// server-authoritative (entity event 9 → `complete_using`); the timer
+    /// just runs negative until the server acts.
+    #[allow(clippy::too_many_arguments)]
+    fn update_using_item(
+        &mut self,
+        held_stack: Option<&ItemStackData>,
+        audio: &AudioEngine,
+        chunks: &ChunkStore,
+        player_pos: DVec3,
+        eye_pos: DVec3,
+        look: LookDirection,
+        effects: &mut BreakEffects,
+    ) {
+        let Some(active) = &self.using_item else {
+            return;
+        };
+        if held_stack.map(|s| s.kind) != Some(active.kind) {
+            self.using_item = None;
+            return;
+        }
+        // `Consumable.shouldEmitParticlesAndSounds`.
+        let elapsed = active.duration - active.remaining;
+        let wait = (active.duration as f32 * CONSUME_EFFECTS_START_FRACTION) as i32;
+        if elapsed > wait && active.remaining % CONSUME_EFFECTS_INTERVAL == 0 {
+            emit_consume_effects(
+                active,
+                5,
+                audio,
+                effects.particles,
+                chunks,
+                player_pos,
+                eye_pos,
+                look,
+            );
+        }
+        if let Some(active) = &mut self.using_item {
+            active.remaining -= 1;
+        }
+    }
+
+    /// Vanilla `MultiPlayerGameMode.releaseUsingItem`: an early release just
+    /// cancels a consume; nothing finishes on release for food.
+    fn release_using_item(&mut self, sender: &PacketSender) {
+        send_action(
+            sender,
+            Action::ReleaseUseItem,
+            BlockPos { x: 0, y: 0, z: 0 },
+            Direction::Down,
+            0,
+        );
+        self.using_item = None;
+    }
+
+    /// Client `LivingEntity.completeUsingItem` (entity event 9) →
+    /// `Consumable.onConsume`: the final 16-crumb burst plus one more consume
+    /// sound. Food, saturation, the burp, and the shrunk stack all arrive as
+    /// separate server packets.
+    pub fn complete_using(
+        &mut self,
+        audio: &AudioEngine,
+        particles: &mut ParticleStore,
+        chunks: &ChunkStore,
+        player_pos: DVec3,
+        eye_pos: DVec3,
+        look: LookDirection,
+    ) {
+        let Some(active) = self.using_item.take() else {
+            return;
+        };
+        emit_consume_effects(
+            &active, 16, audio, particles, chunks, player_pos, eye_pos, look,
+        );
+    }
+
+    /// Vanilla `LocalPlayer.itemUseSpeedMultiplier`: the in-use item's
+    /// `UseEffects` movement-input scale (1.0 when nothing is in use).
+    pub fn use_speed_multiplier(&self) -> f64 {
+        self.using_item
+            .as_ref()
+            .map_or(1.0, |a| a.use_effects.speed_multiplier as f64)
+    }
+
+    /// Vanilla `LocalPlayer.isSlowDueToUsingItem`, which gates sprinting.
+    pub fn slow_due_to_using_item(&self) -> bool {
+        self.using_item
+            .as_ref()
+            .is_some_and(|a| !a.use_effects.can_sprint)
+    }
+
+    /// First-person use-animation state for the held-item renderer, vanilla
+    /// `ItemInHandRenderer.applyEatTransform` inputs. `None` unless an
+    /// eat/drink use is active with ticks remaining.
+    pub fn use_animation(&self, partial_tick: f32) -> Option<UseAnim> {
+        let active = self.using_item.as_ref()?;
+        if active.remaining <= 0
+            || !matches!(active.anim, ItemUseAnimation::Eat | ItemUseAnimation::Drink)
+        {
+            return None;
+        }
+        Some(UseAnim {
+            curr_usage_time: active.remaining as f32 - partial_tick + 1.0,
+            duration: active.duration as f32,
+        })
     }
 
     /// Predicts placement locally for unambiguous single-state blocks,
@@ -752,8 +1012,8 @@ impl InteractionState {
     }
 }
 
-/// Whether right-clicking this block opens a menu we render (so a use
-/// interaction won't place a block).
+/// Whether right-clicking this block opens a menu we render (so the use
+/// click is consumed: no block placement, no item use).
 fn opens_menu(state: BlockState) -> bool {
     crate::world::block::block_id(state) == "crafting_table"
 }
@@ -809,6 +1069,59 @@ pub fn play_break_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
         pos,
         (s.volume + 1.0) / 2.0,
         s.pitch * 0.8,
+    );
+}
+
+/// The stack's component override if the server set one, else the item's
+/// default.
+fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Option<T> {
+    stack
+        .component_patch
+        .get::<T>()
+        .cloned()
+        .or_else(|| get_default_component::<T>(stack.kind))
+}
+
+/// Vanilla `Consumable.emitParticlesAndSounds`: the shared bite / final-gulp
+/// burst of item crumbs plus the consume sound. The sound plays locally here
+/// and again from the server's broadcast, doubling up for the eater exactly
+/// like vanilla (MC-98310).
+#[allow(clippy::too_many_arguments)]
+fn emit_consume_effects(
+    active: &ActiveUse,
+    particle_count: u32,
+    audio: &AudioEngine,
+    particles: &mut ParticleStore,
+    chunks: &ChunkStore,
+    player_pos: DVec3,
+    eye_pos: DVec3,
+    look: LookDirection,
+) {
+    if active.has_particles {
+        particles.add_item_use_particles(
+            particle_count,
+            &active.texture,
+            eye_pos,
+            look.x_rot_deg(),
+            look.y_rot_deg(),
+            chunks,
+        );
+    }
+    let (volume, pitch) = if matches!(active.anim, ItemUseAnimation::Drink) {
+        (0.5, 0.9 + fastrand::f32() * 0.1)
+    } else {
+        (
+            if fastrand::bool() { 0.5 } else { 1.0 },
+            1.0 + 0.2 * (fastrand::f32() - fastrand::f32()),
+        )
+    };
+    audio.play_world_sound(
+        &active.sound,
+        CATEGORY_PLAYERS,
+        Position::new(player_pos.x, player_pos.y, player_pos.z),
+        volume,
+        pitch,
+        fastrand::u64(..),
     );
 }
 
