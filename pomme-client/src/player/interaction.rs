@@ -573,7 +573,7 @@ impl InteractionState {
 
         // TODO: entity targets should send ServerboundInteract (feeding,
         // leads etc.) before falling through to `use_item`.
-        if let Some(HitResult::Block(hit)) = self.target {
+        let hit_block = if let Some(HitResult::Block(hit)) = self.target {
             self.seq += 1;
             sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
                 hand: InteractionHand::MainHand,
@@ -586,9 +586,8 @@ impl InteractionState {
                 },
                 seq: self.seq,
             }));
-            // A menu-opening block consumes the click (vanilla `useWithoutItem`
-            // succeeds) unless sneaking with something in hand: no placement
-            // prediction and no fall-through to `use_item`.
+            // A menu-opening block consumes the click (vanilla `useWithoutItem`)
+            // unless sneaking with something in hand.
             // TODO: other interactive blocks (chests etc.) should consume the
             // click here too once their menus render.
             if !suppress_block_use {
@@ -603,18 +602,16 @@ impl InteractionState {
                 self.predict_place(hit, place_block, chunks, player_pos, dirty_chunks);
                 return true;
             }
-            // A non-block item passes the block interaction, so vanilla falls
-            // through to `useItem` (this is how eating at the ground works).
-            self.use_item(
-                sender, audio, chunks, player_pos, eye_pos, look, held_stack, food, creative,
-                effects,
-            );
-            return true;
-        }
+            true
+        } else {
+            false
+        };
 
+        // A non-block item passes the block interaction, so vanilla falls
+        // through to `useItem` (this is how eating at the ground works).
         self.use_item(
             sender, audio, chunks, player_pos, eye_pos, look, held_stack, food, creative, effects,
-        )
+        ) || hit_block
     }
 
     /// Vanilla `MultiPlayerGameMode.useItem` + `Consumable.startConsuming`:
@@ -1015,8 +1012,8 @@ impl InteractionState {
     }
 }
 
-/// Whether right-clicking this block opens a menu we render (so a use
-/// interaction won't place a block).
+/// Whether right-clicking this block opens a menu we render (so the use
+/// click is consumed: no block placement, no item use).
 fn opens_menu(state: BlockState) -> bool {
     crate::world::block::block_id(state) == "crafting_table"
 }
