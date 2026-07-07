@@ -170,10 +170,8 @@ pub fn handle_game_packet(
                 title: p.title.to_string(),
             });
         }
-        ClientboundGamePacket::ContainerClose(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ContainerClosed {
-                container_id: p.container_id,
-            });
+        ClientboundGamePacket::ContainerClose(_) => {
+            let _ = event_tx.try_send(NetworkEvent::ContainerClosed);
         }
         ClientboundGamePacket::SetHealth(p) => {
             let _ = event_tx.try_send(NetworkEvent::PlayerHealth {

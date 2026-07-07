@@ -42,6 +42,8 @@ pub struct OpenContainer {
     /// Menu slots in container indices: result 0, grid 1..9, then the
     /// inventory-backed slots 10..45 (player slot + 1).
     pub slots: Vec<azalea_inventory::ItemStack>,
+    /// This menu's latest server state id, echoed in container clicks.
+    pub state_id: u32,
 }
 
 impl OpenContainer {
@@ -71,8 +73,9 @@ pub struct GameState {
     pub inventory_open: bool,
     pub creative_inventory_open: bool,
     pub creative_state: crate::ui::creative_inventory::CreativeState,
-    /// Latest container state id from the server, echoed in container clicks.
-    pub container_state_id: u32,
+    /// The inventory menu's (container 0) latest server state id, echoed in
+    /// container clicks; an open container keeps its own.
+    pub inventory_state_id: u32,
     /// Carried (cursor) stack for container screens, driven by the server.
     pub cursor_item: azalea_inventory::ItemStack,
     /// The server-opened container screen (crafting table), if any.
@@ -220,7 +223,7 @@ impl GameState {
             inventory_open: false,
             creative_inventory_open: false,
             creative_state: crate::ui::creative_inventory::CreativeState::new(),
-            container_state_id: 0,
+            inventory_state_id: 0,
             cursor_item: azalea_inventory::ItemStack::Empty,
             open_container: None,
             container_was_open: None,
@@ -322,6 +325,13 @@ impl GameState {
             .skip(OpenContainer::INV_START)
         {
             *slot = self.player.inventory.slot(i - 1).clone();
+        }
+    }
+
+    /// Record the open container's latest server state id.
+    pub fn set_container_state_id(&mut self, state_id: u32) {
+        if let Some(c) = &mut self.open_container {
+            c.state_id = state_id;
         }
     }
 
@@ -816,9 +826,9 @@ fn send_container_clicks(
 
     use crate::player::menu_click::{self, ContainerKind};
 
-    let (container_id, kind) = match &game.open_container {
-        Some(c) => (c.id, ContainerKind::CraftingTable),
-        None => (0, ContainerKind::Player),
+    let (container_id, kind, state_id) = match &game.open_container {
+        Some(c) => (c.id, ContainerKind::CraftingTable, c.state_id),
+        None => (0, ContainerKind::Player, game.inventory_state_id),
     };
 
     let mut drag_kind = QuickCraftKind::Left;
@@ -866,7 +876,7 @@ fn send_container_clicks(
 
         let mut click = ServerboundContainerClick {
             container_id,
-            state_id: game.container_state_id,
+            state_id,
             slot_num: op.slot_num().map(|s| s as i16).unwrap_or(-999),
             button_num: op.button_num(),
             click_type: op.click_type(),

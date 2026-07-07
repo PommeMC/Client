@@ -306,6 +306,7 @@ impl InteractionState {
         creative: bool,
         selected_slot: u8,
         place_block: Option<BlockState>,
+        hands_empty: bool,
         effects: &mut BreakEffects,
     ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
@@ -359,13 +360,13 @@ impl InteractionState {
         if input.action_just_pressed(input::Action::Use)
             || (input.performing_action(input::Action::Use) && self.use_delay == 0)
         {
-            let sneaking = input.performing_action(input::Action::Sneak);
+            let suppress_block_use = input.performing_action(input::Action::Sneak) && !hands_empty;
             let success = self.use_item_on(
                 sender,
                 chunks,
                 player_pos,
                 place_block,
-                sneaking,
+                suppress_block_use,
                 &mut dirty_chunks,
             );
             if success {
@@ -491,7 +492,7 @@ impl InteractionState {
         chunks: &ChunkStore,
         player_pos: DVec3,
         place_block: Option<BlockState>,
-        sneaking: bool,
+        suppress_block_use: bool,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> bool {
         if self.is_destroying {
@@ -520,8 +521,9 @@ impl InteractionState {
         }));
 
         // Clicking a menu-opening block uses it instead of placing (unless
-        // sneaking), so don't predict a placement the server won't do.
-        if !sneaking {
+        // sneaking with something in hand, vanilla `isSecondaryUseActive`),
+        // so don't predict a placement the server won't do.
+        if !suppress_block_use {
             let target = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
             if opens_menu(target) {
                 return true;

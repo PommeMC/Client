@@ -76,9 +76,7 @@ pub enum NetworkEvent {
         menu_type: azalea_registry::builtin::MenuKind,
         title: String,
     },
-    ContainerClosed {
-        container_id: i32,
-    },
+    ContainerClosed,
     CursorItem {
         item: ItemStack,
     },
