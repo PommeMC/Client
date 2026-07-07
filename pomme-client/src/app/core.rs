@@ -925,7 +925,9 @@ impl AppCore {
                     game.entity_store.start_sheep_eat(id);
                 }
                 NetworkEvent::FinishUseItem { id } => {
-                    // TODO: remote players once third-person held items exist.
+                    // Vanilla sends event 9 only to the eater; remote players'
+                    // eating effects come from each client simulating their use
+                    // ticks off entity flags (TODO, with third-person items).
                     if id == game.player.entity_id {
                         game.interaction.complete_using(
                             &self.audio,

@@ -415,14 +415,17 @@ impl InteractionState {
             let suppress_block_use = input.performing_action(input::Action::Sneak) && !hands_empty;
             let success = self.start_use_item(
                 sender,
+                audio,
                 chunks,
                 player_pos,
+                eye_pos,
                 look,
                 place_block,
                 held_stack,
                 food,
                 creative,
                 suppress_block_use,
+                effects,
                 &mut dirty_chunks,
             );
             if success {
@@ -549,14 +552,17 @@ impl InteractionState {
     fn start_use_item(
         &mut self,
         sender: &PacketSender,
+        audio: &AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
+        eye_pos: DVec3,
         look: LookDirection,
         place_block: Option<BlockState>,
         held_stack: Option<&ItemStackData>,
         food: u32,
         creative: bool,
         suppress_block_use: bool,
+        effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> bool {
         if self.is_destroying {
@@ -599,24 +605,35 @@ impl InteractionState {
             }
             // A non-block item passes the block interaction, so vanilla falls
             // through to `useItem` (this is how eating at the ground works).
-            self.use_item(sender, held_stack, food, creative, look);
+            self.use_item(
+                sender, audio, chunks, player_pos, eye_pos, look, held_stack, food, creative,
+                effects,
+            );
             return true;
         }
 
-        self.use_item(sender, held_stack, food, creative, look)
+        self.use_item(
+            sender, audio, chunks, player_pos, eye_pos, look, held_stack, food, creative, effects,
+        )
     }
 
     /// Vanilla `MultiPlayerGameMode.useItem` + `Consumable.startConsuming`:
     /// sends `ServerboundUseItem` for any held item (the server decides what
     /// it does; pearls and snowballs work through this too) and begins the
     /// local use timer when the item is consumable and edible right now.
+    #[allow(clippy::too_many_arguments)]
     fn use_item(
         &mut self,
         sender: &PacketSender,
+        audio: &AudioEngine,
+        chunks: &ChunkStore,
+        player_pos: DVec3,
+        eye_pos: DVec3,
+        look: LookDirection,
         held_stack: Option<&ItemStackData>,
         food: u32,
         creative: bool,
-        look: LookDirection,
+        effects: &mut BreakEffects,
     ) -> bool {
         let Some(stack) = held_stack else {
             return false;
@@ -643,17 +660,31 @@ impl InteractionState {
         }
 
         let duration = (consumable.consume_seconds * 20.0) as i32;
+        let active = ActiveUse {
+            kind: stack.kind,
+            anim: consumable.animation,
+            sound: SoundRef::resolve(&consumable.sound),
+            has_particles: consumable.has_consume_particles,
+            texture: format!("item/{}", item_resource_name(stack.kind)),
+            use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
+            duration,
+            remaining: duration,
+        };
         if duration > 0 {
-            self.using_item = Some(ActiveUse {
-                kind: stack.kind,
-                anim: consumable.animation,
-                sound: SoundRef::resolve(&consumable.sound),
-                has_particles: consumable.has_consume_particles,
-                texture: format!("item/{}", item_resource_name(stack.kind)),
-                use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
-                duration,
-                remaining: duration,
-            });
+            self.using_item = Some(active);
+        } else {
+            // Vanilla `Consumable.startConsuming`: a zero-duration consumable
+            // skips the use timer and consumes on the spot (`onConsume`).
+            emit_consume_effects(
+                &active,
+                16,
+                audio,
+                effects.particles,
+                chunks,
+                player_pos,
+                eye_pos,
+                look,
+            );
         }
         true
     }
