@@ -163,6 +163,13 @@ pub fn handle_game_packet(
                 state_id: p.state_id,
             });
         }
+        ClientboundGamePacket::ContainerSetData(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ContainerData {
+                container_id: p.container_id,
+                id: p.id,
+                value: p.value,
+            });
+        }
         ClientboundGamePacket::OpenScreen(p) => {
             let _ = event_tx.try_send(NetworkEvent::OpenScreen {
                 container_id: p.container_id,

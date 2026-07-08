@@ -19,6 +19,7 @@ use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::player::LocalPlayer;
 use crate::player::interaction::{HitResult, InteractionState};
+use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
@@ -35,21 +36,44 @@ use crate::ui::{common, hud};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
-/// A server-opened container screen (currently only the crafting table).
+/// Which screen a server-opened container renders as.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ContainerScreen {
+    CraftingTable,
+    Furnace(crate::ui::furnace::FurnaceVariant),
+}
+
+impl ContainerScreen {
+    /// The click-prediction menu kind backing this screen.
+    pub fn click_kind(self) -> ContainerKind {
+        match self {
+            Self::CraftingTable => ContainerKind::CraftingTable,
+            Self::Furnace(_) => ContainerKind::Furnace,
+        }
+    }
+}
+
+/// A server-opened container screen.
 pub struct OpenContainer {
     pub id: i32,
     pub title: String,
-    /// Menu slots in container indices: result 0, grid 1..9, then the
-    /// inventory-backed slots 10..45 (player slot + 1).
+    pub screen: ContainerScreen,
+    /// Menu slots in container indices; slots from `inv_start()` on are backed
+    /// by the player inventory.
     pub slots: Vec<azalea_inventory::ItemStack>,
+    /// The menu's data values (`ClientboundContainerSetData`), e.g. furnace
+    /// lit/cook progress.
+    pub data: [u16; 4],
     /// This menu's latest server state id, echoed in container clicks.
     pub state_id: u32,
 }
 
 impl OpenContainer {
     /// First container slot backed by the player inventory; container slot `i`
-    /// maps to player inventory slot `i - 1` from here on.
-    pub const INV_START: usize = 10;
+    /// maps to player inventory slot `i - inv_start() + 9` from here on.
+    fn inv_start(&self) -> usize {
+        self.screen.click_kind().inv_start()
+    }
 }
 
 pub struct GameState {
@@ -295,7 +319,7 @@ impl GameState {
     }
 
     /// Set a slot of the currently open menu. Container slots backing the
-    /// player inventory (10..) mirror into it, so the hotbar and a reopened
+    /// player inventory mirror into it, so the hotbar and a reopened
     /// inventory stay in sync.
     pub fn set_menu_slot(&mut self, index: usize, item: azalea_inventory::ItemStack) {
         match &mut self.open_container {
@@ -304,8 +328,9 @@ impl GameState {
                     return;
                 };
                 *s = item.clone();
-                if index >= OpenContainer::INV_START {
-                    self.player.inventory.set_slot(index - 1, item);
+                let inv_start = c.inv_start();
+                if index >= inv_start {
+                    self.player.inventory.set_slot(index - inv_start + 9, item);
                 }
             }
             None => self.player.inventory.set_slot(index, item),
@@ -318,13 +343,9 @@ impl GameState {
         let Some(c) = &mut self.open_container else {
             return;
         };
-        for (i, slot) in c
-            .slots
-            .iter_mut()
-            .enumerate()
-            .skip(OpenContainer::INV_START)
-        {
-            *slot = self.player.inventory.slot(i - 1).clone();
+        let inv_start = c.inv_start();
+        for (i, slot) in c.slots.iter_mut().enumerate().skip(inv_start) {
+            *slot = self.player.inventory.slot(i - inv_start + 9).clone();
         }
     }
 
@@ -824,10 +845,10 @@ fn send_container_clicks(
         HashedStack, ServerboundContainerClick,
     };
 
-    use crate::player::menu_click::{self, ContainerKind};
+    use crate::player::menu_click;
 
     let (container_id, kind, state_id) = match &game.open_container {
-        Some(c) => (c.id, ContainerKind::CraftingTable, c.state_id),
+        Some(c) => (c.id, c.screen.click_kind(), c.state_id),
         None => (0, ContainerKind::Player, game.inventory_state_id),
     };
 
@@ -1440,19 +1461,37 @@ pub fn update_game(
             shift: core.input.shift_held(),
         };
         let (clicked_outside, ops) = if let Some(container) = &game.open_container {
-            let result = crate::ui::crafting_table::build_crafting_table(
-                &mut elements,
-                sw,
-                sh,
-                core.input.cursor_pos(),
-                &input,
-                &container.slots,
-                &container.title,
-                &game.cursor_item,
-                &mut game.inv_drag,
-                &mut game.inv_last_click,
-                gs,
-            );
+            let result = match container.screen {
+                ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    &container.slots,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                ),
+                ContainerScreen::Furnace(variant) => crate::ui::furnace::build_furnace(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    variant,
+                    &container.slots,
+                    container.data,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
+                ),
+            };
             (result.clicked_outside, result.ops)
         } else {
             let result = crate::ui::inventory::build_inventory(

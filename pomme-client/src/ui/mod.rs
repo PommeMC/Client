@@ -8,6 +8,7 @@ pub mod death;
 #[allow(dead_code)]
 pub mod font;
 pub mod friends;
+pub mod furnace;
 pub mod hud;
 pub mod inventory;
 pub mod menu;

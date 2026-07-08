@@ -4,28 +4,19 @@
 use std::time::Instant;
 
 use azalea_inventory::ItemStack;
-use azalea_inventory::operations::ClickOperation;
 
 use super::common::SLOT_STRIDE;
 use super::container::{
-    ContainerInput, DragState, SlotCtx, push_cursor_stack, push_panel, push_recipe_book_button,
-    resolve_gesture,
+    ContainerInput, ContainerResult, DragState, SlotCtx, push_cursor_stack, push_panel,
+    push_recipe_book_button, resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
-pub const SLOT_COUNT: usize = 46;
 const SLOT_RESULT: u16 = 0;
 const SLOT_GRID_BASE: u16 = 1;
 const SLOT_MAIN_BASE: u16 = 10;
 const SLOT_HOTBAR_BASE: u16 = 37;
-
-pub struct CraftingResult {
-    pub clicked_outside: bool,
-    /// Container-click operations to send this frame (usually 0-1; a drag
-    /// release emits a start/add.../end sequence).
-    pub ops: Vec<ClickOperation>,
-}
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_crafting_table(
@@ -40,7 +31,7 @@ pub fn build_crafting_table(
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
-) -> CraftingResult {
+) -> ContainerResult {
     let panel = push_panel(
         elements,
         screen_w,
@@ -97,7 +88,7 @@ pub fn build_crafting_table(
         last_click,
     );
 
-    CraftingResult {
+    ContainerResult {
         clicked_outside,
         ops,
     }

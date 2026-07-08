@@ -71,6 +71,12 @@ pub enum NetworkEvent {
         item: ItemStack,
         state_id: u32,
     },
+    /// A menu data value (furnace lit/cook progress, etc.).
+    ContainerData {
+        container_id: i32,
+        id: u16,
+        value: u16,
+    },
     OpenScreen {
         container_id: i32,
         menu_type: azalea_registry::builtin::MenuKind,

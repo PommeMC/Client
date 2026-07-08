@@ -1,5 +1,5 @@
-//! Shared pieces for container screens (survival inventory, crafting table):
-//! the click/drag gesture state machine and per-frame slot drawing.
+//! Shared pieces for container screens (survival inventory, crafting table,
+//! furnace): the click/drag gesture state machine and per-frame slot drawing.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -23,6 +23,14 @@ const DOUBLE_CLICK_MS: u128 = 250;
 
 /// Active click-drag: which button, and the slots covered so far.
 pub type DragState = (QuickCraftKind, Vec<u16>);
+
+/// What a container screen's frame produced.
+pub struct ContainerResult {
+    pub clicked_outside: bool,
+    /// Container-click operations to send this frame (usually 0-1; a drag
+    /// release emits a start/add.../end sequence).
+    pub ops: Vec<ClickOperation>,
+}
 
 /// Input for a container screen this frame.
 pub struct ContainerInput {

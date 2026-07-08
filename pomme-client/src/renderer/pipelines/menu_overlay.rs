@@ -1543,6 +1543,15 @@ pub enum SpriteId {
     ExperienceBarProgress,
     InventoryBackground,
     CraftingTableBackground,
+    FurnaceBackground,
+    BlastFurnaceBackground,
+    SmokerBackground,
+    FurnaceLitProgress,
+    FurnaceBurnProgress,
+    BlastFurnaceLitProgress,
+    BlastFurnaceBurnProgress,
+    SmokerLitProgress,
+    SmokerBurnProgress,
     CreativeItemsBackground,
     CreativeSearchBackground,
     CreativeInventoryBackground,
@@ -1821,6 +1830,36 @@ fn build_sprite_atlas(
         (
             SpriteId::SlotHighlightFront,
             "minecraft/textures/gui/sprites/container/slot_highlight_front.png",
+            0.0,
+        ),
+        (
+            SpriteId::FurnaceLitProgress,
+            "minecraft/textures/gui/sprites/container/furnace/lit_progress.png",
+            0.0,
+        ),
+        (
+            SpriteId::FurnaceBurnProgress,
+            "minecraft/textures/gui/sprites/container/furnace/burn_progress.png",
+            0.0,
+        ),
+        (
+            SpriteId::BlastFurnaceLitProgress,
+            "minecraft/textures/gui/sprites/container/blast_furnace/lit_progress.png",
+            0.0,
+        ),
+        (
+            SpriteId::BlastFurnaceBurnProgress,
+            "minecraft/textures/gui/sprites/container/blast_furnace/burn_progress.png",
+            0.0,
+        ),
+        (
+            SpriteId::SmokerLitProgress,
+            "minecraft/textures/gui/sprites/container/smoker/lit_progress.png",
+            0.0,
+        ),
+        (
+            SpriteId::SmokerBurnProgress,
+            "minecraft/textures/gui/sprites/container/smoker/burn_progress.png",
             0.0,
         ),
         (
@@ -2116,6 +2155,24 @@ fn build_sprite_atlas(
         (
             SpriteId::CraftingTableBackground,
             "minecraft/textures/gui/container/crafting_table.png",
+            INV_TEX_W,
+            INV_TEX_H,
+        ),
+        (
+            SpriteId::FurnaceBackground,
+            "minecraft/textures/gui/container/furnace.png",
+            INV_TEX_W,
+            INV_TEX_H,
+        ),
+        (
+            SpriteId::BlastFurnaceBackground,
+            "minecraft/textures/gui/container/blast_furnace.png",
+            INV_TEX_W,
+            INV_TEX_H,
+        ),
+        (
+            SpriteId::SmokerBackground,
+            "minecraft/textures/gui/container/smoker.png",
             INV_TEX_W,
             INV_TEX_H,
         ),
