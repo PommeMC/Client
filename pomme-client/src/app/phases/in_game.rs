@@ -10,6 +10,7 @@ use glam::FloatExt as _;
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
 use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE, input};
+use crate::audio::{CATEGORY_PLAYERS, SoundRef};
 use crate::benchmark::{
     Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep, UploadHandle,
     UploadStatus, upload_result,
@@ -58,6 +59,8 @@ pub struct GameState {
     pub position_set: bool,
     pub player_loaded_sent: bool,
     pub player: LocalPlayer,
+    /// Bubble index the pop sound last played for, so each pop fires once.
+    pub last_bubble_pop_sound_played: i32,
     pub biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     pub player_walk_pos: f32,
     pub player_walk_speed: f32,
@@ -208,6 +211,7 @@ impl GameState {
             },
             block_entity_anim: BlockEntityAnimStore::default(),
             player: LocalPlayer::new(),
+            last_bubble_pop_sound_played: 0,
             biome_climate: Arc::new(HashMap::new()),
             player_walk_pos: 0.0,
             player_walk_speed: 0.0,
@@ -1128,6 +1132,26 @@ pub fn update_game(
     // the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
     if !benchmark_running {
+        if let Some(bubbles) = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
+            .filter(|_| crate::player::is_survival(game.player.game_mode))
+        {
+            if !game.player.eyes_in_water {
+                game.last_bubble_pop_sound_played = 0;
+            } else if bubbles.is_popping && game.last_bubble_pop_sound_played != bubbles.popping_pos
+            {
+                let volume = 0.5 + 0.1 * (bubbles.empty - 3 + 1).max(0) as f32;
+                let pitch = 1.0 + 0.1 * (bubbles.empty - 5 + 1).max(0) as f32;
+                core.audio.play_world_sound(
+                    &SoundRef::Event("ui.hud.bubble_pop".into()),
+                    CATEGORY_PLAYERS,
+                    game.player.position,
+                    volume,
+                    pitch,
+                    fastrand::u64(..),
+                );
+                game.last_bubble_pop_sound_played = bubbles.popping_pos;
+            }
+        }
         hud::build_hud(
             &mut elements,
             sw,

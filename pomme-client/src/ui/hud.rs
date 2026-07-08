@@ -254,26 +254,16 @@ pub fn build_hud(
         }
     }
 
-    let max_air = crate::player::MAX_AIR_SUPPLY;
-    if is_survival && (eyes_in_water || air_supply < max_air) {
-        let air = air_supply.clamp(0, max_air);
-        let bubble_count =
-            |offset: i32| -> i32 { (((air + offset) * 10 + max_air - 1) / max_air).clamp(0, 10) };
-        let full_bubbles = bubble_count(-2);
-        let popping_pos = bubble_count(0);
-        let empty_delay = if air == 0 || !eyes_in_water { 0 } else { 1 };
-        let empty_bubbles = 10 - bubble_count(empty_delay);
-        let is_popping = full_bubbles != popping_pos;
-
-        let bubble_y = (status_bar_y - ICON_SIZE * gs - 1.0 * gs).round();
+    if let Some(bubbles) = air_bubbles(air_supply, eyes_in_water).filter(|_| is_survival) {
+        let bubble_y = (status_bar_y - (ICON_SIZE * 2.0 + 1.0) * gs).round();
         let stride = ICON_STRIDE * gs;
         let icon_size = ICON_SIZE * gs;
         for b in 1..=10i32 {
-            let sprite = if b <= full_bubbles {
+            let sprite = if b <= bubbles.full {
                 SpriteId::AirFull
-            } else if is_popping && b == popping_pos && eyes_in_water {
+            } else if bubbles.is_popping && b == bubbles.popping_pos && eyes_in_water {
                 SpriteId::AirBursting
-            } else if b <= 10 - empty_bubbles {
+            } else if b <= 10 - bubbles.empty {
                 continue;
             } else {
                 SpriteId::AirEmpty
@@ -289,6 +279,33 @@ pub fn build_hud(
             });
         }
     }
+}
+
+pub struct AirBubbles {
+    pub full: i32,
+    pub popping_pos: i32,
+    pub empty: i32,
+    pub is_popping: bool,
+}
+
+/// None when the air row is hidden (full air and not underwater).
+pub fn air_bubbles(air_supply: i32, eyes_in_water: bool) -> Option<AirBubbles> {
+    let max_air = crate::player::MAX_AIR_SUPPLY;
+    if !eyes_in_water && air_supply >= max_air {
+        return None;
+    }
+    let air = air_supply.clamp(0, max_air);
+    let bubble_count =
+        |offset: i32| -> i32 { (((air + offset) * 10 + max_air - 1) / max_air).clamp(0, 10) };
+    let full = bubble_count(-2);
+    let popping_pos = bubble_count(0);
+    let empty_delay = if air == 0 || !eyes_in_water { 0 } else { 1 };
+    Some(AirBubbles {
+        full,
+        popping_pos,
+        empty: 10 - bubble_count(empty_delay),
+        is_popping: full != popping_pos,
+    })
 }
 
 fn build_crosshair(elements: &mut Vec<MenuElement>, cx: f32, cy: f32) {
@@ -331,7 +348,7 @@ fn build_status_bar(
 
     for i in 0..10u8 {
         let x = if right_to_left {
-            (x_start - (i as f32 + 1.0) * stride).round()
+            (x_start - i as f32 * stride - icon_size).round()
         } else {
             (x_start + i as f32 * stride).round()
         };
