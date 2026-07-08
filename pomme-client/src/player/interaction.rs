@@ -1027,6 +1027,7 @@ fn opens_menu(state: BlockState) -> bool {
             | "ender_chest"
             | "barrel"
     ) || id.ends_with("shulker_box")
+        || id.ends_with("anvil")
 }
 
 fn destroy_progress(state: BlockState, on_ground: bool, creative: bool) -> f32 {

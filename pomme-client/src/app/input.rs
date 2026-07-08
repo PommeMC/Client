@@ -45,6 +45,9 @@ pub struct InputState {
     cursor_moved: bool,
     typed_chars: Vec<char>,
     menu_scroll: f32,
+    /// A focused text field (anvil rename, creative search) is capturing
+    /// keyboard input this frame: letter/digit hotkeys must type, not act.
+    pub text_capture: bool,
     backspace_pressed: bool,
     enter_pressed: bool,
     escape_pressed: bool,
@@ -121,6 +124,7 @@ impl InputState {
             cursor_moved: false,
             typed_chars: Vec::new(),
             menu_scroll: 0.0,
+            text_capture: false,
             backspace_pressed: false,
             enter_pressed: false,
             escape_pressed: false,
@@ -438,11 +442,13 @@ impl InputState {
             match event.state {
                 ElementState::Pressed => {
                     self.pressed.insert(code);
-                    if let Some(slot) = hotbar_slot(code) {
+                    if !self.text_capture
+                        && let Some(slot) = hotbar_slot(code)
+                    {
                         self.selected_slot = slot;
                     }
                     match code {
-                        KeyCode::KeyE => {
+                        KeyCode::KeyE if !self.text_capture => {
                             self.recent_actions.insert(Action::ToggleInventory, true);
                         }
                         KeyCode::Escape => {

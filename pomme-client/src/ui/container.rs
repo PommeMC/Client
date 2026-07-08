@@ -63,6 +63,26 @@ impl Panel {
             color: SLOT_LABEL_COLOR,
         });
     }
+
+    /// An untinted sprite at a GUI-unit rectangle.
+    pub fn image(
+        &self,
+        elements: &mut Vec<MenuElement>,
+        sprite: SpriteId,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) {
+        elements.push(MenuElement::Image {
+            x: self.ox + x * self.scale,
+            y: self.oy + y * self.scale,
+            w: w * self.scale,
+            h: h * self.scale,
+            sprite,
+            tint: WHITE,
+        });
+    }
 }
 
 /// The dimmed backdrop and the centered panel placement for a `panel_w` x
@@ -109,14 +129,7 @@ pub fn push_panel(
     sprite: SpriteId,
 ) -> Panel {
     let panel = push_backdrop(elements, screen_w, screen_h, gs, 176.0, panel_h);
-    elements.push(MenuElement::Image {
-        x: panel.ox,
-        y: panel.oy,
-        w: panel.w,
-        h: panel.h,
-        sprite,
-        tint: WHITE,
-    });
+    panel.image(elements, sprite, 0.0, 0.0, 176.0, panel_h);
     panel
 }
 
@@ -129,23 +142,13 @@ pub fn push_clipped_sprite(
     clip: [f32; 4],
 ) {
     let s = panel.scale;
-    let px = |v: [f32; 4]| [panel.ox + v[0] * s, panel.oy + v[1] * s, v[2] * s, v[3] * s];
-    let [cx, cy, cw, ch] = px(clip);
-    let [x, y, w, h] = px(rect);
     elements.push(MenuElement::ScissorPush {
-        x: cx,
-        y: cy,
-        w: cw,
-        h: ch,
+        x: panel.ox + clip[0] * s,
+        y: panel.oy + clip[1] * s,
+        w: clip[2] * s,
+        h: clip[3] * s,
     });
-    elements.push(MenuElement::Image {
-        x,
-        y,
-        w,
-        h,
-        sprite,
-        tint: WHITE,
-    });
+    panel.image(elements, sprite, rect[0], rect[1], rect[2], rect[3]);
     elements.push(MenuElement::ScissorPop);
 }
 

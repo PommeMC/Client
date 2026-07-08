@@ -19,13 +19,14 @@ pub enum ContainerKind {
     Furnace,
     Chest { rows: u8 },
     ShulkerBox,
+    Anvil,
 }
 
 impl ContainerKind {
     pub fn slot_count(self) -> usize {
         match self {
             Self::Player | Self::CraftingTable => 46,
-            Self::Furnace => 39,
+            Self::Furnace | Self::Anvil => 39,
             Self::Chest { rows } => rows as usize * 9 + 36,
             Self::ShulkerBox => 63,
         }
@@ -36,19 +37,21 @@ impl ContainerKind {
     pub fn inv_start(self) -> usize {
         match self {
             Self::Player | Self::CraftingTable => 10,
-            Self::Furnace => 3,
+            Self::Furnace | Self::Anvil => 3,
             Self::Chest { rows } => rows as usize * 9,
             Self::ShulkerBox => 27,
         }
     }
 
-    /// The crafting-result slot, if this menu has one. Its clicks need recipe
-    /// logic we can't predict, and vanilla excludes it from double-click
+    /// The result slot whose clicks we can't predict, if this menu has one:
+    /// crafting results need recipe logic, the anvil result costs XP and
+    /// materials. Vanilla also excludes the crafting result from double-click
     /// gathering (`canTakeItemForPickAll`). The furnace result slot is neither:
     /// taking from it is a plain pickup.
     fn crafting_result_slot(self) -> Option<usize> {
         match self {
             Self::Player | Self::CraftingTable => Some(0),
+            Self::Anvil => Some(2),
             Self::Furnace | Self::Chest { .. } | Self::ShulkerBox => None,
         }
     }
@@ -95,6 +98,12 @@ impl ContainerKind {
                 contents: SlotList::default(),
                 player: SlotList::default(),
             },
+            Self::Anvil => Menu::Anvil {
+                first: ItemStack::Empty,
+                second: ItemStack::Empty,
+                result: ItemStack::Empty,
+                player: SlotList::default(),
+            },
         };
         for (i, item) in slots.iter().enumerate() {
             if let Some(s) = menu.slot_mut(i) {
@@ -112,7 +121,7 @@ impl ContainerKind {
     fn may_place(self, s: usize, item: &ItemStackData) -> bool {
         match (self, s) {
             (Self::Player | Self::CraftingTable, 0) => false,
-            (Self::Furnace, 2) => false,
+            (Self::Furnace | Self::Anvil, 2) => false,
             (Self::Player, 5..=8) => {
                 let want = match s {
                     5 => EquipmentSlot::Head,
@@ -330,8 +339,9 @@ fn safe_insert(slot: &mut ItemStack, carried: &mut ItemStack, amount: i32) {
 /// Shift-click, repeating until it stops making progress (vanilla loops too).
 /// Chest menus move between the contents and player regions exactly like
 /// vanilla `ChestMenu.quickMoveStack` (contents-bound forward, player-bound
-/// reversed); the other menus use azalea's `quick_move_stack`, whose routing
-/// matches vanilla closely enough for them.
+/// reversed); the anvil ports `ItemCombinerMenu.quickMoveStack` (inputs first,
+/// then a main/hotbar toggle); the other menus use azalea's
+/// `quick_move_stack`, whose routing matches vanilla closely enough for them.
 fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
     for _ in 0..menu.len() {
         let before = menu.slot(s).map(ItemStack::count).unwrap_or(0);
@@ -345,6 +355,17 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
                     move_item_stack_to(kind, menu, s, split..menu.len(), true);
                 } else {
                     move_item_stack_to(kind, menu, s, 0..split, false);
+                }
+            }
+            ContainerKind::Anvil => {
+                if s < 3 {
+                    move_item_stack_to(kind, menu, s, 3..menu.len(), false);
+                } else {
+                    move_item_stack_to(kind, menu, s, 0..2, false);
+                    if menu.slot(s).map(ItemStack::count).unwrap_or(0) == before {
+                        let to = if s < 30 { 30..39 } else { 3..30 };
+                        move_item_stack_to(kind, menu, s, to, false);
+                    }
                 }
             }
             _ => {

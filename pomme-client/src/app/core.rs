@@ -592,6 +592,7 @@ impl AppCore {
                         MenuKind::Generic9x5 => Some(ContainerScreen::Chest { rows: 5 }),
                         MenuKind::Generic9x6 => Some(ContainerScreen::Chest { rows: 6 }),
                         MenuKind::ShulkerBox => Some(ContainerScreen::ShulkerBox),
+                        MenuKind::Anvil => Some(ContainerScreen::Anvil),
                         _ => None,
                     };
                     if let Some(screen) = screen {
@@ -608,6 +609,8 @@ impl AppCore {
                             screen,
                             slots: vec![ItemStack::Empty; screen.click_kind().slot_count()],
                             data: [0; 4],
+                            anvil: (screen == ContainerScreen::Anvil)
+                                .then(crate::ui::anvil::AnvilState::new),
                             state_id: 0,
                         });
                         game.sync_container_from_inventory();

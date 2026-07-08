@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use azalea_inventory::ItemStack;
 
-use super::common::{SLOT_STRIDE, WHITE};
+use super::common::SLOT_STRIDE;
 use super::container::{
     ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_backdrop, push_clipped_sprite,
     push_cursor_stack, push_panel, resolve_gesture,
@@ -46,14 +46,14 @@ pub fn build_chest(
         [0.0, 0.0, 176.0, TOP_TEX_H],
         [0.0, 0.0, 176.0, split],
     );
-    elements.push(MenuElement::Image {
-        x: panel.ox,
-        y: panel.oy + split * panel.scale,
-        w: panel.w,
-        h: BOTTOM_TEX_H * panel.scale,
-        sprite: SpriteId::Generic54Bottom,
-        tint: WHITE,
-    });
+    panel.image(
+        elements,
+        SpriteId::Generic54Bottom,
+        0.0,
+        split,
+        176.0,
+        BOTTOM_TEX_H,
+    );
     panel.label(elements, 8.0, 6.0, title);
     panel.label(elements, 8.0, rows_h + 20.0, "Inventory");
 

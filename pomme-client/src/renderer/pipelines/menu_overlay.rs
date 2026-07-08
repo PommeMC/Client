@@ -1549,6 +1549,10 @@ pub enum SpriteId {
     Generic54Top,
     Generic54Bottom,
     ShulkerBoxBackground,
+    AnvilBackground,
+    AnvilTextField,
+    AnvilTextFieldDisabled,
+    AnvilError,
     FurnaceLitProgress,
     FurnaceBurnProgress,
     BlastFurnaceLitProgress,
@@ -1833,6 +1837,21 @@ fn build_sprite_atlas(
         (
             SpriteId::SlotHighlightFront,
             "minecraft/textures/gui/sprites/container/slot_highlight_front.png",
+            0.0,
+        ),
+        (
+            SpriteId::AnvilTextField,
+            "minecraft/textures/gui/sprites/container/anvil/text_field.png",
+            0.0,
+        ),
+        (
+            SpriteId::AnvilTextFieldDisabled,
+            "minecraft/textures/gui/sprites/container/anvil/text_field_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::AnvilError,
+            "minecraft/textures/gui/sprites/container/anvil/error.png",
             0.0,
         ),
         (
@@ -2205,6 +2224,13 @@ fn build_sprite_atlas(
             0,
             INV_TEX_W,
             167,
+        ),
+        (
+            SpriteId::AnvilBackground,
+            "minecraft/textures/gui/container/anvil.png",
+            0,
+            INV_TEX_W,
+            INV_TEX_H,
         ),
         (
             SpriteId::CreativeItemsBackground,

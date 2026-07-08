@@ -43,6 +43,7 @@ pub enum ContainerScreen {
     Furnace(crate::ui::furnace::FurnaceVariant),
     Chest { rows: u8 },
     ShulkerBox,
+    Anvil,
 }
 
 impl ContainerScreen {
@@ -53,6 +54,7 @@ impl ContainerScreen {
             Self::Furnace(_) => ContainerKind::Furnace,
             Self::Chest { rows } => ContainerKind::Chest { rows },
             Self::ShulkerBox => ContainerKind::ShulkerBox,
+            Self::Anvil => ContainerKind::Anvil,
         }
     }
 }
@@ -66,8 +68,10 @@ pub struct OpenContainer {
     /// by the player inventory.
     pub slots: Vec<azalea_inventory::ItemStack>,
     /// The menu's data values (`ClientboundContainerSetData`), e.g. furnace
-    /// lit/cook progress.
+    /// lit/cook progress or the anvil repair cost.
     pub data: [u16; 4],
+    /// The anvil rename field's state; Some only for the anvil screen.
+    pub anvil: Option<crate::ui::anvil::AnvilState>,
     /// This menu's latest server state id, echoed in container clicks.
     pub state_id: u32,
 }
@@ -375,6 +379,21 @@ impl GameState {
         self.cursor_item = azalea_inventory::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
+    }
+
+    /// A focused text field (anvil rename, creative search) is capturing
+    /// keyboard input: letter/digit keys must type instead of acting as
+    /// hotkeys. The anvil field is editable only while its input slot is
+    /// filled, matching vanilla.
+    pub fn wants_text_input(&self) -> bool {
+        if self.creative_inventory_open {
+            return self.creative_state.tab.captures_typing();
+        }
+        matches!(
+            &self.open_container,
+            Some(c) if c.screen == ContainerScreen::Anvil
+                && c.slots.first().is_some_and(|s| s.is_present())
+        )
     }
 
     /// No menu (pause, inventory, chat) is capturing input.
@@ -1047,6 +1066,8 @@ pub fn update_game(
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
+    core.input.text_capture = game.wants_text_input();
+
     let mut close_inventory = false;
     let mut pause_action = PauseAction::None;
     let mut death_action = DeathAction::None;
@@ -1464,6 +1485,19 @@ pub fn update_game(
             right_held: core.input.right_held(),
             shift: core.input.shift_held(),
         };
+        // The anvil rename field consumes this frame's typing; a changed
+        // accepted name goes to the server (vanilla `onNameChanged`).
+        if let Some(c) = &mut game.open_container
+            && let Some(state) = &mut c.anvil
+            && let Some(name) = crate::ui::anvil::update_rename(state, &c.slots, &typed, backspace)
+        {
+            use azalea_protocol::packets::game::s_rename_item::ServerboundRenameItem;
+            connection
+                .packet_tx
+                .send(ServerboundGamePacket::RenameItem(ServerboundRenameItem {
+                    name,
+                }));
+        }
         let (clicked_outside, ops) = if let Some(container) = &game.open_container {
             let result = match container.screen {
                 ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
@@ -1522,6 +1556,24 @@ pub fn update_game(
                     &mut game.inv_last_click,
                     gs,
                 ),
+                ContainerScreen::Anvil => crate::ui::anvil::build_anvil(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    &container.slots,
+                    container.data,
+                    &container.title,
+                    container.anvil.as_ref().expect("anvil screen has state"),
+                    game.player.experience_level,
+                    game.player.game_mode == 1,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
+                ),
             };
             (result.clicked_outside, result.ops)
         } else {
@@ -1551,8 +1603,8 @@ pub fn update_game(
         let middle_clicked = core.input.middle_just_pressed();
         let right_clicked = core.input.right_just_pressed();
         let scroll_delta = core.input.consume_menu_scroll();
-        let typed = core.input.drain_typed_chars();
-        let backspace = core.input.backspace_pressed();
+        // `typed`/`backspace` come from the frame's single drain up top; a
+        // second drain here would always read empty.
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,

@@ -1,3 +1,4 @@
+pub mod anvil;
 pub mod chat;
 pub mod chest;
 pub mod common;

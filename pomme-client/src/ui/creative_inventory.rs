@@ -229,7 +229,7 @@ impl CreativeTab {
         }
     }
 
-    fn captures_typing(self) -> bool {
+    pub fn captures_typing(self) -> bool {
         matches!(self, CreativeTab::Search)
     }
 }
