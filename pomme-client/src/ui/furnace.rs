@@ -7,10 +7,10 @@ use std::time::Instant;
 
 use azalea_inventory::ItemStack;
 
-use super::common::{FONT_SIZE, WHITE};
+use super::common::FONT_SIZE;
 use super::container::{
-    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_cursor_stack, push_panel,
-    push_recipe_book_button, resolve_gesture,
+    ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_clipped_sprite,
+    push_cursor_stack, push_panel, push_recipe_book_button, resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -76,7 +76,7 @@ pub fn build_furnace(
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> ContainerResult {
     let (background, lit_sprite, burn_sprite) = variant.sprites();
-    let panel = push_panel(elements, screen_w, screen_h, gs, background);
+    let panel = push_panel(elements, screen_w, screen_h, gs, 166.0, background);
     // Vanilla centers the furnace title: (imageWidth - font.width(title)) / 2.
     let title_x = ((176.0 - text_width_fn(title, FONT_SIZE)) / 2.0).floor();
     panel.label(elements, title_x, 6.0, title);
@@ -94,7 +94,7 @@ pub fn build_furnace(
         drag,
     );
 
-    ctx.player_rows(slots, SLOT_MAIN_BASE, SLOT_HOTBAR_BASE);
+    ctx.player_rows(slots, SLOT_MAIN_BASE, SLOT_HOTBAR_BASE, 84.0);
 
     let item = |num: u16| slots.get(num as usize).unwrap_or(&ItemStack::Empty);
     ctx.slot(56.0, 17.0, item(SLOT_INGREDIENT), None, SLOT_INGREDIENT);
@@ -168,33 +168,4 @@ fn push_progress_overlays(
             [79.0, 34.0, w, 16.0],
         );
     }
-}
-
-/// A sprite scissored to a sub-rectangle, both `[x, y, w, h]` in GUI units.
-fn push_clipped_sprite(
-    elements: &mut Vec<MenuElement>,
-    panel: &Panel,
-    sprite: SpriteId,
-    rect: [f32; 4],
-    clip: [f32; 4],
-) {
-    let s = panel.scale;
-    let px = |v: [f32; 4]| [panel.ox + v[0] * s, panel.oy + v[1] * s, v[2] * s, v[3] * s];
-    let [cx, cy, cw, ch] = px(clip);
-    let [x, y, w, h] = px(rect);
-    elements.push(MenuElement::ScissorPush {
-        x: cx,
-        y: cy,
-        w: cw,
-        h: ch,
-    });
-    elements.push(MenuElement::Image {
-        x,
-        y,
-        w,
-        h,
-        sprite,
-        tint: WHITE,
-    });
-    elements.push(MenuElement::ScissorPop);
 }

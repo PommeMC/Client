@@ -1,4 +1,5 @@
 pub mod chat;
+pub mod chest;
 pub mod common;
 pub mod container;
 pub mod crafting_table;

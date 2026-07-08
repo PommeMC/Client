@@ -37,6 +37,7 @@ pub fn build_crafting_table(
         screen_w,
         screen_h,
         gs,
+        166.0,
         SpriteId::CraftingTableBackground,
     );
     panel.label(elements, 29.0, 6.0, title);
@@ -52,7 +53,7 @@ pub fn build_crafting_table(
         drag,
     );
 
-    ctx.player_rows(slots, SLOT_MAIN_BASE, SLOT_HOTBAR_BASE);
+    ctx.player_rows(slots, SLOT_MAIN_BASE, SLOT_HOTBAR_BASE, 84.0);
 
     for row in 0..3u16 {
         for col in 0..3u16 {

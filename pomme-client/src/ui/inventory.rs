@@ -54,6 +54,7 @@ pub fn build_inventory(
         screen_w,
         screen_h,
         gs,
+        166.0,
         SpriteId::InventoryBackground,
     );
     panel.label(elements, 97.0, 6.0, "Crafting");
@@ -69,7 +70,7 @@ pub fn build_inventory(
         drag,
     );
 
-    ctx.player_rows(slots, SLOT_MAIN_BASE, SLOT_HOTBAR_BASE);
+    ctx.player_rows(slots, SLOT_MAIN_BASE, SLOT_HOTBAR_BASE, 84.0);
 
     let armor_ys = [8.0, 26.0, 44.0, 62.0];
     for i in 0..4u16 {

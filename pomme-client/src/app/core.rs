@@ -585,6 +585,13 @@ impl AppCore {
                             Some(ContainerScreen::Furnace(FurnaceVariant::BlastFurnace))
                         }
                         MenuKind::Smoker => Some(ContainerScreen::Furnace(FurnaceVariant::Smoker)),
+                        MenuKind::Generic9x1 => Some(ContainerScreen::Chest { rows: 1 }),
+                        MenuKind::Generic9x2 => Some(ContainerScreen::Chest { rows: 2 }),
+                        MenuKind::Generic9x3 => Some(ContainerScreen::Chest { rows: 3 }),
+                        MenuKind::Generic9x4 => Some(ContainerScreen::Chest { rows: 4 }),
+                        MenuKind::Generic9x5 => Some(ContainerScreen::Chest { rows: 5 }),
+                        MenuKind::Generic9x6 => Some(ContainerScreen::Chest { rows: 6 }),
+                        MenuKind::ShulkerBox => Some(ContainerScreen::ShulkerBox),
                         _ => None,
                     };
                     if let Some(screen) = screen {

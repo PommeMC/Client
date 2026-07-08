@@ -17,8 +17,6 @@ use super::common::{
 use crate::player::menu_click::{self, ContainerKind};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
-const TEX_W: f32 = 176.0;
-const TEX_H: f32 = 166.0;
 const DOUBLE_CLICK_MS: u128 = 250;
 
 /// Active click-drag: which button, and the slots covered so far.
@@ -41,7 +39,7 @@ pub struct ContainerInput {
     pub shift: bool,
 }
 
-/// The centered 176x166 container panel's placement on screen.
+/// The centered container panel's placement on screen.
 pub struct Panel {
     pub scale: f32,
     pub ox: f32,
@@ -67,17 +65,19 @@ impl Panel {
     }
 }
 
-/// The dimmed backdrop and the centered container background sprite.
-pub fn push_panel(
+/// The dimmed backdrop and the centered panel placement for a `panel_w` x
+/// `panel_h` (GUI units) container, without a background sprite.
+pub fn push_backdrop(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
     screen_h: f32,
     gs: f32,
-    sprite: SpriteId,
+    panel_w: f32,
+    panel_h: f32,
 ) -> Panel {
-    let scale = gs.min(screen_w / TEX_W).min(screen_h / TEX_H);
-    let w = TEX_W * scale;
-    let h = TEX_H * scale;
+    let scale = gs.min(screen_w / panel_w).min(screen_h / panel_h);
+    let w = panel_w * scale;
+    let h = panel_h * scale;
     let ox = (screen_w - w) / 2.0;
     let oy = (screen_h - h) / 2.0;
 
@@ -88,14 +88,6 @@ pub fn push_panel(
         [0.0627, 0.0627, 0.0627, 0.7529],
         [0.0627, 0.0627, 0.0627, 0.8157],
     );
-    elements.push(MenuElement::Image {
-        x: ox,
-        y: oy,
-        w,
-        h,
-        sprite,
-        tint: WHITE,
-    });
 
     Panel {
         scale,
@@ -104,6 +96,57 @@ pub fn push_panel(
         w,
         h,
     }
+}
+
+/// The dimmed backdrop and the centered 176 x `panel_h` container background
+/// sprite.
+pub fn push_panel(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    panel_h: f32,
+    sprite: SpriteId,
+) -> Panel {
+    let panel = push_backdrop(elements, screen_w, screen_h, gs, 176.0, panel_h);
+    elements.push(MenuElement::Image {
+        x: panel.ox,
+        y: panel.oy,
+        w: panel.w,
+        h: panel.h,
+        sprite,
+        tint: WHITE,
+    });
+    panel
+}
+
+/// A sprite scissored to a sub-rectangle, both `[x, y, w, h]` in GUI units.
+pub fn push_clipped_sprite(
+    elements: &mut Vec<MenuElement>,
+    panel: &Panel,
+    sprite: SpriteId,
+    rect: [f32; 4],
+    clip: [f32; 4],
+) {
+    let s = panel.scale;
+    let px = |v: [f32; 4]| [panel.ox + v[0] * s, panel.oy + v[1] * s, v[2] * s, v[3] * s];
+    let [cx, cy, cw, ch] = px(clip);
+    let [x, y, w, h] = px(rect);
+    elements.push(MenuElement::ScissorPush {
+        x: cx,
+        y: cy,
+        w: cw,
+        h: ch,
+    });
+    elements.push(MenuElement::Image {
+        x,
+        y,
+        w,
+        h,
+        sprite,
+        tint: WHITE,
+    });
+    elements.push(MenuElement::ScissorPop);
 }
 
 /// The (inert) recipe book toggle at GUI-unit position.
@@ -197,16 +240,22 @@ impl<'e> SlotCtx<'e> {
         }
     }
 
-    /// The three main-inventory rows and the hotbar at their standard
-    /// positions, reading container slots starting at the given bases.
-    pub fn player_rows(&mut self, slots: &[ItemStack], main_base: u16, hotbar_base: u16) {
+    /// The three main-inventory rows starting at GUI-unit `main_y` and the
+    /// hotbar 58 below, reading container slots starting at the given bases.
+    pub fn player_rows(
+        &mut self,
+        slots: &[ItemStack],
+        main_base: u16,
+        hotbar_base: u16,
+        main_y: f32,
+    ) {
         for row in 0..3u16 {
             for col in 0..9u16 {
                 let num = main_base + row * 9 + col;
                 let item = slots.get(num as usize).unwrap_or(&ItemStack::Empty);
                 self.slot(
                     8.0 + col as f32 * SLOT_STRIDE,
-                    84.0 + row as f32 * SLOT_STRIDE,
+                    main_y + row as f32 * SLOT_STRIDE,
                     item,
                     None,
                     num,
@@ -216,7 +265,13 @@ impl<'e> SlotCtx<'e> {
         for col in 0..9u16 {
             let num = hotbar_base + col;
             let item = slots.get(num as usize).unwrap_or(&ItemStack::Empty);
-            self.slot(8.0 + col as f32 * SLOT_STRIDE, 142.0, item, None, num);
+            self.slot(
+                8.0 + col as f32 * SLOT_STRIDE,
+                main_y + 58.0,
+                item,
+                None,
+                num,
+            );
         }
     }
 

@@ -1015,10 +1015,18 @@ impl InteractionState {
 /// Whether right-clicking this block opens a menu we render (so the use
 /// click is consumed: no block placement, no item use).
 fn opens_menu(state: BlockState) -> bool {
+    let id = crate::world::block::block_id(state);
     matches!(
-        crate::world::block::block_id(state),
-        "crafting_table" | "furnace" | "blast_furnace" | "smoker"
-    )
+        id,
+        "crafting_table"
+            | "furnace"
+            | "blast_furnace"
+            | "smoker"
+            | "chest"
+            | "trapped_chest"
+            | "ender_chest"
+            | "barrel"
+    ) || id.ends_with("shulker_box")
 }
 
 fn destroy_progress(state: BlockState, on_ground: bool, creative: bool) -> f32 {

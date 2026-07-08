@@ -41,6 +41,8 @@ use crate::world::chunk::ChunkStore;
 pub enum ContainerScreen {
     CraftingTable,
     Furnace(crate::ui::furnace::FurnaceVariant),
+    Chest { rows: u8 },
+    ShulkerBox,
 }
 
 impl ContainerScreen {
@@ -49,6 +51,8 @@ impl ContainerScreen {
         match self {
             Self::CraftingTable => ContainerKind::CraftingTable,
             Self::Furnace(_) => ContainerKind::Furnace,
+            Self::Chest { rows } => ContainerKind::Chest { rows },
+            Self::ShulkerBox => ContainerKind::ShulkerBox,
         }
     }
 }
@@ -1490,6 +1494,33 @@ pub fn update_game(
                     &mut game.inv_last_click,
                     gs,
                     &|t, s| gfx.renderer.menu_text_width(t, s),
+                ),
+                ContainerScreen::Chest { rows } => crate::ui::chest::build_chest(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    rows,
+                    &container.slots,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                ),
+                ContainerScreen::ShulkerBox => crate::ui::chest::build_shulker_box(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    &container.slots,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
                 ),
             };
             (result.clicked_outside, result.ops)
