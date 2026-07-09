@@ -172,7 +172,7 @@ impl InputState {
                         && game.player.game_mode != 3
                         && !game.chat.is_open()
                     {
-                        if game.player.game_mode == 1 {
+                        if crate::player::is_creative(game.player.game_mode) {
                             game.creative_inventory_open = true;
                         } else {
                             game.inventory_open = !game.inventory_open;

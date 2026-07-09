@@ -25,6 +25,11 @@ pub fn is_survival(game_mode: u8) -> bool {
     game_mode == 0 || game_mode == 2
 }
 
+/// Matches vanilla GameType.isCreative(): Creative (1).
+pub fn is_creative(game_mode: u8) -> bool {
+    game_mode == 1
+}
+
 fn is_water_block(state: azalea_block::BlockState) -> bool {
     if state.is_air() {
         return false;

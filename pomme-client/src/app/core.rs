@@ -1249,7 +1249,7 @@ impl AppCore {
             game.player.look_dir,
             &game.chunk_store,
             &game.entity_store,
-            game.player.game_mode == 1,
+            crate::player::is_creative(game.player.game_mode),
         );
 
         let held_stack = match game
@@ -1276,7 +1276,7 @@ impl AppCore {
             game.player.eye_pos().into(),
             game.player.look_dir,
             game.player.on_ground,
-            game.player.game_mode == 1,
+            crate::player::is_creative(game.player.game_mode),
             game.player.food,
             input.selected_slot(),
             held_stack,

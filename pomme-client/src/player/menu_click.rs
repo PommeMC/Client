@@ -45,9 +45,10 @@ impl ContainerKind {
 
     /// The result slot whose clicks we can't predict, if this menu has one:
     /// crafting results need recipe logic, the anvil result costs XP and
-    /// materials. Vanilla also excludes the crafting result from double-click
-    /// gathering (`canTakeItemForPickAll`). The furnace result slot is neither:
-    /// taking from it is a plain pickup.
+    /// materials. Vanilla excludes the crafting result from double-click
+    /// gathering (`canTakeItemForPickAll`) but not the anvil result; we skip
+    /// that one too since its take costs aren't modeled here. The furnace
+    /// result slot is neither: taking from it is a plain pickup.
     fn crafting_result_slot(self) -> Option<usize> {
         match self {
             Self::Player | Self::CraftingTable => Some(0),
@@ -155,9 +156,9 @@ pub fn apply_click(
     {
         return Vec::new();
     }
-    // Azalea's furnace quick-move lacks vanilla's smeltable/fuel routing, so a
-    // shift-click out of the player slots would predict the wrong destination;
-    // leave those to the server too.
+    // Vanilla routes a player-slot shift-click by whether the item is
+    // smeltable or fuel; recipes and fuel values live server-side, so leave
+    // those to the server too.
     if kind == ContainerKind::Furnace
         && matches!(op, ClickOperation::QuickMove(_))
         && op
@@ -337,11 +338,13 @@ fn safe_insert(slot: &mut ItemStack, carried: &mut ItemStack, amount: i32) {
 }
 
 /// Shift-click, repeating until it stops making progress (vanilla loops too).
-/// Chest menus move between the contents and player regions exactly like
-/// vanilla `ChestMenu.quickMoveStack` (contents-bound forward, player-bound
-/// reversed); the anvil ports `ItemCombinerMenu.quickMoveStack` (inputs first,
-/// then a main/hotbar toggle); the other menus use azalea's
-/// `quick_move_stack`, whose routing matches vanilla closely enough for them.
+/// Chests move between the contents and player regions like `ChestMenu`
+/// (player-bound reversed); the anvil only ever tries the input slots
+/// (`canMoveIntoInputSlots` is true, making `ItemCombinerMenu`'s main/hotbar
+/// branches dead code); the furnace moves its own slots to the player region
+/// like `AbstractFurnaceMenu` (result reversed; player-slot clicks never get
+/// predicted). The player and crafting menus use azalea's `quick_move_stack`,
+/// whose routing matches vanilla closely enough for them.
 fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
     for _ in 0..menu.len() {
         let before = menu.slot(s).map(ItemStack::count).unwrap_or(0);
@@ -362,11 +365,10 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
                     move_item_stack_to(kind, menu, s, 3..menu.len(), false);
                 } else {
                     move_item_stack_to(kind, menu, s, 0..2, false);
-                    if menu.slot(s).map(ItemStack::count).unwrap_or(0) == before {
-                        let to = if s < 30 { 30..39 } else { 3..30 };
-                        move_item_stack_to(kind, menu, s, to, false);
-                    }
                 }
+            }
+            ContainerKind::Furnace => {
+                move_item_stack_to(kind, menu, s, 3..menu.len(), s == 2);
             }
             _ => {
                 menu.quick_move_stack(s);

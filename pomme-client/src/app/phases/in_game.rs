@@ -1567,7 +1567,7 @@ pub fn update_game(
                     &container.title,
                     container.anvil.as_ref().expect("anvil screen has state"),
                     game.player.experience_level,
-                    game.player.game_mode == 1,
+                    crate::player::is_creative(game.player.game_mode),
                     &game.cursor_item,
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
@@ -1626,7 +1626,7 @@ pub fn update_game(
         );
         use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
         let mut set_creative_slot = |slot_num: u16, item: azalea_inventory::ItemStack| {
-            if game.player.game_mode == 1 {
+            if crate::player::is_creative(game.player.game_mode) {
                 connection
                     .packet_tx
                     .send(ServerboundGamePacket::SetCreativeModeSlot(

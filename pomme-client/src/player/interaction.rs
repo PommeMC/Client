@@ -588,8 +588,8 @@ impl InteractionState {
             }));
             // A menu-opening block consumes the click (vanilla `useWithoutItem`)
             // unless sneaking with something in hand.
-            // TODO: other interactive blocks (chests etc.) should consume the
-            // click here too once their menus render.
+            // TODO: other interactive blocks (brewing stand, dispenser, ...)
+            // should consume the click here too once their menus render.
             if !suppress_block_use {
                 let target =
                     chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
