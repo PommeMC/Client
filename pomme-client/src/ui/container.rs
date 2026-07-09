@@ -1,5 +1,5 @@
-//! Shared pieces for container screens (survival inventory, crafting table):
-//! the click/drag gesture state machine and per-frame slot drawing.
+//! Shared pieces for container screens (survival inventory, crafting table,
+//! furnace): the click/drag gesture state machine and per-frame slot drawing.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -17,12 +17,18 @@ use super::common::{
 use crate::player::menu_click::{self, ContainerKind};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 
-const TEX_W: f32 = 176.0;
-const TEX_H: f32 = 166.0;
 const DOUBLE_CLICK_MS: u128 = 250;
 
 /// Active click-drag: which button, and the slots covered so far.
 pub type DragState = (QuickCraftKind, Vec<u16>);
+
+/// What a container screen's frame produced.
+pub struct ContainerResult {
+    pub clicked_outside: bool,
+    /// Container-click operations to send this frame (usually 0-1; a drag
+    /// release emits a start/add.../end sequence).
+    pub ops: Vec<ClickOperation>,
+}
 
 /// Input for a container screen this frame.
 pub struct ContainerInput {
@@ -33,7 +39,7 @@ pub struct ContainerInput {
     pub shift: bool,
 }
 
-/// The centered 176x166 container panel's placement on screen.
+/// The centered container panel's placement on screen.
 pub struct Panel {
     pub scale: f32,
     pub ox: f32,
@@ -57,19 +63,41 @@ impl Panel {
             color: SLOT_LABEL_COLOR,
         });
     }
+
+    /// An untinted sprite at a GUI-unit rectangle.
+    pub fn image(
+        &self,
+        elements: &mut Vec<MenuElement>,
+        sprite: SpriteId,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) {
+        elements.push(MenuElement::Image {
+            x: self.ox + x * self.scale,
+            y: self.oy + y * self.scale,
+            w: w * self.scale,
+            h: h * self.scale,
+            sprite,
+            tint: WHITE,
+        });
+    }
 }
 
-/// The dimmed backdrop and the centered container background sprite.
-pub fn push_panel(
+/// The dimmed backdrop and the centered panel placement for a `panel_w` x
+/// `panel_h` (GUI units) container, without a background sprite.
+pub fn push_backdrop(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
     screen_h: f32,
     gs: f32,
-    sprite: SpriteId,
+    panel_w: f32,
+    panel_h: f32,
 ) -> Panel {
-    let scale = gs.min(screen_w / TEX_W).min(screen_h / TEX_H);
-    let w = TEX_W * scale;
-    let h = TEX_H * scale;
+    let scale = gs.min(screen_w / panel_w).min(screen_h / panel_h);
+    let w = panel_w * scale;
+    let h = panel_h * scale;
     let ox = (screen_w - w) / 2.0;
     let oy = (screen_h - h) / 2.0;
 
@@ -80,14 +108,6 @@ pub fn push_panel(
         [0.0627, 0.0627, 0.0627, 0.7529],
         [0.0627, 0.0627, 0.0627, 0.8157],
     );
-    elements.push(MenuElement::Image {
-        x: ox,
-        y: oy,
-        w,
-        h,
-        sprite,
-        tint: WHITE,
-    });
 
     Panel {
         scale,
@@ -96,6 +116,40 @@ pub fn push_panel(
         w,
         h,
     }
+}
+
+/// The dimmed backdrop and the centered 176 x `panel_h` container background
+/// sprite.
+pub fn push_panel(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    panel_h: f32,
+    sprite: SpriteId,
+) -> Panel {
+    let panel = push_backdrop(elements, screen_w, screen_h, gs, 176.0, panel_h);
+    panel.image(elements, sprite, 0.0, 0.0, 176.0, panel_h);
+    panel
+}
+
+/// A sprite scissored to a sub-rectangle, both `[x, y, w, h]` in GUI units.
+pub fn push_clipped_sprite(
+    elements: &mut Vec<MenuElement>,
+    panel: &Panel,
+    sprite: SpriteId,
+    rect: [f32; 4],
+    clip: [f32; 4],
+) {
+    let s = panel.scale;
+    elements.push(MenuElement::ScissorPush {
+        x: panel.ox + clip[0] * s,
+        y: panel.oy + clip[1] * s,
+        w: clip[2] * s,
+        h: clip[3] * s,
+    });
+    panel.image(elements, sprite, rect[0], rect[1], rect[2], rect[3]);
+    elements.push(MenuElement::ScissorPop);
 }
 
 /// The (inert) recipe book toggle at GUI-unit position.
@@ -189,16 +243,22 @@ impl<'e> SlotCtx<'e> {
         }
     }
 
-    /// The three main-inventory rows and the hotbar at their standard
-    /// positions, reading container slots starting at the given bases.
-    pub fn player_rows(&mut self, slots: &[ItemStack], main_base: u16, hotbar_base: u16) {
+    /// The three main-inventory rows starting at GUI-unit `main_y` and the
+    /// hotbar 58 below, reading container slots starting at the given bases.
+    pub fn player_rows(
+        &mut self,
+        slots: &[ItemStack],
+        main_base: u16,
+        hotbar_base: u16,
+        main_y: f32,
+    ) {
         for row in 0..3u16 {
             for col in 0..9u16 {
                 let num = main_base + row * 9 + col;
                 let item = slots.get(num as usize).unwrap_or(&ItemStack::Empty);
                 self.slot(
                     8.0 + col as f32 * SLOT_STRIDE,
-                    84.0 + row as f32 * SLOT_STRIDE,
+                    main_y + row as f32 * SLOT_STRIDE,
                     item,
                     None,
                     num,
@@ -208,7 +268,13 @@ impl<'e> SlotCtx<'e> {
         for col in 0..9u16 {
             let num = hotbar_base + col;
             let item = slots.get(num as usize).unwrap_or(&ItemStack::Empty);
-            self.slot(8.0 + col as f32 * SLOT_STRIDE, 142.0, item, None, num);
+            self.slot(
+                8.0 + col as f32 * SLOT_STRIDE,
+                main_y + 58.0,
+                item,
+                None,
+                num,
+            );
         }
     }
 

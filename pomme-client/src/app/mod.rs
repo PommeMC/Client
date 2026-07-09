@@ -376,6 +376,14 @@ impl ApplicationHandler for App {
                                             }
                                         }
                                     }
+                                } else if game.wants_text_input() {
+                                    // A container text field (anvil rename) has
+                                    // focus; keys type into it. Escape still
+                                    // closes via the OpenMenu action.
+                                    let f3_held = self.core.input.key_pressed(KeyCode::F3);
+                                    if !game.handle_debug_key(code, f3_held) {
+                                        self.core.input.on_menu_key_event(&event);
+                                    }
                                 } else {
                                     match code {
                                         KeyCode::Escape

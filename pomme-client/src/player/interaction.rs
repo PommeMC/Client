@@ -588,8 +588,8 @@ impl InteractionState {
             }));
             // A menu-opening block consumes the click (vanilla `useWithoutItem`)
             // unless sneaking with something in hand.
-            // TODO: other interactive blocks (chests etc.) should consume the
-            // click here too once their menus render.
+            // TODO: other interactive blocks (brewing stand, dispenser, ...)
+            // should consume the click here too once their menus render.
             if !suppress_block_use {
                 let target =
                     chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
@@ -1015,7 +1015,19 @@ impl InteractionState {
 /// Whether right-clicking this block opens a menu we render (so the use
 /// click is consumed: no block placement, no item use).
 fn opens_menu(state: BlockState) -> bool {
-    crate::world::block::block_id(state) == "crafting_table"
+    let id = crate::world::block::block_id(state);
+    matches!(
+        id,
+        "crafting_table"
+            | "furnace"
+            | "blast_furnace"
+            | "smoker"
+            | "chest"
+            | "trapped_chest"
+            | "ender_chest"
+            | "barrel"
+    ) || id.ends_with("shulker_box")
+        || id.ends_with("anvil")
 }
 
 fn destroy_progress(state: BlockState, on_ground: bool, creative: bool) -> f32 {

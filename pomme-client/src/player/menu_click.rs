@@ -1,28 +1,108 @@
 //! Client-side prediction of survival container clicks: a port of vanilla
 //! `AbstractContainerMenu.doClick` for the menus we open (player inventory,
-//! crafting table). The server stays authoritative and reconciles, so a wrong
-//! prediction only causes a self-correcting glitch, never item dup/loss.
+//! crafting table, furnace, chests). The server stays authoritative and
+//! reconciles, so a wrong prediction only causes a self-correcting glitch,
+//! never item dup/loss.
 
 use azalea_inventory::components::{EquipmentSlot, Equippable};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::operations::{ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick};
 use azalea_inventory::{ItemStack, ItemStackData, Menu, Player, SlotList};
 
-/// Which container menu a click applies to. Both menus have 46 slots with the
-/// result/output at index 0.
+/// Which container menu a click applies to. `Furnace` covers the furnace,
+/// blast furnace, and smoker menus, which share the same slot structure;
+/// `Chest` covers every generic 9xN menu (chests, ender chests, barrels, ...).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ContainerKind {
     Player,
     CraftingTable,
+    Furnace,
+    Chest { rows: u8 },
+    ShulkerBox,
+    Anvil,
 }
 
 impl ContainerKind {
+    pub fn slot_count(self) -> usize {
+        match self {
+            Self::Player | Self::CraftingTable => 46,
+            Self::Furnace | Self::Anvil => 39,
+            Self::Chest { rows } => rows as usize * 9 + 36,
+            Self::ShulkerBox => 63,
+        }
+    }
+
+    /// First menu slot backed by the player inventory; menu slot `i` maps to
+    /// player inventory slot `i - inv_start() + 9` from here on.
+    pub fn inv_start(self) -> usize {
+        match self {
+            Self::Player | Self::CraftingTable => 10,
+            Self::Furnace | Self::Anvil => 3,
+            Self::Chest { rows } => rows as usize * 9,
+            Self::ShulkerBox => 27,
+        }
+    }
+
+    /// The result slot whose clicks we can't predict, if this menu has one:
+    /// crafting results need recipe logic, the anvil result costs XP and
+    /// materials. Vanilla excludes the crafting result from double-click
+    /// gathering (`canTakeItemForPickAll`) but not the anvil result; we skip
+    /// that one too since its take costs aren't modeled here. The furnace
+    /// result slot is neither: taking from it is a plain pickup.
+    fn crafting_result_slot(self) -> Option<usize> {
+        match self {
+            Self::Player | Self::CraftingTable => Some(0),
+            Self::Anvil => Some(2),
+            Self::Furnace | Self::Chest { .. } | Self::ShulkerBox => None,
+        }
+    }
+
     fn build_menu(self, slots: &[ItemStack]) -> Menu {
         let mut menu = match self {
             Self::Player => Menu::Player(Player::default()),
             Self::CraftingTable => Menu::Crafting {
                 result: ItemStack::Empty,
                 grid: SlotList::default(),
+                player: SlotList::default(),
+            },
+            Self::Furnace => Menu::Furnace {
+                ingredient: ItemStack::Empty,
+                fuel: ItemStack::Empty,
+                result: ItemStack::Empty,
+                player: SlotList::default(),
+            },
+            Self::Chest { rows: 1 } => Menu::Generic9x1 {
+                contents: SlotList::default(),
+                player: SlotList::default(),
+            },
+            Self::Chest { rows: 2 } => Menu::Generic9x2 {
+                contents: SlotList::default(),
+                player: SlotList::default(),
+            },
+            Self::Chest { rows: 3 } => Menu::Generic9x3 {
+                contents: SlotList::default(),
+                player: SlotList::default(),
+            },
+            Self::Chest { rows: 4 } => Menu::Generic9x4 {
+                contents: SlotList::default(),
+                player: SlotList::default(),
+            },
+            Self::Chest { rows: 5 } => Menu::Generic9x5 {
+                contents: SlotList::default(),
+                player: SlotList::default(),
+            },
+            Self::Chest { .. } => Menu::Generic9x6 {
+                contents: SlotList::default(),
+                player: SlotList::default(),
+            },
+            Self::ShulkerBox => Menu::ShulkerBox {
+                contents: SlotList::default(),
+                player: SlotList::default(),
+            },
+            Self::Anvil => Menu::Anvil {
+                first: ItemStack::Empty,
+                second: ItemStack::Empty,
+                result: ItemStack::Empty,
                 player: SlotList::default(),
             },
         };
@@ -34,12 +114,15 @@ impl ContainerKind {
         menu
     }
 
-    /// Whether `item` may be placed into slot `s`: the result slot never,
-    /// player armor slots only their matching equipment, everything else yes.
-    /// Mirrors vanilla `mayPlace`.
+    /// Whether `item` may be placed into slot `s`: result/output slots never,
+    /// player armor slots only their matching equipment, shulker contents no
+    /// shulker boxes, everything else yes. Mirrors vanilla `mayPlace`. The
+    /// furnace fuel slot accepts anything here: fuel values live server-side,
+    /// so the server reconciles bad placements.
     fn may_place(self, s: usize, item: &ItemStackData) -> bool {
         match (self, s) {
-            (_, 0) => false,
+            (Self::Player | Self::CraftingTable, 0) => false,
+            (Self::Furnace | Self::Anvil, 2) => false,
             (Self::Player, 5..=8) => {
                 let want = match s {
                     5 => EquipmentSlot::Head,
@@ -48,6 +131,9 @@ impl ContainerKind {
                     _ => EquipmentSlot::Feet,
                 };
                 item.get_component::<Equippable>().map(|c| c.slot) == Some(want)
+            }
+            (Self::ShulkerBox, 0..=26) => {
+                !crate::player::inventory::item_resource_name(item.kind).ends_with("shulker_box")
             }
             _ => true,
         }
@@ -64,7 +150,21 @@ pub fn apply_click(
     op: &ClickOperation,
 ) -> Vec<(u16, ItemStack)> {
     // Crafting-result clicks need recipe logic; leave them to the server.
-    if op.slot_num() == Some(0) {
+    if op
+        .slot_num()
+        .is_some_and(|s| Some(s as usize) == kind.crafting_result_slot())
+    {
+        return Vec::new();
+    }
+    // Vanilla routes a player-slot shift-click by whether the item is
+    // smeltable or fuel; recipes and fuel values live server-side, so leave
+    // those to the server too.
+    if kind == ContainerKind::Furnace
+        && matches!(op, ClickOperation::QuickMove(_))
+        && op
+            .slot_num()
+            .is_some_and(|s| s as usize >= kind.inv_start())
+    {
         return Vec::new();
     }
     let mut menu = kind.build_menu(slots);
@@ -160,9 +260,9 @@ fn apply_op(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack, op: &C
             let s = match q {
                 QuickMoveClick::Left { slot } | QuickMoveClick::Right { slot } => *slot as usize,
             };
-            quick_move(menu, s);
+            quick_move(kind, menu, s);
         }
-        ClickOperation::PickupAll(_) => pickup_all(menu, cursor),
+        ClickOperation::PickupAll(_) => pickup_all(kind, menu, cursor),
         // Drag is handled at the send site; the rest have no UI path yet.
         ClickOperation::Swap(_)
         | ClickOperation::Throw(_)
@@ -237,31 +337,112 @@ fn safe_insert(slot: &mut ItemStack, carried: &mut ItemStack, amount: i32) {
     shrink(carried, take);
 }
 
-/// Shift-click: let azalea's `quick_move_stack` move the stack to its
-/// destination, repeating until it stops making progress (vanilla loops too).
-fn quick_move(menu: &mut Menu, s: usize) {
+/// Shift-click, repeating until it stops making progress (vanilla loops too).
+/// Chests move between the contents and player regions like `ChestMenu`
+/// (player-bound reversed); the anvil only ever tries the input slots
+/// (`canMoveIntoInputSlots` is true, making `ItemCombinerMenu`'s main/hotbar
+/// branches dead code); the furnace moves its own slots to the player region
+/// like `AbstractFurnaceMenu` (result reversed; player-slot clicks never get
+/// predicted). The player and crafting menus use azalea's `quick_move_stack`,
+/// whose routing matches vanilla closely enough for them.
+fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
     for _ in 0..menu.len() {
         let before = menu.slot(s).map(ItemStack::count).unwrap_or(0);
         if before == 0 {
             break;
         }
-        menu.quick_move_stack(s);
+        match kind {
+            ContainerKind::Chest { .. } | ContainerKind::ShulkerBox => {
+                let split = kind.inv_start();
+                if s < split {
+                    move_item_stack_to(kind, menu, s, split..menu.len(), true);
+                } else {
+                    move_item_stack_to(kind, menu, s, 0..split, false);
+                }
+            }
+            ContainerKind::Anvil => {
+                if s < 3 {
+                    move_item_stack_to(kind, menu, s, 3..menu.len(), false);
+                } else {
+                    move_item_stack_to(kind, menu, s, 0..2, false);
+                }
+            }
+            ContainerKind::Furnace => {
+                move_item_stack_to(kind, menu, s, 3..menu.len(), s == 2);
+            }
+            _ => {
+                menu.quick_move_stack(s);
+            }
+        }
         if menu.slot(s).map(ItemStack::count).unwrap_or(0) == before {
             break;
         }
     }
 }
 
-/// Double-click: gather matching items from every slot but the result slot
-/// onto the cursor up to a full stack, partial stacks first (vanilla
+/// Vanilla `AbstractContainerMenu.moveItemStackTo`: first merge into matching
+/// stacks across `range` (back to front when `reverse`), then place the
+/// remainder into the first empty slot that accepts it.
+fn move_item_stack_to(
+    kind: ContainerKind,
+    menu: &mut Menu,
+    src: usize,
+    range: std::ops::Range<usize>,
+    reverse: bool,
+) {
+    let mut moving = take_slot(menu, src);
+    let indices: Vec<usize> = if reverse {
+        range.rev().collect()
+    } else {
+        range.collect()
+    };
+
+    if moving
+        .as_present()
+        .is_some_and(|d| d.kind.max_stack_size() > 1)
+    {
+        for &i in &indices {
+            if moving.is_empty() {
+                break;
+            }
+            if let Some(slot) = menu.slot_mut(i)
+                && same_item(slot, &moving)
+            {
+                merge_into(slot, &mut moving);
+            }
+        }
+    }
+
+    if let ItemStack::Present(data) = &moving {
+        for &i in &indices {
+            if !kind.may_place(i, data) {
+                continue;
+            }
+            if let Some(slot) = menu.slot_mut(i)
+                && slot.is_empty()
+            {
+                *slot = std::mem::take(&mut moving);
+                break;
+            }
+        }
+    }
+
+    put_slot(menu, src, moving);
+}
+
+/// Double-click: gather matching items from every slot but the crafting-result
+/// slot onto the cursor up to a full stack, partial stacks first (vanilla
 /// `PICKUP_ALL` + `canTakeItemForPickAll`).
-fn pickup_all(menu: &mut Menu, cursor: &mut ItemStack) {
+fn pickup_all(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack) {
     let ItemStack::Present(carried) = cursor else {
         return;
     };
     let max = carried.kind.max_stack_size();
     for pass in 0..2 {
-        for s in 1..menu.len() {
+        for s in 0..menu.len() {
+            if Some(s) == kind.crafting_result_slot() {
+                continue;
+            }
             if cursor.count() >= max {
                 break;
             }

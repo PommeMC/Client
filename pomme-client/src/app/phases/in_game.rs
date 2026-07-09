@@ -20,6 +20,7 @@ use crate::entity::{EntityStore, ItemEntityStore, lerp_angle};
 use crate::net::connection::ConnectionHandle;
 use crate::player::LocalPlayer;
 use crate::player::interaction::{HitResult, InteractionState};
+use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
@@ -36,21 +37,52 @@ use crate::ui::{common, hud};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
-/// A server-opened container screen (currently only the crafting table).
+/// Which screen a server-opened container renders as.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ContainerScreen {
+    CraftingTable,
+    Furnace(crate::ui::furnace::FurnaceVariant),
+    Chest { rows: u8 },
+    ShulkerBox,
+    Anvil,
+}
+
+impl ContainerScreen {
+    /// The click-prediction menu kind backing this screen.
+    pub fn click_kind(self) -> ContainerKind {
+        match self {
+            Self::CraftingTable => ContainerKind::CraftingTable,
+            Self::Furnace(_) => ContainerKind::Furnace,
+            Self::Chest { rows } => ContainerKind::Chest { rows },
+            Self::ShulkerBox => ContainerKind::ShulkerBox,
+            Self::Anvil => ContainerKind::Anvil,
+        }
+    }
+}
+
+/// A server-opened container screen.
 pub struct OpenContainer {
     pub id: i32,
     pub title: String,
-    /// Menu slots in container indices: result 0, grid 1..9, then the
-    /// inventory-backed slots 10..45 (player slot + 1).
+    pub screen: ContainerScreen,
+    /// Menu slots in container indices; slots from `inv_start()` on are backed
+    /// by the player inventory.
     pub slots: Vec<azalea_inventory::ItemStack>,
+    /// The menu's data values (`ClientboundContainerSetData`), e.g. furnace
+    /// lit/cook progress or the anvil repair cost.
+    pub data: [u16; 4],
+    /// The anvil rename field's state; Some only for the anvil screen.
+    pub anvil: Option<crate::ui::anvil::AnvilState>,
     /// This menu's latest server state id, echoed in container clicks.
     pub state_id: u32,
 }
 
 impl OpenContainer {
     /// First container slot backed by the player inventory; container slot `i`
-    /// maps to player inventory slot `i - 1` from here on.
-    pub const INV_START: usize = 10;
+    /// maps to player inventory slot `i - inv_start() + 9` from here on.
+    fn inv_start(&self) -> usize {
+        self.screen.click_kind().inv_start()
+    }
 }
 
 pub struct GameState {
@@ -299,7 +331,7 @@ impl GameState {
     }
 
     /// Set a slot of the currently open menu. Container slots backing the
-    /// player inventory (10..) mirror into it, so the hotbar and a reopened
+    /// player inventory mirror into it, so the hotbar and a reopened
     /// inventory stay in sync.
     pub fn set_menu_slot(&mut self, index: usize, item: azalea_inventory::ItemStack) {
         match &mut self.open_container {
@@ -308,8 +340,9 @@ impl GameState {
                     return;
                 };
                 *s = item.clone();
-                if index >= OpenContainer::INV_START {
-                    self.player.inventory.set_slot(index - 1, item);
+                let inv_start = c.inv_start();
+                if index >= inv_start {
+                    self.player.inventory.set_slot(index - inv_start + 9, item);
                 }
             }
             None => self.player.inventory.set_slot(index, item),
@@ -322,13 +355,9 @@ impl GameState {
         let Some(c) = &mut self.open_container else {
             return;
         };
-        for (i, slot) in c
-            .slots
-            .iter_mut()
-            .enumerate()
-            .skip(OpenContainer::INV_START)
-        {
-            *slot = self.player.inventory.slot(i - 1).clone();
+        let inv_start = c.inv_start();
+        for (i, slot) in c.slots.iter_mut().enumerate().skip(inv_start) {
+            *slot = self.player.inventory.slot(i - inv_start + 9).clone();
         }
     }
 
@@ -354,6 +383,21 @@ impl GameState {
         self.cursor_item = azalea_inventory::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
+    }
+
+    /// A focused text field (anvil rename, creative search) is capturing
+    /// keyboard input: letter/digit keys must type instead of acting as
+    /// hotkeys. The anvil field is editable only while its input slot is
+    /// filled, matching vanilla.
+    pub fn wants_text_input(&self) -> bool {
+        if self.creative_inventory_open {
+            return self.creative_state.tab.captures_typing();
+        }
+        matches!(
+            &self.open_container,
+            Some(c) if c.screen == ContainerScreen::Anvil
+                && c.slots.first().is_some_and(|s| s.is_present())
+        )
     }
 
     /// No menu (pause, inventory, chat) is capturing input.
@@ -828,10 +872,10 @@ fn send_container_clicks(
         HashedStack, ServerboundContainerClick,
     };
 
-    use crate::player::menu_click::{self, ContainerKind};
+    use crate::player::menu_click;
 
     let (container_id, kind, state_id) = match &game.open_container {
-        Some(c) => (c.id, ContainerKind::CraftingTable, c.state_id),
+        Some(c) => (c.id, c.screen.click_kind(), c.state_id),
         None => (0, ContainerKind::Player, game.inventory_state_id),
     };
 
@@ -1025,6 +1069,8 @@ pub fn update_game(
         core.send_chat_message(connection, msg);
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
+
+    core.input.text_capture = game.wants_text_input();
 
     let mut close_inventory = false;
     let mut pause_action = PauseAction::None;
@@ -1466,20 +1512,96 @@ pub fn update_game(
             right_held: core.input.right_held(),
             shift: core.input.shift_held(),
         };
+        // The anvil rename field consumes this frame's typing; a changed
+        // accepted name goes to the server (vanilla `onNameChanged`).
+        if let Some(c) = &mut game.open_container
+            && let Some(state) = &mut c.anvil
+            && let Some(name) = crate::ui::anvil::update_rename(state, &c.slots, &typed, backspace)
+        {
+            use azalea_protocol::packets::game::s_rename_item::ServerboundRenameItem;
+            connection
+                .packet_tx
+                .send(ServerboundGamePacket::RenameItem(ServerboundRenameItem {
+                    name,
+                }));
+        }
         let (clicked_outside, ops) = if let Some(container) = &game.open_container {
-            let result = crate::ui::crafting_table::build_crafting_table(
-                &mut elements,
-                sw,
-                sh,
-                core.input.cursor_pos(),
-                &input,
-                &container.slots,
-                &container.title,
-                &game.cursor_item,
-                &mut game.inv_drag,
-                &mut game.inv_last_click,
-                gs,
-            );
+            let result = match container.screen {
+                ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    &container.slots,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                ),
+                ContainerScreen::Furnace(variant) => crate::ui::furnace::build_furnace(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    variant,
+                    &container.slots,
+                    container.data,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
+                ),
+                ContainerScreen::Chest { rows } => crate::ui::chest::build_chest(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    rows,
+                    &container.slots,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                ),
+                ContainerScreen::ShulkerBox => crate::ui::chest::build_shulker_box(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    &container.slots,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                ),
+                ContainerScreen::Anvil => crate::ui::anvil::build_anvil(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    &container.slots,
+                    container.data,
+                    &container.title,
+                    container.anvil.as_ref().expect("anvil screen has state"),
+                    game.player.experience_level,
+                    crate::player::is_creative(game.player.game_mode),
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
+                ),
+            };
             (result.clicked_outside, result.ops)
         } else {
             let result = crate::ui::inventory::build_inventory(
@@ -1508,8 +1630,8 @@ pub fn update_game(
         let middle_clicked = core.input.middle_just_pressed();
         let right_clicked = core.input.right_just_pressed();
         let scroll_delta = core.input.consume_menu_scroll();
-        let typed = core.input.drain_typed_chars();
-        let backspace = core.input.backspace_pressed();
+        // `typed`/`backspace` come from the frame's single drain up top; a
+        // second drain here would always read empty.
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,
@@ -1531,7 +1653,7 @@ pub fn update_game(
         );
         use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
         let mut set_creative_slot = |slot_num: u16, item: azalea_inventory::ItemStack| {
-            if game.player.game_mode == 1 {
+            if crate::player::is_creative(game.player.game_mode) {
                 connection
                     .packet_tx
                     .send(ServerboundGamePacket::SetCreativeModeSlot(

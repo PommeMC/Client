@@ -554,6 +554,18 @@ impl AppCore {
                         game.set_container_state_id(state_id);
                     }
                 }
+                NetworkEvent::ContainerData {
+                    container_id,
+                    id,
+                    value,
+                } => {
+                    if let Some(c) = &mut game.open_container
+                        && c.id == container_id
+                        && let Some(d) = c.data.get_mut(id as usize)
+                    {
+                        *d = value;
+                    }
+                }
                 NetworkEvent::OpenScreen {
                     container_id,
                     menu_type,
@@ -561,7 +573,29 @@ impl AppCore {
                 } => {
                     use azalea_inventory::ItemStack;
                     use azalea_registry::builtin::MenuKind;
-                    if menu_type == MenuKind::Crafting {
+
+                    use crate::app::phases::in_game::ContainerScreen;
+                    use crate::ui::furnace::FurnaceVariant;
+                    let screen = match menu_type {
+                        MenuKind::Crafting => Some(ContainerScreen::CraftingTable),
+                        MenuKind::Furnace => {
+                            Some(ContainerScreen::Furnace(FurnaceVariant::Furnace))
+                        }
+                        MenuKind::BlastFurnace => {
+                            Some(ContainerScreen::Furnace(FurnaceVariant::BlastFurnace))
+                        }
+                        MenuKind::Smoker => Some(ContainerScreen::Furnace(FurnaceVariant::Smoker)),
+                        MenuKind::Generic9x1 => Some(ContainerScreen::Chest { rows: 1 }),
+                        MenuKind::Generic9x2 => Some(ContainerScreen::Chest { rows: 2 }),
+                        MenuKind::Generic9x3 => Some(ContainerScreen::Chest { rows: 3 }),
+                        MenuKind::Generic9x4 => Some(ContainerScreen::Chest { rows: 4 }),
+                        MenuKind::Generic9x5 => Some(ContainerScreen::Chest { rows: 5 }),
+                        MenuKind::Generic9x6 => Some(ContainerScreen::Chest { rows: 6 }),
+                        MenuKind::ShulkerBox => Some(ContainerScreen::ShulkerBox),
+                        MenuKind::Anvil => Some(ContainerScreen::Anvil),
+                        _ => None,
+                    };
+                    if let Some(screen) = screen {
                         // Vanilla setScreen replaces whatever screen is up,
                         // including the pause menu.
                         game.paused = false;
@@ -572,7 +606,11 @@ impl AppCore {
                         game.open_container = Some(crate::app::phases::in_game::OpenContainer {
                             id: container_id,
                             title,
-                            slots: vec![ItemStack::Empty; crate::ui::crafting_table::SLOT_COUNT],
+                            screen,
+                            slots: vec![ItemStack::Empty; screen.click_kind().slot_count()],
+                            data: [0; 4],
+                            anvil: (screen == ContainerScreen::Anvil)
+                                .then(crate::ui::anvil::AnvilState::new),
                             state_id: 0,
                         });
                         game.sync_container_from_inventory();
@@ -583,8 +621,9 @@ impl AppCore {
                         self.apply_cursor_grab(window, Some(game));
                     } else {
                         // TODO: render the remaining menu screens (chest,
-                        // furnace, ...). Until then tell the server we closed
-                        // the menu so its container state stays consistent.
+                        // brewing stand, ...). Until then tell the server we
+                        // closed the menu so its container state stays
+                        // consistent.
                         use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
                         connection
                             .packet_tx
@@ -1210,7 +1249,7 @@ impl AppCore {
             game.player.look_dir,
             &game.chunk_store,
             &game.entity_store,
-            game.player.game_mode == 1,
+            crate::player::is_creative(game.player.game_mode),
         );
 
         let held_stack = match game
@@ -1237,7 +1276,7 @@ impl AppCore {
             game.player.eye_pos().into(),
             game.player.look_dir,
             game.player.on_ground,
-            game.player.game_mode == 1,
+            crate::player::is_creative(game.player.game_mode),
             game.player.food,
             input.selected_slot(),
             held_stack,
