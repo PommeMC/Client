@@ -193,6 +193,12 @@ pub fn handle_game_packet(
                 level: p.experience_level as i32,
             });
         }
+        ClientboundGamePacket::Waypoint(p) => {
+            let _ = event_tx.try_send(NetworkEvent::Waypoint {
+                operation: p.operation,
+                waypoint: p.waypoint.clone(),
+            });
+        }
         ClientboundGamePacket::UpdateAttributes(p) => {
             use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
             use azalea_registry::builtin::Attribute;

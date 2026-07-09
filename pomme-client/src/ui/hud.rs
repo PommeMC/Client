@@ -5,6 +5,18 @@ use glam::DVec3;
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::world::waypoints::{LocatorDot, PitchDirection, WaypointStyleId};
+
+/// Which bar occupies the slot above the hotbar (vanilla `ContextualInfo`).
+// TODO: JumpableVehicle bar.
+pub enum ContextualBarKind<'a> {
+    Empty,
+    Experience,
+    Locator {
+        dots: &'a [LocatorDot],
+        arrow_frame_1: bool,
+    },
+}
 
 pub struct FrameTimings {
     pub frame_ms: f32,
@@ -80,6 +92,7 @@ pub fn build_hud(
     tick: u64,
     experience_level: i32,
     experience_progress: f32,
+    bar: ContextualBarKind<'_>,
     game_mode: u8,
     hotbar: &[ItemStack],
     first_person: bool,
@@ -185,75 +198,94 @@ pub fn build_hud(
                 gs,
             );
         }
+    }
 
-        let xp_w = XP_BAR_W * gs;
-        let xp_h = XP_BAR_H * gs;
-        let xp_x = (cx - xp_w / 2.0).round();
-        let xp_y = (hotbar_y - xp_h - 2.0 * gs).round();
+    let bar_w = XP_BAR_W * gs;
+    let bar_h = XP_BAR_H * gs;
+    let bar_x = (cx - bar_w / 2.0).round();
+    let bar_y = (hotbar_y - bar_h - 2.0 * gs).round();
 
+    let bar_background = match bar {
+        ContextualBarKind::Experience => Some(SpriteId::ExperienceBarBackground),
+        ContextualBarKind::Locator { .. } => Some(SpriteId::LocatorBarBackground),
+        ContextualBarKind::Empty => None,
+    };
+    if let Some(sprite) = bar_background {
         elements.push(MenuElement::Image {
-            x: xp_x,
-            y: xp_y,
-            w: xp_w,
-            h: xp_h,
-            sprite: SpriteId::ExperienceBarBackground,
+            x: bar_x,
+            y: bar_y,
+            w: bar_w,
+            h: bar_h,
+            sprite,
             tint: WHITE,
         });
+    }
 
+    if matches!(bar, ContextualBarKind::Experience) {
         let fill_px = (experience_progress.clamp(0.0, 1.0) * XP_BAR_W).ceil() as i32;
         if fill_px > 0 {
             let fill_w = (fill_px as f32 * gs).round();
             elements.push(MenuElement::ScissorPush {
-                x: xp_x,
-                y: xp_y,
+                x: bar_x,
+                y: bar_y,
                 w: fill_w,
-                h: xp_h,
+                h: bar_h,
             });
             elements.push(MenuElement::Image {
-                x: xp_x,
-                y: xp_y,
-                w: xp_w,
-                h: xp_h,
+                x: bar_x,
+                y: bar_y,
+                w: bar_w,
+                h: bar_h,
                 sprite: SpriteId::ExperienceBarProgress,
                 tint: WHITE,
             });
             elements.push(MenuElement::ScissorPop);
         }
+    }
 
-        if experience_level > 0 {
-            let text = experience_level.to_string();
-            let fs = FONT_SIZE * gs;
-            let ty = (xp_y - 6.0 * gs).round();
-            let shadow = [0.0, 0.0, 0.0, 1.0];
-            let main = [0.5, 1.0, 0.125, 1.0];
-            for (dx, dy) in [
-                (1.0, 0.0),
-                (-1.0, 0.0),
-                (0.0, 1.0),
-                (0.0, -1.0),
-                (1.0, 1.0),
-                (1.0, -1.0),
-                (-1.0, 1.0),
-                (-1.0, -1.0),
-            ] {
-                elements.push(MenuElement::Text {
-                    x: (cx + dx * gs).round(),
-                    y: (ty + dy * gs).round(),
-                    text: text.clone(),
-                    scale: fs,
-                    color: shadow,
-                    centered: true,
-                });
-            }
+    // Vanilla draws the level number over whichever bar is showing, between
+    // the background and the locator dots.
+    if is_survival && experience_level > 0 {
+        let text = experience_level.to_string();
+        let fs = FONT_SIZE * gs;
+        let ty = (bar_y - 6.0 * gs).round();
+        let shadow = [0.0, 0.0, 0.0, 1.0];
+        let main = [0.5, 1.0, 0.125, 1.0];
+        for (dx, dy) in [
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (1.0, 1.0),
+            (1.0, -1.0),
+            (-1.0, 1.0),
+            (-1.0, -1.0),
+        ] {
             elements.push(MenuElement::Text {
-                x: cx,
-                y: ty,
-                text,
+                x: (cx + dx * gs).round(),
+                y: (ty + dy * gs).round(),
+                text: text.clone(),
                 scale: fs,
-                color: main,
+                color: shadow,
                 centered: true,
             });
         }
+        elements.push(MenuElement::Text {
+            x: cx,
+            y: ty,
+            text,
+            scale: fs,
+            color: main,
+            centered: true,
+        });
+    }
+
+    if let ContextualBarKind::Locator {
+        dots,
+        arrow_frame_1,
+    } = bar
+    {
+        build_locator_dots(elements, bar_x, bar_y, gs, dots, arrow_frame_1);
     }
 
     if let Some(bubbles) = air_bubbles {
@@ -318,6 +350,84 @@ pub fn air_bubbles(air_supply: i32, eyes_in_water: bool) -> Option<AirBubbles> {
         empty: 10 - bubble_count(empty_delay),
         is_popping: full != popping_pos,
     })
+}
+
+fn locator_dot_sprite(style: WaypointStyleId, index: usize) -> SpriteId {
+    const DEFAULT: [SpriteId; 4] = [
+        SpriteId::LocatorDotDefault0,
+        SpriteId::LocatorDotDefault1,
+        SpriteId::LocatorDotDefault2,
+        SpriteId::LocatorDotDefault3,
+    ];
+    match style {
+        WaypointStyleId::Default => DEFAULT[index.min(3)],
+        WaypointStyleId::Bowtie => {
+            if index == 0 {
+                SpriteId::LocatorDotBowtie
+            } else {
+                DEFAULT[(index - 1).min(3)]
+            }
+        }
+        WaypointStyleId::Missing => SpriteId::LocatorDotMissing,
+    }
+}
+
+fn build_locator_dots(
+    elements: &mut Vec<MenuElement>,
+    bar_x: f32,
+    bar_y: f32,
+    gs: f32,
+    dots: &[LocatorDot],
+    arrow_frame_1: bool,
+) {
+    // Vanilla centers dots on ceil((gui_w - 9) / 2) while the bar's left edge
+    // is (gui_w - 182) / 2; the offset between them is 87 GUI px at any width.
+    for dot in dots {
+        let c = dot.color;
+        let tint = [
+            (c >> 16 & 0xFF) as f32 / 255.0,
+            (c >> 8 & 0xFF) as f32 / 255.0,
+            (c & 0xFF) as f32 / 255.0,
+            (c >> 24) as f32 / 255.0,
+        ];
+        elements.push(MenuElement::Image {
+            x: (bar_x + (87 + dot.dot_position) as f32 * gs).round(),
+            y: (bar_y - 2.0 * gs).round(),
+            w: 9.0 * gs,
+            h: 9.0 * gs,
+            sprite: locator_dot_sprite(dot.style, dot.sprite_index),
+            tint,
+        });
+        let arrow = match dot.pitch {
+            PitchDirection::None => None,
+            PitchDirection::Up => Some((
+                -6.0,
+                if arrow_frame_1 {
+                    SpriteId::LocatorArrowUp1
+                } else {
+                    SpriteId::LocatorArrowUp0
+                },
+            )),
+            PitchDirection::Down => Some((
+                6.0,
+                if arrow_frame_1 {
+                    SpriteId::LocatorArrowDown1
+                } else {
+                    SpriteId::LocatorArrowDown0
+                },
+            )),
+        };
+        if let Some((dy, sprite)) = arrow {
+            elements.push(MenuElement::Image {
+                x: (bar_x + (88 + dot.dot_position) as f32 * gs).round(),
+                y: (bar_y + dy * gs).round(),
+                w: 7.0 * gs,
+                h: 5.0 * gs,
+                sprite,
+                tint: WHITE,
+            });
+        }
+    }
 }
 
 fn build_crosshair(elements: &mut Vec<MenuElement>, cx: f32, cy: f32) {

@@ -616,9 +616,13 @@ impl EntityStore {
     }
 
     pub fn has_player_uuid(&self, uuid: &uuid::Uuid) -> bool {
+        self.player_by_uuid(uuid).is_some()
+    }
+
+    pub fn player_by_uuid(&self, uuid: &uuid::Uuid) -> Option<&LivingEntity> {
         self.living
             .values()
-            .any(|entity| entity.player_uuid == Some(*uuid))
+            .find(|entity| entity.player_uuid == Some(*uuid))
     }
 
     pub fn tick_living(&mut self) {
