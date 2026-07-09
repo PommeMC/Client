@@ -1132,9 +1132,11 @@ pub fn update_game(
     // the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
     if !benchmark_running {
-        if let Some(bubbles) = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
-            .filter(|_| crate::player::is_survival(game.player.game_mode))
-        {
+        let air_bubbles = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
+            .filter(|_| crate::player::is_survival(game.player.game_mode));
+        // TODO: gate the pop sound on HUD visibility if a hide-HUD toggle (F1) is
+        // added.
+        if let Some(bubbles) = &air_bubbles {
             if !game.player.eyes_in_water {
                 game.last_bubble_pop_sound_played = 0;
             } else if bubbles.is_popping && game.last_bubble_pop_sound_played != bubbles.popping_pos
@@ -1160,8 +1162,9 @@ pub fn update_game(
             game.player.health,
             game.player.food,
             game.player.armor,
-            game.player.air_supply,
+            air_bubbles,
             game.player.eyes_in_water,
+            game.sky_state.game_time,
             game.player.experience_level,
             game.player.experience_progress,
             game.player.game_mode,

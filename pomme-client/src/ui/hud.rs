@@ -74,8 +74,10 @@ pub fn build_hud(
     health: f32,
     food: u32,
     armor: u32,
-    air_supply: i32,
+    // Gated to survival by the caller.
+    air_bubbles: Option<AirBubbles>,
     eyes_in_water: bool,
+    tick: u64,
     experience_level: i32,
     experience_progress: f32,
     game_mode: u8,
@@ -254,11 +256,13 @@ pub fn build_hud(
         }
     }
 
-    if let Some(bubbles) = air_bubbles(air_supply, eyes_in_water).filter(|_| is_survival) {
+    if let Some(bubbles) = air_bubbles {
         let bubble_y = (status_bar_y - (ICON_SIZE * 2.0 + 1.0) * gs).round();
-        let stride = ICON_STRIDE * gs;
         let icon_size = ICON_SIZE * gs;
+        let mut rng = crate::util::JavaRandom::new((tick as i64).wrapping_mul(312871));
+        let wobbling = bubbles.empty == 10 && tick.is_multiple_of(2);
         for b in 1..=10i32 {
+            let mut y = bubble_y;
             let sprite = if b <= bubbles.full {
                 SpriteId::AirFull
             } else if bubbles.is_popping && b == bubbles.popping_pos && eyes_in_water {
@@ -266,12 +270,15 @@ pub fn build_hud(
             } else if b <= 10 - bubbles.empty {
                 continue;
             } else {
+                if wobbling {
+                    y += rng.next_int(2) as f32 * gs;
+                }
                 SpriteId::AirEmpty
             };
-            let x = (hotbar_x + hotbar_w - (b - 1) as f32 * stride - icon_size).round();
+            let x = icon_row_x_rtl(hotbar_x + hotbar_w, b - 1, gs);
             elements.push(MenuElement::Image {
                 x,
-                y: bubble_y,
+                y,
                 w: icon_size,
                 h: icon_size,
                 sprite,
@@ -279,6 +286,11 @@ pub fn build_hud(
             });
         }
     }
+}
+
+/// Right-aligned status icon x, matching vanilla `xRight - i * 8 - 9`.
+fn icon_row_x_rtl(x_right: f32, i: i32, gs: f32) -> f32 {
+    (x_right - i as f32 * ICON_STRIDE * gs - ICON_SIZE * gs).round()
 }
 
 pub struct AirBubbles {
@@ -348,7 +360,7 @@ fn build_status_bar(
 
     for i in 0..10u8 {
         let x = if right_to_left {
-            (x_start - i as f32 * stride - icon_size).round()
+            icon_row_x_rtl(x_start, i as i32, gs)
         } else {
             (x_start + i as f32 * stride).round()
         };

@@ -38,4 +38,20 @@ impl JavaRandom {
     pub fn next_float(&mut self) -> f32 {
         self.next(24) as f32 / (1u32 << 24) as f32
     }
+
+    /// Matches `Random.nextInt(int)`, in `[0, bound)`.
+    pub fn next_int(&mut self, bound: i32) -> i32 {
+        assert!(bound > 0);
+        if bound & (bound - 1) == 0 {
+            return ((bound as i64).wrapping_mul(self.next(31) as i64) >> 31) as i32;
+        }
+        loop {
+            let bits = self.next(31);
+            let val = bits % bound;
+            // Java relies on int overflow here to reject biased samples.
+            if bits.wrapping_sub(val).wrapping_add(bound - 1) >= 0 {
+                return val;
+            }
+        }
+    }
 }
