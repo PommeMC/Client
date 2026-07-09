@@ -1191,8 +1191,9 @@ pub fn update_game(
     // the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
     if !benchmark_running {
+        let is_survival = crate::player::is_survival(game.player.game_mode);
         let air_bubbles = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
-            .filter(|_| crate::player::is_survival(game.player.game_mode));
+            .filter(|_| is_survival);
         // TODO: gate the pop sound on HUD visibility if a hide-HUD toggle (F1) is
         // added.
         if let Some(bubbles) = &air_bubbles {
@@ -1216,9 +1217,8 @@ pub fn update_game(
         // Contextual bar choice (vanilla Hud.nextContextualInfoState): the
         // locator bar takes the XP bar's slot while waypoints are tracked,
         // except for 100 ticks after an XP change.
-        let has_xp = crate::player::is_survival(game.player.game_mode);
         let show_locator = game.waypoints.has_waypoints()
-            && !(has_xp && game.xp_display_start_tick + 100 > game.tick_count as i64);
+            && !(is_survival && game.xp_display_start_tick + 100 > game.tick_count as i64);
         let locator_dots = if show_locator {
             let (yaw_deg, pitch_deg) = gfx.renderer.camera_effective_look_deg();
             let cam = crate::world::waypoints::WaypointCamera {
@@ -1260,7 +1260,7 @@ pub fn update_game(
                 dots: &locator_dots,
                 arrow_frame_1: game.tick_count % 14 >= 10,
             }
-        } else if has_xp {
+        } else if is_survival {
             hud::ContextualBarKind::Experience
         } else {
             hud::ContextualBarKind::Empty
@@ -1275,7 +1275,7 @@ pub fn update_game(
             game.player.armor,
             air_bubbles,
             game.player.eyes_in_water,
-            game.sky_state.game_time,
+            game.tick_count,
             game.player.experience_level,
             game.player.experience_progress,
             bar,
