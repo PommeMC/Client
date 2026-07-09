@@ -1232,6 +1232,7 @@ pub fn update_game(
             let entity_eye_pos = |uuid: &uuid::Uuid| {
                 store.player_by_uuid(uuid).map(|e| {
                     let feet = e.prev_position.lerp(e.position, partial_tick as f64);
+                    // TODO: swimming/gliding eye height needs entity pose data.
                     let eye_height = if e.is_crouching {
                         crate::player::CROUCH_EYE_HEIGHT
                     } else {

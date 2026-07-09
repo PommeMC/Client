@@ -222,7 +222,8 @@ pub fn build_hud(
     }
 
     if matches!(bar, ContextualBarKind::Experience) {
-        let fill_px = (experience_progress.clamp(0.0, 1.0) * XP_BAR_W).ceil() as i32;
+        // Vanilla ExperienceBar: (int)(experienceProgress * 183).
+        let fill_px = (experience_progress.clamp(0.0, 1.0) * 183.0) as i32;
         if fill_px > 0 {
             let fill_w = (fill_px as f32 * gs).round();
             elements.push(MenuElement::ScissorPush {
@@ -251,16 +252,7 @@ pub fn build_hud(
         let ty = (bar_y - 6.0 * gs).round();
         let shadow = [0.0, 0.0, 0.0, 1.0];
         let main = [0.5, 1.0, 0.125, 1.0];
-        for (dx, dy) in [
-            (1.0, 0.0),
-            (-1.0, 0.0),
-            (0.0, 1.0),
-            (0.0, -1.0),
-            (1.0, 1.0),
-            (1.0, -1.0),
-            (-1.0, 1.0),
-            (-1.0, -1.0),
-        ] {
+        for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
             elements.push(MenuElement::Text {
                 x: (cx + dx * gs).round(),
                 y: (ty + dy * gs).round(),
