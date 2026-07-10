@@ -127,6 +127,15 @@ pub struct GameState {
     pub chat: ChatState,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
+    /// Locator bar waypoints tracked by the server.
+    pub waypoints: crate::world::waypoints::WaypointMap,
+    /// Client tick counter (vanilla `player.tickCount`).
+    pub tick_count: u64,
+    /// Tick of the last XP progress change; the XP bar outprioritizes the
+    /// locator bar for 100 ticks after it (vanilla
+    /// `experienceDisplayStartTick`; `i64::MIN` = untouched since (re)spawn,
+    /// so the first change after joining never takes priority).
+    pub xp_display_start_tick: i64,
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
@@ -269,6 +278,9 @@ impl GameState {
             chat: ChatState::new(),
             command_tree: None,
             tab_list: TabList::new(),
+            waypoints: crate::world::waypoints::WaypointMap::default(),
+            tick_count: 0,
+            xp_display_start_tick: i64::MIN,
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
             show_debug: false,
@@ -1044,6 +1056,7 @@ pub fn update_game(
     // Menus never pause the simulation; tick_physics substitutes neutral input.
     core.tick_accumulator += dt;
     while core.tick_accumulator >= TICK_RATE {
+        game.tick_count = game.tick_count.wrapping_add(1);
         core.tick_physics(&mut gfx.renderer, connection, game);
         game.item_entity_store.tick(&game.chunk_store);
         game.particle_store.tick(&game.chunk_store);
@@ -1178,8 +1191,9 @@ pub fn update_game(
     // the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
     if !benchmark_running {
+        let is_survival = crate::player::is_survival(game.player.game_mode);
         let air_bubbles = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
-            .filter(|_| crate::player::is_survival(game.player.game_mode));
+            .filter(|_| is_survival);
         // TODO: gate the pop sound on HUD visibility if a hide-HUD toggle (F1) is
         // added.
         if let Some(bubbles) = &air_bubbles {
@@ -1200,6 +1214,57 @@ pub fn update_game(
                 game.last_bubble_pop_sound_played = bubbles.popping_pos;
             }
         }
+        // Contextual bar choice (vanilla Hud.nextContextualInfoState): the
+        // locator bar takes the XP bar's slot while waypoints are tracked,
+        // except for 100 ticks after an XP change.
+        let show_locator = game.waypoints.has_waypoints()
+            && !(is_survival && game.xp_display_start_tick + 100 > game.tick_count as i64);
+        let locator_dots = if show_locator {
+            let (yaw_deg, pitch_deg) = gfx.renderer.camera_effective_look_deg();
+            let cam = crate::world::waypoints::WaypointCamera {
+                position: gfx.renderer.camera_render_position(),
+                yaw_deg,
+                pitch_deg,
+                view_rot_proj: gfx.renderer.locator_projection(),
+                fov_y_deg: gfx.renderer.camera_fov_degrees(),
+            };
+            let store = &game.entity_store;
+            let entity_eye_pos = |uuid: &uuid::Uuid| {
+                store.player_by_uuid(uuid).map(|e| {
+                    let feet = e.prev_position.lerp(e.position, partial_tick as f64);
+                    // TODO: swimming/gliding eye height needs entity pose data.
+                    let eye_height = if e.is_crouching {
+                        crate::player::CROUCH_EYE_HEIGHT
+                    } else {
+                        crate::player::STANDING_EYE_HEIGHT
+                    };
+                    let block_pos = glam::IVec3::new(
+                        e.position.x.floor() as i32,
+                        e.position.y.floor() as i32,
+                        e.position.z.floor() as i32,
+                    );
+                    (block_pos, *feet + glam::DVec3::new(0.0, eye_height, 0.0))
+                })
+            };
+            game.waypoints.extract_dots(
+                &cam,
+                *game.player.position,
+                core.user.uuid,
+                &entity_eye_pos,
+            )
+        } else {
+            Vec::new()
+        };
+        let bar = if show_locator {
+            hud::ContextualBarKind::Locator {
+                dots: &locator_dots,
+                arrow_frame_1: game.tick_count % 14 >= 10,
+            }
+        } else if is_survival {
+            hud::ContextualBarKind::Experience
+        } else {
+            hud::ContextualBarKind::Empty
+        };
         hud::build_hud(
             &mut elements,
             sw,
@@ -1210,9 +1275,10 @@ pub fn update_game(
             game.player.armor,
             air_bubbles,
             game.player.eyes_in_water,
-            game.sky_state.game_time,
+            game.tick_count,
             game.player.experience_level,
             game.player.experience_progress,
+            bar,
             game.player.game_mode,
             game.player.inventory.hotbar_slots(),
             gfx.renderer.is_first_person(),

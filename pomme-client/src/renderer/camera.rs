@@ -330,6 +330,38 @@ impl Camera {
         proj * view
     }
 
+    /// Vanilla `Camera.getViewRotationProjectionMatrix`: rotation-only view
+    /// times the GL-convention projection — no view bob, no third-person
+    /// translation, no Vulkan Y flip. Used by the locator bar's waypoint
+    /// pitch test.
+    pub fn view_rotation_projection(&self) -> Mat4 {
+        let (forward, up) = self.view_basis();
+        let view = Mat4::look_to_rh(Vec3::ZERO, forward, up);
+        let proj = Mat4::perspective_rh_gl(
+            self.fov_radians(self.render_partial_tick),
+            self.aspect_ratio,
+            NEAR,
+            FAR,
+        );
+        proj * view
+    }
+
+    /// Camera yaw/pitch in degrees as vanilla `Camera.setRotation` sees them:
+    /// the mirrored third-person view turns around (yaw + 180, pitch negated).
+    pub fn effective_look_deg(&self) -> (f32, f32) {
+        let yaw = self.look_dir.y_rot_deg();
+        let pitch = self.look_dir.x_rot_deg();
+        if self.mode == CameraMode::ThirdPersonFront {
+            (yaw + 180.0, -pitch)
+        } else {
+            (yaw, pitch)
+        }
+    }
+
+    pub fn fov_degrees(&self) -> f32 {
+        self.fov_radians(self.render_partial_tick).to_degrees()
+    }
+
     pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
         let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();

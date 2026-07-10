@@ -350,6 +350,9 @@ impl AppCore {
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
                     game.position_set = false;
                     game.player_loaded_sent = false;
+                    // Login/respawn recreate vanilla's LocalPlayer, resetting
+                    // the XP display sentinel; waypoints persist.
+                    game.xp_display_start_tick = i64::MIN;
 
                     renderer.clear_chunk_meshes();
                     game.mesh_dispatcher =
@@ -498,8 +501,24 @@ impl AppCore {
                     }
                 }
                 NetworkEvent::PlayerExperience { progress, level } => {
+                    if progress != game.player.experience_progress {
+                        // Vanilla LocalPlayer.setExperienceValues: the first
+                        // change after (re)spawn only arms the sentinel and
+                        // doesn't yet prioritize the XP bar.
+                        game.xp_display_start_tick = if game.xp_display_start_tick == i64::MIN {
+                            i64::MIN + 1
+                        } else {
+                            game.tick_count as i64
+                        };
+                    }
                     game.player.experience_progress = progress;
                     game.player.experience_level = level;
+                }
+                NetworkEvent::Waypoint {
+                    operation,
+                    waypoint,
+                } => {
+                    game.waypoints.apply(operation, waypoint);
                 }
                 NetworkEvent::EntityArmorUpdate { entity_id, armor } => {
                     if entity_id == game.player.entity_id {

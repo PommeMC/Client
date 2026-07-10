@@ -55,6 +55,10 @@ pub enum NetworkEvent {
         progress: f32,
         level: i32,
     },
+    Waypoint {
+        operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
+        waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,
+    },
     EntityArmorUpdate {
         entity_id: i32,
         armor: u32,

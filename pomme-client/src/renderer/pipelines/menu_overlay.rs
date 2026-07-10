@@ -1541,6 +1541,17 @@ pub enum SpriteId {
     ArmorFull,
     ExperienceBarBackground,
     ExperienceBarProgress,
+    LocatorBarBackground,
+    LocatorDotDefault0,
+    LocatorDotDefault1,
+    LocatorDotDefault2,
+    LocatorDotDefault3,
+    LocatorDotBowtie,
+    LocatorDotMissing,
+    LocatorArrowUp0,
+    LocatorArrowUp1,
+    LocatorArrowDown0,
+    LocatorArrowDown1,
     InventoryBackground,
     CraftingTableBackground,
     FurnaceBackground,
@@ -1802,6 +1813,31 @@ fn build_sprite_atlas(
         (
             SpriteId::ExperienceBarProgress,
             "minecraft/textures/gui/sprites/hud/experience_bar_progress.png",
+            0.0,
+        ),
+        (
+            SpriteId::LocatorDotDefault0,
+            "minecraft/textures/gui/sprites/hud/locator_bar_dot/default_0.png",
+            0.0,
+        ),
+        (
+            SpriteId::LocatorDotDefault1,
+            "minecraft/textures/gui/sprites/hud/locator_bar_dot/default_1.png",
+            0.0,
+        ),
+        (
+            SpriteId::LocatorDotDefault2,
+            "minecraft/textures/gui/sprites/hud/locator_bar_dot/default_2.png",
+            0.0,
+        ),
+        (
+            SpriteId::LocatorDotDefault3,
+            "minecraft/textures/gui/sprites/hud/locator_bar_dot/default_3.png",
+            0.0,
+        ),
+        (
+            SpriteId::LocatorDotBowtie,
+            "minecraft/textures/gui/sprites/hud/locator_bar_dot/bowtie.png",
             0.0,
         ),
         (
@@ -2165,6 +2201,110 @@ fn build_sprite_atlas(
             images.push((SpriteId::SteveHead, vec![255, 0, 255, 255], 1, 1, 0.0));
         }
     }
+
+    // Locator bar background: pre-tile the 12x5 nine-slice (borders L/R 5,
+    // 2px center repeated) to its fixed 182x5 draw size.
+    let locator_bg_path = resolve_asset_path(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/textures/gui/sprites/hud/locator_bar_background.png",
+    );
+    match crate::assets::load_image(&locator_bg_path) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            if rgba.width() == 12 && rgba.height() == 5 {
+                let src = rgba.as_raw();
+                let mut out = vec![0u8; 182 * 5 * 4];
+                for y in 0..5usize {
+                    let row = |x: usize| (y * 12 + x) * 4;
+                    let dst_row = y * 182 * 4;
+                    out[dst_row..dst_row + 5 * 4].copy_from_slice(&src[row(0)..row(5)]);
+                    for rep in 0..86usize {
+                        let dst = dst_row + (5 + rep * 2) * 4;
+                        out[dst..dst + 2 * 4].copy_from_slice(&src[row(5)..row(7)]);
+                    }
+                    let dst = dst_row + 177 * 4;
+                    out[dst..dst + 5 * 4].copy_from_slice(&src[row(7)..row(12)]);
+                }
+                images.push((SpriteId::LocatorBarBackground, out, 182, 5, 0.0));
+            } else {
+                tracing::warn!(
+                    "Unexpected locator bar background size: {}x{}",
+                    rgba.width(),
+                    rgba.height()
+                );
+                let (w, h) = (rgba.width(), rgba.height());
+                images.push((SpriteId::LocatorBarBackground, rgba.into_raw(), w, h, 0.0));
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load locator bar background: {e}");
+            images.push((
+                SpriteId::LocatorBarBackground,
+                vec![255, 0, 255, 255],
+                1,
+                1,
+                0.0,
+            ));
+        }
+    }
+
+    // Locator arrows: each 7x10 strip holds two 7x5 animation frames.
+    for (frame0, frame1, asset_key) in [
+        (
+            SpriteId::LocatorArrowUp0,
+            SpriteId::LocatorArrowUp1,
+            "minecraft/textures/gui/sprites/hud/locator_bar_arrow_up.png",
+        ),
+        (
+            SpriteId::LocatorArrowDown0,
+            SpriteId::LocatorArrowDown1,
+            "minecraft/textures/gui/sprites/hud/locator_bar_arrow_down.png",
+        ),
+    ] {
+        let path = resolve_asset_path(jar_assets_dir, asset_index, asset_key);
+        let frames = match crate::assets::load_image(&path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                if rgba.width() == 7 && rgba.height() == 10 {
+                    let src = rgba.into_raw();
+                    let frame_bytes = 7 * 5 * 4;
+                    Some((src[..frame_bytes].to_vec(), src[frame_bytes..].to_vec()))
+                } else {
+                    tracing::warn!(
+                        "Unexpected locator arrow size {}x{} for {asset_key}",
+                        rgba.width(),
+                        rgba.height()
+                    );
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load locator arrow {asset_key}: {e}");
+                None
+            }
+        };
+        match frames {
+            Some((f0, f1)) => {
+                images.push((frame0, f0, 7, 5, 0.0));
+                images.push((frame1, f1, 7, 5, 0.0));
+            }
+            None => {
+                for id in [frame0, frame1] {
+                    images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
+                }
+            }
+        }
+    }
+
+    // Placeholder for unknown waypoint styles (vanilla shows missingno).
+    images.push((
+        SpriteId::LocatorDotMissing,
+        vec![255, 0, 255, 255],
+        1,
+        1,
+        0.0,
+    ));
 
     // Container backgrounds live in a 256x256 atlas; crop out the used region
     // starting at texture row `src_y`.

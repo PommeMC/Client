@@ -812,6 +812,20 @@ impl Renderer {
         self.camera.look_dir
     }
 
+    /// Rotation-only view-projection for the locator bar's waypoint pitch test.
+    pub fn locator_projection(&self) -> glam::Mat4 {
+        self.camera.view_rotation_projection()
+    }
+
+    /// Effective camera (yaw, pitch) in degrees, mirrored-view adjusted.
+    pub fn camera_effective_look_deg(&self) -> (f32, f32) {
+        self.camera.effective_look_deg()
+    }
+
+    pub fn camera_fov_degrees(&self) -> f32 {
+        self.camera.fov_degrees()
+    }
+
     pub fn camera_pivot_position(&self) -> Position {
         self.camera.position
     }
