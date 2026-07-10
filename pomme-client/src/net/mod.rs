@@ -86,6 +86,13 @@ pub enum NetworkEvent {
     CommandTree {
         tree: Arc<crate::net::commands::CommandTree>,
     },
+    CommandSuggestions {
+        id: u32,
+        /// Offset into the command string (as sent, including the leading `/`)
+        /// where the completed range begins.
+        start: usize,
+        options: Vec<String>,
+    },
     BlockUpdate {
         pos: BlockPos,
         state: BlockState,

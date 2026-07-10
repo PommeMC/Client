@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use azalea_core::position::ChunkPos;
-use azalea_protocol::packets::game::{ServerboundClientInformation, ServerboundGamePacket};
+use azalea_protocol::packets::game::{
+    ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
+};
 use azalea_registry::builtin::EntityKind;
 use glam::FloatExt as _;
 
@@ -1020,6 +1022,13 @@ pub fn update_game(
     ) {
         core.send_chat_message(connection, msg);
         core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+    if let Some((id, command)) = game.chat.take_suggestion_request() {
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::CommandSuggestion(
+                ServerboundCommandSuggestion { id, command },
+            ));
     }
 
     let mut close_inventory = false;

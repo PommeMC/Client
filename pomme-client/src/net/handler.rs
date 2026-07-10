@@ -594,7 +594,11 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
         }
         ClientboundGamePacket::CommandSuggestions(p) => {
-            tracing::debug!("Command suggestions received (id {})", p.id);
+            let _ = event_tx.try_send(NetworkEvent::CommandSuggestions {
+                id: p.id,
+                start: p.suggestions.range().start(),
+                options: p.suggestions.list().iter().map(|s| s.text()).collect(),
+            });
         }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(

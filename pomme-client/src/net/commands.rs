@@ -42,6 +42,13 @@ impl CommandTree {
         &node.children
     }
 
+    fn is_argument(&self, index: u32) -> bool {
+        matches!(
+            self.node(index).map(|c| &c.node_type),
+            Some(NodeType::Argument { .. })
+        )
+    }
+
     /// Follow one command token: a literal child whose name equals `token`,
     /// else the (single) argument child that would consume it.
     fn descend(&self, child_ids: &[u32], token: &str) -> Option<u32> {
@@ -51,14 +58,7 @@ impl CommandTree {
                 Some(NodeType::Literal { name }) if name.as_str() == token
             )
         });
-        literal.or_else(|| {
-            child_ids.iter().copied().find(|&cid| {
-                matches!(
-                    self.node(cid).map(|c| &c.node_type),
-                    Some(NodeType::Argument { .. })
-                )
-            })
-        })
+        literal.or_else(|| child_ids.iter().copied().find(|&cid| self.is_argument(cid)))
     }
 
     /// The direct child literals of the root node: the top-level commands the
@@ -108,7 +108,7 @@ impl CommandTree {
     /// Local completions for `command` (the chat input with the leading `/`
     /// removed): literal child names reachable after the completed tokens,
     /// filtered by the partial last token. Mirrors the local half of vanilla
-    /// `CommandSuggestions`; `ask_server` arguments are not requested.
+    /// `CommandSuggestions`.
     pub fn suggestions(&self, command: &str) -> Suggestions {
         let tokens: Vec<&str> = command.split_whitespace().collect();
         let (completed, partial): (&[&str], &str) = if command.ends_with(char::is_whitespace) {
@@ -136,8 +136,8 @@ impl CommandTree {
             return Suggestions::empty();
         };
         let lower = partial.to_ascii_lowercase();
-        let options = self
-            .effective_children(node)
+        let child_ids = self.effective_children(node);
+        let mut options: Vec<String> = child_ids
             .iter()
             .filter_map(|&cid| match self.node(cid).map(|c| &c.node_type) {
                 Some(NodeType::Literal { name })
@@ -148,9 +148,12 @@ impl CommandTree {
                 _ => None,
             })
             .collect();
+        options.sort_by_key(|a| a.to_ascii_lowercase());
+        let needs_server = child_ids.iter().any(|&cid| self.is_argument(cid));
         Suggestions {
             options,
             partial_len: partial.len(),
+            needs_server,
         }
     }
 }
@@ -160,6 +163,11 @@ impl CommandTree {
 pub struct Suggestions {
     pub options: Vec<String>,
     pub partial_len: usize,
+    /// The token being completed could also be an argument, so the server
+    /// should be asked for completions (player names, enum values, ...).
+    /// Pomme has no client-side argument parsers, so unlike vanilla it defers
+    /// every argument to the server, not just `ask_server` ones.
+    pub needs_server: bool,
 }
 
 impl Suggestions {
@@ -167,6 +175,7 @@ impl Suggestions {
         Self {
             options: Vec::new(),
             partial_len: 0,
+            needs_server: false,
         }
     }
 }
@@ -271,18 +280,44 @@ mod tests {
             argument("amount", BrigadierParser::Bool, vec![], true),
         ]);
 
-        let mut all = t.suggestions("time set ").options;
-        all.sort();
-        assert_eq!(all, vec!["day", "midnight", "night", "noon"]);
+        let all = t.suggestions("time set ");
+        assert_eq!(all.options, vec!["day", "midnight", "night", "noon"]);
+        // <amount> is an argument sibling: the server should be asked too.
+        assert!(all.needs_server);
 
         let d = t.suggestions("time set d");
         assert_eq!(d.options, vec!["day"]);
         assert_eq!(d.partial_len, 1);
+        assert!(d.needs_server);
 
         let se = t.suggestions("time se");
         assert_eq!(se.options, vec!["set"]);
         assert_eq!(se.partial_len, 2);
+        assert!(!se.needs_server);
 
-        assert!(t.suggestions("bogus foo").options.is_empty());
+        let bogus = t.suggestions("bogus foo");
+        assert!(bogus.options.is_empty());
+        assert!(!bogus.needs_server);
+    }
+
+    #[test]
+    fn suggestions_argument_only_position_asks_server() {
+        // root -> "gamemode" -> <gamemode>
+        let t = tree(vec![
+            root(vec![1]),
+            literal("gamemode", vec![2], false),
+            argument("gamemode", BrigadierParser::Bool, vec![], true),
+        ]);
+
+        let sug = t.suggestions("gamemode ");
+        assert!(sug.options.is_empty());
+        assert!(sug.needs_server);
+
+        let sug = t.suggestions("gamemode c");
+        assert!(sug.options.is_empty());
+        assert_eq!(sug.partial_len, 1);
+        assert!(sug.needs_server);
+
+        assert!(!t.suggestions("gam").needs_server);
     }
 }

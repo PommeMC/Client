@@ -27,6 +27,8 @@ const MAX_SUGGESTION_ROWS: usize = 10;
 const SUGGEST_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.816];
 const SUGGEST_TEXT: [f32; 4] = [0.667, 0.667, 0.667, 1.0];
 const SUGGEST_SELECTED: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
+// Vanilla EditBox suggestion color, 0xFF808080.
+const GHOST_TEXT: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
 
 struct ChatLine {
     spans: Vec<TextSpan>,
@@ -43,6 +45,15 @@ pub struct ChatState {
     suggest_anchor: String,
     suggest_applied: bool,
     last_computed: String,
+    /// Monotonic tab-complete transaction id (vanilla `pendingSuggestionsId`).
+    /// Never reset, so a response from a previous chat session can't match.
+    next_suggest_id: u32,
+    /// Id and input snapshot of the in-flight server request; a response is
+    /// applied only if both still match.
+    awaiting: Option<(u32, String)>,
+    /// Request produced by the last recompute, drained once per frame by the
+    /// game loop and sent as `ServerboundCommandSuggestion`.
+    outgoing_request: Option<(u32, String)>,
 }
 
 impl ChatState {
@@ -57,6 +68,9 @@ impl ChatState {
             suggest_anchor: String::new(),
             suggest_applied: false,
             last_computed: String::new(),
+            next_suggest_id: 0,
+            awaiting: None,
+            outgoing_request: None,
         }
     }
 
@@ -99,14 +113,20 @@ impl ChatState {
         self.suggest_index = 0;
         self.suggest_applied = false;
         self.last_computed.clear();
+        self.awaiting = None;
+        self.outgoing_request = None;
     }
 
     /// Recompute command completions from the current input. Only command input
-    /// (leading `/`) yields suggestions; anything else clears them.
+    /// (leading `/`) yields suggestions; anything else clears them. Local
+    /// literals show immediately; argument positions also queue a server
+    /// request whose response replaces them (vanilla requests per keystroke
+    /// with latest-id-wins, no debounce).
     fn recompute_suggestions(&mut self, tree: Option<&CommandTree>) {
         self.last_computed = self.input.clone();
         self.suggest_index = 0;
         self.suggest_applied = false;
+        self.awaiting = None;
         if let Some(cmd) = self.input.strip_prefix('/')
             && let Some(tree) = tree
         {
@@ -114,10 +134,50 @@ impl ChatState {
             let cut = self.input.len() - sug.partial_len;
             self.suggest_anchor = self.input[..cut].to_string();
             self.suggestions = sug.options;
+            if sug.needs_server {
+                self.next_suggest_id = self.next_suggest_id.wrapping_add(1);
+                let request = (self.next_suggest_id, self.input.clone());
+                self.awaiting = Some(request.clone());
+                self.outgoing_request = Some(request);
+            }
         } else {
             self.suggestions.clear();
             self.suggest_anchor.clear();
         }
+    }
+
+    /// The tab-complete request queued by the last recompute, if any. The
+    /// command is the full input including the leading `/`, matching what
+    /// vanilla sends (the response range indexes into that exact string).
+    pub fn take_suggestion_request(&mut self) -> Option<(u32, String)> {
+        self.outgoing_request.take()
+    }
+
+    /// Apply a `ClientboundCommandSuggestions` response. `start` is the offset
+    /// into the sent command string where the completed range begins. Stale
+    /// responses (id or input no longer matching) are dropped; an empty
+    /// response keeps the local literal suggestions.
+    pub fn apply_server_suggestions(&mut self, id: u32, start: usize, options: Vec<String>) {
+        let Some((want_id, want_input)) = &self.awaiting else {
+            return;
+        };
+        if id != *want_id || !self.open || self.input != *want_input {
+            return;
+        }
+        self.awaiting = None;
+        if options.is_empty() {
+            return;
+        }
+        // Java's StringRange counts UTF-16 units; identical to bytes for ASCII
+        // commands, and `get` bails instead of panicking otherwise.
+        let Some(anchor) = self.input.get(..start) else {
+            return;
+        };
+        let partial = self.input[start..].to_ascii_lowercase();
+        self.suggest_anchor = anchor.to_string();
+        self.suggestions = sort_with_partial_first(options, &partial);
+        self.suggest_index = 0;
+        self.suggest_applied = false;
     }
 
     pub fn handle_key_input(
@@ -180,6 +240,17 @@ impl ChatState {
         }
 
         None
+    }
+
+    /// The grey inline completion: the remainder of the selected suggestion
+    /// past what is already typed. Mirrors vanilla
+    /// `CommandSuggestions.calculateSuggestionSuffix` (case-sensitive; the
+    /// cursor is always at the end of pomme's chat input).
+    fn ghost_suffix(&self) -> Option<&str> {
+        let selected = self.suggestions.get(self.suggest_index)?;
+        let rest = self.input.strip_prefix(self.suggest_anchor.as_str())?;
+        let suffix = selected.strip_prefix(rest)?;
+        (!suffix.is_empty()).then_some(suffix)
     }
 
     pub fn build(
@@ -283,6 +354,17 @@ impl ChatState {
             });
 
             let tw = text_width_fn(&self.input, fs);
+            // Vanilla `EditBox` draws the suggestion at `cursorX - 1`.
+            if let Some(ghost) = self.ghost_suffix() {
+                elements.push(MenuElement::Text {
+                    x: origin + indent + tw - gs,
+                    y: text_y,
+                    text: ghost.to_string(),
+                    scale: fs,
+                    color: GHOST_TEXT,
+                    centered: false,
+                });
+            }
             common::push_cursor_blink(
                 elements,
                 &self.cursor_blink,
@@ -340,6 +422,18 @@ impl ChatState {
             }
         }
     }
+}
+
+/// Float suggestions matching the typed partial (or its `minecraft:`-prefixed
+/// form) to the front, keeping order otherwise. Mirrors vanilla
+/// `CommandSuggestions.sortSuggestions`; `partial` must be lowercased.
+fn sort_with_partial_first(options: Vec<String>, partial: &str) -> Vec<String> {
+    let namespaced = format!("minecraft:{partial}");
+    let (mut hits, misses): (Vec<String>, Vec<String>) = options
+        .into_iter()
+        .partition(|s| s.starts_with(partial) || s.starts_with(&namespaced));
+    hits.extend(misses);
+    hits
 }
 
 /// Trim ends, collapse internal whitespace runs to single spaces, and clamp to
@@ -546,5 +640,79 @@ mod tests {
         let lines = wrap_spans(&[], 50.0, &width);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].is_empty());
+    }
+
+    /// A chat awaiting a server response for `input` with request id 1.
+    fn awaiting_chat(input: &str) -> ChatState {
+        let mut chat = ChatState::new();
+        chat.open = true;
+        chat.input = input.to_string();
+        chat.awaiting = Some((1, input.to_string()));
+        chat
+    }
+
+    #[test]
+    fn server_suggestions_replace_and_select_first() {
+        let mut chat = awaiting_chat("/gamemode c");
+        chat.suggestions = vec!["stale".into()];
+        chat.suggest_index = 3;
+        chat.suggest_applied = true;
+        chat.apply_server_suggestions(1, 10, vec!["creative".into()]);
+        assert_eq!(chat.suggestions, vec!["creative"]);
+        assert_eq!(chat.suggest_anchor, "/gamemode ");
+        assert_eq!(chat.suggest_index, 0);
+        assert!(!chat.suggest_applied);
+        assert!(chat.awaiting.is_none());
+    }
+
+    #[test]
+    fn server_suggestions_stale_dropped() {
+        // Wrong id.
+        let mut chat = awaiting_chat("/gamemode c");
+        chat.apply_server_suggestions(2, 10, vec!["creative".into()]);
+        assert!(chat.suggestions.is_empty());
+        assert!(chat.awaiting.is_some());
+
+        // Input changed since the request.
+        let mut chat = awaiting_chat("/gamemode c");
+        chat.input = "/gamemode cr".to_string();
+        chat.apply_server_suggestions(1, 10, vec!["creative".into()]);
+        assert!(chat.suggestions.is_empty());
+    }
+
+    #[test]
+    fn server_suggestions_empty_keeps_local() {
+        let mut chat = awaiting_chat("/time set d");
+        chat.suggestions = vec!["day".into()];
+        chat.suggest_anchor = "/time set ".to_string();
+        chat.apply_server_suggestions(1, 10, Vec::new());
+        assert_eq!(chat.suggestions, vec!["day"]);
+        assert!(chat.awaiting.is_none());
+    }
+
+    #[test]
+    fn ghost_is_selected_suggestion_remainder() {
+        let mut chat = ChatState::new();
+        chat.input = "/gam".to_string();
+        chat.suggest_anchor = "/".to_string();
+        chat.suggestions = vec!["gamemode".into(), "gamerule".into()];
+        assert_eq!(chat.ghost_suffix(), Some("emode"));
+        chat.suggest_index = 1;
+        assert_eq!(chat.ghost_suffix(), Some("erule"));
+        // Case mismatch shows no ghost (vanilla is case-sensitive here).
+        chat.input = "/GAM".to_string();
+        assert_eq!(chat.ghost_suffix(), None);
+        // Fully typed suggestion leaves nothing to show.
+        chat.input = "/gamerule".to_string();
+        assert_eq!(chat.ghost_suffix(), None);
+    }
+
+    #[test]
+    fn sort_floats_partial_matches() {
+        let sorted = sort_with_partial_first(
+            vec!["apple".into(), "creative".into(), "minecraft:cow".into()],
+            "c",
+        );
+        assert_eq!(sorted, vec!["creative", "minecraft:cow", "apple"]);
     }
 }

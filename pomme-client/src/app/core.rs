@@ -607,6 +607,9 @@ impl AppCore {
                 NetworkEvent::CommandTree { tree } => {
                     game.command_tree = Some(tree);
                 }
+                NetworkEvent::CommandSuggestions { id, start, options } => {
+                    game.chat.apply_server_suggestions(id, start, options);
+                }
                 NetworkEvent::BlockUpdate { pos, state } => {
                     if game.interaction.update_known_server_state(&pos, state) {
                         continue;
