@@ -37,6 +37,7 @@ pub struct ContainerResult {
 pub struct ContainerInput {
     pub left_pressed: bool,
     pub right_pressed: bool,
+    pub middle_pressed: bool,
     pub left_held: bool,
     pub right_held: bool,
     pub shift: bool,

@@ -282,9 +282,9 @@ pub fn build_enchantment(
 
     // Vanilla `mouseClicked` runs the `clickMenuButton` predicate before the
     // click reaches slot handling; a passing option click is consumed. Vanilla
-    // doesn't filter the mouse button, so right clicks trigger options too.
+    // doesn't filter the mouse button, so any button triggers options.
     let mut button = None;
-    if input.left_pressed || input.right_pressed {
+    if input.left_pressed || input.right_pressed || input.middle_pressed {
         for i in 0..3usize {
             if hit_test(cursor, option_rect(&panel, i))
                 && click_menu_button(i, data, item(SLOT_ITEM), gold, experience_level, creative)

@@ -1589,6 +1589,7 @@ pub fn update_game(
         let input = crate::ui::container::ContainerInput {
             left_pressed: core.input.left_just_pressed(),
             right_pressed: core.input.right_just_pressed(),
+            middle_pressed: core.input.middle_just_pressed(),
             left_held: core.input.left_held(),
             right_held: core.input.right_held(),
             shift: core.input.shift_held(),
