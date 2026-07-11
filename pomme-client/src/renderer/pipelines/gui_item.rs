@@ -2,6 +2,7 @@ use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
 
+use glam::camera::rh::proj;
 use glam::{Mat4, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
@@ -199,7 +200,8 @@ impl GuiItemPipeline {
     fn write_atlas_ortho(&mut self, atlas_px: f32) {
         // Bottom/top swapped to Y-invert the projection (matches vanilla's
         // `invertY=true`).
-        let view_proj = Mat4::orthographic_rh(0.0, atlas_px, atlas_px, 0.0, -10000.0, 10000.0);
+        let view_proj =
+            proj::directx::orthographic(0.0, atlas_px, atlas_px, 0.0, -10000.0, 10000.0);
         let uniform = CameraUniform::with_view_proj(view_proj);
         let bytes = bytemuck::bytes_of(&uniform);
         if let Some(alloc) = self.camera_alloc.as_mut() {
