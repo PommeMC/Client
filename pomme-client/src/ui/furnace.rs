@@ -67,7 +67,7 @@ pub fn build_furnace(
     input: &ContainerInput,
     variant: FurnaceVariant,
     slots: &[ItemStack],
-    data: [u16; 4],
+    data: &[i16],
     title: &str,
     cursor_item: &ItemStack,
     drag: &mut Option<DragState>,
@@ -121,6 +121,7 @@ pub fn build_furnace(
     ContainerResult {
         clicked_outside,
         ops,
+        button: None,
     }
 }
 
@@ -132,7 +133,7 @@ fn push_progress_overlays(
     panel: &Panel,
     lit_sprite: SpriteId,
     burn_sprite: SpriteId,
-    data: [u16; 4],
+    data: &[i16],
 ) {
     if data[DATA_LIT_TIME] > 0 {
         // ceil(progress * 13) + 1 rows of the 14px flame, from the bottom.

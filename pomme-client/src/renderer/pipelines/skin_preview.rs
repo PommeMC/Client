@@ -9,14 +9,14 @@ use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 3],
-    uv: [f32; 2],
+pub(crate) struct Vertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) uv: [f32; 2],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniform {
+pub(crate) struct Uniform {
     mvp: [[f32; 4]; 4],
 }
 
@@ -524,7 +524,7 @@ fn camera_view() -> Mat4 {
     Mat4::look_at_rh(Vec3::new(0.0, 0.0, -4.5), Vec3::ZERO, Vec3::Y)
 }
 
-fn write_uniform(alloc: &mut Allocation, mvp: &Mat4) {
+pub(crate) fn write_uniform(alloc: &mut Allocation, mvp: &Mat4) {
     let uniform = Uniform {
         mvp: mvp.to_cols_array_2d(),
     };
@@ -532,7 +532,10 @@ fn write_uniform(alloc: &mut Allocation, mvp: &Mat4) {
     alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
 }
 
-fn create_pipeline(
+/// The textured-model preview pipeline, shared with the enchanting book
+/// preview. Vanilla's GL-CCW front faces come out clockwise in Vulkan's
+/// y-down framebuffer coords, so this culls the CCW set.
+pub(crate) fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
@@ -657,7 +660,7 @@ fn create_pipeline(
             None,
             slice::from_mut(&mut pipeline),
         )
-        .expect("failed to create skin preview pipeline");
+        .expect("failed to create preview pipeline");
 
     device.destroy_shader_module(vert_mod, None);
     device.destroy_shader_module(frag_mod, None);

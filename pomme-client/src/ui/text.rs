@@ -13,6 +13,9 @@ pub struct TextSpan {
     pub italic: bool,
     pub strikethrough: bool,
     pub underline: bool,
+    /// Render with the Standard Galactic Alphabet glyphs (the `minecraft:alt`
+    /// font used for enchantment gibberish).
+    pub sga: bool,
 }
 
 impl TextSpan {
@@ -25,6 +28,7 @@ impl TextSpan {
             italic: false,
             strikethrough: false,
             underline: false,
+            sga: false,
         }
     }
 }
@@ -61,6 +65,7 @@ pub fn format_text_spans(text: &FormattedText) -> Vec<TextSpan> {
                     italic,
                     strikethrough,
                     underline,
+                    sga: false,
                 });
             }
             String::new()

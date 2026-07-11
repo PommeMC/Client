@@ -92,5 +92,6 @@ pub fn build_crafting_table(
     ContainerResult {
         clicked_outside,
         ops,
+        button: None,
     }
 }

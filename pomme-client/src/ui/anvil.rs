@@ -106,7 +106,7 @@ pub fn build_anvil(
     cursor: (f32, f32),
     input: &ContainerInput,
     slots: &[ItemStack],
-    data: [u16; 4],
+    data: &[i16],
     title: &str,
     state: &AnvilState,
     experience_level: i32,
@@ -185,6 +185,7 @@ pub fn build_anvil(
     ContainerResult {
         clicked_outside,
         ops,
+        button: None,
     }
 }
 
@@ -240,13 +241,14 @@ fn push_name_text(
 fn push_cost_label(
     elements: &mut Vec<MenuElement>,
     panel: &Panel,
-    cost: u16,
+    cost: i16,
     has_result: bool,
     experience_level: i32,
     creative: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) {
-    if cost == 0 {
+    // Vanilla gates on cost > 0; a short-wrapped negative cost shows nothing.
+    if cost <= 0 {
         return;
     }
     let (line, color) = if cost >= 40 && !creative {

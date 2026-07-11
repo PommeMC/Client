@@ -36,6 +36,9 @@ pub(crate) struct GlyphInfo {
 
 pub struct GlyphMap {
     pub(crate) glyphs: HashMap<char, GlyphInfo>,
+    /// Standard Galactic Alphabet glyphs (the `minecraft:alt` font); stacked
+    /// below the ASCII sheet in the same texture, keyed by the plain letter.
+    sga_glyphs: HashMap<char, GlyphInfo>,
     pub(crate) cell_w: u32,
     pub(crate) cell_h: u32,
     pixels: Vec<u8>,
@@ -98,15 +101,60 @@ impl GlyphMap {
             },
         );
 
-        let pixels = img.into_raw();
+        let mut pixels = img.into_raw();
+        let mut tex_h = tex_h;
+        let mut sga_glyphs = HashMap::new();
+        if let Some(sga) = load_sga(jar_assets_dir, asset_index, tex_w) {
+            // The SGA sheet only fills the letter rows (A-Z and a-z, laid out
+            // like ascii.png); stacked below, its rows start at GRID_ROWS.
+            for (row, line) in ASCII_CHARS.iter().enumerate().take(8).skip(4) {
+                for (col, ch) in line.chars().enumerate() {
+                    if !ch.is_ascii_alphabetic() {
+                        continue;
+                    }
+                    let bounds = detect_glyph_bounds(
+                        &sga,
+                        col as u32 * cell_w,
+                        row as u32 * cell_h,
+                        cell_w,
+                        cell_h,
+                    );
+                    if let Some((width, y_offset, height)) = bounds {
+                        sga_glyphs.insert(
+                            ch,
+                            GlyphInfo {
+                                col: col as u32,
+                                row: GRID_ROWS + row as u32,
+                                width,
+                                y_offset,
+                                height,
+                            },
+                        );
+                    }
+                }
+            }
+            tex_h += sga.height();
+            pixels.extend_from_slice(sga.as_raw());
+        }
+
         Some(Self {
             glyphs,
+            sga_glyphs,
             cell_w,
             cell_h,
             pixels,
             tex_w,
             tex_h,
         })
+    }
+
+    /// The glyph for `ch`, from the SGA sheet when `sga` (missing glyphs fall
+    /// back to the plain font, like vanilla's font fallback chain).
+    pub(crate) fn glyph(&self, ch: char, sga: bool) -> Option<&GlyphInfo> {
+        if sga && let Some(g) = self.sga_glyphs.get(&ch) {
+            return Some(g);
+        }
+        self.glyphs.get(&ch)
     }
 
     pub fn raw_pixels(&self) -> &[u8] {
@@ -116,6 +164,32 @@ impl GlyphMap {
     pub fn dimensions(&self) -> (u32, u32) {
         (self.tex_w, self.tex_h)
     }
+}
+
+/// Loads the SGA sheet (`minecraft:alt` font bitmap), which must match the
+/// ASCII sheet's width so the two can share cell metrics when stacked.
+fn load_sga(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    ascii_w: u32,
+) -> Option<image::RgbaImage> {
+    let path = resolve_asset_path(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/textures/font/ascii_sga.png",
+    );
+    let img = load_image(&path)
+        .map_err(|e| tracing::warn!("Failed to load SGA font: {e}"))
+        .ok()?
+        .to_rgba8();
+    if img.width() != ascii_w {
+        tracing::warn!(
+            "SGA font sheet is {}px wide but ascii.png is {ascii_w}px; skipping",
+            img.width()
+        );
+        return None;
+    }
+    Some(img)
 }
 
 fn detect_glyph_bounds(

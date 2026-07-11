@@ -835,6 +835,7 @@ impl MenuOverlayPipeline {
                     spans,
                     scale,
                     centered,
+                    shadow,
                 } => {
                     if let Some(ref gm) = self.mc_glyph_map {
                         let start_x = if *centered {
@@ -846,7 +847,7 @@ impl MenuOverlayPipeline {
                         } else {
                             *x
                         };
-                        push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale, true);
+                        push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale, *shadow);
                     }
                 }
                 MenuElement::GradientRect {
@@ -1037,7 +1038,7 @@ impl MenuOverlayPipeline {
 
                 let content_w = lines
                     .iter()
-                    .map(|l| (self.mc_text_width(&l.text, *scale) + px).ceil())
+                    .map(|l| (self.spans_width(&l.spans, *scale) + px).ceil())
                     .fold(0.0f32, f32::max);
                 let content_h = lines.len() as f32 * line_h - 2.0 * px;
 
@@ -1075,13 +1076,12 @@ impl MenuOverlayPipeline {
                 }
 
                 for (i, line) in lines.iter().enumerate() {
-                    let span = TextSpan::new(line.text.clone(), line.color);
                     push_mc_text(
                         &mut vertices,
                         gm,
                         text_x,
                         text_y + i as f32 * line_h,
-                        &[span],
+                        &line.spans,
                         *scale,
                         true,
                     );
@@ -1295,17 +1295,37 @@ impl MenuOverlayPipeline {
     }
 
     pub fn mc_text_width(&self, text: &str, scale: f32) -> f32 {
+        self.text_width_in(text, scale, false)
+    }
+
+    /// Text width in the SGA (`minecraft:alt`) glyphs.
+    pub fn mc_text_width_sga(&self, text: &str, scale: f32) -> f32 {
+        self.text_width_in(text, scale, true)
+    }
+
+    fn text_width_in(&self, text: &str, scale: f32, sga: bool) -> f32 {
         let Some(ref gm) = self.mc_glyph_map else {
             return 0.0;
         };
         let px_scale = scale / gm.cell_h as f32;
         let raw: f32 = text
             .chars()
-            .map(|ch| {
-                let w = gm.glyphs.get(&ch).map(|g| g.width).unwrap_or(gm.cell_w / 2);
-                (w as f32 + 1.0) * px_scale
-            })
+            .map(|ch| glyph_advance(gm, ch, sga) * px_scale)
             .sum();
+        raw.ceil()
+    }
+
+    /// Width of a multi-span line, honoring each span's font.
+    fn spans_width(&self, spans: &[TextSpan], scale: f32) -> f32 {
+        let Some(ref gm) = self.mc_glyph_map else {
+            return 0.0;
+        };
+        let px_scale = scale / gm.cell_h as f32;
+        let raw: f32 = spans
+            .iter()
+            .flat_map(|s| s.text.chars().map(|ch| glyph_advance(gm, ch, s.sga)))
+            .sum::<f32>()
+            * px_scale;
         raw.ceil()
     }
 
@@ -1386,8 +1406,16 @@ impl MenuOverlayPipeline {
 }
 
 pub struct TooltipLine {
-    pub text: String,
-    pub color: [f32; 4],
+    pub spans: Vec<TextSpan>,
+}
+
+impl TooltipLine {
+    /// A single-color line.
+    pub fn new(text: String, color: [f32; 4]) -> Self {
+        Self {
+            spans: vec![TextSpan::new(text, color)],
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -1460,6 +1488,7 @@ pub enum MenuElement {
         spans: Vec<TextSpan>,
         scale: f32,
         centered: bool,
+        shadow: bool,
     },
     TiledImage {
         x: f32,
@@ -1564,6 +1593,17 @@ pub enum SpriteId {
     AnvilTextField,
     AnvilTextFieldDisabled,
     AnvilError,
+    EnchantingTableBackground,
+    EnchantmentSlot,
+    EnchantmentSlotDisabled,
+    EnchantmentSlotHighlighted,
+    EnchantmentLevel1,
+    EnchantmentLevel2,
+    EnchantmentLevel3,
+    EnchantmentLevel1Disabled,
+    EnchantmentLevel2Disabled,
+    EnchantmentLevel3Disabled,
+    EmptyLapisLazuli,
     FurnaceLitProgress,
     FurnaceBurnProgress,
     BlastFurnaceLitProgress,
@@ -1888,6 +1928,56 @@ fn build_sprite_atlas(
         (
             SpriteId::AnvilError,
             "minecraft/textures/gui/sprites/container/anvil/error.png",
+            0.0,
+        ),
+        (
+            SpriteId::EnchantmentSlot,
+            "minecraft/textures/gui/sprites/container/enchanting_table/enchantment_slot.png",
+            0.0,
+        ),
+        (
+            SpriteId::EnchantmentSlotDisabled,
+            "minecraft/textures/gui/sprites/container/enchanting_table/enchantment_slot_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::EnchantmentSlotHighlighted,
+            "minecraft/textures/gui/sprites/container/enchanting_table/enchantment_slot_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::EnchantmentLevel1,
+            "minecraft/textures/gui/sprites/container/enchanting_table/level_1.png",
+            0.0,
+        ),
+        (
+            SpriteId::EnchantmentLevel2,
+            "minecraft/textures/gui/sprites/container/enchanting_table/level_2.png",
+            0.0,
+        ),
+        (
+            SpriteId::EnchantmentLevel3,
+            "minecraft/textures/gui/sprites/container/enchanting_table/level_3.png",
+            0.0,
+        ),
+        (
+            SpriteId::EnchantmentLevel1Disabled,
+            "minecraft/textures/gui/sprites/container/enchanting_table/level_1_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::EnchantmentLevel2Disabled,
+            "minecraft/textures/gui/sprites/container/enchanting_table/level_2_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::EnchantmentLevel3Disabled,
+            "minecraft/textures/gui/sprites/container/enchanting_table/level_3_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::EmptyLapisLazuli,
+            "minecraft/textures/gui/sprites/container/slot/lapis_lazuli.png",
             0.0,
         ),
         (
@@ -2373,6 +2463,13 @@ fn build_sprite_atlas(
             INV_TEX_H,
         ),
         (
+            SpriteId::EnchantingTableBackground,
+            "minecraft/textures/gui/container/enchanting_table.png",
+            0,
+            INV_TEX_W,
+            INV_TEX_H,
+        ),
+        (
             SpriteId::CreativeItemsBackground,
             "minecraft/textures/gui/container/creative_inventory/tab_items.png",
             0,
@@ -2844,6 +2941,11 @@ fn push_nine_slice(
     }
 }
 
+/// A glyph's horizontal advance in font-texture pixels.
+fn glyph_advance(gm: &GlyphMap, ch: char, sga: bool) -> f32 {
+    gm.glyph(ch, sga).map(|g| g.width).unwrap_or(gm.cell_w / 2) as f32 + 1.0
+}
+
 fn push_mc_text(
     verts: &mut Vec<Vertex>,
     gm: &GlyphMap,
@@ -2882,7 +2984,7 @@ fn push_mc_text(
                 continue;
             }
 
-            let Some(gi) = gm.glyphs.get(&ch) else {
+            let Some(gi) = gm.glyph(ch, span.sga) else {
                 continue;
             };
             let glyph_w = gi.width as f32 * px_scale;
