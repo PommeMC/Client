@@ -37,7 +37,7 @@ impl AtlasUVMap {
 }
 
 pub fn atlas_asset_path(key: &str) -> String {
-    if key.starts_with("item/") || key.starts_with("entity/") {
+    if key.starts_with("item/") || key.starts_with("entity/") || key.starts_with("particle/") {
         format!("minecraft/textures/{key}.png")
     } else {
         format!("minecraft/textures/block/{key}.png")

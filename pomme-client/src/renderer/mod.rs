@@ -207,6 +207,7 @@ impl Renderer {
         let texture_names: HashSet<&str> = registry
             .texture_names()
             .chain(registry.flat_item_textures())
+            .chain(crate::particle::END_ROD_SPRITES)
             .collect();
         let atlas = TextureAtlas::build(
             &ctx.device,
@@ -1064,8 +1065,11 @@ impl Renderer {
         );
 
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
-        let texture_names: std::collections::HashSet<&str> =
-            self.registry.texture_names().collect();
+        let texture_names: std::collections::HashSet<&str> = self
+            .registry
+            .texture_names()
+            .chain(crate::particle::END_ROD_SPRITES)
+            .collect();
         self.atlas = TextureAtlas::build(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -1083,6 +1087,8 @@ impl Renderer {
         self.gui_item_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.held_item_pipeline
+            .rebind_atlas(&self.ctx.device, &self.atlas);
+        self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
 
         tracing::info!("Assets reloaded");

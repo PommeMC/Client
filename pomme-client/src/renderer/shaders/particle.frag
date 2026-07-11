@@ -14,8 +14,8 @@ layout(location = 0) out vec4 out_color;
 void main() {
     vec4 tex = texture(atlas_texture, v_uv);
     // Vanilla particle.fsh discards below 0.1 (items use 0.5).
-    if (tex.a < 0.1) discard;
-    vec3 color = tex.rgb * v_color.rgb;
-    color = apply_fog(color, v_fog, v_fog_color);
-    out_color = vec4(color, 1.0);
+    vec4 color = vec4(tex.rgb * v_color.rgb, tex.a * v_color.a);
+    if (color.a < 0.1) discard;
+    color.rgb = apply_fog(color.rgb, v_fog, v_fog_color);
+    out_color = color;
 }

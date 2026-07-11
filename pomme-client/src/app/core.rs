@@ -935,6 +935,26 @@ impl AppCore {
                         );
                     }
                 }
+                NetworkEvent::LevelParticles {
+                    kind,
+                    override_limiter,
+                    pos,
+                    x_dist,
+                    y_dist,
+                    z_dist,
+                    max_speed,
+                    count,
+                } => {
+                    game.particle_store.add_particles_from_packet(
+                        kind,
+                        override_limiter,
+                        pos,
+                        glam::dvec3(x_dist as f64, y_dist as f64, z_dist as f64),
+                        max_speed as f64,
+                        count,
+                        renderer.camera_render_position(),
+                    );
+                }
                 NetworkEvent::EntitiesRemoved { ids } => {
                     for id in &ids {
                         if let Some(entity) = game.entity_store.remove_living(*id)

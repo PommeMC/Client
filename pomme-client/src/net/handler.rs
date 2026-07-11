@@ -373,6 +373,20 @@ pub fn handle_game_packet(
                 velocity: lp_to_dvec3(&p.delta),
             });
         }
+        ClientboundGamePacket::LevelParticles(p) => {
+            if let Some(kind) = crate::particle::ServerParticleKind::from_azalea(&p.particle) {
+                let _ = event_tx.try_send(NetworkEvent::LevelParticles {
+                    kind,
+                    override_limiter: p.override_limiter,
+                    pos: glam::DVec3::new(p.pos.x, p.pos.y, p.pos.z),
+                    x_dist: p.x_dist,
+                    y_dist: p.y_dist,
+                    z_dist: p.z_dist,
+                    max_speed: p.max_speed,
+                    count: p.count,
+                });
+            }
+        }
         ClientboundGamePacket::LevelEvent(p) => {
             let _ = event_tx.try_send(NetworkEvent::LevelEvent {
                 event_type: p.event_type,

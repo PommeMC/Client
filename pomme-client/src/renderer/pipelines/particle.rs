@@ -27,6 +27,9 @@ pub struct ParticleQuad {
     pub v1: f32,
     /// Packed RGBA8; rgb already multiplied by tint and world light.
     pub color: u32,
+    /// Vanilla `SingleQuadParticle.Layer`: false = opaque/cutout terrain
+    /// layer, true = alpha-blended translucent layer.
+    pub translucent: bool,
 }
 
 #[repr(C)]
@@ -39,6 +42,7 @@ struct ParticleVertex {
 
 pub struct ParticlePipeline {
     pipeline: vk::Pipeline,
+    translucent_pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
     atlas_layout: vk::DescriptorSetLayout,
@@ -79,7 +83,8 @@ impl ParticlePipeline {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create particle pipeline layout");
 
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
+        let pipeline = create_pipeline(device, render_pass, pipeline_layout, false);
+        let translucent_pipeline = create_pipeline(device, render_pass, pipeline_layout, true);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -170,6 +175,7 @@ impl ParticlePipeline {
 
         let this = Self {
             pipeline,
+            translucent_pipeline,
             pipeline_layout,
             camera_layout,
             atlas_layout,
@@ -181,11 +187,11 @@ impl ParticlePipeline {
             vertex_buffers,
             vertex_allocations,
         };
-        this.bind_atlas(device, atlas);
+        this.rebind_atlas(device, atlas);
         this
     }
 
-    fn bind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
+    pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
         let image_info = vk::DescriptorImageInfo {
             sampler: atlas.sampler,
             image_view: atlas.view,
@@ -223,31 +229,40 @@ impl ParticlePipeline {
         let (right, up) = camera.billboard_axes();
         let mut verts: Vec<ParticleVertex> =
             Vec::with_capacity(quads.len().min(MAX_PARTICLE_QUADS) * 6);
-        for quad in quads.iter().take(MAX_PARTICLE_QUADS) {
-            let center = Vec3::from(quad.pos);
-            let corner = |nx: f32, ny: f32, u: f32, v: f32| ParticleVertex {
-                position: (center + (right * nx + up * ny) * quad.size).into(),
-                uv: [u, v],
-                color: quad.color,
-            };
-            // Vanilla QuadParticleRenderState corner order and UV mapping.
-            let corners = [
-                corner(1.0, -1.0, quad.u1, quad.v1),
-                corner(1.0, 1.0, quad.u1, quad.v0),
-                corner(-1.0, 1.0, quad.u0, quad.v0),
-                corner(-1.0, -1.0, quad.u0, quad.v1),
-            ];
-            for &i in &[0usize, 1, 2, 0, 2, 3] {
-                verts.push(corners[i]);
+        // Opaque quads first, then translucent, so each layer is one
+        // contiguous draw range (vanilla renders the layers separately).
+        let emit = |verts: &mut Vec<ParticleVertex>, translucent: bool| {
+            for quad in quads.iter().filter(|q| q.translucent == translucent) {
+                if verts.len() >= MAX_VERTS {
+                    return;
+                }
+                let center = Vec3::from(quad.pos);
+                let corner = |nx: f32, ny: f32, u: f32, v: f32| ParticleVertex {
+                    position: (center + (right * nx + up * ny) * quad.size).into(),
+                    uv: [u, v],
+                    color: quad.color,
+                };
+                // Vanilla QuadParticleRenderState corner order and UV mapping.
+                let corners = [
+                    corner(1.0, -1.0, quad.u1, quad.v1),
+                    corner(1.0, 1.0, quad.u1, quad.v0),
+                    corner(-1.0, 1.0, quad.u0, quad.v0),
+                    corner(-1.0, -1.0, quad.u0, quad.v1),
+                ];
+                for &i in &[0usize, 1, 2, 0, 2, 3] {
+                    verts.push(corners[i]);
+                }
             }
-        }
+        };
+        emit(&mut verts, false);
+        let opaque_verts = verts.len();
+        emit(&mut verts, true);
 
         let bytes = bytemuck::cast_slice::<ParticleVertex, u8>(&verts);
         if let Some(alloc) = self.vertex_allocations[frame].as_mut() {
             alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
         }
 
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
         cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Graphics,
@@ -256,12 +271,27 @@ impl ParticlePipeline {
             &[self.camera_sets[frame], self.atlas_set],
             &[],
         );
-        cmd.draw(verts.len() as u32, 1, 0, 0);
+        if opaque_verts > 0 {
+            cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+            cmd.draw(opaque_verts as u32, 1, 0, 0);
+        }
+        if verts.len() > opaque_verts {
+            cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.translucent_pipeline);
+            cmd.draw(
+                (verts.len() - opaque_verts) as u32,
+                1,
+                opaque_verts as u32,
+                0,
+            );
+        }
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+        device.destroy_pipeline(self.translucent_pipeline, None);
+        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout, false);
+        self.translucent_pipeline =
+            create_pipeline(device, render_pass, self.pipeline_layout, true);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -279,6 +309,7 @@ impl ParticlePipeline {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.translucent_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
@@ -290,6 +321,7 @@ fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
+    translucent: bool,
 ) -> vk::Pipeline {
     let vert_spv = shader::include_spirv!("particle.vert.spv");
     let frag_spv = shader::include_spirv!("particle.frag.spv");
@@ -365,18 +397,32 @@ fn create_pipeline(
         rasterization_samples: vk::SampleCountFlags::Type1,
         ..Default::default()
     };
-    // Vanilla OPAQUE_PARTICLE: depth test AND write, no blending (alpha is
-    // handled by the fragment discard).
+    // Vanilla PARTICLE_SNIPPET: depth test AND write for both layers.
+    // OPAQUE_PARTICLE has no blending (alpha is handled by the fragment
+    // discard); TRANSLUCENT_PARTICLE adds standard alpha blending.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: vk::TRUE,
         depth_compare_op: vk::CompareOp::Less,
         ..Default::default()
     };
-    let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::FALSE,
-        color_write_mask: vk::ColorComponentFlags::RGBA,
-        ..Default::default()
+    let blend_attachment = if translucent {
+        vk::PipelineColorBlendAttachmentState {
+            blend_enable: vk::TRUE,
+            src_color_blend_factor: vk::BlendFactor::SrcAlpha,
+            dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+            color_blend_op: vk::BlendOp::Add,
+            src_alpha_blend_factor: vk::BlendFactor::One,
+            dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+            alpha_blend_op: vk::BlendOp::Add,
+            color_write_mask: vk::ColorComponentFlags::RGBA,
+        }
+    } else {
+        vk::PipelineColorBlendAttachmentState {
+            blend_enable: vk::FALSE,
+            color_write_mask: vk::ColorComponentFlags::RGBA,
+            ..Default::default()
+        }
     };
     let color_blending = vk::PipelineColorBlendStateCreateInfo {
         attachment_count: 1,

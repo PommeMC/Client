@@ -202,6 +202,19 @@ pub enum NetworkEvent {
         pos: BlockPos,
         data: u32,
     },
+    /// `ClientboundLevelParticles`. The handler drops unimplemented particle
+    /// kinds and the `always_show` flag (it only matters below
+    /// `ParticleStatus::All`, and pomme has no particles setting).
+    LevelParticles {
+        kind: crate::particle::ServerParticleKind,
+        override_limiter: bool,
+        pos: DVec3,
+        x_dist: f32,
+        y_dist: f32,
+        z_dist: f32,
+        max_speed: f32,
+        count: u32,
+    },
     EntitiesRemoved {
         ids: Vec<i32>,
     },
