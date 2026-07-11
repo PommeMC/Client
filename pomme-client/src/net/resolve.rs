@@ -22,29 +22,59 @@ use tokio::net::TcpStream;
 /// Socket addresses to try in order: IPv4 first, the SRV-correct ones (derived
 /// from azalea's resolution) ahead of the system-resolver fallbacks.
 pub async fn resolve_candidates(server: &ServerAddr) -> Result<Vec<SocketAddr>, ResolveError> {
-    let primary = resolve_address(server).await?;
     let mut candidates: Vec<SocketAddr> = Vec::new();
 
-    // A NAT64-mapped IPv6 (well-known 64:ff9b::/96 prefix) embeds the real IPv4
-    // in its low 32 bits; that IPv4 is reachable even when the NAT64 gateway
-    // isn't. Prefer it, keeping azalea's (SRV-resolved) port.
-    if let IpAddr::V6(v6) = primary.ip()
-        && let Some(v4) = nat64_embedded_ipv4(v6)
-    {
-        candidates.push(SocketAddr::new(IpAddr::V4(v4), primary.port()));
+    // An IP literal needs no DNS; skip azalea's resolution, whose SRV lookup
+    // runs even for literals and stalls badly on resolvers that drop the query.
+    if let Ok(ip) = server.host.parse::<IpAddr>() {
+        push_with_nat64(&mut candidates, SocketAddr::new(ip, server.port));
+        return Ok(candidates);
     }
-    candidates.push(primary);
 
-    // System resolver as a general fallback (covers normal dual-stack hosts).
-    if let Ok(extra) = tokio::net::lookup_host((server.host.as_str(), server.port)).await {
-        candidates.extend(extra);
+    // Bound both lookups so a stalled resolver can't hold the connection
+    // hostage. The system resolver runs concurrently as a fallback; it also
+    // covers `localhost`, which hickory can end up sending to DNS on Windows.
+    let (primary, extra) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(2), resolve_address(server)),
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host((server.host.as_str(), server.port)),
+        ),
+    );
+    let primary = primary.unwrap_or_else(|_| Err(ResolveError::from("resolution timed out")));
+    let extra: Vec<SocketAddr> = extra
+        .ok()
+        .and_then(Result::ok)
+        .map(Iterator::collect)
+        .unwrap_or_default();
+
+    match primary {
+        Ok(addr) => push_with_nat64(&mut candidates, addr),
+        Err(e) if extra.is_empty() => return Err(e),
+        Err(e) => tracing::warn!(
+            "Resolving {} failed ({e}); using system resolver",
+            server.host
+        ),
     }
+    candidates.extend(extra);
 
     // IPv4 before IPv6 (stable, so the SRV-correct entries stay ahead), deduped.
     candidates.sort_by_key(SocketAddr::is_ipv6);
     let mut seen = HashSet::new();
     candidates.retain(|a| seen.insert(*a));
     Ok(candidates)
+}
+
+/// Push `addr`, preceded by its embedded IPv4 if it's a NAT64-mapped IPv6
+/// (well-known 64:ff9b::/96 prefix): that IPv4 is reachable even when the
+/// NAT64 gateway isn't. Keeps the original (possibly SRV-resolved) port.
+fn push_with_nat64(candidates: &mut Vec<SocketAddr>, addr: SocketAddr) {
+    if let IpAddr::V6(v6) = addr.ip()
+        && let Some(v4) = nat64_embedded_ipv4(v6)
+    {
+        candidates.push(SocketAddr::new(IpAddr::V4(v4), addr.port()));
+    }
+    candidates.push(addr);
 }
 
 /// The IPv4 embedded in a well-known-prefix (`64:ff9b::/96`) NAT64 address.

@@ -153,7 +153,8 @@ async fn ping_server(
         let _ = conn.read().await.map_err(|e| format!("Pong failed: {e}"))?;
         let latency_ms = ping_start.elapsed().as_millis() as u64;
 
-        let motd = format_text_spans(&status.description);
+        // Vanilla MOTD base color: 0x808080.
+        let motd = format_text_spans(&status.description, [0.5, 0.5, 0.5, 1.0]);
         let version = status.version.name.clone();
         let protocol_match = status.version.protocol == azalea_protocol::packets::PROTOCOL_VERSION;
         let (online, max) = (status.players.online, status.players.max);
