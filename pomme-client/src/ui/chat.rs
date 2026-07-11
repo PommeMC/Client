@@ -123,10 +123,8 @@ impl ChatState {
     /// request whose response replaces them (vanilla requests per keystroke
     /// with latest-id-wins, no debounce).
     fn recompute_suggestions(&mut self, tree: Option<&CommandTree>) {
+        self.clear_suggestions();
         self.last_computed = self.input.clone();
-        self.suggest_index = 0;
-        self.suggest_applied = false;
-        self.awaiting = None;
         if let Some(cmd) = self.input.strip_prefix('/')
             && let Some(tree) = tree
         {
@@ -140,9 +138,6 @@ impl ChatState {
                 self.awaiting = Some(request.clone());
                 self.outgoing_request = Some(request);
             }
-        } else {
-            self.suggestions.clear();
-            self.suggest_anchor.clear();
         }
     }
 
@@ -168,13 +163,12 @@ impl ChatState {
         if options.is_empty() {
             return;
         }
-        // Java's StringRange counts UTF-16 units; identical to bytes for ASCII
-        // commands, and `get` bails instead of panicking otherwise.
-        let Some(anchor) = self.input.get(..start) else {
+        // Java's StringRange counts UTF-16 units, not bytes.
+        let Some(start) = utf16_offset_to_byte(&self.input, start) else {
             return;
         };
         let partial = self.input[start..].to_ascii_lowercase();
-        self.suggest_anchor = anchor.to_string();
+        self.suggest_anchor = self.input[..start].to_string();
         self.suggestions = sort_with_partial_first(options, &partial);
         self.suggest_index = 0;
         self.suggest_applied = false;
@@ -422,6 +416,19 @@ impl ChatState {
             }
         }
     }
+}
+
+/// Byte offset for a UTF-16 code-unit offset (Java's `StringRange` counts
+/// UTF-16 units). `None` if it lands mid-char or past the end.
+fn utf16_offset_to_byte(s: &str, utf16: usize) -> Option<usize> {
+    let mut units = 0;
+    for (i, c) in s.char_indices() {
+        if units == utf16 {
+            return Some(i);
+        }
+        units += c.len_utf16();
+    }
+    (units == utf16).then_some(s.len())
 }
 
 /// Float suggestions matching the typed partial (or its `minecraft:`-prefixed
@@ -714,5 +721,31 @@ mod tests {
             "c",
         );
         assert_eq!(sorted, vec!["creative", "minecraft:cow", "apple"]);
+    }
+
+    #[test]
+    fn server_suggestions_non_ascii_start() {
+        // "/msg héllo " is 11 UTF-16 units but 12 bytes ('é' is 2 bytes).
+        let mut chat = awaiting_chat("/msg héllo w");
+        chat.apply_server_suggestions(1, 11, vec!["world".into()]);
+        assert_eq!(chat.suggest_anchor, "/msg héllo ");
+        assert_eq!(chat.suggestions, vec!["world"]);
+
+        // Out-of-range start is dropped.
+        let mut chat = awaiting_chat("/msg héllo w");
+        chat.apply_server_suggestions(1, 99, vec!["world".into()]);
+        assert!(chat.suggestions.is_empty());
+    }
+
+    #[test]
+    fn utf16_offset_conversion() {
+        assert_eq!(utf16_offset_to_byte("abc", 0), Some(0));
+        assert_eq!(utf16_offset_to_byte("abc", 3), Some(3));
+        // 'é' is 1 UTF-16 unit, 2 bytes.
+        assert_eq!(utf16_offset_to_byte("héllo", 2), Some(3));
+        // '𝄞' is 2 UTF-16 units, 4 bytes.
+        assert_eq!(utf16_offset_to_byte("𝄞x", 2), Some(4));
+        assert_eq!(utf16_offset_to_byte("𝄞x", 1), None);
+        assert_eq!(utf16_offset_to_byte("abc", 4), None);
     }
 }
