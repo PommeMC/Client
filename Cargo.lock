@@ -549,21 +549,9 @@ dependencies = [
 [[package]]
 name = "azalea-block"
 version = "0.16.0+mc26.2"
-source = "git+https://github.com/azalea-rs/azalea?branch=26.2#ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32"
 dependencies = [
- "azalea-block-macros",
  "azalea-buf",
  "azalea-registry",
-]
-
-[[package]]
-name = "azalea-block-macros"
-version = "0.16.0+mc26.2"
-source = "git+https://github.com/azalea-rs/azalea?branch=26.2#ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -999,6 +987,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdeb9d870516001442e364c5220d3574d2da8dc765554b4a617230d33fa58ef5"
 dependencies = [
  "objc2 0.6.4",
+]
+
+[[package]]
+name = "blockgen"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4296,6 +4292,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_threads"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "objc-sys"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6224,6 +6229,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap 2.14.0",
  "itoa",
  "memchr",
  "serde",
@@ -7541,7 +7547,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18dfaaeddcb932337b5e7866ee7d0ce9b76d2fd092997146f187ec09b4558a50"
 dependencies = [
  "deranged",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",

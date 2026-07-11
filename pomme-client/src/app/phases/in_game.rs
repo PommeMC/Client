@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use azalea_core::position::ChunkPos;
+use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_protocol::packets::game::{
     ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
 };
-use azalea_registry::builtin::EntityKind;
+use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
@@ -26,6 +26,7 @@ use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
+use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
     EntityRenderInfo, WHITE_TINT, jeb_sheep_tint, wool_color_tint,
 };
@@ -1169,10 +1170,15 @@ pub fn update_game(
                 let state =
                     game.chunk_store
                         .get_block_state(t.block_pos.x, t.block_pos.y, t.block_pos.z);
+                let props = crate::world::block::block_properties(state)
+                    .entries()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect();
                 Some((
                     t.block_pos,
                     t.face,
                     crate::world::block::block_id(state).to_string(),
+                    props,
                 ))
             }),
             chunk_count: gfx.renderer.loaded_chunk_count(),
@@ -1950,26 +1956,44 @@ pub fn update_game(
         game.chunk_store
             .block_entities
             .iter()
-            .map(|(pos, be)| {
+            .filter_map(|(pos, be)| {
                 let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+                let id = crate::world::block::block_id(state);
+                // A predicted break leaves a stale entry until the server
+                // confirms; don't render entries whose block is gone.
+                if !crate::world::block_entity::is_block_entity_block(id) {
+                    return None;
+                }
                 let props = crate::world::block::block_properties(state);
-                let variant = crate::renderer::pipelines::block_entity::variant_for_block(
+                let variant = block_entity::variant_for_block(be.kind, id, props);
+                let yaw = block_entity::yaw_for_block(be.kind, props);
+                let openness_at = |p: &BlockPos| {
+                    game.block_entity_anim
+                        .container(p)
+                        .map(|a| a.openness(partial_tick))
+                        .unwrap_or(0.0)
+                };
+                let mut lid_open = openness_at(pos);
+                // A double chest's lids follow the max openness of both halves
+                // (vanilla opennessCombiner); the open block event only arrives
+                // at the interacted half's position.
+                if matches!(
                     be.kind,
-                    crate::world::block::block_id(state),
-                );
-                let yaw = crate::renderer::pipelines::block_entity::yaw_for_block(be.kind, props);
-                let lid_open = game
-                    .block_entity_anim
-                    .container(pos)
-                    .map(|a| a.openness)
-                    .unwrap_or(0.0);
-                crate::renderer::BlockEntityRenderInfo {
+                    BlockEntityKind::Chest | BlockEntityKind::TrappedChest
+                ) && let Some((dx, dz)) = block_entity::chest_partner_offset(
+                    props.get("facing").unwrap_or("north"),
+                    props.get("type").unwrap_or("single"),
+                ) {
+                    let partner = BlockPos::new(pos.x + dx, pos.y, pos.z + dz);
+                    lid_open = lid_open.max(openness_at(&partner));
+                }
+                Some(crate::renderer::BlockEntityRenderInfo {
                     pos: *pos,
                     kind: be.kind,
                     yaw,
                     variant,
                     lid_open,
-                }
+                })
             })
             .collect()
     };

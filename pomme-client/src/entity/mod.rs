@@ -2,7 +2,6 @@ pub mod components;
 
 use std::collections::HashMap;
 
-use azalea_block::fluid_state::{FluidKind, FluidState};
 use azalea_core::position::ChunkPos;
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
@@ -10,6 +9,7 @@ use glam::DVec3;
 use crate::entity::components::{LookDirection, Position};
 use crate::physics::aabb::Aabb;
 use crate::physics::collision::resolve_collision;
+use crate::world::block::{FluidKind, fluid};
 use crate::world::chunk::ChunkStore;
 
 const INTERPOLATION_STEPS: i32 = 3;
@@ -426,7 +426,7 @@ fn tick_item_physics(id: i32, entity: &mut ItemEntity, chunk_store: &ChunkStore)
     }
 
     let state = chunk_store.get_block_state(block_x, block_y, block_z);
-    let fluid = FluidState::from(state);
+    let fluid = fluid(state);
     // Vanilla `getFluidHeight(...) > 0.1`: how far the fluid surface sits
     // above the item's feet, sampled at the position block.
     let fluid_height = block_y as f64 + fluid.height() as f64 - entity.position.y;

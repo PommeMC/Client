@@ -11,7 +11,7 @@ use pyronyx::vk;
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
-use crate::renderer::entity_model::{BakedEntityModel, PartAnim};
+use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim};
 use crate::renderer::pipelines::entity_renderer::{
     BlendMode, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
@@ -21,6 +21,9 @@ pub struct BlockEntityRenderInfo {
     pub pos: BlockPos,
     pub kind: BlockEntityKind,
     pub yaw: f32,
+    /// Texture-variant index; for chest kinds it doubles as the model index
+    /// (0 = single, 1 = double-left, 2 = double-right). Kinds with a single
+    /// model clamp it to model 0.
     pub variant: u32,
     /// Lid openness for chest/shulker, 0.0=closed to 1.0=open. Raw (un-eased);
     /// the pipeline applies a cubic ease at draw time.
@@ -35,7 +38,9 @@ struct TextureSlot {
 }
 
 struct KindEntry {
-    model: BakedEntityModel,
+    /// Model variants sharing one vertex buffer; their `part_ranges` are
+    /// rebased to be buffer-absolute at build time.
+    models: Vec<BakedEntityModel>,
     vertex_buffer: vk::Buffer,
     vertex_allocation: Allocation,
     textures: Vec<TextureSlot>,
@@ -43,7 +48,7 @@ struct KindEntry {
 
 struct KindDef {
     kind: BlockEntityKind,
-    model: BakedEntityModel,
+    models: Vec<BakedEntityModel>,
     tex_variants: &'static [&'static [&'static str]],
     tex_size: u32,
 }
@@ -91,6 +96,28 @@ const SIGN_TEXTURES: &[&[&str]] = &[
     &["minecraft/textures/block/warped_sign.png"],
 ];
 
+/// Chest textures in variant order [single, double-left, double-right],
+/// mirroring vanilla `Sheets.chooseSprite`.
+const CHEST_TEXTURES: &[&[&str]] = &[
+    &["minecraft/textures/entity/chest/normal.png"],
+    &["minecraft/textures/entity/chest/normal_left.png"],
+    &["minecraft/textures/entity/chest/normal_right.png"],
+];
+
+const CHEST_XMAS_TEXTURES: &[&[&str]] = &[
+    &["minecraft/textures/entity/chest/christmas.png"],
+    &["minecraft/textures/entity/chest/christmas_left.png"],
+    &["minecraft/textures/entity/chest/christmas_right.png"],
+];
+
+const TRAPPED_CHEST_TEXTURES: &[&[&str]] = &[
+    &["minecraft/textures/entity/chest/trapped.png"],
+    &["minecraft/textures/entity/chest/trapped_left.png"],
+    &["minecraft/textures/entity/chest/trapped_right.png"],
+];
+
+const ENDER_CHEST_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/chest/ender.png"]];
+
 const SHULKER_TEXTURES: &[&[&str]] = &[
     &["minecraft/textures/entity/shulker/shulker_white.png"],
     &["minecraft/textures/entity/shulker/shulker_orange.png"],
@@ -115,9 +142,9 @@ fn name_index(table: &[&str], name: &str) -> Option<u32> {
     table.iter().position(|&n| n == name).map(|i| i as u32)
 }
 
-/// Build a [`PartAnim`] applying chest/shulker lid motion to part index 0.
-/// `openness` is the raw [0, 1] value; vanilla applies cubic easing so the lid
-/// decelerates as it approaches the open or closed extreme.
+/// Build a [`PartAnim`] applying chest/shulker lid motion. `openness` is the
+/// raw [0, 1] value; vanilla applies cubic easing so the lid decelerates as it
+/// approaches the open or closed extreme.
 fn lid_anim(kind: BlockEntityKind, openness: f32) -> PartAnim {
     if openness <= 0.0 {
         return PartAnim::default();
@@ -126,11 +153,10 @@ fn lid_anim(kind: BlockEntityKind, openness: f32) -> PartAnim {
     let eased = 1.0 - inv * inv * inv;
     match kind {
         BlockEntityKind::Chest | BlockEntityKind::TrappedChest | BlockEntityKind::EnderChest => {
+            // Parts are [bottom, lid, lock]; lid and lock swing together.
+            let rot = glam::Vec3::new(-eased * std::f32::consts::FRAC_PI_2, 0.0, 0.0);
             PartAnim {
-                rotation: vec![(
-                    0,
-                    glam::Vec3::new(-eased * std::f32::consts::FRAC_PI_2, 0.0, 0.0),
-                )],
+                rotation: vec![(1, rot), (2, rot)],
                 ..Default::default()
             }
         }
@@ -143,8 +169,18 @@ fn lid_anim(kind: BlockEntityKind, openness: f32) -> PartAnim {
     }
 }
 
-pub fn variant_for_block(kind: BlockEntityKind, name: &str) -> u32 {
+pub fn variant_for_block(
+    kind: BlockEntityKind,
+    name: &str,
+    props: &crate::world::block::PropMap,
+) -> u32 {
     match kind {
+        // Ender chests have no `type` property and fall through to 0.
+        BlockEntityKind::Chest | BlockEntityKind::TrappedChest => match props.get("type") {
+            Some("left") => 1,
+            Some("right") => 2,
+            _ => 0,
+        },
         BlockEntityKind::ShulkerBox => name
             .strip_suffix("_shulker_box")
             .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
@@ -158,8 +194,26 @@ pub fn variant_for_block(kind: BlockEntityKind, name: &str) -> u32 {
     }
 }
 
-/// Values mirror vanilla's `direction.asRotation()` offset, since the draw
-/// code applies `from_rotation_y((180 - yaw).to_radians())`.
+/// XZ offset from a double-chest half to its partner. `type=left` connects at
+/// `facing.getClockWise()`, `type=right` at `getCounterClockWise()` (vanilla
+/// `ChestBlock.getConnectedDirection`).
+pub fn chest_partner_offset(facing: &str, chest_type: &str) -> Option<(i32, i32)> {
+    let clockwise = match facing {
+        "north" => (1, 0),
+        "east" => (0, 1),
+        "south" => (-1, 0),
+        "west" => (0, -1),
+        _ => return None,
+    };
+    match chest_type {
+        "left" => Some(clockwise),
+        "right" => Some((-clockwise.0, -clockwise.1)),
+        _ => None,
+    }
+}
+
+/// Values mirror vanilla's `direction.toYRot()`; the draw code applies
+/// `rotY(180 - yaw)` for y-down models and `rotY(-yaw)` for y-up ones.
 pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap) -> f32 {
     match kind {
         BlockEntityKind::Chest
@@ -184,23 +238,56 @@ pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap
     }
 }
 
+/// Vanilla swaps chest textures for the christmas set on Dec 24-26 (local
+/// date), decided once at renderer construction. The check runs before the
+/// trapped-chest one there, so trapped chests turn christmas too; ender and
+/// copper chests never do.
+fn is_christmas() -> bool {
+    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    now.month() == time::Month::December && (24..=26).contains(&now.day())
+}
+
 fn kind_definitions() -> Vec<KindDef> {
+    let xmas = is_christmas();
+    let chest_models = block_entity_model::bake_chest_models();
+    // Ender chests have no double form; only the single model applies.
+    let ender_models = vec![chest_models[0].clone()];
     vec![
         KindDef {
             kind: BlockEntityKind::Chest,
-            model: block_entity_model::bake_chest_model(),
-            tex_variants: &[&["minecraft/textures/entity/chest/normal.png"]],
+            models: chest_models.clone(),
+            tex_variants: if xmas {
+                CHEST_XMAS_TEXTURES
+            } else {
+                CHEST_TEXTURES
+            },
+            tex_size: 64,
+        },
+        KindDef {
+            kind: BlockEntityKind::TrappedChest,
+            models: chest_models,
+            tex_variants: if xmas {
+                CHEST_XMAS_TEXTURES
+            } else {
+                TRAPPED_CHEST_TEXTURES
+            },
+            tex_size: 64,
+        },
+        KindDef {
+            kind: BlockEntityKind::EnderChest,
+            models: ender_models,
+            tex_variants: ENDER_CHEST_TEXTURES,
             tex_size: 64,
         },
         KindDef {
             kind: BlockEntityKind::ShulkerBox,
-            model: block_entity_model::bake_shulker_box_model(),
+            models: vec![block_entity_model::bake_shulker_box_model()],
             tex_variants: SHULKER_TEXTURES,
             tex_size: 64,
         },
         KindDef {
             kind: BlockEntityKind::Sign,
-            model: block_entity_model::bake_sign_model(),
+            models: vec![block_entity_model::bake_sign_model()],
             tex_variants: SIGN_TEXTURES,
             tex_size: 32,
         },
@@ -346,7 +433,7 @@ impl BlockEntityPipeline {
                 texture_sampler,
                 jar_assets_dir,
                 asset_index,
-                def.model,
+                def.models,
                 def.tex_variants,
                 def.tex_size,
                 &mut pending_uploads,
@@ -419,17 +506,30 @@ impl BlockEntityPipeline {
                 bound_set = slot.set;
             }
 
+            let model = &entry.models[(info.variant as usize).min(entry.models.len() - 1)];
+
             let block_center = glam::Vec3::new(
                 info.pos.x as f32 + 0.5,
                 info.pos.y as f32,
                 info.pos.z as f32 + 0.5,
             );
-            let model_mat = glam::Mat4::from_translation(block_center)
-                * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians());
+            let model_mat = match model.convention {
+                ModelConvention::EntityYDown => {
+                    glam::Mat4::from_translation(block_center)
+                        * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians())
+                }
+                // Vanilla `ChestRenderer`: rotate by -facing.toYRot() about the
+                // block center; coords are relative to the block's min corner.
+                ModelConvention::BlockYUp => {
+                    glam::Mat4::from_translation(block_center)
+                        * glam::Mat4::from_rotation_y((-info.yaw).to_radians())
+                        * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5))
+                }
+            };
 
             let anim = lid_anim(info.kind, info.lid_open);
-            let part_transforms = entry.model.compute_part_transforms(&anim);
-            for (i, (start, count)) in entry.model.part_ranges.iter().enumerate() {
+            let part_transforms = model.compute_part_transforms(&anim);
+            for (i, (start, count)) in model.part_ranges.iter().enumerate() {
                 if *count == 0 {
                     continue;
                 }
@@ -513,13 +613,21 @@ fn build_entry(
     texture_sampler: vk::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-    model: BakedEntityModel,
+    mut models: Vec<BakedEntityModel>,
     tex_variants: &[&[&str]],
     fallback_tex_size: u32,
     pending_uploads: &mut Vec<util::PendingImageUpload>,
     staging_to_free: &mut Vec<(vk::Buffer, Allocation)>,
 ) -> KindEntry {
-    let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
+    let mut all_vertices: Vec<ChunkVertex> = Vec::new();
+    for model in &mut models {
+        let base = all_vertices.len() as u32;
+        all_vertices.append(&mut model.vertices);
+        for range in &mut model.part_ranges {
+            range.0 += base;
+        }
+    }
+    let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&all_vertices);
     let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
         device,
         allocator,
@@ -548,7 +656,7 @@ fn build_entry(
         .collect();
 
     KindEntry {
-        model,
+        models,
         vertex_buffer,
         vertex_allocation,
         textures,

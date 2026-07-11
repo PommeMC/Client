@@ -1,0 +1,10 @@
+[package]
+name = "azalea-block"
+description = "Data-free shim replacing azalea-block; block semantics live in pomme's own per-version tables."
+version = "0.16.0+mc26.2"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+azalea-buf = { version = "0.16.0", default-features = false }
+azalea-registry = { version = "0.16.0", default-features = false }

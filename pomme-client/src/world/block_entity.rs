@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+
+use azalea_block::BlockState;
+use azalea_core::position::BlockPos;
 use azalea_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
 
@@ -9,8 +13,49 @@ pub struct StoredBlockEntity {
     pub nbt: NbtCompound,
 }
 
-/// Blocks vanilla draws via a `BlockEntityRenderer` instead of a baked model.
-/// The chunk mesher skips these positions; the BE renderer fills them in.
+/// Blocks the block-entity pipeline draws in place of chunk geometry. The
+/// chunk mesher skips these (their block models are particle-texture-only,
+/// which would otherwise fall back to a full cube of that texture); other
+/// block-entity blocks either have real block models or placeholder cubes.
+pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
+    match name {
+        "chest" => Some(BlockEntityKind::Chest),
+        "trapped_chest" => Some(BlockEntityKind::TrappedChest),
+        "ender_chest" => Some(BlockEntityKind::EnderChest),
+        s if s == "shulker_box" || s.ends_with("_shulker_box") => Some(BlockEntityKind::ShulkerBox),
+        _ => None,
+    }
+}
+
+/// Sync the client-side entry for `pos` after a block update. The server sends
+/// no block-entity data for e.g. a freshly placed chest, so blocks the BE
+/// pipeline renders get an entry synthesized from the block state (vanilla
+/// creates the client `BlockEntity` from the state the same way); a position
+/// whose block is no longer a block entity drops its stale entry.
+pub fn sync_block_entity(
+    map: &mut HashMap<BlockPos, StoredBlockEntity>,
+    pos: BlockPos,
+    state: BlockState,
+) {
+    let id = crate::world::block::block_id(state);
+    if let Some(kind) = rendered_kind(id) {
+        if map.get(&pos).is_none_or(|e| e.kind != kind) {
+            map.insert(
+                pos,
+                StoredBlockEntity {
+                    kind,
+                    nbt: NbtCompound::default(),
+                },
+            );
+        }
+    } else if !is_block_entity_block(id) {
+        map.remove(&pos);
+    }
+}
+
+/// Blocks vanilla backs with a block entity. Used to suppress missing-model
+/// warnings and to detect stale block-entity map entries; the subset the BE
+/// pipeline actually draws is [`rendered_kind`].
 pub fn is_block_entity_block(name: &str) -> bool {
     matches!(
         name,

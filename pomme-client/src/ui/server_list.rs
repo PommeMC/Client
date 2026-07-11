@@ -156,7 +156,7 @@ async fn ping_server(
         // Vanilla MOTD base color: 0x808080.
         let motd = format_text_spans(&status.description, [0.5, 0.5, 0.5, 1.0]);
         let version = status.version.name.clone();
-        let protocol_match = status.version.protocol == azalea_protocol::packets::PROTOCOL_VERSION;
+        let protocol_match = status.version.protocol == crate::version::selected_protocol();
         let (online, max) = (status.players.online, status.players.max);
 
         let favicon_rgba = status.favicon.as_deref().and_then(decode_favicon);

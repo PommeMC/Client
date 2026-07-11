@@ -9,6 +9,7 @@ use pyronyx::vk;
 use super::greedy;
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
+use crate::world::block::is_air;
 use crate::world::block::model::{BakedModel, Direction};
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
 use crate::world::chunk;
@@ -1222,7 +1223,7 @@ impl BlockTypeMap {
                 let bz = world_z + lz;
                 for by in (min_y - 1)..=(max_y) {
                     let state = snapshot.get_block_state(bx, by, bz);
-                    if state.is_air() || state_to_id.contains_key(&state) {
+                    if is_air(state) || state_to_id.contains_key(&state) {
                         continue;
                     }
                     let has_baked = registry.get_baked_model(state).is_some();
@@ -1255,7 +1256,7 @@ impl BlockTypeMap {
     }
 
     fn get_id(&self, state: BlockState) -> u16 {
-        if state.is_air() {
+        if is_air(state) {
             return 0;
         }
         self.state_to_id.get(&state).copied().unwrap_or(0)
@@ -1717,7 +1718,7 @@ enum BlockKind {
 }
 
 fn classify_block(state: azalea_block::BlockState) -> BlockKind {
-    if state.is_air() {
+    if is_air(state) {
         return BlockKind::Air;
     }
     match crate::world::block::block_id(state) {
@@ -1726,6 +1727,8 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
         }
         "water" | "bubble_column" => BlockKind::Water,
         "lava" => BlockKind::Lava,
+        // Drawn by the block-entity pipeline; nothing to mesh.
+        id if crate::world::block_entity::rendered_kind(id).is_some() => BlockKind::Air,
         _ => BlockKind::Solid,
     }
 }

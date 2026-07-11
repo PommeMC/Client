@@ -7,7 +7,7 @@ use glam::{dvec2, dvec3};
 use inventory::Inventory;
 
 use crate::entity::components::{LookDirection, Position, Velocity};
-use crate::world::block::{block_id, block_properties};
+use crate::world::block::{FluidKind, fluid};
 
 pub const MAX_AIR_SUPPLY: i32 = 300;
 pub const STANDING_HEIGHT: f64 = 1.8;
@@ -31,16 +31,7 @@ pub fn is_creative(game_mode: u8) -> bool {
 }
 
 fn is_water_block(state: azalea_block::BlockState) -> bool {
-    if state.is_air() {
-        return false;
-    }
-    let id = block_id(state);
-    if id == "water" || id == "bubble_column" {
-        return true;
-    }
-    block_properties(state)
-        .get("waterlogged")
-        .is_some_and(|v| v == "true")
+    fluid(state).kind == FluidKind::Water
 }
 
 pub struct LocalPlayer {

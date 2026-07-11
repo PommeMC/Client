@@ -34,7 +34,7 @@ glam = "0.33"
 clap = { version = "4", features = ["derive"] }
 parking_lot = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
-time = { version = "0.3", features = ["formatting", "macros"] }
+time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 flate2 = "1"
 azalea-buf = "0.16"
 azalea-protocol = { version = "0.16", features = ["connecting"] }

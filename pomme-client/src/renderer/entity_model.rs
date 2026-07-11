@@ -43,11 +43,25 @@ pub struct EntityPart {
     pub parent: Option<usize>,
 }
 
+/// Coordinate space a model's parts and vertices were authored in.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelConvention {
+    /// Vanilla entity convention: cube Y negated at bake, pivots at
+    /// `(24 - y)/16`, euler signs (-x, -y, +z). All mob models use this.
+    #[default]
+    EntityYDown,
+    /// Vanilla block-entity literal space: y-up, coords/16 relative to the
+    /// block's min corner, pivots at `offset/16`, vanilla ZYX euler with
+    /// unmodified signs. Used by the chest models.
+    BlockYUp,
+}
+
 #[derive(Clone)]
 pub struct BakedEntityModel {
     pub parts: Vec<EntityPart>,
     pub vertices: Vec<ChunkVertex>,
     pub part_ranges: Vec<(u32, u32)>,
+    pub convention: ModelConvention,
     /// Per-part scale (parallel to `parts`), applied about each part's pivot at
     /// transform time. Scales geometry only, never UVs — used for baby mobs
     /// whose head and body shrink by different factors. Default 1.0 for
@@ -77,8 +91,14 @@ impl BakedEntityModel {
             parts,
             vertices,
             part_ranges,
+            convention: ModelConvention::default(),
             part_scales,
         }
+    }
+
+    pub(crate) fn with_convention(mut self, convention: ModelConvention) -> Self {
+        self.convention = convention;
+        self
     }
 
     pub fn compute_part_transforms(&self, anim: &PartAnim) -> Vec<Mat4> {
@@ -107,20 +127,30 @@ impl BakedEntityModel {
                 }
             }
 
-            let offset_x = part.offset.x + extra_translation.x;
-            let offset_y = -(part.offset.y + extra_translation.y - 24.0);
-            let offset_z = part.offset.z + extra_translation.z;
-            let offset = Vec3::new(offset_x, offset_y, offset_z) / 16.0;
+            let offset = match self.convention {
+                ModelConvention::EntityYDown => Vec3::new(
+                    part.offset.x + extra_translation.x,
+                    -(part.offset.y + extra_translation.y - 24.0),
+                    part.offset.z + extra_translation.z,
+                ),
+                ModelConvention::BlockYUp => part.offset + extra_translation,
+            } / 16.0;
 
             // A quaternion override expresses the exact render-space orientation
-            // directly; otherwise use the legacy per-axis euler product (note the
-            // engine's mixed signs: -x, -y, +z).
-            let rot_mat = match quat_rot {
-                Some(q) => Mat4::from_quat(q),
-                None => {
+            // directly; otherwise use the per-axis euler product: the y-down
+            // convention needs the engine's mixed signs (-x, -y, +z), y-up
+            // matches vanilla's `translateAndRotate` ZYX order verbatim.
+            let rot_mat = match (quat_rot, self.convention) {
+                (Some(q), _) => Mat4::from_quat(q),
+                (None, ModelConvention::EntityYDown) => {
                     Mat4::from_rotation_x(-rot.x)
                         * Mat4::from_rotation_y(-rot.y)
                         * Mat4::from_rotation_z(rot.z)
+                }
+                (None, ModelConvention::BlockYUp) => {
+                    Mat4::from_rotation_z(rot.z)
+                        * Mat4::from_rotation_y(rot.y)
+                        * Mat4::from_rotation_x(rot.x)
                 }
             };
             let scale = self.part_scales.get(i).copied().unwrap_or(1.0);

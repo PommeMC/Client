@@ -8,7 +8,8 @@ use azalea_core::position::BlockPos;
 #[derive(Default)]
 pub struct ContainerAnim {
     /// 0.0 = closed, 1.0 = fully open. Cubic easing is applied at render time.
-    pub openness: f32,
+    openness: f32,
+    prev_openness: f32,
     pub opening: bool,
 }
 
@@ -17,12 +18,19 @@ impl ContainerAnim {
     const RATE: f32 = 0.1;
 
     pub fn tick(&mut self) {
+        self.prev_openness = self.openness;
         let delta = if self.opening {
             Self::RATE
         } else {
             -Self::RATE
         };
         self.openness = (self.openness + delta).clamp(0.0, 1.0);
+    }
+
+    /// Openness interpolated between the previous and current tick, matching
+    /// vanilla `ChestLidController.getOpenness(partialTicks)`.
+    pub fn openness(&self, partial_tick: f32) -> f32 {
+        self.prev_openness + (self.openness - self.prev_openness) * partial_tick
     }
 }
 
@@ -35,8 +43,9 @@ impl BlockEntityAnimStore {
     pub fn tick(&mut self) {
         self.containers.retain(|_, anim| {
             anim.tick();
-            // Drop fully-closed, non-opening entries to keep the map small.
-            anim.opening || anim.openness > 0.0
+            // Drop fully-closed, non-opening entries to keep the map small;
+            // keep the final closing tick so it still lerps to zero.
+            anim.opening || anim.openness > 0.0 || anim.prev_openness > 0.0
         });
     }
 

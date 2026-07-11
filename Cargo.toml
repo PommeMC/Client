@@ -3,7 +3,9 @@ resolver = "3"
 members = [
     "pomme-client",
     "pomme-launcher/src-tauri",
-    "pomme-gpu-allocator"
+    "pomme-gpu-allocator",
+    "pomme-block",
+    "tools/blockgen"
 ]
 
 [workspace.dependencies]
@@ -24,6 +26,9 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # azalea lags crates.io releases; track the 26.2 branch from git.
+# azalea-block is replaced by the pomme-block shim (pomme owns block data);
+# the second patch table substitutes it under the azalea git workspace's own
+# path dependencies too.
 [patch.crates-io]
 azalea-buf = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
 azalea-protocol = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
@@ -31,11 +36,14 @@ azalea-crypto = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
 azalea-auth = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
 azalea-entity = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
 azalea-world = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
-azalea-block = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
+azalea-block = { path = "pomme-block" }
 azalea-chat = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
 azalea-core = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
 azalea-registry = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
 azalea-inventory = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
+
+[patch."https://github.com/azalea-rs/azalea"]
+azalea-block = { path = "pomme-block" }
 
 [profile.dev]
 opt-level = 1

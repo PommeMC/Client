@@ -32,7 +32,12 @@ pub struct DebugInfo<'a> {
     pub position: DVec3,
     pub y_rot_deg: f32,
     pub x_rot_deg: f32,
-    pub target_block: Option<(BlockPos, azalea_core::direction::Direction, String)>,
+    pub target_block: Option<(
+        BlockPos,
+        azalea_core::direction::Direction,
+        String,
+        Vec<String>,
+    )>,
     pub chunk_count: u32,
     pub sections_drawn: u32,
     pub occlusion_on: bool,
@@ -544,13 +549,14 @@ fn build_debug_overlay(
         },
     ];
 
-    if let Some((target, face, name)) = &info.target_block {
+    if let Some((target, face, name, props)) = &info.target_block {
         left_lines.push(String::new());
         left_lines.push(format!(
             "Targeted Block: {}, {}, {}",
             target.x, target.y, target.z
         ));
         left_lines.push(format!("minecraft:{name}"));
+        left_lines.extend(props.iter().cloned());
         left_lines.push(format!("Face: {:?}", face));
     }
 

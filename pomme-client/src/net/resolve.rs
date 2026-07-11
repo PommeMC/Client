@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use azalea_protocol::address::ServerAddr;
 use azalea_protocol::connect::{Connection, ConnectionError};
+use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::handshake::s_intention::ServerboundIntention;
 use azalea_protocol::packets::handshake::{ClientboundHandshakePacket, ServerboundHandshakePacket};
-use azalea_protocol::packets::{ClientIntention, PROTOCOL_VERSION};
 use azalea_protocol::resolve::{ResolveError, resolve_address};
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -117,7 +117,7 @@ pub async fn connect(
                     .await
                     .map_err(ConnectError::Handshake)?;
                 conn.write(ServerboundIntention {
-                    protocol_version: PROTOCOL_VERSION,
+                    protocol_version: crate::version::selected_protocol(),
                     hostname: server.host.clone(),
                     port: server.port,
                     intention,

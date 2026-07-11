@@ -1,0 +1,10 @@
+[package]
+name = "blockgen"
+description = "Generates pomme's per-version block-state tables from Mojang's data-generator reports."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { version = "1", features = ["preserve_order"] }

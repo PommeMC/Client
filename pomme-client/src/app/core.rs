@@ -673,6 +673,15 @@ impl AppCore {
                     game.chat.apply_server_suggestions(id, start, options);
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
+                    // Sync even when a pending prediction absorbs the update
+                    // (the state is applied later in `acknowledge`), so e.g. a
+                    // chest placed where a break was just predicted still gets
+                    // its block-entity entry.
+                    crate::world::block_entity::sync_block_entity(
+                        &mut game.chunk_store.block_entities,
+                        pos,
+                        state,
+                    );
                     if game.interaction.update_known_server_state(&pos, state) {
                         continue;
                     }
@@ -690,6 +699,11 @@ impl AppCore {
                     let min_y = game.chunk_store.min_y();
                     let n = game.chunk_store.section_count();
                     for (pos, state) in updates {
+                        crate::world::block_entity::sync_block_entity(
+                            &mut game.chunk_store.block_entities,
+                            pos,
+                            state,
+                        );
                         if game.interaction.update_known_server_state(&pos, state) {
                             continue;
                         }
@@ -928,9 +942,9 @@ impl AppCore {
                     // broadcast; the local break's effects come from
                     // `predict_destroy`. TODO: the other level events.
                     if event_type == 2001
-                        && let Ok(state) = azalea_block::BlockState::try_from(data)
+                        && let Some(state) = crate::world::block::try_state(data)
                     {
-                        if !state.is_air() {
+                        if !crate::world::block::is_air(state) {
                             crate::player::interaction::play_break_sound(&self.audio, state, pos);
                         }
                         game.particle_store.add_destroy_block_effect(

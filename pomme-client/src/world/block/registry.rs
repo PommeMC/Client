@@ -189,7 +189,7 @@ impl BlockRegistry {
     }
 
     fn baked_model_flag(&self, state: BlockState, f: impl Fn(&BakedModel) -> bool) -> bool {
-        if state.is_air() {
+        if super::is_air(state) {
             return false;
         }
         self.get_baked_model(state).map(f).unwrap_or(false)

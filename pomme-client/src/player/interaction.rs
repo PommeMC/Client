@@ -29,6 +29,7 @@ use crate::physics::collision::has_collision;
 use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::held_item::UseAnim;
+use crate::world::block::is_air;
 use crate::world::block::registry::BlockRegistry;
 use crate::world::block::sound::block_sounds;
 use crate::world::chunk::ChunkStore;
@@ -482,7 +483,7 @@ impl InteractionState {
         };
 
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
-        if state.is_air() {
+        if is_air(state) {
             self.miss_time = MISS_COOLDOWN;
             self.swing(sender);
             return;
@@ -526,7 +527,7 @@ impl InteractionState {
         };
 
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
-        if state.is_air() {
+        if is_air(state) {
             self.stop_destroying(sender);
             return;
         }
@@ -813,7 +814,7 @@ impl InteractionState {
         let pos = hit.block_pos.offset_with_direction(hit.face);
 
         // Only predict into an empty cell; replacing grass/water isn't handled yet.
-        if !chunks.get_block_state(pos.x, pos.y, pos.z).is_air() {
+        if !is_air(chunks.get_block_state(pos.x, pos.y, pos.z)) {
             return;
         }
 
@@ -845,7 +846,7 @@ impl InteractionState {
     ) {
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
 
-        if state.is_air() {
+        if is_air(state) {
             return;
         }
 
@@ -947,7 +948,7 @@ impl InteractionState {
         }
 
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
-        if state.is_air() {
+        if is_air(state) {
             self.is_destroying = false;
             return;
         }
@@ -1212,7 +1213,7 @@ pub fn raycast(
     let mut t = 0.0_f64;
     while t <= max_dist as f64 {
         let state = chunks.get_block_state(bx, by, bz);
-        if !state.is_air() {
+        if !is_air(state) {
             let block_pos = BlockPos {
                 x: bx,
                 y: by,
