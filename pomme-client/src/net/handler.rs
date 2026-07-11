@@ -684,7 +684,8 @@ fn parse_level_particles(
     let y_dist = f32::azalea_read(cur)?;
     let z_dist = f32::azalea_read(cur)?;
     let max_speed = f32::azalea_read(cur)?;
-    let count = u32::azalea_read(cur)?;
+    // Signed on the wire; Java's `i < count` loop no-ops on negative counts.
+    let count = i32::azalea_read(cur)?.max(0) as u32;
     let Some(kind) = crate::particle::ServerParticleKind::from_id(u32::azalea_read_var(cur)?)
     else {
         return Ok(None);
