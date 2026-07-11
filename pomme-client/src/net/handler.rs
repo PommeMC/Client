@@ -7,7 +7,7 @@ use super::NetworkEvent;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::components::Position;
-use crate::ui::text::{TextSpan, format_text_spans};
+use crate::ui::text::format_text_spans;
 
 pub fn handle_game_packet(
     packet: &ClientboundGamePacket,
@@ -232,13 +232,13 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::SystemChat(p) if !p.overlay => {
-            send_chat(event_tx, format_text_spans(&p.content));
+            send_chat(event_tx, &p.content);
         }
         ClientboundGamePacket::PlayerChat(p) => {
-            send_chat(event_tx, format_text_spans(&p.message()));
+            send_chat(event_tx, &p.message());
         }
         ClientboundGamePacket::DisguisedChat(p) => {
-            send_chat(event_tx, format_text_spans(&p.message));
+            send_chat(event_tx, &p.message);
         }
         ClientboundGamePacket::BlockUpdate(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockUpdate {
@@ -620,7 +620,8 @@ pub fn handle_game_packet(
     }
 }
 
-fn send_chat(event_tx: &Sender<NetworkEvent>, spans: Vec<TextSpan>) {
+fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
+    let spans = format_text_spans(message, [1.0; 4]);
     let text: String = spans.iter().map(|s| s.text.as_str()).collect();
     tracing::info!("Chat: {text}");
     let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });

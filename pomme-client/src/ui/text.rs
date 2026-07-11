@@ -30,12 +30,10 @@ impl TextSpan {
 }
 
 /// Flatten a `FormattedText` component into styled spans for rendering.
-pub fn format_text_spans(text: &FormattedText) -> Vec<TextSpan> {
-    let white: azalea_chat::style::TextColor = azalea_chat::style::ChatFormatting::White
-        .try_into()
-        .unwrap();
-    let white_style = Style::default().color(white);
-
+///
+/// `base_color` applies wherever the component carries no explicit color,
+/// mirroring vanilla `drawString`'s color argument.
+pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<TextSpan> {
     let spans: RefCell<Vec<TextSpan>> = RefCell::new(Vec::new());
     let current_style: RefCell<Option<Style>> = RefCell::new(None);
 
@@ -48,7 +46,9 @@ pub fn format_text_spans(text: &FormattedText) -> Vec<TextSpan> {
             if !t.is_empty() {
                 let style = current_style.borrow();
                 let s = style.as_ref();
-                let color = s.map(style_to_rgba).unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                let color = s
+                    .map(|s| style_to_rgba(s, base_color))
+                    .unwrap_or(base_color);
                 let bold = s.and_then(|s| s.bold).unwrap_or(false);
                 let italic = s.and_then(|s| s.italic).unwrap_or(false);
                 let strikethrough = s.and_then(|s| s.strikethrough).unwrap_or(false);
@@ -66,21 +66,21 @@ pub fn format_text_spans(text: &FormattedText) -> Vec<TextSpan> {
             String::new()
         },
         |_| String::new(),
-        &white_style,
+        &Style::default(),
     );
 
     let result = spans.into_inner();
     if result.is_empty() {
         let plain = format!("{text}");
         if !plain.is_empty() {
-            return vec![TextSpan::new(plain, [0.63, 0.63, 0.63, 1.0])];
+            return vec![TextSpan::new(plain, base_color)];
         }
     }
 
     result
 }
 
-fn style_to_rgba(style: &Style) -> [f32; 4] {
+fn style_to_rgba(style: &Style, base_color: [f32; 4]) -> [f32; 4] {
     if let Some(color) = &style.color {
         let v = color.value;
         [
@@ -90,6 +90,6 @@ fn style_to_rgba(style: &Style) -> [f32; 4] {
             1.0,
         ]
     } else {
-        [1.0, 1.0, 1.0, 1.0]
+        base_color
     }
 }
