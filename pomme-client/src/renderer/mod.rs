@@ -1923,12 +1923,19 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
     }
 
     let url = format!("https://sessionserver.mojang.com/session/minecraft/profile/{uuid}");
-    let profile: SessionProfile = reqwest::get(&url)
-        .await
-        .map_err(|e| e.to_string())?
+    let response = reqwest::get(&url).await.map_err(error_chain)?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
+    ) {
+        return Err(format!("no profile for {uuid}"));
+    }
+    let profile: SessionProfile = response
+        .error_for_status()
+        .map_err(error_chain)?
         .json()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(error_chain)?;
 
     let value = &profile
         .properties
@@ -1978,8 +1985,8 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(value)
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
-        .map_err(|e| e.to_string())?;
-    let payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(|e| e.to_string())?;
+        .map_err(error_chain)?;
+    let payload: TexturesPayload = serde_json::from_slice(&decoded).map_err(error_chain)?;
 
     payload
         .textures
@@ -1991,15 +1998,29 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
         .ok_or_else(|| "No skin texture".to_string())
 }
 
+/// Error message including the source chain (`reqwest` hides the detail there).
+fn error_chain(e: impl std::error::Error) -> String {
+    let mut msg = e.to_string();
+    let mut source = e.source();
+    while let Some(s) = source {
+        msg.push_str(": ");
+        msg.push_str(&s.to_string());
+        source = s.source();
+    }
+    msg
+}
+
 async fn fetch_skin_image(skin_url: &str) -> Result<(Vec<u8>, u32, u32), String> {
     let skin_bytes = reqwest::get(skin_url)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(error_chain)?
+        .error_for_status()
+        .map_err(error_chain)?
         .bytes()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(error_chain)?;
 
-    let img = image::load_from_memory(&skin_bytes).map_err(|e| e.to_string())?;
+    let img = image::load_from_memory(&skin_bytes).map_err(error_chain)?;
     let rgba = img.to_rgba8();
     let w = rgba.width();
     let h = rgba.height();
