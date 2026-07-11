@@ -34,7 +34,7 @@ pub fn item_display_name(kind: ItemKind) -> String {
     title_case_snake(&bare)
 }
 
-fn title_case_snake(s: &str) -> String {
+pub(crate) fn title_case_snake(s: &str) -> String {
     s.split('_')
         .map(|p| {
             let mut c = p.chars();

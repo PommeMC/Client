@@ -28,12 +28,16 @@ pub struct ContainerResult {
     /// Container-click operations to send this frame (usually 0-1; a drag
     /// release emits a start/add.../end sequence).
     pub ops: Vec<ClickOperation>,
+    /// Menu button clicked this frame (`ServerboundContainerButtonClick`),
+    /// e.g. an enchantment option.
+    pub button: Option<u32>,
 }
 
 /// Input for a container screen this frame.
 pub struct ContainerInput {
     pub left_pressed: bool,
     pub right_pressed: bool,
+    pub middle_pressed: bool,
     pub left_held: bool,
     pub right_held: bool,
     pub shift: bool,

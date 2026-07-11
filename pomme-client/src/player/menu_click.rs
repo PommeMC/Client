@@ -8,6 +8,7 @@ use azalea_inventory::components::{EquipmentSlot, Equippable};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::operations::{ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick};
 use azalea_inventory::{ItemStack, ItemStackData, Menu, Player, SlotList};
+use azalea_registry::builtin::ItemKind;
 
 /// Which container menu a click applies to. `Furnace` covers the furnace,
 /// blast furnace, and smoker menus, which share the same slot structure;
@@ -20,6 +21,7 @@ pub enum ContainerKind {
     Chest { rows: u8 },
     ShulkerBox,
     Anvil,
+    Enchantment,
 }
 
 impl ContainerKind {
@@ -29,6 +31,7 @@ impl ContainerKind {
             Self::Furnace | Self::Anvil => 39,
             Self::Chest { rows } => rows as usize * 9 + 36,
             Self::ShulkerBox => 63,
+            Self::Enchantment => 38,
         }
     }
 
@@ -40,6 +43,7 @@ impl ContainerKind {
             Self::Furnace | Self::Anvil => 3,
             Self::Chest { rows } => rows as usize * 9,
             Self::ShulkerBox => 27,
+            Self::Enchantment => 2,
         }
     }
 
@@ -53,7 +57,16 @@ impl ContainerKind {
         match self {
             Self::Player | Self::CraftingTable => Some(0),
             Self::Anvil => Some(2),
-            Self::Furnace | Self::Chest { .. } | Self::ShulkerBox => None,
+            Self::Furnace | Self::Chest { .. } | Self::ShulkerBox | Self::Enchantment => None,
+        }
+    }
+
+    /// Per-slot stack limit where a menu overrides the item's own maximum
+    /// (vanilla `Slot::getMaxStackSize`): the enchanting item slot holds one.
+    fn slot_limit(self, s: usize) -> i32 {
+        match (self, s) {
+            (Self::Enchantment, 0) => 1,
+            _ => i32::MAX,
         }
     }
 
@@ -105,6 +118,11 @@ impl ContainerKind {
                 result: ItemStack::Empty,
                 player: SlotList::default(),
             },
+            Self::Enchantment => Menu::Enchantment {
+                item: ItemStack::Empty,
+                lapis: ItemStack::Empty,
+                player: SlotList::default(),
+            },
         };
         for (i, item) in slots.iter().enumerate() {
             if let Some(s) = menu.slot_mut(i) {
@@ -135,6 +153,7 @@ impl ContainerKind {
             (Self::ShulkerBox, 0..=26) => {
                 !crate::player::inventory::item_resource_name(item.kind).ends_with("shulker_box")
             }
+            (Self::Enchantment, 1) => item.kind == ItemKind::LapisLazuli,
             _ => true,
         }
     }
@@ -214,7 +233,7 @@ pub fn drag_distribution(
     for &s in &eligible {
         let it = slots.get(s as usize).unwrap_or(&ItemStack::Empty);
         let existing = if same_item(cursor, it) { it.count() } else { 0 };
-        let new_count = (place + existing).min(max);
+        let new_count = (place + existing).min(max.min(container.slot_limit(s as usize)));
         remaining -= new_count - existing;
         let mut stack = carried.clone();
         stack.count = new_count;
@@ -287,7 +306,7 @@ fn pickup_click(
         let can_place = carried.as_present().is_some_and(|c| kind.may_place(s, c));
         if can_place {
             let amount = if primary { carried.count() } else { 1 };
-            safe_insert(&mut slot_item, &mut carried, amount);
+            safe_insert(kind, s, &mut slot_item, &mut carried, amount);
         }
     } else if carried.is_empty() {
         let total = slot_item.count();
@@ -296,10 +315,10 @@ fn pickup_click(
     } else if carried.as_present().is_some_and(|c| kind.may_place(s, c)) {
         if same_item(&carried, &slot_item) {
             let amount = if primary { carried.count() } else { 1 };
-            safe_insert(&mut slot_item, &mut carried, amount);
+            safe_insert(kind, s, &mut slot_item, &mut carried, amount);
         } else if carried
             .as_present()
-            .is_some_and(|c| c.count <= c.kind.max_stack_size())
+            .is_some_and(|c| c.count <= c.kind.max_stack_size().min(kind.slot_limit(s)))
         {
             // Vanilla swaps only when the carried stack fits the slot's limit.
             std::mem::swap(&mut carried, &mut slot_item);
@@ -313,12 +332,19 @@ fn pickup_click(
 }
 
 /// Move up to `amount` of `carried` into `slot` (empty or same item), capped to
-/// the item's max stack, like vanilla `Slot::safeInsert`.
-fn safe_insert(slot: &mut ItemStack, carried: &mut ItemStack, amount: i32) {
+/// the item's max stack and the slot's own limit, like vanilla
+/// `Slot::safeInsert`.
+fn safe_insert(
+    kind: ContainerKind,
+    s: usize,
+    slot: &mut ItemStack,
+    carried: &mut ItemStack,
+    amount: i32,
+) {
     let ItemStack::Present(c) = carried.clone() else {
         return;
     };
-    let max = c.kind.max_stack_size();
+    let max = c.kind.max_stack_size().min(kind.slot_limit(s));
     let take = match slot {
         ItemStack::Empty => amount.min(c.count).min(max),
         ItemStack::Present(d) => amount.min(c.count).min((max - d.count).max(0)),
@@ -369,6 +395,25 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
             }
             ContainerKind::Furnace => {
                 move_item_stack_to(kind, menu, s, 3..menu.len(), s == 2);
+            }
+            ContainerKind::Enchantment => {
+                // Vanilla `EnchantmentMenu.quickMoveStack`: menu slots go to
+                // the player region; lapis fills its slot; anything else moves
+                // a single item into the empty item slot.
+                if s < 2 {
+                    move_item_stack_to(kind, menu, s, 2..menu.len(), true);
+                } else if menu
+                    .slot(s)
+                    .and_then(ItemStack::as_present)
+                    .is_some_and(|d| d.kind == ItemKind::LapisLazuli)
+                {
+                    move_item_stack_to(kind, menu, s, 1..2, true);
+                } else if menu.slot(0).is_some_and(ItemStack::is_empty)
+                    && let ItemStack::Present(d) = take_slot(menu, s)
+                {
+                    put_slot(menu, s, with_count(d.clone(), d.count - 1));
+                    put_slot(menu, 0, with_count(d, 1));
+                }
             }
             _ => {
                 menu.quick_move_stack(s);

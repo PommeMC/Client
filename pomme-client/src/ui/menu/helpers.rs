@@ -278,6 +278,7 @@ pub(super) fn push_server_status(
                     spans: line.clone(),
                     scale: fs,
                     centered: false,
+                    shadow: true,
                 });
             }
 
@@ -374,6 +375,7 @@ fn wrap_motd_spans(
             italic: span.italic,
             strikethrough: span.strikethrough,
             underline: span.underline,
+            sga: span.sga,
         };
 
         for part in span.text.split_inclusive([' ', '\n']) {

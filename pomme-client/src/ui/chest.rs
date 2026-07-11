@@ -162,5 +162,6 @@ fn build_contents(
     ContainerResult {
         clicked_outside,
         ops,
+        button: None,
     }
 }

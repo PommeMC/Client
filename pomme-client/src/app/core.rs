@@ -582,7 +582,7 @@ impl AppCore {
                         && c.id == container_id
                         && let Some(d) = c.data.get_mut(id as usize)
                     {
-                        *d = value;
+                        *d = value as i16;
                     }
                 }
                 NetworkEvent::OpenScreen {
@@ -612,6 +612,7 @@ impl AppCore {
                         MenuKind::Generic9x6 => Some(ContainerScreen::Chest { rows: 6 }),
                         MenuKind::ShulkerBox => Some(ContainerScreen::ShulkerBox),
                         MenuKind::Anvil => Some(ContainerScreen::Anvil),
+                        MenuKind::Enchantment => Some(ContainerScreen::Enchantment),
                         _ => None,
                     };
                     if let Some(screen) = screen {
@@ -627,9 +628,11 @@ impl AppCore {
                             title,
                             screen,
                             slots: vec![ItemStack::Empty; screen.click_kind().slot_count()],
-                            data: [0; 4],
+                            data: [0; 10],
                             anvil: (screen == ContainerScreen::Anvil)
                                 .then(crate::ui::anvil::AnvilState::new),
+                            enchant: (screen == ContainerScreen::Enchantment)
+                                .then(crate::ui::enchantment::EnchantState::new),
                             state_id: 0,
                         });
                         game.sync_container_from_inventory();

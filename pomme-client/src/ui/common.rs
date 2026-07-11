@@ -13,6 +13,15 @@ pub const SLOT_STRIDE: f32 = 18.0;
 pub const SLOT_LABEL_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 const BTN_BORDER: f32 = 3.0;
 
+pub const fn rgb(hex: u32) -> [f32; 4] {
+    [
+        ((hex >> 16) & 0xff) as f32 / 255.0,
+        ((hex >> 8) & 0xff) as f32 / 255.0,
+        (hex & 0xff) as f32 / 255.0,
+        1.0,
+    ]
+}
+
 pub fn push_tooltip(
     elements: &mut Vec<MenuElement>,
     cursor: (f32, f32),

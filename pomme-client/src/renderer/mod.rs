@@ -27,6 +27,7 @@ use pipelines::block_entity::BlockEntityPipeline;
 pub use pipelines::block_entity::BlockEntityRenderInfo;
 use pipelines::block_overlay::BlockOverlayPipeline;
 use pipelines::blur::BlurPipeline;
+use pipelines::book_preview::BookPreviewPipeline;
 use pipelines::chunk::ChunkPipeline;
 use pipelines::clouds::CloudPipeline;
 use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
@@ -67,6 +68,32 @@ pub struct PlayerPreview {
     pub cursor: (f32, f32),
 }
 
+/// The enchanting table's 3D book box: where to draw it and the
+/// partial-tick-interpolated animation inputs.
+#[derive(Clone, Copy)]
+pub struct BookPreview {
+    pub rect: [f32; 4],
+    pub gui_scale: f32,
+    pub open: f32,
+    pub flip: f32,
+}
+
+/// A GUI preview box's `[x, y, w, h]` clamped to the swapchain, as the scissor
+/// rect its 3D content draws within; None when fully off screen.
+fn preview_box_rect(rect: [f32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> {
+    let x0 = rect[0].max(0.0) as i32;
+    let y0 = rect[1].max(0.0) as i32;
+    let w = (rect[2] as u32).min(extent.width.saturating_sub(x0 as u32));
+    let h = (rect[3] as u32).min(extent.height.saturating_sub(y0 as u32));
+    (w > 0 && h > 0).then_some(vk::Rect2D {
+        offset: vk::Offset2D { x: x0, y: y0 },
+        extent: vk::Extent2D {
+            width: w,
+            height: h,
+        },
+    })
+}
+
 // Constructed once per frame and consumed immediately, never stored.
 #[allow(clippy::large_enum_variant)]
 enum RenderMode<'a> {
@@ -86,6 +113,7 @@ enum RenderMode<'a> {
         cloud_mode: CloudMode,
         render_distance: u32,
         player_preview: Option<PlayerPreview>,
+        book_preview: Option<BookPreview>,
         eyes_in_water: bool,
     },
     MainMenu {
@@ -124,6 +152,7 @@ pub struct Renderer {
     menu_pipeline: MenuOverlayPipeline,
     blur_pipeline: BlurPipeline,
     skin_preview: SkinPreviewPipeline,
+    book_preview: BookPreviewPipeline,
     chunk_border_pipeline: ChunkBorderPipeline,
     item_entity_pipeline: ItemEntityPipeline,
     held_item_pipeline: pipelines::held_item::HeldItemPipeline,
@@ -305,6 +334,16 @@ impl Renderer {
             hand_pipeline.skin_sampler(),
         );
 
+        let book_preview = BookPreviewPipeline::new(
+            &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            jar_assets_dir,
+            asset_index,
+        );
+
         let blur_pipeline = BlurPipeline::new(
             &ctx.device,
             ctx.graphics_queue,
@@ -422,6 +461,7 @@ impl Renderer {
             menu_pipeline,
             blur_pipeline,
             skin_preview,
+            book_preview,
             entity_renderer,
             block_entity_pipeline,
             chunk_border_pipeline,
@@ -662,6 +702,8 @@ impl Renderer {
         self.menu_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.skin_preview
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.book_preview
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.entity_renderer
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
@@ -978,6 +1020,7 @@ impl Renderer {
         cloud_mode: CloudMode,
         render_distance: u32,
         player_preview: Option<PlayerPreview>,
+        book_preview: Option<BookPreview>,
         eyes_in_water: bool,
     ) -> Result<(), RendererError> {
         let held_item = held_item.map(|(name, light)| {
@@ -1017,6 +1060,7 @@ impl Renderer {
                 cloud_mode,
                 render_distance,
                 player_preview,
+                book_preview,
                 eyes_in_water,
             },
         )
@@ -1181,6 +1225,11 @@ impl Renderer {
 
     pub fn menu_text_width(&self, text: &str, scale: f32) -> f32 {
         self.menu_pipeline.text_width(text, scale)
+    }
+
+    /// Menu text width in the SGA (`minecraft:alt`) glyphs.
+    pub fn menu_text_width_sga(&self, text: &str, scale: f32) -> f32 {
+        self.menu_pipeline.mc_text_width_sga(text, scale)
     }
 
     /// Builds the item mesh if needed; returns whether it has a 3D model
@@ -1489,6 +1538,7 @@ impl Renderer {
                 cloud_mode,
                 render_distance,
                 player_preview,
+                book_preview,
                 eyes_in_water,
             } => {
                 // Vanilla water fog hides the sky dome and clouds; the framebuffer
@@ -1629,31 +1679,34 @@ impl Renderer {
                 self.menu_pipeline
                     .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
 
-                if let Some(p) = player_preview {
-                    let x0 = p.rect[0].max(0.0) as i32;
-                    let y0 = p.rect[1].max(0.0) as i32;
-                    let w = (p.rect[2] as u32)
-                        .min(self.swapchain.extent.width.saturating_sub(x0 as u32));
-                    let h = (p.rect[3] as u32)
-                        .min(self.swapchain.extent.height.saturating_sub(y0 as u32));
-                    if w > 0 && h > 0 {
-                        let rect = vk::Rect2D {
-                            offset: vk::Offset2D { x: x0, y: y0 },
-                            extent: vk::Extent2D {
-                                width: w,
-                                height: h,
-                            },
-                        };
-                        let clear_rect = vk::ClearRect {
-                            rect,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        };
-                        cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
-                        cmd.set_scissor(0, &[rect]);
-                        self.skin_preview.draw_in_box(cmd, frame, *p, sw, sh);
-                        cmd.set_scissor(0, &[scissor]);
-                    }
+                // Each preview box gets its depth cleared and its own scissor
+                // while the 3D content draws.
+                if let Some(p) = player_preview
+                    && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
+                {
+                    let clear_rect = vk::ClearRect {
+                        rect,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    };
+                    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
+                    cmd.set_scissor(0, &[rect]);
+                    self.skin_preview.draw_in_box(cmd, frame, *p, sw, sh);
+                    cmd.set_scissor(0, &[scissor]);
+                }
+
+                if let Some(p) = book_preview
+                    && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
+                {
+                    let clear_rect = vk::ClearRect {
+                        rect,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    };
+                    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
+                    cmd.set_scissor(0, &[rect]);
+                    self.book_preview.draw_in_box(cmd, frame, *p, sw, sh);
+                    cmd.set_scissor(0, &[scissor]);
                 }
 
                 self.last_timings.cull_ms = cull_ms;
@@ -1947,6 +2000,8 @@ impl Drop for Renderer {
         self.blur_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.skin_preview
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.book_preview
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.entity_renderer
             .destroy(&self.ctx.device, &self.ctx.allocator);

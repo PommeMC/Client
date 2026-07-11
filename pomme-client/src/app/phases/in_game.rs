@@ -47,6 +47,7 @@ pub enum ContainerScreen {
     Chest { rows: u8 },
     ShulkerBox,
     Anvil,
+    Enchantment,
 }
 
 impl ContainerScreen {
@@ -58,6 +59,7 @@ impl ContainerScreen {
             Self::Chest { rows } => ContainerKind::Chest { rows },
             Self::ShulkerBox => ContainerKind::ShulkerBox,
             Self::Anvil => ContainerKind::Anvil,
+            Self::Enchantment => ContainerKind::Enchantment,
         }
     }
 }
@@ -71,10 +73,14 @@ pub struct OpenContainer {
     /// by the player inventory.
     pub slots: Vec<azalea_inventory::ItemStack>,
     /// The menu's data values (`ClientboundContainerSetData`), e.g. furnace
-    /// lit/cook progress or the anvil repair cost.
-    pub data: [u16; 4],
+    /// lit/cook progress or the anvil repair cost. Vanilla data slots are
+    /// shorts; the enchanting table uses all 10 (costs, seed, clues) with -1
+    /// sentinels, so values are kept sign-extended.
+    pub data: [i16; 10],
     /// The anvil rename field's state; Some only for the anvil screen.
     pub anvil: Option<crate::ui::anvil::AnvilState>,
+    /// The book animation's state; Some only for the enchantment screen.
+    pub enchant: Option<crate::ui::enchantment::EnchantState>,
     /// This menu's latest server state id, echoed in container clicks.
     pub state_id: u32,
 }
@@ -1063,6 +1069,14 @@ pub fn update_game(
         game.item_entity_store.tick(&game.chunk_store);
         game.particle_store.tick(&game.chunk_store);
         game.block_entity_anim.tick();
+        if let Some(c) = &mut game.open_container
+            && let Some(state) = &mut c.enchant
+        {
+            state.tick(&c.slots, &c.data);
+            // Vanilla `EnchantmentScreen.containerTick` keeps the XP bar
+            // prioritized while the screen is open.
+            game.xp_display_start_tick = game.tick_count as i64;
+        }
         core.tick_accumulator -= TICK_RATE;
     }
 
@@ -1579,10 +1593,12 @@ pub fn update_game(
     }
 
     let mut player_preview = None;
+    let mut book_preview = None;
     if game.inventory_open || game.open_container.is_some() {
         let input = crate::ui::container::ContainerInput {
             left_pressed: core.input.left_just_pressed(),
             right_pressed: core.input.right_just_pressed(),
+            middle_pressed: core.input.middle_just_pressed(),
             left_held: core.input.left_held(),
             right_held: core.input.right_held(),
             shift: core.input.shift_held(),
@@ -1623,7 +1639,7 @@ pub fn update_game(
                     &input,
                     variant,
                     &container.slots,
-                    container.data,
+                    &container.data,
                     &container.title,
                     &game.cursor_item,
                     &mut game.inv_drag,
@@ -1665,7 +1681,7 @@ pub fn update_game(
                     core.input.cursor_pos(),
                     &input,
                     &container.slots,
-                    container.data,
+                    &container.data,
                     &container.title,
                     container.anvil.as_ref().expect("anvil screen has state"),
                     game.player.experience_level,
@@ -1676,7 +1692,46 @@ pub fn update_game(
                     gs,
                     &|t, s| gfx.renderer.menu_text_width(t, s),
                 ),
+                ContainerScreen::Enchantment => {
+                    let result = crate::ui::enchantment::build_enchantment(
+                        &mut elements,
+                        sw,
+                        sh,
+                        core.input.cursor_pos(),
+                        &input,
+                        &container.slots,
+                        &container.data,
+                        &container.title,
+                        container
+                            .enchant
+                            .as_ref()
+                            .expect("enchantment screen has state"),
+                        partial_tick,
+                        &game.registries,
+                        game.player.experience_level,
+                        crate::player::is_creative(game.player.game_mode),
+                        &game.cursor_item,
+                        &mut game.inv_drag,
+                        &mut game.inv_last_click,
+                        gs,
+                        &|t, s| gfx.renderer.menu_text_width(t, s),
+                        &|t, s| gfx.renderer.menu_text_width_sga(t, s),
+                    );
+                    book_preview = Some(result.book);
+                    result.container
+                }
             };
+            if let Some(button_id) = result.button {
+                use azalea_protocol::packets::game::s_container_button_click::ServerboundContainerButtonClick;
+                connection
+                    .packet_tx
+                    .send(ServerboundGamePacket::ContainerButtonClick(
+                        ServerboundContainerButtonClick {
+                            container_id: container.id,
+                            button_id,
+                        },
+                    ));
+            }
             (result.clicked_outside, result.ops)
         } else {
             let result = crate::ui::inventory::build_inventory(
@@ -1981,6 +2036,7 @@ pub fn update_game(
         },
         effective_rd,
         player_preview,
+        book_preview,
         game.player.eyes_in_water,
     ) {
         tracing::error!("Render error: {e}");

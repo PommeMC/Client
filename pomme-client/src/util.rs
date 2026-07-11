@@ -20,6 +20,16 @@ impl JavaRandom {
         rng
     }
 
+    /// A time-seeded instance, for vanilla's unseeded `RandomSource.create()`
+    /// uses where the exact sequence doesn't matter.
+    pub fn from_time() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as i64 + d.as_secs() as i64)
+            .unwrap_or(0);
+        Self::new(nanos)
+    }
+
     /// Matches `Random.setSeed`: scrambles with the multiplier before use.
     pub fn set_seed(&mut self, seed: i64) {
         self.seed = (seed as u64 ^ Self::MULTIPLIER) & Self::MASK;

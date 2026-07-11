@@ -320,6 +320,7 @@ impl ChatState {
                 spans: faded,
                 scale: fs,
                 centered: false,
+                shadow: true,
             });
         }
 
@@ -573,6 +574,7 @@ fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
                 italic: st.italic,
                 strikethrough: st.strikethrough,
                 underline: st.underline,
+                sga: false,
             });
             last_style = Some(st);
         }

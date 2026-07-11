@@ -11,7 +11,7 @@ use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
 
 use super::common::{
-    self, FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_slot,
+    self, FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_slot, rgb,
 };
 use super::creative_tab_data::{
     BUILDING_BLOCKS_ITEMS, COLORED_BLOCKS_ITEMS, COMBAT_ITEMS, FOOD_AND_DRINKS_ITEMS,
@@ -730,15 +730,6 @@ struct DragPreview {
     remainder: i32,
 }
 
-const fn rgb(hex: u32) -> [f32; 4] {
-    [
-        ((hex >> 16) & 0xff) as f32 / 255.0,
-        ((hex >> 8) & 0xff) as f32 / 255.0,
-        (hex & 0xff) as f32 / 255.0,
-        1.0,
-    ]
-}
-
 const TOOLTIP_NAME_COLOR: [f32; 4] = rgb(0xFFFFFF);
 const TOOLTIP_TAB_COLOR: [f32; 4] = rgb(0x5555FF);
 const TOOLTIP_ADVANCED_COLOR: [f32; 4] = rgb(0x555555);
@@ -841,18 +832,18 @@ fn lore_lines(data: &ItemStackData) -> Vec<TooltipLine> {
             .or_else(|| get_default_component::<MaxDamage>(data.kind).map(|m| m.amount))
             .unwrap_or(0);
         if max > 0 {
-            lines.push(TooltipLine {
-                text: format!("Durability: {} / {}", max - damage.amount, max),
-                color: TOOLTIP_LORE_COLOR,
-            });
+            lines.push(TooltipLine::new(
+                format!("Durability: {} / {}", max - damage.amount, max),
+                TOOLTIP_LORE_COLOR,
+            ));
         }
     }
     if let Some(ench) = data.component_patch.get::<Enchantments>() {
         for (enchantment, level) in &ench.levels {
-            lines.push(TooltipLine {
-                text: format!("{:?} {}", enchantment, roman(*level)),
-                color: TOOLTIP_LORE_COLOR,
-            });
+            lines.push(TooltipLine::new(
+                format!("{:?} {}", enchantment, roman(*level)),
+                TOOLTIP_LORE_COLOR,
+            ));
         }
     }
     lines
@@ -898,26 +889,23 @@ fn tabs_containing(kind: ItemKind) -> &'static [&'static str] {
 fn build_item_tooltip_lines(data: &ItemStackData, advanced: bool) -> Vec<TooltipLine> {
     let kind = data.kind;
     let mut lines = Vec::new();
-    lines.push(TooltipLine {
-        text: item_display_name(kind),
-        color: rarity_color(kind),
-    });
+    lines.push(TooltipLine::new(
+        item_display_name(kind),
+        rarity_color(kind),
+    ));
     lines.extend(lore_lines(data));
     for &title in tabs_containing(kind) {
-        lines.push(TooltipLine {
-            text: title.to_string(),
-            color: TOOLTIP_TAB_COLOR,
-        });
+        lines.push(TooltipLine::new(title.to_string(), TOOLTIP_TAB_COLOR));
     }
     if advanced {
-        lines.push(TooltipLine {
-            text: format!("minecraft:{}", item_resource_name(kind)),
-            color: TOOLTIP_ADVANCED_COLOR,
-        });
-        lines.push(TooltipLine {
-            text: format!("{} component(s)", total_component_count(data)),
-            color: TOOLTIP_ADVANCED_COLOR,
-        });
+        lines.push(TooltipLine::new(
+            format!("minecraft:{}", item_resource_name(kind)),
+            TOOLTIP_ADVANCED_COLOR,
+        ));
+        lines.push(TooltipLine::new(
+            format!("{} component(s)", total_component_count(data)),
+            TOOLTIP_ADVANCED_COLOR,
+        ));
     }
     lines
 }
