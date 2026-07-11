@@ -8,13 +8,13 @@ use azalea_protocol::packets::login::s_hello::ServerboundHello;
 use azalea_protocol::packets::login::s_key::ServerboundKey;
 use azalea_protocol::packets::login::s_login_acknowledged::ServerboundLoginAcknowledged;
 use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
-use azalea_protocol::read::ReadPacketError;
+use azalea_protocol::read::{ReadPacketError, deserialize_packet};
 use crossbeam_channel::Sender;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
 use super::NetworkEvent;
-use super::handler::handle_game_packet;
+use super::handler::{handle_game_packet, handle_raw_game_packet};
 use super::sender::PacketSender;
 
 #[derive(Error, Debug)]
@@ -523,14 +523,21 @@ async fn game_loop(
     let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
 
     loop {
-        match reader.read().await {
+        let raw = match reader.raw.read().await {
+            Ok(raw) => raw,
+            Err(e) => {
+                skip_malformed_packet(e)?;
+                continue;
+            }
+        };
+        if handle_raw_game_packet(&raw, event_tx) {
+            continue;
+        }
+        match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
             Ok(packet) => {
                 handle_game_packet(&packet, &sender, event_tx, &registry_holder, &shared_tree)
             }
-            Err(e) if is_recoverable_read_error(&e) => {
-                tracing::warn!("Skipping malformed packet: {e}");
-            }
-            Err(e) => return Err(e.into()),
+            Err(e) => skip_malformed_packet(e)?,
         }
     }
 }
@@ -554,13 +561,18 @@ async fn write_game_packet(
     writer.write(packet).await
 }
 
-fn is_recoverable_read_error(err: &ReadPacketError) -> bool {
-    matches!(
-        err,
+/// Recoverable decode errors skip the packet; anything else tears down the
+/// connection.
+fn skip_malformed_packet(err: Box<ReadPacketError>) -> Result<(), ConnectionError> {
+    match &*err {
         ReadPacketError::Parse { .. }
-            | ReadPacketError::UnknownPacketId { .. }
-            | ReadPacketError::LeftoverData { .. }
-    )
+        | ReadPacketError::UnknownPacketId { .. }
+        | ReadPacketError::LeftoverData { .. } => {
+            tracing::warn!("Skipping malformed packet: {err}");
+            Ok(())
+        }
+        _ => Err(err.into()),
+    }
 }
 
 fn friendly_error_reason(err: &ConnectionError) -> String {

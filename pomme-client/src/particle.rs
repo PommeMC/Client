@@ -40,6 +40,13 @@ enum Kind {
     EndRod,
 }
 
+impl Kind {
+    /// Vanilla `SingleQuadParticle.getLayer`.
+    fn translucent(&self) -> bool {
+        matches!(self, Kind::EndRod)
+    }
+}
+
 pub struct Particle {
     kind: Kind,
     /// Bounding-box bottom-center, like vanilla `Particle.setPos`.
@@ -245,17 +252,20 @@ pub const END_ROD_SPRITES: [&str; 8] = [
     "particle/glitter_0",
 ];
 
-/// Server-sent particle types pomme implements. `from_azalea` returning
-/// `None` drops the packet in the network handler, before the event channel.
+/// Server-sent particle types pomme implements. `from_id` returning `None`
+/// drops the packet in the network handler, before the event channel.
 #[derive(Clone, Copy, Debug)]
 pub enum ServerParticleKind {
     EndRod,
 }
 
 impl ServerParticleKind {
-    pub fn from_azalea(particle: &azalea_entity::particle::Particle) -> Option<Self> {
-        match particle {
-            azalea_entity::particle::Particle::EndRod => Some(Self::EndRod),
+    /// Maps a particle registry id (`ParticleTypes` registration order in the
+    /// 26.2 reference; ids shift between versions). Pomme owns this mapping
+    /// because azalea's particle wire enum is out of sync with the registry.
+    pub fn from_id(id: u32) -> Option<Self> {
+        match id {
+            27 => Some(Self::EndRod),
             _ => None,
         }
     }
@@ -545,7 +555,7 @@ impl ParticleStore {
                         channel(p.color[2]),
                         (p.alpha * 255.0).round() as u8,
                     ]),
-                    translucent: matches!(p.kind, Kind::EndRod),
+                    translucent: p.kind.translucent(),
                 }
             })
             .collect()
