@@ -31,16 +31,22 @@ pub async fn resolve_candidates(server: &ServerAddr) -> Result<Vec<SocketAddr>, 
         return Ok(candidates);
     }
 
-    // Bound azalea's SRV-aware resolution so a stalled SRV lookup can't hold
-    // the connection hostage; the system resolver runs concurrently as a
-    // fallback (it also covers `localhost`, which hickory can end up sending
-    // to DNS on Windows).
+    // Bound both lookups so a stalled resolver can't hold the connection
+    // hostage. The system resolver runs concurrently as a fallback; it also
+    // covers `localhost`, which hickory can end up sending to DNS on Windows.
     let (primary, extra) = tokio::join!(
         tokio::time::timeout(Duration::from_secs(2), resolve_address(server)),
-        tokio::net::lookup_host((server.host.as_str(), server.port)),
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host((server.host.as_str(), server.port)),
+        ),
     );
     let primary = primary.unwrap_or_else(|_| Err(ResolveError::from("resolution timed out")));
-    let extra: Vec<SocketAddr> = extra.map(Iterator::collect).unwrap_or_default();
+    let extra: Vec<SocketAddr> = extra
+        .ok()
+        .and_then(Result::ok)
+        .map(Iterator::collect)
+        .unwrap_or_default();
 
     match primary {
         Ok(addr) => push_with_nat64(&mut candidates, addr),
