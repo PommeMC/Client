@@ -300,7 +300,13 @@ pub fn bake_baby_pig_model() -> BakedEntityModel {
     bake_model(parts, 32, 32)
 }
 
-pub fn bake_player_model() -> BakedEntityModel {
+/// `slim` is the 3px-wide-arm (Alex) layout; same texture offsets and pivots,
+/// only the arm boxes differ.
+// TODO: jacket/sleeve/pants overlay layers (only the hat is modeled here).
+// TODO: default-skin-by-UUID selection for players without a fetched skin.
+pub fn bake_player_model(slim: bool) -> BakedEntityModel {
+    let arm_w = if slim { 3.0 } else { 4.0 };
+    let right_arm_ox = if slim { -2.0 } else { -3.0 };
     let parts = vec![
         EntityPart {
             name: "head".into(),
@@ -343,8 +349,8 @@ pub fn bake_player_model() -> BakedEntityModel {
             offset: Vec3::new(-5.0, 2.0, 0.0),
             default_rotation: Vec3::ZERO,
             cubes: vec![ModelCube {
-                origin: Vec3::new(-3.0, -2.0, -2.0),
-                size: Vec3::new(4.0, 12.0, 4.0),
+                origin: Vec3::new(right_arm_ox, -2.0, -2.0),
+                size: Vec3::new(arm_w, 12.0, 4.0),
                 tex_offset: (40, 16),
                 deformation: 0.0,
                 mirror: false,
@@ -357,7 +363,7 @@ pub fn bake_player_model() -> BakedEntityModel {
             default_rotation: Vec3::ZERO,
             cubes: vec![ModelCube {
                 origin: Vec3::new(-1.0, -2.0, -2.0),
-                size: Vec3::new(4.0, 12.0, 4.0),
+                size: Vec3::new(arm_w, 12.0, 4.0),
                 tex_offset: (32, 48),
                 deformation: 0.0,
                 mirror: false,

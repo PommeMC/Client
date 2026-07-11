@@ -7,7 +7,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, SkinData, shader, util};
 const NEAR: f32 = 0.05;
 const FAR: f32 = 10.0;
 
@@ -163,16 +163,9 @@ impl HandPipeline {
 
         update_skin_descriptor(device, skin_set, skin_view, skin_sampler);
 
-        let vertices = build_arm_vertices(skin_w, skin_h);
-        let vertex_count = vertices.len() as u32;
-        let vertex_bytes = bytemuck::cast_slice::<HandVertex, u8>(&vertices);
-        let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
-            device,
-            allocator,
-            vertex_bytes,
-            vk::BufferUsageFlags::VertexBuffer,
-            "hand_vertices",
-        );
+        // Wide arms until the profile's skin (and its model flag) is fetched.
+        let (vertex_buffer, vertex_allocation, vertex_count) =
+            create_arm_vertex_buffer(device, allocator, skin_w, skin_h, false);
 
         tracing::info!(
             "Hand pipeline initialized ({vertex_count} vertices, skin {skin_w}x{skin_h})"
@@ -261,25 +254,22 @@ impl HandPipeline {
         self.skin_sampler
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn reload_skin(
         &mut self,
         device: &vk::Device,
         queue: vk::Queue,
         command_pool: vk::CommandPool,
         allocator: &Arc<Mutex<Allocator>>,
-        pixels: &[u8],
-        width: u32,
-        height: u32,
+        skin: &SkinData,
     ) {
         let (image, view, allocation) = upload_skin_to_gpu(
             device,
             queue,
             command_pool,
             allocator,
-            pixels,
-            width,
-            height,
+            &skin.pixels,
+            skin.width,
+            skin.height,
         );
 
         device.destroy_image_view(self.skin_view, None);
@@ -297,7 +287,26 @@ impl HandPipeline {
         self.skin_allocation = allocation;
         update_skin_descriptor(device, self.skin_set, self.skin_view, self.skin_sampler);
 
-        tracing::info!("Skin reloaded: {width}x{height}");
+        device.destroy_buffer(self.vertex_buffer, None);
+        allocator
+            .lock()
+            .unwrap()
+            .free(std::mem::replace(&mut self.vertex_allocation, unsafe {
+                std::mem::zeroed()
+            }))
+            .ok();
+        let (vertex_buffer, vertex_allocation, vertex_count) =
+            create_arm_vertex_buffer(device, allocator, skin.width, skin.height, skin.slim);
+        self.vertex_buffer = vertex_buffer;
+        self.vertex_allocation = vertex_allocation;
+        self.vertex_count = vertex_count;
+
+        tracing::info!(
+            "Skin reloaded: {}x{} (slim: {})",
+            skin.width,
+            skin.height,
+            skin.slim
+        );
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
@@ -354,23 +363,43 @@ pub(super) fn projection(aspect: f32) -> Mat4 {
     proj
 }
 
-fn build_arm_vertices(skin_w: u32, skin_h: u32) -> Vec<HandVertex> {
+fn create_arm_vertex_buffer(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    skin_w: u32,
+    skin_h: u32,
+    slim: bool,
+) -> (vk::Buffer, Allocation, u32) {
+    let vertices = build_arm_vertices(skin_w, skin_h, slim);
+    let vertex_bytes = bytemuck::cast_slice::<HandVertex, u8>(&vertices);
+    let (buffer, allocation) = util::create_mapped_buffer(
+        device,
+        allocator,
+        vertex_bytes,
+        vk::BufferUsageFlags::VertexBuffer,
+        "hand_vertices",
+    );
+    (buffer, allocation, vertices.len() as u32)
+}
+
+fn build_arm_vertices(skin_w: u32, skin_h: u32, slim: bool) -> Vec<HandVertex> {
     let sw = skin_w as f32;
     let sh = skin_h as f32;
 
-    // Vanilla addBox(-3, -2, -2, 4, 12, 4) scaled to blocks (1/16).
+    // Vanilla right arm addBox(-3, -2, -2, 4, 12, 4), or the slim layout's
+    // addBox(-2, -2, -2, 3, 12, 4), scaled to blocks (1/16).
     // Model space is Y-down: y0 is the shoulder end, y1 the hand end.
-    let x0: f32 = -3.0 / 16.0;
-    let x1: f32 = 1.0 / 16.0;
+    let w = if slim { 3.0 } else { 4.0 };
+    let x0: f32 = if slim { -2.0 } else { -3.0 } / 16.0;
+    let x1: f32 = x0 + w / 16.0;
     let y0: f32 = -2.0 / 16.0;
     let y1: f32 = 10.0 / 16.0;
     let z0: f32 = -2.0 / 16.0;
     let z1: f32 = 2.0 / 16.0;
 
-    // texOffs(40, 16) on Steve skin, box dimensions w=4 h=12 d=4
+    // texOffs(40, 16), box dimensions h=12 d=4
     let u0 = 40.0;
     let v0 = 16.0;
-    let w = 4.0;
     let h = 12.0;
     let d = 4.0;
 

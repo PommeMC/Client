@@ -319,6 +319,7 @@ fn atlas_dirty(count: usize, last: &mut usize, since: &mut Option<Instant>) -> b
 
 pub struct MainMenu {
     username: String,
+    version: String,
     screen: Screen,
     server_list: ServerList,
     selected_server: Option<usize>,
@@ -406,6 +407,7 @@ impl MainMenu {
         game_dir: &Path,
         rt: Arc<tokio::runtime::Runtime>,
         username: String,
+        version: String,
         access_token: Option<String>,
     ) -> Self {
         let server_list = ServerList::load(game_dir);
@@ -414,6 +416,7 @@ impl MainMenu {
         let settings = load_settings(game_dir);
         Self {
             username,
+            version,
             screen: Screen::Main,
             server_list,
             selected_server: None,

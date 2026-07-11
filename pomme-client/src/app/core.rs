@@ -40,7 +40,7 @@ pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::P
 struct PlayerSkinResult {
     uuid: uuid::Uuid,
     textures: Option<String>,
-    result: Result<(Vec<u8>, u32, u32), String>,
+    result: Result<crate::renderer::SkinData, String>,
 }
 
 /// Queues `pos` and its already-loaded mesh neighborhood (de-duplicated): when
@@ -150,6 +150,7 @@ impl AppCore {
             &data_dirs.game_dir,
             Arc::clone(&tokio_rt),
             user.username.clone(),
+            version.clone(),
             user.access_token.clone(),
         );
 
@@ -288,8 +289,8 @@ impl AppCore {
                 continue;
             }
             match skin.result {
-                Ok((pixels, width, height)) => {
-                    renderer.update_player_entity_skin(&skin.uuid, &pixels, width, height);
+                Ok(data) => {
+                    renderer.update_player_entity_skin(&skin.uuid, &data);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load entity player skin for {}: {e}", skin.uuid)

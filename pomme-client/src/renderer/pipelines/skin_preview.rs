@@ -55,6 +55,7 @@ impl SkinPreviewPipeline {
         allocator: &Arc<Mutex<Allocator>>,
         skin_view: vk::ImageView,
         skin_sampler: vk::Sampler,
+        slim: bool,
     ) -> Self {
         let mvp_layout = util::create_descriptor_set_layout(
             device,
@@ -238,7 +239,7 @@ impl SkinPreviewPipeline {
         };
         device.update_descriptor_sets(&[tex_write], &[]);
 
-        let body_verts = build_body_mesh();
+        let body_verts = build_body_mesh(slim);
         let body_bytes = bytemuck::cast_slice(&body_verts);
         let (body_buffer, body_allocation) = util::create_mapped_buffer(
             device,
@@ -248,7 +249,7 @@ impl SkinPreviewPipeline {
             "skin_body",
         );
 
-        let arm_verts = build_right_arm_mesh();
+        let arm_verts = build_right_arm_mesh(slim);
         let arm_bytes = bytemuck::cast_slice(&arm_verts);
         let (arm_buffer, arm_allocation) = util::create_mapped_buffer(
             device,
@@ -781,9 +782,11 @@ fn build_head_mesh() -> Vec<Vertex> {
     v
 }
 
-fn build_body_mesh() -> Vec<Vertex> {
+fn build_body_mesh(slim: bool) -> Vec<Vertex> {
     let mut v = Vec::new();
     let e = 0.25; // overlay inflation for body/limbs
+    let arm_tw: u32 = if slim { 3 } else { 4 };
+    let arm_w = arm_tw as f32;
 
     // Body: addBox(-4, 0, -2, 8, 12, 4) @ (0, 0, 0), UV (16, 16)
     add_box(
@@ -808,9 +811,9 @@ fn build_body_mesh() -> Vec<Vertex> {
         4,
     );
 
-    // Left arm: addBox(-1, -2, -2, 4, 12, 4) @ (5, 2, 0), UV (32, 48)
+    // Left arm: addBox(-1, -2, -2, 4|3, 12, 4) @ (5, 2, 0), UV (32, 48)
     add_box(
-        &mut v, 5.0, 2.0, 0.0, -1.0, -2.0, -2.0, 4.0, 12.0, 4.0, 32, 48, 4, 12, 4,
+        &mut v, 5.0, 2.0, 0.0, -1.0, -2.0, -2.0, arm_w, 12.0, 4.0, 32, 48, arm_tw, 12, 4,
     );
     // Left sleeve overlay: UV (48, 48)
     add_box(
@@ -821,12 +824,12 @@ fn build_body_mesh() -> Vec<Vertex> {
         -1.0 - e,
         -2.0 - e,
         -2.0 - e,
-        4.0 + e * 2.0,
+        arm_w + e * 2.0,
         12.0 + e * 2.0,
         4.0 + e * 2.0,
         48,
         48,
-        4,
+        arm_tw,
         12,
         4,
     );
@@ -879,26 +882,31 @@ fn build_body_mesh() -> Vec<Vertex> {
     v
 }
 
-fn build_right_arm_mesh() -> Vec<Vertex> {
+fn build_right_arm_mesh(slim: bool) -> Vec<Vertex> {
     let mut v = Vec::new();
     let e = 0.25;
+    let arm_tw: u32 = if slim { 3 } else { 4 };
+    let arm_w = arm_tw as f32;
+    let ox = if slim { -2.0 } else { -3.0 };
+    // Right arm: addBox(-3|-2, -2, -2, 4|3, 12, 4) @ (-5, 2, 0), UV (40, 16)
     add_box(
-        &mut v, -5.0, 2.0, 0.0, -3.0, -2.0, -2.0, 4.0, 12.0, 4.0, 40, 16, 4, 12, 4,
+        &mut v, -5.0, 2.0, 0.0, ox, -2.0, -2.0, arm_w, 12.0, 4.0, 40, 16, arm_tw, 12, 4,
     );
+    // Right sleeve overlay: UV (40, 32)
     add_box(
         &mut v,
         -5.0,
         2.0,
         0.0,
-        -3.0 - e,
+        ox - e,
         -2.0 - e,
         -2.0 - e,
-        4.0 + e * 2.0,
+        arm_w + e * 2.0,
         12.0 + e * 2.0,
         4.0 + e * 2.0,
         40,
         32,
-        4,
+        arm_tw,
         12,
         4,
     );

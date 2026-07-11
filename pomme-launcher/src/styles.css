@@ -366,7 +366,8 @@ body {
   height: 28px;
   border-radius: 4px;
   image-rendering: pixelated;
-  background-size: 800% 800%;
+  /* auto height keeps legacy 64x32 skins from stretching to a square */
+  background-size: 800% auto;
   background-position: -28px -28px;
   background-color: #555;
 }
@@ -622,7 +623,7 @@ body {
 .mc-head-sm {
   width: 24px;
   height: 24px;
-  background-size: 192px 192px;
+  background-size: 192px auto;
   background-position: -24px -24px;
 }
 

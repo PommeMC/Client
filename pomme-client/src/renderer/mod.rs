@@ -297,12 +297,14 @@ impl Renderer {
 
         splash(&mut menu_pipeline, 0.9, "Finalizing...");
 
+        // Wide arms until the profile's skin (and its model flag) is fetched.
         let skin_preview = SkinPreviewPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
             &ctx.allocator,
             hand_pipeline.skin_view(),
             hand_pipeline.skin_sampler(),
+            false,
         );
 
         let blur_pipeline = BlurPipeline::new(
@@ -1109,47 +1111,43 @@ impl Renderer {
 
     pub fn load_player_skin(&mut self, uuid: &uuid::Uuid, rt: &tokio::runtime::Runtime) {
         let uuid_str = uuid.to_string().replace('-', "");
-        let skin_pixels = rt.block_on(async { fetch_skin_texture(&uuid_str).await });
-        match skin_pixels {
-            Ok((pixels, w, h)) => {
+        let skin = rt.block_on(async { fetch_skin_texture(&uuid_str).await });
+        match skin {
+            Ok(skin) => {
+                // In-flight frames may still reference the old skin texture,
+                // hand mesh, and preview pipeline about to be destroyed.
+                let _ = self.ctx.device.wait_idle();
                 self.hand_pipeline.reload_skin(
                     &self.ctx.device,
                     self.ctx.graphics_queue,
                     self.ctx.command_pool,
                     &self.ctx.allocator,
-                    &pixels,
-                    w,
-                    h,
+                    &skin,
                 );
+                self.skin_preview
+                    .destroy(&self.ctx.device, &self.ctx.allocator);
                 self.skin_preview = SkinPreviewPipeline::new(
                     &self.ctx.device,
                     self.swapchain.render_pass,
                     &self.ctx.allocator,
                     self.hand_pipeline.skin_view(),
                     self.hand_pipeline.skin_sampler(),
+                    skin.slim,
                 );
-                self.update_player_entity_skin(uuid, &pixels, w, h);
+                self.update_player_entity_skin(uuid, &skin);
             }
             Err(e) => tracing::warn!("Failed to load player skin: {e}"),
         }
     }
 
-    pub fn update_player_entity_skin(
-        &mut self,
-        uuid: &uuid::Uuid,
-        pixels: &[u8],
-        width: u32,
-        height: u32,
-    ) {
+    pub fn update_player_entity_skin(&mut self, uuid: &uuid::Uuid, skin: &SkinData) {
         self.entity_renderer.update_player_skin(
             &self.ctx.device,
             self.ctx.graphics_queue,
             self.ctx.command_pool,
             &self.ctx.allocator,
             uuid,
-            pixels,
-            width,
-            height,
+            skin,
         );
     }
 
@@ -1845,7 +1843,16 @@ fn warm_item_meshes(
     }
 }
 
-pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<(Vec<u8>, u32, u32), String> {
+/// Decoded skin ready for upload: always a 64x64 RGBA sheet (legacy 64x32
+/// skins are converted), plus the profile's arm model.
+pub(crate) struct SkinData {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub slim: bool,
+}
+
+pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
     #[derive(serde::Deserialize)]
     struct SessionProfile {
         properties: Vec<ProfileProperty>,
@@ -1877,12 +1884,18 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<(Vec<u8>, u32, u32)
 
 pub(crate) async fn fetch_skin_texture_from_profile_property(
     value: &str,
-) -> Result<(Vec<u8>, u32, u32), String> {
-    let skin_url = skin_url_from_texture_property(value)?;
-    fetch_skin_image(&skin_url).await
+) -> Result<SkinData, String> {
+    let (skin_url, slim) = skin_url_from_texture_property(value)?;
+    let (pixels, width, height) = fetch_skin_image(&skin_url).await?;
+    Ok(SkinData {
+        pixels,
+        width,
+        height,
+        slim,
+    })
 }
 
-fn skin_url_from_texture_property(value: &str) -> Result<String, String> {
+fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String> {
     #[derive(serde::Deserialize)]
     struct TexturesPayload {
         textures: Textures,
@@ -1895,6 +1908,11 @@ fn skin_url_from_texture_property(value: &str) -> Result<String, String> {
     #[derive(serde::Deserialize)]
     struct SkinTexture {
         url: String,
+        metadata: Option<SkinMetadata>,
+    }
+    #[derive(serde::Deserialize)]
+    struct SkinMetadata {
+        model: Option<String>,
     }
 
     use base64::Engine;
@@ -1907,7 +1925,10 @@ fn skin_url_from_texture_property(value: &str) -> Result<String, String> {
     payload
         .textures
         .skin
-        .map(|s| s.url)
+        .map(|s| {
+            let slim = s.metadata.as_ref().and_then(|m| m.model.as_deref()) == Some("slim");
+            (s.url, slim)
+        })
         .ok_or_else(|| "No skin texture".to_string())
 }
 
@@ -1923,7 +1944,100 @@ async fn fetch_skin_image(skin_url: &str) -> Result<(Vec<u8>, u32, u32), String>
     let rgba = img.to_rgba8();
     let w = rgba.width();
     let h = rgba.height();
-    Ok((rgba.into_raw(), w, h))
+    process_legacy_skin(rgba.into_raw(), w, h)
+}
+
+const SKIN_W: u32 = 64;
+
+fn skin_px(x: u32, y: u32) -> usize {
+    ((y * SKIN_W + x) * 4) as usize
+}
+
+/// `SkinTextureDownloader.processLegacySkin`: rejects bad sizes, upgrades
+/// legacy 64x32 sheets to 64x64 by mirroring the right limbs into the modern
+/// left-limb slots, and applies the alpha fixups.
+fn process_legacy_skin(
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    if width != 64 || (height != 32 && height != 64) {
+        return Err(format!(
+            "Discarding incorrectly sized ({width}x{height}) skin texture"
+        ));
+    }
+    let legacy = height == 32;
+    let mut img = if legacy {
+        let mut full = vec![0u8; (SKIN_W * SKIN_W * 4) as usize];
+        full[..pixels.len()].copy_from_slice(&pixels);
+        full
+    } else {
+        pixels
+    };
+
+    if legacy {
+        // (x, y, dx, dy, w, h): mirror the right leg/arm into the left slots.
+        const COPIES: [(u32, u32, i32, i32, u32, u32); 12] = [
+            (4, 16, 16, 32, 4, 4),
+            (8, 16, 16, 32, 4, 4),
+            (0, 20, 24, 32, 4, 12),
+            (4, 20, 16, 32, 4, 12),
+            (8, 20, 8, 32, 4, 12),
+            (12, 20, 16, 32, 4, 12),
+            (44, 16, -8, 32, 4, 4),
+            (48, 16, -8, 32, 4, 4),
+            (40, 20, 0, 32, 4, 12),
+            (44, 20, -8, 32, 4, 12),
+            (48, 20, -16, 32, 4, 12),
+            (52, 20, -8, 32, 4, 12),
+        ];
+        for (x, y, dx, dy, w, h) in COPIES {
+            copy_rect_mirrored(&mut img, x, y, dx, dy, w, h);
+        }
+    }
+    set_no_alpha(&mut img, 0, 0, 32, 16);
+    if legacy {
+        strip_alpha_if_opaque(&mut img, 32, 0, 64, 32);
+    }
+    set_no_alpha(&mut img, 0, 16, 64, 32);
+    set_no_alpha(&mut img, 16, 48, 48, 64);
+    Ok((img, SKIN_W, SKIN_W))
+}
+
+/// `NativeImage.copyRect(x, y, dx, dy, w, h, true, false)`: copies the rect at
+/// (x, y) to (x + dx, y + dy) with each row written right-to-left.
+fn copy_rect_mirrored(img: &mut [u8], x: u32, y: u32, dx: i32, dy: i32, w: u32, h: u32) {
+    for row in 0..h {
+        for col in 0..w {
+            let src = skin_px(x + col, y + row);
+            let dst_x = (x as i32 + dx) as u32 + (w - 1 - col);
+            let dst_y = (y as i32 + dy) as u32 + row;
+            let dst = skin_px(dst_x, dst_y);
+            img.copy_within(src..src + 4, dst);
+        }
+    }
+}
+
+/// Forces the rect fully opaque (base layer regions never carry transparency).
+fn set_no_alpha(img: &mut [u8], x0: u32, y0: u32, x1: u32, y1: u32) {
+    for y in y0..y1 {
+        for x in x0..x1 {
+            img[skin_px(x, y) + 3] = 0xFF;
+        }
+    }
+}
+
+/// The "Notch transparency hack": a fully opaque hat region predates hat
+/// transparency, so strip its alpha entirely instead of drawing a solid box.
+fn strip_alpha_if_opaque(img: &mut [u8], x0: u32, y0: u32, x1: u32, y1: u32) {
+    let all_opaque = (y0..y1).all(|y| (x0..x1).all(|x| img[skin_px(x, y) + 3] >= 128));
+    if all_opaque {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                img[skin_px(x, y) + 3] = 0;
+            }
+        }
+    }
 }
 
 impl Drop for Renderer {
@@ -1993,7 +2107,10 @@ mod tests {
 
         assert_eq!(
             skin_url_from_texture_property(&value).unwrap(),
-            "https://textures.minecraft.net/texture/testskin"
+            (
+                "https://textures.minecraft.net/texture/testskin".into(),
+                false
+            )
         );
     }
 
@@ -2008,7 +2125,80 @@ mod tests {
 
         assert_eq!(
             skin_url_from_texture_property(value).unwrap(),
-            "https://textures.minecraft.net/texture/testskin"
+            (
+                "https://textures.minecraft.net/texture/testskin".into(),
+                false
+            )
         );
+    }
+
+    #[test]
+    fn decodes_slim_model_from_textures_property() {
+        use base64::Engine;
+
+        let payload = r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/testskin","metadata":{"model":"slim"}}}}"#;
+        let value = base64::engine::general_purpose::STANDARD.encode(payload);
+
+        assert_eq!(
+            skin_url_from_texture_property(&value).unwrap(),
+            (
+                "https://textures.minecraft.net/texture/testskin".into(),
+                true
+            )
+        );
+    }
+
+    fn set_px(img: &mut [u8], x: u32, y: u32, rgba: [u8; 4]) {
+        img[skin_px(x, y)..skin_px(x, y) + 4].copy_from_slice(&rgba);
+    }
+
+    fn get_px(img: &[u8], x: u32, y: u32) -> [u8; 4] {
+        img[skin_px(x, y)..skin_px(x, y) + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn rejects_incorrectly_sized_skins() {
+        assert!(process_legacy_skin(vec![0; 128 * 128 * 4], 128, 128).is_err());
+        assert!(process_legacy_skin(vec![0; 64 * 16 * 4], 64, 16).is_err());
+    }
+
+    #[test]
+    fn passes_64x64_skins_through() {
+        let mut img = vec![0u8; 64 * 64 * 4];
+        set_px(&mut img, 20, 50, [1, 2, 3, 200]);
+        let (out, w, h) = process_legacy_skin(img, 64, 64).unwrap();
+        assert_eq!((w, h), (64, 64));
+        // Base region alpha is forced opaque, rgb untouched.
+        assert_eq!(get_px(&out, 20, 50), [1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn converts_legacy_skins_to_64x64() {
+        let mut img = vec![0u8; 64 * 32 * 4];
+        // Right leg front, top-left pixel: (4, 20).
+        set_px(&mut img, 4, 20, [10, 20, 30, 255]);
+        // Right arm front, top-left pixel: (44, 20).
+        set_px(&mut img, 44, 20, [40, 50, 60, 255]);
+        let (out, w, h) = process_legacy_skin(img, 64, 32).unwrap();
+        assert_eq!((w, h), (64, 64));
+
+        // copyRect(4, 20, 16, 32, 4, 12, mirrored): left leg front spans
+        // x 20..24, and mirroring puts the source's left edge on the right.
+        assert_eq!(get_px(&out, 23, 52), [10, 20, 30, 255]);
+        // copyRect(44, 20, -8, 32, 4, 12, mirrored): left arm front x 36..40.
+        assert_eq!(get_px(&out, 39, 52), [40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn strips_alpha_of_fully_opaque_legacy_hat() {
+        let mut img = vec![0u8; 64 * 32 * 4];
+        for y in 0..32 {
+            for x in 32..64 {
+                set_px(&mut img, x, y, [9, 9, 9, 255]);
+            }
+        }
+        let (out, _, _) = process_legacy_skin(img, 64, 32).unwrap();
+        // A fully opaque hat region predates hat transparency: alpha stripped.
+        assert_eq!(get_px(&out, 40, 8)[3], 0);
     }
 }

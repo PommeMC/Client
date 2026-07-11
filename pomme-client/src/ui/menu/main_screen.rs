@@ -52,7 +52,9 @@ impl MainMenu {
             },
         ];
 
-        let s = (screen_h / 400.0).max(1.0);
+        // Clamp by width too: past this the panel width clamp would bind and
+        // text scaled by height alone would outgrow the panel.
+        let s = (screen_h / 400.0).max(1.0).min(screen_w * 0.4 / 260.0);
         let panel_w = (260.0 * s).min(screen_w * 0.4);
         let panel_pad = 28.0 * s;
         let panel_r = 14.0 * s;
@@ -492,7 +494,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: footer_pad,
             y: footer_y,
-            text: "1.21.11".into(),
+            text: self.version.clone(),
             scale: footer_size,
             color: footer_col,
             centered: false,

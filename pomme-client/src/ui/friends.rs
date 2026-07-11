@@ -151,10 +151,12 @@ pub fn refresh_friends(
                     }
                     let faces = Arc::clone(&faces);
                     rt.spawn(async move {
-                        if let Ok((rgba, w, h)) = crate::renderer::fetch_skin_texture(&uuid).await
+                        if let Ok(skin) = crate::renderer::fetch_skin_texture(&uuid).await
                             && let Some(face) =
                                 crate::renderer::pipelines::menu_overlay::extract_face_8x8(
-                                    &rgba, w, h,
+                                    &skin.pixels,
+                                    skin.width,
+                                    skin.height,
                                 )
                         {
                             faces.write().insert(uuid, face);

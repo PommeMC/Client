@@ -95,6 +95,7 @@ struct PlayerSkinTexture {
     view: vk::ImageView,
     allocation: Allocation,
     set: vk::DescriptorSet,
+    slim: bool,
 }
 
 impl MobEntry {
@@ -221,7 +222,7 @@ struct VariantDef {
 struct MobDef {
     kind: EntityKind,
     anim: AnimationType,
-    adult: VariantDef,
+    adult: Vec<VariantDef>,
     baby: Option<VariantDef>,
     adult_overlays: Vec<VariantDef>,
     baby_overlays: Vec<VariantDef>,
@@ -280,7 +281,7 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Pig,
             anim: AnimationType::Quadruped,
-            adult: opaque(entity_model::bake_pig_model(), PIG_ADULT_TEX, 64),
+            adult: vec![opaque(entity_model::bake_pig_model(), PIG_ADULT_TEX, 64)],
             baby: Some(opaque(
                 entity_model::bake_baby_pig_model(),
                 PIG_BABY_TEX,
@@ -292,7 +293,7 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Cow,
             anim: AnimationType::Quadruped,
-            adult: opaque(entity_model::bake_cow_model(), COW_ADULT_TEX, 64),
+            adult: vec![opaque(entity_model::bake_cow_model(), COW_ADULT_TEX, 64)],
             baby: Some(opaque(
                 entity_model::bake_baby_cow_model(),
                 COW_BABY_TEX,
@@ -304,7 +305,11 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Sheep,
             anim: AnimationType::Quadruped,
-            adult: opaque(entity_model::bake_sheep_model(), SHEEP_ADULT_TEX, 64),
+            adult: vec![opaque(
+                entity_model::bake_sheep_model(),
+                SHEEP_ADULT_TEX,
+                64,
+            )],
             baby: Some(opaque(
                 entity_model::bake_baby_sheep_model(),
                 SHEEP_BABY_TEX,
@@ -327,7 +332,12 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Player,
             anim: AnimationType::Humanoid,
-            adult: opaque(entity_model::bake_player_model(), PLAYER_TEX, 64),
+            // Variant 0 = classic (wide) arms, 1 = slim; picked per player from
+            // the skin's model metadata (effective_variant_index).
+            adult: vec![
+                opaque(entity_model::bake_player_model(false), PLAYER_TEX, 64),
+                opaque(entity_model::bake_player_model(true), PLAYER_TEX, 64),
+            ],
             baby: None,
             adult_overlays: vec![],
             baby_overlays: vec![],
@@ -335,7 +345,7 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Zombie,
             anim: AnimationType::Zombie,
-            adult: opaque(entity_model::bake_zombie_model(), ZOMBIE_TEX, 64),
+            adult: vec![opaque(entity_model::bake_zombie_model(), ZOMBIE_TEX, 64)],
             baby: Some(opaque(
                 entity_model::bake_baby_zombie_model(),
                 ZOMBIE_TEX,
@@ -347,7 +357,11 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Skeleton,
             anim: AnimationType::Skeleton,
-            adult: opaque(entity_model::bake_skeleton_model(), SKELETON_TEX, 64),
+            adult: vec![opaque(
+                entity_model::bake_skeleton_model(),
+                SKELETON_TEX,
+                64,
+            )],
             baby: None,
             adult_overlays: vec![],
             baby_overlays: vec![],
@@ -355,7 +369,7 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Creeper,
             anim: AnimationType::Quadruped,
-            adult: opaque(entity_model::bake_creeper_model(), CREEPER_TEX, 64),
+            adult: vec![opaque(entity_model::bake_creeper_model(), CREEPER_TEX, 64)],
             baby: None,
             // Slot 0: charged-creeper energy swirl (additive, scrolling), shown only
             // when `powered` (gated via overlay_tints in entity_extras).
@@ -370,7 +384,7 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Spider,
             anim: AnimationType::Spider,
-            adult: opaque(entity_model::bake_spider_model(), SPIDER_TEX, 64),
+            adult: vec![opaque(entity_model::bake_spider_model(), SPIDER_TEX, 64)],
             baby: None,
             // Slot 0: glowing eyes (translucent, full-bright), always visible.
             adult_overlays: vec![VariantDef {
@@ -422,7 +436,7 @@ impl EntityRenderer {
         let tex_count: u32 = defs
             .iter()
             .map(|d| {
-                let mut n = d.adult.tex_variants.len() as u32;
+                let mut n: u32 = d.adult.iter().map(|v| v.tex_variants.len() as u32).sum();
                 if let Some(b) = &d.baby {
                     n += b.tex_variants.len() as u32;
                 }
@@ -491,7 +505,8 @@ impl EntityRenderer {
                     v,
                 )
             };
-            let adult_variants = build(def.adult);
+            let adult_variants: Vec<MobVariant> =
+                def.adult.into_iter().flat_map(&mut build).collect();
             let baby_variants = def.baby.map(&mut build);
             let adult_overlays: Vec<MobVariant> = def
                 .adult_overlays
@@ -547,7 +562,6 @@ impl EntityRenderer {
             .copy_from_slice(bytes);
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn update_player_skin(
         &mut self,
         device: &vk::Device,
@@ -555,9 +569,7 @@ impl EntityRenderer {
         command_pool: vk::CommandPool,
         allocator: &Arc<Mutex<Allocator>>,
         uuid: &uuid::Uuid,
-        pixels: &[u8],
-        width: u32,
-        height: u32,
+        skin: &crate::renderer::SkinData,
     ) {
         if !self.player_skins.contains_key(uuid) && self.player_skins.len() >= MAX_PLAYER_SKINS {
             tracing::warn!("Player skin cache full; keeping fallback texture for {uuid}");
@@ -569,9 +581,9 @@ impl EntityRenderer {
             queue,
             command_pool,
             allocator,
-            pixels,
-            width,
-            height,
+            &skin.pixels,
+            skin.width,
+            skin.height,
         );
         let set = if let Some(old) = self.player_skins.get(uuid) {
             old.set
@@ -611,6 +623,7 @@ impl EntityRenderer {
                 view,
                 allocation,
                 set,
+                slim: skin.slim,
             },
         ) {
             device.destroy_image_view(old.view, None);
@@ -618,7 +631,11 @@ impl EntityRenderer {
             allocator.lock().unwrap().free(old.allocation).ok();
         }
 
-        tracing::debug!("Player skin loaded for {uuid}: {width}x{height}");
+        tracing::debug!(
+            "Player skin loaded for {uuid}: {}x{}",
+            skin.width,
+            skin.height
+        );
     }
 
     pub fn remove_player_skin(
@@ -639,19 +656,26 @@ impl EntityRenderer {
         }
     }
 
+    fn player_skin(&self, info: &EntityRenderInfo) -> Option<&PlayerSkinTexture> {
+        if info.entity_kind != EntityKind::Player {
+            return None;
+        }
+        self.player_skins.get(info.player_uuid.as_ref()?)
+    }
+
     fn player_texture_set(
         &self,
         info: &EntityRenderInfo,
         fallback: vk::DescriptorSet,
     ) -> vk::DescriptorSet {
-        if info.entity_kind == EntityKind::Player
-            && let Some(uuid) = &info.player_uuid
-            && let Some(skin) = self.player_skins.get(uuid)
-        {
-            skin.set
-        } else {
-            fallback
-        }
+        self.player_skin(info).map_or(fallback, |skin| skin.set)
+    }
+
+    /// Players pick their model variant (0 = wide, 1 = slim) from the fetched
+    /// skin's metadata rather than the caller-supplied index.
+    fn effective_variant_index(&self, info: &EntityRenderInfo) -> u32 {
+        self.player_skin(info)
+            .map_or(info.variant_index, |skin| skin.slim as u32)
     }
 
     fn compute_anim(
@@ -741,7 +765,7 @@ impl EntityRenderer {
                 if !info.skip_cull && !entity_visible(info, frustum, eye, cull_dist_sq) {
                     continue;
                 }
-                let variant = entry.base_variant(info.is_baby, info.variant_index);
+                let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
                 let entity_mat = Self::entity_matrix(info);
                 let anim = self.compute_anim(entry.anim, &variant.model, info);
                 vis.push(VisEntity {
@@ -763,7 +787,9 @@ impl EntityRenderer {
                 } else {
                     NO_OVERLAY
                 };
-                let base = v.entry.base_variant(v.info.is_baby, v.info.variant_index);
+                let base = v
+                    .entry
+                    .base_variant(v.info.is_baby, self.effective_variant_index(v.info));
                 let texture_set = self.player_texture_set(v.info, base.texture_set);
                 opaque.add(
                     base,

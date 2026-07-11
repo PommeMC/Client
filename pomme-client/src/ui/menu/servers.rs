@@ -465,7 +465,14 @@ impl MainMenu {
             self.set_screen(Screen::Main);
         }
 
-        push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
+        push_bottom_text(
+            &mut elements,
+            screen_w,
+            screen_h,
+            gs,
+            &self.version,
+            text_width_fn,
+        );
         MainMenuResult {
             elements,
             action,
@@ -563,7 +570,14 @@ impl MainMenu {
             self.set_screen(Screen::ServerList);
         }
 
-        push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
+        push_bottom_text(
+            &mut elements,
+            screen_w,
+            screen_h,
+            gs,
+            &self.version,
+            text_width_fn,
+        );
         MainMenuResult {
             elements,
             action: MenuAction::None,
@@ -683,7 +697,14 @@ impl MainMenu {
             self.set_screen(Screen::ServerList);
         }
 
-        push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
+        push_bottom_text(
+            &mut elements,
+            screen_w,
+            screen_h,
+            gs,
+            &self.version,
+            text_width_fn,
+        );
         MainMenuResult {
             elements,
             action,
@@ -839,7 +860,14 @@ impl MainMenu {
             self.set_screen(Screen::ServerList);
         }
 
-        push_bottom_text(&mut elements, screen_w, screen_h, gs, text_width_fn);
+        push_bottom_text(
+            &mut elements,
+            screen_w,
+            screen_h,
+            gs,
+            &self.version,
+            text_width_fn,
+        );
         MainMenuResult {
             elements,
             action: MenuAction::None,
