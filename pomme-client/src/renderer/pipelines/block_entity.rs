@@ -21,9 +21,9 @@ pub struct BlockEntityRenderInfo {
     pub pos: BlockPos,
     pub kind: BlockEntityKind,
     pub yaw: f32,
-    /// Texture-variant index; for chest kinds it doubles as the model index
-    /// (0 = single, 1 = double-left, 2 = double-right). Kinds with a single
-    /// model clamp it to model 0.
+    /// Texture-variant index; the model index is `variant % models.len()`, so
+    /// chest variants (material-major, [single, left, right] per material)
+    /// fold to their type's model and single-model kinds always use model 0.
     pub variant: u32,
     /// Lid openness for chest/shulker, 0.0=closed to 1.0=open. Raw (un-eased);
     /// the pipeline applies a cubic ease at draw time.
@@ -96,25 +96,30 @@ const SIGN_TEXTURES: &[&[&str]] = &[
     &["minecraft/textures/block/warped_sign.png"],
 ];
 
-/// Chest textures in variant order [single, double-left, double-right],
-/// mirroring vanilla `Sheets.chooseSprite`.
-const CHEST_TEXTURES: &[&[&str]] = &[
-    &["minecraft/textures/entity/chest/normal.png"],
-    &["minecraft/textures/entity/chest/normal_left.png"],
-    &["minecraft/textures/entity/chest/normal_right.png"],
-];
+/// Chest textures mirroring vanilla `Sheets.chooseSprite`: material-major with
+/// [single, double-left, double-right] per material, so
+/// `variant = material * 3 + type` and `variant % 3` is the model index.
+/// Material order matches [`variant_for_block`]. Christmas only reskins the
+/// normal material (vanilla `getChestMaterial` checks copper first), so copper
+/// stages keep their look.
+macro_rules! chest_textures {
+    ($base:literal, copper) => {
+        chest_textures!($base, "copper", "copper_exposed", "copper_weathered", "copper_oxidized")
+    };
+    ($($mat:literal),+ $(,)?) => {
+        &[$(
+            &[concat!("minecraft/textures/entity/chest/", $mat, ".png")],
+            &[concat!("minecraft/textures/entity/chest/", $mat, "_left.png")],
+            &[concat!("minecraft/textures/entity/chest/", $mat, "_right.png")],
+        )+]
+    };
+}
 
-const CHEST_XMAS_TEXTURES: &[&[&str]] = &[
-    &["minecraft/textures/entity/chest/christmas.png"],
-    &["minecraft/textures/entity/chest/christmas_left.png"],
-    &["minecraft/textures/entity/chest/christmas_right.png"],
-];
+const CHEST_TEXTURES: &[&[&str]] = chest_textures!("normal", copper);
 
-const TRAPPED_CHEST_TEXTURES: &[&[&str]] = &[
-    &["minecraft/textures/entity/chest/trapped.png"],
-    &["minecraft/textures/entity/chest/trapped_left.png"],
-    &["minecraft/textures/entity/chest/trapped_right.png"],
-];
+const CHEST_XMAS_TEXTURES: &[&[&str]] = chest_textures!("christmas", copper);
+
+const TRAPPED_CHEST_TEXTURES: &[&[&str]] = chest_textures!("trapped");
 
 const ENDER_CHEST_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/chest/ender.png"]];
 
@@ -176,11 +181,23 @@ pub fn variant_for_block(
 ) -> u32 {
     match kind {
         // Ender chests have no `type` property and fall through to 0.
-        BlockEntityKind::Chest | BlockEntityKind::TrappedChest => match props.get("type") {
-            Some("left") => 1,
-            Some("right") => 2,
-            _ => 0,
-        },
+        BlockEntityKind::Chest | BlockEntityKind::TrappedChest => {
+            let ty = match props.get("type") {
+                Some("left") => 1,
+                Some("right") => 2,
+                _ => 0,
+            };
+            // Copper weathering stage selects the material row (waxing keeps
+            // the stage's texture); trapped chests have no copper form.
+            let material = match name.strip_prefix("waxed_").unwrap_or(name) {
+                "copper_chest" => 1,
+                "exposed_copper_chest" => 2,
+                "weathered_copper_chest" => 3,
+                "oxidized_copper_chest" => 4,
+                _ => 0,
+            };
+            material * 3 + ty
+        }
         BlockEntityKind::ShulkerBox => name
             .strip_suffix("_shulker_box")
             .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
@@ -506,7 +523,7 @@ impl BlockEntityPipeline {
                 bound_set = slot.set;
             }
 
-            let model = &entry.models[(info.variant as usize).min(entry.models.len() - 1)];
+            let model = &entry.models[info.variant as usize % entry.models.len()];
 
             let block_center = glam::Vec3::new(
                 info.pos.x as f32 + 0.5,

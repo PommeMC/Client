@@ -25,13 +25,12 @@ use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::Aabb;
-use crate::physics::collision::has_collision;
 use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::held_item::UseAnim;
-use crate::world::block::is_air;
 use crate::world::block::registry::BlockRegistry;
 use crate::world::block::sound::block_sounds;
+use crate::world::block::{has_collision, is_air};
 use crate::world::chunk::ChunkStore;
 
 const REACH: f32 = 4.5;

@@ -22,9 +22,24 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         "chest" => Some(BlockEntityKind::Chest),
         "trapped_chest" => Some(BlockEntityKind::TrappedChest),
         "ender_chest" => Some(BlockEntityKind::EnderChest),
+        // Copper chests share vanilla's `chest` block entity type; the
+        // weathering stage only picks the texture.
+        s if s.ends_with("copper_chest") => Some(BlockEntityKind::Chest),
         s if s == "shulker_box" || s.ends_with("_shulker_box") => Some(BlockEntityKind::ShulkerBox),
         _ => None,
     }
+}
+
+/// Kinds [`rendered_kind`] synthesizes entries for; used to detect entries
+/// gone stale when the block at their position stops mapping to them.
+fn is_rendered(kind: BlockEntityKind) -> bool {
+    matches!(
+        kind,
+        BlockEntityKind::Chest
+            | BlockEntityKind::TrappedChest
+            | BlockEntityKind::EnderChest
+            | BlockEntityKind::ShulkerBox
+    )
 }
 
 /// Sync the client-side entry for `pos` after a block update. The server sends
@@ -48,7 +63,9 @@ pub fn sync_block_entity(
                 },
             );
         }
-    } else if !is_block_entity_block(id) {
+    } else if !is_block_entity_block(id) || map.get(&pos).is_some_and(|e| is_rendered(e.kind)) {
+        // A synthesized entry is also stale when the block swaps directly to a
+        // different block-entity block (e.g. /setblock chest -> sign).
         map.remove(&pos);
     }
 }
@@ -57,15 +74,9 @@ pub fn sync_block_entity(
 /// warnings and to detect stale block-entity map entries; the subset the BE
 /// pipeline actually draws is [`rendered_kind`].
 pub fn is_block_entity_block(name: &str) -> bool {
-    matches!(
+    rendered_kind(name).is_some() // chests, copper chests, shulker boxes
+        || matches!(
         name,
-        // Chests / containers
-        "chest" | "trapped_chest" | "ender_chest"
-        | "shulker_box"
-        | "white_shulker_box" | "orange_shulker_box" | "magenta_shulker_box" | "light_blue_shulker_box"
-        | "yellow_shulker_box" | "lime_shulker_box" | "pink_shulker_box" | "gray_shulker_box"
-        | "light_gray_shulker_box" | "cyan_shulker_box" | "purple_shulker_box" | "blue_shulker_box"
-        | "brown_shulker_box" | "green_shulker_box" | "red_shulker_box" | "black_shulker_box"
         // Signs
         | "oak_sign" | "spruce_sign" | "birch_sign" | "jungle_sign" | "acacia_sign" | "dark_oak_sign"
         | "mangrove_sign" | "cherry_sign" | "pale_oak_sign" | "bamboo_sign"

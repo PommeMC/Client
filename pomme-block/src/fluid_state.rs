@@ -6,7 +6,7 @@ use crate::block_state::BlockState;
 #[derive(Clone, Debug, Default)]
 pub struct FluidState {
     pub kind: FluidKind,
-    /// 0 = empty, 8 = full, 9 = max.
+    /// 0 = empty, 8 = full source; height is measured against 9.
     pub amount: u8,
     /// Whether this fluid is at the max level and there's another fluid of the
     /// same type above it.

@@ -181,6 +181,8 @@ fn emit_vanilla_cube(
             vertices.push(ChunkVertex {
                 position: [pos[0] / 16.0, pos[1] / 16.0, pos[2] / 16.0],
                 tex_coords: pack_uv(u / tex_w as f32, v / tex_h as f32),
+                // TODO: full-bright; vanilla samples the lightmap at the block
+                // (pending lighting support in the entity pipeline).
                 light_tint: pack_light_tint(1.0, PACKED_WHITE_SHIFTED),
             });
         }
