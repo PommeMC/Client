@@ -1,3 +1,4 @@
+use glam::camera::rh::{proj, view};
 use glam::{FloatExt, Mat4, Vec3};
 
 use crate::app::input::InputState;
@@ -319,8 +320,8 @@ impl Camera {
 
     pub fn sky_view_projection(&self) -> Mat4 {
         let (forward, up) = self.view_basis();
-        let view = Mat4::look_to_rh(Vec3::ZERO, forward, up);
-        let mut proj = Mat4::perspective_rh(
+        let view = view::look_to_mat4(Vec3::ZERO, forward, up);
+        let mut proj = proj::directx::perspective(
             self.fov_radians(self.render_partial_tick),
             self.aspect_ratio,
             NEAR,
@@ -336,8 +337,8 @@ impl Camera {
     /// pitch test.
     pub fn view_rotation_projection(&self) -> Mat4 {
         let (forward, up) = self.view_basis();
-        let view = Mat4::look_to_rh(Vec3::ZERO, forward, up);
-        let proj = Mat4::perspective_rh_gl(
+        let view = view::look_to_mat4(Vec3::ZERO, forward, up);
+        let proj = proj::opengl::perspective(
             self.fov_radians(self.render_partial_tick),
             self.aspect_ratio,
             NEAR,
@@ -365,8 +366,8 @@ impl Camera {
     pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
         let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
-        let view = self.bob_matrix() * Mat4::look_to_rh(offset, forward, up);
-        let mut proj = Mat4::perspective_rh(fov, self.aspect_ratio, NEAR, FAR);
+        let view = self.bob_matrix() * view::look_to_mat4(offset, forward, up);
+        let mut proj = proj::directx::perspective(fov, self.aspect_ratio, NEAR, FAR);
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
     }

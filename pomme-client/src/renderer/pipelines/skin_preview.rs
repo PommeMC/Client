@@ -1,6 +1,7 @@
 use std::slice;
 use std::sync::{Arc, Mutex};
 
+use glam::camera::rh::{proj, view};
 use glam::{Mat4, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
@@ -329,7 +330,7 @@ impl SkinPreviewPipeline {
         let head_x_rot_rad = head_x_rot_raw * 20.0f32.to_radians();
 
         let fov = 0.6f32;
-        let mut proj = Mat4::perspective_rh(fov, aspect, 0.1, 100.0);
+        let mut proj = proj::directx::perspective(fov, aspect, 0.1, 100.0);
         proj.y_axis.y *= -1.0;
 
         let ndc_x = screen_x * 2.0 - 1.0;
@@ -368,7 +369,7 @@ impl SkinPreviewPipeline {
         let units_to_px = 30.0 * p.gui_scale;
         let half_w = sw / (2.0 * units_to_px);
         let half_h = sh / (2.0 * units_to_px);
-        let mut proj = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
+        let mut proj = proj::directx::orthographic(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
         proj.y_axis.y *= -1.0;
 
         let clip_offset =
@@ -522,7 +523,7 @@ impl SkinPreviewPipeline {
 }
 
 fn camera_view() -> Mat4 {
-    Mat4::look_at_rh(Vec3::new(0.0, 0.0, -4.5), Vec3::ZERO, Vec3::Y)
+    view::look_at_mat4(Vec3::new(0.0, 0.0, -4.5), Vec3::ZERO, Vec3::Y)
 }
 
 pub(crate) fn write_uniform(alloc: &mut Allocation, mvp: &Mat4) {

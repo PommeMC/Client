@@ -2,6 +2,7 @@ use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
 
+use glam::camera::rh::proj;
 use glam::{Mat4, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
@@ -353,7 +354,7 @@ impl HandPipeline {
 }
 
 pub(super) fn projection(aspect: f32) -> Mat4 {
-    let mut proj = Mat4::perspective_rh(
+    let mut proj = proj::directx::perspective(
         crate::renderer::camera::DEFAULT_FOV_DEGREES.to_radians(),
         aspect,
         NEAR,
