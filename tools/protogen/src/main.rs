@@ -184,7 +184,13 @@ fn collect_packet_types(proto_dir: &Path) -> Result<TypeMaps, Error> {
                 (types_class.clone(), constant),
                 (direction, resource.clone()),
             );
-            maps.by_class.insert(class, (direction, resource));
+            if maps
+                .by_class
+                .insert(class.clone(), (direction, resource))
+                .is_some()
+            {
+                return Err(format!("duplicate PacketType class {class}").into());
+            }
         }
     }
     Ok(maps)

@@ -59,9 +59,12 @@ jobs:
           cargo clippy -p pomme-client --release --all-targets --all-features -- -D warnings
           cargo clippy -p pomme-protocol --release --all-targets --all-features -- -D warnings
 
-      - name: Test pomme-protocol
+      - name: Tests
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test -p pomme-protocol
+        # --release reuses the dependency artifacts the clippy step built.
+        run: |
+          cargo test -p pomme-protocol
+          cargo test -p pomme-client --release net::azalea_compat
 
   launcher-frontend:
     runs-on: ubuntu-latest
