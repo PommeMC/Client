@@ -46,8 +46,9 @@ pub struct EntityPart {
 /// Coordinate space a model's parts and vertices were authored in.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModelConvention {
-    /// Vanilla entity convention: cube Y negated at bake, pivots at
-    /// `(24 - y)/16`, euler signs (-x, -y, +z). All mob models use this.
+    /// Vanilla entity convention: cube Y negated at bake, root pivots at
+    /// `(24 - y)/16` (child pivots just negate y), euler signs (-x, -y, +z).
+    /// All mob models use this.
     #[default]
     EntityYDown,
     /// Vanilla block-entity literal space: y-up, coords/16 relative to the
@@ -127,13 +128,16 @@ impl BakedEntityModel {
                 }
             }
 
+            let pivot = part.offset + extra_translation;
             let offset = match self.convention {
-                ModelConvention::EntityYDown => Vec3::new(
-                    part.offset.x + extra_translation.x,
-                    -(part.offset.y + extra_translation.y - 24.0),
-                    part.offset.z + extra_translation.z,
-                ),
-                ModelConvention::BlockYUp => part.offset + extra_translation,
+                ModelConvention::EntityYDown => {
+                    // The +24 re-bases vanilla's y-down ground plane onto the
+                    // engine's y-up origin; child pivots are relative to their
+                    // parent (already re-based), so they only mirror.
+                    let rebase = if part.parent.is_some() { 0.0 } else { 24.0 };
+                    Vec3::new(pivot.x, rebase - pivot.y, pivot.z)
+                }
+                ModelConvention::BlockYUp => pivot,
             } / 16.0;
 
             // A quaternion override expresses the exact render-space orientation
