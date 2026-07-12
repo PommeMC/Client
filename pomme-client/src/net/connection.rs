@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 use super::NetworkEvent;
 use super::handler::{handle_game_packet, handle_raw_game_packet};
-use super::sender::PacketSender;
+use super::sender::{Outbound, PacketSender};
 
 #[derive(Error, Debug)]
 pub enum ConnectionError {
@@ -76,7 +76,7 @@ impl Drop for ConnectionHandle {
 pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> ConnectionHandle {
     let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
     let (chat_tx, chat_rx) = crossbeam_channel::bounded::<String>(64);
-    let (packet_tx, packet_rx) = mpsc::unbounded_channel::<ServerboundGamePacket>();
+    let (packet_tx, packet_rx) = mpsc::unbounded_channel::<Outbound>();
     let game_packet_tx = packet_tx.clone();
     let packet_tx = PacketSender::new(packet_tx);
     let task = rt.spawn(async move {
@@ -100,8 +100,8 @@ pub async fn connect_to_server(
     args: ConnectArgs,
     event_tx: Sender<NetworkEvent>,
     chat_rx: crossbeam_channel::Receiver<String>,
-    game_packet_tx: mpsc::UnboundedSender<ServerboundGamePacket>,
-    game_packet_rx: mpsc::UnboundedReceiver<ServerboundGamePacket>,
+    game_packet_tx: mpsc::UnboundedSender<Outbound>,
+    game_packet_rx: mpsc::UnboundedReceiver<Outbound>,
 ) -> Result<(), ConnectionError> {
     let server_addr: ServerAddr = args
         .server
@@ -446,8 +446,8 @@ async fn game_loop(
     conn: Connection<ClientboundGamePacket, ServerboundGamePacket>,
     event_tx: &Sender<NetworkEvent>,
     chat_rx: crossbeam_channel::Receiver<String>,
-    outbound_tx: mpsc::UnboundedSender<ServerboundGamePacket>,
-    mut outbound_rx: mpsc::UnboundedReceiver<ServerboundGamePacket>,
+    outbound_tx: mpsc::UnboundedSender<Outbound>,
+    mut outbound_rx: mpsc::UnboundedReceiver<Outbound>,
     registry_holder: azalea_core::registry_holder::RegistryHolder,
 ) -> Result<(), ConnectionError> {
     let (mut reader, mut writer): (
@@ -461,8 +461,12 @@ async fn game_loop(
         std::sync::Arc::new(parking_lot::Mutex::new(None));
 
     tokio::spawn(async move {
-        while let Some(packet) = outbound_rx.recv().await {
-            if let Err(e) = write_game_packet(&mut writer, packet).await {
+        while let Some(out) = outbound_rx.recv().await {
+            let result = match out {
+                Outbound::Packet(packet) => write_game_packet(&mut writer, *packet).await,
+                Outbound::Raw(bytes) => writer.raw.write(&bytes).await,
+            };
+            if let Err(e) = result {
                 tracing::error!("Failed to write packet: {e}");
                 break;
             }
@@ -511,7 +515,10 @@ async fn game_loop(
                     },
                 )
             };
-            if chat_outbound_tx.send(packet).is_err() {
+            if chat_outbound_tx
+                .send(Outbound::Packet(Box::new(packet)))
+                .is_err()
+            {
                 break;
             }
         }

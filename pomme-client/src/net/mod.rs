@@ -3,6 +3,7 @@ pub mod connection;
 pub mod handler;
 pub mod resolve;
 pub mod sender;
+pub mod wire;
 
 use std::sync::Arc;
 
