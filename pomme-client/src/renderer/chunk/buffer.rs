@@ -24,6 +24,15 @@ const FADE_DURATION_MS: f32 = 1000.0;
 /// immediately and never fade in.
 const NEARBY_DIST_SQ: f32 = 768.0;
 
+/// Whether a column's center is within the always-near X/Z radius of the eye
+/// (vanilla `isNearby`), rebased in f64 for precision at extreme coordinates.
+/// Also gates mesh-scheduling tiers (`in_game::apply_visibility`).
+pub fn column_is_near(pos: ChunkPos, eye: DVec3) -> bool {
+    let dx = pos.x as f64 * 16.0 + 8.0 - eye.x;
+    let dz = pos.z as f64 * 16.0 + 8.0 - eye.z;
+    dx * dx + dz * dz < NEARBY_DIST_SQ as f64
+}
+
 /// First-fit free-list sub-allocator over a fixed element range, coalescing on
 /// free. Each section gets an exact-size vertex (and index) slice instead of
 /// whole fixed buckets — vanilla's `UberGpuBuffer` model — so re-uploading one
@@ -756,9 +765,7 @@ impl ChunkBufferStore {
     /// Whether `pos`'s column is near enough to the eye to render opaque
     /// immediately (a nearby column never fades in).
     fn column_nearby(&self, pos: ChunkPos, eye: DVec3) -> bool {
-        let dx = pos.x as f64 * 16.0 + 8.0 - eye.x;
-        let dz = pos.z as f64 * 16.0 + 8.0 - eye.z;
-        !self.fade_enabled || dx * dx + dz * dz < NEARBY_DIST_SQ as f64
+        !self.fade_enabled || column_is_near(pos, eye)
     }
 
     /// Submit the accumulated staging copies as a single transfer and block on

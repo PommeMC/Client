@@ -24,6 +24,7 @@ use crate::player::LocalPlayer;
 use crate::player::interaction::{HitResult, InteractionState};
 use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
+use crate::renderer::chunk::buffer::column_is_near;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::pipelines::block_entity;
@@ -732,10 +733,6 @@ impl GameState {
     }
 }
 
-/// Always-mesh radius (vanilla `isNearby`, squared block distance in X/Z):
-/// close columns are tier 0 regardless of frustum so the area around the player
-/// is never deferred.
-const NEARBY_DIST_SQ: f32 = 768.0;
 /// Extra FOV (radians) for the tier-1 "about to be seen" margin frustum, so
 /// small camera turns reveal already-meshed terrain instead of a meshing
 /// curtain.
@@ -765,13 +762,6 @@ fn column_frustum_tier(
     } else {
         2
     }
-}
-
-/// Whether a column is within the always-mesh radius (never deferred/demoted).
-fn column_is_near(pos: ChunkPos, eye: glam::DVec3) -> bool {
-    let cx = pos.x as f64 * 16.0 + 8.0 - eye.x;
-    let cz = pos.z as f64 * 16.0 + 8.0 - eye.z;
-    cx * cx + cz * cz < NEARBY_DIST_SQ as f64
 }
 
 /// Full mask for an `n`-section column (bits `0..n` set).

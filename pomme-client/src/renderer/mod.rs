@@ -1003,8 +1003,12 @@ impl Renderer {
     }
 
     pub fn update_chunk_borders(&mut self, min_y: i32, max_y: i32) {
-        self.chunk_border_pipeline
-            .update_lines(*self.camera.position, min_y, max_y);
+        self.chunk_border_pipeline.update_lines(
+            *self.camera.position,
+            self.camera_render_position(),
+            min_y,
+            max_y,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]

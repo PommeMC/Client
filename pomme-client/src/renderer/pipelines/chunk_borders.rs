@@ -270,11 +270,13 @@ impl ChunkBorderPipeline {
         data[..size_of::<CameraUniform>()].copy_from_slice(bytemuck::bytes_of(uniform));
     }
 
-    /// Lines are camera-relative, subtracted in f64 so they stay on the grid
-    /// at extreme coordinates.
-    pub fn update_lines(&mut self, cam: glam::DVec3, min_y: i32, max_y: i32) {
-        let chunk_x = (cam.x.floor() as i32).div_euclid(16) * 16;
-        let chunk_z = (cam.z.floor() as i32).div_euclid(16) * 16;
+    /// Lines are eye-relative (including the third-person offset, the origin
+    /// the view matrix renders from), subtracted in f64 so they stay on the
+    /// grid at extreme coordinates. The grid cell comes from `pivot` (the
+    /// player eye): vanilla outlines the entity's chunk, not the camera's.
+    pub fn update_lines(&mut self, pivot: glam::DVec3, eye: glam::DVec3, min_y: i32, max_y: i32) {
+        let chunk_x = (pivot.x.floor() as i32).div_euclid(16) * 16;
+        let chunk_z = (pivot.z.floor() as i32).div_euclid(16) * 16;
 
         let mut verts: Vec<LineVertex> = Vec::new();
         let y_min = min_y as f64;
@@ -290,17 +292,17 @@ impl ChunkBorderPipeline {
                          color: [f32; 4]| {
             verts.push(LineVertex {
                 position: [
-                    (x0 - cam.x) as f32,
-                    (y0 - cam.y) as f32,
-                    (z0 - cam.z) as f32,
+                    (x0 - eye.x) as f32,
+                    (y0 - eye.y) as f32,
+                    (z0 - eye.z) as f32,
                 ],
                 color,
             });
             verts.push(LineVertex {
                 position: [
-                    (x1 - cam.x) as f32,
-                    (y1 - cam.y) as f32,
-                    (z1 - cam.z) as f32,
+                    (x1 - eye.x) as f32,
+                    (y1 - eye.y) as f32,
+                    (z1 - eye.z) as f32,
                 ],
                 color,
             });

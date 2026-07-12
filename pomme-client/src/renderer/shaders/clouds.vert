@@ -55,8 +55,9 @@ void main() {
     bool use_top = (in_dir_flags.y & 1u) != 0u;
 
     vec3 corner = CORNERS[dir * 4 + QUAD[gl_VertexIndex]];
-    // `corner`/`in_cell` are in the integer cell grid; adding the offset yields
-    // the camera-relative position (== world - camera_pos), matching weather.vert.
+    // `corner`/`in_cell` are in the integer cell grid; adding the offset
+    // (computed against the eye in f64 CPU-side) yields the eye-relative
+    // position, the same space weather.vert ends up in.
     vec3 pos = corner * CELL
         + vec3(float(in_cell.x), 0.0, float(in_cell.y)) * CELL
         + pc.offset.xyz;
