@@ -15,6 +15,7 @@ use crate::renderer::CloudMode;
 use crate::renderer::pipelines::menu_overlay::{
     ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_GEAR, ICON_GLOBE, ICON_LANGUAGE, ICON_LINK,
     ICON_PAINTBRUSH, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS, MenuElement, SpriteId,
+    TooltipLine,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -164,7 +165,7 @@ use super::common;
 use super::common::WHITE;
 use super::friends::{self, ActionError, FaceCache, FriendsData};
 use super::server_list::{
-    PingGeneration, PingResults, PingState, ServerEntry, ServerList, is_valid_address,
+    Compat, PingGeneration, PingResults, PingState, ServerEntry, ServerList, is_valid_address,
     ping_all_servers,
 };
 

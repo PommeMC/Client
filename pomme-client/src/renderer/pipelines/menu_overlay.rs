@@ -1036,10 +1036,11 @@ impl MenuOverlayPipeline {
                 let margin = 9.0 * px;
                 let line_h = *scale + 2.0 * px;
 
-                let content_w = lines
+                let line_widths: Vec<f32> = lines
                     .iter()
                     .map(|l| (self.spans_width(&l.spans, *scale) + px).ceil())
-                    .fold(0.0f32, f32::max);
+                    .collect();
+                let content_w = line_widths.iter().copied().fold(0.0f32, f32::max);
                 let content_h = lines.len() as f32 * line_h - 2.0 * px;
 
                 let mut text_x = *x + 12.0;
@@ -1075,11 +1076,16 @@ impl MenuOverlayPipeline {
                     );
                 }
 
-                for (i, line) in lines.iter().enumerate() {
+                for (i, (line, line_w)) in lines.iter().zip(&line_widths).enumerate() {
+                    let line_x = if line.right_align {
+                        text_x + content_w - line_w
+                    } else {
+                        text_x
+                    };
                     push_mc_text(
                         &mut vertices,
                         gm,
-                        text_x,
+                        line_x,
                         text_y + i as f32 * line_h,
                         &line.spans,
                         *scale,
@@ -1407,6 +1413,8 @@ impl MenuOverlayPipeline {
 
 pub struct TooltipLine {
     pub spans: Vec<TextSpan>,
+    /// Aligned against the widest line in the tooltip instead of the left.
+    pub right_align: bool,
 }
 
 impl TooltipLine {
@@ -1414,6 +1422,15 @@ impl TooltipLine {
     pub fn new(text: String, color: [f32; 4]) -> Self {
         Self {
             spans: vec![TextSpan::new(text, color)],
+            right_align: false,
+        }
+    }
+
+    /// A single-color right-aligned line.
+    pub fn right_aligned(text: String, color: [f32; 4]) -> Self {
+        Self {
+            right_align: true,
+            ..Self::new(text, color)
         }
     }
 }
