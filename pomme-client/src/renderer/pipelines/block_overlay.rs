@@ -219,6 +219,7 @@ impl BlockOverlayPipeline {
             .copy_from_slice(bytes);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         cmd: vk::CommandBuffer,
@@ -226,9 +227,10 @@ impl BlockOverlayPipeline {
         registry: &BlockRegistry,
         state: BlockState,
         block_pos: &BlockPos,
+        anchor: glam::DVec3,
         stage: u32,
     ) {
-        let vertices = build_overlay_vertices(registry, state, block_pos, stage);
+        let vertices = build_overlay_vertices(registry, state, block_pos, anchor, stage);
         if vertices.is_empty() {
             return;
         }
@@ -298,9 +300,14 @@ fn build_overlay_vertices(
     registry: &BlockRegistry,
     state: BlockState,
     pos: &BlockPos,
+    anchor: glam::DVec3,
     stage: u32,
 ) -> Vec<OverlayVertex> {
-    let origin = [pos.x as f32, pos.y as f32, pos.z as f32];
+    // Anchor-relative (see Camera::anchor); the crack-UV projection is
+    // min-normalized per quad, so the rebase doesn't shift the texture.
+    let origin = (glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) - anchor)
+        .as_vec3()
+        .to_array();
     let mut verts = Vec::new();
 
     if let Some(model) = registry.get_baked_model(state) {

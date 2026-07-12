@@ -270,29 +270,40 @@ impl ChunkBorderPipeline {
         data[..size_of::<CameraUniform>()].copy_from_slice(bytemuck::bytes_of(uniform));
     }
 
-    pub fn update_lines(&mut self, cam_x: f32, cam_y: f32, cam_z: f32, min_y: i32, max_y: i32) {
-        let chunk_x = (cam_x as i32).div_euclid(16) * 16;
-        let chunk_z = (cam_z as i32).div_euclid(16) * 16;
+    /// Lines are eye-relative (including the third-person offset, the origin
+    /// the view matrix renders from), subtracted in f64 so they stay on the
+    /// grid at extreme coordinates. The grid cell comes from `pivot` (the
+    /// player eye): vanilla outlines the entity's chunk, not the camera's.
+    pub fn update_lines(&mut self, pivot: glam::DVec3, eye: glam::DVec3, min_y: i32, max_y: i32) {
+        let chunk_x = (pivot.x.floor() as i32).div_euclid(16) * 16;
+        let chunk_z = (pivot.z.floor() as i32).div_euclid(16) * 16;
 
         let mut verts: Vec<LineVertex> = Vec::new();
-        let y_min = min_y as f32;
-        let y_max = max_y as f32;
+        let y_min = min_y as f64;
+        let y_max = max_y as f64;
 
-        let cam = [cam_x, cam_y, cam_z];
         let push_line = |verts: &mut Vec<LineVertex>,
-                         x0: f32,
-                         y0: f32,
-                         z0: f32,
-                         x1: f32,
-                         y1: f32,
-                         z1: f32,
+                         x0: f64,
+                         y0: f64,
+                         z0: f64,
+                         x1: f64,
+                         y1: f64,
+                         z1: f64,
                          color: [f32; 4]| {
             verts.push(LineVertex {
-                position: [x0 - cam[0], y0 - cam[1], z0 - cam[2]],
+                position: [
+                    (x0 - eye.x) as f32,
+                    (y0 - eye.y) as f32,
+                    (z0 - eye.z) as f32,
+                ],
                 color,
             });
             verts.push(LineVertex {
-                position: [x1 - cam[0], y1 - cam[1], z1 - cam[2]],
+                position: [
+                    (x1 - eye.x) as f32,
+                    (y1 - eye.y) as f32,
+                    (z1 - eye.z) as f32,
+                ],
                 color,
             });
         };
@@ -300,20 +311,20 @@ impl ChunkBorderPipeline {
         // Vertical lines at chunk corners (red)
         for dx in [0, 16] {
             for dz in [0, 16] {
-                let x = (chunk_x + dx) as f32;
-                let z = (chunk_z + dz) as f32;
+                let x = (chunk_x + dx) as f64;
+                let z = (chunk_z + dz) as f64;
                 push_line(&mut verts, x, y_min, z, x, y_max, z, RED);
             }
         }
 
         // Vertical lines along chunk edges (blue) - every block along edges
         for d in 1..16 {
-            let x0 = chunk_x as f32;
-            let x1 = (chunk_x + 16) as f32;
-            let z0 = chunk_z as f32;
-            let z1 = (chunk_z + 16) as f32;
-            let p = (chunk_x + d) as f32;
-            let q = (chunk_z + d) as f32;
+            let x0 = chunk_x as f64;
+            let x1 = (chunk_x + 16) as f64;
+            let z0 = chunk_z as f64;
+            let z1 = (chunk_z + 16) as f64;
+            let p = (chunk_x + d) as f64;
+            let q = (chunk_z + d) as f64;
             push_line(&mut verts, p, y_min, z0, p, y_max, z0, BLUE);
             push_line(&mut verts, p, y_min, z1, p, y_max, z1, BLUE);
             push_line(&mut verts, x0, y_min, q, x0, y_max, q, BLUE);
@@ -322,11 +333,11 @@ impl ChunkBorderPipeline {
 
         // Horizontal lines at section boundaries (yellow)
         for section in 0..=((max_y - min_y) / 16) {
-            let y = (min_y + section * 16) as f32;
-            let x0 = chunk_x as f32;
-            let x1 = (chunk_x + 16) as f32;
-            let z0 = chunk_z as f32;
-            let z1 = (chunk_z + 16) as f32;
+            let y = (min_y + section * 16) as f64;
+            let x0 = chunk_x as f64;
+            let x1 = (chunk_x + 16) as f64;
+            let z0 = chunk_z as f64;
+            let z1 = (chunk_z + 16) as f64;
             push_line(&mut verts, x0, y, z0, x1, y, z0, YELLOW);
             push_line(&mut verts, x0, y, z1, x1, y, z1, YELLOW);
             push_line(&mut verts, x0, y, z0, x0, y, z1, YELLOW);

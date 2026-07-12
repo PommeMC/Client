@@ -16,7 +16,8 @@ layout(set = 0, binding = 0) uniform CameraUniform {
 #include "packing.glsl"
 
 layout(push_constant) uniform SectionPc {
-    // xyz = section world origin, w = fade.
+    // xyz = section origin relative to the camera anchor (rebased in f64
+    // CPU-side), w = fade.
     vec4 origin_fade;
 };
 

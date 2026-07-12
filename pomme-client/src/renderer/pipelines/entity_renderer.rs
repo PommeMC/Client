@@ -732,18 +732,22 @@ impl EntityRenderer {
         }
     }
 
-    fn entity_matrix(info: &EntityRenderInfo) -> glam::Mat4 {
-        glam::Mat4::from_translation(info.position.as_vec3())
+    /// The translation is anchor-relative, subtracted in f64 (see
+    /// `Camera::anchor`).
+    fn entity_matrix(info: &EntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
+        glam::Mat4::from_translation((*info.position - anchor).as_vec3())
             * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         cmd: vk::CommandBuffer,
         frame: usize,
         entities: &[EntityRenderInfo],
         frustum: &[[f32; 4]; 6],
-        eye: [f32; 3],
+        anchor: glam::DVec3,
+        eye: glam::DVec3,
         cull_dist: f32,
     ) {
         if entities.is_empty() {
@@ -766,7 +770,7 @@ impl EntityRenderer {
                     continue;
                 }
                 let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
-                let entity_mat = Self::entity_matrix(info);
+                let entity_mat = Self::entity_matrix(info, anchor);
                 let anim = self.compute_anim(entry.anim, &variant.model, info);
                 vis.push(VisEntity {
                     info,
@@ -1139,24 +1143,24 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
     (w * s, h * s)
 }
 
-/// Bounding-sphere frustum + distance cull. `eye` is the shader's `camera_pos`,
-/// since the frustum planes operate on camera-relative coords (like chunk
-/// cull).
+/// Bounding-sphere frustum + distance cull. The frustum planes operate on
+/// camera-relative coords (like chunk cull), so the entity position is
+/// rebased against the eye in f64 first.
 fn entity_visible(
     info: &EntityRenderInfo,
     frustum: &[[f32; 4]; 6],
-    eye: [f32; 3],
+    eye: glam::DVec3,
     cull_dist_sq: f32,
 ) -> bool {
     let (w, h) = entity_bounds(info.entity_kind, info.is_baby);
     let radius = 0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN;
-    let p = info.position.as_vec3();
-    let q = [p.x - eye[0], p.y + h * 0.5 - eye[1], p.z - eye[2]];
-    if q[0] * q[0] + q[1] * q[1] + q[2] * q[2] > cull_dist_sq {
+    let mut q = (*info.position - eye).as_vec3();
+    q.y += h * 0.5;
+    if q.length_squared() > cull_dist_sq {
         return false;
     }
     for pl in frustum {
-        if pl[0] * q[0] + pl[1] * q[1] + pl[2] * q[2] + pl[3] < -radius {
+        if pl[0] * q.x + pl[1] * q.y + pl[2] * q.z + pl[3] < -radius {
             return false;
         }
     }

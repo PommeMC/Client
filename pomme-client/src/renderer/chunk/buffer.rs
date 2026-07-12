@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use azalea_core::position::ChunkPos;
+use glam::DVec3;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
@@ -22,6 +23,15 @@ const FADE_DURATION_MS: f32 = 1000.0;
 /// Columns within this squared X/Z distance of the camera render opaque
 /// immediately and never fade in.
 const NEARBY_DIST_SQ: f32 = 768.0;
+
+/// Whether a column's center is within the always-near X/Z radius of the eye
+/// (vanilla `isNearby`), rebased in f64 for precision at extreme coordinates.
+/// Also gates mesh-scheduling tiers (`in_game::apply_visibility`).
+pub fn column_is_near(pos: ChunkPos, eye: DVec3) -> bool {
+    let dx = pos.x as f64 * 16.0 + 8.0 - eye.x;
+    let dz = pos.z as f64 * 16.0 + 8.0 - eye.z;
+    dx * dx + dz * dz < NEARBY_DIST_SQ as f64
+}
 
 /// First-fit free-list sub-allocator over a fixed element range, coalescing on
 /// free. Each section gets an exact-size vertex (and index) slice instead of
@@ -116,15 +126,18 @@ fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ChunkMeta {
+    /// Section-local vertex bounds; the cull shader rebases them via `origin`.
     aabb_min: [f32; 4],
     aabb_max: [f32; 4],
     index_count: u32,
     first_index: u32,
     vertex_offset: i32,
     visibility: u32,
-    /// Section world origin, bound as a per-instance vertex attribute so the
-    /// vertex shader rebases the quantized local position.
-    origin: [f32; 3],
+    /// Absolute section origin as integers (vanilla `ChunkPosition`), bound
+    /// as a per-instance vertex attribute; the vertex shader subtracts the
+    /// camera block position in integer math, so no large f32 is ever
+    /// formed.
+    origin: [i32; 3],
     /// Read by the cull shader to split the solid/cutout draws; fills the
     /// fourth lane of `origin`'s 16-byte slot, keeping the struct at 64 bytes.
     solid_index_count: u32,
@@ -190,7 +203,7 @@ pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 6] {
         vk::VertexInputAttributeDescription {
             location: 4,
             binding: 1,
-            format: vk::Format::R32G32B32Sfloat,
+            format: vk::Format::R32G32B32Sint,
             offset: origin_off,
         },
         vk::VertexInputAttributeDescription {
@@ -212,18 +225,21 @@ struct DrawCommand {
     first_instance: u32,
 }
 
-/// Camera-relative frustum/AABB test mirroring `cull.comp` (the GPU opaque
-/// path), used by the CPU-driven water pass.
-fn aabb_in_frustum(aabb: &ChunkAABB, planes: &[[f32; 4]; 6], cam: [f32; 3]) -> bool {
+/// Camera-relative frustum test of a section-local AABB, mirroring `cull.comp`
+/// (the GPU opaque path); used by the CPU-driven water pass. The section
+/// origin is rebased against the eye in f64 for precision at extreme
+/// coordinates.
+fn aabb_in_frustum(aabb: &ChunkAABB, origin: [i32; 3], planes: &[[f32; 4]; 6], eye: DVec3) -> bool {
+    let base = (origin_dvec(origin) - eye).as_vec3();
     let mn = [
-        aabb.min[0] - cam[0],
-        aabb.min[1] - cam[1],
-        aabb.min[2] - cam[2],
+        base.x + aabb.min[0],
+        base.y + aabb.min[1],
+        base.z + aabb.min[2],
     ];
     let mx = [
-        aabb.max[0] - cam[0],
-        aabb.max[1] - cam[1],
-        aabb.max[2] - cam[2],
+        base.x + aabb.max[0],
+        base.y + aabb.max[1],
+        base.z + aabb.max[2],
     ];
     for p in planes {
         let d = p[0] * if p[0] >= 0.0 { mx[0] } else { mn[0] }
@@ -237,12 +253,24 @@ fn aabb_in_frustum(aabb: &ChunkAABB, planes: &[[f32; 4]; 6], cam: [f32; 3]) -> b
     true
 }
 
+/// An integer section origin widened for f64 math.
+fn origin_dvec(origin: [i32; 3]) -> DVec3 {
+    DVec3::new(origin[0] as f64, origin[1] as f64, origin[2] as f64)
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrustumData {
     planes: [[f32; 4]; 6],
     chunk_count: u32,
-    camera_pos: [f32; 3],
+    /// Camera block position (the render anchor as integers); the cull
+    /// subtracts it from the absolute integer section origins.
+    cam_block: [i32; 3],
+    /// Eye position relative to `cam_block` (small, full precision).
+    frac: [f32; 3],
+    /// Pads the struct to a 16-byte multiple so the buffer always covers the
+    /// std140 block size.
+    _pad: f32,
 }
 
 /// One uploaded 16³ section: a self-contained indexed draw plus its tight AABB.
@@ -256,7 +284,7 @@ struct SectionAlloc {
     aabb: ChunkAABB,
     /// Section world origin (`chunk*16`, `min_y + si*16`), used to rebase the
     /// quantized vertices and passed to the GPU via `ChunkMeta.origin`.
-    origin: [f32; 3],
+    origin: [i32; 3],
     first_index: u32,
     /// Opaque index count (the GPU-culled draw); water is excluded.
     index_count: u32,
@@ -313,9 +341,9 @@ pub struct ChunkBufferStore {
     /// per-section fade values change each frame, so `cached_meta` must be
     /// rebuilt; an O(1) check replacing the old all-sections scan.
     fade_until: std::time::Instant,
-    /// Camera position at the last front-to-back sort; the sort (an early-Z
+    /// Eye position at the last front-to-back sort; the sort (an early-Z
     /// optimization) is only redone once the camera moves past a threshold.
-    last_sort_cam: [f32; 3],
+    last_sort_cam: DVec3,
     /// Frame slots still needing the latest `cached_meta` uploaded. Set to
     /// `MAX_FRAMES_IN_FLIGHT` whenever the draw list changes, decremented per
     /// frame; at steady state the per-frame meta copy stops.
@@ -702,7 +730,7 @@ impl ChunkBufferStore {
             cached_meta: Vec::new(),
             meta_dirty: true,
             fade_until: std::time::Instant::now(),
-            last_sort_cam: [f32::MAX; 3],
+            last_sort_cam: DVec3::MAX,
             meta_upload_pending: 0,
             compute_pipeline,
             compute_layout,
@@ -734,12 +762,10 @@ impl ChunkBufferStore {
         self.last_draw_count
     }
 
-    /// Whether `pos`'s column is near enough to `cam` to render opaque
+    /// Whether `pos`'s column is near enough to the eye to render opaque
     /// immediately (a nearby column never fades in).
-    fn column_nearby(&self, pos: ChunkPos, cam: [f32; 3]) -> bool {
-        let dx = pos.x as f32 * 16.0 + 8.0 - cam[0];
-        let dz = pos.z as f32 * 16.0 + 8.0 - cam[2];
-        !self.fade_enabled || dx * dx + dz * dz < NEARBY_DIST_SQ
+    fn column_nearby(&self, pos: ChunkPos, eye: DVec3) -> bool {
+        !self.fade_enabled || column_is_near(pos, eye)
     }
 
     /// Submit the accumulated staging copies as a single transfer and block on
@@ -813,7 +839,7 @@ impl ChunkBufferStore {
             idx_off: u32,
             solid_index_count: u32,
             aabb: ChunkAABB,
-            origin: [f32; 3],
+            origin: [i32; 3],
         }
 
         // Retired slices only reclaim in `begin_frame`; if rendering is paused
@@ -955,9 +981,9 @@ impl ChunkBufferStore {
                     solid_index_count: sec.solid_index_count,
                     aabb: sec.aabb,
                     origin: [
-                        (mesh.pos.x * 16) as f32,
-                        (mesh.min_y + sec.section_index * 16) as f32,
-                        (mesh.pos.z * 16) as f32,
+                        mesh.pos.x * 16,
+                        mesh.min_y + sec.section_index * 16,
+                        mesh.pos.z * 16,
                     ],
                 });
             }
@@ -1277,12 +1303,16 @@ impl ChunkBufferStore {
         self.meta_dirty = true;
     }
 
+    /// `anchor` must be the same `Camera::anchor()` this frame's
+    /// `CameraUniform` was built with, so the cull's block/fraction split
+    /// matches the vertex shader's.
     pub fn dispatch_cull(
         &mut self,
         cmd: vk::CommandBuffer,
         frame: usize,
         frustum: &[[f32; 4]; 6],
-        camera_pos: [f32; 3],
+        anchor: DVec3,
+        eye: DVec3,
     ) {
         if self.chunks.is_empty() {
             return;
@@ -1291,7 +1321,7 @@ impl ChunkBufferStore {
         let now = std::time::Instant::now();
         // Re-sort only once the camera moves ~8 blocks; front-to-back order is an
         // early-Z optimization, so finer staleness is harmless.
-        const SORT_RECAM_SQ: f32 = 64.0;
+        const SORT_RECAM_SQ: f64 = 64.0;
 
         // A fade in flight changes per-section visibility every frame, so the draw
         // list must rebuild; otherwise it only changes on edits/loads/visibility
@@ -1304,7 +1334,7 @@ impl ChunkBufferStore {
             for (pos, alloc) in self.chunks.iter() {
                 // Near columns never fade; otherwise each section fades on its own
                 // timer (X/Z distance is per-column).
-                let nearby = self.column_nearby(*pos, camera_pos);
+                let nearby = self.column_nearby(*pos, eye);
 
                 // CPU omission: the visibility graph's mask skips sections proven
                 // occluded, so they never reach the GPU cull (absent => all draw).
@@ -1330,35 +1360,24 @@ impl ChunkBufferStore {
             self.meta_dirty = false;
         }
 
-        let cam_moved = {
-            let dx = camera_pos[0] - self.last_sort_cam[0];
-            let dy = camera_pos[1] - self.last_sort_cam[1];
-            let dz = camera_pos[2] - self.last_sort_cam[2];
-            dx * dx + dy * dy + dz * dz > SORT_RECAM_SQ
-        };
+        let cam_moved = (eye - self.last_sort_cam).length_squared() > SORT_RECAM_SQ;
         if content_changed || cam_moved {
+            // Section centers rebased against the eye in f64, for precision at
+            // extreme coordinates.
+            let center_dist_sq = |m: &ChunkMeta| {
+                let center = DVec3::new(
+                    ((m.aabb_min[0] + m.aabb_max[0]) * 0.5) as f64,
+                    ((m.aabb_min[1] + m.aabb_max[1]) * 0.5) as f64,
+                    ((m.aabb_min[2] + m.aabb_max[2]) * 0.5) as f64,
+                );
+                (origin_dvec(m.origin) + center - eye).length_squared()
+            };
             self.cached_meta.sort_unstable_by(|a, b| {
-                let center_a = [
-                    (a.aabb_min[0] + a.aabb_max[0]) * 0.5 - camera_pos[0],
-                    (a.aabb_min[1] + a.aabb_max[1]) * 0.5 - camera_pos[1],
-                    (a.aabb_min[2] + a.aabb_max[2]) * 0.5 - camera_pos[2],
-                ];
-                let center_b = [
-                    (b.aabb_min[0] + b.aabb_max[0]) * 0.5 - camera_pos[0],
-                    (b.aabb_min[1] + b.aabb_max[1]) * 0.5 - camera_pos[1],
-                    (b.aabb_min[2] + b.aabb_max[2]) * 0.5 - camera_pos[2],
-                ];
-                let dist_a = center_a[0] * center_a[0]
-                    + center_a[1] * center_a[1]
-                    + center_a[2] * center_a[2];
-                let dist_b = center_b[0] * center_b[0]
-                    + center_b[1] * center_b[1]
-                    + center_b[2] * center_b[2];
-                dist_a
-                    .partial_cmp(&dist_b)
+                center_dist_sq(a)
+                    .partial_cmp(&center_dist_sq(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            self.last_sort_cam = camera_pos;
+            self.last_sort_cam = eye;
             // Draw list reordered: every frame slot's meta buffer needs the refresh.
             self.meta_upload_pending = MAX_FRAMES_IN_FLIGHT as u32;
         }
@@ -1376,7 +1395,9 @@ impl ChunkBufferStore {
         let frustum_data = FrustumData {
             planes: *frustum,
             chunk_count: count,
-            camera_pos,
+            cam_block: anchor.as_ivec3().to_array(),
+            frac: (eye - anchor).as_vec3().to_array(),
+            _pad: 0.0,
         };
         let frustum_bytes = bytemuck::bytes_of(&frustum_data);
         self.frustum_allocs[frame].mapped_slice_mut().unwrap()[..frustum_bytes.len()]
@@ -1495,6 +1516,11 @@ impl ChunkBufferStore {
     /// small subset, so a per-section draw is cheap and keeps the opaque
     /// indirect path untouched.
     ///
+    /// `anchor` must be the same `Camera::anchor()` this frame's
+    /// `CameraUniform` was built with: the push-constant origins are rebased
+    /// against it and the shader adds back `camera_pos` (the eye's offset
+    /// from that anchor).
+    ///
     /// TODO: water isn't depth-sorted, so overlapping translucent surfaces
     /// (oceans at grazing angles, water seen through water) can blend out of
     /// order.
@@ -1503,7 +1529,8 @@ impl ChunkBufferStore {
         cmd: vk::CommandBuffer,
         layout: vk::PipelineLayout,
         frustum: &[[f32; 4]; 6],
-        camera_pos: [f32; 3],
+        anchor: DVec3,
+        eye: DVec3,
     ) {
         if self.chunks.is_empty() {
             return;
@@ -1515,16 +1542,17 @@ impl ChunkBufferStore {
         let now = std::time::Instant::now();
         for (pos, alloc) in self.chunks.iter() {
             let col_vis = self.chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
-            let nearby = self.column_nearby(*pos, camera_pos);
+            let nearby = self.column_nearby(*pos, eye);
             for sec in &alloc.sections {
                 if sec.water_index_count == 0
                     || col_vis & (1u32 << sec.section_index) == 0
-                    || !aabb_in_frustum(&sec.aabb, frustum, camera_pos)
+                    || !aabb_in_frustum(&sec.aabb, sec.origin, frustum, eye)
                 {
                     continue;
                 }
                 let vis = Self::section_visibility(nearby, sec, now);
-                let origin_fade = [sec.origin[0], sec.origin[1], sec.origin[2], vis];
+                let rel = (origin_dvec(sec.origin) - anchor).as_vec3();
+                let origin_fade = [rel.x, rel.y, rel.z, vis];
                 cmd.push_constants(
                     layout,
                     vk::ShaderStageFlags::Vertex,

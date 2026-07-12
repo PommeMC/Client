@@ -14,8 +14,8 @@ layout(location = 0) out vec2 v_uv;
 layout(location = 1) out float v_brightness;
 
 void main() {
-    // Positions are absolute world-space; render camera-relative for precision
-    // (matches item_entity.vert).
+    // Positions arrive anchor-relative (rebased in f64 CPU-side); camera_pos
+    // is the eye's offset from the anchor (matches item_entity.vert).
     gl_Position = view_proj * vec4(position - camera_pos.xyz, 1.0);
     v_uv = uv;
     v_brightness = brightness;

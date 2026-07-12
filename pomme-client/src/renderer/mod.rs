@@ -875,10 +875,15 @@ impl Renderer {
         self.camera.position
     }
 
-    /// Camera position used for rendering (eye plus any third-person offset),
-    /// matching `CameraUniform`'s `camera_pos`.
+    /// Camera position used for rendering (eye plus any third-person offset).
     pub fn camera_render_position(&self) -> glam::DVec3 {
         *self.camera.position + self.camera.third_person_offset().as_dvec3()
+    }
+
+    /// The render anchor (camera block position); world-space data uploaded
+    /// to the GPU is rebased against this in f64 first (see `Camera::anchor`).
+    pub fn camera_anchor(&self) -> glam::DVec3 {
+        self.camera.anchor()
     }
 
     /// Six normalized frustum planes (camera-relative, same convention as the
@@ -998,9 +1003,12 @@ impl Renderer {
     }
 
     pub fn update_chunk_borders(&mut self, min_y: i32, max_y: i32) {
-        let cam = self.camera.position.as_vec3();
-        self.chunk_border_pipeline
-            .update_lines(cam.x, cam.y, cam.z, min_y, max_y);
+        self.chunk_border_pipeline.update_lines(
+            *self.camera.position,
+            self.camera_render_position(),
+            min_y,
+            max_y,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1378,11 +1386,13 @@ impl Renderer {
             let frustum = self.camera.frustum_planes();
             // The eye (including the third-person offset) is the origin the chunk
             // vertex shader renders relative to, so the cull must use it too.
-            let eye = self.camera.position.as_vec3() + self.camera.third_person_offset();
-            let cam_pos: [f32; 3] = eye.into();
-
-            self.chunk_buffers
-                .dispatch_cull(cmd, frame, &frustum, cam_pos);
+            self.chunk_buffers.dispatch_cull(
+                cmd,
+                frame,
+                &frustum,
+                self.camera.anchor(),
+                self.camera_render_position(),
+            );
         }
 
         let clear_values = [
@@ -1567,6 +1577,9 @@ impl Renderer {
                 self.chunk_buffers.draw_indirect(cmd, frame, true);
                 let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
+                let anchor = self.camera.anchor();
+                let eye = self.camera_render_position();
+
                 if let Some((block_pos, stage, state)) = destroy_info {
                     self.block_overlay_pipeline.draw(
                         cmd,
@@ -1574,13 +1587,12 @@ impl Renderer {
                         &self.registry,
                         *state,
                         block_pos,
+                        anchor,
                         *stage,
                     );
                 }
 
                 let ent_frustum = self.camera.frustum_planes();
-                let ent_eye: [f32; 3] =
-                    (self.camera.position.as_vec3() + self.camera.third_person_offset()).into();
                 // Entities aren't sent beyond the server's tracking range; a
                 // generous render-distance cap just trims anything stray.
                 let ent_cull_dist = (*render_distance * 16) as f32 + 16.0;
@@ -1589,11 +1601,13 @@ impl Renderer {
                     frame,
                     entities,
                     &ent_frustum,
-                    ent_eye,
+                    anchor,
+                    eye,
                     ent_cull_dist,
                 );
 
-                self.block_entity_pipeline.draw(cmd, frame, block_entities);
+                self.block_entity_pipeline
+                    .draw(cmd, frame, anchor, block_entities);
 
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
 
@@ -1614,7 +1628,8 @@ impl Renderer {
                     cmd,
                     self.chunk_pipeline.pipeline_layout,
                     &ent_frustum,
-                    ent_eye,
+                    anchor,
+                    eye,
                 );
 
                 // Clouds draw after opaque world geometry (so terrain occludes

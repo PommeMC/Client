@@ -1,5 +1,5 @@
 use glam::camera::rh::{proj, view};
-use glam::{FloatExt, Mat4, Vec3};
+use glam::{DVec3, FloatExt, Mat4, Vec3};
 
 use crate::app::input::InputState;
 use crate::entity::components::{LookDirection, Position};
@@ -187,9 +187,14 @@ impl Camera {
         self.position = position
     }
 
-    #[allow(dead_code)] // TODO: camera relative rendering
-    pub fn camera_relative_f32(&self, world_pos: Position) -> Vec3 {
-        (world_pos - self.position).as_vec3()
+    /// Render-space anchor: the camera's block position (vanilla
+    /// `CameraBlockPos`). World positions are rebased against it in f64
+    /// before narrowing to f32, keeping full precision near the camera even
+    /// at extreme coordinates (no stripe lands at 2^24). Never narrow the
+    /// anchor itself to f32 — its components are integers, exact in i32 and
+    /// f64 but not in f32 past 2^24.
+    pub fn anchor(&self) -> DVec3 {
+        self.position.floor()
     }
 
     pub fn update_fov_modifier(&mut self, target: f32) {
@@ -377,8 +382,15 @@ impl Camera {
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    /// xyz: eye position relative to the render anchor (small, full f32
+    /// precision; see `Camera::anchor`), w: fog start. All world-space data
+    /// is uploaded anchor-relative, so shaders never see large floats.
     camera_pos: [f32; 4],
     fog_color: [f32; 4],
+    /// xyz: the anchor as integers (vanilla `CameraBlockPos`). Declared only
+    /// in chunk.vert, which subtracts it from the absolute integer section
+    /// origins; the other shaders keep the shorter block prefix.
+    camera_block: [i32; 4],
 }
 
 // Vanilla FogType.WATER defaults (EnvironmentAttributes): color 0xFF050533,
@@ -396,8 +408,9 @@ impl CameraUniform {
         render_distance_chunks: u32,
         eyes_in_water: bool,
     ) -> Self {
+        let anchor = camera.anchor();
         let offset = camera.third_person_offset();
-        let pos = camera.position.as_vec3() + offset;
+        let pos = (*camera.position - anchor).as_vec3() + offset;
         // Vanilla render-distance fog band: the last clamp(blocks / 10, 4, 64) blocks.
         // The top-down benchmark view sits hundreds of blocks up, so push fog past the
         // far plane to keep the whole loaded area visible.
@@ -416,6 +429,7 @@ impl CameraUniform {
             view_proj: camera.view_projection().to_cols_array_2d(),
             camera_pos: [pos.x, pos.y, pos.z, fog_start],
             fog_color: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_end],
+            camera_block: anchor.as_ivec3().extend(0).to_array(),
         }
     }
 
@@ -424,6 +438,7 @@ impl CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
             camera_pos: [0.0; 4],
             fog_color: [0.0; 4],
+            camera_block: [0; 4],
         }
     }
 }

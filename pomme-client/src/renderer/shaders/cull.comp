@@ -9,8 +9,8 @@ struct ChunkMeta {
     uint first_index;
     int vertex_offset;
     uint visibility;
-    // vec3 + uint pack into one 16-byte slot, matching the Rust layout.
-    vec3 origin;
+    // ivec3 + uint pack into one 16-byte slot, matching the Rust layout.
+    ivec3 origin;
     uint solid_index_count;
 };
 
@@ -29,9 +29,15 @@ layout(set = 0, binding = 0) readonly buffer MetaBuf {
 layout(set = 0, binding = 1) uniform FrustumBuf {
     vec4 planes[6];
     uint chunk_count;
-    float cam_x;
-    float cam_y;
-    float cam_z;
+    // Camera block position plus the eye's small offset from it; the
+    // origins are rebased in integer math so nothing here forms a large
+    // float.
+    int cam_x;
+    int cam_y;
+    int cam_z;
+    float frac_x;
+    float frac_y;
+    float frac_z;
 };
 
 layout(set = 0, binding = 2) writeonly buffer IndirectBuf {
@@ -75,9 +81,10 @@ void main() {
     ChunkMeta m = chunks[idx];
     if (m.index_count == 0u) return;
 
-    vec3 cam = vec3(cam_x, cam_y, cam_z);
-    vec3 mn = m.aabb_min.xyz - cam;
-    vec3 mx = m.aabb_max.xyz - cam;
+    vec3 base = vec3(m.origin - ivec3(cam_x, cam_y, cam_z))
+        - vec3(frac_x, frac_y, frac_z);
+    vec3 mn = base + m.aabb_min.xyz;
+    vec3 mx = base + m.aabb_max.xyz;
 
     for (int i = 0; i < 6; i++) {
         vec4 p = planes[i];

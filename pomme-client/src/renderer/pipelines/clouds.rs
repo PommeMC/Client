@@ -276,7 +276,9 @@ impl CloudPipeline {
             return;
         };
 
-        let cam = camera.position.as_vec3() + camera.third_person_offset();
+        // Stay in f64 until the values are camera-relative so the cell phase
+        // and layer height keep precision at extreme coordinates.
+        let eye = *camera.position + camera.third_person_offset().as_dvec3();
 
         // Scroll the cloud field in +X over time (vanilla `cloudOffset`).
         let cycle = grid.width as i64 * 400;
@@ -285,8 +287,8 @@ impl CloudPipeline {
 
         let tex_w_blocks = grid.width as f64 * CELL_SIZE as f64;
         let tex_h_blocks = grid.height as f64 * CELL_SIZE as f64;
-        let mut cloud_x = cam.x as f64 + (cloud_offset * SCROLL_PER_TICK) as f64;
-        let mut cloud_z = cam.z as f64 + Z_BIAS;
+        let mut cloud_x = eye.x + (cloud_offset * SCROLL_PER_TICK) as f64;
+        let mut cloud_z = eye.z + Z_BIAS;
         cloud_x -= (cloud_x / tex_w_blocks).floor() * tex_w_blocks;
         cloud_z -= (cloud_z / tex_h_blocks).floor() * tex_h_blocks;
 
@@ -294,7 +296,7 @@ impl CloudPipeline {
         let cell_z = (cloud_z / CELL_SIZE as f64).floor() as i32;
         let x_in_cell = (cloud_x - cell_x as f64 * CELL_SIZE as f64) as f32;
         let z_in_cell = (cloud_z - cell_z as f64 * CELL_SIZE as f64) as f32;
-        let relative_bottom_y = CLOUD_HEIGHT - cam.y;
+        let relative_bottom_y = (CLOUD_HEIGHT as f64 - eye.y) as f32;
         let relative_top_y = relative_bottom_y + CLOUD_THICKNESS;
         let rel = if relative_top_y < 0.0 {
             RelativePos::Above

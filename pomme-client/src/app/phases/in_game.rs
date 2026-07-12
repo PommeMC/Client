@@ -24,6 +24,7 @@ use crate::player::LocalPlayer;
 use crate::player::interaction::{HitResult, InteractionState};
 use crate::player::menu_click::ContainerKind;
 use crate::player::tab_list::TabList;
+use crate::renderer::chunk::buffer::column_is_near;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::pipelines::block_entity;
@@ -651,7 +652,7 @@ impl GameState {
     fn apply_visibility(&mut self, renderer: &mut Renderer, bfs: &HashMap<ChunkPos, u32>) {
         let planes = renderer.frustum_planes();
         let planes_wide = renderer.frustum_planes_dilated(VIS_MARGIN_RADIANS);
-        let eye_f = renderer.camera_render_position().as_vec3();
+        let eye_f = renderer.camera_render_position();
         let min_y = self.chunk_store.min_y() as f32;
         let max_y = min_y + self.chunk_store.height() as f32;
         let full = section_mask(self.chunk_store.section_count());
@@ -732,10 +733,6 @@ impl GameState {
     }
 }
 
-/// Always-mesh radius (vanilla `isNearby`, squared block distance in X/Z):
-/// close columns are tier 0 regardless of frustum so the area around the player
-/// is never deferred.
-const NEARBY_DIST_SQ: f32 = 768.0;
 /// Extra FOV (radians) for the tier-1 "about to be seen" margin frustum, so
 /// small camera turns reveal already-meshed terrain instead of a meshing
 /// curtain.
@@ -745,18 +742,19 @@ const VIS_MARGIN_RADIANS: f32 = 0.6;
 /// camera. (Nearby columns are forced to 0 by the caller.)
 fn column_frustum_tier(
     pos: ChunkPos,
-    eye: glam::Vec3,
+    eye: glam::DVec3,
     planes: &[[f32; 4]; 6],
     planes_wide: &[[f32; 4]; 6],
     min_y: f32,
     max_y: f32,
 ) -> u8 {
-    let bx = pos.x as f32 * 16.0;
-    let bz = pos.z as f32 * 16.0;
-    // Camera-relative full-height column box, matching how the GPU cull subtracts
-    // the eye before its plane test (cull.comp).
-    let mn = [bx - eye.x, min_y - eye.y, bz - eye.z];
-    let mx = [bx + 16.0 - eye.x, max_y - eye.y, bz + 16.0 - eye.z];
+    // Camera-relative full-height column box, matching how the GPU cull
+    // subtracts the eye before its plane test (cull.comp); f64 first for
+    // precision at extreme coordinates.
+    let dx = (pos.x as f64 * 16.0 - eye.x) as f32;
+    let dz = (pos.z as f64 * 16.0 - eye.z) as f32;
+    let mn = [dx, (min_y as f64 - eye.y) as f32, dz];
+    let mx = [dx + 16.0, (max_y as f64 - eye.y) as f32, dz + 16.0];
     if aabb_in_frustum(&mn, &mx, planes) {
         0
     } else if aabb_in_frustum(&mn, &mx, planes_wide) {
@@ -764,13 +762,6 @@ fn column_frustum_tier(
     } else {
         2
     }
-}
-
-/// Whether a column is within the always-mesh radius (never deferred/demoted).
-fn column_is_near(pos: ChunkPos, eye: glam::Vec3) -> bool {
-    let cx = pos.x as f32 * 16.0 + 8.0 - eye.x;
-    let cz = pos.z as f32 * 16.0 + 8.0 - eye.z;
-    cx * cx + cz * cz < NEARBY_DIST_SQ
 }
 
 /// Full mask for an `n`-section column (bits `0..n` set).
@@ -1946,6 +1937,7 @@ pub fn update_game(
             &game.item_entity_store,
             &game.chunk_store,
             *gfx.renderer.camera_pivot_position(),
+            gfx.renderer.camera_anchor(),
             partial_tick,
         )
     };
@@ -2012,7 +2004,8 @@ pub fn update_game(
     let particle_quads = if benchmark_running {
         Vec::new()
     } else {
-        game.particle_store.extract(partial_tick)
+        game.particle_store
+            .extract(partial_tick, gfx.renderer.camera_anchor())
     };
 
     let effective_rd = if game.server_render_distance > 0 {
@@ -2275,7 +2268,7 @@ fn emit_item_copies(
     item_name: &str,
     item_id: u32,
     count: i32,
-    world_pos: glam::Vec3,
+    anchor_rel_pos: glam::Vec3,
     age_f: f32,
     bob_offset: f32,
     is_block_model: bool,
@@ -2296,7 +2289,7 @@ fn emit_item_copies(
     // hover = bob + (-modelBoundingBox.minY) + 0.0625
     let hover_y = bob - min_y_r + 0.0625;
 
-    let base = glam::Mat4::from_translation(world_pos + glam::Vec3::new(0.0, hover_y, 0.0))
+    let base = glam::Mat4::from_translation(anchor_rel_pos + glam::Vec3::new(0.0, hover_y, 0.0))
         * glam::Mat4::from_rotation_y(spin);
     let scale_mat = glam::Mat4::from_scale(glam::Vec3::splat(scale));
     let mut push = |copy_offset: glam::Mat4| {
@@ -2335,6 +2328,7 @@ fn build_item_render_infos(
     entity_store: &crate::entity::ItemEntityStore,
     chunk_store: &ChunkStore,
     camera_pos: glam::DVec3,
+    anchor: glam::DVec3,
     partial_tick: f32,
 ) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
     let mut infos = Vec::new();
@@ -2347,7 +2341,7 @@ fn build_item_render_infos(
             &item.item_name,
             item.item_id,
             item.count,
-            lerped.as_vec3(),
+            (*lerped - anchor).as_vec3(),
             age_f,
             item.bob_offset,
             item.is_block_model,
@@ -2367,7 +2361,7 @@ fn build_item_render_infos(
             &pickup.item_name,
             pickup.item_id,
             pickup.count,
-            pickup.position.as_vec3(),
+            (*pickup.position - anchor).as_vec3(),
             age_f,
             pickup.bob_offset,
             pickup.is_block_model,
