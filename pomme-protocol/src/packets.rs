@@ -65,6 +65,26 @@ impl PacketTable {
         })
     }
 
+    /// The table for a launchable protocol number, or `None` for versions
+    /// without an embedded table. Patch releases share a number (26.1 and
+    /// 26.1.1 are both 775) and are wire-identical, so one table serves all.
+    pub fn for_protocol(protocol: i32) -> Option<&'static PacketTable> {
+        match protocol {
+            _ if protocol == LATEST.protocol => Some(Self::latest()),
+            775 => {
+                static TABLE: OnceLock<PacketTable> = OnceLock::new();
+                Some(TABLE.get_or_init(|| {
+                    // The table was generated from reference/26.1; the other
+                    // 775 releases (26.1.1, 26.1.2) are wire-identical.
+                    let expected = ProtocolVersion::from_name("26.1").expect("26.1 in VERSIONS");
+                    Self::parse(include_str!("data/protocol-26.1.json"), expected)
+                        .expect("embedded 26.1 packet table")
+                }))
+            }
+            _ => None,
+        }
+    }
+
     fn parse(json: &str, expected: ProtocolVersion) -> Result<Self, String> {
         let file: TableFile = serde_json::from_str(json).map_err(|e| e.to_string())?;
         if file.version != expected.name || file.protocol != expected.protocol {
@@ -171,6 +191,51 @@ mod tests {
             Some(0)
         );
         assert_eq!(t.id(Phase::Game, Direction::Serverbound, "no_such"), None);
+    }
+
+    /// Registration-order anchors for 26.1, spot-checked by hand against
+    /// `reference/26.1/decompiled/.../GameProtocols.java`. Ids match 26.2
+    /// everywhere; the serverbound slot 62 packet was renamed in 26.2
+    /// (`spectate_entity` -> `spectator_action`).
+    #[test]
+    fn anchors_26_1() {
+        let t = PacketTable::for_protocol(775).unwrap();
+        assert_eq!(t.version().protocol, 775);
+        assert_eq!(t.version().name, "26.1");
+        assert_eq!(t.id(Phase::Game, Direction::Serverbound, "attack"), Some(1));
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "interact"),
+            Some(0x1A)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "level_particles"),
+            Some(47)
+        );
+        assert_eq!(
+            t.name_of(Phase::Game, Direction::Serverbound, 62),
+            Some("spectate_entity")
+        );
+        assert_eq!(
+            t.id(Phase::Login, Direction::Clientbound, "login_finished"),
+            Some(2)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "login"),
+            PacketTable::latest().id(Phase::Game, Direction::Clientbound, "login")
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_player_team"),
+            PacketTable::latest().id(Phase::Game, Direction::Clientbound, "set_player_team")
+        );
+    }
+
+    #[test]
+    fn for_protocol_lookups() {
+        assert!(std::ptr::eq(
+            PacketTable::for_protocol(776).unwrap(),
+            PacketTable::latest()
+        ));
+        assert!(PacketTable::for_protocol(774).is_none());
     }
 
     /// Per-phase counts from the 26.2 registration lists; a regenerated table

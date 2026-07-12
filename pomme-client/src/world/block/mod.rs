@@ -122,7 +122,10 @@ struct BehaviorEntry {
     requires_correct_tool: bool,
 }
 
-static BLOCK_TABLE: OnceLock<Vec<BlockData>> = OnceLock::new();
+/// One lazily-built table per embedded data file; `ACTIVE_TABLE` indexes the
+/// protocol currently spoken (see [`set_active_protocol`]).
+static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; 2] = [OnceLock::new(), OnceLock::new()];
+static ACTIVE_TABLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Vanilla getFluidState overrides on blocks without a `waterlogged` property.
 const IMPLICIT_WATER: [&str; 4] = ["seagrass", "tall_seagrass", "kelp", "kelp_plant"];
@@ -368,15 +371,33 @@ const NO_COLLISION: &[&str] = &[
     "yellow_wall_banner",
 ];
 
-/// Loads the block-state table for the selected game version. Must be called
+/// Loads the block-state table for the launched game version. Must be called
 /// once at startup before any world/render code runs.
 pub fn init(version: &str) {
-    if version != "26.2" {
-        tracing::warn!(
-            "no block-state data for version {version}, using 26.2 — expect state drift"
-        );
-    }
-    let _ = BLOCK_TABLE.set(build_table(include_str!("data/blocks-26.2.json")));
+    let protocol = pomme_protocol::ProtocolVersion::from_name(version)
+        .map(|v| v.protocol)
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "no block-state data for version {version}, using 26.2 — expect state drift"
+            );
+            pomme_protocol::version::LATEST.protocol
+        });
+    set_active_protocol(protocol);
+}
+
+/// Switches the active table to the given protocol's, building it on first
+/// use, so state ids from the wire are interpreted natively in that
+/// version's id space (no chunk remapping). Patch releases sharing a
+/// protocol number (26.1 through 26.1.2 are all 775) get the same table.
+/// Only safe between worlds — meshes built against the previous table
+/// interpret ids in the old id space.
+pub fn set_active_protocol(protocol: i32) {
+    let (slot, data) = match protocol {
+        775 => (1, include_str!("data/blocks-26.1.json")),
+        _ => (0, include_str!("data/blocks-26.2.json")),
+    };
+    BLOCK_TABLES[slot].get_or_init(|| build_table(data));
+    ACTIVE_TABLE.store(slot, std::sync::atomic::Ordering::Release);
 }
 
 fn build_table(data: &str) -> Vec<BlockData> {
@@ -487,7 +508,7 @@ fn state_fluid(name: &'static str, props: &PropMap) -> Fluid {
 }
 
 fn table() -> &'static Vec<BlockData> {
-    BLOCK_TABLE
+    BLOCK_TABLES[ACTIVE_TABLE.load(std::sync::atomic::Ordering::Acquire)]
         .get()
         .expect("world::block::init must be called before use")
 }

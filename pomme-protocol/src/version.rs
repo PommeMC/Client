@@ -13,7 +13,11 @@ pub const VERSIONS: &[ProtocolVersion] = &[
         protocol: 776,
     },
     ProtocolVersion {
-        name: "26.1",
+        name: "26.1.2",
+        protocol: 775,
+    },
+    ProtocolVersion {
+        name: "26.1.1",
         protocol: 775,
     },
     ProtocolVersion {
@@ -21,7 +25,7 @@ pub const VERSIONS: &[ProtocolVersion] = &[
         protocol: 0x40000130,
     },
     ProtocolVersion {
-        name: "26.1.1",
+        name: "26.1",
         protocol: 775,
     },
 ];
@@ -34,8 +38,8 @@ impl ProtocolVersion {
         VERSIONS.iter().copied().find(|v| v.name == name)
     }
 
-    /// Newest match wins for numbers shared by several versions (26.1 and
-    /// 26.1.1 are both 775).
+    /// Newest match wins for numbers shared by several versions (26.1
+    /// through 26.1.2 are all 775, wire-identical).
     pub fn from_protocol(protocol: i32) -> Option<Self> {
         VERSIONS.iter().copied().find(|v| v.protocol == protocol)
     }
@@ -49,7 +53,8 @@ mod tests {
     fn lookups() {
         assert_eq!(LATEST.protocol, 776);
         assert_eq!(ProtocolVersion::from_name("26.2").unwrap().protocol, 776);
-        assert_eq!(ProtocolVersion::from_protocol(775).unwrap().name, "26.1");
+        assert_eq!(ProtocolVersion::from_protocol(775).unwrap().name, "26.1.2");
+        assert_eq!(ProtocolVersion::from_name("26.1").unwrap().protocol, 775);
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
     }
 }

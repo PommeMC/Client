@@ -112,10 +112,7 @@ async fn ping_server(
     generation: PingGeneration,
     spawned_gen: u64,
 ) {
-    use azalea_protocol::packets::ClientIntention;
-    use azalea_protocol::packets::status::ClientboundStatusPacket;
     use azalea_protocol::packets::status::s_ping_request::ServerboundPingRequest;
-    use azalea_protocol::packets::status::s_status_request::ServerboundStatusRequest;
 
     let result = async {
         use azalea_protocol::address::ServerAddr;
@@ -124,21 +121,9 @@ async fn ping_server(
             .as_str()
             .try_into()
             .map_err(|_| format!("Invalid address: {address}"))?;
-        let conn = crate::net::resolve::connect(&server_addr, ClientIntention::Status)
+        let (status, mut conn) = crate::net::resolve::request_status(&server_addr)
             .await
             .map_err(|e| format!("{address}: {e}"))?;
-
-        let mut conn = conn.status();
-
-        conn.write(ServerboundStatusRequest {})
-            .await
-            .map_err(|e| format!("Status request failed: {e}"))?;
-
-        let packet = conn.read().await.map_err(|e| format!("Read failed: {e}"))?;
-        let status = match packet {
-            ClientboundStatusPacket::StatusResponse(s) => s,
-            _ => return Err("Unexpected packet".to_string()),
-        };
 
         let ping_start = Instant::now();
         let time = std::time::SystemTime::now()
@@ -156,7 +141,10 @@ async fn ping_server(
         // Vanilla MOTD base color: 0x808080.
         let motd = format_text_spans(&status.description, [0.5, 0.5, 0.5, 1.0]);
         let version = status.version.name.clone();
-        let protocol_match = status.version.protocol == crate::version::selected_protocol();
+        // Joinable if we speak the server's protocol natively or through the
+        // wire translation layer.
+        let protocol_match =
+            pomme_protocol::PacketTable::for_protocol(status.version.protocol).is_some();
         let (online, max) = (status.players.online, status.players.max);
 
         let favicon_rgba = status.favicon.as_deref().and_then(decode_favicon);

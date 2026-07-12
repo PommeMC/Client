@@ -108,6 +108,7 @@ pub async fn connect_to_server(
         .as_str()
         .try_into()
         .map_err(|_| ConnectionError::InvalidAddress(args.server.clone()))?;
+    negotiate_wire_version(&server_addr).await;
     let conn = super::resolve::connect(&server_addr, ClientIntention::Login).await?;
     let mut conn = conn.login();
 
@@ -153,12 +154,48 @@ pub async fn connect_to_server(
     .await
 }
 
+/// Pings the server for its protocol and adopts it as the wire version when
+/// translation data for it exists, so one client joins any supported server
+/// version; otherwise the launched version is kept (and the server shows its
+/// own mismatch message, as before). Sets the session protocol and the
+/// matching block-state table, so it must run before the login handshake and
+/// before any world state loads.
+async fn negotiate_wire_version(server_addr: &ServerAddr) {
+    let probe = async {
+        let (status, _) = super::resolve::request_status(server_addr).await.ok()?;
+        Some(status.version.protocol)
+    };
+    let selected = crate::version::selected_protocol();
+    let wire = match tokio::time::timeout(std::time::Duration::from_secs(5), probe).await {
+        Ok(Some(p)) if pomme_protocol::PacketTable::for_protocol(p).is_some() => p,
+        Ok(Some(p)) => {
+            tracing::warn!("Server speaks unsupported protocol {p}; connecting as {selected}");
+            selected
+        }
+        _ => {
+            tracing::warn!("Server protocol probe failed; connecting as {selected}");
+            selected
+        }
+    };
+    tracing::info!("Negotiated wire protocol {wire}");
+    crate::version::set_session_protocol(wire);
+    crate::world::block::set_active_protocol(wire);
+}
+
 async fn login_sequence(
     conn: &mut Connection<ClientboundLoginPacket, ServerboundLoginPacket>,
     args: &ConnectArgs,
 ) -> Result<(), ConnectionError> {
     loop {
-        let packet: ClientboundLoginPacket = conn.read().await?;
+        // Read the raw frame ourselves so older-version layouts can be
+        // rewritten before the typed decode (26.1's login_finished lacks the
+        // trailing session id).
+        let raw = conn.reader.raw.read().await?;
+        let raw = match super::translate::active() {
+            Some(t) => t.translate_login_frame(raw),
+            None => raw,
+        };
+        let packet: ClientboundLoginPacket = deserialize_packet(&mut std::io::Cursor::new(&raw))?;
         tracing::info!("Login packet: {:?}", std::mem::discriminant(&packet));
         match packet {
             ClientboundLoginPacket::Hello(p) => {
@@ -463,7 +500,12 @@ async fn game_loop(
     tokio::spawn(async move {
         while let Some(out) = outbound_rx.recv().await {
             let result = match out {
-                Outbound::Packet(packet) => writer.write(*packet).await,
+                Outbound::Packet(mut packet) => {
+                    if let Some(t) = super::translate::active() {
+                        t.remap_outbound(&mut packet);
+                    }
+                    writer.write(*packet).await
+                }
                 Outbound::Raw(bytes) => writer.raw.write(&bytes).await,
             };
             if let Err(e) = result {
@@ -537,11 +579,23 @@ async fn game_loop(
                 continue;
             }
         };
+        let raw = match super::translate::active() {
+            Some(t) => match t.translate_game_frame(raw) {
+                Some(raw) => raw,
+                None => continue,
+            },
+            None => raw,
+        };
         if handle_raw_game_packet(&raw, event_tx) {
             continue;
         }
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
-            Ok(packet) => {
+            Ok(mut packet) => {
+                if let Some(t) = super::translate::active()
+                    && !t.remap_inbound(&mut packet)
+                {
+                    continue;
+                }
                 handle_game_packet(&packet, &sender, event_tx, &registry_holder, &shared_tree)
             }
             Err(e) => skip_malformed_packet(e)?,

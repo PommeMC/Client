@@ -34,3 +34,11 @@ client-pre-pr:
 # Regenerate a version's packet-id table from the decompiled reference.
 protogen version="26.2":
     @cargo run -p protogen -- reference/{{ version }}/decompiled {{ version }} pomme-protocol/src/data/protocol-{{ version }}.json
+
+# Regenerate a version's client-registry id table from the data-generator report.
+registrygen version="26.2":
+    @cargo run -p protogen -- registries reference/{{ version }} {{ version }} pomme-protocol/src/data/registries-{{ version }}.json
+
+# Regenerate a version's block-state table from the data-generator report.
+blockgen version="26.2":
+    @cargo run -p blockgen -- blocks reference/{{ version }}/generated/reports/blocks.json {{ version }} pomme-client/src/world/block/data/blocks-{{ version }}.json
