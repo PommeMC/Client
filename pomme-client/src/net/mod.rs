@@ -3,6 +3,7 @@ pub mod connection;
 pub mod handler;
 pub mod resolve;
 pub mod sender;
+pub mod wire;
 
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use glam::DVec3;
 use simdnbt::owned::NbtCompound;
 
 use crate::entity::components::Position;
+use crate::entity::villager::{VillagerKind, VillagerProfession};
 
 pub enum NetworkEvent {
     Connected,
@@ -258,6 +260,16 @@ pub enum NetworkEvent {
     CowVariant {
         id: i32,
         variant: u8,
+    },
+    VillagerData {
+        id: i32,
+        kind: VillagerKind,
+        profession: VillagerProfession,
+        level: u32,
+    },
+    VillagerUnhappy {
+        id: i32,
+        counter: i32,
     },
     EntityCustomName {
         id: i32,

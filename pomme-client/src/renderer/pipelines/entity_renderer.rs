@@ -14,7 +14,7 @@ use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
 
-pub const MAX_OVERLAYS: usize = 2;
+pub const MAX_OVERLAYS: usize = 4;
 
 /// Per-frame instance buffer capacity, in (entity, part) draws. Far above any
 /// realistic on-screen entity count; excess is dropped with a warning.
@@ -45,6 +45,10 @@ pub struct EntityRenderInfo {
     pub player_uuid: Option<uuid::Uuid>,
     pub variant_index: u32,
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
+    /// Per-slot overlay texture variant (villager type/profession/level).
+    pub overlay_variants: [u32; MAX_OVERLAYS],
+    /// Villager head-shake (unhappy counter > 0).
+    pub is_unhappy: bool,
     pub head_y_offset: f32,
     pub head_x_rot_deg_override: Option<f32>,
     pub has_red_overlay: bool,
@@ -85,8 +89,10 @@ struct MobVariant {
 struct MobEntry {
     adult_variants: Vec<MobVariant>,
     baby_variants: Option<Vec<MobVariant>>,
-    adult_overlays: Vec<MobVariant>,
-    baby_overlays: Vec<MobVariant>,
+    /// Overlay slots, each with its own texture variants
+    /// (`overlay_variants[slot]` picks one).
+    adult_overlays: Vec<Vec<MobVariant>>,
+    baby_overlays: Vec<Vec<MobVariant>>,
     anim: AnimationType,
 }
 
@@ -109,12 +115,18 @@ impl MobEntry {
         &pool[idx]
     }
 
-    fn overlays(&self, is_baby: bool) -> &[MobVariant] {
+    fn overlays(&self, is_baby: bool) -> &[Vec<MobVariant>] {
         if is_baby {
             &self.baby_overlays
         } else {
             &self.adult_overlays
         }
+    }
+
+    fn overlay_variant(&self, is_baby: bool, slot: usize, variant_index: u32) -> &MobVariant {
+        let pool = &self.overlays(is_baby)[slot];
+        let idx = (variant_index as usize).min(pool.len().saturating_sub(1));
+        &pool[idx]
     }
 }
 
@@ -208,6 +220,7 @@ enum AnimationType {
     Zombie,
     Skeleton,
     Spider,
+    Villager,
 }
 
 struct VariantDef {
@@ -262,6 +275,54 @@ fn mob_definitions() -> Vec<MobDef> {
         &[&["minecraft/textures/entity/creeper/creeper_armor.png"]];
     const SPIDER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/spider/spider.png"]];
     const SPIDER_EYES_TEX: &[&[&str]] = &[&["minecraft/textures/entity/spider/spider_eyes.png"]];
+    const VILLAGER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/villager/villager.png"]];
+    const VILLAGER_BABY_TEX: &[&[&str]] =
+        &[&["minecraft/textures/entity/villager/villager_baby.png"]];
+    // Indexed by the builtin VillagerKind registry order.
+    const VILLAGER_TYPE_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/villager/type/desert.png"],
+        &["minecraft/textures/entity/villager/type/jungle.png"],
+        &["minecraft/textures/entity/villager/type/plains.png"],
+        &["minecraft/textures/entity/villager/type/savanna.png"],
+        &["minecraft/textures/entity/villager/type/snow.png"],
+        &["minecraft/textures/entity/villager/type/swamp.png"],
+        &["minecraft/textures/entity/villager/type/taiga.png"],
+    ];
+    const VILLAGER_BABY_TYPE_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/villager/baby/desert.png"],
+        &["minecraft/textures/entity/villager/baby/jungle.png"],
+        &["minecraft/textures/entity/villager/baby/plains.png"],
+        &["minecraft/textures/entity/villager/baby/savanna.png"],
+        &["minecraft/textures/entity/villager/baby/snow.png"],
+        &["minecraft/textures/entity/villager/baby/swamp.png"],
+        &["minecraft/textures/entity/villager/baby/taiga.png"],
+    ];
+    // Indexed by VillagerProfession registry order minus one ("none" has no
+    // texture).
+    const VILLAGER_PROFESSION_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/villager/profession/armorer.png"],
+        &["minecraft/textures/entity/villager/profession/butcher.png"],
+        &["minecraft/textures/entity/villager/profession/cartographer.png"],
+        &["minecraft/textures/entity/villager/profession/cleric.png"],
+        &["minecraft/textures/entity/villager/profession/farmer.png"],
+        &["minecraft/textures/entity/villager/profession/fisherman.png"],
+        &["minecraft/textures/entity/villager/profession/fletcher.png"],
+        &["minecraft/textures/entity/villager/profession/leatherworker.png"],
+        &["minecraft/textures/entity/villager/profession/librarian.png"],
+        &["minecraft/textures/entity/villager/profession/mason.png"],
+        &["minecraft/textures/entity/villager/profession/nitwit.png"],
+        &["minecraft/textures/entity/villager/profession/shepherd.png"],
+        &["minecraft/textures/entity/villager/profession/toolsmith.png"],
+        &["minecraft/textures/entity/villager/profession/weaponsmith.png"],
+    ];
+    // Indexed by profession level 1-5 minus one.
+    const VILLAGER_LEVEL_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/villager/profession_level/stone.png"],
+        &["minecraft/textures/entity/villager/profession_level/iron.png"],
+        &["minecraft/textures/entity/villager/profession_level/gold.png"],
+        &["minecraft/textures/entity/villager/profession_level/emerald.png"],
+        &["minecraft/textures/entity/villager/profession_level/diamond.png"],
+    ];
 
     // Base and baby models, plus opaque overlays (sheep wool), are all Opaque.
     fn opaque(
@@ -380,6 +441,61 @@ fn mob_definitions() -> Vec<MobDef> {
                 overlay_kind: OverlayKind::SwirlAdditive,
             }],
             baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Villager,
+            anim: AnimationType::Villager,
+            adult: vec![opaque(
+                entity_model::bake_villager_model(false),
+                VILLAGER_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_villager_model(false),
+                VILLAGER_BABY_TEX,
+                64,
+            )),
+            // Cutout layers over the base skin (vanilla `VillagerProfessionLayer`):
+            // slot 0 = biome type, slot 1 = biome type on the no-hat model (used
+            // when the profession texture brings its own hat), slot 2 =
+            // profession, slot 3 = profession level badge. entity_extras gates
+            // slot 0 xor 1 and picks each slot's texture variant.
+            // TODO: CustomHeadLayer (worn head items) and CrossedArmsItemLayer
+            // (held item) need a held-item layer first.
+            adult_overlays: vec![
+                opaque(
+                    entity_model::bake_villager_model(false),
+                    VILLAGER_TYPE_TEX,
+                    64,
+                ),
+                opaque(
+                    entity_model::bake_villager_model(true),
+                    VILLAGER_TYPE_TEX,
+                    64,
+                ),
+                opaque(
+                    entity_model::bake_villager_model(false),
+                    VILLAGER_PROFESSION_TEX,
+                    64,
+                ),
+                opaque(
+                    entity_model::bake_villager_model(false),
+                    VILLAGER_LEVEL_TEX,
+                    64,
+                ),
+            ],
+            baby_overlays: vec![
+                opaque(
+                    entity_model::bake_baby_villager_model(false),
+                    VILLAGER_BABY_TYPE_TEX,
+                    64,
+                ),
+                opaque(
+                    entity_model::bake_baby_villager_model(true),
+                    VILLAGER_BABY_TYPE_TEX,
+                    64,
+                ),
+            ],
         },
         MobDef {
             kind: EntityKind::Spider,
@@ -508,13 +624,10 @@ impl EntityRenderer {
             let adult_variants: Vec<MobVariant> =
                 def.adult.into_iter().flat_map(&mut build).collect();
             let baby_variants = def.baby.map(&mut build);
-            let adult_overlays: Vec<MobVariant> = def
-                .adult_overlays
-                .into_iter()
-                .flat_map(&mut build)
-                .collect();
-            let baby_overlays: Vec<MobVariant> =
-                def.baby_overlays.into_iter().flat_map(&mut build).collect();
+            let adult_overlays: Vec<Vec<MobVariant>> =
+                def.adult_overlays.into_iter().map(&mut build).collect();
+            let baby_overlays: Vec<Vec<MobVariant>> =
+                def.baby_overlays.into_iter().map(&mut build).collect();
 
             // Anim part-name indices are computed against the base variant's model and
             // reused for each overlay draw. Catch mismatched part order at construction
@@ -729,6 +842,15 @@ impl EntityRenderer {
                 info.walk_anim_pos,
                 info.walk_anim_speed,
             ),
+            AnimationType::Villager => entity_model::compute_villager_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.is_unhappy,
+                info.age_in_ticks,
+            ),
         }
     }
 
@@ -783,14 +905,22 @@ impl EntityRenderer {
                 return;
             }
 
-            // Opaque pass: base model + opaque overlays (sheep wool).
-            let mut opaque = VariantGroups::default();
-            for (vi, v) in vis.iter().enumerate() {
-                let overlay_color = if v.info.has_red_overlay {
+            // Opaque pass: base model + opaque overlays (sheep wool, villager
+            // clothing). Overlay layers are exactly coplanar with the base and
+            // rely on LessOrEqual depth + draw order to win, so emit in layer
+            // phases (all bases, then slot 0 across all entities, then slot
+            // 1, ...) — interleaving per entity would let a shared group
+            // created by an earlier entity draw a later entity's lower layer
+            // after its upper one.
+            let hurt_color = |info: &EntityRenderInfo| {
+                if info.has_red_overlay {
                     HURT_OVERLAY
                 } else {
                     NO_OVERLAY
-                };
+                }
+            };
+            let mut opaque = VariantGroups::default();
+            for (vi, v) in vis.iter().enumerate() {
                 let base = v
                     .entry
                     .base_variant(v.info.is_baby, self.effective_variant_index(v.info));
@@ -798,9 +928,19 @@ impl EntityRenderer {
                 opaque.add(
                     base,
                     texture_set,
-                    (vi, WHITE_TINT, overlay_color, [0.0, 0.0]),
+                    (vi, WHITE_TINT, hurt_color(v.info), [0.0, 0.0]),
                 );
-                for (slot, overlay) in v.entry.overlays(v.info.is_baby).iter().enumerate() {
+            }
+            for slot in 0..MAX_OVERLAYS {
+                for (vi, v) in vis.iter().enumerate() {
+                    if slot >= v.entry.overlays(v.info.is_baby).len() {
+                        continue;
+                    }
+                    let overlay = v.entry.overlay_variant(
+                        v.info.is_baby,
+                        slot,
+                        v.info.overlay_variants[slot],
+                    );
                     if overlay.overlay_kind != OverlayKind::Opaque {
                         continue;
                     }
@@ -808,7 +948,7 @@ impl EntityRenderer {
                         opaque.add(
                             overlay,
                             overlay.texture_set,
-                            (vi, tint, overlay_color, [0.0, 0.0]),
+                            (vi, tint, hurt_color(v.info), [0.0, 0.0]),
                         );
                     }
                 }
@@ -919,8 +1059,8 @@ impl EntityRenderer {
                 .adult_variants
                 .iter_mut()
                 .chain(entry.baby_variants.iter_mut().flatten())
-                .chain(entry.adult_overlays.iter_mut())
-                .chain(entry.baby_overlays.iter_mut())
+                .chain(entry.adult_overlays.iter_mut().flatten())
+                .chain(entry.baby_overlays.iter_mut().flatten())
                 .collect();
             for v in variants {
                 device.destroy_buffer(v.vertex_buffer, None);
@@ -1111,7 +1251,10 @@ fn collect_emissive<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
         } else {
             [0.0, 0.0]
         };
-        for (slot, overlay) in v.entry.overlays(v.info.is_baby).iter().enumerate() {
+        for slot in 0..v.entry.overlays(v.info.is_baby).len() {
+            let overlay =
+                v.entry
+                    .overlay_variant(v.info.is_baby, slot, v.info.overlay_variants[slot]);
             if overlay.overlay_kind != kind {
                 continue;
             }
@@ -1136,6 +1279,7 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::Skeleton => (0.6, 1.99),
         EntityKind::Creeper => (0.6, 1.7),
         EntityKind::Spider => (1.4, 0.9),
+        EntityKind::Villager => (0.6, 1.95),
         EntityKind::Player => (0.6, 1.8),
         _ => (1.0, 1.0),
     };
@@ -1167,7 +1311,7 @@ fn entity_visible(
     true
 }
 
-fn assert_part_order_matches(base: &[MobVariant], overlays: &[MobVariant]) {
+fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) {
     let Some(base_first) = base.first() else {
         return;
     };
@@ -1177,7 +1321,7 @@ fn assert_part_order_matches(base: &[MobVariant], overlays: &[MobVariant]) {
         .iter()
         .map(|p| p.name.as_str())
         .collect();
-    for overlay in overlays {
+    for overlay in overlays.iter().flatten() {
         let overlay_names: Vec<&str> = overlay
             .model
             .parts

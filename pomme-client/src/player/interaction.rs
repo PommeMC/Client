@@ -23,6 +23,7 @@ use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::EntityStore;
 use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
+use crate::net::wire;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::Aabb;
 use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
@@ -65,6 +66,7 @@ pub struct BlockHitResult {
 pub struct EntityHitResult {
     pub entity_id: i32,
     pub location: DVec3,
+    pub entity_pos: DVec3,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -412,7 +414,8 @@ impl InteractionState {
         } else if input.action_just_pressed(input::Action::Use)
             || (input.performing_action(input::Action::Use) && self.use_delay == 0)
         {
-            let suppress_block_use = input.performing_action(input::Action::Sneak) && !hands_empty;
+            let sneaking = input.performing_action(input::Action::Sneak);
+            let suppress_block_use = sneaking && !hands_empty;
             let success = self.start_use_item(
                 sender,
                 audio,
@@ -424,6 +427,7 @@ impl InteractionState {
                 held_stack,
                 food,
                 creative,
+                sneaking,
                 suppress_block_use,
                 effects,
                 &mut dirty_chunks,
@@ -561,6 +565,7 @@ impl InteractionState {
         held_stack: Option<&ItemStackData>,
         food: u32,
         creative: bool,
+        sneaking: bool,
         suppress_block_use: bool,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
@@ -571,8 +576,22 @@ impl InteractionState {
 
         self.use_delay = USE_DELAY;
 
-        // TODO: entity targets should send ServerboundInteract (feeding,
-        // leads etc.) before falling through to `use_item`.
+        // Vanilla `startUseItem` checks the entity target before block/item
+        // use and sends one interact packet; the server does the rest
+        // (trading, feeding, leads, the villager head-shake).
+        // TODO: consuming unconditionally is an approximation; vanilla falls
+        // through to `useItem` when the client-side `interactOn` returns PASS
+        // (e.g. eating while the crosshair rests on a passive mob).
+        if let Some(HitResult::Entity(hit)) = self.target {
+            sender.send_raw(wire::encode_interact(
+                hit.entity_id,
+                hit.location - hit.entity_pos,
+                sneaking,
+            ));
+            self.swing(sender);
+            return true;
+        }
+
         let hit_block = if let Some(HitResult::Block(hit)) = self.target {
             self.seq += 1;
             sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
@@ -1274,6 +1293,7 @@ fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<
             nearest = Some(EntityHitResult {
                 entity_id,
                 location,
+                entity_pos: entity.position.into(),
             });
         }
     }
