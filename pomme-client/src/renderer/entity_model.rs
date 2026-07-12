@@ -1339,12 +1339,31 @@ fn clear_head_subtree(parts: &mut [EntityPart]) {
     }
 }
 
+/// Vanilla `villagerLikeScale` (`LayerDefinitions`): the adult layers bake
+/// with the roots scaled 0.9375 and their poses adjusted to keep feet
+/// grounded (`PartPose.scaled(f).translated(0, 24.016 * (1 - f), 0)`).
+const VILLAGER_SCALE: f32 = 0.9375;
+
 pub fn bake_villager_model(no_hat: bool) -> BakedEntityModel {
     let mut parts = villager_parts();
     if no_hat {
         clear_head_subtree(&mut parts);
     }
-    bake_model(parts, 64, 64)
+    // Root-only: the transform chain propagates a root's scale to child
+    // pivots and geometry like vanilla's pose stack (children would
+    // double-scale).
+    let mut scales = Vec::with_capacity(parts.len());
+    for part in &mut parts {
+        let is_root = part.parent.is_none();
+        if is_root {
+            part.offset =
+                part.offset * VILLAGER_SCALE + Vec3::new(0.0, 24.016 * (1.0 - VILLAGER_SCALE), 0.0);
+        }
+        scales.push(if is_root { VILLAGER_SCALE } else { 1.0 });
+    }
+    let mut model = bake_model(parts, 64, 64);
+    model.part_scales = scales;
+    model
 }
 
 pub fn bake_baby_villager_model(no_hat: bool) -> BakedEntityModel {
