@@ -15,6 +15,7 @@ use glam::DVec3;
 use simdnbt::owned::NbtCompound;
 
 use crate::entity::components::Position;
+use crate::entity::villager::{VillagerKind, VillagerProfession};
 
 pub enum NetworkEvent {
     Connected,
@@ -261,8 +262,8 @@ pub enum NetworkEvent {
     },
     VillagerData {
         id: i32,
-        kind: u8,
-        profession: u8,
+        kind: VillagerKind,
+        profession: VillagerProfession,
         level: u32,
     },
     VillagerUnhappy {

@@ -498,16 +498,13 @@ pub fn handle_game_packet(
                     });
                 }
                 // Index 19 on villagers = VillagerData (type/profession/level).
-                // Kind/profession ids follow the builtin registry order, which
-                // matches vanilla's bootstrap order.
                 if item.index == 19
                     && let azalea_entity::EntityDataValue::VillagerData(data) = &item.value
                 {
-                    use azalea_registry::Registry;
                     let _ = event_tx.try_send(NetworkEvent::VillagerData {
                         id: p.id.0,
-                        kind: data.kind.to_u32() as u8,
-                        profession: data.profession.to_u32() as u8,
+                        kind: data.kind.into(),
+                        profession: data.profession.into(),
                         level: data.level,
                     });
                 }

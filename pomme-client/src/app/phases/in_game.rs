@@ -2494,9 +2494,10 @@ const VILLAGER_PROFESSION_HAT: [u8; 15] = [
 /// 2 = profession, 3 = profession level. Mirrors vanilla
 /// `VillagerProfessionLayer.submit`.
 fn villager_extras(e: &crate::entity::LivingEntity) -> EntityExtras {
-    const NITWIT: usize = 11;
-    let kind = e.villager_kind.min(6) as usize;
-    let profession = e.villager_profession.min(14) as usize;
+    use crate::entity::villager::VillagerProfession;
+
+    let kind = e.villager_kind as usize;
+    let profession = e.villager_profession as usize;
 
     let type_hat = VILLAGER_TYPE_HAT[kind];
     let prof_hat = VILLAGER_PROFESSION_HAT[profession];
@@ -2505,9 +2506,9 @@ fn villager_extras(e: &crate::entity::LivingEntity) -> EntityExtras {
     let mut overlay_tints = [None; MAX_OVERLAYS];
     overlay_tints[if type_hat_visible { 0 } else { 1 }] = Some(WHITE_TINT);
     // Profession and level layers are adult-only; nitwits have no level badge.
-    if !e.is_baby && profession != 0 {
+    if !e.is_baby && e.villager_profession != VillagerProfession::None {
         overlay_tints[2] = Some(WHITE_TINT);
-        if profession != NITWIT {
+        if e.villager_profession != VillagerProfession::Nitwit {
             overlay_tints[3] = Some(WHITE_TINT);
         }
     }

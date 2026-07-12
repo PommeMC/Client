@@ -1,4 +1,5 @@
 pub mod components;
+pub mod villager;
 
 use std::collections::HashMap;
 
@@ -7,6 +8,7 @@ use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
 use crate::entity::components::{LookDirection, Position};
+use crate::entity::villager::{VillagerKind, VillagerProfession};
 use crate::physics::aabb::Aabb;
 use crate::physics::collision::resolve_collision;
 use crate::world::block::{FluidKind, fluid};
@@ -17,8 +19,6 @@ const HURT_DURATION: u8 = 10;
 /// Vanilla default arm-swing duration in ticks
 /// (`LivingEntity.getCurrentSwingDuration`).
 const SWING_DURATION: u8 = 6;
-/// Builtin `VillagerKind` registry id for plains, vanilla's default type.
-const VILLAGER_KIND_PLAINS: u8 = 2;
 
 #[allow(dead_code)]
 pub struct LivingEntity {
@@ -41,8 +41,8 @@ pub struct LivingEntity {
     pub wool_color: Option<u8>,
     pub is_sheared: bool,
     pub cow_variant: u8,
-    pub villager_kind: u8,
-    pub villager_profession: u8,
+    pub villager_kind: VillagerKind,
+    pub villager_profession: VillagerProfession,
     pub villager_level: u32,
     /// Villager head-shake timer; shakes while > 0 (vanilla unhappy counter,
     /// synched then decremented client-side each tick like vanilla does).
@@ -97,8 +97,8 @@ impl LivingEntity {
             wool_color: None,
             is_sheared: false,
             cow_variant: 0,
-            villager_kind: VILLAGER_KIND_PLAINS,
-            villager_profession: 0,
+            villager_kind: VillagerKind::default(),
+            villager_profession: VillagerProfession::default(),
             villager_level: 0,
             unhappy_counter: 0,
             eat_anim_tick: 0,
@@ -562,7 +562,13 @@ impl EntityStore {
         }
     }
 
-    pub fn set_villager_data(&mut self, id: i32, kind: u8, profession: u8, level: u32) {
+    pub fn set_villager_data(
+        &mut self,
+        id: i32,
+        kind: VillagerKind,
+        profession: VillagerProfession,
+        level: u32,
+    ) {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == EntityKind::Villager
         {
