@@ -489,7 +489,13 @@ impl BlockEntityPipeline {
             .copy_from_slice(bytes);
     }
 
-    pub fn draw(&self, cmd: vk::CommandBuffer, frame: usize, items: &[BlockEntityRenderInfo]) {
+    pub fn draw(
+        &self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        anchor: glam::DVec3,
+        items: &[BlockEntityRenderInfo],
+    ) {
         if items.is_empty() {
             return;
         }
@@ -525,11 +531,12 @@ impl BlockEntityPipeline {
 
             let model = &entry.models[info.variant as usize % entry.models.len()];
 
-            let block_center = glam::Vec3::new(
-                info.pos.x as f32 + 0.5,
-                info.pos.y as f32,
-                info.pos.z as f32 + 0.5,
-            );
+            let block_center = (glam::DVec3::new(
+                info.pos.x as f64 + 0.5,
+                info.pos.y as f64,
+                info.pos.z as f64 + 0.5,
+            ) - anchor)
+                .as_vec3();
             let model_mat = match model.convention {
                 ModelConvention::EntityYDown => {
                     glam::Mat4::from_translation(block_center)

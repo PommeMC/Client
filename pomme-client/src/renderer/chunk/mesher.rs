@@ -60,8 +60,8 @@ impl ChunkVertex {
 
 include!("packing_consts.rs");
 
-/// Compact GPU vertex (14 bytes): position quantized to section-local u16 (see
-/// `POS_RANGE`), rebased to world in the vertex shader via the section origin.
+/// Compact GPU vertex (14 bytes): section-local position quantized to u16 (see
+/// `POS_RANGE`), rebased in the vertex shader via the integer section origin.
 /// `light_tint` is `[u8; 4]` (not `u32`) so the struct packs to 14 bytes with
 /// no alignment padding; byte order matches the old `R8G8B8A8_UNORM` (light,
 /// r,g,b).
@@ -84,16 +84,16 @@ fn unorm_to_u16(x: f32) -> u16 {
     (x.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
 }
 
-fn quantize_coord(world: f32, origin: f32) -> u16 {
-    unorm_to_u16((world - origin + POS_BIAS) / POS_RANGE)
+fn quantize_coord(local: f32) -> u16 {
+    unorm_to_u16((local + POS_BIAS) / POS_RANGE)
 }
 
-fn pack_vertex(v: &ChunkVertex, origin: [f32; 3]) -> PackedVertex {
+fn pack_vertex(v: &ChunkVertex) -> PackedVertex {
     PackedVertex {
         pos: [
-            quantize_coord(v.position[0], origin[0]),
-            quantize_coord(v.position[1], origin[1]),
-            quantize_coord(v.position[2], origin[2]),
+            quantize_coord(v.position[0]),
+            quantize_coord(v.position[1]),
+            quantize_coord(v.position[2]),
         ],
         uv: v.tex_coords,
         light_tint: v.light_tint.to_le_bytes(),
@@ -151,7 +151,8 @@ pub struct SectionMesh {
     /// Vertices already quantized against the section origin in the worker, so
     /// upload is a plain memcpy.
     pub vertices: Vec<PackedVertex>,
-    /// Bounds of the un-quantized vertex positions, for culling.
+    /// Section-local bounds of the un-quantized vertex positions, for
+    /// culling (rebase via the section origin).
     pub aabb: ChunkAABB,
     /// Solid (opaque) indices first, then cutout indices. `solid_index_count`
     /// splits the two so each renders in its own pass.
@@ -1359,11 +1360,8 @@ fn greedy_mesh_section(
 
             for (i, (pos, uv)) in verts_uvs.iter().enumerate() {
                 vertices.push(ChunkVertex {
-                    position: [
-                        pos[0] + world_x as f32,
-                        pos[1] + section_y as f32,
-                        pos[2] + world_z as f32,
-                    ],
+                    // Greedy quads are already section-local.
+                    position: *pos,
                     tex_coords: pack_uv(
                         region.u_min + uv[0] * u_span,
                         region.v_min + uv[1] * v_span,
@@ -1504,13 +1502,19 @@ fn mesh_chunk_snapshot(
                     continue;
                 }
 
-                let block_pos = [bx as f32, by as f32, bz as f32];
-
                 // Route this block's geometry to its 16-tall section. Clamped so
                 // a non-16-aligned world height can't index past the last section.
                 let s =
                     (((by - min_y) / 16) as usize).min((section_count as usize).saturating_sub(1));
                 let sink = &mut sinks[s];
+
+                // Section-local base (matching the origin buffer.rs derives), so
+                // vertex positions never pass through absolute f32 world space.
+                let block_pos = [
+                    (bx - world_x) as f32,
+                    (by - (min_y + s as i32 * 16)) as f32,
+                    (bz - world_z) as f32,
+                ];
 
                 if lod > 0 {
                     emit_lod_cube(
@@ -1547,10 +1551,10 @@ fn mesh_chunk_snapshot(
     }
 
     // Finalize each non-empty section: concatenate cutout indices after solid
-    // (recording the split), take the AABB from the float positions, then
-    // quantize against the section origin so upload is a plain memcpy. Empty
-    // in-range sections recycle their buffers rather than dropping the
-    // retained capacity.
+    // (recording the split), take the section-local AABB from the float
+    // positions, then quantize so upload is a plain memcpy. Empty in-range
+    // sections recycle their buffers rather than dropping the retained
+    // capacity.
     let mut sections = Vec::with_capacity(sinks.len());
     for (i, mut sink) in sinks.into_iter().enumerate() {
         if sink.solid.is_empty() && sink.cutout.is_empty() && sink.water.is_empty() {
@@ -1561,13 +1565,8 @@ fn mesh_chunk_snapshot(
         let solid_index_count = sink.solid.len() as u32;
         sink.solid.extend_from_slice(&sink.cutout);
         let aabb = section_aabb(&sink.vertices);
-        let origin = [
-            (pos.x * 16) as f32,
-            (min_y + i as i32 * 16) as f32,
-            (pos.z * 16) as f32,
-        ];
         let mut packed = pool.take_vertices();
-        packed.extend(sink.vertices.iter().map(|v| pack_vertex(v, origin)));
+        packed.extend(sink.vertices.iter().map(pack_vertex));
         pool.recycle_scratch(sink.vertices);
         sections.push(SectionMesh {
             section_index: i as i32,

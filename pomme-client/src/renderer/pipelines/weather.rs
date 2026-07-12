@@ -281,7 +281,9 @@ impl WeatherPipeline {
             return;
         }
 
-        let cam = camera.position.as_vec3() + camera.third_person_offset();
+        // Vertices are anchor-relative, subtracted in f64 (see Camera::anchor).
+        let anchor = camera.anchor();
+        let cam = (*camera.position - anchor).as_vec3() + camera.third_person_offset();
         let radius_sq = (WEATHER_RADIUS as f32) * (WEATHER_RADIUS as f32);
 
         let mut rain_verts: Vec<WeatherVertex> = Vec::new();
@@ -300,8 +302,8 @@ impl WeatherPipeline {
                 Precip::None => continue,
             };
 
-            let wx = col.x as f32 + 0.5;
-            let wz = col.z as f32 + 0.5;
+            let wx = (col.x as f64 + 0.5 - anchor.x) as f32;
+            let wz = (col.z as f64 + 0.5 - anchor.z) as f32;
             let dx = wx - cam.x;
             let dz = wz - cam.z;
             let dist_sq = dx * dx + dz * dz;
@@ -324,14 +326,17 @@ impl WeatherPipeline {
             let z1 = wz + hz;
             let u0 = u_off;
             let u1 = u_off + 1.0;
+            // UVs keep the absolute Y so the texture phase matches vanilla.
             let v_top = col.bottom_y * 0.25 + v_off;
             let v_bot = col.top_y * 0.25 + v_off;
+            let y_top = (col.top_y as f64 - anchor.y) as f32;
+            let y_bot = (col.bottom_y as f64 - anchor.y) as f32;
 
             let corners = [
-                ([x0, col.top_y, z0], [u0, v_top]),
-                ([x1, col.top_y, z1], [u1, v_top]),
-                ([x1, col.bottom_y, z1], [u1, v_bot]),
-                ([x0, col.bottom_y, z0], [u0, v_bot]),
+                ([x0, y_top, z0], [u0, v_top]),
+                ([x1, y_top, z1], [u1, v_top]),
+                ([x1, y_bot, z1], [u1, v_bot]),
+                ([x0, y_bot, z0], [u0, v_bot]),
             ];
 
             let target = if is_snow {

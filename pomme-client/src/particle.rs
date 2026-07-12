@@ -537,11 +537,13 @@ impl ParticleStore {
         self.particles.append(&mut self.pending);
     }
 
-    pub fn extract(&self, partial_tick: f32) -> Vec<ParticleQuad> {
+    /// Quad positions are anchor-relative, subtracted in f64 (see
+    /// `Camera::anchor`).
+    pub fn extract(&self, partial_tick: f32, anchor: DVec3) -> Vec<ParticleQuad> {
         self.particles
             .iter()
             .map(|p| {
-                let pos = p.prev_pos.lerp(p.pos, partial_tick as f64).as_vec3();
+                let pos = (p.prev_pos.lerp(p.pos, partial_tick as f64) - anchor).as_vec3();
                 let channel = |c: f32| (c * p.light * 255.0).round() as u8;
                 ParticleQuad {
                     pos: pos.into(),
