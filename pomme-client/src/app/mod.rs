@@ -118,7 +118,7 @@ impl App {
         Self {
             phase: StateSlot::new(AppPhase::Setup {
                 quick_access_multiplayer,
-                pending_skin_uuid: user.online.then_some(user.uuid),
+                pending_skin_uuid: user.has_profile.then_some(user.uuid),
             }),
             core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
             occluded: false,

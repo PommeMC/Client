@@ -2003,8 +2003,11 @@ fn error_chain(e: impl std::error::Error) -> String {
     let mut msg = e.to_string();
     let mut source = e.source();
     while let Some(s) = source {
-        msg.push_str(": ");
-        msg.push_str(&s.to_string());
+        let text = s.to_string();
+        if !msg.contains(&text) {
+            msg.push_str(": ");
+            msg.push_str(&text);
+        }
         source = s.source();
     }
     msg

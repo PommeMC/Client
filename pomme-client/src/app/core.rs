@@ -266,6 +266,12 @@ impl AppCore {
         }
         self.requested_player_skins.insert(uuid, textures.clone());
 
+        // Name-derived (v3) UUIDs from offline-mode servers have no Mojang
+        // profile to fetch; keep the default skin.
+        if textures.is_none() && uuid.get_version_num() == 3 {
+            return;
+        }
+
         let tx = self.player_skin_tx.clone();
         let requested_textures = textures.clone();
         self.tokio_rt.spawn(async move {

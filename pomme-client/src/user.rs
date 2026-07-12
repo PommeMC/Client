@@ -4,7 +4,7 @@ pub struct UserData {
     pub access_token: Option<String>,
     /// True when `uuid` is a launcher-supplied profile UUID rather than a
     /// synthesized offline one (which has no Mojang profile to fetch).
-    pub online: bool,
+    pub has_profile: bool,
 }
 
 impl UserData {
@@ -16,14 +16,14 @@ impl UserData {
         let username = username.unwrap_or_else(|| "Steve".to_string());
 
         let uuid = uuid.and_then(|s| uuid::Uuid::parse_str(&s).ok());
-        let online = uuid.is_some();
+        let has_profile = uuid.is_some();
         let uuid = uuid.unwrap_or_else(|| Self::offline_uuid(&username));
 
         Self {
             username,
             uuid,
             access_token,
-            online,
+            has_profile,
         }
     }
 
