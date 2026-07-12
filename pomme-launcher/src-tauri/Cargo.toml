@@ -18,6 +18,7 @@ base64 = { workspace = true }
 zip = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true, features = ["form"] }
+pomme-protocol = { path = "../../pomme-protocol" }
 
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"

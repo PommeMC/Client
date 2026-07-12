@@ -463,7 +463,7 @@ async fn game_loop(
     tokio::spawn(async move {
         while let Some(out) = outbound_rx.recv().await {
             let result = match out {
-                Outbound::Packet(packet) => write_game_packet(&mut writer, *packet).await,
+                Outbound::Packet(packet) => writer.write(*packet).await,
                 Outbound::Raw(bytes) => writer.raw.write(&bytes).await,
             };
             if let Err(e) = result {
@@ -547,25 +547,6 @@ async fn game_loop(
             Err(e) => skip_malformed_packet(e)?,
         }
     }
-}
-
-/// azalea 0.16 serializes `ServerboundAttack.entity_id` as a fixed i32, but
-/// the protocol expects a VarInt (vanilla `ServerboundAttackPacket` uses
-/// `ByteBufCodecs.VAR_INT`), so the attack packet is encoded by hand.
-async fn write_game_packet(
-    writer: &mut WriteConnection<ServerboundGamePacket>,
-    packet: ServerboundGamePacket,
-) -> std::io::Result<()> {
-    use azalea_buf::AzBufVar;
-    use azalea_protocol::packets::ProtocolPacket;
-
-    if let ServerboundGamePacket::Attack(p) = &packet {
-        let mut buf = Vec::new();
-        packet.id().azalea_write_var(&mut buf)?;
-        p.entity_id.azalea_write_var(&mut buf)?;
-        return writer.raw.write(&buf).await;
-    }
-    writer.write(packet).await
 }
 
 /// Recoverable decode errors skip the packet; anything else tears down the

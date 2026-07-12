@@ -29,10 +29,11 @@ mod world;
 use std::sync::Arc;
 
 use clap::Parser;
+use pomme_protocol::ProtocolVersion;
+use pomme_protocol::version::{LATEST, VERSIONS};
 
 use crate::app::App;
 use crate::user::UserData;
-use crate::version::VERSION_PROTOCOL_MAP;
 
 fn main() {
     let args = args::LaunchArgs::parse();
@@ -56,25 +57,22 @@ fn main() {
         }
     }
 
-    let version = args
-        .version
-        .as_deref()
-        .unwrap_or_else(|| VERSION_PROTOCOL_MAP.first().unwrap().0);
+    let version = args.version.as_deref().unwrap_or(LATEST.name);
 
-    if !VERSION_PROTOCOL_MAP.iter().any(|(v, _)| v == &version) {
-        eprintln!(
-            "{version} is not currently supported. Supported versions: {}",
-            VERSION_PROTOCOL_MAP
-                .iter()
-                .map(|(v, _)| *v)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        #[cfg(not(debug_assertions))]
-        std::process::exit(1);
-    }
-    if let Some(protocol) = version::protocol_for(version) {
-        version::set_selected_protocol(protocol);
+    match ProtocolVersion::from_name(version) {
+        Some(v) => version::set_selected_protocol(v.protocol),
+        None => {
+            eprintln!(
+                "{version} is not currently supported. Supported versions: {}",
+                VERSIONS
+                    .iter()
+                    .map(|v| v.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            #[cfg(not(debug_assertions))]
+            std::process::exit(1);
+        }
     }
 
     let data_dirs = dirs::DataDirs::resolve(

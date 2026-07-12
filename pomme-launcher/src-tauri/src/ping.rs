@@ -131,12 +131,8 @@ async fn ping_inner(address: &str) -> Result<ServerStatus, Box<dyn std::error::E
             v.get("protocol")
                 .and_then(|p| p.as_i64())
                 .and_then(|p| i32::try_from(p).ok())
-                .and_then(|p| {
-                    crate::VERSION_PROTOCOL_MAP
-                        .iter()
-                        .find(|(_, val)| *val == p)
-                })
-                .map(|(n, _)| (*n).to_string())
+                .and_then(pomme_protocol::ProtocolVersion::from_protocol)
+                .map(|v| v.name.to_string())
                 .or_else(|| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
         })
         .unwrap_or_default();

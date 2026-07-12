@@ -5,7 +5,9 @@ members = [
     "pomme-launcher/src-tauri",
     "pomme-gpu-allocator",
     "pomme-block",
-    "tools/blockgen"
+    "pomme-protocol",
+    "tools/blockgen",
+    "tools/protogen"
 ]
 
 [workspace.dependencies]
@@ -19,6 +21,9 @@ base64 = "0.22"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json"] }
+# Shared by pomme-client and pomme-protocol; the versions must agree so
+# glam types unify across the crate boundary.
+glam = "0.33"
 
 # client
 pyronyx = "=0.3.2"

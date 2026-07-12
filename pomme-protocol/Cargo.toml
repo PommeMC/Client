@@ -1,0 +1,11 @@
+[package]
+name = "pomme-protocol"
+description = "Per-version Minecraft protocol data (packet-id tables) and pomme-owned wire encoding."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+glam = { workspace = true }

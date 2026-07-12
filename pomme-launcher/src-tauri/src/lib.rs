@@ -19,16 +19,6 @@ pub struct AppState {
     pub installations_lock: Mutex<()>,
 }
 
-/// Maps all supported versions to their protocol version.
-/// Snapshots encode as `(1 << 30) | base_protocol`.
-/// KEEP IN SYNC WITH pomme-client/src/main.rs
-const VERSION_PROTOCOL_MAP: [(&str, i32); 4] = [
-    ("26.2", 776),
-    ("26.1", 775),
-    ("26.1.1-rc-1", 0x40000130),
-    ("26.1.1", 775),
-];
-
 const TYPED_ERROR_IMPL: &str = r#"export type Result<T, E> =
   | { ok: true;  value: T }
   | { ok: false; error: E };
