@@ -487,6 +487,30 @@ pub fn handle_game_packet(
                         variant: resolved,
                     });
                 }
+                // Index 18 on villagers = unhappy counter (head-shake while > 0).
+                // Emit unconditionally; consumer filters by entity type.
+                if item.index == 18
+                    && let azalea_entity::EntityDataValue::Int(counter) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::VillagerUnhappy {
+                        id: p.id.0,
+                        counter: *counter,
+                    });
+                }
+                // Index 19 on villagers = VillagerData (type/profession/level).
+                // Kind/profession ids follow the builtin registry order, which
+                // matches vanilla's bootstrap order.
+                if item.index == 19
+                    && let azalea_entity::EntityDataValue::VillagerData(data) = &item.value
+                {
+                    use azalea_registry::Registry;
+                    let _ = event_tx.try_send(NetworkEvent::VillagerData {
+                        id: p.id.0,
+                        kind: data.kind.to_u32() as u8,
+                        profession: data.profession.to_u32() as u8,
+                        level: data.level,
+                    });
+                }
             }
         }
         // Event id 9 = finished using an item (vanilla `completeUsingItem`).

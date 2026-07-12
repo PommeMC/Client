@@ -28,7 +28,7 @@ use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
-    EntityRenderInfo, WHITE_TINT, jeb_sheep_tint, wool_color_tint,
+    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, jeb_sheep_tint, wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
@@ -1875,6 +1875,8 @@ pub fn update_game(
                     player_uuid: e.player_uuid,
                     variant_index: extras.variant_index,
                     overlay_tints: extras.overlay_tints,
+                    overlay_variants: extras.overlay_variants,
+                    is_unhappy: e.unhappy_counter > 0,
                     head_y_offset: extras.head_y_offset,
                     head_x_rot_deg_override: extras.head_x_rot_deg_override,
                     has_red_overlay: e.hurt_time > 0,
@@ -1913,7 +1915,9 @@ pub fn update_game(
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
             variant_index: 0,
-            overlay_tints: [None, None],
+            overlay_tints: [None; MAX_OVERLAYS],
+            overlay_variants: [0; MAX_OVERLAYS],
+            is_unhappy: false,
             head_y_offset: 0.0,
             head_x_rot_deg_override: None,
             has_red_overlay: false,
@@ -2382,16 +2386,25 @@ fn build_item_render_infos(
 
 struct EntityExtras {
     variant_index: u32,
-    overlay_tints: [Option<[f32; 4]>; 2],
+    overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
+    overlay_variants: [u32; MAX_OVERLAYS],
     head_y_offset: f32,
     head_x_rot_deg_override: Option<f32>,
 }
 
 const EMPTY_EXTRAS: EntityExtras = EntityExtras {
     variant_index: 0,
-    overlay_tints: [None, None],
+    overlay_tints: [None; MAX_OVERLAYS],
+    overlay_variants: [0; MAX_OVERLAYS],
     head_y_offset: 0.0,
     head_x_rot_deg_override: None,
+};
+
+/// Only the first overlay slot visible, untinted.
+const SLOT0_TINTS: [Option<[f32; 4]>; MAX_OVERLAYS] = {
+    let mut tints = [None; MAX_OVERLAYS];
+    tints[0] = Some(WHITE_TINT);
+    tints
 };
 
 fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
@@ -2401,14 +2414,15 @@ fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) ->
             ..EMPTY_EXTRAS
         },
         EntityKind::Sheep => sheep_extras(entity_id, e, alpha),
+        EntityKind::Villager => villager_extras(e),
         // Spider eyes overlay is always visible (slot 0).
         EntityKind::Spider => EntityExtras {
-            overlay_tints: [Some(WHITE_TINT), None],
+            overlay_tints: SLOT0_TINTS,
             ..EMPTY_EXTRAS
         },
         // Charged-creeper aura overlay (slot 0) only when powered.
         EntityKind::Creeper if e.powered => EntityExtras {
-            overlay_tints: [Some(WHITE_TINT), None],
+            overlay_tints: SLOT0_TINTS,
             ..EMPTY_EXTRAS
         },
         _ => EMPTY_EXTRAS,
@@ -2425,17 +2439,16 @@ fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> 
         WHITE_TINT
     };
 
-    let overlay_tints = if e.is_sheared {
-        [None, None]
-    } else if e.is_baby {
-        [Some(tint), None]
-    } else {
-        let undercoat_visible = is_jeb || e.wool_color.is_some_and(|c| c != 0);
-        [
-            if undercoat_visible { Some(tint) } else { None },
-            Some(tint),
-        ]
-    };
+    let mut overlay_tints = [None; MAX_OVERLAYS];
+    if !e.is_sheared {
+        if e.is_baby {
+            overlay_tints[0] = Some(tint);
+        } else {
+            let undercoat_visible = is_jeb || e.wool_color.is_some_and(|c| c != 0);
+            overlay_tints[0] = if undercoat_visible { Some(tint) } else { None };
+            overlay_tints[1] = Some(tint);
+        }
+    }
 
     let (pos_scale, angle_scale) = sheep_eat_scales(e.eat_anim_tick, e.prev_eat_anim_tick, alpha);
     let age_scale = if e.is_baby { 0.5 } else { 1.0 };
@@ -2447,10 +2460,67 @@ fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> 
     };
 
     EntityExtras {
-        variant_index: 0,
         overlay_tints,
         head_y_offset,
         head_x_rot_deg_override,
+        ..EMPTY_EXTRAS
+    }
+}
+
+/// Whether the type texture's built-in hat is fully or partially covered by
+/// the profession texture's own hat, per the `villager` sections of the
+/// `.png.mcmeta` files under `textures/entity/villager/` (hardcoded — no
+/// resource-pack support). 0 = none, 1 = partial, 2 = full.
+const VILLAGER_TYPE_HAT: [u8; 7] = [2, 0, 0, 0, 2, 0, 0]; // desert, snow = full
+const VILLAGER_PROFESSION_HAT: [u8; 15] = [
+    0, // none
+    0, // armorer
+    1, // butcher (partial)
+    0, // cartographer
+    0, // cleric
+    2, // farmer
+    2, // fisherman
+    2, // fletcher
+    0, // leatherworker
+    2, // librarian
+    0, // mason
+    0, // nitwit
+    2, // shepherd
+    0, // toolsmith
+    0, // weaponsmith
+];
+
+/// Overlay slots: 0 = biome type (full model), 1 = biome type (no-hat model),
+/// 2 = profession, 3 = profession level. Mirrors vanilla
+/// `VillagerProfessionLayer.submit`.
+fn villager_extras(e: &crate::entity::LivingEntity) -> EntityExtras {
+    const NITWIT: usize = 11;
+    let kind = e.villager_kind.min(6) as usize;
+    let profession = e.villager_profession.min(14) as usize;
+
+    let type_hat = VILLAGER_TYPE_HAT[kind];
+    let prof_hat = VILLAGER_PROFESSION_HAT[profession];
+    let type_hat_visible = prof_hat == 0 || (prof_hat == 1 && type_hat != 2);
+
+    let mut overlay_tints = [None; MAX_OVERLAYS];
+    overlay_tints[if type_hat_visible { 0 } else { 1 }] = Some(WHITE_TINT);
+    // Profession and level layers are adult-only; nitwits have no level badge.
+    if !e.is_baby && profession != 0 {
+        overlay_tints[2] = Some(WHITE_TINT);
+        if profession != NITWIT {
+            overlay_tints[3] = Some(WHITE_TINT);
+        }
+    }
+
+    EntityExtras {
+        overlay_tints,
+        overlay_variants: [
+            kind as u32,
+            kind as u32,
+            (profession as u32).saturating_sub(1),
+            e.villager_level.clamp(1, 5) - 1,
+        ],
+        ..EMPTY_EXTRAS
     }
 }
 

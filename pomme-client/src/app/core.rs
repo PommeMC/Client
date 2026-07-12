@@ -1041,6 +1041,18 @@ impl AppCore {
                 NetworkEvent::CowVariant { id, variant } => {
                     game.entity_store.set_cow_variant(id, variant);
                 }
+                NetworkEvent::VillagerData {
+                    id,
+                    kind,
+                    profession,
+                    level,
+                } => {
+                    game.entity_store
+                        .set_villager_data(id, kind, profession, level);
+                }
+                NetworkEvent::VillagerUnhappy { id, counter } => {
+                    game.entity_store.set_villager_unhappy(id, counter);
+                }
                 NetworkEvent::EntityCustomName { id, name } => {
                     game.entity_store.set_custom_name(id, name);
                 }

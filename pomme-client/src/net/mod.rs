@@ -259,6 +259,16 @@ pub enum NetworkEvent {
         id: i32,
         variant: u8,
     },
+    VillagerData {
+        id: i32,
+        kind: u8,
+        profession: u8,
+        level: u32,
+    },
+    VillagerUnhappy {
+        id: i32,
+        counter: i32,
+    },
     EntityCustomName {
         id: i32,
         name: Option<String>,

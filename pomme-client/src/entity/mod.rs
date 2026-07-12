@@ -17,6 +17,8 @@ const HURT_DURATION: u8 = 10;
 /// Vanilla default arm-swing duration in ticks
 /// (`LivingEntity.getCurrentSwingDuration`).
 const SWING_DURATION: u8 = 6;
+/// Builtin `VillagerKind` registry id for plains, vanilla's default type.
+const VILLAGER_KIND_PLAINS: u8 = 2;
 
 #[allow(dead_code)]
 pub struct LivingEntity {
@@ -39,6 +41,12 @@ pub struct LivingEntity {
     pub wool_color: Option<u8>,
     pub is_sheared: bool,
     pub cow_variant: u8,
+    pub villager_kind: u8,
+    pub villager_profession: u8,
+    pub villager_level: u32,
+    /// Villager head-shake timer; shakes while > 0 (vanilla unhappy counter,
+    /// synched then decremented client-side each tick like vanilla does).
+    pub unhappy_counter: i32,
     pub eat_anim_tick: u8,
     pub prev_eat_anim_tick: u8,
     pub hurt_time: u8,
@@ -89,6 +97,10 @@ impl LivingEntity {
             wool_color: None,
             is_sheared: false,
             cow_variant: 0,
+            villager_kind: VILLAGER_KIND_PLAINS,
+            villager_profession: 0,
+            villager_level: 0,
+            unhappy_counter: 0,
             eat_anim_tick: 0,
             prev_eat_anim_tick: 0,
             hurt_time: 0,
@@ -550,6 +562,24 @@ impl EntityStore {
         }
     }
 
+    pub fn set_villager_data(&mut self, id: i32, kind: u8, profession: u8, level: u32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Villager
+        {
+            entity.villager_kind = kind;
+            entity.villager_profession = profession;
+            entity.villager_level = level;
+        }
+    }
+
+    pub fn set_villager_unhappy(&mut self, id: i32, counter: i32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Villager
+        {
+            entity.unhappy_counter = counter;
+        }
+    }
+
     pub fn start_sheep_eat(&mut self, id: i32) {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == EntityKind::Sheep
@@ -648,6 +678,9 @@ impl EntityStore {
             if entity.swing_time > 0 {
                 entity.swing_time -= 1;
             }
+            if entity.unhappy_counter > 0 {
+                entity.unhappy_counter -= 1;
+            }
             entity.age_in_ticks = entity.age_in_ticks.wrapping_add(1);
         }
     }
@@ -694,5 +727,6 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
             | EntityKind::Skeleton
             | EntityKind::Creeper
             | EntityKind::Spider
+            | EntityKind::Villager
     )
 }
