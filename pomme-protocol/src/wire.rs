@@ -4,17 +4,21 @@
 
 use glam::DVec3;
 
-/// Serverbound game packet ids, MC 26.2 (`GameProtocols.java` registration
-/// order).
-const INTERACT_PACKET_ID: u32 = 0x1A;
+use crate::packets::{Direction, PacketTable, Phase};
 
 const MAIN_HAND: u32 = 0;
+
+fn game_serverbound_id(name: &str) -> u32 {
+    PacketTable::latest()
+        .id(Phase::Game, Direction::Serverbound, name)
+        .unwrap_or_else(|| panic!("{name} missing from packet table"))
+}
 
 /// Vanilla `ServerboundInteractPacket`: right-click on an entity. `location`
 /// is the hit point relative to the entity origin.
 pub fn encode_interact(entity_id: i32, location: DVec3, sneaking: bool) -> Vec<u8> {
     let mut buf = Vec::new();
-    write_varint(&mut buf, INTERACT_PACKET_ID);
+    write_varint(&mut buf, game_serverbound_id("interact"));
     write_varint(&mut buf, entity_id as u32);
     write_varint(&mut buf, MAIN_HAND);
     write_lp_vec3(&mut buf, location);
@@ -22,7 +26,17 @@ pub fn encode_interact(entity_id: i32, location: DVec3, sneaking: bool) -> Vec<u
     buf
 }
 
-fn write_varint(buf: &mut Vec<u8>, mut v: u32) {
+/// Vanilla `ServerboundAttackPacket`: left-click on an entity. Encoded here
+/// because azalea serializes the entity id as a fixed i32 instead of a
+/// varint.
+pub fn encode_attack(entity_id: i32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("attack"));
+    write_varint(&mut buf, entity_id as u32);
+    buf
+}
+
+pub fn write_varint(buf: &mut Vec<u8>, mut v: u32) {
     loop {
         let byte = (v & 0x7F) as u8;
         v >>= 7;
@@ -38,7 +52,7 @@ fn write_varint(buf: &mut Vec<u8>, mut v: u32) {
 /// to 15 bits of the fraction `component / scale`, packed with the scale's low
 /// 2 bits (plus a continuation flag and varint for larger scales) into 6
 /// bytes.
-fn write_lp_vec3(buf: &mut Vec<u8>, v: DVec3) {
+pub fn write_lp_vec3(buf: &mut Vec<u8>, v: DVec3) {
     const ABS_MAX_VALUE: f64 = 1.717_986_918_3e10;
     const ABS_MIN_VALUE: f64 = 3.051_944_088_384_301e-5;
 
@@ -81,42 +95,19 @@ fn write_lp_vec3(buf: &mut Vec<u8>, v: DVec3) {
 mod tests {
     use super::*;
 
-    /// Round-trip through azalea's `LpVec3` decoder to cross-check the port.
-    fn decode_lp_vec3(bytes: &[u8]) -> DVec3 {
-        use azalea_buf::AzBuf;
-        let mut cursor = std::io::Cursor::new(bytes);
-        let lp = azalea_core::delta::LpVec3::azalea_read(&mut cursor).unwrap();
-        assert_eq!(cursor.position() as usize, bytes.len(), "leftover bytes");
-        let v = azalea_core::position::Vec3::from(lp);
-        DVec3::new(v.x, v.y, v.z)
-    }
-
-    #[test]
-    fn lp_vec3_roundtrip() {
-        let cases = [
-            DVec3::ZERO,
-            DVec3::new(0.3, 1.62, -0.21),
-            DVec3::new(-0.5, -0.001, 0.5),
-            DVec3::new(2.75, -3.5, 1.0),
-            DVec3::new(120.0, -64.25, 300.5),
-        ];
-        for v in cases {
-            let mut buf = Vec::new();
-            write_lp_vec3(&mut buf, v);
-            let decoded = decode_lp_vec3(&buf);
-            // Quantization error is bounded by scale / 32766 per component.
-            let tolerance = (v.abs().max_element().ceil() / 32766.0).max(1e-9) * 1.01;
-            assert!(
-                (decoded - v).abs().max_element() <= tolerance,
-                "{v:?} decoded as {decoded:?} (tolerance {tolerance})"
-            );
-        }
-    }
+    // The azalea LpVec3 round-trip cross-check lives in pomme-client's
+    // net::azalea_compat (this crate stays azalea-free).
 
     #[test]
     fn interact_packet_layout() {
         let bytes = encode_interact(42, DVec3::ZERO, true);
         // id 0x1A, entity id 42, main hand 0, LpVec3 zero byte, sneaking.
         assert_eq!(bytes, [0x1A, 42, 0, 0, 1]);
+    }
+
+    #[test]
+    fn attack_packet_layout() {
+        // id 0x01, entity id 42.
+        assert_eq!(encode_attack(42), [0x01, 42]);
     }
 }

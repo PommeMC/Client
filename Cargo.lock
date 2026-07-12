@@ -5134,6 +5134,7 @@ dependencies = [
  "parking_lot",
  "png 0.17.16",
  "pomme-gpu-allocator",
+ "pomme-protocol",
  "pyronyx",
  "raw-window-handle",
  "reqwest",
@@ -5178,6 +5179,7 @@ dependencies = [
  "keyring",
  "log",
  "open",
+ "pomme-protocol",
  "rand 0.10.2",
  "reqwest",
  "serde",
@@ -5197,6 +5199,15 @@ dependencies = [
  "url",
  "urlencoding",
  "zip",
+]
+
+[[package]]
+name = "pomme-protocol"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -5351,6 +5362,10 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
+
+[[package]]
+name = "protogen"
+version = "0.1.0"
 
 [[package]]
 name = "pxfm"

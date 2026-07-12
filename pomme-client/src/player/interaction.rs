@@ -2,14 +2,12 @@ use std::collections::HashMap;
 
 use azalea_block::BlockState;
 use azalea_core::direction::Direction;
-use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::position::BlockPos;
 use azalea_entity::dimensions::EntityDimensions;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{Consumable, Food, ItemUseAnimation, UseEffects};
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
-use azalea_protocol::packets::game::s_attack::ServerboundAttack;
 use azalea_protocol::packets::game::s_interact::InteractionHand;
 use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerAction};
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
@@ -17,13 +15,13 @@ use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
 use azalea_registry::builtin::ItemKind;
 use glam::{DVec3, Vec3, dvec3};
+use pomme_protocol::wire;
 
 use crate::app::input::{self, InputState};
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::entity::EntityStore;
 use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
-use crate::net::wire;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::Aabb;
 use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
@@ -475,9 +473,7 @@ impl InteractionState {
                 return;
             }
             Some(HitResult::Entity(hit)) => {
-                sender.send(ServerboundGamePacket::Attack(ServerboundAttack {
-                    entity_id: MinecraftEntityId(hit.entity_id),
-                }));
+                sender.send_raw(wire::encode_attack(hit.entity_id));
                 self.swing(sender);
                 let _ = input.weak_rumble_for_instant();
                 return;

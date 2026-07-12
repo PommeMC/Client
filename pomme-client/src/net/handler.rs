@@ -728,26 +728,15 @@ fn parse_level_particles(
     }))
 }
 
-/// `ClientboundLevelParticles`' packet id, taken from azalea's own dispatch
-/// table so it tracks protocol updates.
+/// `ClientboundLevelParticles`' packet id from the vanilla-derived table
+/// (cross-checked against azalea's dispatch table in `azalea_compat`).
 fn level_particles_packet_id() -> u32 {
-    use azalea_protocol::packets::ProtocolPacket;
+    use pomme_protocol::{Direction, PacketTable, Phase};
 
     static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *ID.get_or_init(|| {
-        ClientboundGamePacket::LevelParticles(
-            azalea_protocol::packets::game::c_level_particles::ClientboundLevelParticles {
-                override_limiter: false,
-                always_show: false,
-                pos: azalea_core::position::Vec3::default(),
-                x_dist: 0.0,
-                y_dist: 0.0,
-                z_dist: 0.0,
-                max_speed: 0.0,
-                count: 0,
-                particle: azalea_entity::particle::Particle::AngryVillager,
-            },
-        )
-        .id()
+        PacketTable::latest()
+            .id(Phase::Game, Direction::Clientbound, "level_particles")
+            .expect("level_particles in packet table")
     })
 }

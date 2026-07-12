@@ -1,0 +1,6 @@
+[package]
+name = "protogen"
+description = "Generates pomme's per-version packet-id tables from the decompiled vanilla protocol registrations."
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
