@@ -194,7 +194,12 @@ const STRIP_COUNT: usize = 14;
 
 pub enum MenuAction {
     None,
-    Connect { server: String, username: String },
+    Connect {
+        server: String,
+        username: String,
+        /// From the entry's ping, when joining out of the server list.
+        protocol: Option<i32>,
+    },
     ChangeTheme(PanoramaTheme),
     Quit,
 }

@@ -283,6 +283,47 @@ fn remap_add_entity_26_1() {
     assert_eq!(p.entity_type, EntityKind::Tadpole);
 }
 
+/// azalea's typed encoder always writes 26.2 component-type ids, so a
+/// creative stack whose patch touches a shifted id (78+, where 26.2 inserted
+/// `sulfur_cube_content`) is cleared wholesale outbound; unshifted
+/// components survive.
+#[test]
+fn strip_creative_components_26_1() {
+    use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
+    use azalea_protocol::packets::game::ServerboundGamePacket;
+    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+    use azalea_registry::builtin::{DataComponentKind, ItemKind};
+
+    let remap = |kind: DataComponentKind| {
+        let mut patch = DataComponentPatch::default();
+        // A removal marker carries no typed value, making it the safe way to
+        // put an arbitrary kind in the otherwise-opaque patch.
+        unsafe { patch.unchecked_insert_component(kind, None) };
+        let mut packet =
+            ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
+                slot_num: 36,
+                item_stack: ItemStack::Present(ItemStackData {
+                    kind: ItemKind::Stone,
+                    count: 1,
+                    component_patch: patch,
+                }),
+            });
+        translation().remap_outbound(&mut packet);
+        let ServerboundGamePacket::SetCreativeModeSlot(p) = packet else {
+            unreachable!()
+        };
+        let ItemStack::Present(data) = p.item_stack else {
+            panic!("stack cleared");
+        };
+        data.component_patch
+    };
+
+    // max_stack_size (id 1) is numbered the same in 26.1: kept.
+    assert_eq!(remap(DataComponentKind::MaxStackSize).iter().count(), 1);
+    // lock (79 in 26.2, 78 in 26.1) is shifted: the patch is cleared.
+    assert_eq!(remap(DataComponentKind::Lock).iter().count(), 0);
+}
+
 #[test]
 fn lp_vec3_roundtrip() {
     let cases = [

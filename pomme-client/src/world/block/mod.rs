@@ -122,9 +122,20 @@ struct BehaviorEntry {
     requires_correct_tool: bool,
 }
 
+/// Per-protocol block-state data, latest first; unknown protocols fall back
+/// to the latest (slot 0).
+const BLOCK_DATA: [(i32, &str); 2] = [
+    (
+        pomme_protocol::version::LATEST.protocol,
+        include_str!("data/blocks-26.2.json"),
+    ),
+    (775, include_str!("data/blocks-26.1.json")),
+];
+
 /// One lazily-built table per embedded data file; `ACTIVE_TABLE` indexes the
 /// protocol currently spoken (see [`set_active_protocol`]).
-static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; 2] = [OnceLock::new(), OnceLock::new()];
+static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; BLOCK_DATA.len()] =
+    [const { OnceLock::new() }; BLOCK_DATA.len()];
 static ACTIVE_TABLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Vanilla getFluidState overrides on blocks without a `waterlogged` property.
@@ -392,11 +403,11 @@ pub fn init(version: &str) {
 /// Only safe between worlds — meshes built against the previous table
 /// interpret ids in the old id space.
 pub fn set_active_protocol(protocol: i32) {
-    let (slot, data) = match protocol {
-        775 => (1, include_str!("data/blocks-26.1.json")),
-        _ => (0, include_str!("data/blocks-26.2.json")),
-    };
-    BLOCK_TABLES[slot].get_or_init(|| build_table(data));
+    let slot = BLOCK_DATA
+        .iter()
+        .position(|&(p, _)| p == protocol)
+        .unwrap_or(0);
+    BLOCK_TABLES[slot].get_or_init(|| build_table(BLOCK_DATA[slot].1));
     ACTIVE_TABLE.store(slot, std::sync::atomic::Ordering::Release);
 }
 

@@ -24,8 +24,14 @@ pub fn set_session_protocol(protocol: i32) {
     SESSION_PROTOCOL.store(protocol, Ordering::Release);
 }
 
+/// Forget the negotiated wire version; called when a connection ends so no
+/// stale protocol leaks into the next session.
+pub fn clear_session_protocol() {
+    SESSION_PROTOCOL.store(0, Ordering::Release);
+}
+
 /// The protocol id spoken on the wire right now: the negotiated one, or the
-/// launched version's before any connection was made.
+/// launched version's outside a connection.
 pub fn session_protocol() -> i32 {
     match SESSION_PROTOCOL.load(Ordering::Acquire) {
         0 => selected_protocol(),

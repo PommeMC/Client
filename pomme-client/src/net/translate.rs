@@ -17,22 +17,24 @@
 //! - serverbound slot 62 was replaced (`spectate_entity` ->
 //!   `spectator_action`); pomme sends neither
 //!
-//! Known 26.1 limitation (accepted): an item stack carrying a data component
-//! at/after the first shifted component id (78, where 26.2 inserted
-//! `sulfur_cube_content`) misparses under the 26.2 codecs and the packet is
-//! skipped by `skip_malformed_packet`; common survival items only use
-//! earlier, unshifted components. Items nested inside component values
-//! (bundles, containers) also keep their source-version ids.
+//! Known 26.1 limitation (accepted): an inbound item stack carrying a data
+//! component at/after the first shifted component id (78, where 26.2
+//! inserted `sulfur_cube_content`) decodes under the wrong 26.2 codec —
+//! usually a misparse that skips the packet via `skip_malformed_packet`,
+//! though a coincidentally parsable layout yields a silently wrong
+//! component. Common survival items only use earlier, unshifted components.
+//! Items nested inside component values (bundles, containers) also keep
+//! their source-version ids.
 
 use std::io::Cursor;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use azalea_buf::AzBufVar;
 use azalea_core::sound::CustomSound;
-use azalea_inventory::ItemStack;
+use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_protocol::packets::game::s_container_click::HashedStack;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_registry::builtin::SoundEvent;
+use azalea_registry::builtin::{DataComponentKind, SoundEvent};
 use azalea_registry::{Holder, Registry};
 use pomme_protocol::version::LATEST;
 use pomme_protocol::{ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps};
@@ -49,16 +51,23 @@ pub struct Translation {
 /// or `None` when the client speaks it natively (the latest version, or one
 /// without embedded protocol data, which connects untranslated as before).
 pub fn active() -> Option<&'static Translation> {
-    match crate::version::session_protocol() {
-        775 => {
-            static TRANSLATION: OnceLock<Translation> = OnceLock::new();
-            Some(TRANSLATION.get_or_init(|| {
-                tracing::info!("Translating protocol 775 <-> {}", LATEST.protocol);
-                Translation::for_protocol(775).expect("embedded 26.1 protocol data")
-            }))
-        }
-        _ => None,
+    let protocol = crate::version::session_protocol();
+    if protocol == LATEST.protocol {
+        return None;
     }
+    // One leaked entry per old protocol ever spoken (bounded by the embedded
+    // version set); consulted per packet, so the hit path is one short scan.
+    static CACHE: Mutex<Vec<(i32, Option<&'static Translation>)>> = Mutex::new(Vec::new());
+    let mut cache = CACHE.lock().unwrap();
+    if let Some(&(_, translation)) = cache.iter().find(|&&(p, _)| p == protocol) {
+        return translation;
+    }
+    let translation = Translation::for_protocol(protocol).map(|t| &*Box::leak(Box::new(t)));
+    if translation.is_some() {
+        tracing::info!("Translating protocol {protocol} <-> {}", LATEST.protocol);
+    }
+    cache.push((protocol, translation));
+    translation
 }
 
 impl Translation {
@@ -194,6 +203,9 @@ impl Translation {
             }
             ServerboundGamePacket::SetCreativeModeSlot(p) => {
                 remap_stack(self.from_latest, &mut p.item_stack);
+                if let ItemStack::Present(data) = &mut p.item_stack {
+                    strip_untranslatable_components(self.from_latest, data);
+                }
             }
             _ => {}
         }
@@ -229,6 +241,24 @@ fn remap_with<T: Registry>(remaps: &RegistryRemaps, reg: ClientRegistry, value: 
             true
         }
         None => false,
+    }
+}
+
+/// azalea's typed encoder always writes latest-version component-type ids,
+/// and `DataComponentPatch` is opaque (single entries can't be rewritten or
+/// removed), so a patch touching any component the target version numbers
+/// differently is cleared wholesale rather than sent misencoded.
+fn strip_untranslatable_components(remaps: &RegistryRemaps, data: &mut ItemStackData) {
+    let translates = |kind: DataComponentKind| {
+        remaps.remap(ClientRegistry::DataComponentType, kind.to_u32()) == Some(kind.to_u32())
+    };
+    if !data
+        .component_patch
+        .iter()
+        .all(|(kind, _)| translates(kind))
+    {
+        tracing::warn!("Dropping creative item components the wire version numbers differently");
+        data.component_patch = Default::default();
     }
 }
 

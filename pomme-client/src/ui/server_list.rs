@@ -36,6 +36,9 @@ pub enum PingState {
         max: i32,
         latency_ms: u64,
         version: String,
+        /// The server's protocol number, reused at join time to skip the
+        /// wire-version probe.
+        protocol: i32,
         compat: Compat,
         favicon_rgba: Option<Vec<u8>>,
         player_names: Vec<String>,
@@ -179,6 +182,7 @@ async fn ping_server(
             max,
             latency_ms,
             version,
+            protocol: status.version.protocol,
             compat,
             favicon_rgba,
             player_names,

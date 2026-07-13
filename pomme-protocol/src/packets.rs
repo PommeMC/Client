@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::version::{LATEST, ProtocolVersion};
+use crate::version::{EMBEDDED, LATEST, ProtocolVersion};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
@@ -66,23 +66,17 @@ impl PacketTable {
     }
 
     /// The table for a launchable protocol number, or `None` for versions
-    /// without an embedded table. Patch releases share a number (26.1 and
-    /// 26.1.1 are both 775) and are wire-identical, so one table serves all.
+    /// without an embedded table.
     pub fn for_protocol(protocol: i32) -> Option<&'static PacketTable> {
-        match protocol {
-            _ if protocol == LATEST.protocol => Some(Self::latest()),
-            775 => {
-                static TABLE: OnceLock<PacketTable> = OnceLock::new();
-                Some(TABLE.get_or_init(|| {
-                    // The table was generated from reference/26.1; the other
-                    // 775 releases (26.1.1, 26.1.2) are wire-identical.
-                    let expected = ProtocolVersion::from_name("26.1").expect("26.1 in VERSIONS");
-                    Self::parse(include_str!("data/protocol-26.1.json"), expected)
-                        .expect("embedded 26.1 packet table")
-                }))
-            }
-            _ => None,
+        if protocol == LATEST.protocol {
+            return Some(Self::latest());
         }
+        static TABLES: [OnceLock<PacketTable>; EMBEDDED.len()] =
+            [const { OnceLock::new() }; EMBEDDED.len()];
+        crate::version::embedded_get(protocol, &TABLES, |e| {
+            Self::parse(e.packets, e.version)
+                .unwrap_or_else(|err| panic!("embedded {} packet table: {err}", e.version.name))
+        })
     }
 
     fn parse(json: &str, expected: ProtocolVersion) -> Result<Self, String> {

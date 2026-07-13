@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::version::{LATEST, ProtocolVersion};
+use crate::version::{EMBEDDED, LATEST, ProtocolVersion};
 
 /// The registries carried in `registries-<version>.json` (matching
 /// protogen's `CLIENT_REGISTRIES`): the ones whose numeric ids reach the
@@ -79,20 +79,15 @@ impl RegistryTable {
     /// The table for a launchable protocol number, or `None` for versions
     /// without an embedded table.
     pub fn for_protocol(protocol: i32) -> Option<&'static RegistryTable> {
-        match protocol {
-            _ if protocol == LATEST.protocol => Some(Self::latest()),
-            775 => {
-                static TABLE: OnceLock<RegistryTable> = OnceLock::new();
-                Some(TABLE.get_or_init(|| {
-                    // Generated from reference/26.1; the other 775 releases
-                    // (26.1.1, 26.1.2) are wire-identical.
-                    let expected = ProtocolVersion::from_name("26.1").expect("26.1 in VERSIONS");
-                    Self::parse(include_str!("data/registries-26.1.json"), expected)
-                        .expect("embedded 26.1 registry table")
-                }))
-            }
-            _ => None,
+        if protocol == LATEST.protocol {
+            return Some(Self::latest());
         }
+        static TABLES: [OnceLock<RegistryTable>; EMBEDDED.len()] =
+            [const { OnceLock::new() }; EMBEDDED.len()];
+        crate::version::embedded_get(protocol, &TABLES, |e| {
+            Self::parse(e.registries, e.version)
+                .unwrap_or_else(|err| panic!("embedded {} registry table: {err}", e.version.name))
+        })
     }
 
     fn parse(json: &str, expected: ProtocolVersion) -> Result<Self, String> {
@@ -145,35 +140,31 @@ impl RegistryRemaps {
     /// inbound packets), or `None` for versions without an embedded registry
     /// table. For the latest version itself this is an identity map.
     pub fn to_latest(protocol: i32) -> Option<&'static RegistryRemaps> {
-        match protocol {
-            775 => {
-                static REMAPS: OnceLock<RegistryRemaps> = OnceLock::new();
-                Some(
-                    REMAPS.get_or_init(|| Self::build(Self::table_26_1(), RegistryTable::latest())),
-                )
-            }
-            _ if protocol == LATEST.protocol => Some(Self::identity()),
-            _ => None,
+        if protocol == LATEST.protocol {
+            return Some(Self::identity());
         }
+        static REMAPS: [OnceLock<RegistryRemaps>; EMBEDDED.len()] =
+            [const { OnceLock::new() }; EMBEDDED.len()];
+        crate::version::embedded_get(protocol, &REMAPS, |_| {
+            Self::build(Self::embedded_table(protocol), RegistryTable::latest())
+        })
     }
 
     /// Remaps from the latest version's id space to `protocol`'s (for
     /// outbound packets); the mirror of [`Self::to_latest`].
     pub fn from_latest(protocol: i32) -> Option<&'static RegistryRemaps> {
-        match protocol {
-            775 => {
-                static REMAPS: OnceLock<RegistryRemaps> = OnceLock::new();
-                Some(
-                    REMAPS.get_or_init(|| Self::build(RegistryTable::latest(), Self::table_26_1())),
-                )
-            }
-            _ if protocol == LATEST.protocol => Some(Self::identity()),
-            _ => None,
+        if protocol == LATEST.protocol {
+            return Some(Self::identity());
         }
+        static REMAPS: [OnceLock<RegistryRemaps>; EMBEDDED.len()] =
+            [const { OnceLock::new() }; EMBEDDED.len()];
+        crate::version::embedded_get(protocol, &REMAPS, |_| {
+            Self::build(RegistryTable::latest(), Self::embedded_table(protocol))
+        })
     }
 
-    fn table_26_1() -> &'static RegistryTable {
-        RegistryTable::for_protocol(775).expect("embedded 26.1 registry table")
+    fn embedded_table(protocol: i32) -> &'static RegistryTable {
+        RegistryTable::for_protocol(protocol).expect("embedded registry table")
     }
 
     fn identity() -> &'static RegistryRemaps {
