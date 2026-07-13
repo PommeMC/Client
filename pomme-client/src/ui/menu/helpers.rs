@@ -439,15 +439,11 @@ fn ping_sprite(ms: u64) -> SpriteId {
     }
 }
 
-/// Tooltip color for a latency, on the same tiers as [`ping_sprite`]:
-/// green through 4+ bars, yellow through 2-3, red below.
 fn ping_color(ms: u64) -> [f32; 4] {
-    if ms < 300 {
-        [0.33, 0.87, 0.33, 1.0]
-    } else if ms < 1000 {
-        [0.92, 0.85, 0.33, 1.0]
-    } else {
-        COL_RED
+    match ping_sprite(ms) {
+        SpriteId::Ping5 => [0.33, 0.87, 0.33, 1.0],
+        SpriteId::Ping4 | SpriteId::Ping3 => [0.92, 0.65, 0.2, 1.0],
+        _ => COL_RED,
     }
 }
 
