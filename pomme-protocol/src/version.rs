@@ -5,25 +5,17 @@ pub struct ProtocolVersion {
     pub protocol: i32,
 }
 
+const fn v(name: &'static str, protocol: i32) -> ProtocolVersion {
+    ProtocolVersion { name, protocol }
+}
+
 /// All versions the client can be launched as, newest first. Snapshot
 /// protocol numbers encode as `(1 << 30) | base_protocol`.
 pub const VERSIONS: &[ProtocolVersion] = &[
-    ProtocolVersion {
-        name: "26.2",
-        protocol: 776,
-    },
-    ProtocolVersion {
-        name: "26.1",
-        protocol: 775,
-    },
-    ProtocolVersion {
-        name: "26.1.1-rc-1",
-        protocol: 0x40000130,
-    },
-    ProtocolVersion {
-        name: "26.1.1",
-        protocol: 775,
-    },
+    v("26.2", 776),
+    v("26.1.2", 775),
+    v("26.1.1", 775),
+    v("26.1", 775),
 ];
 
 /// The version the client speaks internally.
@@ -34,8 +26,8 @@ impl ProtocolVersion {
         VERSIONS.iter().copied().find(|v| v.name == name)
     }
 
-    /// Newest match wins for numbers shared by several versions (26.1 and
-    /// 26.1.1 are both 775).
+    /// Newest match wins for numbers shared by several versions (26.1
+    /// through 26.1.2 are all 775).
     pub fn from_protocol(protocol: i32) -> Option<Self> {
         VERSIONS.iter().copied().find(|v| v.protocol == protocol)
     }
@@ -49,7 +41,9 @@ mod tests {
     fn lookups() {
         assert_eq!(LATEST.protocol, 776);
         assert_eq!(ProtocolVersion::from_name("26.2").unwrap().protocol, 776);
-        assert_eq!(ProtocolVersion::from_protocol(775).unwrap().name, "26.1");
+        assert_eq!(ProtocolVersion::from_name("26.1.2").unwrap().protocol, 775);
+        assert_eq!(ProtocolVersion::from_protocol(775).unwrap().name, "26.1.2");
+        assert!(ProtocolVersion::from_name("26.1.1-rc-1").is_none());
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
     }
 }
