@@ -2,7 +2,7 @@ use azalea_inventory::{ItemStack, ItemStackData};
 
 use crate::benchmark::UploadStatus;
 use crate::player::inventory::item_resource_name;
-use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 
 pub const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 pub const FONT_SIZE: f32 = 8.0;
@@ -34,6 +34,24 @@ pub fn push_tooltip(
         x: cursor.0,
         y: cursor.1,
         text: text.into(),
+        scale: FONT_SIZE * gs,
+        screen_w,
+        screen_h,
+    });
+}
+
+pub fn push_tooltip_lines(
+    elements: &mut Vec<MenuElement>,
+    cursor: (f32, f32),
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    lines: Vec<TooltipLine>,
+) {
+    elements.push(MenuElement::TooltipLines {
+        x: cursor.0,
+        y: cursor.1,
+        lines,
         scale: FONT_SIZE * gs,
         screen_w,
         screen_h,

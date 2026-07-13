@@ -515,7 +515,10 @@ fn push_clue_tooltip(
             continue;
         };
 
-        let mut lines = vec![TooltipLine { spans: clue }];
+        let mut lines = vec![TooltipLine {
+            spans: clue,
+            right_align: false,
+        }];
         if !creative {
             lines.push(TooltipLine::new(String::new(), WHITE));
             if experience_level < min_level {

@@ -8,6 +8,15 @@
 //!   e.g. protogen reference/26.2/decompiled 26.2 \
 //!        pomme-protocol/src/data/protocol-26.2.json
 //!
+//!   protogen registries <reference-root> <version> <out.json>
+//!   e.g. protogen registries reference/26.2 26.2 \
+//!        pomme-protocol/src/data/registries-26.2.json
+//!
+//! The `registries` mode emits the ordered entry names of the client-facing
+//! static registries (id == index) from the data-generator report at
+//! `<reference-root>/generated/reports/registries.json`, for building
+//! cross-version id remaps.
+//!
 //! The protocol number is parsed from `SharedConstants.getProtocolVersion()`;
 //! `--protocol` overrides it (and is required if the method body isn't a bare
 //! integer literal). The parser hard-fails on anything it can't resolve
@@ -35,6 +44,21 @@ const PHASES: [(&str, &str, bool); 5] = [
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("registries") {
+        return match args.as_slice() {
+            [_, root, version, out] => match generate_registries(Path::new(root), version, out) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("protogen: {e}");
+                    ExitCode::FAILURE
+                }
+            },
+            _ => {
+                eprintln!("usage: protogen registries <reference-root> <version> <out.json>");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let (root, version, out, protocol_override) = match args.as_slice() {
         [root, version, out] => (root, version, out, None),
         [root, version, out, flag, n] if flag == "--protocol" => match n.parse::<i32>() {
@@ -114,6 +138,79 @@ fn generate(
     out.push_str("}\n");
 
     std::fs::write(out_path, out)?;
+    println!("wrote {out_path}");
+    Ok(())
+}
+
+/// The static registries whose numeric ids reach the client over the wire
+/// and can shift between versions; the remap layer covers exactly these.
+const CLIENT_REGISTRIES: [&str; 8] = [
+    "attribute",
+    "block_entity_type",
+    "data_component_type",
+    "entity_type",
+    "game_event",
+    "item",
+    "particle_type",
+    "sound_event",
+];
+
+/// Emits the ordered names (id == index) of `CLIENT_REGISTRIES` from the
+/// data-generator report, alongside the version/protocol pair.
+fn generate_registries(root: &Path, version: &str, out_path: &str) -> Result<(), Error> {
+    let report_path = root.join("generated/reports/registries.json");
+    let report =
+        std::fs::read_to_string(&report_path).map_err(|e| format!("{report_path:?}: {e}"))?;
+    let report: serde_json::Value = serde_json::from_str(&report)?;
+    let protocol = resolve_protocol_number(&root.join("decompiled"), None)?;
+
+    let mut registries = serde_json::Map::new();
+    for name in CLIENT_REGISTRIES {
+        let entries = report
+            .get(format!("minecraft:{name}"))
+            .and_then(|r| r.get("entries"))
+            .and_then(|e| e.as_object())
+            .ok_or_else(|| format!("registry minecraft:{name} missing from report"))?;
+        let mut ordered: Vec<(&str, u64)> = entries
+            .iter()
+            .map(|(key, v)| {
+                let id = v
+                    .get("protocol_id")
+                    .and_then(|id| id.as_u64())
+                    .ok_or_else(|| format!("{name}: {key} has no protocol_id"))?;
+                let key = key
+                    .strip_prefix("minecraft:")
+                    .ok_or_else(|| format!("{name}: non-minecraft entry {key}"))?;
+                Ok((key, id))
+            })
+            .collect::<Result<_, Error>>()?;
+        ordered.sort_unstable_by_key(|&(_, id)| id);
+        // Wire ids are dense indexes; a gap means the report and the remap
+        // layer's id == index assumption disagree.
+        if let Some((key, id)) = ordered
+            .iter()
+            .enumerate()
+            .find(|&(i, &(_, id))| id != i as u64)
+            .map(|(_, e)| e)
+        {
+            return Err(format!("{name}: non-dense protocol_id {id} at {key}").into());
+        }
+        let names: Vec<serde_json::Value> = ordered
+            .into_iter()
+            .map(|(key, _)| serde_json::Value::from(key))
+            .collect();
+        println!("{name}: {} entries", names.len());
+        registries.insert(name.to_string(), serde_json::Value::Array(names));
+    }
+
+    let file = serde_json::json!({
+        "version": version,
+        "protocol": protocol,
+        "registries": registries,
+    });
+    let mut text = serde_json::to_string_pretty(&file)?;
+    text.push('\n');
+    std::fs::write(out_path, text)?;
     println!("wrote {out_path}");
     Ok(())
 }

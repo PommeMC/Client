@@ -225,6 +225,7 @@ impl MainMenu {
                     action = MenuAction::Connect {
                         server: server.address.clone(),
                         username: self.username.clone(),
+                        protocol: pinged_protocol(&ping_results, &server.address),
                     };
                 } else if on_icon && top_left && i > 0 {
                     pending_swap = Some((i, i - 1));
@@ -239,6 +240,7 @@ impl MainMenu {
                         action = MenuAction::Connect {
                             server: server.address.clone(),
                             username: self.username.clone(),
+                            protocol: pinged_protocol(&ping_results, &server.address),
                         };
                     } else {
                         self.selected_server = Some(i);
@@ -356,6 +358,7 @@ impl MainMenu {
             action = MenuAction::Connect {
                 server: server.address.clone(),
                 username: self.username.clone(),
+                protocol: pinged_protocol(&ping_results, &server.address),
             };
         }
         if push_button(
@@ -678,6 +681,7 @@ impl MainMenu {
             action = MenuAction::Connect {
                 server: self.edit_address.clone(),
                 username: self.username.clone(),
+                protocol: None,
             };
         }
         y += btn_h + gap;
@@ -1057,4 +1061,15 @@ fn push_undo(stack: &mut Vec<(u8, String)>, field_idx: u8, prev: String) {
 
 pub(super) fn write_clipboard(text: &str) -> bool {
     crate::ui::common::set_clipboard(text)
+}
+
+/// The protocol number from `address`'s completed ping, if any.
+fn pinged_protocol(
+    ping_results: &std::collections::HashMap<String, PingState>,
+    address: &str,
+) -> Option<i32> {
+    match ping_results.get(address) {
+        Some(PingState::Success { protocol, .. }) => Some(*protocol),
+        _ => None,
+    }
 }

@@ -712,8 +712,17 @@ fn parse_level_particles(
     let max_speed = f32::azalea_read(cur)?;
     // Signed on the wire; Java's `i < count` loop no-ops on negative counts.
     let count = i32::azalea_read(cur)?.max(0) as u32;
-    let Some(kind) = crate::particle::ServerParticleKind::from_id(u32::azalea_read_var(cur)?)
-    else {
+    let type_id = u32::azalea_read_var(cur)?;
+    // Particle ids shift between versions; translate into the latest id
+    // space (`ServerParticleKind`'s) when speaking an older protocol.
+    let type_id = match super::translate::active() {
+        Some(t) => match t.remap_particle(type_id) {
+            Some(id) => id,
+            None => return Ok(None),
+        },
+        None => type_id,
+    };
+    let Some(kind) = crate::particle::ServerParticleKind::from_id(type_id) else {
         return Ok(None);
     };
     Ok(Some(NetworkEvent::LevelParticles {

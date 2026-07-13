@@ -218,6 +218,7 @@ impl ApplicationHandler for App {
                             uuid: self.core.user.uuid,
                             access_token: self.core.user.access_token.clone(),
                             view_distance: self.core.menu.render_distance as u8,
+                            protocol: None,
                         },
                     );
 

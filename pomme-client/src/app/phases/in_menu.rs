@@ -103,7 +103,11 @@ pub fn update_menu(
     }
 
     match action {
-        MenuAction::Connect { server, username } => {
+        MenuAction::Connect {
+            server,
+            username,
+            protocol,
+        } => {
             core.audio.stop_menu_music();
             let connect_args = ConnectArgs {
                 server,
@@ -111,6 +115,7 @@ pub fn update_menu(
                 uuid: core.user.uuid,
                 access_token: core.user.access_token.clone(),
                 view_distance: core.menu.render_distance as u8,
+                protocol,
             };
 
             return MenuUpdateResult::Connect { connect_args };
