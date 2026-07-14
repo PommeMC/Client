@@ -516,19 +516,35 @@ async fn game_loop(
         std::sync::Arc::new(parking_lot::Mutex::new(None));
 
     tokio::spawn(async move {
-        while let Some(out) = outbound_rx.recv().await {
-            let result = match out {
+        let translation = super::translate::active();
+        'writer: while let Some(out) = outbound_rx.recv().await {
+            // Frames are in the latest layout (azalea's serializer and
+            // `wire`'s encoders both emit it); older wire versions get them
+            // translated before framing.
+            let frame = match out {
                 Outbound::Packet(mut packet) => {
-                    if let Some(t) = super::translate::active() {
+                    if let Some(t) = translation {
                         t.remap_outbound(&mut packet);
                     }
-                    writer.write(*packet).await
+                    match azalea_protocol::write::serialize_packet(&*packet) {
+                        Ok(frame) => Vec::from(frame),
+                        Err(e) => {
+                            tracing::error!("Failed to serialize packet: {e}");
+                            break;
+                        }
+                    }
                 }
-                Outbound::Raw(bytes) => writer.raw.write(&bytes).await,
+                Outbound::Raw(bytes) => bytes,
             };
-            if let Err(e) = result {
-                tracing::error!("Failed to write packet: {e}");
-                break;
+            let frames = match translation {
+                Some(t) if t.translates_outbound() => t.translate_outbound_game_frame(frame),
+                _ => vec![frame],
+            };
+            for frame in frames {
+                if let Err(e) = writer.raw.write(&frame).await {
+                    tracing::error!("Failed to write packet: {e}");
+                    break 'writer;
+                }
             }
         }
     });

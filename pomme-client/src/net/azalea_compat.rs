@@ -69,10 +69,10 @@ fn translation() -> crate::net::translate::Translation {
     crate::net::translate::Translation::for_protocol(775).expect("26.1 translation data")
 }
 
-/// 1.21.11 (774) has embedded tables but no wire translation.
+/// Protocols outside `TRANSLATED` never build a translation.
 #[test]
 fn no_translation_without_coverage() {
-    assert!(crate::net::translate::Translation::for_protocol(774).is_none());
+    assert!(crate::net::translate::Translation::for_protocol(773).is_none());
 }
 
 /// 26.2 appended a trailing session-id UUID to login_finished
@@ -328,6 +328,193 @@ fn strip_creative_components_26_1() {
     assert_eq!(remap(DataComponentKind::MaxStackSize).iter().count(), 1);
     // lock (79 in 26.2, 78 in 26.1) is shifted: the patch is cleared.
     assert_eq!(remap(DataComponentKind::Lock).iter().count(), 0);
+}
+
+/// The 1.21.11 -> 26.2 translation under test; 1.21.11 wire layouts below
+/// are hand-built from the decompiled reference codecs
+/// (`reference/1.21.11/decompiled/.../network/`).
+fn translation_774() -> crate::net::translate::Translation {
+    crate::net::translate::Translation::for_protocol(774).expect("1.21.11 translation data")
+}
+
+fn old_id_774(dir: Direction, name: &str) -> u32 {
+    PacketTable::for_protocol(774)
+        .unwrap()
+        .id(Phase::Game, dir, name)
+        .unwrap()
+}
+
+/// Translates a hand-built 1.21.11 game frame and decodes the result with
+/// azalea's 26.2 codecs.
+fn translate_and_decode_774(old: Vec<u8>) -> ClientboundGamePacket {
+    let translated = translation_774()
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap()
+}
+
+/// 26.1's game ids match 26.2, so its frames pass through without the id
+/// remap or the outbound reroute; 1.21.11's diverge, so they don't.
+#[test]
+fn outbound_translation_gating() {
+    assert!(!translation().translates_outbound());
+    assert!(translation_774().translates_outbound());
+}
+
+/// The id remap alone (`set_health` shifted between the versions).
+#[test]
+fn remap_game_ids_774() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id_774(Direction::Clientbound, "set_health"));
+    old.extend_from_slice(&18.0f32.to_be_bytes());
+    wire::write_varint(&mut old, 19); // food
+    old.extend_from_slice(&4.5f32.to_be_bytes());
+
+    let ClientboundGamePacket::SetHealth(p) = translate_and_decode_774(old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.health, 18.0);
+    assert_eq!(p.food, 19);
+    assert_eq!(p.saturation, 4.5);
+}
+
+/// The serializer-id walker (see `translate_entity_data`): 1.21.11
+/// `cow_variant` is 22, 26.2's is 23.
+#[test]
+fn translate_entity_data_774() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id_774(Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
+    old.extend_from_slice(&[17, 22, 4]); // index 17, cow_variant, holder id 4
+    old.push(0xFF);
+
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode_774(old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.id, MinecraftEntityId(9));
+    let items = &p.packed_items.0;
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].index, 0);
+    assert!(matches!(
+        items[0].value,
+        azalea_entity::EntityDataValue::Byte(2)
+    ));
+    assert_eq!(items[1].index, 17);
+    assert!(matches!(
+        items[1].value,
+        azalea_entity::EntityDataValue::CowVariant(_)
+    ));
+}
+
+/// The per-section `fluidCount` insertion (see `translate_chunk`).
+#[test]
+fn translate_chunk_774() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id_774(Direction::Clientbound, "level_chunk_with_light"),
+    );
+    old.extend_from_slice(&3i32.to_be_bytes()); // chunk x
+    old.extend_from_slice(&(-2i32).to_be_bytes()); // chunk z
+    old.push(0); // no heightmaps
+    // One section: block count 1, single-value palettes for states/biomes.
+    let section = [0u8, 1, 0, 5, 0, 0];
+    wire::write_varint(&mut old, section.len() as u32);
+    old.extend_from_slice(&section);
+    old.push(0); // no block entities
+    old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
+
+    let ClientboundGamePacket::LevelChunkWithLight(p) = translate_and_decode_774(old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.x, 3);
+    assert_eq!(p.z, -2);
+    assert_eq!(p.chunk_data.data[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+}
+
+/// The world-clock map synthesis (see `translate_set_time`).
+#[test]
+fn translate_set_time_774() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id_774(Direction::Clientbound, "set_time"));
+    old.extend_from_slice(&12000u64.to_be_bytes()); // game time
+    old.extend_from_slice(&6000u64.to_be_bytes()); // day time
+    old.push(1); // tickDayTime
+
+    let ClientboundGamePacket::SetTime(p) = translate_and_decode_774(old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.game_time, 12000);
+    let clock = p.clock_updates.values().next().unwrap();
+    assert_eq!(clock.total_ticks, 6000);
+    assert_eq!(clock.rate, 1.0);
+}
+
+/// 1.21.11 has no serverbound `attack`; the frame becomes an `interact`
+/// with the ATTACK action (`ServerboundInteractPacket` action bodies in the
+/// 1.21.11 reference).
+#[test]
+fn translate_attack_774() {
+    let frames = translation_774().translate_outbound_game_frame(wire::encode_attack(42));
+    let interact = old_id_774(Direction::Serverbound, "interact");
+    assert_eq!(frames, [[interact as u8, 42, 1, 0]]);
+}
+
+/// A 26.2 `interact` (hand + LpVec3 location) becomes the 1.21.11 pair a
+/// vanilla client sends: INTERACT_AT (raw floats, then hand) then INTERACT.
+#[test]
+fn translate_interact_774() {
+    let location = DVec3::new(0.5, 1.25, -0.25);
+    let frames =
+        translation_774().translate_outbound_game_frame(wire::encode_interact(42, location, true));
+    assert_eq!(frames.len(), 2);
+
+    let interact = old_id_774(Direction::Serverbound, "interact") as u8;
+    let at = &frames[0];
+    assert_eq!(at[..3], [interact, 42, 2]);
+    let float_at = |i: usize| f32::from_be_bytes(at[3 + 4 * i..7 + 4 * i].try_into().unwrap());
+    for (i, expected) in [location.x, location.y, location.z].iter().enumerate() {
+        // Bounded by the LpVec3 quantization the 26.2 frame already carries.
+        assert!((f64::from(float_at(i)) - expected).abs() < 1e-3);
+    }
+    assert_eq!(at[15..], [0, 1]); // main hand, sneaking
+
+    assert_eq!(frames[1], [interact, 42, 0, 0, 1]);
+}
+
+/// 26.2-only serverbound packets with no 1.21.11 equivalent are suppressed
+/// rather than sent under a wrong id.
+#[test]
+fn suppress_unknown_outbound_774() {
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        table_id(Direction::Serverbound, "set_game_rule"),
+    );
+    frame.push(0);
+    assert!(
+        translation_774()
+            .translate_outbound_game_frame(frame)
+            .is_empty()
+    );
+}
+
+/// Outbound frames whose layout didn't change get the id remap only
+/// (`swing` is 60 on 1.21.11, 63 on 26.2).
+#[test]
+fn remap_outbound_ids_774() {
+    let mut frame = Vec::new();
+    wire::write_varint(&mut frame, table_id(Direction::Serverbound, "swing"));
+    frame.push(0); // main hand
+    let frames = translation_774().translate_outbound_game_frame(frame);
+    assert_eq!(
+        frames,
+        [[old_id_774(Direction::Serverbound, "swing") as u8, 0]]
+    );
 }
 
 #[test]
