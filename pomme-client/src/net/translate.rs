@@ -17,9 +17,25 @@
 //! - serverbound slot 62 was replaced (`spectate_entity` ->
 //!   `spectator_action`); pomme sends neither
 //!
-//! Known 26.1 limitation (accepted): an inbound item stack carrying a data
-//! component at/after the first shifted component id (78, where 26.2
-//! inserted `sulfur_cube_content`) decodes under the wrong 26.2 codec —
+//! 1.21.11 -> 26.2 wire changes (all of the above — 1.21.11 matches 26.1 on
+//! those three layouts — plus):
+//! - game packet ids diverge in both directions (handshake/status/login/
+//!   configuration ids and layouts are identical), so frames get an id remap at
+//!   the edge; every 1.21.11 packet still exists in 26.2 under the same name,
+//!   and no other clientbound layout changed
+//! - `set_entity_data` serializer ids shifted (26.x interleaved four
+//!   `*_sound_variant` serializers into `EntityDataSerializers`)
+//! - each chunk section in `level_chunk_with_light` gained a `fluidCount` short
+//!   after `nonEmptyBlockCount`
+//! - `set_time` replaced `dayTime`/`tickDayTime` with a world-clock map
+//! - serverbound `attack` split out of `interact`, which now always carries the
+//!   hand and a low-precision hit location; 26.2-only serverbound packets
+//!   without an equivalent (`set_game_rule`, `spectator_action`) are suppressed
+//!
+//! Known limitation (accepted): an inbound item stack carrying a data
+//! component at/after the first id the versions number differently (26.1:
+//! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
+//! inserted `additional_trade_cost`) decodes under the wrong 26.2 codec —
 //! usually a misparse that skips the packet via `skip_malformed_packet`,
 //! though a coincidentally parsable layout yields a silently wrong
 //! component. Common survival items only use earlier, unshifted components.
@@ -43,14 +59,35 @@ pub struct Translation {
     to_latest: &'static RegistryRemaps,
     from_latest: &'static RegistryRemaps,
     login_finished_id: u32,
+    /// Latest-space; game-frame rewrites dispatch after the id remap.
     game_login_id: u32,
     set_player_team_id: u32,
+    /// Game-phase packet-id translation and the rewrites tied to it; `None`
+    /// when the wire version's ids match the latest (26.1).
+    game_ids: Option<GameIds>,
 }
 
-/// Protocols the wire translation fully covers. 1.21.11 (774) has embedded
-/// tables, but its game translation hasn't landed yet, so it stays
-/// un-joinable and untranslated.
-const TRANSLATED: &[i32] = &[775];
+/// Game-phase id tables for a wire version whose ids diverged from the
+/// latest, plus the latest-space ids its frame rewrites dispatch on.
+struct GameIds {
+    /// Wire-version clientbound id -> latest id; `None` drops the frame
+    /// (no latest equivalent — none exist for 1.21.11, kept for safety).
+    inbound: Box<[Option<u32>]>,
+    /// Latest serverbound id -> wire-version id; `None` suppresses the
+    /// frame (the packet doesn't exist on the older version).
+    outbound: Box<[Option<u32>]>,
+    set_entity_data_id: u32,
+    level_chunk_id: u32,
+    set_time_id: u32,
+    attack_id: u32,
+    interact_id: u32,
+    interact_old_id: u32,
+}
+
+/// Protocols the wire translation fully covers. A version with embedded
+/// tables but no entry here (the staging state while its translation is
+/// built) pings with the right version but stays un-joinable.
+const TRANSLATED: &[i32] = &[775, 774];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -91,17 +128,20 @@ impl Translation {
             return None;
         }
         let table = PacketTable::for_protocol(protocol)?;
+        let latest = PacketTable::latest();
         let id = |phase, name: &str| {
-            table
+            latest
                 .id(phase, Direction::Clientbound, name)
                 .unwrap_or_else(|| panic!("{name} missing from {phase:?} packet table"))
         };
         Some(Translation {
             to_latest: RegistryRemaps::to_latest(protocol)?,
             from_latest: RegistryRemaps::from_latest(protocol)?,
+            // Login-phase ids are identical across all supported versions.
             login_finished_id: id(Phase::Login, "login_finished"),
             game_login_id: id(Phase::Game, "login"),
             set_player_team_id: id(Phase::Game, "set_player_team"),
+            game_ids: GameIds::build(table, latest),
         })
     }
 
@@ -119,30 +159,90 @@ impl Translation {
     }
 
     /// Rewrites a raw game-phase frame into the latest layout; `None` drops
-    /// the packet (malformed beyond repair).
+    /// the packet (malformed beyond repair, or without a latest equivalent).
     pub fn translate_game_frame(&self, raw: Box<[u8]>) -> Option<Box<[u8]>> {
-        let mut cur = Cursor::new(&raw[..]);
-        let id = u32::azalea_read_var(&mut cur).ok()?;
-        if id == self.game_login_id {
-            // 26.2 added `onlineMode` before the trailing
-            // `enforcesSecureChat` bool.
-            let mut out = raw.into_vec();
-            if out.is_empty() {
-                return None;
+        let mut id_end = 0;
+        let wire_id = pomme_protocol::wire::read_varint(&raw, &mut id_end)?;
+        let id = match &self.game_ids {
+            Some(ids) => {
+                let Some(latest) = ids.inbound.get(wire_id as usize).copied().flatten() else {
+                    tracing::debug!("Dropping inbound game packet {wire_id} with no latest id");
+                    return None;
+                };
+                latest
             }
-            out.insert(out.len() - 1, 0);
-            return Some(out.into_boxed_slice());
+            None => wire_id,
+        };
+
+        let payload = &raw[id_end..];
+        let rewritten = if id == self.game_login_id {
+            translate_game_login(id, payload)
+        } else if id == self.set_player_team_id {
+            translate_team(id, payload)
+        } else if let Some(ids) = &self.game_ids {
+            if id == ids.set_entity_data_id {
+                translate_entity_data(id, payload)
+            } else if id == ids.level_chunk_id {
+                translate_chunk(id, payload)
+            } else if id == ids.set_time_id {
+                translate_set_time(id, payload)
+            } else if id == wire_id {
+                return Some(raw);
+            } else {
+                let mut out = Vec::with_capacity(raw.len() + 1);
+                pomme_protocol::wire::write_varint(&mut out, id);
+                out.extend_from_slice(payload);
+                return Some(out.into_boxed_slice());
+            }
+        } else {
+            return Some(raw);
+        };
+        match rewritten {
+            Some(out) => Some(out.into_boxed_slice()),
+            None => {
+                tracing::warn!("Dropping unparsable game packet {id}");
+                None
+            }
         }
-        if id == self.set_player_team_id {
-            return match translate_team(&raw, cur.position() as usize) {
-                Some(out) => Some(out.into_boxed_slice()),
-                None => {
-                    tracing::warn!("Dropping unparsable 26.1 set_player_team packet");
-                    None
-                }
-            };
+    }
+
+    /// Whether outbound game frames need translation before hitting the
+    /// wire (the version's serverbound ids or layouts diverge from latest).
+    pub fn translates_outbound(&self) -> bool {
+        self.game_ids.is_some()
+    }
+
+    /// Translates a latest-layout serverbound game frame into the wire
+    /// version's: id remap, `attack`/`interact` layout rewrites, and
+    /// suppression of packets the older version lacks. Returns the frames to
+    /// send (empty = suppressed, two for `interact`, one otherwise).
+    pub fn translate_outbound_game_frame(&self, frame: Vec<u8>) -> Vec<Vec<u8>> {
+        let Some(ids) = &self.game_ids else {
+            return vec![frame];
+        };
+        let mut pos = 0;
+        let Some(id) = pomme_protocol::wire::read_varint(&frame, &mut pos) else {
+            return Vec::new();
+        };
+        if id == ids.attack_id {
+            return translate_attack(ids.interact_old_id, &frame[pos..]);
         }
-        Some(raw)
+        if id == ids.interact_id {
+            return translate_interact(ids.interact_old_id, &frame[pos..]);
+        }
+        match ids.outbound.get(id as usize).copied().flatten() {
+            Some(old) if old == id => vec![frame],
+            Some(old) => {
+                let mut out = Vec::with_capacity(frame.len() + 1);
+                pomme_protocol::wire::write_varint(&mut out, old);
+                out.extend_from_slice(&frame[pos..]);
+                vec![out]
+            }
+            None => {
+                tracing::warn!("Suppressing outbound game packet {id} the wire version lacks");
+                Vec::new()
+            }
+        }
     }
 
     /// The latest-version particle id for a source-version one, for the raw
@@ -247,6 +347,351 @@ impl Translation {
     }
 }
 
+impl GameIds {
+    /// Name-matched game-phase id tables between one wire version and the
+    /// latest. `None` when translation-by-id is a no-op: every inbound id
+    /// maps to itself and every outbound id maps to itself or to nothing
+    /// (26.1's only divergence is 26.2's `spectate_entity` ->
+    /// `spectator_action` rename, which pomme never sends).
+    fn build(table: &PacketTable, latest: &PacketTable) -> Option<GameIds> {
+        use Direction::{Clientbound, Serverbound};
+        let map = |from: &PacketTable, to: &PacketTable, dir| -> Box<[Option<u32>]> {
+            (0..)
+                .map_while(|i| from.name_of(Phase::Game, dir, i))
+                .map(|name| to.id(Phase::Game, dir, name))
+                .collect()
+        };
+        let inbound = map(table, latest, Clientbound);
+        let outbound = map(latest, table, Serverbound);
+        let same_ids = inbound
+            .iter()
+            .enumerate()
+            .all(|(i, v)| *v == Some(i as u32))
+            && outbound
+                .iter()
+                .enumerate()
+                .all(|(i, v)| v.is_none() || *v == Some(i as u32));
+        if same_ids {
+            return None;
+        }
+        let id = |dir, name: &str| {
+            latest
+                .id(Phase::Game, dir, name)
+                .unwrap_or_else(|| panic!("{name} missing from latest packet table"))
+        };
+        Some(GameIds {
+            inbound,
+            outbound,
+            set_entity_data_id: id(Clientbound, "set_entity_data"),
+            level_chunk_id: id(Clientbound, "level_chunk_with_light"),
+            set_time_id: id(Clientbound, "set_time"),
+            attack_id: id(Serverbound, "attack"),
+            interact_id: id(Serverbound, "interact"),
+            interact_old_id: table
+                .id(Phase::Game, Serverbound, "interact")
+                .expect("interact in wire-version packet table"),
+        })
+    }
+}
+
+/// `ServerboundInteractPacket` action ordinals on versions where attacking
+/// is an `interact` action (`INTERACT` carries a hand, `ATTACK` nothing,
+/// `INTERACT_AT` a hit location then a hand).
+const ACTION_INTERACT: u32 = 0;
+const ACTION_ATTACK: u32 = 1;
+const ACTION_INTERACT_AT: u32 = 2;
+
+/// The shared `id, entityId, action` prefix of an old-layout `interact`
+/// frame.
+fn interact_frame(interact_old_id: u32, entity_id: u32, action: u32) -> Vec<u8> {
+    use pomme_protocol::wire::write_varint;
+    let mut out = Vec::with_capacity(24);
+    write_varint(&mut out, interact_old_id);
+    write_varint(&mut out, entity_id);
+    write_varint(&mut out, action);
+    out
+}
+
+/// Rewrites a latest `attack` payload (`entityId`) into an old-layout
+/// `interact` frame with the `ATTACK` action. The old packet's trailing
+/// `usingSecondaryAction` bool doesn't exist on the new one and the server
+/// ignores it for attacks, so it's synthesized as false.
+fn translate_attack(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let mut pos = 0;
+    let Some(entity_id) = pomme_protocol::wire::read_varint(payload, &mut pos) else {
+        return Vec::new();
+    };
+    let mut out = interact_frame(interact_old_id, entity_id, ACTION_ATTACK);
+    out.push(0);
+    vec![out]
+}
+
+/// Rewrites a latest `interact` payload (`entityId, hand, LpVec3 location,
+/// usingSecondaryAction`) into old-layout `interact` frames. Old clients
+/// send `INTERACT_AT` (raw-float hit location, then hand) followed by
+/// `INTERACT` (hand only) for one entity use; both are emitted for parity —
+/// servers act on whichever the target entity handles.
+fn translate_interact(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    use pomme_protocol::wire::{read_lp_vec3, read_varint, write_varint};
+    let parse = || {
+        let mut pos = 0;
+        let entity_id = read_varint(payload, &mut pos)?;
+        let hand = read_varint(payload, &mut pos)?;
+        let location = read_lp_vec3(payload, &mut pos)?;
+        let secondary = *payload.get(pos)?;
+        Some((entity_id, hand, location, secondary))
+    };
+    let Some((entity_id, hand, location, secondary)) = parse() else {
+        return Vec::new();
+    };
+
+    let mut at = interact_frame(interact_old_id, entity_id, ACTION_INTERACT_AT);
+    for c in [location.x as f32, location.y as f32, location.z as f32] {
+        at.extend_from_slice(&c.to_be_bytes());
+    }
+    write_varint(&mut at, hand);
+    at.push(secondary);
+
+    let mut plain = interact_frame(interact_old_id, entity_id, ACTION_INTERACT);
+    write_varint(&mut plain, hand);
+    plain.push(secondary);
+
+    vec![at, plain]
+}
+
+/// The latest serializer id for an old `EntityDataSerializers` id: 26.x
+/// interleaved `cat/cow/pig/chicken_sound_variant` at ids 22/24/29/31
+/// (line-checked against both versions' `EntityDataSerializers.java`
+/// registration blocks; anchored by tests in `azalea_compat`).
+fn remap_serializer(old: u32) -> Option<u32> {
+    Some(match old {
+        0..=21 => old,
+        22 => 23,
+        23..=26 => old + 2,
+        27 => 30,
+        28..=38 => old + 4,
+        _ => return None,
+    })
+}
+
+/// Rewrites the game `login` payload: 26.2 added `onlineMode` before the
+/// trailing `enforcesSecureChat` bool.
+fn translate_game_login(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let (secure_chat, body) = payload.split_last()?;
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    pomme_protocol::wire::write_varint(&mut out, id);
+    out.extend_from_slice(body);
+    out.push(0);
+    out.push(*secure_chat);
+    Some(out)
+}
+
+/// Rewrites `set_entity_data` (`entityId`, then `(u8 index, varint
+/// serializer, value)` entries terminated by `0xFF`) by remapping each
+/// entry's serializer id. Value layouts are identical between the versions
+/// (verified serializer by serializer); they're skipped, not decoded. An
+/// item-stack or particle value can't be skipped without full component /
+/// particle codecs — the remainder is copied verbatim, which is correct
+/// unless a shifted serializer follows one (no vanilla entity does that).
+fn translate_entity_data(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    varint_span(&mut cur)?; // entity id
+
+    let mut out = Vec::with_capacity(payload.len() + 1);
+    pomme_protocol::wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..cur.position() as usize]);
+    loop {
+        let index = read_u8(&mut cur)?;
+        out.push(index);
+        if index == 0xFF {
+            break;
+        }
+        let old = u32::azalea_read_var(&mut cur).ok()?;
+        let new = remap_serializer(old)?;
+        pomme_protocol::wire::write_varint(&mut out, new);
+        let value_at = cur.position() as usize;
+        if !skip_metadata_value(&mut cur, old)? {
+            tracing::debug!("Copying entity data tail verbatim past serializer {old}");
+            out.extend_from_slice(&payload[value_at..]);
+            return Some(out);
+        }
+        out.extend_from_slice(&payload[value_at..cur.position() as usize]);
+    }
+    out.extend_from_slice(&payload[cur.position() as usize..]);
+    Some(out)
+}
+
+/// Advances past one entity-data value of the given old-version serializer.
+/// `Some(false)` means the value (and thus anything after it) can't be
+/// walked; `None` means the data is malformed.
+fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool> {
+    match serializer {
+        0 | 8 => advance(cur, 1)?, // byte, boolean
+        3 => advance(cur, 4)?,     // float
+        9 => advance(cur, 12)?,    // rotations
+        10 => advance(cur, 8)?,    // block_pos
+        35 => advance(cur, 12)?,   // vector3
+        36 => advance(cur, 16)?,   // quaternion
+        // varint-shaped: int, enums, registry/holder ids, optional ints
+        1 | 12 | 14 | 15 | 19 | 20 | 21 | 22..=28 | 31..=34 | 38 => {
+            varint_span(cur)?;
+        }
+        2 => {
+            u64::azalea_read_var(cur).ok()?; // var_long
+        }
+        4 => skip_utf(cur)?,                           // string
+        5 => skip_nbt(cur)?,                           // component
+        6 => skip_optional(cur, skip_nbt)?,            // optional component
+        11 => skip_optional(cur, |c| advance(c, 8))?,  // optional block_pos
+        13 => skip_optional(cur, |c| advance(c, 16))?, // optional entity ref (UUID)
+        18 => {
+            // villager data: type + profession holder ids, level
+            varint_span(cur)?;
+            varint_span(cur)?;
+            varint_span(cur)?;
+        }
+        29 => {
+            // optional global pos: dimension key + block pos
+            skip_optional(cur, |c| {
+                skip_utf(c)?;
+                advance(c, 8)
+            })?;
+        }
+        30 => {
+            // painting variant holder: id + 1, or 0 followed by the direct
+            // form (width, height, asset id, optional title/author)
+            if u32::azalea_read_var(cur).ok()? == 0 {
+                varint_span(cur)?;
+                varint_span(cur)?;
+                skip_utf(cur)?;
+                skip_optional(cur, skip_nbt)?;
+                skip_optional(cur, skip_nbt)?;
+            }
+        }
+        // item stacks (7), particles (16/17) and resolvable profiles (37)
+        // need full value codecs to walk past
+        _ => return Some(false),
+    }
+    Some(true)
+}
+
+fn skip_utf(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    let len = u32::azalea_read_var(cur).ok()?;
+    advance(cur, len as usize)
+}
+
+fn skip_nbt(cur: &mut Cursor<&[u8]>) -> Option<()> {
+    let tag = read_u8(cur)?;
+    skip_nbt_payload(cur, tag, 0)
+}
+
+fn skip_optional(
+    cur: &mut Cursor<&[u8]>,
+    inner: impl Fn(&mut Cursor<&[u8]>) -> Option<()>,
+) -> Option<()> {
+    if read_u8(cur)? != 0 {
+        inner(cur)
+    } else {
+        Some(())
+    }
+}
+
+/// Rewrites `level_chunk_with_light` by inserting the `fluidCount` short
+/// 26.2 added after each section's `nonEmptyBlockCount` (zero: pomme
+/// doesn't consume it and the client recounts on block changes). The
+/// heightmaps before the section buffer and the block entities / light data
+/// after it are copied verbatim.
+fn translate_chunk(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    advance(&mut cur, 8)?; // chunk x/z ints
+    let heightmaps = u32::azalea_read_var(&mut cur).ok()?;
+    for _ in 0..heightmaps {
+        varint_span(&mut cur)?; // heightmap type
+        let longs = u32::azalea_read_var(&mut cur).ok()?;
+        advance(&mut cur, (longs as usize).checked_mul(8)?)?;
+    }
+    let len_at = cur.position() as usize;
+    let buffer_len = u32::azalea_read_var(&mut cur).ok()? as usize;
+    let buffer_at = cur.position() as usize;
+    let buffer_end = buffer_at.checked_add(buffer_len)?;
+    if buffer_end > payload.len() {
+        return None;
+    }
+
+    let mut buffer = Vec::with_capacity(buffer_len + 3 * 26 * 2);
+    let mut bcur = Cursor::new(&payload[..buffer_end]);
+    bcur.set_position(buffer_at as u64);
+    while (bcur.position() as usize) < buffer_end {
+        let section_at = bcur.position() as usize;
+        advance(&mut bcur, 2)?; // nonEmptyBlockCount
+        buffer.extend_from_slice(&payload[section_at..bcur.position() as usize]);
+        buffer.extend_from_slice(&[0, 0]); // fluidCount, new in 26.2
+        let rest_at = bcur.position() as usize;
+        skip_paletted_container(&mut bcur, 4096, 8)?;
+        skip_paletted_container(&mut bcur, 64, 3)?;
+        buffer.extend_from_slice(&payload[rest_at..bcur.position() as usize]);
+    }
+
+    let mut out = Vec::with_capacity(payload.len() + buffer.len() - buffer_len + 3);
+    pomme_protocol::wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..len_at]);
+    pomme_protocol::wire::write_varint(&mut out, buffer.len() as u32);
+    out.extend_from_slice(&buffer);
+    out.extend_from_slice(&payload[buffer_end..]);
+    Some(out)
+}
+
+/// Advances past one `PalettedContainer`: bits-per-entry byte, palette
+/// (single value: one id; indirect while `bits <= max_indirect_bits`:
+/// id list; global: nothing), then the unprefixed packed-long array.
+fn skip_paletted_container(
+    cur: &mut Cursor<&[u8]>,
+    entries: usize,
+    max_indirect_bits: u8,
+) -> Option<()> {
+    let bits = read_u8(cur)?;
+    match bits {
+        0 => {
+            varint_span(cur)?;
+        }
+        _ if bits <= max_indirect_bits => {
+            let palette_len = u32::azalea_read_var(cur).ok()?;
+            for _ in 0..palette_len {
+                varint_span(cur)?;
+            }
+        }
+        _ => {}
+    }
+    if bits > 0 {
+        let values_per_long = 64 / bits as usize;
+        let longs = entries.div_ceil(values_per_long);
+        advance(cur, longs.checked_mul(8)?)?;
+    }
+    Some(())
+}
+
+/// Rewrites `set_time` from `gameTime, dayTime, tickDayTime` to 26.2's
+/// `gameTime` plus a world-clock map: one entry for clock id 0 carrying
+/// `dayTime` as its total ticks and a rate of 1 or 0 for `tickDayTime`
+/// (vanilla `ClockNetworkState`: var-long totalTicks, float partialTick,
+/// float rate). Pomme reads day time from the first map entry.
+fn translate_set_time(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let game_time = payload.get(..8)?;
+    let day_time = u64::from_be_bytes(payload.get(8..16)?.try_into().ok()?);
+    let tick_day_time = *payload.get(16)?;
+
+    let mut out = Vec::with_capacity(32);
+    pomme_protocol::wire::write_varint(&mut out, id);
+    out.extend_from_slice(game_time);
+    out.push(1); // one clock update
+    out.push(0); // world clock id 0
+    day_time.azalea_write_var(&mut out).ok()?;
+    out.extend_from_slice(&0f32.to_be_bytes()); // partial tick
+    let rate: f32 = if tick_day_time != 0 { 1.0 } else { 0.0 };
+    out.extend_from_slice(&rate.to_be_bytes());
+    Some(out)
+}
+
 fn remap_with<T: Registry>(remaps: &RegistryRemaps, reg: ClientRegistry, value: &mut T) -> bool {
     match remaps.remap(reg, value.to_u32()).and_then(T::from_u32) {
         Some(v) => {
@@ -287,31 +732,29 @@ fn remap_stack(remaps: &RegistryRemaps, stack: &mut ItemStack) {
     }
 }
 
-/// Rewrites `set_player_team` from the 26.1 `Parameters` layout
+/// Rewrites `set_player_team` from the pre-26.2 `Parameters` layout
 /// (`displayName, options, visibility, collision, color, prefix, suffix`
 /// with color as a `ChatFormatting` ordinal) to the 26.2 one
 /// (`displayName, prefix, suffix, visibility, collision, color, options`
-/// with color as `Optional<TeamColor>`). `payload_start` is the offset past
-/// the packet-id varint; the surrounding name/method/player-list fields are
-/// copied verbatim.
-fn translate_team(raw: &[u8], payload_start: usize) -> Option<Vec<u8>> {
-    let mut cur = Cursor::new(raw);
-    cur.set_position(payload_start as u64);
-
+/// with color as `Optional<TeamColor>`); the surrounding name/method/
+/// player-list fields are copied verbatim.
+fn translate_team(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
     let name_len = u32::azalea_read_var(&mut cur).ok()?;
     advance(&mut cur, name_len as usize)?;
     let method_at = cur.position() as usize;
-    let method = *raw.get(method_at)?;
+    let method = *payload.get(method_at)?;
     advance(&mut cur, 1)?;
 
-    let mut out = Vec::with_capacity(raw.len() + 2);
-    out.extend_from_slice(&raw[..method_at + 1]);
+    let mut out = Vec::with_capacity(payload.len() + 3);
+    pomme_protocol::wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..method_at + 1]);
 
     // Methods 0 (add) and 2 (change) carry Parameters.
     if method == 0 || method == 2 {
         let display = nbt_span(&mut cur)?;
         let options_at = cur.position() as usize;
-        let options = *raw.get(options_at)?;
+        let options = *payload.get(options_at)?;
         advance(&mut cur, 1)?;
         let visibility = varint_span(&mut cur)?;
         let collision = varint_span(&mut cur)?;
@@ -319,11 +762,11 @@ fn translate_team(raw: &[u8], payload_start: usize) -> Option<Vec<u8>> {
         let prefix = nbt_span(&mut cur)?;
         let suffix = nbt_span(&mut cur)?;
 
-        out.extend_from_slice(&raw[display]);
-        out.extend_from_slice(&raw[prefix]);
-        out.extend_from_slice(&raw[suffix]);
-        out.extend_from_slice(&raw[visibility]);
-        out.extend_from_slice(&raw[collision]);
+        out.extend_from_slice(&payload[display]);
+        out.extend_from_slice(&payload[prefix]);
+        out.extend_from_slice(&payload[suffix]);
+        out.extend_from_slice(&payload[visibility]);
+        out.extend_from_slice(&payload[collision]);
         // ChatFormatting ordinals 0..=15 are the colors, in TeamColor id
         // order; formats (16..=20) and RESET (21) have no team color.
         if color <= 15 {
@@ -336,7 +779,7 @@ fn translate_team(raw: &[u8], payload_start: usize) -> Option<Vec<u8>> {
     }
 
     // Player list (methods 0/3/4) and anything after: verbatim.
-    out.extend_from_slice(&raw[cur.position() as usize..]);
+    out.extend_from_slice(&payload[cur.position() as usize..]);
     Some(out)
 }
 

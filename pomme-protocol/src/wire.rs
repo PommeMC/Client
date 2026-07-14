@@ -36,6 +36,20 @@ pub fn encode_attack(entity_id: i32) -> Vec<u8> {
     buf
 }
 
+/// Reads one varint, advancing `pos`; `None` on truncation or overlong data.
+pub fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let mut v = 0u32;
+    for shift in 0..5 {
+        let byte = *bytes.get(*pos)?;
+        *pos += 1;
+        v |= u32::from(byte & 0x7F) << (shift * 7);
+        if byte & 0x80 == 0 {
+            return Some(v);
+        }
+    }
+    None
+}
+
 pub fn write_varint(buf: &mut Vec<u8>, mut v: u32) {
     loop {
         let byte = (v & 0x7F) as u8;
@@ -91,6 +105,33 @@ pub fn write_lp_vec3(buf: &mut Vec<u8>, v: DVec3) {
     }
 }
 
+/// Vanilla `LpVec3.read`, the inverse of [`write_lp_vec3`]; advances `pos`.
+pub fn read_lp_vec3(bytes: &[u8], pos: &mut usize) -> Option<DVec3> {
+    fn unpack(value: u64) -> f64 {
+        (value & 0x7FFF).min(32766) as f64 * 2.0 / 32766.0 - 1.0
+    }
+
+    let lowest = *bytes.get(*pos)?;
+    *pos += 1;
+    if lowest == 0 {
+        return Some(DVec3::ZERO);
+    }
+    let middle = *bytes.get(*pos)?;
+    *pos += 1;
+    let highest = u32::from_be_bytes(bytes.get(*pos..*pos + 4)?.try_into().ok()?);
+    *pos += 4;
+    let buffer = (u64::from(highest) << 16) | (u64::from(middle) << 8) | u64::from(lowest);
+    let mut scale = u64::from(lowest & 3);
+    if lowest & 4 != 0 {
+        scale |= u64::from(read_varint(bytes, pos)?) << 2;
+    }
+    Some(DVec3::new(
+        unpack(buffer >> 3) * scale as f64,
+        unpack(buffer >> 18) * scale as f64,
+        unpack(buffer >> 33) * scale as f64,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +150,35 @@ mod tests {
     fn attack_packet_layout() {
         // id 0x01, entity id 42.
         assert_eq!(encode_attack(42), [0x01, 42]);
+    }
+
+    #[test]
+    fn lp_vec3_round_trip() {
+        for v in [
+            DVec3::ZERO,
+            DVec3::new(0.25, -0.5, 0.75),
+            DVec3::new(1.5, -2.0, 3.25),
+            DVec3::new(100.0, -250.5, 0.125),
+        ] {
+            let mut buf = Vec::new();
+            write_lp_vec3(&mut buf, v);
+            let mut pos = 0;
+            let read = read_lp_vec3(&buf, &mut pos).unwrap();
+            assert_eq!(pos, buf.len());
+            // 15-bit quantization per axis, scaled by the chessboard length.
+            let tolerance = v.abs().max_element().ceil().max(1.0) / 16383.0;
+            assert!((read - v).abs().max_element() <= tolerance, "{v} -> {read}");
+        }
+    }
+
+    #[test]
+    fn varint_round_trip() {
+        for v in [0u32, 1, 127, 128, 300, 25565, u32::MAX] {
+            let mut buf = Vec::new();
+            write_varint(&mut buf, v);
+            let mut pos = 0;
+            assert_eq!(read_varint(&buf, &mut pos), Some(v));
+            assert_eq!(pos, buf.len());
+        }
     }
 }
