@@ -53,7 +53,7 @@ use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacke
 use azalea_registry::builtin::{DataComponentKind, SoundEvent};
 use azalea_registry::{Holder, Registry};
 use pomme_protocol::version::LATEST;
-use pomme_protocol::{ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps};
+use pomme_protocol::{ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, wire};
 
 pub struct Translation {
     to_latest: &'static RegistryRemaps,
@@ -129,11 +129,7 @@ impl Translation {
         }
         let table = PacketTable::for_protocol(protocol)?;
         let latest = PacketTable::latest();
-        let id = |phase, name: &str| {
-            latest
-                .id(phase, Direction::Clientbound, name)
-                .unwrap_or_else(|| panic!("{name} missing from {phase:?} packet table"))
-        };
+        let id = |phase, name| required_id(latest, phase, Direction::Clientbound, name);
         Some(Translation {
             to_latest: RegistryRemaps::to_latest(protocol)?,
             from_latest: RegistryRemaps::from_latest(protocol)?,
@@ -162,7 +158,7 @@ impl Translation {
     /// the packet (malformed beyond repair, or without a latest equivalent).
     pub fn translate_game_frame(&self, raw: Box<[u8]>) -> Option<Box<[u8]>> {
         let mut id_end = 0;
-        let wire_id = pomme_protocol::wire::read_varint(&raw, &mut id_end)?;
+        let wire_id = wire::read_varint(&raw, &mut id_end)?;
         let id = match &self.game_ids {
             Some(ids) => {
                 let Some(latest) = ids.inbound.get(wire_id as usize).copied().flatten() else {
@@ -190,7 +186,7 @@ impl Translation {
                 return Some(raw);
             } else {
                 let mut out = Vec::with_capacity(raw.len() + 1);
-                pomme_protocol::wire::write_varint(&mut out, id);
+                wire::write_varint(&mut out, id);
                 out.extend_from_slice(payload);
                 return Some(out.into_boxed_slice());
             }
@@ -221,7 +217,7 @@ impl Translation {
             return vec![frame];
         };
         let mut pos = 0;
-        let Some(id) = pomme_protocol::wire::read_varint(&frame, &mut pos) else {
+        let Some(id) = wire::read_varint(&frame, &mut pos) else {
             return Vec::new();
         };
         if id == ids.attack_id {
@@ -234,7 +230,7 @@ impl Translation {
             Some(old) if old == id => vec![frame],
             Some(old) => {
                 let mut out = Vec::with_capacity(frame.len() + 1);
-                pomme_protocol::wire::write_varint(&mut out, old);
+                wire::write_varint(&mut out, old);
                 out.extend_from_slice(&frame[pos..]);
                 vec![out]
             }
@@ -374,11 +370,7 @@ impl GameIds {
         if same_ids {
             return None;
         }
-        let id = |dir, name: &str| {
-            latest
-                .id(Phase::Game, dir, name)
-                .unwrap_or_else(|| panic!("{name} missing from latest packet table"))
-        };
+        let id = |dir, name| required_id(latest, Phase::Game, dir, name);
         Some(GameIds {
             inbound,
             outbound,
@@ -387,11 +379,16 @@ impl GameIds {
             set_time_id: id(Clientbound, "set_time"),
             attack_id: id(Serverbound, "attack"),
             interact_id: id(Serverbound, "interact"),
-            interact_old_id: table
-                .id(Phase::Game, Serverbound, "interact")
-                .expect("interact in wire-version packet table"),
+            interact_old_id: required_id(table, Phase::Game, Serverbound, "interact"),
         })
     }
+}
+
+/// A packet id that must exist in the given table.
+fn required_id(table: &PacketTable, phase: Phase, dir: Direction, name: &str) -> u32 {
+    table
+        .id(phase, dir, name)
+        .unwrap_or_else(|| panic!("{name} missing from {phase:?} packet table"))
 }
 
 /// `ServerboundInteractPacket` action ordinals on versions where attacking
@@ -404,11 +401,10 @@ const ACTION_INTERACT_AT: u32 = 2;
 /// The shared `id, entityId, action` prefix of an old-layout `interact`
 /// frame.
 fn interact_frame(interact_old_id: u32, entity_id: u32, action: u32) -> Vec<u8> {
-    use pomme_protocol::wire::write_varint;
     let mut out = Vec::with_capacity(24);
-    write_varint(&mut out, interact_old_id);
-    write_varint(&mut out, entity_id);
-    write_varint(&mut out, action);
+    wire::write_varint(&mut out, interact_old_id);
+    wire::write_varint(&mut out, entity_id);
+    wire::write_varint(&mut out, action);
     out
 }
 
@@ -418,7 +414,7 @@ fn interact_frame(interact_old_id: u32, entity_id: u32, action: u32) -> Vec<u8> 
 /// ignores it for attacks, so it's synthesized as false.
 fn translate_attack(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     let mut pos = 0;
-    let Some(entity_id) = pomme_protocol::wire::read_varint(payload, &mut pos) else {
+    let Some(entity_id) = wire::read_varint(payload, &mut pos) else {
         return Vec::new();
     };
     let mut out = interact_frame(interact_old_id, entity_id, ACTION_ATTACK);
@@ -428,16 +424,18 @@ fn translate_attack(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
 
 /// Rewrites a latest `interact` payload (`entityId, hand, LpVec3 location,
 /// usingSecondaryAction`) into old-layout `interact` frames. Old clients
-/// send `INTERACT_AT` (raw-float hit location, then hand) followed by
-/// `INTERACT` (hand only) for one entity use; both are emitted for parity —
-/// servers act on whichever the target entity handles.
+/// always send `INTERACT_AT` (raw-float hit location, then hand) and follow
+/// with `INTERACT` (hand only) unless the client-side `interactAt` result
+/// consumed the action (`Minecraft.startUseItem` in the reference). The
+/// translator can't evaluate that, so it always emits both — matching
+/// vanilla for the many entities whose `interactAt` passes, but sending an
+/// extra `INTERACT` to those that consume it (e.g. armor stands).
 fn translate_interact(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
-    use pomme_protocol::wire::{read_lp_vec3, read_varint, write_varint};
     let parse = || {
         let mut pos = 0;
-        let entity_id = read_varint(payload, &mut pos)?;
-        let hand = read_varint(payload, &mut pos)?;
-        let location = read_lp_vec3(payload, &mut pos)?;
+        let entity_id = wire::read_varint(payload, &mut pos)?;
+        let hand = wire::read_varint(payload, &mut pos)?;
+        let location = wire::read_lp_vec3(payload, &mut pos)?;
         let secondary = *payload.get(pos)?;
         Some((entity_id, hand, location, secondary))
     };
@@ -449,11 +447,11 @@ fn translate_interact(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     for c in [location.x as f32, location.y as f32, location.z as f32] {
         at.extend_from_slice(&c.to_be_bytes());
     }
-    write_varint(&mut at, hand);
+    wire::write_varint(&mut at, hand);
     at.push(secondary);
 
     let mut plain = interact_frame(interact_old_id, entity_id, ACTION_INTERACT);
-    write_varint(&mut plain, hand);
+    wire::write_varint(&mut plain, hand);
     plain.push(secondary);
 
     vec![at, plain]
@@ -479,7 +477,7 @@ fn remap_serializer(old: u32) -> Option<u32> {
 fn translate_game_login(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let (secure_chat, body) = payload.split_last()?;
     let mut out = Vec::with_capacity(payload.len() + 2);
-    pomme_protocol::wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, id);
     out.extend_from_slice(body);
     out.push(0);
     out.push(*secure_chat);
@@ -498,7 +496,7 @@ fn translate_entity_data(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     varint_span(&mut cur)?; // entity id
 
     let mut out = Vec::with_capacity(payload.len() + 1);
-    pomme_protocol::wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..cur.position() as usize]);
     loop {
         let index = read_u8(&mut cur)?;
@@ -508,7 +506,7 @@ fn translate_entity_data(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
         }
         let old = u32::azalea_read_var(&mut cur).ok()?;
         let new = remap_serializer(old)?;
-        pomme_protocol::wire::write_varint(&mut out, new);
+        wire::write_varint(&mut out, new);
         let value_at = cur.position() as usize;
         if !skip_metadata_value(&mut cur, old)? {
             tracing::debug!("Copying entity data tail verbatim past serializer {old}");
@@ -633,9 +631,9 @@ fn translate_chunk(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     }
 
     let mut out = Vec::with_capacity(payload.len() + buffer.len() - buffer_len + 3);
-    pomme_protocol::wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..len_at]);
-    pomme_protocol::wire::write_varint(&mut out, buffer.len() as u32);
+    wire::write_varint(&mut out, buffer.len() as u32);
     out.extend_from_slice(&buffer);
     out.extend_from_slice(&payload[buffer_end..]);
     Some(out)
@@ -681,7 +679,7 @@ fn translate_set_time(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let tick_day_time = *payload.get(16)?;
 
     let mut out = Vec::with_capacity(32);
-    pomme_protocol::wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, id);
     out.extend_from_slice(game_time);
     out.push(1); // one clock update
     out.push(0); // world clock id 0
@@ -740,14 +738,13 @@ fn remap_stack(remaps: &RegistryRemaps, stack: &mut ItemStack) {
 /// player-list fields are copied verbatim.
 fn translate_team(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
-    let name_len = u32::azalea_read_var(&mut cur).ok()?;
-    advance(&mut cur, name_len as usize)?;
+    skip_utf(&mut cur)?; // team name
     let method_at = cur.position() as usize;
     let method = *payload.get(method_at)?;
     advance(&mut cur, 1)?;
 
     let mut out = Vec::with_capacity(payload.len() + 3);
-    pomme_protocol::wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..method_at + 1]);
 
     // Methods 0 (add) and 2 (change) carry Parameters.
@@ -803,8 +800,7 @@ fn varint_span(cur: &mut Cursor<&[u8]>) -> Option<std::ops::Range<usize>> {
 /// advancing past it.
 fn nbt_span(cur: &mut Cursor<&[u8]>) -> Option<std::ops::Range<usize>> {
     let start = cur.position() as usize;
-    let tag = read_u8(cur)?;
-    skip_nbt_payload(cur, tag, 0)?;
+    skip_nbt(cur)?;
     Some(start..cur.position() as usize)
 }
 
