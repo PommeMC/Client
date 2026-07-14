@@ -69,6 +69,12 @@ fn translation() -> crate::net::translate::Translation {
     crate::net::translate::Translation::for_protocol(775).expect("26.1 translation data")
 }
 
+/// 1.21.11 (774) has embedded tables but no wire translation.
+#[test]
+fn no_translation_without_coverage() {
+    assert!(crate::net::translate::Translation::for_protocol(774).is_none());
+}
+
 /// 26.2 appended a trailing session-id UUID to login_finished
 /// (`ClientboundLoginFinishedPacket.STREAM_CODEC`); the shim pads a zero one.
 #[test]
