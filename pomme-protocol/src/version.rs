@@ -16,6 +16,8 @@ pub const VERSIONS: &[ProtocolVersion] = &[
     v("26.1.2", 775),
     v("26.1.1", 775),
     v("26.1", 775),
+    // 1.21.11 (774) has embedded tables but no wire translation yet; it
+    // becomes launchable when the translation lands.
 ];
 
 /// The version the client speaks internally.
@@ -31,11 +33,18 @@ pub(crate) struct EmbeddedVersion {
     pub registries: &'static str,
 }
 
-pub(crate) const EMBEDDED: [EmbeddedVersion; 1] = [EmbeddedVersion {
-    version: v("26.1", 775),
-    packets: include_str!("data/protocol-26.1.json"),
-    registries: include_str!("data/registries-26.1.json"),
-}];
+pub(crate) const EMBEDDED: [EmbeddedVersion; 2] = [
+    EmbeddedVersion {
+        version: v("26.1", 775),
+        packets: include_str!("data/protocol-26.1.json"),
+        registries: include_str!("data/registries-26.1.json"),
+    },
+    EmbeddedVersion {
+        version: v("1.21.11", 774),
+        packets: include_str!("data/protocol-1.21.11.json"),
+        registries: include_str!("data/registries-1.21.11.json"),
+    },
+];
 
 /// The `EMBEDDED` slot for a protocol number. The latest version's data is
 /// embedded separately (`PacketTable::latest` etc.), not here.
@@ -76,6 +85,9 @@ mod tests {
         assert_eq!(ProtocolVersion::from_name("26.2").unwrap().protocol, 776);
         assert_eq!(ProtocolVersion::from_name("26.1.2").unwrap().protocol, 775);
         assert_eq!(ProtocolVersion::from_protocol(775).unwrap().name, "26.1.2");
+        // Not launchable until the 1.21.11 translation lands.
+        assert!(ProtocolVersion::from_name("1.21.11").is_none());
+        assert!(ProtocolVersion::from_protocol(774).is_none());
         assert!(ProtocolVersion::from_name("26.1.1-rc-1").is_none());
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
     }
@@ -83,7 +95,8 @@ mod tests {
     #[test]
     fn embedded_lookup() {
         assert_eq!(embedded_index(775), Some(0));
+        assert_eq!(embedded_index(774), Some(1));
         assert_eq!(embedded_index(LATEST.protocol), None);
-        assert_eq!(embedded_index(774), None);
+        assert_eq!(embedded_index(773), None);
     }
 }

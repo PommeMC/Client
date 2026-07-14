@@ -47,6 +47,18 @@ pub struct Translation {
     set_player_team_id: u32,
 }
 
+/// Protocols the wire translation fully covers. 1.21.11 (774) has embedded
+/// tables for server-list version/ping display, but its game translation
+/// hasn't landed yet, so it stays un-joinable.
+const TRANSLATED: &[i32] = &[775];
+
+/// Whether a server speaking `protocol` can be joined: the native latest
+/// version, or an older one with a complete wire translation. Gates both
+/// wire-version negotiation and the server list's compatibility marker.
+pub fn joinable(protocol: i32) -> bool {
+    protocol == LATEST.protocol || TRANSLATED.contains(&protocol)
+}
+
 /// The translation for the wire version negotiated with the current server,
 /// or `None` when the client speaks it natively (the latest version, or one
 /// without embedded protocol data, which connects untranslated as before).

@@ -185,7 +185,7 @@ async fn negotiate_wire_version(server_addr: &ServerAddr, known: Option<i32>) {
         }
     };
     let wire = match probed {
-        Some(p) if pomme_protocol::PacketTable::for_protocol(p).is_some() => p,
+        Some(p) if super::translate::joinable(p) => p,
         Some(p) => {
             tracing::warn!("Server speaks unsupported protocol {p}; connecting as {selected}");
             selected

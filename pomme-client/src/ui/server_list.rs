@@ -161,7 +161,7 @@ async fn ping_server(
         // older server is joined through translation.
         let compat = if status.version.protocol == pomme_protocol::version::LATEST.protocol {
             Compat::Native
-        } else if pomme_protocol::PacketTable::for_protocol(status.version.protocol).is_some() {
+        } else if crate::net::translate::joinable(status.version.protocol) {
             Compat::Translated
         } else {
             Compat::Incompatible
