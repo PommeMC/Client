@@ -199,13 +199,47 @@ impl RegistryRemaps {
 mod tests {
     use super::*;
 
+    /// The remap under test plus its endpoint tables.
+    fn setup(
+        protocol: i32,
+    ) -> (
+        &'static RegistryRemaps,
+        &'static RegistryTable,
+        &'static RegistryTable,
+    ) {
+        (
+            RegistryRemaps::to_latest(protocol).unwrap(),
+            RegistryTable::for_protocol(protocol).unwrap(),
+            RegistryTable::latest(),
+        )
+    }
+
+    /// The bed block entity was removed in 26.2; its id has no remap.
+    fn assert_bed_unmapped(r: &RegistryRemaps, from: &RegistryTable) {
+        let bed = from
+            .names(ClientRegistry::BlockEntityType)
+            .iter()
+            .position(|n| n == "bed")
+            .unwrap() as u32;
+        assert_eq!(r.remap(ClientRegistry::BlockEntityType, bed), None);
+    }
+
+    /// Every remapped id resolves to the same entry name in the target table.
+    fn assert_round_trips(r: &RegistryRemaps, from: &RegistryTable, to: &RegistryTable) {
+        for reg in ClientRegistry::ALL {
+            for (id, name) in from.names(reg).iter().enumerate() {
+                if let Some(new_id) = r.remap(reg, id as u32) {
+                    assert_eq!(to.name_of(reg, new_id), Some(name.as_str()), "{reg:?} {id}");
+                }
+            }
+        }
+    }
+
     /// Anchors hand-checked against the 26.1/26.2 `registries.json` report
     /// diff (insertion points and the one removed entry).
     #[test]
     fn remap_26_1_anchors() {
-        let r = RegistryRemaps::to_latest(775).unwrap();
-        let from = RegistryTable::for_protocol(775).unwrap();
-        let to = RegistryTable::latest();
+        let (r, from, to) = setup(775);
 
         // 26.2 inserted air_drag_modifier at attribute id 0.
         assert_eq!(from.name_of(ClientRegistry::Attribute, 0), Some("armor"));
@@ -220,13 +254,7 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::EntityType, 129), Some(129));
         assert_eq!(r.remap(ClientRegistry::EntityType, 130), Some(131));
 
-        // The bed block entity was removed in 26.2.
-        let bed = from
-            .names(ClientRegistry::BlockEntityType)
-            .iter()
-            .position(|n| n == "bed")
-            .unwrap() as u32;
-        assert_eq!(r.remap(ClientRegistry::BlockEntityType, bed), None);
+        assert_bed_unmapped(r, from);
 
         // Particle ids diverge right after bubble (id 3 in both).
         assert_eq!(r.remap(ClientRegistry::ParticleType, 3), Some(3));
@@ -240,23 +268,14 @@ mod tests {
         // Out-of-range source ids don't remap.
         assert_eq!(r.remap(ClientRegistry::SoundEvent, 100_000), None);
 
-        // Every remapped id round-trips to the same entry name.
-        for reg in ClientRegistry::ALL {
-            for (id, name) in from.names(reg).iter().enumerate() {
-                if let Some(new_id) = r.remap(reg, id as u32) {
-                    assert_eq!(to.name_of(reg, new_id), Some(name.as_str()), "{reg:?} {id}");
-                }
-            }
-        }
+        assert_round_trips(r, from, to);
     }
 
     /// Anchor checks against the 1.21.11 -> 26.2 registry diff (spot-checked
     /// by hand against the two data-generator reports).
     #[test]
     fn remap_1_21_11_anchors() {
-        let r = RegistryRemaps::to_latest(774).unwrap();
-        let from = RegistryTable::for_protocol(774).unwrap();
-        let to = RegistryTable::latest();
+        let (r, from, to) = setup(774);
 
         // 26.x inserted air_drag_modifier at attribute id 0.
         assert_eq!(from.name_of(ClientRegistry::Attribute, 0), Some("armor"));
@@ -270,13 +289,7 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::EntityType, 129), Some(129));
         assert_eq!(r.remap(ClientRegistry::EntityType, 130), Some(131));
 
-        // The bed block entity was removed in 26.2.
-        let bed = from
-            .names(ClientRegistry::BlockEntityType)
-            .iter()
-            .position(|n| n == "bed")
-            .unwrap() as u32;
-        assert_eq!(r.remap(ClientRegistry::BlockEntityType, bed), None);
+        assert_bed_unmapped(r, from);
 
         // Particle ids diverge right after bubble (id 3 in both).
         assert_eq!(r.remap(ClientRegistry::ParticleType, 3), Some(3));
@@ -292,14 +305,7 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 40), Some(40));
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 41), Some(42));
 
-        // Every remapped id round-trips to the same entry name.
-        for reg in ClientRegistry::ALL {
-            for (id, name) in from.names(reg).iter().enumerate() {
-                if let Some(new_id) = r.remap(reg, id as u32) {
-                    assert_eq!(to.name_of(reg, new_id), Some(name.as_str()), "{reg:?} {id}");
-                }
-            }
-        }
+        assert_round_trips(r, from, to);
     }
 
     /// Anchor checks against the 1.21.10 -> 26.2 registry diff (spot-checked
@@ -308,9 +314,7 @@ mod tests {
     /// in several registries.
     #[test]
     fn remap_1_21_10_anchors() {
-        let r = RegistryRemaps::to_latest(773).unwrap();
-        let from = RegistryTable::for_protocol(773).unwrap();
-        let to = RegistryTable::latest();
+        let (r, from, to) = setup(773);
 
         // 26.x inserted air_drag_modifier at attribute id 0.
         assert_eq!(from.name_of(ClientRegistry::Attribute, 0), Some("armor"));
@@ -322,13 +326,7 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::EntityType, 20), Some(21));
         assert_eq!(r.remap(ClientRegistry::EntityType, 127), Some(131)); // tadpole
 
-        // The bed block entity was removed in 26.2.
-        let bed = from
-            .names(ClientRegistry::BlockEntityType)
-            .iter()
-            .position(|n| n == "bed")
-            .unwrap() as u32;
-        assert_eq!(r.remap(ClientRegistry::BlockEntityType, bed), None);
+        assert_bed_unmapped(r, from);
 
         // Particle ids diverge right after bubble (id 3 in both).
         assert_eq!(r.remap(ClientRegistry::ParticleType, 3), Some(3));
@@ -345,14 +343,7 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 4), Some(4));
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 5), Some(6));
 
-        // Every remapped id round-trips to the same entry name.
-        for reg in ClientRegistry::ALL {
-            for (id, name) in from.names(reg).iter().enumerate() {
-                if let Some(new_id) = r.remap(reg, id as u32) {
-                    assert_eq!(to.name_of(reg, new_id), Some(name.as_str()), "{reg:?} {id}");
-                }
-            }
-        }
+        assert_round_trips(r, from, to);
     }
 
     #[test]
