@@ -18,6 +18,7 @@ pub const VERSIONS: &[ProtocolVersion] = &[
     v("26.1", 775),
     v("1.21.11", 774),
     v("1.21.10", 773),
+    v("1.21.9", 773),
 ];
 
 /// The version the client speaks internally.
@@ -93,6 +94,7 @@ mod tests {
         assert_eq!(ProtocolVersion::from_name("1.21.11").unwrap().protocol, 774);
         assert_eq!(ProtocolVersion::from_protocol(774).unwrap().name, "1.21.11");
         assert_eq!(ProtocolVersion::from_name("1.21.10").unwrap().protocol, 773);
+        assert_eq!(ProtocolVersion::from_name("1.21.9").unwrap().protocol, 773);
         assert_eq!(ProtocolVersion::from_protocol(773).unwrap().name, "1.21.10");
         assert!(ProtocolVersion::from_name("26.1.1-rc-1").is_none());
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
