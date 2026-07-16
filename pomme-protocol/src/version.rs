@@ -17,6 +17,8 @@ pub const VERSIONS: &[ProtocolVersion] = &[
     v("26.1.1", 775),
     v("26.1", 775),
     v("1.21.11", 774),
+    // 1.21.10 (773) has embedded tables but no wire translation yet; it
+    // becomes launchable when the translation lands.
 ];
 
 /// The version the client speaks internally.
