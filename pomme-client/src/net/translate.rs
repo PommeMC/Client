@@ -359,9 +359,8 @@ impl Translation {
 /// Packets renamed between versions with identical fields; name matching
 /// treats each pair as the same packet.
 const RENAMED: &[(&str, &str)] = &[
-    // 1.21.11 renamed `horse_screen_open` (same containerId /
-    // inventoryColumns / entityId fields; `ClientboundHorseScreenOpenPacket`
-    // vs `ClientboundMountScreenOpenPacket` in the references).
+    // `ClientboundHorseScreenOpenPacket` vs `ClientboundMountScreenOpenPacket`
+    // in the references, byte-identical write() bodies.
     ("horse_screen_open", "mount_screen_open"),
 ];
 
@@ -578,10 +577,9 @@ fn translate_entity_data(
 }
 
 /// Advances past one entity-data value of the given latest-version
-/// serializer (the caller remaps first; value layouts are identical across
-/// the supported versions, verified serializer by serializer). `Some(false)`
-/// means the value (and thus anything after it) can't be walked; `None`
-/// means the data is malformed.
+/// serializer (the caller remaps first). `Some(false)` means the value (and
+/// thus anything after it) can't be walked; `None` means the data is
+/// malformed.
 fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool> {
     match serializer {
         0 | 8 => advance(cur, 1)?, // byte, boolean
