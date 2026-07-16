@@ -271,13 +271,63 @@ mod tests {
         );
     }
 
+    /// Registration-order anchors for 1.21.10, cross-checked in full against
+    /// Mojang's `generated/reports/packets.json`. Its game tables match
+    /// 1.21.11 exactly except clientbound 40, which 1.21.11 renamed
+    /// (`horse_screen_open` -> `mount_screen_open`, identical fields).
+    #[test]
+    fn anchors_1_21_10() {
+        let t = PacketTable::for_protocol(773).unwrap();
+        assert_eq!(t.version().protocol, 773);
+        assert_eq!(t.version().name, "1.21.10");
+        assert_eq!(t.id(Phase::Game, Direction::Serverbound, "attack"), None);
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "interact"),
+            Some(25)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "container_click"),
+            Some(17)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "level_particles"),
+            Some(46)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_entity_data"),
+            Some(97)
+        );
+        assert_eq!(
+            t.name_of(Phase::Game, Direction::Clientbound, 40),
+            Some("horse_screen_open")
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "mount_screen_open"),
+            None
+        );
+        assert_eq!(
+            t.id(Phase::Login, Direction::Clientbound, "login_finished"),
+            Some(2)
+        );
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 65).is_some());
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 66).is_none());
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 138)
+                .is_some()
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 139)
+                .is_none()
+        );
+    }
+
     #[test]
     fn for_protocol_lookups() {
         assert!(std::ptr::eq(
             PacketTable::for_protocol(776).unwrap(),
             PacketTable::latest()
         ));
-        assert!(PacketTable::for_protocol(773).is_none());
+        assert!(PacketTable::for_protocol(772).is_none());
     }
 
     /// Per-phase counts from the 26.2 registration lists; a regenerated table

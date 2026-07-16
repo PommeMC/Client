@@ -124,13 +124,14 @@ struct BehaviorEntry {
 
 /// Per-protocol block-state data, latest first; unknown protocols fall back
 /// to the latest (slot 0).
-const BLOCK_DATA: [(i32, &str); 3] = [
+const BLOCK_DATA: [(i32, &str); 4] = [
     (
         pomme_protocol::version::LATEST.protocol,
         include_str!("data/blocks-26.2.json"),
     ),
     (775, include_str!("data/blocks-26.1.json")),
     (774, include_str!("data/blocks-1.21.11.json")),
+    (773, include_str!("data/blocks-1.21.10.json")),
 ];
 
 /// One lazily-built table per embedded data file; `ACTIVE_TABLE` indexes the

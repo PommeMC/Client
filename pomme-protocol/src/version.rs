@@ -32,7 +32,7 @@ pub(crate) struct EmbeddedVersion {
     pub registries: &'static str,
 }
 
-pub(crate) const EMBEDDED: [EmbeddedVersion; 2] = [
+pub(crate) const EMBEDDED: [EmbeddedVersion; 3] = [
     EmbeddedVersion {
         version: v("26.1", 775),
         packets: include_str!("data/protocol-26.1.json"),
@@ -42,6 +42,11 @@ pub(crate) const EMBEDDED: [EmbeddedVersion; 2] = [
         version: v("1.21.11", 774),
         packets: include_str!("data/protocol-1.21.11.json"),
         registries: include_str!("data/registries-1.21.11.json"),
+    },
+    EmbeddedVersion {
+        version: v("1.21.10", 773),
+        packets: include_str!("data/protocol-1.21.10.json"),
+        registries: include_str!("data/registries-1.21.10.json"),
     },
 ];
 
@@ -94,7 +99,8 @@ mod tests {
     fn embedded_lookup() {
         assert_eq!(embedded_index(775), Some(0));
         assert_eq!(embedded_index(774), Some(1));
+        assert_eq!(embedded_index(773), Some(2));
         assert_eq!(embedded_index(LATEST.protocol), None);
-        assert_eq!(embedded_index(773), None);
+        assert_eq!(embedded_index(772), None);
     }
 }

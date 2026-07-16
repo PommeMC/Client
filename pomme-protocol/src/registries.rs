@@ -302,6 +302,59 @@ mod tests {
         }
     }
 
+    /// Anchor checks against the 1.21.10 -> 26.2 registry diff (spot-checked
+    /// by hand against the two data-generator reports). 1.21.11 added the
+    /// nautilus/spear content drop, so 1.21.10 diverges earlier than 1.21.11
+    /// in several registries.
+    #[test]
+    fn remap_1_21_10_anchors() {
+        let r = RegistryRemaps::to_latest(773).unwrap();
+        let from = RegistryTable::for_protocol(773).unwrap();
+        let to = RegistryTable::latest();
+
+        // 26.x inserted air_drag_modifier at attribute id 0.
+        assert_eq!(from.name_of(ClientRegistry::Attribute, 0), Some("armor"));
+        assert_eq!(r.remap(ClientRegistry::Attribute, 0), Some(1));
+
+        // Entity ids diverge at 20, where 1.21.11 inserted camel_husk.
+        assert_eq!(from.name_of(ClientRegistry::EntityType, 20), Some("cat"));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 19), Some(19));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 20), Some(21));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 127), Some(131)); // tadpole
+
+        // The bed block entity was removed in 26.2.
+        let bed = from
+            .names(ClientRegistry::BlockEntityType)
+            .iter()
+            .position(|n| n == "bed")
+            .unwrap() as u32;
+        assert_eq!(r.remap(ClientRegistry::BlockEntityType, bed), None);
+
+        // Particle ids diverge right after bubble (id 3 in both).
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 3), Some(3));
+        assert_ne!(r.remap(ClientRegistry::ParticleType, 4), Some(4));
+
+        // Component ids diverge at 5, where 1.21.11 inserted use_effects —
+        // far earlier than 1.21.11's divergence at 41, so the raw item-stack
+        // limitation (see translate.rs) covers common components like
+        // custom_name and enchantments on this version.
+        assert_eq!(
+            from.name_of(ClientRegistry::DataComponentType, 5),
+            Some("custom_name")
+        );
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 4), Some(4));
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 5), Some(6));
+
+        // Every remapped id round-trips to the same entry name.
+        for reg in ClientRegistry::ALL {
+            for (id, name) in from.names(reg).iter().enumerate() {
+                if let Some(new_id) = r.remap(reg, id as u32) {
+                    assert_eq!(to.name_of(reg, new_id), Some(name.as_str()), "{reg:?} {id}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn latest_identity() {
         let r = RegistryRemaps::to_latest(LATEST.protocol).unwrap();
