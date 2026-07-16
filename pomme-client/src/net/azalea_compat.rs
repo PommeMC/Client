@@ -62,17 +62,33 @@ fn decode_lp_vec3(bytes: &[u8]) -> DVec3 {
     DVec3::new(v.x, v.y, v.z)
 }
 
-/// The 26.1 -> 26.2 translation under test; 26.1 wire layouts below are
-/// hand-built from the decompiled reference codecs
-/// (`reference/26.1/decompiled/.../network/protocol/`).
-fn translation() -> crate::net::translate::Translation {
-    crate::net::translate::Translation::for_protocol(775).expect("26.1 translation data")
+/// The wire translation under test for one protocol; the old-layout frames
+/// in the tests below are hand-built from that version's decompiled
+/// reference codecs (`reference/<version>/decompiled/.../network/`).
+fn translation_for(protocol: i32) -> crate::net::translate::Translation {
+    crate::net::translate::Translation::for_protocol(protocol).expect("translation data")
+}
+
+fn old_id(protocol: i32, dir: Direction, name: &str) -> u32 {
+    PacketTable::for_protocol(protocol)
+        .unwrap()
+        .id(Phase::Game, dir, name)
+        .unwrap()
+}
+
+/// Translates a hand-built old-version game frame and decodes the result
+/// with azalea's 26.2 codecs.
+fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
+    let translated = translation_for(protocol)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap()
 }
 
 /// Protocols outside `TRANSLATED` never build a translation.
 #[test]
 fn no_translation_without_coverage() {
-    assert!(crate::net::translate::Translation::for_protocol(773).is_none());
+    assert!(crate::net::translate::Translation::for_protocol(772).is_none());
 }
 
 /// 26.2 appended a trailing session-id UUID to login_finished
@@ -94,7 +110,7 @@ fn translate_login_finished_26_1() {
     // A 26.1 frame is the same bytes without the trailing UUID.
     let old = frame[..frame.len() - 16].to_vec().into_boxed_slice();
 
-    let translated = translation().translate_login_frame(old);
+    let translated = translation_for(775).translate_login_frame(old);
     let decoded: ClientboundLoginPacket =
         azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap();
     let ClientboundLoginPacket::LoginFinished(decoded) = decoded else {
@@ -148,7 +164,7 @@ fn translate_game_login_26_1() {
     let mut old = frame.to_vec();
     old.remove(old.len() - 2);
 
-    let translated = translation()
+    let translated = translation_for(775)
         .translate_game_frame(old.into_boxed_slice())
         .unwrap();
     assert_eq!(&translated[..], &frame[..]);
@@ -179,7 +195,7 @@ fn translate_set_player_team_26_1() {
     old.extend_from_slice(prefix);
     old.extend_from_slice(suffix);
 
-    let translated = translation()
+    let translated = translation_for(775)
         .translate_game_frame(old.into_boxed_slice())
         .unwrap();
 
@@ -217,7 +233,7 @@ fn translate_set_player_team_26_1_reset_color() {
     old.extend_from_slice(component);
     old.extend_from_slice(&[1, 3, b'b', b'o', b'b']); // player list
 
-    let translated = translation()
+    let translated = translation_for(775)
         .translate_game_frame(old.into_boxed_slice())
         .unwrap();
 
@@ -282,7 +298,7 @@ fn remap_add_entity_26_1() {
         y_head_rot: 0,
         data: 0,
     });
-    assert!(translation().remap_inbound(&mut packet));
+    assert!(translation_for(775).remap_inbound(&mut packet));
     let ClientboundGamePacket::AddEntity(p) = &packet else {
         unreachable!()
     };
@@ -314,7 +330,7 @@ fn strip_creative_components_26_1() {
                     component_patch: patch,
                 }),
             });
-        translation().remap_outbound(&mut packet);
+        translation_for(775).remap_outbound(&mut packet);
         let ServerboundGamePacket::SetCreativeModeSlot(p) = packet else {
             unreachable!()
         };
@@ -330,47 +346,24 @@ fn strip_creative_components_26_1() {
     assert_eq!(remap(DataComponentKind::Lock).iter().count(), 0);
 }
 
-/// The 1.21.11 -> 26.2 translation under test; 1.21.11 wire layouts below
-/// are hand-built from the decompiled reference codecs
-/// (`reference/1.21.11/decompiled/.../network/`).
-fn translation_774() -> crate::net::translate::Translation {
-    crate::net::translate::Translation::for_protocol(774).expect("1.21.11 translation data")
-}
-
-fn old_id_774(dir: Direction, name: &str) -> u32 {
-    PacketTable::for_protocol(774)
-        .unwrap()
-        .id(Phase::Game, dir, name)
-        .unwrap()
-}
-
-/// Translates a hand-built 1.21.11 game frame and decodes the result with
-/// azalea's 26.2 codecs.
-fn translate_and_decode_774(old: Vec<u8>) -> ClientboundGamePacket {
-    let translated = translation_774()
-        .translate_game_frame(old.into_boxed_slice())
-        .unwrap();
-    azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap()
-}
-
 /// 26.1's game ids match 26.2, so its frames pass through without the id
 /// remap or the outbound reroute; 1.21.11's diverge, so they don't.
 #[test]
 fn outbound_translation_gating() {
-    assert!(!translation().translates_outbound());
-    assert!(translation_774().translates_outbound());
+    assert!(!translation_for(775).translates_outbound());
+    assert!(translation_for(774).translates_outbound());
 }
 
 /// The id remap alone (`set_health` shifted between the versions).
 #[test]
 fn remap_game_ids_774() {
     let mut old = Vec::new();
-    wire::write_varint(&mut old, old_id_774(Direction::Clientbound, "set_health"));
+    wire::write_varint(&mut old, old_id(774, Direction::Clientbound, "set_health"));
     old.extend_from_slice(&18.0f32.to_be_bytes());
     wire::write_varint(&mut old, 19); // food
     old.extend_from_slice(&4.5f32.to_be_bytes());
 
-    let ClientboundGamePacket::SetHealth(p) = translate_and_decode_774(old) else {
+    let ClientboundGamePacket::SetHealth(p) = translate_and_decode(774, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.health, 18.0);
@@ -385,14 +378,14 @@ fn translate_entity_data_774() {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
-        old_id_774(Direction::Clientbound, "set_entity_data"),
+        old_id(774, Direction::Clientbound, "set_entity_data"),
     );
     wire::write_varint(&mut old, 9); // entity id
     old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
     old.extend_from_slice(&[17, 22, 4]); // index 17, cow_variant, holder id 4
     old.push(0xFF);
 
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode_774(old) else {
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(774, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.id, MinecraftEntityId(9));
@@ -416,7 +409,7 @@ fn translate_chunk_774() {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
-        old_id_774(Direction::Clientbound, "level_chunk_with_light"),
+        old_id(774, Direction::Clientbound, "level_chunk_with_light"),
     );
     old.extend_from_slice(&3i32.to_be_bytes()); // chunk x
     old.extend_from_slice(&(-2i32).to_be_bytes()); // chunk z
@@ -428,7 +421,7 @@ fn translate_chunk_774() {
     old.push(0); // no block entities
     old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
 
-    let ClientboundGamePacket::LevelChunkWithLight(p) = translate_and_decode_774(old) else {
+    let ClientboundGamePacket::LevelChunkWithLight(p) = translate_and_decode(774, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.x, 3);
@@ -440,12 +433,12 @@ fn translate_chunk_774() {
 #[test]
 fn translate_set_time_774() {
     let mut old = Vec::new();
-    wire::write_varint(&mut old, old_id_774(Direction::Clientbound, "set_time"));
+    wire::write_varint(&mut old, old_id(774, Direction::Clientbound, "set_time"));
     old.extend_from_slice(&12000u64.to_be_bytes()); // game time
     old.extend_from_slice(&6000u64.to_be_bytes()); // day time
     old.push(1); // tickDayTime
 
-    let ClientboundGamePacket::SetTime(p) = translate_and_decode_774(old) else {
+    let ClientboundGamePacket::SetTime(p) = translate_and_decode(774, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.game_time, 12000);
@@ -459,8 +452,8 @@ fn translate_set_time_774() {
 /// 1.21.11 reference).
 #[test]
 fn translate_attack_774() {
-    let frames = translation_774().translate_outbound_game_frame(wire::encode_attack(42));
-    let interact = old_id_774(Direction::Serverbound, "interact");
+    let frames = translation_for(774).translate_outbound_game_frame(wire::encode_attack(42));
+    let interact = old_id(774, Direction::Serverbound, "interact");
     assert_eq!(frames, [[interact as u8, 42, 1, 0]]);
 }
 
@@ -469,11 +462,11 @@ fn translate_attack_774() {
 #[test]
 fn translate_interact_774() {
     let location = DVec3::new(0.5, 1.25, -0.25);
-    let frames =
-        translation_774().translate_outbound_game_frame(wire::encode_interact(42, location, true));
+    let frames = translation_for(774)
+        .translate_outbound_game_frame(wire::encode_interact(42, location, true));
     assert_eq!(frames.len(), 2);
 
-    let interact = old_id_774(Direction::Serverbound, "interact") as u8;
+    let interact = old_id(774, Direction::Serverbound, "interact") as u8;
     let at = &frames[0];
     assert_eq!(at[..3], [interact, 42, 2]);
     let float_at = |i: usize| f32::from_be_bytes(at[3 + 4 * i..7 + 4 * i].try_into().unwrap());
@@ -497,7 +490,7 @@ fn suppress_unknown_outbound_774() {
     );
     frame.push(0);
     assert!(
-        translation_774()
+        translation_for(774)
             .translate_outbound_game_frame(frame)
             .is_empty()
     );
@@ -510,11 +503,74 @@ fn remap_outbound_ids_774() {
     let mut frame = Vec::new();
     wire::write_varint(&mut frame, table_id(Direction::Serverbound, "swing"));
     frame.push(0); // main hand
-    let frames = translation_774().translate_outbound_game_frame(frame);
+    let frames = translation_for(774).translate_outbound_game_frame(frame);
     assert_eq!(
         frames,
-        [[old_id_774(Direction::Serverbound, "swing") as u8, 0]]
+        [[old_id(774, Direction::Serverbound, "swing") as u8, 0]]
     );
+}
+
+// 1.21.10's game tables and layouts match 1.21.11's except clientbound 40
+// (`horse_screen_open`, which 1.21.11 renamed `mount_screen_open`) and the
+// serializer interleave, so the shared frame rewriters are covered by the
+// 774 tests above; the tests below pin what's 1.21.10-specific.
+
+/// The 1.21.10 serializer interleave: `sniffer_state` is 30 there (31 on
+/// 1.21.11, 35 on 26.2), past the `zombie_nautilus_variant` insertion the
+/// 1.21.11 map doesn't account for.
+#[test]
+fn translate_entity_data_773() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(773, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
+    old.extend_from_slice(&[17, 30, 2]); // index 17, sniffer_state, ordinal 2
+    old.push(0xFF);
+
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(773, old) else {
+        panic!("wrong packet");
+    };
+    let items = &p.packed_items.0;
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[1].index, 17);
+    assert!(matches!(
+        items[1].value,
+        azalea_entity::EntityDataValue::SnifferState(_)
+    ));
+}
+
+/// 1.21.11 renamed `horse_screen_open` -> `mount_screen_open` with identical
+/// fields (containerId, inventoryColumns varints, entityId int in both
+/// references); the name alias keeps the frame flowing under the new id.
+#[test]
+fn translate_horse_screen_open_773() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(773, Direction::Clientbound, "horse_screen_open"),
+    );
+    old.push(1); // container id
+    old.push(3); // inventory columns
+    old.extend_from_slice(&42i32.to_be_bytes());
+
+    let ClientboundGamePacket::MountScreenOpen(p) = translate_and_decode(773, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.container_id, 1);
+    assert_eq!(p.inventory_columns, 3);
+    assert_eq!(p.entity_id, MinecraftEntityId(42));
+}
+
+/// 1.21.10, like 1.21.11, has no serverbound `attack`; the same reroute to
+/// `interact` with the ATTACK action applies through its own id table.
+#[test]
+fn translate_attack_773() {
+    let frames = translation_for(773).translate_outbound_game_frame(wire::encode_attack(42));
+    let interact = old_id(773, Direction::Serverbound, "interact");
+    assert_eq!(frames, [[interact as u8, 42, 1, 0]]);
 }
 
 #[test]

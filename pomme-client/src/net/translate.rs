@@ -32,10 +32,19 @@
 //!   hand and a low-precision hit location; 26.2-only serverbound packets
 //!   without an equivalent (`set_game_rule`, `spectator_action`) are suppressed
 //!
+//! 1.21.10 -> 26.2 wire changes (identical to 1.21.11's — the packet layouts
+//! didn't change between the two — except):
+//! - clientbound 40 is `horse_screen_open`, which 1.21.11 renamed
+//!   `mount_screen_open` with identical fields; the id match aliases the pair
+//! - `EntityDataSerializers` lacks 1.21.11's `zombie_nautilus_variant` (28) and
+//!   trailing `humanoid_arm`, so the serializer remap differs
+//!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
 //! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
-//! inserted `additional_trade_cost`) decodes under the wrong 26.2 codec —
+//! inserted `additional_trade_cost`; 1.21.10: 5, where 1.21.11 inserted
+//! `use_effects` — so even `custom_name` and `enchantments` are affected
+//! there) decodes under the wrong 26.2 codec —
 //! usually a misparse that skips the packet via `skip_malformed_packet`,
 //! though a coincidentally parsable layout yields a silently wrong
 //! component. Common survival items only use earlier, unshifted components.
@@ -71,11 +80,15 @@ pub struct Translation {
 /// latest, plus the latest-space ids its frame rewrites dispatch on.
 struct GameIds {
     /// Wire-version clientbound id -> latest id; `None` drops the frame
-    /// (no latest equivalent — none exist for 1.21.11, kept for safety).
+    /// (no latest equivalent — none exist for 1.21.11/1.21.10, kept for
+    /// safety).
     inbound: Box<[Option<u32>]>,
     /// Latest serverbound id -> wire-version id; `None` suppresses the
     /// frame (the packet doesn't exist on the older version).
     outbound: Box<[Option<u32>]>,
+    /// The wire version's `EntityDataSerializers` interleave (the
+    /// registration order shifts between versions).
+    serializer_map: fn(u32) -> Option<u32>,
     set_entity_data_id: u32,
     level_chunk_id: u32,
     set_time_id: u32,
@@ -87,7 +100,7 @@ struct GameIds {
 /// Protocols the wire translation fully covers. A version with embedded
 /// tables but no entry here (the staging state while its translation is
 /// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[775, 774];
+const TRANSLATED: &[i32] = &[775, 774, 773];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -137,7 +150,7 @@ impl Translation {
             login_finished_id: id(Phase::Login, "login_finished"),
             game_login_id: id(Phase::Game, "login"),
             set_player_team_id: id(Phase::Game, "set_player_team"),
-            game_ids: GameIds::build(table, latest),
+            game_ids: GameIds::build(protocol, table, latest),
         })
     }
 
@@ -177,7 +190,7 @@ impl Translation {
             translate_team(id, payload)
         } else if let Some(ids) = &self.game_ids {
             if id == ids.set_entity_data_id {
-                translate_entity_data(id, payload)
+                translate_entity_data(id, payload, ids.serializer_map)
             } else if id == ids.level_chunk_id {
                 translate_chunk(id, payload)
             } else if id == ids.set_time_id {
@@ -343,18 +356,40 @@ impl Translation {
     }
 }
 
+/// Packets renamed between versions with identical fields; name matching
+/// treats each pair as the same packet.
+const RENAMED: &[(&str, &str)] = &[
+    // 1.21.11 renamed `horse_screen_open` (same containerId /
+    // inventoryColumns / entityId fields; `ClientboundHorseScreenOpenPacket`
+    // vs `ClientboundMountScreenOpenPacket` in the references).
+    ("horse_screen_open", "mount_screen_open"),
+];
+
 impl GameIds {
     /// Name-matched game-phase id tables between one wire version and the
     /// latest. `None` when translation-by-id is a no-op: every inbound id
     /// maps to itself and every outbound id maps to itself or to nothing
     /// (26.1's only divergence is 26.2's `spectate_entity` ->
     /// `spectator_action` rename, which pomme never sends).
-    fn build(table: &PacketTable, latest: &PacketTable) -> Option<GameIds> {
+    fn build(protocol: i32, table: &PacketTable, latest: &PacketTable) -> Option<GameIds> {
         use Direction::{Clientbound, Serverbound};
         let map = |from: &PacketTable, to: &PacketTable, dir| -> Box<[Option<u32>]> {
             (0..)
                 .map_while(|i| from.name_of(Phase::Game, dir, i))
-                .map(|name| to.id(Phase::Game, dir, name))
+                .map(|name| {
+                    to.id(Phase::Game, dir, name).or_else(|| {
+                        let alias = RENAMED.iter().find_map(|&(a, b)| {
+                            if name == a {
+                                Some(b)
+                            } else if name == b {
+                                Some(a)
+                            } else {
+                                None
+                            }
+                        })?;
+                        to.id(Phase::Game, dir, alias)
+                    })
+                })
                 .collect()
         };
         let inbound = map(table, latest, Clientbound);
@@ -374,6 +409,11 @@ impl GameIds {
         Some(GameIds {
             inbound,
             outbound,
+            serializer_map: match protocol {
+                774 => remap_serializer_774,
+                773 => remap_serializer_773,
+                p => panic!("no serializer map for protocol {p}"),
+            },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
             level_chunk_id: id(Clientbound, "level_chunk_with_light"),
             set_time_id: id(Clientbound, "set_time"),
@@ -457,11 +497,11 @@ fn translate_interact(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     vec![at, plain]
 }
 
-/// The latest serializer id for an old `EntityDataSerializers` id: 26.x
+/// The latest serializer id for a 1.21.11 `EntityDataSerializers` id: 26.x
 /// interleaved `cat/cow/pig/chicken_sound_variant` at ids 22/24/29/31
 /// (line-checked against both versions' `EntityDataSerializers.java`
 /// registration blocks; anchored by tests in `azalea_compat`).
-fn remap_serializer(old: u32) -> Option<u32> {
+fn remap_serializer_774(old: u32) -> Option<u32> {
     Some(match old {
         0..=21 => old,
         22 => 23,
@@ -470,6 +510,19 @@ fn remap_serializer(old: u32) -> Option<u32> {
         28..=38 => old + 4,
         _ => return None,
     })
+}
+
+/// The latest serializer id for a 1.21.10 `EntityDataSerializers` id:
+/// 1.21.11 inserted `zombie_nautilus_variant` right above `chicken_variant`
+/// (27), shifting everything past it by one more slot; below that the
+/// 1.21.11 interleave applies unchanged (its trailing `humanoid_arm`
+/// addition shifts nothing).
+fn remap_serializer_773(old: u32) -> Option<u32> {
+    match old {
+        0..=27 => remap_serializer_774(old),
+        28..=36 => Some(old + 5),
+        _ => None,
+    }
 }
 
 /// Rewrites the game `login` payload: 26.2 added `onlineMode` before the
@@ -486,12 +539,17 @@ fn translate_game_login(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 
 /// Rewrites `set_entity_data` (`entityId`, then `(u8 index, varint
 /// serializer, value)` entries terminated by `0xFF`) by remapping each
-/// entry's serializer id. Value layouts are identical between the versions
-/// (verified serializer by serializer); they're skipped, not decoded. An
-/// item-stack or particle value can't be skipped without full component /
-/// particle codecs — the remainder is copied verbatim, which is correct
-/// unless a shifted serializer follows one (no vanilla entity does that).
-fn translate_entity_data(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+/// entry's serializer id through the wire version's `serializer_map`. Value
+/// layouts are identical between the versions (verified serializer by
+/// serializer); they're skipped, not decoded. An item-stack or particle
+/// value can't be skipped without full component / particle codecs — the
+/// remainder is copied verbatim, which is correct unless a shifted
+/// serializer follows one (no vanilla entity does that).
+fn translate_entity_data(
+    id: u32,
+    payload: &[u8],
+    serializer_map: fn(u32) -> Option<u32>,
+) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
 
@@ -505,10 +563,10 @@ fn translate_entity_data(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
             break;
         }
         let old = u32::azalea_read_var(&mut cur).ok()?;
-        let new = remap_serializer(old)?;
+        let new = serializer_map(old)?;
         wire::write_varint(&mut out, new);
         let value_at = cur.position() as usize;
-        if !skip_metadata_value(&mut cur, old)? {
+        if !skip_metadata_value(&mut cur, new)? {
             tracing::debug!("Copying entity data tail verbatim past serializer {old}");
             out.extend_from_slice(&payload[value_at..]);
             return Some(out);
@@ -519,19 +577,21 @@ fn translate_entity_data(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Advances past one entity-data value of the given old-version serializer.
-/// `Some(false)` means the value (and thus anything after it) can't be
-/// walked; `None` means the data is malformed.
+/// Advances past one entity-data value of the given latest-version
+/// serializer (the caller remaps first; value layouts are identical across
+/// the supported versions, verified serializer by serializer). `Some(false)`
+/// means the value (and thus anything after it) can't be walked; `None`
+/// means the data is malformed.
 fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool> {
     match serializer {
         0 | 8 => advance(cur, 1)?, // byte, boolean
         3 => advance(cur, 4)?,     // float
         9 => advance(cur, 12)?,    // rotations
         10 => advance(cur, 8)?,    // block_pos
-        35 => advance(cur, 12)?,   // vector3
-        36 => advance(cur, 16)?,   // quaternion
+        39 => advance(cur, 12)?,   // vector3
+        40 => advance(cur, 16)?,   // quaternion
         // varint-shaped: int, enums, registry/holder ids, optional ints
-        1 | 12 | 14 | 15 | 19 | 20 | 21 | 22..=28 | 31..=34 | 38 => {
+        1 | 12 | 14 | 15 | 19 | 20 | 21 | 22..=32 | 35..=38 | 42 => {
             varint_span(cur)?;
         }
         2 => {
@@ -548,14 +608,14 @@ fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool>
             varint_span(cur)?;
             varint_span(cur)?;
         }
-        29 => {
+        33 => {
             // optional global pos: dimension key + block pos
             skip_optional(cur, |c| {
                 skip_utf(c)?;
                 advance(c, 8)
             })?;
         }
-        30 => {
+        34 => {
             // painting variant holder: id + 1, or 0 followed by the direct
             // form (width, height, asset id, optional title/author)
             if u32::azalea_read_var(cur).ok()? == 0 {
@@ -566,7 +626,7 @@ fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool>
                 skip_optional(cur, skip_nbt)?;
             }
         }
-        // item stacks (7), particles (16/17) and resolvable profiles (37)
+        // item stacks (7), particles (16/17) and resolvable profiles (41)
         // need full value codecs to walk past
         _ => return Some(false),
     }

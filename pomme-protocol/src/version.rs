@@ -17,8 +17,7 @@ pub const VERSIONS: &[ProtocolVersion] = &[
     v("26.1.1", 775),
     v("26.1", 775),
     v("1.21.11", 774),
-    // 1.21.10 (773) has embedded tables but no wire translation yet; it
-    // becomes launchable when the translation lands.
+    v("1.21.10", 773),
 ];
 
 /// The version the client speaks internally.
@@ -93,6 +92,8 @@ mod tests {
         assert_eq!(ProtocolVersion::from_protocol(775).unwrap().name, "26.1.2");
         assert_eq!(ProtocolVersion::from_name("1.21.11").unwrap().protocol, 774);
         assert_eq!(ProtocolVersion::from_protocol(774).unwrap().name, "1.21.11");
+        assert_eq!(ProtocolVersion::from_name("1.21.10").unwrap().protocol, 773);
+        assert_eq!(ProtocolVersion::from_protocol(773).unwrap().name, "1.21.10");
         assert!(ProtocolVersion::from_name("26.1.1-rc-1").is_none());
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
     }
