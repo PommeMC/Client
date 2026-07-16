@@ -447,14 +447,17 @@ fn translate_set_time_774() {
     assert_eq!(clock.rate, 1.0);
 }
 
-/// 1.21.11 has no serverbound `attack`; the frame becomes an `interact`
-/// with the ATTACK action (`ServerboundInteractPacket` action bodies in the
-/// 1.21.11 reference).
+/// Neither 1.21.11 nor 1.21.10 has a serverbound `attack`; the frame
+/// becomes an `interact` with the ATTACK action (`ServerboundInteractPacket`
+/// action bodies in the references), through each version's id table.
 #[test]
-fn translate_attack_774() {
-    let frames = translation_for(774).translate_outbound_game_frame(wire::encode_attack(42));
-    let interact = old_id(774, Direction::Serverbound, "interact");
-    assert_eq!(frames, [[interact as u8, 42, 1, 0]]);
+fn translate_attack_old_versions() {
+    for protocol in [774, 773] {
+        let frames =
+            translation_for(protocol).translate_outbound_game_frame(wire::encode_attack(42));
+        let interact = old_id(protocol, Direction::Serverbound, "interact");
+        assert_eq!(frames, [[interact as u8, 42, 1, 0]], "{protocol}");
+    }
 }
 
 /// A 26.2 `interact` (hand + LpVec3 location) becomes the 1.21.11 pair a
@@ -562,15 +565,6 @@ fn translate_horse_screen_open_773() {
     assert_eq!(p.container_id, 1);
     assert_eq!(p.inventory_columns, 3);
     assert_eq!(p.entity_id, MinecraftEntityId(42));
-}
-
-/// 1.21.10, like 1.21.11, has no serverbound `attack`; the same reroute to
-/// `interact` with the ATTACK action applies through its own id table.
-#[test]
-fn translate_attack_773() {
-    let frames = translation_for(773).translate_outbound_game_frame(wire::encode_attack(42));
-    let interact = old_id(773, Direction::Serverbound, "interact");
-    assert_eq!(frames, [[interact as u8, 42, 1, 0]]);
 }
 
 #[test]
