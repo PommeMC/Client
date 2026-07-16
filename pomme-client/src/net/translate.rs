@@ -132,6 +132,14 @@ pub fn active() -> Option<&'static Translation> {
     translation
 }
 
+/// Builds the version-keyed caches a translated join needs (registry remaps,
+/// packet tables, block-state table) without activating anything, so a join
+/// after a server-list ping finds them warm. No-op when already built.
+pub fn prewarm(protocol: i32) {
+    let _ = Translation::for_protocol(protocol);
+    crate::world::block::prewarm_protocol(protocol);
+}
+
 impl Translation {
     /// The translation for one protocol number, or `None` outside
     /// `TRANSLATED`: the frame rewrites below are version-specific, so

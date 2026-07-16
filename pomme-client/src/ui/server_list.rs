@@ -13,6 +13,10 @@ use crate::ui::text::{TextSpan, format_text_spans};
 pub struct ServerEntry {
     pub name: String,
     pub address: String,
+    /// The protocol from this server's last successful ping, so a join
+    /// before the current ping completes still skips the wire-version probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<i32>,
 }
 
 /// How the client can speak to a pinged server.
@@ -162,6 +166,8 @@ async fn ping_server(
         let compat = if status.version.protocol == pomme_protocol::version::LATEST.protocol {
             Compat::Native
         } else if crate::net::translate::joinable(status.version.protocol) {
+            let protocol = status.version.protocol;
+            tokio::task::spawn_blocking(move || crate::net::translate::prewarm(protocol));
             Compat::Translated
         } else {
             Compat::Incompatible

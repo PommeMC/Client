@@ -218,6 +218,8 @@ impl ApplicationHandler for App {
                             uuid: self.core.user.uuid,
                             access_token: self.core.user.access_token.clone(),
                             view_distance: self.core.menu.render_distance as u8,
+                            // TODO: read the saved server list's protocol for
+                            // this address to skip the join-time probe.
                             protocol: None,
                         },
                     );
