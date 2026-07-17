@@ -16,6 +16,8 @@
 mod block;
 mod data;
 mod queue;
+mod sky;
+mod sources;
 mod storage;
 mod world;
 
@@ -25,6 +27,8 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 use block::BlockLightEngine;
 use data::{DataLayer, LAYER_BYTES};
+use sky::SkyLightEngine;
+use sources::ChunkSkyLightSources;
 use storage::StorageCore;
 pub(crate) use storage::{LightPos, SectionKey};
 use world::StoreWorld;
@@ -97,12 +101,14 @@ pub(crate) struct LightDirty {
 #[derive(Clone, Copy)]
 enum LayerKind {
     Block,
-    // TODO(light-sky): Sky, once the sky engine lands.
+    Sky,
 }
 
 pub(crate) struct LevelLightEngine {
     block: BlockLightEngine,
-    // TODO(light-sky): sky: Option<SkyLightEngine>.
+    /// `None` in dimensions without skylight (vanilla constructs the sky
+    /// engine only when `dimensionType().hasSkyLight()`).
+    sky: Option<SkyLightEngine>,
     tasks: VecDeque<LightTask>,
     /// Lowest block section y (`min_y >> 4`); light sections span one extra
     /// section below and above.
@@ -111,9 +117,10 @@ pub(crate) struct LevelLightEngine {
 }
 
 impl LevelLightEngine {
-    pub fn new(height: u32, min_y: i32, _has_sky: bool) -> Self {
+    pub fn new(height: u32, min_y: i32, has_sky: bool) -> Self {
         Self {
             block: BlockLightEngine::new(),
+            sky: has_sky.then(SkyLightEngine::new),
             tasks: VecDeque::new(),
             min_section_y: min_y >> 4,
             section_count: (height / 16) as i32,
@@ -133,32 +140,47 @@ impl LevelLightEngine {
     }
 
     /// Vanilla `LevelChunk.setBlockState`'s light lines: section empty-status
-    /// first, then a relight check when the light properties changed. Call
-    /// with the block already written to the chunk.
+    /// first, then (when the light properties changed) the sky-source
+    /// heightmap update followed by a relight check. Call with the block
+    /// already written to the chunk; `column_state` reads the block column at
+    /// the position's x/z by world Y.
     pub fn on_block_changed(
         &mut self,
         pos: LightPos,
         old: BlockState,
         new: BlockState,
         empty_flip: Option<bool>,
+        column_state: &impl Fn(i32) -> BlockState,
     ) {
         if let Some(empty) = empty_flip {
             self.block.update_section_status(pos.section(), empty);
+            if let Some(sky) = &mut self.sky {
+                sky.update_section_status(pos.section(), empty);
+            }
         }
         if has_different_light_properties(old, new) {
-            // TODO(light-sky): ChunkSkyLightSources.update before checkBlock.
+            if let Some(sky) = &mut self.sky
+                && let Some(sources) = sky.sources.get_mut(&(pos.x >> 4, pos.z >> 4))
+            {
+                sources.update(column_state, pos.x & 15, pos.y, pos.z & 15);
+            }
             self.block.check_block(pos);
+            if let Some(sky) = &mut self.sky {
+                sky.check_block(pos);
+            }
         }
     }
 
-    /// Registers a freshly loaded chunk column: creates its light column from
-    /// any layers the engine already stores (border sections lit by loaded
-    /// neighbors), so later publishes only need to touch changed sections.
+    /// Registers a freshly loaded chunk column: builds its sky-source
+    /// heightmap (vanilla fills sources at chunk-data apply, before the
+    /// queued light task) and creates its light column from any layers the
+    /// engine already stores (border sections lit by loaded neighbors), so
+    /// later publishes only need to touch changed sections.
     pub fn on_chunk_loaded(&mut self, store: &mut ChunkStore, pos: (i32, i32)) {
         let count = self.light_section_count();
         let min_section_y = self.min_section_y;
         let key_at = |index: usize| SectionKey::new(pos.0, min_section_y - 1 + index as i32, pos.1);
-        let sky_sections = vec![None; count];
+        let mut sky_sections = vec![None; count];
         let mut block_sections = vec![None; count];
         for (index, slot) in block_sections.iter_mut().enumerate() {
             *slot = self
@@ -167,7 +189,19 @@ impl LevelLightEngine {
                 .layer(key_at(index))
                 .map(DataLayer::to_bytes);
         }
-        // TODO(light-sky): fill sky sections + build ChunkSkyLightSources.
+        if let Some(sky) = &mut self.sky {
+            for (index, slot) in sky_sections.iter_mut().enumerate() {
+                *slot = sky.storage.layer(key_at(index)).map(DataLayer::to_bytes);
+            }
+            if let Some(chunk) =
+                store.get_chunk(&azalea_core::position::ChunkPos::new(pos.0, pos.1))
+            {
+                sky.sources.insert(
+                    pos,
+                    ChunkSkyLightSources::fill_from(store.min_y(), &chunk.read()),
+                );
+            }
+        }
         store.light_data.insert(
             pos,
             Arc::new(ChunkLightData {
@@ -176,6 +210,15 @@ impl LevelLightEngine {
                 min_y: store.min_y(),
             }),
         );
+    }
+
+    /// Forgets a column's sky sources; vanilla's live on the chunk object and
+    /// vanish when it drops. The stored light tears down via
+    /// [`LightTask::Remove`].
+    pub fn on_chunk_unloaded(&mut self, pos: (i32, i32)) {
+        if let Some(sky) = &mut self.sky {
+            sky.sources.remove(&pos);
+        }
     }
 
     /// Drains queued light tasks at vanilla's per-tick rate limit, then runs
@@ -206,8 +249,19 @@ impl LevelLightEngine {
                 block,
                 enable,
             } => {
-                // TODO(light-sky): queue sky entries into the sky engine.
-                let _ = sky;
+                // Vanilla readSectionList order: sky layer first, then block.
+                for (index, entry) in sky.iter().enumerate() {
+                    let key = self.light_section_key(pos, index);
+                    if let Some(engine) = &mut self.sky
+                        && let Some(layer) = entry.to_layer()
+                    {
+                        engine.queue_section_data(key, Some(layer));
+                    }
+                    if !enable && !matches!(entry, SectionEntry::Skip) {
+                        // Vanilla `setSectionDirtyWithNeighbors`.
+                        out.sections.extend(key.with_neighbors());
+                    }
+                }
                 for (index, entry) in block.iter().enumerate() {
                     let key = self.light_section_key(pos, index);
                     if let Some(layer) = entry.to_layer() {
@@ -219,7 +273,13 @@ impl LevelLightEngine {
                     }
                 }
                 // Vanilla applyLightData tail: sources on for both task kinds.
+                // The enable-before-status order is load-bearing: fresh
+                // above-terrain sky sections initialize to 15 only while the
+                // column's light is already on.
                 self.block.set_light_enabled(pos, true);
+                if let Some(engine) = &mut self.sky {
+                    engine.set_light_enabled(pos, true);
+                }
                 if enable {
                     // Vanilla enableChunkLight: report each block section's
                     // emptiness, then schedule the column's meshes.
@@ -227,6 +287,9 @@ impl LevelLightEngine {
                         let key = SectionKey::new(pos.0, section_y, pos.1);
                         let empty = store.section_is_empty(pos, section_y);
                         self.block.update_section_status(key, empty);
+                        if let Some(engine) = &mut self.sky {
+                            engine.update_section_status(key, empty);
+                        }
                     }
                     out.columns.push(pos);
                 }
@@ -235,21 +298,30 @@ impl LevelLightEngine {
                 // Vanilla queueLightRemoval order: sources off, null out every
                 // light section, then mark every block section empty.
                 self.block.set_light_enabled(pos, false);
+                if let Some(engine) = &mut self.sky {
+                    engine.set_light_enabled(pos, false);
+                }
                 for index in 0..self.light_section_count() {
                     let key = self.light_section_key(pos, index);
                     self.block.queue_section_data(key, None);
+                    if let Some(engine) = &mut self.sky {
+                        engine.queue_section_data(key, None);
+                    }
                 }
                 for section_y in self.min_section_y..self.min_section_y + self.section_count {
-                    self.block
-                        .update_section_status(SectionKey::new(pos.0, section_y, pos.1), true);
+                    let key = SectionKey::new(pos.0, section_y, pos.1);
+                    self.block.update_section_status(key, true);
+                    if let Some(engine) = &mut self.sky {
+                        engine.update_section_status(key, true);
+                    }
                 }
             }
         }
     }
 
-    /// Vanilla `runLightUpdates` per engine, with the publish step sitting
-    /// where `swapSectionMap` does: after the decrease pass, before the
-    /// increase pass.
+    /// Vanilla `runLightUpdates` per engine (block first, then sky), with the
+    /// publish step sitting where `swapSectionMap` does: after the decrease
+    /// pass, before the increase pass.
     fn run_light_updates(&mut self, store: &mut ChunkStore, out: &mut LightDirty) {
         let (min_section_y, section_count) = (self.min_section_y, self.section_count);
         {
@@ -267,6 +339,24 @@ impl LevelLightEngine {
         {
             let world = StoreWorld::new(store);
             self.block.finish_updates(&world);
+        }
+        if let Some(sky) = &mut self.sky {
+            {
+                let world = StoreWorld::new(store);
+                sky.begin_updates(&world);
+            }
+            Self::publish(
+                &mut sky.storage,
+                store,
+                LayerKind::Sky,
+                min_section_y,
+                section_count,
+                out,
+            );
+            {
+                let world = StoreWorld::new(store);
+                sky.finish_updates(&world);
+            }
         }
     }
 
@@ -300,6 +390,7 @@ impl LevelLightEngine {
             let column = Arc::make_mut(column);
             let slot = match layer {
                 LayerKind::Block => &mut column.block_sections[index as usize],
+                LayerKind::Sky => &mut column.sky_sections[index as usize],
             };
             *slot = storage.layer(key).map(DataLayer::to_bytes);
         }
@@ -485,6 +576,98 @@ mod tests {
         assert_eq!(level(&engine, 8, 9, 8), 13);
         assert_eq!(level(&engine, 9, 9, 8), 12);
         assert_eq!(level(&engine, 8, 10, 8), 10);
+    }
+
+    fn sky_run(engine: &mut SkyLightEngine, world: &TestWorld) {
+        engine.begin_updates(world);
+        engine.finish_updates(world);
+    }
+
+    fn sky_level(engine: &SkyLightEngine, x: i32, y: i32, z: i32) -> u8 {
+        engine.storage.get_stored_level(LightPos::new(x, y, z))
+    }
+
+    /// Sky engine storing light around section (0,0,0), with chunk (0,0)'s
+    /// sources built from the world by updating each column at `source_ys`.
+    fn sky_engine(world: &TestWorld, source_ys: &[(i32, i32, i32)]) -> SkyLightEngine {
+        let mut engine = SkyLightEngine::new();
+        engine.update_section_status(SectionKey::new(0, 0, 0), false);
+        let mut sources = ChunkSkyLightSources::new(-64);
+        for &(x, y, z) in source_ys {
+            sources.update(&|sy| world.state(LightPos::new(x, sy, z)), x, y, z);
+        }
+        engine.sources.insert((0, 0), sources);
+        engine.set_light_enabled((0, 0), true);
+        engine
+    }
+
+    #[test]
+    fn digging_through_a_floor_lets_sky_under_it() {
+        let mut world = TestWorld::new();
+        let stone = find_state("stone", &[]);
+        for x in 0..16 {
+            for z in 0..16 {
+                world.set(x, 0, z, stone);
+            }
+        }
+        let floor: Vec<(i32, i32, i32)> = (0..16)
+            .flat_map(|x| (0..16).map(move |z| (x, 0, z)))
+            .collect();
+        let mut engine = sky_engine(&world, &floor);
+        sky_run(&mut engine, &world);
+        // Enabling pre-filled the fully-above-terrain section with 15.
+        assert_eq!(sky_level(&engine, 8, 20, 8), 15);
+        assert_eq!(sky_level(&engine, 8, -1, 8), 0);
+
+        // Dig one floor block: its column becomes open sky and light floods
+        // sideways under the floor.
+        world.clear(8, 0, 8);
+        engine.sources.get_mut(&(0, 0)).unwrap().update(
+            &|y| world.state(LightPos::new(8, y, 8)),
+            8,
+            0,
+            8,
+        );
+        engine.check_block(LightPos::new(8, 0, 8));
+        sky_run(&mut engine, &world);
+        assert_eq!(sky_level(&engine, 8, 0, 8), 15);
+        assert_eq!(sky_level(&engine, 8, -10, 8), 15);
+        assert_eq!(sky_level(&engine, 9, 0, 8), 0); // stone floor
+        assert_eq!(sky_level(&engine, 9, -1, 8), 14);
+        assert_eq!(sky_level(&engine, 12, -1, 8), 11);
+
+        // Cover it again: the source column tears down and the decrease wave
+        // re-darkens everything under the floor.
+        world.set(8, 0, 8, stone);
+        engine.sources.get_mut(&(0, 0)).unwrap().update(
+            &|y| world.state(LightPos::new(8, y, 8)),
+            8,
+            0,
+            8,
+        );
+        engine.check_block(LightPos::new(8, 0, 8));
+        sky_run(&mut engine, &world);
+        for (x, y, z) in [(8, 0, 8), (8, -10, 8), (9, -1, 8), (12, -1, 8)] {
+            assert_eq!(sky_level(&engine, x, y, z), 0, "at {x} {y} {z}");
+        }
+        assert_eq!(sky_level(&engine, 8, 20, 8), 15);
+    }
+
+    #[test]
+    fn leaves_attenuate_falling_sky_light() {
+        let mut world = TestWorld::new();
+        world.set(8, 10, 8, find_state("oak_leaves", &[]));
+        let mut engine = sky_engine(&world, &[(8, 10, 8)]);
+        engine.check_block(LightPos::new(8, 10, 8));
+        sky_run(&mut engine, &world);
+
+        // Sources stop above the leaf; below it the light falls with the
+        // leaf's opacity of 1 and then keeps losing 1 per non-source step.
+        assert_eq!(sky_level(&engine, 8, 12, 8), 15);
+        assert_eq!(sky_level(&engine, 9, 11, 8), 14);
+        assert_eq!(sky_level(&engine, 8, 10, 8), 14);
+        assert_eq!(sky_level(&engine, 8, 9, 8), 13);
+        assert_eq!(sky_level(&engine, 8, 5, 8), 9);
     }
 
     #[test]
