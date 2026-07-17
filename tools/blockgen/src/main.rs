@@ -5,6 +5,7 @@
 //! Usage:
 //!   blockgen blocks <reports/blocks.json> <version> <out.json>
 //!   blockgen behavior <azalea generated.rs> <out.json>
+//!   blockgen light <generated/light.json> <blocks-<v>.json> <out.json>
 //!
 //! `blocks` flattens the report into a compact per-block table (name, first
 //! state id, default state id, ordered property lists). Every explicit state
@@ -16,6 +17,13 @@
 //! `generated.rs` (e.g. `~/.cargo/git/checkouts/azalea-*/<rev>/azalea-block/
 //! src/generated.rs`); new blocks the seed doesn't know must be appended by
 //! hand from the decompiled `Blocks.java`.
+//!
+//! `light` compacts the raw per-state light-property dump produced by
+//! `tools/lightgen/LightDump.java` (see `just lightgen`) into the per-block
+//! table the client embeds: each field is a scalar when uniform across the
+//! block's states, else a per-state array, and face-occlusion masks are
+//! deduped into a dictionary. State counts and value ranges are cross-checked
+//! against the version's blocks table.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -26,7 +34,8 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         [cmd, report, version, out] if cmd == "blocks" => gen_blocks(report, version, out),
         [cmd, generated, out] if cmd == "behavior" => gen_behavior(generated, out),
-        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>".into()),
+        [cmd, dump, blocks, out] if cmd == "light" => gen_light(dump, blocks, out),
+        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>\n       blockgen light <light.json> <blocks-<v>.json> <out.json>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -311,4 +320,205 @@ fn extract_float_arg(text: &str, method: &str) -> Option<f32> {
     let rest = &text[start..];
     let end = rest.find([',', ')'])?;
     rest[..end].trim().parse().ok()
+}
+
+/// Raw per-state dump written by `tools/lightgen/LightDump.java`.
+#[derive(serde::Deserialize)]
+struct LightDumpFile {
+    version: String,
+    state_count: u32,
+    emission: Vec<u8>,
+    dampening: Vec<u8>,
+    propagates_skylight_down: Vec<u8>,
+    can_occlude: Vec<u8>,
+    use_shape_for_light_occlusion: Vec<u8>,
+    /// State id (as string) -> 6 face masks, 64 hex chars each, present
+    /// exactly for states with `can_occlude && use_shape_for_light_occlusion`.
+    face_masks: std::collections::HashMap<String, [String; 6]>,
+}
+
+#[derive(serde::Deserialize)]
+struct BlocksFile {
+    version: String,
+    state_count: u32,
+    blocks: Vec<BlocksEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct BlocksEntry {
+    name: String,
+    first_id: u32,
+    #[serde(default)]
+    props: Vec<(String, Vec<String>)>,
+}
+
+fn gen_light(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), Error> {
+    let dump: LightDumpFile = serde_json::from_str(&std::fs::read_to_string(dump_path)?)?;
+    let blocks: BlocksFile = serde_json::from_str(&std::fs::read_to_string(blocks_path)?)?;
+
+    if dump.version != blocks.version {
+        return Err(format!(
+            "version mismatch: light dump is '{}', blocks table is '{}'",
+            dump.version, blocks.version
+        )
+        .into());
+    }
+    if dump.state_count != blocks.state_count {
+        return Err(format!(
+            "state count mismatch: light dump has {}, blocks table has {}",
+            dump.state_count, blocks.state_count
+        )
+        .into());
+    }
+    let n = dump.state_count as usize;
+    for (key, len) in [
+        ("emission", dump.emission.len()),
+        ("dampening", dump.dampening.len()),
+        (
+            "propagates_skylight_down",
+            dump.propagates_skylight_down.len(),
+        ),
+        ("can_occlude", dump.can_occlude.len()),
+        (
+            "use_shape_for_light_occlusion",
+            dump.use_shape_for_light_occlusion.len(),
+        ),
+    ] {
+        if len != n {
+            return Err(format!("{key} has {len} entries, expected {n}").into());
+        }
+    }
+    for i in 0..n {
+        if dump.emission[i] > 15 || dump.dampening[i] > 15 {
+            return Err(format!("state {i}: light value out of 0..=15 range").into());
+        }
+        for (key, v) in [
+            ("propagates_skylight_down", dump.propagates_skylight_down[i]),
+            ("can_occlude", dump.can_occlude[i]),
+            (
+                "use_shape_for_light_occlusion",
+                dump.use_shape_for_light_occlusion[i],
+            ),
+        ] {
+            if v > 1 {
+                return Err(format!("state {i}: {key} is {v}, expected 0/1").into());
+            }
+        }
+    }
+
+    // Dedupe face masks into a dictionary, keeping first-seen (state id) order
+    // deterministic.
+    let mut masks_by_state: BTreeMap<u32, &[String; 6]> = BTreeMap::new();
+    for (key, masks) in &dump.face_masks {
+        let id: u32 = key
+            .parse()
+            .map_err(|_| format!("face_masks key '{key}' is not a state id"))?;
+        if id as usize >= n {
+            return Err(format!("face_masks state id {id} out of range").into());
+        }
+        for mask in masks {
+            if mask.len() != 64 || !mask.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!("state {id}: face mask '{mask}' is not 64 hex chars").into());
+            }
+        }
+        masks_by_state.insert(id, masks);
+    }
+    for i in 0..n {
+        let shaped = dump.can_occlude[i] == 1 && dump.use_shape_for_light_occlusion[i] == 1;
+        if shaped != masks_by_state.contains_key(&(i as u32)) {
+            return Err(format!(
+                "state {i}: face masks {} but can_occlude && use_shape is {shaped}",
+                if shaped { "missing" } else { "present" }
+            )
+            .into());
+        }
+    }
+    let mut dict: Vec<&str> = Vec::new();
+    let mut dict_index: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    let mut state_masks: Vec<Option<[u32; 6]>> = vec![None; n];
+    for (&id, masks) in &masks_by_state {
+        let mut indices = [0u32; 6];
+        for (slot, mask) in indices.iter_mut().zip(masks.iter()) {
+            *slot = *dict_index.entry(mask).or_insert_with(|| {
+                dict.push(mask);
+                dict.len() as u32 - 1
+            });
+        }
+        state_masks[id as usize] = Some(indices);
+    }
+
+    let mut out = String::new();
+    writeln!(out, "{{")?;
+    writeln!(
+        out,
+        "  \"version\": {},",
+        serde_json::to_string(&dump.version)?
+    )?;
+    writeln!(out, "  \"state_count\": {n},")?;
+    writeln!(out, "  \"masks\": {},", serde_json::to_string(&dict)?)?;
+    writeln!(out, "  \"blocks\": [")?;
+    let mut expected_id = 0u32;
+    for (i, block) in blocks.blocks.iter().enumerate() {
+        if block.first_id != expected_id {
+            return Err(format!(
+                "blocks table not dense at '{}': starts at {} expected {expected_id}",
+                block.name, block.first_id
+            )
+            .into());
+        }
+        let count: u32 = block.props.iter().map(|(_, vs)| vs.len() as u32).product();
+        let range = block.first_id as usize..(block.first_id + count) as usize;
+        expected_id += count;
+
+        let mut line = format!("    {{\"name\": {}", serde_json::to_string(&block.name)?);
+        for (key, values) in [
+            ("e", &dump.emission[range.clone()]),
+            ("d", &dump.dampening[range.clone()]),
+            ("p", &dump.propagates_skylight_down[range.clone()]),
+            ("o", &dump.can_occlude[range.clone()]),
+            ("u", &dump.use_shape_for_light_occlusion[range.clone()]),
+        ] {
+            write!(line, ", \"{key}\": {}", scalar_or_array(values)?)?;
+        }
+        let masks = &state_masks[range];
+        if masks.iter().any(Option::is_some) {
+            if masks.iter().all(|m| *m == masks[0]) {
+                // Uniform across the block: a single 6-index tuple.
+                write!(
+                    line,
+                    ", \"f\": {}",
+                    serde_json::to_string(&masks[0].unwrap())?
+                )?;
+            } else {
+                // Per state: 6-index tuple or null.
+                write!(line, ", \"f\": {}", serde_json::to_string(masks)?)?;
+            }
+        }
+        let comma = if i + 1 < blocks.blocks.len() { "," } else { "" };
+        writeln!(out, "{line}}}{comma}")?;
+    }
+    if expected_id as usize != n {
+        return Err(format!("blocks cover {expected_id} states, dump has {n}").into());
+    }
+    writeln!(out, "  ]")?;
+    writeln!(out, "}}")?;
+
+    std::fs::write(out_path, &out)?;
+    println!(
+        "wrote light data for {} states ({} shaped, {} distinct masks) to {out_path}",
+        n,
+        masks_by_state.len(),
+        dict.len()
+    );
+    Ok(())
+}
+
+/// A single JSON value when every entry is equal, else the full array.
+fn scalar_or_array(values: &[u8]) -> Result<String, Error> {
+    let first = *values.first().ok_or("block with zero states")?;
+    if values.iter().all(|&v| v == first) {
+        Ok(first.to_string())
+    } else {
+        Ok(serde_json::to_string(values)?)
+    }
 }
