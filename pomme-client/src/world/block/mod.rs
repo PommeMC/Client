@@ -719,6 +719,14 @@ fn all_states() -> impl Iterator<Item = (BlockState, &'static BlockData)> {
     })
 }
 
+/// First declared state of the named block, e.g. the light engine's bedrock
+/// fallback for unloaded-chunk reads.
+// TODO: drop the allow with the LightProps one above.
+#[allow(dead_code)]
+pub(crate) fn first_state_of(name: &str) -> Option<BlockState> {
+    all_states().find(|(_, d)| d.id == name).map(|(s, _)| s)
+}
+
 /// Converts a wire-side numeric state id, validated against the loaded table.
 pub fn try_state(id: u32) -> Option<BlockState> {
     if (id as usize) < table().len() {

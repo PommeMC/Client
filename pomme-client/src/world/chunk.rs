@@ -230,6 +230,26 @@ impl ChunkStore {
         (self.height() / 16) as i32
     }
 
+    /// Whether the block section at world section-y has only air (vanilla
+    /// `LevelChunkSection.hasOnlyAir`; azalea tracks per-section block
+    /// counts). Missing chunks and out-of-range sections read as empty.
+    // TODO: drop the allow once the light engine is wired into the game.
+    #[allow(dead_code)]
+    pub fn section_is_empty(&self, pos: (i32, i32), section_y: i32) -> bool {
+        let Some(chunk) = self.get_chunk(&ChunkPos::new(pos.0, pos.1)) else {
+            return true;
+        };
+        let index = section_y - (self.min_y() >> 4);
+        let chunk = chunk.read();
+        match usize::try_from(index)
+            .ok()
+            .and_then(|i| chunk.sections.get(i))
+        {
+            Some(section) => section.block_count == 0,
+            None => true,
+        }
+    }
+
     /// Top non-motion-blocking Y for the column (vanilla MOTION_BLOCKING
     /// surface, i.e. one above the highest solid block). Used to position
     /// weather columns. Returns `min_y` when the chunk or its heightmap is
