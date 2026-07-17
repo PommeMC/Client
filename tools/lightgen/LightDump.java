@@ -86,11 +86,11 @@ public final class LightDump {
             w.write("{\n");
             w.write("  \"version\": \"" + version + "\",\n");
             w.write("  \"state_count\": " + id + ",\n");
-            writeIntArray(w, "emission", emission, true);
-            writeIntArray(w, "dampening", dampening, true);
-            writeIntArray(w, "propagates_skylight_down", propagates, true);
-            writeIntArray(w, "can_occlude", canOcclude, true);
-            writeIntArray(w, "use_shape_for_light_occlusion", useShape, true);
+            writeIntArray(w, "emission", emission);
+            writeIntArray(w, "dampening", dampening);
+            writeIntArray(w, "propagates_skylight_down", propagates);
+            writeIntArray(w, "can_occlude", canOcclude);
+            writeIntArray(w, "use_shape_for_light_occlusion", useShape);
             w.write("  \"face_masks\": {");
             boolean first = true;
             for (Map.Entry<Integer, String[]> e : faceMasks.entrySet()) {
@@ -113,8 +113,8 @@ public final class LightDump {
                 + " with face-occlusion shapes) to " + out);
     }
 
-    private static void writeIntArray(BufferedWriter w, String key, List<Integer> values,
-            boolean trailingComma) throws IOException {
+    private static void writeIntArray(BufferedWriter w, String key, List<Integer> values)
+            throws IOException {
         w.write("  \"" + key + "\": [");
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < values.size(); i++) {
@@ -124,7 +124,7 @@ public final class LightDump {
             sb.append(values.get(i));
         }
         w.write(sb.toString());
-        w.write("]" + (trailingComma ? "," : "") + "\n");
+        w.write("],\n");
     }
 
     /** Projects a face shape's boxes onto the face plane as a 16x16 bit grid. */

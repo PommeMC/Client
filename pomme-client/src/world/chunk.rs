@@ -187,17 +187,7 @@ impl ChunkStore {
     }
 
     pub fn set_block_state(&self, x: i32, y: i32, z: i32, state: BlockState) {
-        let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
-        let Some(chunk_lock) = self.get_chunk(&chunk_pos) else {
-            return;
-        };
-        let mut chunk = chunk_lock.write();
-        let block_pos = azalea_core::position::ChunkBlockPos {
-            x: x.rem_euclid(16) as u8,
-            y,
-            z: z.rem_euclid(16) as u8,
-        };
-        chunk.set_block_state(&block_pos, state, self.chunk_storage.min_y());
+        self.set_block_state_tracked(x, y, z, state);
     }
 
     /// Sets a block and reports what vanilla `LevelChunk.setBlockState` feeds

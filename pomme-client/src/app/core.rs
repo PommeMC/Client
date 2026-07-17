@@ -76,33 +76,30 @@ fn apply_server_block(
     );
 }
 
-/// Queues a column's packet light for the per-tick apply; each layer is
-/// `(y_mask, empty_y_mask, updates)`. Chunk loads enable the column,
-/// standalone light updates are corrections.
+/// Queues a column's packet light for the per-tick apply. Chunk loads enable
+/// the column, standalone light updates are corrections.
 fn queue_light_apply(
     game: &mut GameState,
     pos: azalea_core::position::ChunkPos,
-    sky: (
-        &azalea_core::bitset::BitSet,
-        &azalea_core::bitset::BitSet,
-        &[Box<[u8]>],
-    ),
-    block: (
-        &azalea_core::bitset::BitSet,
-        &azalea_core::bitset::BitSet,
-        &[Box<[u8]>],
-    ),
+    light: &crate::net::PacketLightData,
     enable: bool,
 ) {
     let count = game.light_engine.light_section_count();
-    let entries = |(mask, empty, updates): (&_, &_, &[Box<[u8]>])| {
-        crate::world::light::section_entries(count, mask, empty, updates)
-    };
     game.light_engine
         .queue_task(crate::world::light::LightTask::ApplyLight {
             pos: (pos.x, pos.z),
-            sky: entries(sky),
-            block: entries(block),
+            sky: crate::world::light::section_entries(
+                count,
+                &light.sky_y_mask,
+                &light.empty_sky_y_mask,
+                &light.sky_updates[..],
+            ),
+            block: crate::world::light::section_entries(
+                count,
+                &light.block_y_mask,
+                &light.empty_block_y_mask,
+                &light.block_updates[..],
+            ),
             enable,
         });
 }
@@ -425,12 +422,7 @@ impl AppCore {
                     pos,
                     data,
                     heightmaps,
-                    sky_light,
-                    block_light,
-                    sky_y_mask,
-                    block_y_mask,
-                    empty_sky_y_mask,
-                    empty_block_y_mask,
+                    light,
                 } => {
                     if let Err(e) = game.chunk_store.load_chunk(pos, &data, &heightmaps) {
                         tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
@@ -440,30 +432,10 @@ impl AppCore {
                         .on_chunk_loaded(&mut game.chunk_store, (pos.x, pos.z));
                     // The column meshes once its queued light applies (vanilla
                     // schedules the rebuild from enableChunkLight, not here).
-                    queue_light_apply(
-                        game,
-                        pos,
-                        (&sky_y_mask, &empty_sky_y_mask, &sky_light[..]),
-                        (&block_y_mask, &empty_block_y_mask, &block_light[..]),
-                        true,
-                    );
+                    queue_light_apply(game, pos, &light, true);
                 }
-                NetworkEvent::LightUpdate {
-                    pos,
-                    sky_light,
-                    block_light,
-                    sky_y_mask,
-                    block_y_mask,
-                    empty_sky_y_mask,
-                    empty_block_y_mask,
-                } => {
-                    queue_light_apply(
-                        game,
-                        pos,
-                        (&sky_y_mask, &empty_sky_y_mask, &sky_light[..]),
-                        (&block_y_mask, &empty_block_y_mask, &block_light[..]),
-                        false,
-                    );
+                NetworkEvent::LightUpdate { pos, light } => {
+                    queue_light_apply(game, pos, &light, false);
                 }
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.chunk_store.unload_chunk(&pos);
