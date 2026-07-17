@@ -26,7 +26,7 @@ use crate::renderer::Renderer;
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::menu::{MainMenu, MenuInput};
 use crate::user::UserData;
-use crate::world::chunk::{ChunkStore, mesh_neighborhood};
+use crate::world::chunk::ChunkStore;
 
 pub struct PendingPackDownload {
     pub id: uuid::Uuid,
@@ -43,19 +43,68 @@ struct PlayerSkinResult {
     result: Result<crate::renderer::SkinData, String>,
 }
 
-/// Queues `pos` and its already-loaded mesh neighborhood (de-duplicated): when
-/// `pos` changes, every chunk whose mesh samples it must re-mesh too, else
-/// their shared border keeps the stale full-bright edge light.
-fn enqueue_with_neighbors(
-    out: &mut Vec<azalea_core::position::ChunkPos>,
-    store: &ChunkStore,
-    pos: azalea_core::position::ChunkPos,
+/// Applies a server-driven block change: block-entity sync, prediction
+/// absorption, the block + light write, and the remesh cascade. The block
+/// entity syncs even when a pending prediction absorbs the update (the state
+/// is applied later in `acknowledge`), so e.g. a chest placed where a break
+/// was just predicted still gets its entry.
+fn apply_server_block(
+    game: &mut GameState,
+    priority_remesh: &mut Vec<(azalea_core::position::ChunkPos, i32)>,
+    pos: azalea_core::position::BlockPos,
+    state: azalea_block::BlockState,
 ) {
-    for p in mesh_neighborhood(pos) {
-        if (p == pos || store.get_chunk(&p).is_some()) && !out.contains(&p) {
-            out.push(p);
-        }
+    crate::world::block_entity::sync_block_entity(&mut game.chunk_store.block_entities, pos, state);
+    if game.interaction.update_known_server_state(&pos, state) {
+        return;
     }
+    crate::world::light::set_block_and_light(
+        &game.chunk_store,
+        &mut game.light_engine,
+        pos.x,
+        pos.y,
+        pos.z,
+        state,
+    );
+    dirty_sections_for_block(
+        priority_remesh,
+        pos.x,
+        pos.y,
+        pos.z,
+        game.chunk_store.min_y(),
+        game.chunk_store.section_count(),
+    );
+}
+
+/// Queues a column's packet light for the per-tick apply; each layer is
+/// `(y_mask, empty_y_mask, updates)`. Chunk loads enable the column,
+/// standalone light updates are corrections.
+fn queue_light_apply(
+    game: &mut GameState,
+    pos: azalea_core::position::ChunkPos,
+    sky: (
+        &azalea_core::bitset::BitSet,
+        &azalea_core::bitset::BitSet,
+        &[Box<[u8]>],
+    ),
+    block: (
+        &azalea_core::bitset::BitSet,
+        &azalea_core::bitset::BitSet,
+        &[Box<[u8]>],
+    ),
+    enable: bool,
+) {
+    let count = game.light_engine.light_section_count();
+    let entries = |(mask, empty, updates): (&_, &_, &[Box<[u8]>])| {
+        crate::world::light::section_entries(count, mask, empty, updates)
+    };
+    game.light_engine
+        .queue_task(crate::world::light::LightTask::ApplyLight {
+            pos: (pos.x, pos.z),
+            sky: entries(sky),
+            block: entries(block),
+            enable,
+        });
 }
 
 /// Mirror of vanilla `LevelExtractor.setBlockDirty`: a block at (x,y,z) dirties
@@ -323,7 +372,6 @@ impl AppCore {
         // Phase timers for the chunk-load benchmark's worst-frame breakdown.
         let t_net = std::time::Instant::now();
 
-        let mut chunks_to_mesh = Vec::new();
         // Block edits go on the priority lane so they apply instantly even while
         // chunks stream in, instead of starving behind the load backlog.
         let mut priority_remesh: Vec<(azalea_core::position::ChunkPos, i32)> = Vec::new();
@@ -351,10 +399,18 @@ impl AppCore {
                     game.mesh_dispatcher
                         .set_biome_climate(Arc::clone(&game.biome_climate));
                 }
-                NetworkEvent::DimensionInfo { height, min_y } => {
-                    tracing::info!("Dimension: height={height}, min_y={min_y}");
+                NetworkEvent::DimensionInfo {
+                    height,
+                    min_y,
+                    has_skylight,
+                } => {
+                    tracing::info!(
+                        "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}"
+                    );
                     game.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
+                    game.light_engine =
+                        crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
                     game.position_set = false;
                     game.player_loaded_sent = false;
                     // Login/respawn recreate vanilla's LocalPlayer, resetting
@@ -373,22 +429,49 @@ impl AppCore {
                     block_light,
                     sky_y_mask,
                     block_y_mask,
+                    empty_sky_y_mask,
+                    empty_block_y_mask,
                 } => {
                     if let Err(e) = game.chunk_store.load_chunk(pos, &data, &heightmaps) {
                         tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
                         continue;
                     }
-                    game.chunk_store.store_light(
+                    game.light_engine
+                        .on_chunk_loaded(&mut game.chunk_store, (pos.x, pos.z));
+                    // The column meshes once its queued light applies (vanilla
+                    // schedules the rebuild from enableChunkLight, not here).
+                    queue_light_apply(
+                        game,
                         pos,
-                        &sky_light,
-                        &block_light,
-                        &sky_y_mask,
-                        &block_y_mask,
+                        (&sky_y_mask, &empty_sky_y_mask, &sky_light[..]),
+                        (&block_y_mask, &empty_block_y_mask, &block_light[..]),
+                        true,
                     );
-                    enqueue_with_neighbors(&mut chunks_to_mesh, &game.chunk_store, pos);
+                }
+                NetworkEvent::LightUpdate {
+                    pos,
+                    sky_light,
+                    block_light,
+                    sky_y_mask,
+                    block_y_mask,
+                    empty_sky_y_mask,
+                    empty_block_y_mask,
+                } => {
+                    queue_light_apply(
+                        game,
+                        pos,
+                        (&sky_y_mask, &empty_sky_y_mask, &sky_light[..]),
+                        (&block_y_mask, &empty_block_y_mask, &block_light[..]),
+                        false,
+                    );
                 }
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.chunk_store.unload_chunk(&pos);
+                    game.light_engine.on_chunk_unloaded((pos.x, pos.z));
+                    game.light_engine
+                        .queue_task(crate::world::light::LightTask::Remove {
+                            pos: (pos.x, pos.z),
+                        });
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
                     game.content_gen.remove(&pos);
                     game.meshed.remove(&pos);
@@ -679,49 +762,11 @@ impl AppCore {
                     game.chat.apply_server_suggestions(id, start, options);
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
-                    // Sync even when a pending prediction absorbs the update
-                    // (the state is applied later in `acknowledge`), so e.g. a
-                    // chest placed where a break was just predicted still gets
-                    // its block-entity entry.
-                    crate::world::block_entity::sync_block_entity(
-                        &mut game.chunk_store.block_entities,
-                        pos,
-                        state,
-                    );
-                    if game.interaction.update_known_server_state(&pos, state) {
-                        continue;
-                    }
-                    game.chunk_store.set_block_state(pos.x, pos.y, pos.z, state);
-                    dirty_sections_for_block(
-                        &mut priority_remesh,
-                        pos.x,
-                        pos.y,
-                        pos.z,
-                        game.chunk_store.min_y(),
-                        game.chunk_store.section_count(),
-                    );
+                    apply_server_block(game, &mut priority_remesh, pos, state);
                 }
                 NetworkEvent::SectionBlocksUpdate { updates } => {
-                    let min_y = game.chunk_store.min_y();
-                    let n = game.chunk_store.section_count();
                     for (pos, state) in updates {
-                        crate::world::block_entity::sync_block_entity(
-                            &mut game.chunk_store.block_entities,
-                            pos,
-                            state,
-                        );
-                        if game.interaction.update_known_server_state(&pos, state) {
-                            continue;
-                        }
-                        game.chunk_store.set_block_state(pos.x, pos.y, pos.z, state);
-                        dirty_sections_for_block(
-                            &mut priority_remesh,
-                            pos.x,
-                            pos.y,
-                            pos.z,
-                            min_y,
-                            n,
-                        );
+                        apply_server_block(game, &mut priority_remesh, pos, state);
                     }
                 }
                 NetworkEvent::BlockEntitySync { chunk_pos, entries } => {
@@ -838,6 +883,8 @@ impl AppCore {
                     let min_y = game.chunk_store.min_y();
                     let n = game.chunk_store.section_count();
                     for b in ack_dirty {
+                        game.light_engine
+                            .on_block_dirty(&game.chunk_store, b.x, b.y, b.z);
                         dirty_sections_for_block(&mut priority_remesh, b.x, b.y, b.z, min_y, n);
                     }
                 }
@@ -1237,17 +1284,12 @@ impl AppCore {
             game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk));
         }
 
-        // New chunk loads (and their neighbours, for border lighting) are only
-        // marked dirty here; the visibility re-scan enqueues them gated by tier so
-        // hidden/behind-camera columns don't waste meshing time.
-        for &pos in &chunks_to_mesh {
-            game.bump_content_gen(pos);
-        }
-
         // Refresh the frustum tiers (throttled to camera movement / new loads),
         // then enqueue everything that needs meshing — visible-first, with hidden
         // columns backfilled at a bounded rate so the world still completes.
-        let loads_happened = !chunks_to_mesh.is_empty();
+        // New chunk loads mark themselves dirty when their queued light
+        // applies (GameState::tick_light), which raises this flag.
+        let loads_happened = std::mem::take(&mut game.pending_load_rescan);
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1000.0;
         game.last_update_phases.net_decode_ms = ms(t_net);
 
@@ -1371,6 +1413,11 @@ impl AppCore {
             let n = game.chunk_store.section_count();
             let mut sections: Vec<(azalea_core::position::ChunkPos, i32)> = Vec::new();
             for b in dirty {
+                // Light lands next tick's poll_and_run, matching vanilla's
+                // prediction timing (setBlockState queues; ClientLevel.tick
+                // drains).
+                game.light_engine
+                    .on_block_dirty(&game.chunk_store, b.x, b.y, b.z);
                 dirty_sections_for_block(&mut sections, b.x, b.y, b.z, min_y, n);
             }
             // One span per column so each column builds its mesh snapshot

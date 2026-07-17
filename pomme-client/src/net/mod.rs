@@ -29,6 +29,7 @@ pub enum NetworkEvent {
     DimensionInfo {
         height: u32,
         min_y: i32,
+        has_skylight: bool,
     },
     ChunkLoaded {
         pos: ChunkPos,
@@ -38,6 +39,18 @@ pub enum NetworkEvent {
         block_light: Arc<Box<[Box<[u8]>]>>,
         sky_y_mask: azalea_core::bitset::BitSet,
         block_y_mask: azalea_core::bitset::BitSet,
+        empty_sky_y_mask: azalea_core::bitset::BitSet,
+        empty_block_y_mask: azalea_core::bitset::BitSet,
+    },
+    /// Standalone server light correction (`ClientboundLightUpdate`).
+    LightUpdate {
+        pos: ChunkPos,
+        sky_light: Arc<Box<[Box<[u8]>]>>,
+        block_light: Arc<Box<[Box<[u8]>]>>,
+        sky_y_mask: azalea_core::bitset::BitSet,
+        block_y_mask: azalea_core::bitset::BitSet,
+        empty_sky_y_mask: azalea_core::bitset::BitSet,
+        empty_block_y_mask: azalea_core::bitset::BitSet,
     },
     ChunkUnloaded {
         pos: ChunkPos,

@@ -9,10 +9,6 @@
 //! update passes, publishing between the decrease and increase passes exactly
 //! where vanilla's `swapSectionMap` sits.
 
-// TODO(light-wire): drop once the integration PR calls the facade from the
-// game loop; until then only the tests reach this module.
-#![allow(dead_code)]
-
 mod block;
 mod data;
 mod engine;
@@ -74,6 +70,59 @@ impl SectionEntry {
             SectionEntry::Skip => None,
         }
     }
+}
+
+/// Vanilla `readSectionList`: expands a packet's y-mask pair into one entry
+/// per light section. Malformed (non-2048-byte) payloads are skipped rather
+/// than disconnecting.
+pub(crate) fn section_entries(
+    light_section_count: usize,
+    y_mask: &azalea_core::bitset::BitSet,
+    empty_y_mask: &azalea_core::bitset::BitSet,
+    updates: &[Box<[u8]>],
+) -> Vec<SectionEntry> {
+    let mut next = 0usize;
+    (0..light_section_count)
+        .map(|i| {
+            if i < y_mask.len() && y_mask.index(i) {
+                let entry = match updates.get(next) {
+                    Some(bytes) if bytes.len() == LAYER_BYTES => {
+                        let mut data = Box::new([0u8; LAYER_BYTES]);
+                        data.copy_from_slice(bytes);
+                        SectionEntry::Data(data)
+                    }
+                    _ => SectionEntry::Skip,
+                };
+                next += 1;
+                entry
+            } else if i < empty_y_mask.len() && empty_y_mask.index(i) {
+                SectionEntry::Empty
+            } else {
+                SectionEntry::Skip
+            }
+        })
+        .collect()
+}
+
+/// The block-mutation sites' shared path: vanilla `LevelChunk.setBlockState`'s
+/// write plus its light hooks. Returns the previous state.
+pub(crate) fn set_block_and_light(
+    store: &ChunkStore,
+    engine: &mut LevelLightEngine,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: BlockState,
+) -> BlockState {
+    let (old, empty_flip) = store.set_block_state_tracked(x, y, z, state);
+    engine.on_block_changed(
+        LightPos::new(x, y, z),
+        old,
+        state,
+        empty_flip,
+        &|column_y| store.get_block_state(x, column_y, z),
+    );
+    old
 }
 
 /// A queued light task (vanilla `ClientLevel.lightUpdateQueue` runnables).
@@ -173,6 +222,28 @@ impl LevelLightEngine {
         }
     }
 
+    /// Relight hook for positions mutated without old-state tracking (the
+    /// player-prediction paths, which apply and roll back edits internally):
+    /// the same hooks as [`Self::on_block_changed`] with the
+    /// `hasDifferentLightProperties` work-skip dropped — section status
+    /// dedups and `checkNode` recomputes idempotently, so results match at a
+    /// small recompute cost.
+    pub fn on_block_dirty(&mut self, store: &ChunkStore, x: i32, y: i32, z: i32) {
+        let pos = LightPos::new(x, y, z);
+        let empty = store.section_is_empty((x >> 4, z >> 4), y >> 4);
+        self.block.update_section_status(pos.section(), empty);
+        if let Some(sky) = &mut self.sky {
+            sky.update_section_status(pos.section(), empty);
+            if let Some(sources) = sky.sources.get_mut(&(x >> 4, z >> 4)) {
+                sources.update(&|cy| store.get_block_state(x, cy, z), x & 15, y, z & 15);
+            }
+        }
+        self.block.check_block(pos);
+        if let Some(sky) = &mut self.sky {
+            sky.check_block(pos);
+        }
+    }
+
     /// Registers a freshly loaded chunk column: builds its sky-source
     /// heightmap (vanilla fills sources at chunk-data apply, before the
     /// queued light task) and creates its light column from any layers the
@@ -191,10 +262,15 @@ impl LevelLightEngine {
                 .layer(key_at(index))
                 .map(DataLayer::to_bytes);
         }
+        let mut sky_top_section = None;
         if let Some(sky) = &mut self.sky {
             for (index, slot) in sky_sections.iter_mut().enumerate() {
                 *slot = sky.storage.layer(key_at(index)).map(DataLayer::to_bytes);
             }
+            sky_top_section = sky
+                .sky
+                .column_top(pos)
+                .map(|top| top - (self.min_section_y - 1));
             if let Some(chunk) =
                 store.get_chunk(&azalea_core::position::ChunkPos::new(pos.0, pos.1))
             {
@@ -210,6 +286,8 @@ impl LevelLightEngine {
                 sky_sections,
                 block_sections,
                 min_y: store.min_y(),
+                has_sky: self.sky.is_some(),
+                sky_top_section,
             }),
         );
     }
@@ -332,6 +410,7 @@ impl LevelLightEngine {
         }
         Self::publish(
             &mut self.block.storage,
+            None,
             store,
             LayerKind::Block,
             min_section_y,
@@ -349,6 +428,7 @@ impl LevelLightEngine {
             }
             Self::publish(
                 &mut sky.storage,
+                Some(&sky.sky),
                 store,
                 LayerKind::Sky,
                 min_section_y,
@@ -367,6 +447,7 @@ impl LevelLightEngine {
     /// `onLightUpdate` fan-out).
     fn publish(
         storage: &mut StorageCore,
+        sky: Option<&sky::SkyStorage>,
         store: &mut ChunkStore,
         layer: LayerKind,
         min_section_y: i32,
@@ -395,6 +476,13 @@ impl LevelLightEngine {
                 LayerKind::Sky => &mut column.sky_sections[index as usize],
             };
             *slot = storage.layer(key).map(DataLayer::to_bytes);
+            // A column's top only moves when one of its own sections
+            // changed, so refreshing it per changed key keeps it current.
+            if let Some(sky) = sky {
+                column.sky_top_section = sky
+                    .column_top(key.column())
+                    .map(|top| top - (min_section_y - 1));
+            }
         }
         out.sections.extend(storage.affected_sections.drain());
     }
