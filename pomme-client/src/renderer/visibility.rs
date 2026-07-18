@@ -391,6 +391,7 @@ impl VisibilityPipeline {
         radius: u32,
         height: u32,
         min_y: i32,
+        extra_radians: f32,
     ) {
         let frame_data = &mut self.per_frame[frame];
 
@@ -448,7 +449,7 @@ impl VisibilityPipeline {
             height: height as i32,
             padding0: 0,
             padding1: 0,
-            frustum_planes: camera.frustum_planes(),
+            frustum_planes: camera.frustum_planes_dilated(extra_radians),
         };
 
         let ubo_bytes = bytemuck::bytes_of(&uniform_data);

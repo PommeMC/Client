@@ -22,6 +22,7 @@ struct Settings {
     gui_scale: u32,
     render_distance: u32,
     simulation_distance: u32,
+    frustum_padding: f32,
     #[serde(default = "default_fov")]
     fov: u32,
     #[serde(default = "default_fov_effect_scale")]
@@ -78,6 +79,9 @@ struct Settings {
     cloud_mode: u8,
 }
 
+fn default_frustum_padding() -> f32 {
+    0.1
+}
 fn default_fov() -> u32 {
     70
 }
@@ -115,6 +119,7 @@ impl Default for Settings {
             fov: 70,
             fov_effect_scale: 1.0,
             view_bobbing: true,
+            frustum_padding: 0.1,
             vsync: true,
             max_framerate: 120,
             show_online_status: true,
@@ -334,6 +339,8 @@ pub struct MainMenu {
     face_dirty_since: Option<Instant>,
     friend_tab: FriendTab,
     add_friend_name: String,
+    pub frustum_padding: f32,
+
     action_error: ActionError,
     pending_remove: Option<(String, String)>,
     rt: Arc<tokio::runtime::Runtime>,
@@ -426,6 +433,7 @@ impl MainMenu {
             last_face_count: 0,
             face_dirty_since: None,
             friend_tab: FriendTab::Friends,
+            frustum_padding: settings.frustum_padding,
             add_friend_name: String::new(),
             action_error: Default::default(),
             pending_remove: None,
@@ -551,6 +559,7 @@ impl MainMenu {
                 blocks_volume: self.blocks_volume,
                 hostile_volume: self.hostile_volume,
                 friendly_volume: self.friendly_volume,
+                frustum_padding: self.frustum_padding,
                 players_volume: self.players_volume,
                 ambient_volume: self.ambient_volume,
                 voice_volume: self.voice_volume,

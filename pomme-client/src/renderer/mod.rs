@@ -1453,6 +1453,7 @@ impl Renderer {
         eyes_in_water: bool,
         min_y: i32,
         height: u32,
+        extra_radians: f32,
     ) -> Result<(ChunkRing<u32>, ChunkPos), RendererError> {
         let held_item = held_item.map(|(name, light)| {
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
@@ -1757,6 +1758,7 @@ impl Renderer {
             render_distance,
             height,
             min_y,
+            extra_radians,
         );
         visibility_timer.end();
         frame_start_timer.end();

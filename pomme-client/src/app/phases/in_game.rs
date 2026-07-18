@@ -1281,6 +1281,7 @@ pub fn update_game(
         game.player.eyes_in_water,
         game.chunk_store.shared.min_y(),
         game.chunk_store.shared.height(),
+        core.menu.frustum_padding,
     ) {
         Ok((mask, center)) => {
             game.visibility_mask = mask;
