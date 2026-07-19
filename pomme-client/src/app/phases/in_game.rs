@@ -1,6 +1,5 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use azalea_core::position::{BlockPos, ChunkPos, ChunkSectionPos};
@@ -38,7 +37,6 @@ use crate::ui::chat::ChatState;
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
-use crate::util::ChunkRing;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
@@ -112,8 +110,6 @@ pub struct GameState {
     pub player_walk_speed: f32,
     pub player_prev_walk_speed: f32,
     pub meshing: ChunkMeshing,
-    pub visibility_mask: ChunkRing<u32>,
-    pub visibility_center: ChunkPos,
     pub paused: bool,
     pub dead: bool,
     pub death_message: String,
@@ -204,9 +200,6 @@ impl GameState {
             Arc::clone(&biome_climate),
             Some(resource_packs),
         );
-        // All-visible until the GPU visibility pass returns its first mask; a
-        // zeroed mask would cull every section's draw.
-        let visibility_mask = ChunkRing::new(u32::MAX);
         Self {
             light_engine: crate::world::light::LevelLightEngine::new(
                 chunk_store.height(),
@@ -239,8 +232,6 @@ impl GameState {
             player_walk_speed: 0.0,
             player_prev_walk_speed: 0.0,
             meshing,
-            visibility_mask,
-            visibility_center: ChunkPos::new(0, 0),
             paused: false,
             dead: false,
             death_message: String::new(),
@@ -789,17 +780,7 @@ pub fn update_game(
         if let Some(bench) = &mut game.chunk_load_bench {
             bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
         }
-        // Drop a mesh built from an out-of-date snapshot. Edits (priority lane,
-        // single section) are keyed per section so editing one section never
-        // drops a sibling's in-flight result; bulk loads keep the section content gen.
-        let stale = game
-            .meshing
-            .section_meta
-            .get(mesh.spos)
-            .ver
-            .load(Ordering::Acquire)
-            < mesh.content_gen;
-        if stale {
+        if game.meshing.is_stale(&mesh) {
             continue;
         }
         gfx.renderer.mesh_queue.push_back(mesh);
@@ -1798,7 +1779,7 @@ pub fn update_game(
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
     let t_render = std::time::Instant::now();
-    match gfx.renderer.render_world(
+    if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
         elements,
@@ -1826,13 +1807,7 @@ pub fn update_game(
         game.chunk_store.shared.height(),
         core.menu.frustum_padding,
     ) {
-        Ok((mask, center)) => {
-            game.visibility_mask = mask;
-            game.visibility_center = center;
-        }
-        Err(e) => {
-            tracing::error!("Render error: {e}");
-        }
+        tracing::error!("Render error: {e}");
     }
     game.last_update_phases.render_cpu_ms = t_render.elapsed().as_secs_f32() * 1000.0;
     game.last_update_phases.meta_rebuild_ms = gfx.renderer.meta_rebuild_ms();

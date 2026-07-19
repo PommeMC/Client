@@ -120,6 +120,35 @@ pub struct SharedChunkStore {
     min_y: i32,
 }
 
+/// Drains a ring's slots, dropping every published value. Only sound with
+/// exclusive access to the ring.
+fn drop_ring<T>(ring: &mut ChunkRing<Atomic<T>>) {
+    for slot in ring.buf.iter_mut() {
+        let atomic = std::mem::replace(slot, Atomic::null());
+        // SAFETY: exclusive access (see `Drop` below); nothing can observe
+        // the pointer, so it is reclaimed directly.
+        unsafe {
+            if !atomic
+                .load(Ordering::Relaxed, epoch::unprotected())
+                .is_null()
+            {
+                drop(atomic.into_owned());
+            }
+        }
+    }
+}
+
+impl Drop for SharedChunkStore {
+    /// `Atomic`'s own drop is a no-op, so without this every loaded chunk and
+    /// light column leaks when the store is replaced (dimension change,
+    /// reconnect). Runs at the last Arc owner: `ChunkMeshing`'s drop joins
+    /// the workers before its store Arc dies, so access here is exclusive.
+    fn drop(&mut self) {
+        drop_ring(&mut self.chunks);
+        drop_ring(&mut self.light_data);
+    }
+}
+
 impl SharedChunkStore {
     pub fn new(view_distance: u32) -> Self {
         Self::new_with_dimension(view_distance, OVERWORLD_HEIGHT, OVERWORLD_MIN_Y)

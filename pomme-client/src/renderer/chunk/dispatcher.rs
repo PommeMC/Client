@@ -93,7 +93,10 @@ pub struct ChunkMeshing {
     grass_colormap: Arc<Colormap>,
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
-    biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+    /// Shared with the workers behind a lock (read once per job) so a
+    /// mid-session `BiomeColors` update reaches meshing without recreating
+    /// the dispatcher.
+    biome_climate: Arc<std::sync::RwLock<Arc<HashMap<u32, BiomeClimate>>>>,
 }
 impl ChunkMeshing {
     pub fn new(
@@ -119,6 +122,7 @@ impl ChunkMeshing {
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     ) -> Self {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
+        let biome_climate = Arc::new(std::sync::RwLock::new(biome_climate));
         let section_meta = Arc::new(SectionRing::from_fn(|_, _, _| SectionMeta::default()));
         let update_set = Arc::new(ChunkRing::from_fn(|_, _| AtomicU32::new(0)));
         let queue = Arc::new(MeshQueue::new());
@@ -190,10 +194,14 @@ impl ChunkMeshing {
             Arc::clone(&self.dry_foliage_colormap),
         )
     }
-    pub fn clear(&mut self) {
+    /// Marks every section of every column dirty, forcing a remesh.
+    fn mark_all_dirty(&self) {
         for cell in &self.update_set.buf {
-            cell.store(0xFFFF_FFFF, Ordering::Release);
+            cell.store(u32::MAX, Ordering::Release);
         }
+    }
+    pub fn clear(&mut self) {
+        self.mark_all_dirty();
         self.col_lod.clear();
     }
     pub fn on_chunk_unload(&mut self, pos: ChunkPos) {
@@ -216,7 +224,9 @@ impl ChunkMeshing {
         *self = renderer.create_chunk_meshing(shared_chunk_store, biome_climate, None);
     }
     pub fn set_biome_climate(&mut self, climate: Arc<HashMap<u32, BiomeClimate>>) {
-        self.biome_climate = climate;
+        *self.biome_climate.write().unwrap() = climate;
+        // Re-tint already-meshed terrain under the new climate table.
+        self.mark_all_dirty();
     }
     pub fn bump_content_gen(&mut self, pos: ChunkSectionPos) -> u64 {
         let meta = self.section_meta.get(pos);
@@ -291,6 +301,15 @@ impl ChunkMeshing {
                 let packed_pos = meta.pos.load(Ordering::Acquire);
                 let identity_changed = packed_pos != pack_section_pos(spos);
                 if is_dirty || lod_changed || identity_changed {
+                    // Back the job with a dirty bit like edits: `send`
+                    // replaces the batch each frame, so a job must stay
+                    // re-derivable until a worker claims it (claiming clears
+                    // the bit, ReMarkGuard restores it on failure).
+                    if !is_dirty {
+                        self.update_set
+                            .get(pos)
+                            .fetch_or(1 << si, Ordering::Release);
+                    }
                     if lod_changed {
                         meta.target_lod.store(lod as u8, Ordering::Release);
                         meta.ver.fetch_add(1, Ordering::Release);
@@ -321,6 +340,13 @@ impl ChunkMeshing {
     }
     pub fn drain_results(&self) -> impl Iterator<Item = SectionMeshData> + '_ {
         self.result_rx.try_iter()
+    }
+    /// Whether a drained result predates its section slot's current lifetime
+    /// (ver behind the snapshot's gen: the ring was recreated or the slot
+    /// recycled). Every drain site must drop such meshes; results whose ver
+    /// merely advanced stay, the newer upload supersedes them by epoch.
+    pub fn is_stale(&self, mesh: &SectionMeshData) -> bool {
+        self.section_meta.get(mesh.spos).ver.load(Ordering::Acquire) < mesh.content_gen
     }
     pub fn pending_jobs(&self) -> usize {
         self.queue.pending_jobs()
@@ -367,7 +393,7 @@ impl PendingJob {
         grass_colormap: &Arc<Colormap>,
         foliage_colormap: &Arc<Colormap>,
         dry_foliage_colormap: &Arc<Colormap>,
-        biome_climate: &Arc<HashMap<u32, BiomeClimate>>,
+        biome_climate: &Arc<std::sync::RwLock<Arc<HashMap<u32, BiomeClimate>>>>,
         tx: &crossbeam_channel::Sender<SectionMeshData>,
         queue_ms: f32,
     ) {
@@ -399,7 +425,7 @@ impl PendingJob {
             grass_colormap: Arc::clone(grass_colormap),
             foliage_colormap: Arc::clone(foliage_colormap),
             dry_foliage_colormap: Arc::clone(dry_foliage_colormap),
-            biome_climate: Arc::clone(biome_climate),
+            biome_climate: biome_climate.read().unwrap().clone(),
             min_y: shared_chunk_store.min_y(),
             spos: claim_pos,
         };
@@ -489,7 +515,7 @@ impl MeshQueue {
         grass_colormap: Arc<Colormap>,
         foliage_colormap: Arc<Colormap>,
         dry_foliage_colormap: Arc<Colormap>,
-        biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+        biome_climate: Arc<std::sync::RwLock<Arc<HashMap<u32, BiomeClimate>>>>,
         tx: crossbeam_channel::Sender<SectionMeshData>,
     ) {
         loop {

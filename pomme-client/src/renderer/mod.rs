@@ -192,6 +192,10 @@ pub struct Renderer {
     last_timings: RenderTimings,
     hiz_pipeline: HizPipeline,
     visibility_pipeline: VisibilityPipeline,
+    /// Per-section draw mask refreshed each frame from the GPU visibility
+    /// readback (all-visible until the pass has run). Persistent to avoid a
+    /// per-frame ring allocation.
+    visibility_mask: ChunkRing<u32>,
 }
 
 impl Renderer {
@@ -532,6 +536,7 @@ impl Renderer {
             },
             hiz_pipeline,
             visibility_pipeline,
+            visibility_mask: ChunkRing::new(u32::MAX),
         })
     }
 
@@ -999,6 +1004,11 @@ impl Renderer {
 
     pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {
         self.chunk_buffers.remove(pos);
+        // Queued-but-unstaged meshes for the column would pass the stage
+        // epoch gate (an unloaded column reads as epoch 0) and re-insert a
+        // ChunkAlloc nothing cleans up.
+        self.mesh_queue
+            .retain(|m| m.spos.x != pos.x || m.spos.z != pos.z);
     }
 
     pub fn clear_chunk_meshes(&mut self) {
@@ -1085,7 +1095,7 @@ impl Renderer {
         min_y: i32,
         height: u32,
         extra_radians: f32,
-    ) -> Result<(ChunkRing<u32>, ChunkPos), RendererError> {
+    ) -> Result<(), RendererError> {
         let held_item = held_item.map(|(name, light)| {
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
             pipelines::held_item::HeldItemInfo {
@@ -1130,7 +1140,6 @@ impl Renderer {
             height,
             extra_radians,
         )
-        .map(|vis| vis.expect("world mode always returns a visibility mask"))
     }
 
     pub fn render_menu(
@@ -1157,7 +1166,6 @@ impl Renderer {
             0,
             0.0,
         )
-        .map(|_| ())
     }
 
     pub fn reload_assets(
@@ -1357,7 +1365,7 @@ impl Renderer {
         min_y: i32,
         height: u32,
         extra_radians: f32,
-    ) -> Result<Option<(ChunkRing<u32>, ChunkPos)>, RendererError> {
+    ) -> Result<(), RendererError> {
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
         }
@@ -1394,8 +1402,10 @@ impl Renderer {
         ) {
             Ok(image) => image,
             Err(vk::Error::OutOfDateKHR) => {
+                // Routine on resize/minimize; recreate next frame and skip
+                // this one quietly instead of surfacing an error to log.
                 self.swapchain_dirty = true;
-                return Err(RendererError::Vulkan(vk::Error::OutOfDateKHR));
+                return Ok(());
             }
             Err(e) => return Err(e.into()),
         };
@@ -1475,11 +1485,12 @@ impl Renderer {
         let frame_start_timer = timer.scope(Timestamp::FrameStart, Timestamp::FrameEnd);
 
         // Fail open to all-visible: readback() is None until this slot's
-        // visibility pass has run, and an all-zero mask would cull (and
-        // un-mesh) every section.
-        let mut visibility_mask = ChunkRing::<u32>::new(u32::MAX);
+        // visibility pass has run, and an all-zero mask would cull every
+        // section's draw.
         if let Some(readback) = self.visibility_pipeline.readback(frame) {
-            visibility_mask.buf.copy_from_slice(readback);
+            self.visibility_mask.buf.copy_from_slice(readback);
+        } else {
+            self.visibility_mask.buf.fill(u32::MAX);
         }
         let visibility_center = self.visibility_pipeline.vis_center(frame);
 
@@ -1505,7 +1516,7 @@ impl Renderer {
                 self.camera_render_position(),
                 player_chunk,
                 Some(render_distance),
-                &visibility_mask,
+                &self.visibility_mask,
                 visibility_center,
             );
             cull_timer.end();
@@ -1678,7 +1689,7 @@ impl Renderer {
                     &ent_frustum,
                     anchor,
                     eye,
-                    &visibility_mask,
+                    &self.visibility_mask,
                     visibility_center,
                 );
 
@@ -1910,10 +1921,7 @@ impl Renderer {
         }
         self.ctx.advance_frame();
 
-        Ok(match &mode {
-            RenderMode::World { .. } => Some((visibility_mask, visibility_center)),
-            RenderMode::MainMenu { .. } => None,
-        })
+        Ok(())
     }
 
     fn run_gui_bake(
