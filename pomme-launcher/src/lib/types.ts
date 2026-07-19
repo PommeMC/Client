@@ -39,6 +39,8 @@ export interface Server {
   name: string;
   ip: string;
   category: string;
+  /** The client's last-pinged protocol, persisted round-trip untouched. */
+  protocol?: number | null;
   players: number;
   max_players: number;
   ping: number;

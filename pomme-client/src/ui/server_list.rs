@@ -17,6 +17,10 @@ pub struct ServerEntry {
     /// before the current ping completes still skips the wire-version probe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<i32>,
+    /// Fields other tools own (the launcher's category, ...), passed through
+    /// untouched so a client save doesn't strip them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// How the client can speak to a pinged server.
@@ -230,4 +234,33 @@ pub fn is_valid_address(address: &str) -> bool {
             .split(':')
             .next()
             .is_some_and(|host| !host.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The launcher writes fields the client doesn't model (category); a
+    /// client save must pass them through, not strip them.
+    #[test]
+    fn entry_round_trip_keeps_unknown_fields() {
+        let json = r#"{"name":"a","address":"b:25565","protocol":775,"category":"Modded"}"#;
+        let entry: ServerEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.protocol, Some(775));
+        assert_eq!(
+            entry.extra.get("category").and_then(|v| v.as_str()),
+            Some("Modded")
+        );
+        let back: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_value(&entry).unwrap(), back);
+    }
+
+    /// Entries without the optional fields load and save without gaining any.
+    #[test]
+    fn entry_round_trip_minimal() {
+        let json = r#"{"name":"a","address":"b"}"#;
+        let entry: ServerEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.protocol, None);
+        assert_eq!(serde_json::to_string(&entry).unwrap(), json);
+    }
 }

@@ -12,6 +12,10 @@ pub struct SavedServer {
     pub address: String,
     #[serde(default)]
     pub category: String,
+    /// The client's last-pinged protocol for this server; owned by the
+    /// client, carried through so a launcher save doesn't strip it.
+    #[serde(default)]
+    pub protocol: Option<i32>,
 }
 
 #[derive(serde::Serialize, Clone, specta::Type)]

@@ -863,13 +863,15 @@ impl MainMenu {
                 name,
                 address: self.edit_address.clone(),
                 protocol: None,
+                extra: Default::default(),
             };
             if let Screen::EditServer(idx) = self.screen {
-                // The pinged protocol stays valid while the address does.
-                if let Some(old) = self.server_list.servers.get(idx)
-                    && old.address == entry.address
-                {
-                    entry.protocol = old.protocol;
+                if let Some(old) = self.server_list.servers.get(idx) {
+                    entry.extra = old.extra.clone();
+                    // The pinged protocol stays valid while the address does.
+                    if old.address == entry.address {
+                        entry.protocol = old.protocol;
+                    }
                 }
                 self.server_list.update(idx, entry);
             } else {
