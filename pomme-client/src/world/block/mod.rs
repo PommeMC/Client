@@ -957,15 +957,20 @@ mod tests {
         // The open halves don't occlude.
         assert!(!shape_occludes(top, stone, DOWN));
         assert!(!shape_occludes(bottom, stone, UP));
-        // Stacked opposite halves: top slab above a bottom slab leaves the
-        // seam open; two bottom slabs' side faces combine to a full column?
-        // No — each covers the same lower half, so the union stays half.
+        // Top slab above a bottom slab: neither shape touches the seam plane,
+        // so both face slices are empty and the seam stays open.
         assert!(!shape_occludes(top, bottom, DOWN));
-        // A top slab sitting on a bottom slab: top's DOWN face (empty at the
-        // top half) unions with bottom's UP face — both cover nothing at the
-        // face plane's upper half, stays open.
         const NORTH: usize = 2;
         // Side faces of two aligned bottom slabs cover only the lower half.
         assert!(!shape_occludes(bottom, bottom, NORTH));
+    }
+
+    /// Builds every embedded table so the block/light cross-checks fire for
+    /// all versions, not just the one `setup` activates.
+    #[test]
+    fn all_tables_build() {
+        for (slot, (_, data)) in BLOCK_DATA.iter().enumerate() {
+            build_table(data, LIGHT_DATA[slot]);
+        }
     }
 }

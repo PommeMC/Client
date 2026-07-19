@@ -29,7 +29,7 @@ client-pre-pr:
     @cargo clippy -p pomme-client --release --all-targets --all-features -- -D warnings
     @cargo clippy -p pomme-protocol --release --all-targets --all-features -- -D warnings
     @cargo test -p pomme-protocol
-    @cargo test -p pomme-client net::azalea_compat
+    @cargo test -p pomme-client -- net::azalea_compat world::block
 
 # Regenerate a version's packet-id table from the decompiled reference.
 protogen version="26.2":
@@ -43,6 +43,9 @@ registrygen version="26.2":
 blockgen version="26.2":
     @cargo run -p blockgen -- blocks reference/{{ version }}/generated/reports/blocks.json {{ version }} pomme-client/src/world/block/data/blocks-{{ version }}.json
 
+# JDK 25 bin dir for lightgen; override with `just jdk=<path> lightgen`.
+jdk := "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"
+
 # Regenerate a version's light-property table by running vanilla's own code
 # (tools/lightgen/LightDump.java) against the reference server jar, then
 # compacting the dump with `blockgen light`. Uses the deobf server jar when
@@ -52,7 +55,7 @@ lightgen version="26.2":
     set -euo pipefail
     v="{{ version }}"
     ref="reference/$v"
-    jdk="C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"
+    jdk="{{ jdk }}"
     classes="$ref/server-$v.jar"
     if [ -f "$ref/server-$v-deobf.jar" ]; then classes="$ref/server-$v-deobf.jar"; fi
     if ! find "$ref/bundler" -name '*.jar' 2>/dev/null | grep -q .; then

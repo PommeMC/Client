@@ -406,8 +406,8 @@ fn gen_light(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
         }
     }
 
-    // Dedupe face masks into a dictionary, keeping first-seen (state id) order
-    // deterministic.
+    // Dedupe face masks into a dictionary, iterating in ascending state-id
+    // order so the output is deterministic.
     let mut masks_by_state: BTreeMap<u32, &[String; 6]> = BTreeMap::new();
     for (key, masks) in &dump.face_masks {
         let id: u32 = key
