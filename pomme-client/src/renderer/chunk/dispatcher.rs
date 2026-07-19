@@ -84,6 +84,8 @@ pub struct ChunkMeshing {
     /// Shared: workers clear/re-set bits, edits set bits
     pub update_set: Arc<ChunkRing<AtomicU32>>,
     store: Arc<SharedChunkStore>,
+    /// Per-column rescan cache: the lod last stamped by a full section visit.
+    col_lod: HashMap<ChunkPos, u32>,
     result_rx: crossbeam_channel::Receiver<SectionMeshData>,
     queue: Arc<MeshQueue>,
     workers: Vec<std::thread::JoinHandle<()>>,
@@ -165,6 +167,7 @@ impl ChunkMeshing {
             section_meta,
             update_set,
             store: shared_chunk_store,
+            col_lod: HashMap::new(),
             result_rx,
             queue,
             workers,
@@ -189,8 +192,10 @@ impl ChunkMeshing {
         for cell in &self.update_set.buf {
             cell.store(0xFFFF_FFFF, Ordering::Release);
         }
+        self.col_lod.clear();
     }
     pub fn on_chunk_unload(&mut self, pos: ChunkPos) {
+        self.col_lod.remove(&pos);
         let min_y_sec = self.store.min_section_y();
         for si in 0..self.store.section_count() {
             let spos = ChunkSectionPos::new(pos.x, min_y_sec + si, pos.z);
@@ -254,6 +259,12 @@ impl ChunkMeshing {
             let update_mask = self.update_set.get(pos).load(Ordering::Acquire);
             let active_mask = vis_mask & update_mask;
             let lod = crate::app::core::chunk_lod(pos, player_chunk);
+            // Fast path: a present cache entry means a previous full visit
+            // stamped every section's identity, so with nothing dirty+visible
+            // and the lod unchanged the section loop has no work.
+            if active_mask == 0 && self.col_lod.get(&pos) == Some(&lod) {
+                continue;
+            }
             for si in 0..section_count {
                 let spos = ChunkSectionPos::new(pos.x, min_y_section + si, pos.z);
                 let meta = self.section_meta.get(spos);
@@ -275,6 +286,7 @@ impl ChunkMeshing {
                     });
                 }
             }
+            self.col_lod.insert(pos, lod);
         }
         candidate_jobs.sort_by(
             |PendingJob { pos: pos_a, .. }, PendingJob { pos: pos_b, .. }| {

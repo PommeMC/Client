@@ -776,8 +776,13 @@ pub fn update_game(
             .lerp(game.player.eye_pos(), partial_tick as f64),
     );
 
+    // Bound the drain: a load burst can ready thousands of results at once,
+    // and moving them all in one frame spikes it. Leftovers stay in the
+    // channel for the next frame; the upload's staging budget throttles
+    // downstream anyway.
+    const DRAIN_CAP: usize = 1024;
     let t_drain = std::time::Instant::now();
-    for mesh in game.meshing.drain_results() {
+    for mesh in game.meshing.drain_results().take(DRAIN_CAP) {
         // Stale meshes count too: worker time spent is worker time spent.
         if let Some(bench) = &mut game.chunk_load_bench {
             bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
@@ -800,7 +805,7 @@ pub fn update_game(
     game.last_update_phases.mesh_drain_ms = t_drain.elapsed().as_secs_f32() * 1000.0;
 
     let t_upload = std::time::Instant::now();
-    gfx.renderer.upload_mesh_batch();
+    gfx.renderer.stage_mesh_batch();
     game.last_update_phases.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
     // Per-frame FOV interpolation; set before the frustum/view-projection reads.

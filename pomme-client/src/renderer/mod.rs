@@ -398,12 +398,7 @@ impl Renderer {
             &ctx.allocator,
         );
 
-        let chunk_buffers = ChunkBufferStore::new(
-            &ctx.device,
-            ctx.physical_device,
-            ctx.graphics_family,
-            &ctx.allocator,
-        );
+        let chunk_buffers = ChunkBufferStore::new(&ctx.device, ctx.physical_device, &ctx.allocator);
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
@@ -968,11 +963,10 @@ impl Renderer {
             .wait_for_fences(&self.ctx.in_flight_fences, true, u64::MAX);
     }
 
-    pub fn upload_mesh_batch(&mut self) -> Vec<(ChunkSectionPos, u64)> {
-        self.chunk_buffers.upload_mesh_batch(
+    pub fn stage_mesh_batch(&mut self) -> Vec<(ChunkSectionPos, u64)> {
+        self.chunk_buffers.stage_mesh_batch(
             &self.ctx.device,
             &self.ctx.allocator,
-            self.ctx.graphics_queue,
             &mut self.mesh_queue,
         )
     }
@@ -1435,6 +1429,10 @@ impl Renderer {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent,
         };
+
+        // Meshes staged this frame (or on the loading screen) copy into the
+        // pools through this frame's command buffer; must precede the draws.
+        self.chunk_buffers.record_copies(cmd, frame);
 
         // World frames only: the menu path records just a couple of the
         // Timestamp scopes, and the readback WAITs on all of them, so arming

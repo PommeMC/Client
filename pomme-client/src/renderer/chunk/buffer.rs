@@ -327,6 +327,16 @@ fn slice_of(s: &SectionAlloc) -> (u32, u32, u32, u32) {
     (s.vertex_offset as u32, s.vtx_len, s.first_index, s.idx_len)
 }
 
+/// One accepted section's payload, waiting for `record_copies` to write it
+/// into the frame's staging slab (its pool slices are already reserved).
+struct PendingCopy {
+    vertices: Vec<PackedVertex>,
+    indices: Vec<u32>,
+    water_indices: Vec<u32>,
+    vtx_off: u32,
+    idx_off: u32,
+}
+
 pub struct ChunkBufferStore {
     /// Capacity (in draws) of the per-frame meta/indirect buffers. Grown on
     /// demand because per-section packing yields many more draws than buckets.
@@ -335,15 +345,20 @@ pub struct ChunkBufferStore {
     vertex_alloc: Allocation,
     index_buffer: vk::Buffer,
     index_alloc: Allocation,
-    staging_buffer: vk::Buffer,
-    staging_alloc: Allocation,
+    /// Per-frame staging slabs: slot `frame` is only rewritten after that
+    /// slot's fence was waited, so the copies recorded into the frame command
+    /// buffer never race a previous frame's transfer reads.
+    staging_buffers: Vec<vk::Buffer>,
+    staging_allocs: Vec<Allocation>,
     staging_size: u64,
-    transfer_pool: vk::CommandPool,
-    transfer_cmd: vk::CommandBuffer,
-    /// Signals completion of a batched staging->device transfer. Reused (reset
-    /// before each submit) so a frame's uploads sync once instead of per-mesh.
-    transfer_fence: vk::Fence,
     use_staging: bool,
+    /// Sections accepted by `stage_mesh_batch` (pool slices already reserved),
+    /// written and recorded into the frame command buffer by `record_copies`.
+    pending_copies: Vec<PendingCopy>,
+    /// Bytes `pending_copies` will occupy in each staging half, so a staging
+    /// pass that carried over (skipped frame) still bounds the next batch.
+    pending_v_bytes: usize,
+    pending_i_bytes: usize,
 
     /// Exact-size sub-allocators over the vertex and index pools (in elements).
     vtx_free: FreeList,
@@ -406,7 +421,6 @@ impl ChunkBufferStore {
     pub fn new(
         device: &vk::Device,
         physical_device: vk::PhysicalDevice,
-        graphics_family: u32,
         allocator: &Arc<Mutex<Allocator>>,
     ) -> Self {
         let total_buckets = compute_bucket_count(physical_device);
@@ -458,38 +472,21 @@ impl ChunkBufferStore {
         } else {
             BYTES_PER_BUCKET * 4
         };
-        let (staging_buffer, staging_alloc) = util::create_host_buffer(
-            device,
-            allocator,
-            staging_size,
-            vk::BufferUsageFlags::TransferSrc,
-            "staging",
-        );
-
-        let pool_info = vk::CommandPoolCreateInfo {
-            queue_family_index: graphics_family,
-            flags: vk::CommandPoolCreateFlags::Transient
-                | vk::CommandPoolCreateFlags::ResetCommandBuffer,
-            ..Default::default()
-        };
-        let transfer_pool = device
-            .create_command_pool(&pool_info, None)
-            .expect("failed to create transfer pool");
-        let cmd_info = vk::CommandBufferAllocateInfo {
-            command_pool: transfer_pool,
-            level: vk::CommandBufferLevel::Primary,
-            command_buffer_count: 1,
-            ..Default::default()
-        };
-        let mut transfer_cmd = vk::CommandBuffer::null();
-        unsafe {
-            device.allocate_command_buffers(&cmd_info, std::slice::from_mut(&mut transfer_cmd))
+        let mut staging_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut staging_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        if use_staging {
+            for _ in 0..MAX_FRAMES_IN_FLIGHT {
+                let (b, a) = util::create_host_buffer(
+                    device,
+                    allocator,
+                    staging_size,
+                    vk::BufferUsageFlags::TransferSrc,
+                    "staging",
+                );
+                staging_buffers.push(b);
+                staging_allocs.push(a);
+            }
         }
-        .expect("failed to alloc transfer cmd");
-
-        let transfer_fence = device
-            .create_fence(&vk::FenceCreateInfo::default(), None)
-            .expect("failed to create transfer fence");
 
         tracing::info!(
             "Chunk buffers: {} (vertex={} MB, index={} MB, staging={} KB)",
@@ -734,13 +731,13 @@ impl ChunkBufferStore {
             vertex_alloc,
             index_buffer,
             index_alloc,
-            staging_buffer,
-            staging_alloc,
+            staging_buffers,
+            staging_allocs,
             staging_size,
-            transfer_pool,
-            transfer_cmd,
-            transfer_fence,
             use_staging,
+            pending_copies: Vec::new(),
+            pending_v_bytes: 0,
+            pending_i_bytes: 0,
             vtx_free,
             idx_free,
             chunks: HashMap::new(),
@@ -787,57 +784,76 @@ impl ChunkBufferStore {
         !self.fade_enabled || column_is_near(pos, eye)
     }
 
-    /// Submit the accumulated staging copies as a single transfer and block on
-    /// a fence until it completes. One fence wait per call replaces the old
-    /// per-mesh `queue.wait_idle`, so a frame's uploads synchronize once
-    /// instead of once per mesh.
-    fn flush_transfer(
-        &mut self,
-        device: &vk::Device,
-        queue: vk::Queue,
-        copy_v: &[vk::BufferCopy],
-        copy_i: &[vk::BufferCopy],
-    ) {
-        if copy_v.is_empty() && copy_i.is_empty() {
+    /// Write the staged sections into this frame's staging slab and record
+    /// their pool copies into the frame command buffer, with a barrier so the
+    /// frame's vertex/index reads see them. Runs after the frame fence wait,
+    /// so rewriting the slab can't race an in-flight transfer.
+    pub fn record_copies(&mut self, cmd: vk::CommandBuffer, frame: usize) {
+        if self.pending_copies.is_empty() {
             return;
         }
-        let begin = vk::CommandBufferBeginInfo {
-            flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
+        let staging_half = self.staging_size as usize / 2;
+        let mut copy_v: Vec<vk::BufferCopy> = Vec::with_capacity(self.pending_copies.len());
+        let mut copy_i: Vec<vk::BufferCopy> = Vec::with_capacity(self.pending_copies.len());
+        let mut stg_v = 0usize;
+        let mut stg_i = staging_half;
+        {
+            let buf = self.staging_allocs[frame].mapped_slice_mut().unwrap();
+            for pending in &self.pending_copies {
+                write_verts(buf, stg_v, &pending.vertices);
+                let vbytes = pending.vertices.len() * VERTEX_SIZE as usize;
+                copy_v.push(vk::BufferCopy {
+                    src_offset: stg_v as u64,
+                    dst_offset: pending.vtx_off as u64 * VERTEX_SIZE,
+                    size: vbytes as u64,
+                });
+                stg_v += vbytes;
+
+                let ibytes = write_indices(buf, stg_i, &pending.indices, &pending.water_indices);
+                copy_i.push(vk::BufferCopy {
+                    src_offset: stg_i as u64,
+                    dst_offset: pending.idx_off as u64 * INDEX_SIZE,
+                    size: ibytes as u64,
+                });
+                stg_i += ibytes;
+            }
+        }
+        cmd.copy_buffer(self.staging_buffers[frame], self.vertex_buffer, &copy_v);
+        cmd.copy_buffer(self.staging_buffers[frame], self.index_buffer, &copy_i);
+        let barrier = vk::MemoryBarrier {
+            src_access_mask: vk::AccessFlags::TransferWrite,
+            dst_access_mask: vk::AccessFlags::VertexAttributeRead | vk::AccessFlags::IndexRead,
             ..Default::default()
         };
-        self.transfer_cmd.begin(&begin).unwrap();
-        if !copy_v.is_empty() {
-            self.transfer_cmd
-                .copy_buffer(self.staging_buffer, self.vertex_buffer, copy_v);
-        }
-        if !copy_i.is_empty() {
-            self.transfer_cmd
-                .copy_buffer(self.staging_buffer, self.index_buffer, copy_i);
-        }
-        self.transfer_cmd.end().unwrap();
-        let submit = [vk::SubmitInfo {
-            command_buffer_count: 1,
-            command_buffers: &self.transfer_cmd.handle(),
-            ..Default::default()
-        }];
-        device.reset_fences(&[self.transfer_fence]).unwrap();
-        queue.submit(&submit, self.transfer_fence).unwrap();
-        device
-            .wait_for_fences(&[self.transfer_fence], true, u64::MAX)
-            .unwrap();
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::Transfer,
+            vk::PipelineStageFlags::VertexInput,
+            vk::DependencyFlags::empty(),
+            &[barrier],
+            &[],
+            &[],
+        );
+        self.drop_pending_copies();
+    }
+
+    /// Forget staged-but-unrecorded copies and their budget accounting.
+    fn drop_pending_copies(&mut self) {
+        self.pending_copies.clear();
+        self.pending_v_bytes = 0;
+        self.pending_i_bytes = 0;
     }
 
     /// Drain `mesh_queue` into the GPU pools, newest-epoch-per-section wins.
     /// Each accepted section replaces its slot's slices; an empty mesh retires
-    /// the slot and drops the column when it goes empty. Staging copies are
-    /// coalesced into one fence-synchronized transfer; if the staging budget or
-    /// a pool fills, the loop stops and leaves the rest queued for next frame.
-    /// Returns the uploaded `(section pos, epoch)` list.
-    pub fn upload_mesh_batch(
+    /// the slot and drops the column when it goes empty. CPU-only: the staging
+    /// path defers its byte writes and copies to `record_copies` in the frame
+    /// command buffer instead of blocking on a transfer fence. If the staging
+    /// budget or a pool fills, the loop stops and leaves the rest queued for
+    /// next frame. Returns the accepted `(section pos, epoch)` list.
+    pub fn stage_mesh_batch(
         &mut self,
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
-        queue: vk::Queue,
         mesh_queue: &mut VecDeque<SectionMeshData>,
     ) -> Vec<(ChunkSectionPos, u64)> {
         // Keep only the newest result per section before draining: the stale
@@ -888,8 +904,9 @@ impl ChunkBufferStore {
             }
         }
 
-        let mut current_v_bytes = 0usize;
-        let mut current_i_bytes = 0usize;
+        // Include copies carried over from a skipped frame in the budget.
+        let mut current_v_bytes = self.pending_v_bytes;
+        let mut current_i_bytes = self.pending_i_bytes;
         while let Some(mesh) = mesh_queue.front() {
             let col_pos = ChunkPos::new(mesh.spos.x, mesh.spos.z);
             let si = mesh.relative_si;
@@ -973,52 +990,6 @@ impl ChunkBufferStore {
             return uploaded_info;
         }
 
-        // Stage every entry's verts + indices, then one fence-synced transfer.
-        if self.use_staging {
-            let mut copy_v: Vec<vk::BufferCopy> = Vec::new();
-            let mut copy_i: Vec<vk::BufferCopy> = Vec::new();
-            let mut stg_v = 0usize;
-            let mut stg_i = staging_half;
-            {
-                let buf = self.staging_alloc.mapped_slice_mut().unwrap();
-                for entry in &entries {
-                    write_verts(buf, stg_v, &entry.mesh.vertices);
-                    let vbytes = entry.mesh.vertices.len() * VERTEX_SIZE as usize;
-                    copy_v.push(vk::BufferCopy {
-                        src_offset: stg_v as u64,
-                        dst_offset: entry.vtx_off as u64 * VERTEX_SIZE,
-                        size: vbytes as u64,
-                    });
-                    stg_v += vbytes;
-
-                    let ibytes =
-                        write_indices(buf, stg_i, &entry.mesh.indices, &entry.mesh.water_indices);
-                    copy_i.push(vk::BufferCopy {
-                        src_offset: stg_i as u64,
-                        dst_offset: entry.idx_off as u64 * INDEX_SIZE,
-                        size: ibytes as u64,
-                    });
-                    stg_i += ibytes;
-                }
-            }
-            self.flush_transfer(device, queue, &copy_v, &copy_i);
-        } else {
-            {
-                let vbuf = self.vertex_alloc.mapped_slice_mut().unwrap();
-                for entry in &entries {
-                    let base = entry.vtx_off as usize * VERTEX_SIZE as usize;
-                    write_verts(vbuf, base, &entry.mesh.vertices);
-                }
-            }
-            {
-                let ibuf = self.index_alloc.mapped_slice_mut().unwrap();
-                for entry in &entries {
-                    let off = entry.idx_off as usize * INDEX_SIZE as usize;
-                    write_indices(ibuf, off, &entry.mesh.indices, &entry.mesh.water_indices);
-                }
-            }
-        }
-
         let now = std::time::Instant::now();
         // Freshly revealed sections fade in, so extend the fade window the cull's
         // O(1) check reads; re-meshed-only uploads swap instantly.
@@ -1026,7 +997,7 @@ impl ChunkBufferStore {
             let dur = std::time::Duration::from_secs_f32(FADE_DURATION_MS / 1000.0);
             self.fade_until = self.fade_until.max(now + dur);
         }
-        for entry in entries {
+        for entry in &entries {
             let spos = entry.mesh.spos;
             let sec_alloc = SectionAlloc {
                 section_index: entry.si,
@@ -1056,6 +1027,36 @@ impl ChunkBufferStore {
                 })
                 .sections
                 .push(sec_alloc);
+        }
+
+        if self.use_staging {
+            for entry in &mut entries {
+                self.pending_v_bytes += entry.mesh.vertices.len() * VERTEX_SIZE as usize;
+                self.pending_i_bytes += (entry.mesh.indices.len() + entry.mesh.water_indices.len())
+                    * INDEX_SIZE as usize;
+                self.pending_copies.push(PendingCopy {
+                    vertices: std::mem::take(&mut entry.mesh.vertices),
+                    indices: std::mem::take(&mut entry.mesh.indices),
+                    water_indices: std::mem::take(&mut entry.mesh.water_indices),
+                    vtx_off: entry.vtx_off,
+                    idx_off: entry.idx_off,
+                });
+            }
+        } else {
+            {
+                let vbuf = self.vertex_alloc.mapped_slice_mut().unwrap();
+                for entry in &entries {
+                    let base = entry.vtx_off as usize * VERTEX_SIZE as usize;
+                    write_verts(vbuf, base, &entry.mesh.vertices);
+                }
+            }
+            {
+                let ibuf = self.index_alloc.mapped_slice_mut().unwrap();
+                for entry in &entries {
+                    let off = entry.idx_off as usize * INDEX_SIZE as usize;
+                    write_indices(ibuf, off, &entry.mesh.indices, &entry.mesh.water_indices);
+                }
+            }
         }
 
         let total_sections: usize = self.chunks.values().map(|c| c.sections.len()).sum();
@@ -1236,6 +1237,8 @@ impl ChunkBufferStore {
         self.vtx_free.reset();
         self.idx_free.reset();
         self.pending_free.clear();
+        // Staged copies target pool offsets that just died with the pools.
+        self.drop_pending_copies();
         self.cached_meta.clear();
         self.meta_dirty = true;
         self.fade_enabled = false;
@@ -1601,16 +1604,14 @@ impl ChunkBufferStore {
                 }))
                 .ok();
         }
-        device.destroy_buffer(self.staging_buffer, None);
-        alloc
-            .free(std::mem::replace(&mut self.staging_alloc, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
+        for buffer in self.staging_buffers.drain(..) {
+            device.destroy_buffer(buffer, None);
+        }
+        for allocation in self.staging_allocs.drain(..) {
+            alloc.free(allocation).ok();
+        }
         drop(alloc);
 
-        device.destroy_fence(self.transfer_fence, None);
-        device.destroy_command_pool(self.transfer_pool, None);
         device.destroy_pipeline(self.compute_pipeline, None);
         device.destroy_pipeline_layout(self.compute_layout, None);
         device.destroy_descriptor_pool(self.compute_pool, None);
