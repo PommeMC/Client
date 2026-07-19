@@ -100,7 +100,7 @@ pub struct GameState {
     /// Client-side light engine (vanilla `LevelLightEngine`); recreated with
     /// the chunk store on dimension changes, drained once per tick.
     pub light_engine: crate::world::light::LevelLightEngine,
-    /// Set by [`Self::tick_light`] when chunk-load light marked columns
+    /// Set by [`Self::update_light`] when chunk-load light marked columns
     /// dirty; consumed by the visibility refresh as its new-loads signal.
     pub pending_load_rescan: bool,
     pub entity_store: EntityStore,
@@ -518,12 +518,13 @@ impl GameState {
         )
     }
 
-    /// Runs one light tick (vanilla `ClientLevel.update`: drain queued light
-    /// tasks, then `runLightUpdates`) and turns the resulting dirty scope
-    /// into remesh work: columns whose chunk-load light applied go through
-    /// the content-gen path like chunk loads (the visibility rescan enqueues
+    /// Runs one light update (vanilla `ClientLevel.update`, called per frame
+    /// from `Minecraft.runTick`: drain queued light tasks, then
+    /// `runLightUpdates`) and turns the resulting dirty scope into remesh
+    /// work: columns whose chunk-load light applied go through the
+    /// content-gen path like chunk loads (the visibility rescan enqueues
     /// them tier-gated), individual lit sections remesh on the priority lane.
-    pub fn tick_light(&mut self) {
+    pub fn update_light(&mut self) {
         let mut dirty = crate::world::light::LightDirty::default();
         self.light_engine
             .poll_and_run(&mut self.chunk_store, &mut dirty);
@@ -1126,7 +1127,6 @@ pub fn update_game(
         game.item_entity_store.tick(&game.chunk_store);
         game.particle_store.tick(&game.chunk_store);
         game.block_entity_anim.tick();
-        game.tick_light();
         if let Some(c) = &mut game.open_container
             && let Some(state) = &mut c.enchant
         {
@@ -1137,6 +1137,10 @@ pub fn update_game(
         }
         core.tick_accumulator -= TICK_RATE;
     }
+
+    // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
+    // calls `level.update()`.
+    game.update_light();
 
     let partial_tick = core.tick_accumulator / TICK_RATE;
 

@@ -19,7 +19,8 @@ const OVERWORLD_MIN_Y: i32 = -64;
 /// chunk's mesh samples (see `MeshDispatcher::enqueue`) and, by symmetry, the
 /// set that must re-mesh when `pos` changes. Add the diagonals here when the
 /// corner-sample TODO(chunk-light) lands, so the mesh snapshot and the re-mesh
-/// set stay in sync.
+/// set stay in sync (vanilla's `enableChunkLight` dirties the full 3x3 via
+/// `setSectionRangeDirty`).
 pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 5] {
     [
         pos,

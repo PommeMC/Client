@@ -1257,7 +1257,7 @@ impl AppCore {
         // then enqueue everything that needs meshing — visible-first, with hidden
         // columns backfilled at a bounded rate so the world still completes.
         // New chunk loads mark themselves dirty when their queued light
-        // applies (GameState::tick_light), which raises this flag.
+        // applies (GameState::update_light), which raises this flag.
         let loads_happened = std::mem::take(&mut game.pending_load_rescan);
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1000.0;
         game.last_update_phases.net_decode_ms = ms(t_net);
@@ -1382,9 +1382,9 @@ impl AppCore {
             let n = game.chunk_store.section_count();
             let mut sections: Vec<(azalea_core::position::ChunkPos, i32)> = Vec::new();
             for b in dirty {
-                // Light lands next tick's poll_and_run, matching vanilla's
-                // prediction timing (setBlockState queues; ClientLevel.tick
-                // drains).
+                // Light lands in this frame's update_light, matching vanilla's
+                // prediction timing (setBlockState queues; the per-frame
+                // ClientLevel.update drains).
                 game.light_engine
                     .on_block_dirty(&game.chunk_store, b.x, b.y, b.z);
                 dirty_sections_for_block(&mut sections, b.x, b.y, b.z, min_y, n);
