@@ -510,6 +510,14 @@ impl GameState {
         *g
     }
 
+    /// The chunk column the player stands in.
+    pub fn player_chunk(&self) -> ChunkPos {
+        ChunkPos::new(
+            (self.player.position.x as i32).div_euclid(16),
+            (self.player.position.z as i32).div_euclid(16),
+        )
+    }
+
     /// Runs one light tick (vanilla `ClientLevel.update`: drain queued light
     /// tasks, then `runLightUpdates`) and turns the resulting dirty scope
     /// into remesh work: columns whose chunk-load light applied go through
@@ -536,10 +544,7 @@ impl GameState {
         if !bumped.is_empty() {
             self.pending_load_rescan = true;
         }
-        let player_chunk = ChunkPos::new(
-            (self.player.position.x as i32).div_euclid(16),
-            (self.player.position.z as i32).div_euclid(16),
-        );
+        let player_chunk = self.player_chunk();
         let min_section_y = self.chunk_store.min_y() >> 4;
         let section_count = self.chunk_store.section_count();
         for key in &dirty.sections {
