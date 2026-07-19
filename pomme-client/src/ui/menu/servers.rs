@@ -87,6 +87,20 @@ impl MainMenu {
         let list_left = list_cx - row_w / 2.0;
         let ping_results = self.ping_results.read().clone();
 
+        // Persist pinged protocols for joins before a ping completes.
+        let mut protocol_changed = false;
+        for server in &mut self.server_list.servers {
+            if let Some(PingState::Success { protocol, .. }) = ping_results.get(&server.address)
+                && server.protocol != Some(*protocol)
+            {
+                server.protocol = Some(*protocol);
+                protocol_changed = true;
+            }
+        }
+        if protocol_changed {
+            self.server_list.save();
+        }
+
         elements.push(MenuElement::ScissorPush {
             x: 0.0,
             y: list_top,
@@ -225,7 +239,7 @@ impl MainMenu {
                     action = MenuAction::Connect {
                         server: server.address.clone(),
                         username: self.username.clone(),
-                        protocol: pinged_protocol(&ping_results, &server.address),
+                        protocol: join_protocol(&ping_results, &server.address, server.protocol),
                     };
                 } else if on_icon && top_left && i > 0 {
                     pending_swap = Some((i, i - 1));
@@ -240,7 +254,11 @@ impl MainMenu {
                         action = MenuAction::Connect {
                             server: server.address.clone(),
                             username: self.username.clone(),
-                            protocol: pinged_protocol(&ping_results, &server.address),
+                            protocol: join_protocol(
+                                &ping_results,
+                                &server.address,
+                                server.protocol,
+                            ),
                         };
                     } else {
                         self.selected_server = Some(i);
@@ -358,7 +376,7 @@ impl MainMenu {
             action = MenuAction::Connect {
                 server: server.address.clone(),
                 username: self.username.clone(),
-                protocol: pinged_protocol(&ping_results, &server.address),
+                protocol: join_protocol(&ping_results, &server.address, server.protocol),
             };
         }
         if push_button(
@@ -678,10 +696,16 @@ impl MainMenu {
             || enter_submit
         {
             self.last_mp_ip = self.edit_address.clone();
+            let persisted = self
+                .server_list
+                .servers
+                .iter()
+                .find(|s| s.address == self.edit_address)
+                .and_then(|s| s.protocol);
             action = MenuAction::Connect {
                 server: self.edit_address.clone(),
                 username: self.username.clone(),
-                protocol: None,
+                protocol: join_protocol(&self.ping_results.read(), &self.edit_address, persisted),
             };
         }
         y += btn_h + gap;
@@ -835,11 +859,20 @@ impl MainMenu {
             } else {
                 self.edit_name.clone()
             };
-            let entry = ServerEntry {
+            let mut entry = ServerEntry {
                 name,
                 address: self.edit_address.clone(),
+                protocol: None,
+                extra: Default::default(),
             };
             if let Screen::EditServer(idx) = self.screen {
+                if let Some(old) = self.server_list.servers.get(idx) {
+                    entry.extra = old.extra.clone();
+                    // The pinged protocol stays valid while the address does.
+                    if old.address == entry.address {
+                        entry.protocol = old.protocol;
+                    }
+                }
                 self.server_list.update(idx, entry);
             } else {
                 self.server_list.add(entry);
@@ -1063,13 +1096,15 @@ pub(super) fn write_clipboard(text: &str) -> bool {
     crate::ui::common::set_clipboard(text)
 }
 
-/// The protocol number from `address`'s completed ping, if any.
-fn pinged_protocol(
+/// The protocol to join `address` with: the completed ping's, else the
+/// persisted one, so the join skips the wire-version probe when possible.
+fn join_protocol(
     ping_results: &std::collections::HashMap<String, PingState>,
     address: &str,
+    persisted: Option<i32>,
 ) -> Option<i32> {
     match ping_results.get(address) {
         Some(PingState::Success { protocol, .. }) => Some(*protocol),
-        _ => None,
+        _ => persisted,
     }
 }

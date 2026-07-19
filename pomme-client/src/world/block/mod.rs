@@ -488,12 +488,19 @@ pub fn init(version: &str) {
 /// Only safe between worlds — meshes built against the previous table
 /// interpret ids in the old id space.
 pub fn set_active_protocol(protocol: i32) {
+    let slot = prewarm_protocol(protocol);
+    ACTIVE_TABLE.store(slot, std::sync::atomic::Ordering::Release);
+}
+
+/// Builds the given protocol's table if it isn't already, without switching
+/// to it; safe at any time (e.g. from a server-list ping, ahead of the join).
+pub fn prewarm_protocol(protocol: i32) -> usize {
     let slot = BLOCK_DATA
         .iter()
         .position(|&(p, _)| p == protocol)
         .unwrap_or(0);
     BLOCK_TABLES[slot].get_or_init(|| build_table(BLOCK_DATA[slot].1, LIGHT_DATA[slot]));
-    ACTIVE_TABLE.store(slot, std::sync::atomic::Ordering::Release);
+    slot
 }
 
 fn build_table(data: &str, light_data: &str) -> Vec<BlockData> {

@@ -605,6 +605,7 @@ async fn game_loop(
     let registry_holder = std::sync::Arc::new(registry_holder);
     let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
 
+    let translation = super::translate::active();
     loop {
         let raw = match reader.raw.read().await {
             Ok(raw) => raw,
@@ -613,7 +614,7 @@ async fn game_loop(
                 continue;
             }
         };
-        let raw = match super::translate::active() {
+        let raw = match translation {
             Some(t) => match t.translate_game_frame(raw) {
                 Some(raw) => raw,
                 None => continue,
@@ -625,7 +626,7 @@ async fn game_loop(
         }
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
             Ok(mut packet) => {
-                if let Some(t) = super::translate::active()
+                if let Some(t) = translation
                     && !t.remap_inbound(&mut packet)
                 {
                     continue;

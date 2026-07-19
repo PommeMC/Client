@@ -14,6 +14,7 @@ export const useServers = () => {
       name: s.name,
       address: s.ip,
       category: s.category || undefined,
+      protocol: s.protocol,
     }));
     commands.saveServers(saved).then((res) => {
       if (!res.ok) console.error(res.error);
@@ -55,6 +56,7 @@ export const useServers = () => {
         name: s.name,
         ip: s.address,
         category: s.category || "",
+        protocol: s.protocol,
         players: 0,
         max_players: 0,
         ping: -1,
@@ -102,7 +104,12 @@ export const useServers = () => {
     setServers((prev) => {
       const existing = prev.find((s) => s.id === id);
       ipChanged = existing ? existing.ip !== ip : false;
-      const next = prev.map((s) => (s.id === id ? { ...s, name, ip, category } : s));
+      // The client's pinged protocol stays valid while the address does.
+      const next = prev.map((s) =>
+        s.id === id
+          ? { ...s, name, ip, category, protocol: s.ip === ip ? s.protocol : undefined }
+          : s,
+      );
       persist(next);
       return next;
     });

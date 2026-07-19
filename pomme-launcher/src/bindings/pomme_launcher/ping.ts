@@ -3,6 +3,11 @@ export type SavedServer = {
 	name: string,
 	address: string,
 	category?: string,
+	/**
+	 *  The client's last-pinged protocol for this server; owned by the
+	 *  client, carried through so a launcher save doesn't strip it.
+	 */
+	protocol?: number | null,
 };
 
 export type ServerStatus = {
