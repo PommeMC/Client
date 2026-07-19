@@ -170,7 +170,8 @@ impl MainMenu {
             }
             if input.backspace && self.editor_caret > 0 {
                 let prev = prev_boundary(&self.editor_buffer, self.editor_caret);
-                self.editor_buffer.replace_range(prev..self.editor_caret, "");
+                self.editor_buffer
+                    .replace_range(prev..self.editor_caret, "");
                 self.editor_caret = prev;
                 changed = true;
             }
@@ -278,7 +279,12 @@ impl MainMenu {
         let back_rect = [x0, header_y, back_w, header_h];
         let back_hover = common::hit_test(cursor, back_rect);
         any_hovered |= back_hover;
-        push_panel(&mut elements, back_rect, 6.0 * s, hover_col(&pal, back_hover));
+        push_panel(
+            &mut elements,
+            back_rect,
+            6.0 * s,
+            hover_col(&pal, back_hover),
+        );
         elements.push(MenuElement::Text {
             x: x0 + back_w / 2.0,
             y: header_y + (header_h - ui_fs) / 2.0,
