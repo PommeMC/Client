@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use azalea_block::BlockState;
 
 use super::data::{DataLayer, LAYER_BYTES};
+use super::engine::LightEngine;
 use super::opacity;
 use super::queue::{self as entry, Dir};
 use super::sources::ChunkSkyLightSources;
@@ -202,76 +203,10 @@ impl SkyLightEngine {
         }
     }
 
-    /// First half of vanilla `runLightUpdates`; see
-    /// `BlockLightEngine::begin_updates`.
-    pub fn begin_updates(&mut self, world: &impl LightBlockGetter) {
-        let nodes: Vec<LightPos> = self.nodes_to_check.drain().collect();
-        for pos in nodes {
-            self.check_node(pos);
-        }
-        self.propagate_decreases();
-        world.clear_cache();
-        self.storage.mark_new_inconsistencies(&mut self.sky);
-    }
-
-    /// Second half of vanilla `runLightUpdates`: the increase pass.
-    pub fn finish_updates(&mut self, world: &impl LightBlockGetter) {
-        while let Some((from, data)) = self.increase_queue.pop_front() {
-            if !self.storage.storing_light_for_section(from.section()) {
-                continue;
-            }
-            let mut from_level = self.storage.get_stored_level(from);
-            let target = entry::get_from_level(data);
-            if entry::is_increase_from_emission(data) && from_level < target {
-                self.storage.set_stored_level(from, target);
-                from_level = target;
-            }
-            if from_level == target {
-                self.propagate_increase(world, from, data, from_level);
-            }
-        }
-    }
-
-    fn propagate_decreases(&mut self) {
-        while let Some((from, data)) = self.decrease_queue.pop_front() {
-            self.propagate_decrease(from, data);
-        }
-    }
-
     fn lowest_source_y(&self, x: i32, z: i32, default: i32) -> i32 {
         match self.sources.get(&(x >> 4, z >> 4)) {
             Some(sources) => sources.lowest_source_y(x & 15, z & 15),
             None => default,
-        }
-    }
-
-    fn check_node(&mut self, pos: LightPos) {
-        let section = pos.section();
-        let lowest_source_y = if self.storage.light_on_in_section(section) {
-            self.lowest_source_y(pos.x, pos.z, i32::MAX)
-        } else {
-            i32::MAX
-        };
-        if lowest_source_y != i32::MAX {
-            self.update_sources_in_column(pos.x, pos.z, lowest_source_y);
-        }
-        if !self.storage.storing_light_for_section(section) {
-            return;
-        }
-        if pos.y >= lowest_source_y {
-            self.decrease_queue
-                .push_back((pos, REMOVE_SKY_SOURCE_ENTRY));
-            self.increase_queue.push_back((pos, ADD_SKY_SOURCE_ENTRY));
-        } else {
-            let old_level = self.storage.get_stored_level(pos);
-            if old_level > 0 {
-                self.storage.set_stored_level(pos, 0);
-                self.decrease_queue
-                    .push_back((pos, entry::decrease_all_directions(old_level)));
-            } else {
-                self.decrease_queue
-                    .push_back((pos, entry::PULL_LIGHT_IN_ENTRY));
-            }
         }
     }
 
@@ -340,6 +275,58 @@ impl SkyLightEngine {
             key = key.offset(0, 1, 0);
         }
     }
+}
+
+impl LightEngine for SkyLightEngine {
+    fn storage(&mut self) -> &mut StorageCore {
+        &mut self.storage
+    }
+
+    fn nodes_to_check(&mut self) -> &mut HashSet<LightPos> {
+        &mut self.nodes_to_check
+    }
+
+    fn increase_queue(&mut self) -> &mut VecDeque<(LightPos, u64)> {
+        &mut self.increase_queue
+    }
+
+    fn decrease_queue(&mut self) -> &mut VecDeque<(LightPos, u64)> {
+        &mut self.decrease_queue
+    }
+
+    fn mark_new_inconsistencies(&mut self) {
+        self.storage.mark_new_inconsistencies(&mut self.sky);
+    }
+
+    fn check_node(&mut self, _world: &impl LightBlockGetter, pos: LightPos) {
+        let section = pos.section();
+        let lowest_source_y = if self.storage.light_on_in_section(section) {
+            self.lowest_source_y(pos.x, pos.z, i32::MAX)
+        } else {
+            i32::MAX
+        };
+        if lowest_source_y != i32::MAX {
+            self.update_sources_in_column(pos.x, pos.z, lowest_source_y);
+        }
+        if !self.storage.storing_light_for_section(section) {
+            return;
+        }
+        if pos.y >= lowest_source_y {
+            self.decrease_queue
+                .push_back((pos, REMOVE_SKY_SOURCE_ENTRY));
+            self.increase_queue.push_back((pos, ADD_SKY_SOURCE_ENTRY));
+        } else {
+            let old_level = self.storage.get_stored_level(pos);
+            if old_level > 0 {
+                self.storage.set_stored_level(pos, 0);
+                self.decrease_queue
+                    .push_back((pos, entry::decrease_all_directions(old_level)));
+            } else {
+                self.decrease_queue
+                    .push_back((pos, entry::PULL_LIGHT_IN_ENTRY));
+            }
+        }
+    }
 
     fn propagate_increase(
         &mut self,
@@ -398,7 +385,7 @@ impl SkyLightEngine {
         }
     }
 
-    fn propagate_decrease(&mut self, from: LightPos, data: u64) {
+    fn propagate_decrease(&mut self, _world: &impl LightBlockGetter, from: LightPos, data: u64) {
         let empty_sections_below = self.count_empty_sections_below_if_at_border(from);
         let old_from_level = entry::get_from_level(data) as i32;
         for dir in Dir::ALL {
@@ -428,7 +415,9 @@ impl SkyLightEngine {
             }
         }
     }
+}
 
+impl SkyLightEngine {
     /// How many non-storing sections sit directly below a section-boundary
     /// border cell — the only place light can cross into empty sections.
     fn count_empty_sections_below_if_at_border(&self, pos: LightPos) -> i32 {

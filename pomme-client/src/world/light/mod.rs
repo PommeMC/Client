@@ -15,6 +15,7 @@
 
 mod block;
 mod data;
+mod engine;
 mod queue;
 mod sky;
 mod sources;
@@ -27,6 +28,7 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 use block::BlockLightEngine;
 use data::{DataLayer, LAYER_BYTES};
+use engine::LightEngine;
 use sky::SkyLightEngine;
 use sources::ChunkSkyLightSources;
 use storage::StorageCore;
@@ -442,7 +444,7 @@ mod tests {
         engine
     }
 
-    fn run(engine: &mut BlockLightEngine, world: &TestWorld) {
+    fn run(engine: &mut impl LightEngine, world: &TestWorld) {
         engine.begin_updates(world);
         engine.finish_updates(world);
     }
@@ -578,11 +580,6 @@ mod tests {
         assert_eq!(level(&engine, 8, 10, 8), 10);
     }
 
-    fn sky_run(engine: &mut SkyLightEngine, world: &TestWorld) {
-        engine.begin_updates(world);
-        engine.finish_updates(world);
-    }
-
     fn sky_level(engine: &SkyLightEngine, x: i32, y: i32, z: i32) -> u8 {
         engine.storage.get_stored_level(LightPos::new(x, y, z))
     }
@@ -614,7 +611,7 @@ mod tests {
             .flat_map(|x| (0..16).map(move |z| (x, 0, z)))
             .collect();
         let mut engine = sky_engine(&world, &floor);
-        sky_run(&mut engine, &world);
+        run(&mut engine, &world);
         // Enabling pre-filled the fully-above-terrain section with 15.
         assert_eq!(sky_level(&engine, 8, 20, 8), 15);
         assert_eq!(sky_level(&engine, 8, -1, 8), 0);
@@ -629,7 +626,7 @@ mod tests {
             8,
         );
         engine.check_block(LightPos::new(8, 0, 8));
-        sky_run(&mut engine, &world);
+        run(&mut engine, &world);
         assert_eq!(sky_level(&engine, 8, 0, 8), 15);
         assert_eq!(sky_level(&engine, 8, -10, 8), 15);
         assert_eq!(sky_level(&engine, 9, 0, 8), 0); // stone floor
@@ -646,7 +643,7 @@ mod tests {
             8,
         );
         engine.check_block(LightPos::new(8, 0, 8));
-        sky_run(&mut engine, &world);
+        run(&mut engine, &world);
         for (x, y, z) in [(8, 0, 8), (8, -10, 8), (9, -1, 8), (12, -1, 8)] {
             assert_eq!(sky_level(&engine, x, y, z), 0, "at {x} {y} {z}");
         }
@@ -659,7 +656,7 @@ mod tests {
         world.set(8, 10, 8, find_state("oak_leaves", &[]));
         let mut engine = sky_engine(&world, &[(8, 10, 8)]);
         engine.check_block(LightPos::new(8, 10, 8));
-        sky_run(&mut engine, &world);
+        run(&mut engine, &world);
 
         // Sources stop above the leaf; below it the light falls with the
         // leaf's opacity of 1 and then keeps losing 1 per non-source step.
