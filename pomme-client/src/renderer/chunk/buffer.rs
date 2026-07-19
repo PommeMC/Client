@@ -1,10 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use azalea_core::position::{ChunkPos, ChunkSectionPos};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
+use super::dispatcher::pack_section_pos;
 use super::mesher::{ChunkVertex, SectionMeshData};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 use crate::util::ChunkRing;
@@ -207,10 +208,6 @@ pub struct ChunkBufferStore {
     vtx_free: FreeList,
     idx_free: FreeList,
     chunks: HashMap<ChunkPos, ChunkAlloc>,
-    /// Per-column bitmask of occlusion-visible section indices (bit `si`), from
-    /// the CPU visibility graph. A column absent here defaults to fully
-    /// visible, so freshly-loaded-but-not-yet-graphed columns still draw.
-    chunk_visibility: HashMap<ChunkPos, u32>,
     cached_meta: Vec<ChunkMeta>,
     meta_dirty: bool,
     compute_pipeline: vk::Pipeline,
@@ -496,7 +493,6 @@ impl ChunkBufferStore {
             vtx_free,
             idx_free,
             chunks: HashMap::new(),
-            chunk_visibility: HashMap::new(),
             cached_meta: Vec::new(),
             meta_dirty: true,
             compute_pipeline,
@@ -532,10 +528,24 @@ impl ChunkBufferStore {
         queue: vk::Queue,
         mesh_queue: &mut VecDeque<SectionMeshData>,
     ) -> Vec<(ChunkSectionPos, u64)> {
-        tracing::debug!(
-            "upload_mesh_batch called with {} meshes in queue",
-            mesh_queue.len()
-        );
+        // Keep only the newest result per section before draining: the stale
+        // check below reads `self.chunks`, which only reflects this batch's
+        // uploads after the loop, so two same-section results in one drain
+        // would otherwise both be accepted and the section drawn twice.
+        // (Keyed by packed pos: azalea's ChunkSectionPos doesn't impl Hash.)
+        let mut best: HashMap<u64, u64> = HashMap::new();
+        for mesh in mesh_queue.iter() {
+            let key = pack_section_pos(mesh.spos);
+            let epoch = best.entry(key).or_insert(mesh.upload_epoch);
+            *epoch = (*epoch).max(mesh.upload_epoch);
+        }
+        if best.len() < mesh_queue.len() {
+            let mut seen = HashSet::new();
+            mesh_queue.retain(|m| {
+                let key = pack_section_pos(m.spos);
+                m.upload_epoch == best[&key] && seen.insert(key)
+            });
+        }
         let section_aabb = |verts: &[ChunkVertex]| -> ChunkAABB {
             let mut mn = [f32::MAX; 3];
             let mut mx = [f32::MIN; 3];
@@ -867,15 +877,6 @@ impl ChunkBufferStore {
         self.vtx_free.free_region(vo, vl);
         self.idx_free.free_region(io, il);
     }
-    /// Return slices immediately. Only safe for slices never submitted to a
-    /// frame (e.g. rolling back allocations made earlier in the same `upload`);
-    /// slices that may still be drawn by an in-flight frame must go through
-    /// `retire_slices`.
-    fn free_slices(&mut self, slices: &[(u32, u32, u32, u32)]) {
-        for &slice in slices {
-            self.free_slice(slice);
-        }
-    }
     /// Defer returning slices to the pools until `MAX_FRAMES_IN_FLIGHT` frames
     /// have passed, so the GPU can't still be reading them from an in-flight
     /// frame. Use for slices that were potentially drawn (re-mesh replacement,
@@ -926,13 +927,7 @@ impl ChunkBufferStore {
     pub fn chunk_count(&self) -> u32 {
         self.chunks.len() as u32
     }
-    /// Push the CPU visibility graph's per-column visible-section masks.
-    /// Columns not present default to fully visible, so the cull only omits
-    /// sections the graph proved occluded.
-    pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
-        self.chunk_visibility = vis;
-        self.meta_dirty = true;
-    }
+    #[allow(clippy::too_many_arguments)]
     pub fn dispatch_cull(
         &mut self,
         cmd: vk::CommandBuffer,
@@ -967,15 +962,12 @@ impl ChunkBufferStore {
                         continue;
                     }
                 }
-                // CPU omission: the visibility graph's mask skips sections proven
-                // occluded, so they never reach the GPU cull (absent => all draw).
-                let in_range = (pos.x - visibility_center.x).abs() <= 64
-                    && (pos.z - visibility_center.z).abs() <= 64;
-                let col_vis = if in_range {
-                    *vis_mask.get(*pos)
-                } else {
-                    0xFFFFFFFF
-                };
+                // The GPU visibility pass's mask skips sections proven occluded;
+                // columns outside its ring draw unconditionally.
+                let col_vis = vis_mask
+                    .get_in_range(*pos, visibility_center)
+                    .copied()
+                    .unwrap_or(u32::MAX);
                 for sec in &alloc.sections {
                     if col_vis & (1u32 << sec.section_index) == 0 {
                         continue;
@@ -1140,13 +1132,10 @@ impl ChunkBufferStore {
         cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
         let now = std::time::Instant::now();
         for (pos, alloc) in self.chunks.iter() {
-            let in_range = (pos.x - visibility_center.x).abs() <= 64
-                && (pos.z - visibility_center.z).abs() <= 64;
-            let col_vis = if in_range {
-                *vis_mask.get(*pos)
-            } else {
-                0xFFFFFFFF
-            };
+            let col_vis = vis_mask
+                .get_in_range(*pos, visibility_center)
+                .copied()
+                .unwrap_or(u32::MAX);
             for sec in &alloc.sections {
                 if sec.water_index_count == 0
                     || col_vis & (1u32 << sec.section_index) == 0

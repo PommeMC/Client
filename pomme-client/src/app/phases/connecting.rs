@@ -35,9 +35,7 @@ pub fn update_connecting(
     }
 
     if matches!(connect_phase, ConnectionPhase::Loading) {
-        gfx.renderer
-            .mesh_queue
-            .extend(game.meshing.drain_results());
+        gfx.renderer.mesh_queue.extend(game.meshing.drain_results());
         if !gfx.renderer.mesh_queue.is_empty() {
             gfx.renderer.upload_mesh_batch();
         }

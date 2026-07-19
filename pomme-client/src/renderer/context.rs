@@ -48,9 +48,7 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[
 
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceFeatures {
-    pub fill_mode_non_solid: bool,
     pub timestamp_queries: bool,
-    pub draw_indirect_first_instance: bool,
 }
 
 pub struct VulkanContext {
@@ -215,14 +213,12 @@ impl VulkanContext {
         if draw_indirect_first_instance {
             tracing::info!("drawIndirectFirstInstance supported, chunk fade-in available");
         } else {
-            tracing::warn!("drawIndirectFirstInstance not supported, chunk fade-in may display incorrectly");
+            tracing::warn!(
+                "drawIndirectFirstInstance not supported, chunk fade-in may display incorrectly"
+            );
         }
 
-        let features = DeviceFeatures {
-            fill_mode_non_solid,
-            timestamp_queries,
-            draw_indirect_first_instance,
-        };
+        let features = DeviceFeatures { timestamp_queries };
 
         let queue_priority = 1.0f32;
 

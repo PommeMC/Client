@@ -384,19 +384,6 @@ impl ApplicationHandler for App {
                                         {
                                             game.show_chunk_borders = !game.show_chunk_borders;
                                         }
-                                        // KeyCode::KeyO
-                                        //     if self.core.input.key_pressed(KeyCode::F3) =>
-                                        // {
-                                        //     game.chunk_occlusion_enabled =
-                                        //         !game.chunk_occlusion_enabled;
-                                        //     // Force the throttled recompute to run
-                                        //     // next frame so the toggle takes effect.
-                                        //     game.vis_valid = false;
-                                        //     tracing::info!(
-                                        //         "Chunk occlusion: {}",
-                                        //         game.chunk_occlusion_enabled
-                                        //     );
-                                        // }
                                         _ => {}
                                     }
                                 }

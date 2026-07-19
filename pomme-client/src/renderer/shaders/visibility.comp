@@ -10,11 +10,10 @@ struct Uniform {
     ivec4 vis_center;     // x,z = center in section coords, y = min_y in sections, w = max_y in sections
     vec4 camera_pos;
     int radius;
-    int height;           // Number of section layers
-
+    int section_count;    // Number of section layers (<= 32, one bit each)
     int padding0;
     int padding1;
-vec4 frustum_planes[6];
+    vec4 frustum_planes[6];
 };
 
 layout(set = 0, binding = 0, std430) buffer Visible {
@@ -37,8 +36,9 @@ void main() {
     int section_y = gid.y;
     int rz = gid.z;
     
+    // section_y also bounds the 1u << section_y below (32 bits per column).
     if (rx < 0 || rx >= MAX_SIZE ||
-        section_y < 0 || section_y >= ubo.height ||
+        section_y < 0 || section_y >= min(ubo.section_count, 32) ||
         rz < 0 || rz >= MAX_SIZE) {
         return;
     }
@@ -103,27 +103,28 @@ void main() {
         vec3 rel = corners_ws[i] - ubo.camera_pos.xyz;
         corners_clip[i] = ubo.view_proj * vec4(rel, 1.0);
     }
-for (int plane = 0; plane < 6; plane++) {
-    // Frustum plane: dot(plane.xyz, point) + plane.w >= 0 means inside
-    // The 6 planes are: left, right, bottom, top, near, far
-    // (These match what Camera::frustum_planes() returns)
-    
-    // n-p vertex: pick the corner furthest in the plane's normal direction
-    vec3 n_p = vec3(
-        ubo.frustum_planes[plane].x >= 0.0 ? bmax.x : bmin.x,
-        ubo.frustum_planes[plane].y >= 0.0 ? bmax.y : bmin.y,
-        ubo.frustum_planes[plane].z >= 0.0 ? bmax.z : bmin.z
-    );
-    
-    // Camera-relative
-    vec3 rel = n_p - ubo.camera_pos.xyz;
-    
-    float d = dot(ubo.frustum_planes[plane].xyz, rel) + ubo.frustum_planes[plane].w;
-    if (d < 0.0) {
-        return;  // AABB completely outside this plane
+    for (int plane = 0; plane < 6; plane++) {
+        // Frustum plane: dot(plane.xyz, point) + plane.w >= 0 means inside
+        // The 6 planes are: left, right, bottom, top, near, far
+        // (These match what Camera::frustum_planes() returns)
+
+        // n-p vertex: pick the corner furthest in the plane's normal direction
+        vec3 n_p = vec3(
+            ubo.frustum_planes[plane].x >= 0.0 ? bmax.x : bmin.x,
+            ubo.frustum_planes[plane].y >= 0.0 ? bmax.y : bmin.y,
+            ubo.frustum_planes[plane].z >= 0.0 ? bmax.z : bmin.z
+        );
+
+        // Camera-relative
+        vec3 rel = n_p - ubo.camera_pos.xyz;
+
+        float d = dot(ubo.frustum_planes[plane].xyz, rel) + ubo.frustum_planes[plane].w;
+        if (d < 0.0) {
+            return;  // AABB completely outside this plane
+        }
     }
-}    
-    
+
+
     // Screen-space bounds for HiZ
     vec2 min_xy = vec2(1.0);
     vec2 max_xy = vec2(0.0);

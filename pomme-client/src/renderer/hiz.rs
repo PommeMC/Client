@@ -174,24 +174,23 @@ impl HizPipeline {
             .expect("failed to create hiz depth sampler");
 
         let max_dim = width.max(height).max(1);
-        let mip_levels = (u32::BITS - max_dim.leading_zeros()) as u32;
+        let mip_levels = u32::BITS - max_dim.leading_zeros();
 
-        let mut frame_resources: [HizPyramidResources; MAX_FRAMES_IN_FLIGHT] =
-            unsafe { std::mem::zeroed() };
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            frame_resources[i] = create_frame_resources(
-                device,
-                allocator,
-                width,
-                height,
-                mip_levels,
-                depth_view,
-                &copy_layout,
-                &reduce_layout,
-                depth_sampler,
-                i,
-            );
-        }
+        let frame_resources: [HizPyramidResources; MAX_FRAMES_IN_FLIGHT] =
+            std::array::from_fn(|i| {
+                create_frame_resources(
+                    device,
+                    allocator,
+                    width,
+                    height,
+                    mip_levels,
+                    depth_view,
+                    &copy_layout,
+                    &reduce_layout,
+                    depth_sampler,
+                    i,
+                )
+            });
 
         Self {
             copy_layout,
@@ -242,7 +241,7 @@ impl HizPipeline {
         }
 
         let max_dim = width.max(height).max(1);
-        let mip_levels = (u32::BITS - max_dim.leading_zeros()) as u32;
+        let mip_levels = u32::BITS - max_dim.leading_zeros();
 
         for i in 0..MAX_FRAMES_IN_FLIGHT {
             self.frame_resources[i] = create_frame_resources(
@@ -359,8 +358,8 @@ impl HizPipeline {
             &[resources.copy_set],
             &[],
         );
-        let gx = (extent.width + 7) / 8;
-        let gy = (extent.height + 7) / 8;
+        let gx = extent.width.div_ceil(16);
+        let gy = extent.height.div_ceil(16);
         cmd.dispatch(gx.max(1), gy.max(1), 1);
 
         let mip0_range = vk::ImageSubresourceRange {
@@ -429,8 +428,8 @@ impl HizPipeline {
                 &[resources.reduce_sets[(level - 1) as usize]],
                 &[],
             );
-            let gx = (w + 7) / 8;
-            let gy = (h + 7) / 8;
+            let gx = w.div_ceil(16);
+            let gy = h.div_ceil(16);
             cmd.dispatch(gx.max(1), gy.max(1), 1);
             w = (w / 2).max(1);
             h = (h / 2).max(1);
@@ -458,6 +457,7 @@ impl HizPipeline {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_frame_resources(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,

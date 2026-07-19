@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use azalea_block::BlockState;
 use azalea_core::position::{
     ChunkPos, ChunkSectionBiomePos, ChunkSectionBlockPos, ChunkSectionPos,
@@ -17,16 +15,6 @@ pub struct LocalSection {
 }
 
 impl LocalSection {
-    pub fn new(shared: &SharedChunkStore, spos: ChunkSectionPos) -> Self {
-        let mut section = Self {
-            blocks: [[[BlockState::AIR; 18]; 18]; 18],
-            biomes: [[[Biome::default(); 6]; 6]; 6],
-            light: [[[0; 18]; 18]; 18],
-        };
-        section.build(shared, spos);
-        section
-    }
-
     pub fn new_boxed(shared: &SharedChunkStore, spos: ChunkSectionPos) -> Box<Self> {
         let mut section = Box::new(Self {
             blocks: [[[BlockState::AIR; 18]; 18]; 18],
@@ -57,8 +45,7 @@ impl LocalSection {
                     x: spos.x + (x as i32) - 1,
                     z: spos.z + (z as i32) - 1,
                 };
-                let ptr = shared.light_data.get(pos).load(Ordering::Acquire, &guard);
-                unsafe { ptr.as_ref() }
+                shared.get_light_guard(pos, &guard)
             })
         });
         for lx in -1i32..17 {
@@ -138,7 +125,7 @@ impl LocalSection {
     /// Returns AIR if coordinates are out of bounds.
     #[inline]
     pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> BlockState {
-        if x < -1 || x >= 17 || y < -1 || y >= 17 || z < -1 || z >= 17 {
+        if !(-1..17).contains(&x) || !(-1..17).contains(&y) || !(-1..17).contains(&z) {
             return BlockState::AIR;
         }
         self.blocks[(x + 1) as usize][(y + 1) as usize][(z + 1) as usize]
@@ -148,17 +135,18 @@ impl LocalSection {
     /// Returns default biome if coordinates are out of bounds.
     #[inline]
     pub fn get_biome(&self, x: i32, y: i32, z: i32) -> Biome {
-        if x < -1 || x >= 17 || y < -1 || y >= 17 || z < -1 || z >= 17 {
+        if !(-1..17).contains(&x) || !(-1..17).contains(&y) || !(-1..17).contains(&z) {
             return Biome::default();
         }
-        self.biomes[((x / 4) + 1) as usize][((y / 4) + 1) as usize][((z / 4) + 1) as usize]
+        self.biomes[(x.div_euclid(4) + 1) as usize][(y.div_euclid(4) + 1) as usize]
+            [(z.div_euclid(4) + 1) as usize]
     }
 
     /// Gets the maximum of sky and block light at local block coordinates
     /// (-1..17). Returns 15 if coordinates are out of bounds.
     #[inline]
     pub fn get_light(&self, x: i32, y: i32, z: i32) -> u8 {
-        if x < -1 || x >= 17 || y < -1 || y >= 17 || z < -1 || z >= 17 {
+        if !(-1..17).contains(&x) || !(-1..17).contains(&y) || !(-1..17).contains(&z) {
             return 15;
         }
         self.light[(x + 1) as usize][(y + 1) as usize][(z + 1) as usize]

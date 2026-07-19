@@ -12,13 +12,20 @@ void main() {
     
     ivec2 src_pos = pos * 2;
     ivec2 src_size = imageSize(input_mip);
-    
-    float s00 = imageLoad(input_mip, src_pos).r;
-    float s10 = imageLoad(input_mip, clamp(src_pos + ivec2(1, 0), ivec2(0), src_size - 1)).r;
-    float s01 = imageLoad(input_mip, clamp(src_pos + ivec2(0, 1), ivec2(0), src_size - 1)).r;
-    float s11 = imageLoad(input_mip, clamp(src_pos + ivec2(1, 1), ivec2(0), src_size - 1)).r;
-    
-    float max_d = max(max(s00, s10), max(s01, s11));
-    
+
+    // Output dims are floor(input/2), so an odd input dimension leaves a last
+    // row/column no 2x2 footprint covers; widen the edge texel to 3 there or
+    // the max is underestimated and geometry gets wrongly culled.
+    int nx = (src_size.x & 1) != 0 && pos.x == size.x - 1 ? 3 : 2;
+    int ny = (src_size.y & 1) != 0 && pos.y == size.y - 1 ? 3 : 2;
+
+    float max_d = 0.0;
+    for (int y = 0; y < ny; y++) {
+        for (int x = 0; x < nx; x++) {
+            ivec2 p = min(src_pos + ivec2(x, y), src_size - 1);
+            max_d = max(max_d, imageLoad(input_mip, p).r);
+        }
+    }
+
     imageStore(output_mip, pos, vec4(max_d, 0.0, 0.0, 0.0));
 }

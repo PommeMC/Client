@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -23,7 +22,6 @@ pub fn init(log_dir: &Path) -> WorkerGuard {
         .with(
             fmt::layer()
                 .with_writer(std::io::stdout)
-                .with_span_events(FmtSpan::CLOSE)
                 .with_filter(stdout_filter),
         )
         .init();

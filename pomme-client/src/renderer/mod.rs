@@ -78,7 +78,6 @@ struct FrameCtx {
     frame: usize,
     image_index: u32,
     cmd: vk::CommandBuffer,
-    extent: vk::Extent2D,
     viewport: vk::Viewport,
     scissor: vk::Rect2D,
 }
@@ -837,18 +836,6 @@ impl Renderer {
         *self.camera.position + self.camera.third_person_offset().as_dvec3()
     }
 
-    /// Six normalized frustum planes (camera-relative, same convention as the
-    /// GPU cull), for CPU-side visibility classification of
-    /// mesh-scheduling.
-    pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
-        self.camera.frustum_planes()
-    }
-
-    /// Frustum planes widened by `extra_radians` of FOV, for the tier-1 margin.
-    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
-        self.camera.frustum_planes_dilated(extra_radians)
-    }
-
     pub fn cycle_camera_mode(&mut self) {
         self.camera.mode = self.camera.mode.cycle();
     }
@@ -1332,7 +1319,6 @@ impl Renderer {
             frame,
             image_index,
             cmd,
-            extent,
             viewport,
             scissor,
         })
@@ -1514,9 +1500,13 @@ impl Renderer {
         let timer = Timer::new(ctx.cmd, timer_pool);
 
         let frame_start_timer = timer.scope(Timestamp::FrameStart, Timestamp::FrameEnd);
-        let mut visibility_mask = ChunkRing::<u32>::new(0);
-        let readback = self.visibility_pipeline.readback(frame);
-        visibility_mask.buf.copy_from_slice(readback);
+        // Fail open: until this frame slot's visibility pass has run once, its
+        // readback is all zeroes, which would cull every section (and gate its
+        // meshing) instead of drawing everything.
+        let mut visibility_mask = ChunkRing::<u32>::new(u32::MAX);
+        if let Some(readback) = self.visibility_pipeline.readback(frame) {
+            visibility_mask.buf.copy_from_slice(readback);
+        }
         let visibility_center = self.visibility_pipeline.vis_center(frame);
         let cull_timer = timer.scope(Timestamp::CullStart, Timestamp::CullEnd);
         let frustum = self.camera.frustum_planes();
@@ -1583,6 +1573,23 @@ impl Renderer {
             clear_values: clear_values.as_ptr(),
             ..Default::default()
         };
+
+        // The depth image is shared by every frame in flight, and the previous
+        // frame's Hi-Z pass reads it on the compute stage after that frame's
+        // render pass ended; nothing else orders that read against this
+        // frame's depth writes (the render pass's external dependency only
+        // covers fragment stages, and the fence is 3 frames behind). Barriers
+        // are queue-scoped, so this execution dependency makes this frame's
+        // depth-writing stages wait out any in-flight Hi-Z read
+        // (write-after-read: no access masks needed).
+        ctx.cmd.pipeline_barrier(
+            vk::PipelineStageFlags::ComputeShader,
+            vk::PipelineStageFlags::EarlyFragmentTests | vk::PipelineStageFlags::LateFragmentTests,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[],
+        );
 
         ctx.cmd
             .begin_render_pass(&render_pass_info, vk::SubpassContents::Inline);

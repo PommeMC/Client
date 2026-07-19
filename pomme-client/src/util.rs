@@ -2,7 +2,6 @@
 use azalea_core::position::{ChunkPos, ChunkSectionPos};
 
 pub const MAX_RD: u32 = 64;
-pub const MIN_RD: u32 = 2;
 
 pub const MAX_SIZE: usize = (MAX_RD * 2 + 1) as usize;
 pub const SIZE_Y: usize = 32;
@@ -51,7 +50,6 @@ impl JavaRandom {
 
 /// A ring buffer for chunk data, indexed by ChunkPos.
 /// Uses a flattened 2D buffer of size SIZE x SIZE.
-#[derive(Clone)]
 pub struct ChunkRing<T> {
     pub buf: Box<[T]>,
 }
@@ -88,18 +86,15 @@ impl<T> ChunkRing<T> {
         &self.buf[idx]
     }
 
-    /// Gets a mutable reference to the element at the given chunk position.
+    /// `get`, but `None` when `pos` is outside the ring's addressable window
+    /// around `center`. Slots carry no position tag and alias every MAX_SIZE,
+    /// so reading beyond ±MAX_RD of the writer's center returns another
+    /// position's slot.
     #[inline]
-    pub fn get_mut(&mut self, pos: ChunkPos) -> &mut T {
-        let x = pos.x.rem_euclid(MAX_SIZE as i32) as usize;
-        let z = pos.z.rem_euclid(MAX_SIZE as i32) as usize;
-        let idx = x * MAX_SIZE + z;
-        &mut self.buf[idx]
-    }
-
-    /// Sets the element at the given chunk position to `val`.
-    pub fn set(&mut self, pos: ChunkPos, val: T) {
-        *self.get_mut(pos) = val;
+    pub fn get_in_range(&self, pos: ChunkPos, center: ChunkPos) -> Option<&T> {
+        let in_range =
+            (pos.x - center.x).abs() <= MAX_RD as i32 && (pos.z - center.z).abs() <= MAX_RD as i32;
+        in_range.then(|| self.get(pos))
     }
 }
 
@@ -110,14 +105,6 @@ pub struct SectionRing<T> {
 }
 
 impl<T> SectionRing<T> {
-    /// Creates a new SectionRing with all elements initialized to `init`.
-    pub fn new(init: T) -> Self
-    where
-        T: Copy,
-    {
-        Self::from_fn(|_, _, _| init)
-    }
-
     /// Creates a new SectionRing using a function to initialize each element.
     /// The function receives (x, z, y) coordinates in the ring's local space.
     pub fn from_fn(mut init: impl FnMut(usize, usize, usize) -> T) -> Self {
@@ -142,16 +129,5 @@ impl<T> SectionRing<T> {
         let y = pos.y.rem_euclid(SIZE_Y as i32) as usize;
         let idx = (x * MAX_SIZE + z) * SIZE_Y + y;
         &self.buf[idx]
-    }
-
-    /// Gets a mutable reference to the element at the given chunk section
-    /// position.
-    #[inline]
-    pub fn get_mut(&mut self, pos: ChunkSectionPos) -> &mut T {
-        let x = pos.x.rem_euclid(MAX_SIZE as i32) as usize;
-        let z = pos.z.rem_euclid(MAX_SIZE as i32) as usize;
-        let y = pos.y.rem_euclid(SIZE_Y as i32) as usize;
-        let idx = (x * MAX_SIZE + z) * SIZE_Y + y;
-        &mut self.buf[idx]
     }
 }

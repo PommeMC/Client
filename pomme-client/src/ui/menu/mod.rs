@@ -22,6 +22,7 @@ struct Settings {
     gui_scale: u32,
     render_distance: u32,
     simulation_distance: u32,
+    #[serde(default = "default_frustum_padding")]
     frustum_padding: f32,
     #[serde(default = "default_fov")]
     fov: u32,

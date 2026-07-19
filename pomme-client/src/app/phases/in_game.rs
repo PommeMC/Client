@@ -34,6 +34,7 @@ use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
 use crate::util::ChunkRing;
+use crate::world::block::BlockStateExt;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
@@ -120,7 +121,9 @@ impl GameState {
             Arc::clone(&biome_climate),
             Some(resource_packs),
         );
-        let visibility_mask = ChunkRing::new(0);
+        // All-visible until the GPU visibility pass returns its first mask; a
+        // zeroed mask would gate every section's meshing and drawing off.
+        let visibility_mask = ChunkRing::new(u32::MAX);
         Self {
             chunk_store,
             entity_store: EntityStore::new(),
@@ -244,8 +247,7 @@ impl GameState {
     /// visibility. Bumps that section's generation so the result is dropped
     /// only if the same section is edited again before it lands.
     pub fn enqueue_section_edit(&mut self, pos: ChunkSectionPos, lod: u32) {
-        self.meshing
-            .enqueue_section_edit(&self.chunk_store.shared, pos, lod);
+        self.meshing.enqueue_section_edit(pos, lod);
     }
 
     /// Enqueue every loaded column's not-yet-meshed sections (re-meshing the
@@ -491,23 +493,10 @@ pub fn update_game(
         if stale {
             continue;
         }
-        if let Some(t) = &mesh.timing {
-            let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
-            tracing::info!(
-                "edit remesh [{}, {}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
-                mesh.spos.x,
-                mesh.spos.y,
-                mesh.spos.z,
-                ms(t.started_at - t.enqueued_at),
-                ms(t.meshed_at - t.started_at),
-                ms(t.meshed_at.elapsed()),
-                ms(t.enqueued_at.elapsed()),
-            );
-        }
         gfx.renderer.mesh_queue.push_back(mesh);
     }
 
-    let uploaded = gfx.renderer.upload_mesh_batch();
+    gfx.renderer.upload_mesh_batch();
 
     // Per-frame FOV interpolation; set before the frustum/view-projection reads.
     gfx.renderer.set_render_partial_tick(partial_tick);
@@ -579,12 +568,10 @@ pub fn update_game(
                 let center = game.visibility_center;
                 let mask_ring = &game.visibility_mask;
                 for pos in game.chunk_store.loaded_positions() {
-                    let in_range = (pos.x - center.x).abs() <= 64 && (pos.z - center.z).abs() <= 64;
-                    let mask = if in_range {
-                        *mask_ring.get(pos)
-                    } else {
-                        (1u32 << n) - 1
-                    };
+                    let mask = mask_ring
+                        .get_in_range(pos, center)
+                        .copied()
+                        .unwrap_or((1u32 << n) - 1);
                     let v = mask.count_ones();
                     visible += v;
                     hidden += n.saturating_sub(v);

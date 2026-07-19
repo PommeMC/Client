@@ -49,7 +49,7 @@ fn enqueue_with_neighbors(
     pos: azalea_core::position::ChunkPos,
 ) {
     for p in mesh_neighborhood(pos) {
-        if (p == pos || store.has_chunk(pos)) && !out.contains(&p) {
+        if (p == pos || store.has_chunk(p)) && !out.contains(&p) {
             out.push(p);
         }
     }
@@ -508,11 +508,11 @@ impl AppCore {
                 NetworkEvent::SectionBlocksUpdate { updates } => {
                     let min_y = game.chunk_store.min_y();
                     let n = game.chunk_store.section_count();
+                    let mut applied = Vec::with_capacity(updates.len());
                     for (pos, state) in updates {
                         if game.interaction.update_known_server_state(&pos, state) {
                             continue;
                         }
-                        game.chunk_store.set_block_state(pos.x, pos.y, pos.z, state);
                         dirty_sections_for_block(
                             &mut priority_remesh,
                             pos.x,
@@ -521,7 +521,9 @@ impl AppCore {
                             min_y,
                             n,
                         );
+                        applied.push((pos, state));
                     }
+                    game.chunk_store.set_block_states(applied);
                 }
                 NetworkEvent::BlockEntitySync { chunk_pos, entries } => {
                     game.chunk_store.block_entities.retain(|p, _| {

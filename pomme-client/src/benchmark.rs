@@ -232,22 +232,6 @@ impl Benchmark {
     }
 }
 
-/// Lowest render distance to drop to during the chunk-load reset phase.
-pub const CHUNK_LOAD_MIN_RD: u32 = 2;
-/// Minimum time to hold the minimum render distance before the timed load can
-/// start, so the server has a chance to begin unloading the far chunks.
-const CHUNK_RESET_MIN_SECS: f32 = 0.75;
-/// The reset is done once the loaded-chunk count has stopped dropping for this
-/// long — i.e. the server has finished unloading — regardless of latency.
-const CHUNK_RESET_STABLE_SECS: f32 = 0.5;
-/// Loading is done once the loaded-chunk count holds steady for this long —
-/// long enough to ride out the server's inter-batch gaps at high render
-/// distances, so a mid-stream pause isn't mistaken for completion.
-const CHUNK_LOAD_STALL_SECS: f32 = 8.0;
-/// ...or as soon as this fraction of the target radius's columns have loaded.
-const CHUNK_LOAD_COMPLETE_FRAC: f32 = 0.98;
-/// Safety cap so a stalled/capped load can't run forever.
-const CHUNK_TIMEOUT_SECS: f32 = 90.0;
 /// First run(s) are discarded as warmup (cold disk/network caches).
 pub const CHUNK_LOAD_WARMUP_RUNS: u32 = 1;
 /// Runs that actually count toward the averaged result.
@@ -264,12 +248,6 @@ pub fn is_debug_build() -> bool {
 
 pub fn build_profile() -> &'static str {
     if is_debug_build() { "debug" } else { "release" }
-}
-
-/// Columns in a fully-loaded square of the given radius: (2r+1)².
-fn expected_columns(rd: u32) -> u32 {
-    let d = 2 * rd + 1;
-    d * d
 }
 
 /// Infer the loaded radius from a (roughly square) loaded area: count ≈
@@ -359,13 +337,15 @@ pub enum ChunkLoadStep {
     Wait,
     /// Clear chunk meshes and start timing the meshing/upload phase.
     StartTiming,
-    /// Loading finished; the driver should restore the original render distance.
+    /// Loading finished; the driver should restore the original render
+    /// distance.
     Done(Box<ChunkLoadResult>),
 }
 
 /// Measures how long it takes to load every chunk in a chosen render-distance
-/// radius. First waits for the server to load all chunks, then times the CPU meshing
-/// and GPU uploading until all client cache chunks are uploaded to the GPU.
+/// radius. First waits for the server to load all chunks, then times the CPU
+/// meshing and GPU uploading until all client cache chunks are uploaded to the
+/// GPU.
 pub struct ChunkLoadBench {
     phase: ChunkPhase,
     target_rd: u32,
@@ -450,7 +430,7 @@ impl ChunkLoadBench {
                 let elapsed = self.reset_start.elapsed().as_secs_f32();
                 let min_elapsed = elapsed >= SERVER_WAIT_MIN_SECS;
                 let settled = self.last_change.elapsed().as_secs_f32() >= SERVER_WAIT_STABLE_SECS;
-                
+
                 if min_elapsed && (settled || elapsed >= SERVER_WAIT_MAX_SECS) {
                     self.phase = ChunkPhase::Load;
                     self.start = Instant::now();
@@ -461,7 +441,7 @@ impl ChunkLoadBench {
                     self.frame_ms_sum = 0.0;
                     self.frame_ms_max = 0.0;
                     self.frame_samples = 0;
-                    
+
                     ChunkLoadStep::StartTiming
                 } else {
                     ChunkLoadStep::Wait
@@ -480,7 +460,8 @@ impl ChunkLoadBench {
                     self.first_load_at = Some(Instant::now());
                 }
 
-                // Done when GPU loaded reaches or exceeds the cached chunks target (baseline_count)
+                // Done when GPU loaded reaches or exceeds the cached chunks target
+                // (baseline_count)
                 let done = gpu_loaded >= self.baseline_count;
 
                 if done {
@@ -514,7 +495,7 @@ impl ChunkLoadBench {
                     self.frame_ms_sum = 0.0;
                     self.frame_ms_max = 0.0;
                     self.frame_samples = 0;
-                    
+
                     ChunkLoadStep::StartTiming
                 } else {
                     ChunkLoadStep::Wait

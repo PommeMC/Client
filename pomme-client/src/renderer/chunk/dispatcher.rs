@@ -1,6 +1,6 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use azalea_core::position::{ChunkPos, ChunkSectionPos};
@@ -8,12 +8,9 @@ use crossbeam_epoch as epoch;
 use crossbeam_epoch::Atomic;
 use glam::DVec3;
 
-use super::chunk::LocalSection;
-use super::mesher::{
-    BiomeClimate, Colormap, RemeshTiming, SectionMeshData, SectionStoreSnapshot, mesh_section,
-};
+use super::mesher::{BiomeClimate, Colormap, SectionMeshData, SectionStoreSnapshot, mesh_section};
+use super::section::LocalSection;
 use crate::renderer::Renderer;
-use crate::renderer::camera::Camera;
 use crate::renderer::chunk::atlas::AtlasUVMap;
 use crate::resource_pack::ResourcePackManager;
 use crate::util::{ChunkRing, SectionRing};
@@ -68,15 +65,11 @@ pub struct ChunkMeshing {
     pub section_meta: Arc<SectionRing<SectionMeta>>,
     /// Shared: workers clear/re-set bits, edits set bits
     pub update_set: Arc<ChunkRing<AtomicU32>>,
+    store: Arc<SharedChunkStore>,
     result_rx: crossbeam_channel::Receiver<SectionMeshData>,
     queue: Arc<MeshQueue>,
     workers: Vec<std::thread::JoinHandle<()>>,
     next_epoch: AtomicU64,
-    registry: Arc<BlockRegistry>,
-    uv_map: Arc<AtlasUVMap>,
-    grass_colormap: Arc<Colormap>,
-    foliage_colormap: Arc<Colormap>,
-    dry_foliage_colormap: Arc<Colormap>,
     biome_climate: Arc<HashMap<u32, BiomeClimate>>,
 }
 impl ChunkMeshing {
@@ -150,31 +143,23 @@ impl ChunkMeshing {
         Self {
             section_meta,
             update_set,
+            store: shared_chunk_store,
             result_rx,
             queue,
             workers,
             next_epoch: AtomicU64::new(1),
-            registry,
-            uv_map,
-            grass_colormap,
-            foliage_colormap,
-            dry_foliage_colormap,
             biome_climate,
         }
     }
     pub fn clear(&mut self) {
-        for x in 0..129 {
-            for z in 0..129 {
-                let chunk_pos = ChunkPos::new(x as i32 - 64, z as i32 - 64);
-                self.update_set
-                    .get(chunk_pos)
-                    .store(0xFFFF_FFFF, Ordering::Release);
-            }
+        for cell in &self.update_set.buf {
+            cell.store(0xFFFF_FFFF, Ordering::Release);
         }
     }
     pub fn on_chunk_unload(&mut self, pos: ChunkPos) {
-        for y_idx in 0..32 {
-            let spos = ChunkSectionPos::new(pos.x, y_idx - 4, pos.z);
+        let min_y_sec = self.store.min_section_y();
+        for si in 0..self.store.section_count() {
+            let spos = ChunkSectionPos::new(pos.x, min_y_sec + si, pos.z);
             let meta = self.section_meta.get(spos);
             meta.pos.store(u64::MAX, Ordering::Release);
             meta.ver.fetch_add(1, Ordering::Release);
@@ -195,7 +180,7 @@ impl ChunkMeshing {
     pub fn bump_content_gen(&mut self, pos: ChunkSectionPos) -> u64 {
         let meta = self.section_meta.get(pos);
         let chunk_pos = ChunkPos::new(pos.x, pos.z);
-        let rel_y = (pos.y + 4).clamp(0, 31) as u32;
+        let rel_y = self.store.section_y_index(pos.y);
         meta.pos.store(pack_section_pos(pos), Ordering::Release);
         let new_ver = meta.ver.fetch_add(1, Ordering::Release) + 1;
         self.update_set
@@ -203,16 +188,10 @@ impl ChunkMeshing {
             .fetch_or(1 << rel_y, Ordering::Release);
         new_ver
     }
-    pub fn enqueue_section_edit(
-        &mut self,
-        shared_chunk_store: &SharedChunkStore,
-        pos: ChunkSectionPos,
-        lod: u32,
-    ) {
+    pub fn enqueue_section_edit(&mut self, pos: ChunkSectionPos, lod: u32) {
         let meta = self.section_meta.get(pos);
         let chunk_pos = ChunkPos::new(pos.x, pos.z);
-        let min_y_sec = shared_chunk_store.min_y().div_euclid(16);
-        let rel_y = (pos.y - min_y_sec).clamp(0, 31) as u32;
+        let rel_y = self.store.section_y_index(pos.y);
         meta.pos.store(pack_section_pos(pos), Ordering::Release);
         meta.target_lod.store(lod as u8, Ordering::Release);
         meta.ver.fetch_add(1, Ordering::Release);
@@ -230,17 +209,14 @@ impl ChunkMeshing {
         visibility_center: ChunkPos,
         camera_pos: &DVec3,
     ) {
-        let min_y_section = shared_chunk_store.min_y().div_euclid(16);
+        let min_y_section = shared_chunk_store.min_section_y();
         let section_count = shared_chunk_store.section_count();
         let mut candidate_jobs = Vec::new();
         for pos in shared_chunk_store.loaded_positions() {
-            let in_range = (pos.x - visibility_center.x).abs() <= 64
-                && (pos.z - visibility_center.z).abs() <= 64;
-            let vis_mask = if in_range {
-                *visibility.get(pos)
-            } else {
-                0xFFFFFFFF
-            };
+            let vis_mask = visibility
+                .get_in_range(pos, visibility_center)
+                .copied()
+                .unwrap_or(u32::MAX);
             let update_mask = self.update_set.get(pos).load(Ordering::Acquire);
             let active_mask = vis_mask & update_mask;
             let lod = crate::app::core::chunk_lod(pos, player_chunk);
@@ -261,9 +237,7 @@ impl ChunkMeshing {
                     let upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
                     candidate_jobs.push(PendingJob {
                         pos: spos,
-                        lod,
                         upload_epoch,
-                        enqueued_at: None,
                     });
                 }
             }
@@ -301,9 +275,7 @@ impl Drop for ChunkMeshing {
 #[derive(Clone)]
 struct PendingJob {
     pos: ChunkSectionPos,
-    lod: u32,
     upload_epoch: u64,
-    enqueued_at: Option<std::time::Instant>,
 }
 struct ReMarkGuard<'a> {
     update_set: &'a ChunkRing<AtomicU32>,
@@ -321,6 +293,7 @@ impl<'a> Drop for ReMarkGuard<'a> {
     }
 }
 impl PendingJob {
+    #[allow(clippy::too_many_arguments)]
     fn run(
         self,
         shared_chunk_store: &SharedChunkStore,
@@ -328,49 +301,45 @@ impl PendingJob {
         update_set: &ChunkRing<AtomicU32>,
         registry: &BlockRegistry,
         uv_map: &AtlasUVMap,
-        grass_colormap: &Colormap,
-        foliage_colormap: &Colormap,
-        dry_foliage_colormap: &Colormap,
-        biome_climate: &HashMap<u32, BiomeClimate>,
+        grass_colormap: &Arc<Colormap>,
+        foliage_colormap: &Arc<Colormap>,
+        dry_foliage_colormap: &Arc<Colormap>,
+        biome_climate: &Arc<HashMap<u32, BiomeClimate>>,
         tx: &crossbeam_channel::Sender<SectionMeshData>,
     ) {
         let chunk_pos = ChunkPos::new(self.pos.x, self.pos.z);
-        let rel_y = (self.pos.y + 4).clamp(0, 31) as u32;
+        let rel_y = shared_chunk_store.section_y_index(self.pos.y);
         // Stage 1: Claim — Clear bit in update_set (Acquire)
         update_set
             .get(chunk_pos)
             .fetch_and(!(1 << rel_y), Ordering::Acquire);
-        let claim_ver = section_meta.get(self.pos).ver.load(Ordering::Acquire);
-        let claim_pos_packed = section_meta.get(self.pos).pos.load(Ordering::Acquire);
+        let meta = section_meta.get(self.pos);
+        let claim_ver = meta.ver.load(Ordering::Acquire);
+        let claim_pos_packed = meta.pos.load(Ordering::Acquire);
         let claim_pos = if claim_pos_packed != u64::MAX {
             unpack_section_pos(claim_pos_packed)
         } else {
             self.pos
         };
-        let claim_lod = section_meta
-            .get(self.pos)
-            .target_lod
-            .load(Ordering::Acquire) as u32;
+        let claim_lod = meta.target_lod.load(Ordering::Acquire) as u32;
         let mut guard = ReMarkGuard {
             update_set,
             pos: chunk_pos,
             rel_y,
             defused: false,
         };
-        let started_at = self.enqueued_at.map(|_| std::time::Instant::now());
         // Stage 2: Fetch — Create SectionStoreSnapshot on worker thread from
         // SharedChunkStore
         let snapshot = SectionStoreSnapshot {
             section: LocalSection::new_boxed(shared_chunk_store, claim_pos),
-            grass_colormap: Arc::new(grass_colormap.clone()),
-            foliage_colormap: Arc::new(foliage_colormap.clone()),
-            dry_foliage_colormap: Arc::new(dry_foliage_colormap.clone()),
-            biome_climate: Arc::new(biome_climate.clone()),
+            grass_colormap: Arc::clone(grass_colormap),
+            foliage_colormap: Arc::clone(foliage_colormap),
+            dry_foliage_colormap: Arc::clone(dry_foliage_colormap),
+            biome_climate: Arc::clone(biome_climate),
             min_y: shared_chunk_store.min_y(),
-            height: shared_chunk_store.height(),
         };
         // Stage 3: Execute — Mesh section
-        let mut mesh = mesh_section(
+        let mesh = mesh_section(
             &snapshot,
             claim_pos,
             registry,
@@ -379,13 +348,6 @@ impl PendingJob {
             claim_ver,
             self.upload_epoch,
         );
-        if let (Some(enqueued_at), Some(started_at)) = (self.enqueued_at, started_at) {
-            mesh.timing = Some(RemeshTiming {
-                enqueued_at,
-                started_at,
-                meshed_at: std::time::Instant::now(),
-            });
-        }
         // Stage 4: Return — Send mesh tagged with claim_ver
         guard.defused = true;
         let _ = tx.send(mesh);
@@ -398,6 +360,14 @@ struct QueueState {
 struct MeshQueue {
     state: Atomic<QueueState>,
     closed: AtomicBool,
+}
+impl Drop for MeshQueue {
+    fn drop(&mut self) {
+        let state = std::mem::replace(&mut self.state, Atomic::null());
+        // SAFETY: dropping implies exclusive access (workers are joined before
+        // the last Arc goes away), and `state` is never null.
+        unsafe { drop(state.into_owned()) };
+    }
 }
 impl MeshQueue {
     fn new() -> Self {
@@ -414,23 +384,29 @@ impl MeshQueue {
             tasks: jobs.into_boxed_slice(),
             head: AtomicU32::new(0),
         };
-        self.state
-            .store(epoch::Owned::new(new_state), Ordering::SeqCst);
+        let guard = epoch::pin();
+        let old = self
+            .state
+            .swap(epoch::Owned::new(new_state), Ordering::AcqRel, &guard);
+        if !old.is_null() {
+            // SAFETY: `old` was the queue's owned state and is now unreachable
+            // to new loads; workers still holding it are pinned, which is
+            // exactly what defer_destroy waits out.
+            unsafe { guard.defer_destroy(old) };
+        }
     }
     fn pending_jobs(&self) -> usize {
         let guard = epoch::pin();
-        unsafe {
-            self.state
-                .load(Ordering::Acquire, &guard)
-                .as_ref()
-                .unwrap()
-                .tasks
-                .len()
-        }
+        // SAFETY: loaded under the pinned guard; never null (initialized at
+        // construction, swapped but never nulled).
+        let state = unsafe { self.state.load(Ordering::Acquire, &guard).as_ref().unwrap() };
+        let taken = state.head.load(Ordering::Acquire) as usize;
+        state.tasks.len().saturating_sub(taken)
     }
     fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
     }
+    #[allow(clippy::too_many_arguments)]
     fn run_worker(
         &self,
         shared_chunk_store: Arc<SharedChunkStore>,

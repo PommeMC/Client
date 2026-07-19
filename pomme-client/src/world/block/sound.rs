@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use azalea_block::{BlockState, BlockTrait};
+use azalea_block::BlockState;
+
+use super::BlockStateExt;
 
 /// A block's vanilla `SoundType` sounds: the `sounds.json` hit and break events
 /// plus the raw volume and pitch (the caller applies the play-time scaling). An

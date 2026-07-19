@@ -21,6 +21,7 @@ use crate::net::sender::PacketSender;
 use crate::physics::aabb::Aabb;
 use crate::physics::collision::has_collision;
 use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
+use crate::world::block::BlockStateExt;
 use crate::world::block::sound::block_sounds;
 use crate::world::chunk::SharedChunkStore;
 
@@ -706,8 +707,8 @@ fn destroy_progress(state: BlockState, on_ground: bool, creative: bool) -> f32 {
     if creative {
         return 1.0;
     }
-    use azalea_block::BlockTrait;
-    let behavior = state.to_trait().behavior();
+    let block = state.to_trait();
+    let behavior = block.behavior();
     let hardness = behavior.destroy_time;
 
     if hardness < 0.0 {

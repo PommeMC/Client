@@ -10,6 +10,8 @@ use std::sync::LazyLock;
 
 use azalea_block::BlockState;
 
+use crate::world::block::BlockStateExt;
+
 /// A block-local axis-aligned box: `[min_x, min_y, min_z, max_x, max_y,
 /// max_z]`.
 pub type LocalBox = [f64; 6];

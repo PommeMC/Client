@@ -7,7 +7,8 @@ use pyronyx::vk;
 
 use super::greedy;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
-use crate::renderer::chunk::chunk::LocalSection;
+use crate::renderer::chunk::section::LocalSection;
+use crate::world::block::BlockStateExt;
 use crate::world::block::model::{BakedModel, Direction};
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
 #[repr(C)]
@@ -92,8 +93,6 @@ pub struct SectionMeshData {
     /// in-flight bulk mesh can never clobber a section a newer edit already
     /// uploaded (the edit always enqueues a higher epoch after its write).
     pub upload_epoch: u64,
-    /// Latency stamps for edit remeshes (diagnostic); `None` for bulk loads.
-    pub timing: Option<RemeshTiming>,
 }
 impl SectionMeshData {
     pub fn new(
@@ -110,17 +109,11 @@ impl SectionMeshData {
             water_indices: Vec::with_capacity(256),
             content_gen,
             upload_epoch,
-            timing: None,
         }
     }
     pub fn is_empty(&self) -> bool {
         self.vertices.is_empty() || (self.indices.is_empty() && self.water_indices.is_empty())
     }
-}
-pub struct RemeshTiming {
-    pub enqueued_at: std::time::Instant,
-    pub started_at: std::time::Instant,
-    pub meshed_at: std::time::Instant,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub enum GrassColorModifier {
@@ -354,7 +347,6 @@ pub(crate) struct SectionStoreSnapshot {
     pub(crate) dry_foliage_colormap: Arc<Colormap>,
     pub(crate) biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     pub(crate) min_y: i32,
-    pub(crate) height: u32,
 }
 impl SectionStoreSnapshot {
     fn climate_at(&self, x: i32, y: i32, z: i32) -> BiomeClimate {
@@ -516,8 +508,7 @@ fn greedy_mesh_section(
         for lx in 0..18 {
             for lz in 0..18 {
                 let state = snapshot.section.blocks[lx][ly][lz];
-                let idx =
-                    greedy::pad_linearize::<SECTION_SIZE>(lx as usize, ly as usize, lz as usize);
+                let idx = greedy::pad_linearize::<SECTION_SIZE>(lx, ly, lz);
                 voxels[idx] = type_map.get_id(state);
                 occluders[idx] = registry.is_opaque_full_cube(state);
                 light[idx] = LIGHT_TABLE[snapshot.section.light[lx][ly][lz] as usize];
@@ -626,7 +617,7 @@ pub(crate) fn mesh_section(
                 let mut kind = classify_block(state);
                 // LOD Air Look-ahead
                 if lod > 0 && matches!(kind, BlockKind::Air) {
-                    let end_y = (local_y as i32 + step).min(16);
+                    let end_y = (local_y + step).min(16);
                     for try_y in (local_y + 1)..end_y {
                         let s = snapshot.section.get_block_state(local_x, try_y, local_z);
                         let k = classify_block(s);
@@ -643,16 +634,15 @@ pub(crate) fn mesh_section(
                     continue;
                 }
                 // CULLING: Skip blocks already handled by the greedy mesher
-                if lod == 0 {
-                    if let Some(ref tm) = type_map {
-                        if tm.get_id(state) != 0 {
-                            continue;
-                        }
-                    }
+                if lod == 0
+                    && let Some(ref tm) = type_map
+                    && tm.get_id(state) != 0
+                {
+                    continue;
                 }
-                let bx = wpos.x + local_x as i32;
-                let by = wpos.y + local_y as i32;
-                let bz = wpos.z + local_z as i32;
+                let bx = wpos.x + local_x;
+                let by = wpos.y + local_y;
+                let bz = wpos.z + local_z;
                 let block_pos = [bx as f32, by as f32, bz as f32];
                 // Route this block's geometry
                 if lod > 0 {

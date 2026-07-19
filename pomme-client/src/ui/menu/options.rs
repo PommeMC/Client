@@ -2,12 +2,11 @@ use super::*;
 use crate::resource_pack::PackCompat;
 
 /// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or
-/// two 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
+/// two 150px widgets per `Pair`.
 pub(super) enum OptRow<'a> {
     Header(&'a str),
     Big(&'a str),
     Pair(&'a str, &'a str),
-    PairLeft(&'a str),
 }
 
 fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
@@ -608,7 +607,6 @@ impl MainMenu {
                     widgets.push((*a, left_x, small_w));
                     widgets.push((*b, right_x, small_w));
                 }
-                OptRow::PairLeft(a) => widgets.push((*a, left_x, small_w)),
             }
             for (label, bx, bw) in widgets {
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {

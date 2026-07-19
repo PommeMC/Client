@@ -8,7 +8,7 @@ use pyronyx::vk;
 use crate::renderer::camera::Camera;
 use crate::renderer::hiz::HizPipeline;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
-use crate::util::{CHUNK_RING_SIZE as MAX_SIZE_SQ, MAX_RD};
+use crate::util::{CHUNK_RING_SIZE as MAX_SIZE_SQ, MAX_RD, MAX_SIZE, SIZE_Y};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -17,7 +17,7 @@ pub struct VisibilityUniform {
     pub vis_center: [i32; 4], // x,z = center in section coords, y = min_section, w = max_section
     pub camera_pos: [f32; 4],
     pub radius: i32,
-    pub height: i32,
+    pub section_count: i32,
     pub padding0: i32,
     pub padding1: i32,
     pub frustum_planes: [[f32; 4]; 6],
@@ -36,6 +36,7 @@ pub struct PerFrameData {
 }
 
 impl PerFrameData {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
@@ -185,6 +186,9 @@ pub struct VisibilityPipeline {
     hiz_descriptor_pool: vk::DescriptorPool,
 
     per_frame: [PerFrameData; MAX_FRAMES_IN_FLIGHT],
+    /// Whether `execute` has ever recorded into each frame slot; gates
+    /// `readback`.
+    executed: [bool; MAX_FRAMES_IN_FLIGHT],
 }
 
 impl VisibilityPipeline {
@@ -322,9 +326,8 @@ impl VisibilityPipeline {
             .expect("failed to create visibility hiz descriptor pool");
 
         // 5. Create per-frame data
-        let mut per_frame: [PerFrameData; MAX_FRAMES_IN_FLIGHT] = unsafe { std::mem::zeroed() };
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            per_frame[i] = PerFrameData::new(
+        let per_frame: [PerFrameData; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|i| {
+            PerFrameData::new(
                 device,
                 allocator,
                 &layout_frame,
@@ -333,8 +336,8 @@ impl VisibilityPipeline {
                 &hiz_descriptor_pool,
                 hiz_pipeline,
                 i,
-            );
-        }
+            )
+        });
 
         Self {
             layout_frame,
@@ -344,6 +347,7 @@ impl VisibilityPipeline {
             frame_descriptor_pool,
             hiz_descriptor_pool,
             per_frame,
+            executed: [false; MAX_FRAMES_IN_FLIGHT],
         }
     }
 
@@ -370,19 +374,26 @@ impl VisibilityPipeline {
         }
     }
 
-    pub fn readback(&self, frame: usize) -> &[u32] {
+    /// The frame slot's visibility bitset, or `None` while the slot has never
+    /// been written (its buffer is zeroed, i.e. "all occluded" — callers must
+    /// fail open to fully visible instead).
+    pub fn readback(&self, frame: usize) -> Option<&[u32]> {
+        if !self.executed[frame] {
+            return None;
+        }
         let size_in_bytes = MAX_SIZE_SQ * 4;
         let mapped = self.per_frame[frame]
             .readback_allocation
             .mapped_slice()
             .unwrap();
-        bytemuck::cast_slice(&mapped[..size_in_bytes])
+        Some(bytemuck::cast_slice(&mapped[..size_in_bytes]))
     }
 
     pub fn vis_center(&self, frame: usize) -> ChunkPos {
         self.per_frame[frame].vis_center
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
         &mut self,
         cmd: vk::CommandBuffer,
@@ -393,6 +404,7 @@ impl VisibilityPipeline {
         min_y: i32,
         extra_radians: f32,
     ) {
+        self.executed[frame] = true;
         let frame_data = &mut self.per_frame[frame];
 
         // 1. Clear the output storage buffer to all zeros
@@ -434,7 +446,10 @@ impl VisibilityPipeline {
         let min_section = min_y.div_euclid(16);
 
         // Calculate vis_center in section coordinates for the shader
-        let max_section = min_section + height.div_euclid(16) as i32;
+        // The output bitset holds one bit per section layer, so the pass caps
+        // at SIZE_Y (32) layers regardless of world height.
+        let section_count = (height / 16).min(SIZE_Y as u32);
+        let max_section = min_section + section_count as i32;
 
         let uniform_data = VisibilityUniform {
             view_proj: view_proj.to_cols_array_2d(),
@@ -446,7 +461,7 @@ impl VisibilityPipeline {
             ],
             camera_pos: [pos.x, pos.y, pos.z, 0.0],
             radius: radius as i32,
-            height: height as i32,
+            section_count: section_count as i32,
             padding0: 0,
             padding1: 0,
             frustum_planes: camera.frustum_planes_dilated(extra_radians),
@@ -476,9 +491,9 @@ impl VisibilityPipeline {
         const WG_Y: u32 = 8;
         const WG_Z: u32 = 4;
 
-        let groups_x = (129 + WG_X - 1) / WG_X;
-        let groups_y = (height + WG_Y - 1) / WG_Y;
-        let groups_z = (129 + WG_Z - 1) / WG_Z;
+        let groups_x = (MAX_SIZE as u32).div_ceil(WG_X);
+        let groups_y = section_count.div_ceil(WG_Y);
+        let groups_z = (MAX_SIZE as u32).div_ceil(WG_Z);
 
         cmd.dispatch(groups_x, groups_y, groups_z);
 

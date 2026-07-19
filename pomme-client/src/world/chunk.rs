@@ -6,11 +6,10 @@ use azalea_core::heightmap_kind::HeightmapKind;
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_world::chunk::Chunk;
 use crossbeam_epoch::{self as epoch, Atomic, Owned};
-use parking_lot::RwLock;
 use thiserror::Error;
 
 use super::block_entity::StoredBlockEntity;
-use crate::util::ChunkRing;
+use crate::util::{ChunkRing, MAX_RD, SIZE_Y};
 
 const OVERWORLD_HEIGHT: u32 = 384;
 const OVERWORLD_MIN_Y: i32 = -64;
@@ -87,10 +86,15 @@ pub const fn unpack_chunk_pos(val: u64) -> ChunkPos {
 
 /// Shared, lock-free chunk store accessible by main thread and worker threads
 /// via `crossbeam-epoch`.
+///
+/// Concurrency contract: any thread may read, but all writes
+/// (`load_chunk`, `set_block_state*`, `store_light`, `unload_chunk`) must stay
+/// on the main thread. Mutation is clone-on-write with an unconditional
+/// `swap`, so two concurrent writers to the same slot would silently lose one
+/// update.
 pub struct SharedChunkStore {
     view_center: AtomicU64,
     pub(crate) chunk_radius: u32,
-    view_range: u32,
     chunks: ChunkRing<Atomic<Chunk>>,
     pub light_data: ChunkRing<Atomic<ChunkLightData>>,
     height: u32,
@@ -103,12 +107,16 @@ impl SharedChunkStore {
     }
 
     pub fn new_with_dimension(view_distance: u32, height: u32, min_y: i32) -> Self {
-        let chunk_radius = view_distance.max(64);
-        let view_range = chunk_radius * 2 + 1;
+        // The rings are fixed at MAX_SIZE (= 2 * MAX_RD + 1) slots per axis and
+        // slots carry no position tag, so positions MAX_SIZE apart alias. The
+        // radius is pinned to MAX_RD: anything wider would silently read the
+        // wrong chunk.
+        if view_distance > MAX_RD {
+            tracing::warn!("view distance {view_distance} exceeds ring capacity {MAX_RD}");
+        }
         Self {
             view_center: AtomicU64::new(pack_chunk_pos(ChunkPos::new(0, 0))),
-            chunk_radius,
-            view_range,
+            chunk_radius: MAX_RD,
             height,
             min_y,
             chunks: ChunkRing::from_fn(|_, _| Atomic::null()),
@@ -157,7 +165,24 @@ impl SharedChunkStore {
 
     pub fn get_chunk_guard<'g>(&self, pos: ChunkPos, guard: &'g epoch::Guard) -> Option<&'g Chunk> {
         let shared = self.chunks.get(pos).load(Ordering::Acquire, guard);
+        // SAFETY: loaded under `guard`, which the returned reference borrows,
+        // so a concurrent swap's defer_destroy can't run while it lives.
         unsafe { shared.as_ref() }
+    }
+
+    /// Publishes a new value into `slot`, retiring the previous occupant.
+    fn publish<T>(slot: &Atomic<T>, value: T, guard: &epoch::Guard)
+    where
+        T: Send + Sync + 'static,
+    {
+        let old_ptr = slot.swap(Owned::new(value), Ordering::Release, guard);
+        if !old_ptr.is_null() {
+            // SAFETY: the old pointer is unlinked from the slot; readers that
+            // still hold it are pinned, which defer_destroy waits out.
+            unsafe {
+                guard.defer_destroy(old_ptr);
+            }
+        }
     }
 
     pub fn load_chunk(
@@ -171,15 +196,7 @@ impl SharedChunkStore {
             Chunk::read_with_dimension_height(&mut cursor, self.height, self.min_y, heightmaps)
                 .map_err(|e| ChunkError::Parse(e.to_string()))?;
         let guard = epoch::pin();
-        let old_ptr = self
-            .chunks
-            .get(pos)
-            .swap(Owned::new(chunk), Ordering::Release, &guard);
-        if !old_ptr.is_null() {
-            unsafe {
-                guard.defer_destroy(old_ptr);
-            }
-        }
+        Self::publish(self.chunks.get(pos), chunk, &guard);
         Ok(())
     }
 
@@ -226,24 +243,23 @@ impl SharedChunkStore {
         };
 
         let guard = epoch::pin();
-        let old_ptr = self
-            .light_data
-            .get(pos)
-            .swap(Owned::new(light), Ordering::Release, &guard);
-        if !old_ptr.is_null() {
-            unsafe {
-                guard.defer_destroy(old_ptr);
-            }
-        }
+        Self::publish(self.light_data.get(pos), light, &guard);
+    }
+
+    pub fn get_light_guard<'g>(
+        &self,
+        pos: ChunkPos,
+        guard: &'g epoch::Guard,
+    ) -> Option<&'g ChunkLightData> {
+        let shared = self.light_data.get(pos).load(Ordering::Acquire, guard);
+        // SAFETY: loaded under `guard`, which the returned reference borrows.
+        unsafe { shared.as_ref() }
     }
 
     pub fn get_sky_light(&self, x: i32, y: i32, z: i32) -> u8 {
-        let cx = x.div_euclid(16);
-        let cz = z.div_euclid(16);
-        let pos = ChunkPos::new(cx, cz);
+        let pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let guard = epoch::pin();
-        let shared = self.light_data.get(pos).load(Ordering::Acquire, &guard);
-        if let Some(light) = unsafe { shared.as_ref() } {
+        if let Some(light) = self.get_light_guard(pos, &guard) {
             light.get_sky_light(x.rem_euclid(16), y, z.rem_euclid(16))
         } else {
             15
@@ -251,12 +267,9 @@ impl SharedChunkStore {
     }
 
     pub fn get_block_light(&self, x: i32, y: i32, z: i32) -> u8 {
-        let cx = x.div_euclid(16);
-        let cz = z.div_euclid(16);
-        let pos = ChunkPos::new(cx, cz);
+        let pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let guard = epoch::pin();
-        let shared = self.light_data.get(pos).load(Ordering::Acquire, &guard);
-        if let Some(light) = unsafe { shared.as_ref() } {
+        if let Some(light) = self.get_light_guard(pos, &guard) {
             light.get_block_light(x.rem_euclid(16), y, z.rem_euclid(16))
         } else {
             0
@@ -270,6 +283,7 @@ impl SharedChunkStore {
                 .get(*pos)
                 .swap(epoch::Shared::null(), Ordering::Release, &guard);
         if !old_chunk.is_null() {
+            // SAFETY: unlinked from the ring; pinned readers are waited out.
             unsafe {
                 guard.defer_destroy(old_chunk);
             }
@@ -279,6 +293,7 @@ impl SharedChunkStore {
                 .get(*pos)
                 .swap(epoch::Shared::null(), Ordering::Release, &guard);
         if !old_light.is_null() {
+            // SAFETY: unlinked from the ring; pinned readers are waited out.
             unsafe {
                 guard.defer_destroy(old_light);
             }
@@ -286,35 +301,43 @@ impl SharedChunkStore {
     }
 
     pub fn set_block_state(&self, x: i32, y: i32, z: i32, state: BlockState) {
-        let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
+        self.set_block_states(std::iter::once((BlockPos::new(x, y, z), state)));
+    }
+
+    /// Applies a run of block updates, cloning each affected chunk once per
+    /// contiguous run instead of once per block (multi-block section updates
+    /// arrive hundreds of blocks at a time).
+    pub fn set_block_states(&self, updates: impl IntoIterator<Item = (BlockPos, BlockState)>) {
         let guard = epoch::pin();
-        let shared = self.chunks.get(chunk_pos).load(Ordering::Acquire, &guard);
-        let Some(chunk_ref) = (unsafe { shared.as_ref() }) else {
-            return;
-        };
-        let mut new_chunk: Chunk = chunk_ref.clone();
-        let block_pos = azalea_core::position::ChunkBlockPos {
-            x: x.rem_euclid(16) as u8,
-            y,
-            z: z.rem_euclid(16) as u8,
-        };
-        new_chunk.set_block_state(&block_pos, state, self.min_y);
-        let old_ptr =
-            self.chunks
-                .get(chunk_pos)
-                .swap(Owned::new(new_chunk), Ordering::Release, &guard);
-        if !old_ptr.is_null() {
-            unsafe {
-                guard.defer_destroy(old_ptr);
+        let mut pending: Option<(ChunkPos, Chunk)> = None;
+        for (pos, state) in updates {
+            let chunk_pos = ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
+            if pending.as_ref().is_none_or(|(p, _)| *p != chunk_pos) {
+                if let Some((p, chunk)) = pending.take() {
+                    Self::publish(self.chunks.get(p), chunk, &guard);
+                }
+                let Some(chunk_ref) = self.get_chunk_guard(chunk_pos, &guard) else {
+                    continue;
+                };
+                pending = Some((chunk_pos, clone_chunk(chunk_ref)));
             }
+            let (_, chunk) = pending.as_mut().unwrap();
+            let block_pos = azalea_core::position::ChunkBlockPos {
+                x: pos.x.rem_euclid(16) as u8,
+                y: pos.y,
+                z: pos.z.rem_euclid(16) as u8,
+            };
+            chunk.set_block_state(&block_pos, state, self.min_y);
+        }
+        if let Some((p, chunk)) = pending.take() {
+            Self::publish(self.chunks.get(p), chunk, &guard);
         }
     }
 
     pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> BlockState {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let guard = epoch::pin();
-        let shared = self.chunks.get(chunk_pos).load(Ordering::Acquire, &guard);
-        let Some(chunk_ref) = (unsafe { shared.as_ref() }) else {
+        let Some(chunk_ref) = self.get_chunk_guard(chunk_pos, &guard) else {
             return BlockState::AIR;
         };
         block_state_from_section(chunk_ref, x, y, z, self.min_y)
@@ -332,11 +355,20 @@ impl SharedChunkStore {
         (self.height / 16) as i32
     }
 
+    /// Y of the world's lowest section, in section coordinates.
+    pub fn min_section_y(&self) -> i32 {
+        self.min_y.div_euclid(16)
+    }
+
+    /// A section Y's bit index within a column's 32-bit section masks.
+    pub fn section_y_index(&self, section_y: i32) -> u32 {
+        (section_y - self.min_section_y()).clamp(0, SIZE_Y as i32 - 1) as u32
+    }
+
     pub fn motion_blocking_height(&self, x: i32, z: i32) -> i32 {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let guard = epoch::pin();
-        let shared = self.chunks.get(chunk_pos).load(Ordering::Acquire, &guard);
-        let Some(chunk_ref) = (unsafe { shared.as_ref() }) else {
+        let Some(chunk_ref) = self.get_chunk_guard(chunk_pos, &guard) else {
             return self.min_y;
         };
         chunk_ref
@@ -349,8 +381,7 @@ impl SharedChunkStore {
     pub fn biome_id(&self, x: i32, y: i32, z: i32) -> u32 {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let guard = epoch::pin();
-        let shared = self.chunks.get(chunk_pos).load(Ordering::Acquire, &guard);
-        let Some(chunk_ref) = (unsafe { shared.as_ref() }) else {
+        let Some(chunk_ref) = self.get_chunk_guard(chunk_pos, &guard) else {
             return 0;
         };
         let biome_pos = azalea_core::position::ChunkBiomePos {
@@ -447,6 +478,11 @@ impl ChunkStore {
     }
 
     #[inline]
+    pub fn set_block_states(&self, updates: impl IntoIterator<Item = (BlockPos, BlockState)>) {
+        self.shared.set_block_states(updates);
+    }
+
+    #[inline]
     pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> BlockState {
         self.shared.get_block_state(x, y, z)
     }
@@ -474,6 +510,15 @@ impl ChunkStore {
     #[inline]
     pub fn biome_id(&self, x: i32, y: i32, z: i32) -> u32 {
         self.shared.biome_id(x, y, z)
+    }
+}
+
+/// azalea's `Chunk` doesn't derive `Clone`; both of its fields do, so the
+/// clone-on-write path builds the copy field-wise.
+fn clone_chunk(chunk: &Chunk) -> Chunk {
+    Chunk {
+        sections: chunk.sections.clone(),
+        heightmaps: chunk.heightmaps.clone(),
     }
 }
 

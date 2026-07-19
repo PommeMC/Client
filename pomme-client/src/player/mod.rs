@@ -7,6 +7,7 @@ use glam::{dvec2, dvec3};
 use inventory::Inventory;
 
 use crate::entity::components::{LookDirection, Position, Velocity};
+use crate::world::block::BlockStateExt;
 
 pub const MAX_AIR_SUPPLY: i32 = 300;
 pub const STANDING_HEIGHT: f64 = 1.8;
