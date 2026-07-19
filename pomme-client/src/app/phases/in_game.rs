@@ -205,7 +205,7 @@ impl GameState {
             Some(resource_packs),
         );
         // All-visible until the GPU visibility pass returns its first mask; a
-        // zeroed mask would gate every section's meshing and drawing off.
+        // zeroed mask would cull every section's draw.
         let visibility_mask = ChunkRing::new(u32::MAX);
         Self {
             light_engine: crate::world::light::LevelLightEngine::new(
@@ -461,9 +461,8 @@ impl GameState {
     /// from `Minecraft.runTick`: drain queued light tasks, then
     /// `runLightUpdates`) and turns the resulting dirty scope into remesh
     /// work: columns whose chunk-load light applied go through the
-    /// content-gen path like chunk loads (the visibility rescan enqueues
-    /// them, visibility-gated), individual lit sections remesh on the priority
-    /// lane.
+    /// content-gen path like chunk loads (the rescan enqueues them
+    /// nearest-first), individual lit sections remesh on the priority lane.
     pub fn update_light(&mut self) {
         let mut dirty = crate::world::light::LightDirty::default();
         self.light_engine
@@ -521,8 +520,6 @@ impl GameState {
         self.meshing.rescan_mesh_jobs(
             self.chunk_store.loaded_set(),
             player_chunk,
-            &self.visibility_mask,
-            self.visibility_center,
             &self.player.position,
         );
     }
@@ -812,6 +809,7 @@ pub fn update_game(
     let t_upload = std::time::Instant::now();
     gfx.renderer.stage_mesh_batch();
     game.last_update_phases.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
+    game.last_update_phases.upload_reclaim_ms = gfx.renderer.last_upload_reclaim_ms();
 
     // Per-frame FOV interpolation; set before the frustum/view-projection reads.
     gfx.renderer.set_render_partial_tick(partial_tick);
@@ -882,25 +880,8 @@ pub fn update_game(
             chunk_count: gfx.renderer.loaded_chunk_count(),
             sections_drawn: gfx.renderer.sections_drawn(),
             occlusion_on: true,
-            mesh_gate: Some({
-                // Among in-frustum columns: sections we mesh vs sections skipped as
-                // occluded (the per-section occlusion win). Middle slot unused.
-                let n = game.chunk_store.section_count() as u32;
-                let mut visible = 0u32;
-                let mut hidden = 0u32;
-                let center = game.visibility_center;
-                let mask_ring = &game.visibility_mask;
-                for pos in game.chunk_store.loaded_positions() {
-                    let mask = mask_ring
-                        .get_in_range(pos, center)
-                        .copied()
-                        .unwrap_or((1u32 << n) - 1);
-                    let v = mask.count_ones();
-                    visible += v;
-                    hidden += n.saturating_sub(v);
-                }
-                (visible, 0, hidden)
-            }),
+            sections_total: game.chunk_store.section_count() as u32
+                * game.chunk_store.loaded_set().len() as u32,
             gpu_name: gfx.renderer.gpu_name(),
             vulkan_version: gfx.renderer.vulkan_version(),
             screen_w: gfx.renderer.screen_width(),

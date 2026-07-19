@@ -240,14 +240,13 @@ impl ChunkMeshing {
             .get(chunk_pos)
             .fetch_or(1 << rel_y, Ordering::Release);
     }
-    /// Per-frame rescan: Bitwise AND of `vis_mask` and `update_set`,
-    /// distance-sorted nearest to camera.
+    /// Per-frame rescan of the dirty bits, distance-sorted nearest to camera.
+    /// Visibility never gates meshing (occlusion gates only drawing, like
+    /// vanilla), so turning the camera reveals already-meshed terrain.
     pub fn rescan_mesh_jobs(
         &mut self,
         loaded: &std::collections::HashSet<ChunkPos>,
         player_chunk: ChunkPos,
-        visibility: &ChunkRing<u32>,
-        visibility_center: ChunkPos,
         camera_pos: &DVec3,
     ) {
         let min_y_section = self.store.min_section_y();
@@ -258,16 +257,11 @@ impl ChunkMeshing {
         // for columns it will actually visit.
         let mut active_cols: Vec<(ChunkPos, u32, u32)> = Vec::new();
         for &pos in loaded {
-            let vis_mask = visibility
-                .get_in_range(pos, visibility_center)
-                .copied()
-                .unwrap_or(u32::MAX);
-            let update_mask = self.update_set.get(pos).load(Ordering::Acquire);
-            let active_mask = vis_mask & update_mask;
+            let active_mask = self.update_set.get(pos).load(Ordering::Acquire);
             let lod = crate::app::core::chunk_lod(pos, player_chunk);
             // Fast path: a present cache entry means a previous full visit
-            // stamped every section's identity, so with nothing dirty+visible
-            // and the lod unchanged the section loop has no work.
+            // stamped every section's identity, so with nothing dirty and the
+            // lod unchanged the section loop has no work.
             if active_mask == 0 && self.col_lod.get(&pos) == Some(&lod) {
                 continue;
             }

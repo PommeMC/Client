@@ -43,10 +43,9 @@ pub struct DebugInfo<'a> {
     pub chunk_count: u32,
     pub sections_drawn: u32,
     pub occlusion_on: bool,
-    /// Section counts across loaded columns for the mesh-gate readout:
-    /// `(visible, unused, occluded)`. The middle slot is unused; `None`
-    /// renders as "meshing all".
-    pub mesh_gate: Option<(u32, u32, u32)>,
+    /// Total sections across loaded columns, the denominator for the
+    /// sections-drawn readout.
+    pub sections_total: u32,
     pub gpu_name: &'a str,
     pub vulkan_version: &'a str,
     pub screen_w: u32,
@@ -520,16 +519,11 @@ fn build_debug_overlay(
         String::new(),
         format!("Chunks: {} loaded", info.chunk_count),
         format!(
-            "Sections drawn: {} (occlusion {})",
+            "Sections drawn: {} / {} (occlusion {})",
             info.sections_drawn,
+            info.sections_total,
             if info.occlusion_on { "on" } else { "off" }
         ),
-        match info.mesh_gate {
-            Some((vis, margin, hidden)) => {
-                format!("Mesh gate: vis {vis} / margin {margin} / hidden {hidden}")
-            }
-            None => "Mesh gate: off (meshing all)".to_string(),
-        },
     ];
 
     if let Some((target, face, name, props)) = &info.target_block {

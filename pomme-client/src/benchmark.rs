@@ -271,10 +271,18 @@ fn radius_from_chunk_count(count: u32) -> u32 {
 pub struct UpdatePhases {
     pub update_ms: f32,
     pub net_decode_ms: f32,
+    /// Slowest single event applied inside `net_decode_ms` and its variant
+    /// tag; the drain budget can't split one event, so a net_decode spike is
+    /// always one heavy apply.
+    pub net_worst_event_ms: f32,
+    pub net_worst_event: &'static str,
     pub light_ms: f32,
     pub rescan_ms: f32,
     pub mesh_drain_ms: f32,
     pub upload_ms: f32,
+    /// GPU-wait time inside `upload_ms` from the emergency slice reclaim;
+    /// the remainder is staging bookkeeping (pool allocs, meta inserts).
+    pub upload_reclaim_ms: f32,
     /// CPU time of the whole render call (command recording, staging memcpy,
     /// submit) — the part of `update_ms` no other phase covers.
     pub render_cpu_ms: f32,
@@ -560,10 +568,9 @@ impl ChunkLoadBench {
                     self.first_load_at = Some(Instant::now());
                 }
 
-                // Done when GPU loaded reaches the cached target — or when it
-                // stops growing: meshing is visibility-gated, so columns fully
-                // outside the bench camera's frustum never mesh and the exact
-                // target can be unreachable (this hung run 1 at some angles).
+                // Done when GPU loaded reaches the cached target, with a
+                // stopped-growing fallback as a safety net so an unreachable
+                // target can never hang the run.
                 let reached = gpu_loaded >= self.baseline_count;
                 let settled =
                     gpu_loaded > 0 && self.last_change.elapsed().as_secs_f32() >= LOAD_SETTLE_SECS;

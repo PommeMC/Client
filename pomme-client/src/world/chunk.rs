@@ -418,10 +418,6 @@ impl ChunkStore {
             .retain(|bp, _| bp.x.div_euclid(16) != cx || bp.z.div_euclid(16) != cz);
     }
 
-    pub fn loaded_positions(&self) -> impl Iterator<Item = ChunkPos> + '_ {
-        self.loaded.iter().copied()
-    }
-
     pub fn loaded_set(&self) -> &std::collections::HashSet<ChunkPos> {
         &self.loaded
     }

@@ -102,6 +102,22 @@ fn preview_box_rect(rect: [f32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> 
     })
 }
 
+/// Clears the box's depth and scissors into it; the caller draws its content
+/// and then restores the full-frame scissor.
+fn begin_preview_box(
+    cmd: vk::CommandBuffer,
+    clear_attachment: vk::ClearAttachment,
+    rect: vk::Rect2D,
+) {
+    let clear_rect = vk::ClearRect {
+        rect,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
+    cmd.set_scissor(0, &[rect]);
+}
+
 // Constructed once per frame and consumed immediately, never stored.
 #[allow(clippy::large_enum_variant)]
 enum RenderMode<'a> {
@@ -975,6 +991,12 @@ impl Renderer {
         )
     }
 
+    /// GPU-wait time inside the last `stage_mesh_batch` (emergency slice
+    /// reclaim), for the benchmark's upload breakdown.
+    pub fn last_upload_reclaim_ms(&self) -> f32 {
+        self.chunk_buffers.last_reclaim_ms
+    }
+
     pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {
         self.chunk_buffers.remove(pos);
     }
@@ -1728,18 +1750,10 @@ impl Renderer {
                 self.menu_pipeline
                     .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
 
-                // Each preview box gets its depth cleared and its own scissor
-                // while the 3D content draws.
                 if let Some(p) = player_preview
                     && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
                 {
-                    let clear_rect = vk::ClearRect {
-                        rect,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    };
-                    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
-                    cmd.set_scissor(0, &[rect]);
+                    begin_preview_box(cmd, clear_attachment, rect);
                     self.skin_preview.draw_in_box(cmd, frame, *p, sw, sh);
                     cmd.set_scissor(0, &[scissor]);
                 }
@@ -1747,13 +1761,7 @@ impl Renderer {
                 if let Some(p) = book_preview
                     && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
                 {
-                    let clear_rect = vk::ClearRect {
-                        rect,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    };
-                    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
-                    cmd.set_scissor(0, &[rect]);
+                    begin_preview_box(cmd, clear_attachment, rect);
                     self.book_preview.draw_in_box(cmd, frame, *p, sw, sh);
                     cmd.set_scissor(0, &[scissor]);
                 }

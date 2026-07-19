@@ -18,7 +18,12 @@ const INDEX_SIZE: u64 = size_of::<u32>() as u64;
 const BYTES_PER_BUCKET: u64 =
     BUCKET_VERTICES as u64 * VERTEX_SIZE + BUCKET_INDICES as u64 * INDEX_SIZE;
 const MIN_BUCKETS: u32 = 128;
-const MAX_BUCKETS: u32 = 2048;
+// A full-world reload (dimension change, render-distance toggle) transiently
+// holds both worlds: unloaded slices stay allocated until their frame deadline
+// while the new world uploads. The cap leaves room for that 2x so the reload
+// never hits the emergency GPU-wait reclaim; `VRAM_BUDGET_FRACTION` still
+// bounds smaller cards.
+const MAX_BUCKETS: u32 = 4096;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
 /// Per-section fade-in length, shared by the opaque indirect path and water.
 const FADE_DURATION_MS: f32 = 1000.0;
@@ -364,6 +369,9 @@ pub struct ChunkBufferStore {
     vtx_free: FreeList,
     idx_free: FreeList,
     chunks: HashMap<ChunkPos, ChunkAlloc>,
+    /// Time spent in `reclaim_retired`'s GPU wait during the last
+    /// `stage_mesh_batch`, for the benchmark's upload breakdown.
+    pub last_reclaim_ms: f32,
     cached_meta: Vec<ChunkMeta>,
     meta_dirty: bool,
     /// End of the current fade-in window. While `now < fade_until` the
@@ -745,6 +753,7 @@ impl ChunkBufferStore {
             vtx_free,
             idx_free,
             chunks: HashMap::new(),
+            last_reclaim_ms: 0.0,
             cached_meta: Vec::new(),
             meta_dirty: true,
             fade_until: std::time::Instant::now(),
@@ -865,6 +874,7 @@ impl ChunkBufferStore {
         allocator: &Arc<Mutex<Allocator>>,
         mesh_queue: &mut VecDeque<SectionMeshData>,
     ) -> Vec<(ChunkSectionPos, u64)> {
+        self.last_reclaim_ms = 0.0;
         // Keep only the newest result per section before draining: the stale
         // check below reads `self.chunks`, which only reflects this batch's
         // uploads after the loop, so two same-section results in one drain would
@@ -901,17 +911,6 @@ impl ChunkBufferStore {
             icount: u32,
         }
         let mut entries: Vec<BatchEntry> = Vec::new();
-
-        // Retired slices only reclaim in `begin_frame`; if rendering is paused
-        // while meshing continues (e.g. minimized window) the backlog grows
-        // unbounded. Past a sane bound, force a GPU wait and reclaim it all.
-        const PENDING_FREE_DRAIN_THRESHOLD: usize = 8192;
-        if self.pending_free.len() > PENDING_FREE_DRAIN_THRESHOLD {
-            device.wait_idle().ok();
-            while let Some((_, slice)) = self.pending_free.pop_front() {
-                self.free_slice(slice);
-            }
-        }
 
         // Include copies carried over from a skipped frame in the budget.
         let mut current_v_bytes = self.pending_v_bytes;
@@ -968,14 +967,14 @@ impl ChunkBufferStore {
                 current_v_bytes += v_bytes;
                 current_i_bytes += i_bytes;
             }
-            let Some(vtx_off) = self.vtx_free.alloc(vcount) else {
+            let Some(vtx_off) = self.alloc_vertices(device, vcount) else {
                 tracing::debug!(
                     "Vertex pool full, stopping upload batch for {:?}",
                     mesh.spos
                 );
                 break;
             };
-            let Some(idx_off) = self.idx_free.alloc(icount) else {
+            let Some(idx_off) = self.alloc_indices(device, icount) else {
                 self.vtx_free.free_region(vtx_off, vcount);
                 tracing::debug!("Index pool full, stopping upload batch for {:?}", mesh.spos);
                 break;
@@ -1179,6 +1178,45 @@ impl ChunkBufferStore {
         }
 
         self.max_meta = new_max;
+    }
+
+    /// Pool alloc that, on exhaustion, reclaims retired slices early and
+    /// retries once. A mass unload can retire tens of thousands of slices in
+    /// a burst; reclaiming only when an alloc actually fails keeps the GPU
+    /// wait off the common path (`begin_frame` returns them for free three
+    /// frames later).
+    fn alloc_vertices(&mut self, device: &vk::Device, count: u32) -> Option<u32> {
+        if let Some(off) = self.vtx_free.alloc(count) {
+            return Some(off);
+        }
+        self.reclaim_retired(device)
+            .then(|| self.vtx_free.alloc(count))
+            .flatten()
+    }
+
+    fn alloc_indices(&mut self, device: &vk::Device, count: u32) -> Option<u32> {
+        if let Some(off) = self.idx_free.alloc(count) {
+            return Some(off);
+        }
+        self.reclaim_retired(device)
+            .then(|| self.idx_free.alloc(count))
+            .flatten()
+    }
+
+    /// Emergency reclaim when a pool runs dry: waits the GPU out and returns
+    /// every retired slice immediately instead of at its frame deadline.
+    /// False when there was nothing to reclaim.
+    fn reclaim_retired(&mut self, device: &vk::Device) -> bool {
+        if self.pending_free.is_empty() {
+            return false;
+        }
+        let start = std::time::Instant::now();
+        device.wait_idle().ok();
+        while let Some((_, slice)) = self.pending_free.pop_front() {
+            self.free_slice(slice);
+        }
+        self.last_reclaim_ms += start.elapsed().as_secs_f32() * 1000.0;
+        true
     }
 
     /// Return one slice's vertex and index ranges to the pools.

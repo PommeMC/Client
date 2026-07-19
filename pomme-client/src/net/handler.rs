@@ -86,10 +86,15 @@ pub fn handle_game_packet(
                 &p.chunk_data.heightmaps,
             ) {
                 Ok(chunk) => {
+                    let sky_sources = crate::world::light::ChunkSkyLightSources::fill_from(
+                        dimension.min_y,
+                        &chunk,
+                    );
                     let _ = event_tx.try_send(NetworkEvent::ChunkLoaded {
                         pos: ChunkPos::new(p.x, p.z),
                         chunk: Box::new(chunk),
                         light: (&p.light_data).into(),
+                        sky_sources,
                     });
                 }
                 Err(e) => {

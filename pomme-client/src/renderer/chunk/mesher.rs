@@ -1106,6 +1106,11 @@ fn emit_lod_cube(
     };
     for dir in &CUBE_FACE_DIRS {
         let offset = dir.offset();
+        // Cull against the adjacent cube's representative (its low corner,
+        // `step` away), since that cell decides whether the neighbor cube is
+        // drawn at all. Negative faces at the section's low border sample past
+        // the one-block padding and read AIR, keeping the face — conservative
+        // overdraw beats holes there.
         let nx = lx + offset[0] * step;
         let ny = ly + offset[1] * step;
         let nz = lz + offset[2] * step;

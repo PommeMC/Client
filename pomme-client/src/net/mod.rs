@@ -64,6 +64,8 @@ pub enum NetworkEvent {
         /// Parsed on the net task so bursts don't spike the main thread.
         chunk: Box<azalea_world::chunk::Chunk>,
         light: PacketLightData,
+        /// Sky-source heightmap, scanned on the net task for the same reason.
+        sky_sources: crate::world::light::ChunkSkyLightSources,
     },
     /// Standalone server light correction (`ClientboundLightUpdate`).
     LightUpdate {
@@ -360,4 +362,83 @@ pub enum NetworkEvent {
         header: String,
         footer: String,
     },
+}
+
+impl NetworkEvent {
+    /// Variant tag for the benchmark's worst-event stat. Trivially cheap
+    /// variants share a group tag; anything that touches the chunk store,
+    /// disk, or a nontrivial subsystem is named individually.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            NetworkEvent::Connected => "connected",
+            NetworkEvent::Registries(_) => "registries",
+            NetworkEvent::BiomeColors { .. } => "biome_colors",
+            NetworkEvent::DimensionInfo { .. } => "dimension_info",
+            NetworkEvent::ChunkLoaded { .. } => "chunk_loaded",
+            NetworkEvent::LightUpdate { .. } => "light_update",
+            NetworkEvent::ChunkUnloaded { .. } => "chunk_unloaded",
+            NetworkEvent::ChunkCacheCenter { .. } => "chunk_cache_center",
+            NetworkEvent::PlayerPosition { .. } => "player_position",
+            NetworkEvent::PlayerHealth { .. }
+            | NetworkEvent::PlayerExperience { .. }
+            | NetworkEvent::PlayerAbilitiesChanged { .. }
+            | NetworkEvent::GameModeChanged { .. }
+            | NetworkEvent::PlayerLogin { .. }
+            | NetworkEvent::PlayerScore { .. }
+            | NetworkEvent::PlayerDied { .. } => "player_state",
+            NetworkEvent::Waypoint { .. } => "waypoint",
+            NetworkEvent::ContainerContent { .. }
+            | NetworkEvent::ContainerSlot { .. }
+            | NetworkEvent::ContainerData { .. }
+            | NetworkEvent::OpenScreen { .. }
+            | NetworkEvent::ContainerClosed
+            | NetworkEvent::CursorItem { .. }
+            | NetworkEvent::EntityArmorUpdate { .. } => "container",
+            NetworkEvent::ChatMessage { .. } => "chat_message",
+            NetworkEvent::CommandTree { .. } => "command_tree",
+            NetworkEvent::CommandSuggestions { .. } => "command_suggestions",
+            NetworkEvent::BlockUpdate { .. } => "block_update",
+            NetworkEvent::BlockChangedAck { .. } => "block_changed_ack",
+            NetworkEvent::SectionBlocksUpdate { .. } => "section_blocks_update",
+            NetworkEvent::BlockEntitySync { .. } => "block_entity_sync",
+            NetworkEvent::BlockEntityUpdate { .. } => "block_entity_update",
+            NetworkEvent::BlockEvent { .. } => "block_event",
+            NetworkEvent::PlaySound { .. } | NetworkEvent::PlayEntitySound { .. } => "play_sound",
+            NetworkEvent::TimeUpdate { .. } => "time_update",
+            NetworkEvent::WeatherUpdate { .. } => "weather_update",
+            NetworkEvent::ServerViewDistance { .. }
+            | NetworkEvent::ServerSimulationDistance { .. } => "server_distance",
+            NetworkEvent::EntitySpawned { .. } => "entity_spawned",
+            NetworkEvent::EntitiesRemoved { .. } => "entities_removed",
+            NetworkEvent::LevelEvent { .. } => "level_event",
+            NetworkEvent::LevelParticles { .. } => "level_particles",
+            NetworkEvent::EntityMoved { .. }
+            | NetworkEvent::EntityMovedRotated { .. }
+            | NetworkEvent::EntityMotion { .. }
+            | NetworkEvent::EntityTeleported { .. }
+            | NetworkEvent::EntityHeadRotation { .. }
+            | NetworkEvent::EntityItemData { .. }
+            | NetworkEvent::EntityBabyFlag { .. }
+            | NetworkEvent::EntityPose { .. }
+            | NetworkEvent::SheepWoolData { .. }
+            | NetworkEvent::SheepEatStart { .. }
+            | NetworkEvent::FinishUseItem { .. }
+            | NetworkEvent::CowVariant { .. }
+            | NetworkEvent::VillagerData { .. }
+            | NetworkEvent::VillagerUnhappy { .. }
+            | NetworkEvent::EntityCustomName { .. }
+            | NetworkEvent::EntityAggressive { .. }
+            | NetworkEvent::EntitySwing { .. }
+            | NetworkEvent::CreeperPowered { .. }
+            | NetworkEvent::EntityDamaged { .. }
+            | NetworkEvent::ItemPickedUp { .. } => "entity_state",
+            NetworkEvent::ResourcePackPush { .. } | NetworkEvent::ResourcePackPop { .. } => {
+                "resource_pack"
+            }
+            NetworkEvent::Disconnected { .. } => "disconnected",
+            NetworkEvent::PlayerInfoUpdate { .. } => "player_info_update",
+            NetworkEvent::PlayerInfoRemove { .. } => "player_info_remove",
+            NetworkEvent::TabListHeaderFooter { .. } => "tab_list",
+        }
+    }
 }

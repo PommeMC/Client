@@ -361,11 +361,17 @@ impl AppCore {
             game.pending_events.push_back(event);
         }
         const NET_DRAIN_BUDGET_SECS: f32 = 0.003;
-        while processed < 4096 && t_net.elapsed().as_secs_f32() < NET_DRAIN_BUDGET_SECS {
+        // Record the worst single apply for the bench breakdown, timed by
+        // boundary stamps so the loop stays at one clock read per event.
+        let mut worst_event = "";
+        let mut worst_event_secs = 0.0f32;
+        let mut event_start = t_net.elapsed().as_secs_f32();
+        while processed < 4096 && event_start < NET_DRAIN_BUDGET_SECS {
             let Some(event) = game.pending_events.pop_front() else {
                 break;
             };
             processed += 1;
+            let event_kind = event.kind();
             match event {
                 NetworkEvent::Connected => {
                     if let Some(state) = connect_phase.as_deref_mut() {
@@ -406,10 +412,18 @@ impl AppCore {
                         Arc::clone(&game.biome_climate),
                     );
                 }
-                NetworkEvent::ChunkLoaded { pos, chunk, light } => {
+                NetworkEvent::ChunkLoaded {
+                    pos,
+                    chunk,
+                    light,
+                    sky_sources,
+                } => {
                     game.chunk_store.insert_chunk(pos, *chunk);
-                    game.light_engine
-                        .on_chunk_loaded(&mut game.chunk_store, (pos.x, pos.z));
+                    game.light_engine.on_chunk_loaded(
+                        &game.chunk_store,
+                        (pos.x, pos.z),
+                        sky_sources,
+                    );
                     // The column meshes once its queued light applies (vanilla
                     // schedules the rebuild from enableChunkLight, not here).
                     queue_light_apply(game, pos, &light, true);
@@ -1151,6 +1165,13 @@ impl AppCore {
                     game.tab_list.set_header_footer(header, footer);
                 }
             }
+            let event_end = t_net.elapsed().as_secs_f32();
+            let event_secs = event_end - event_start;
+            if event_secs > worst_event_secs {
+                worst_event_secs = event_secs;
+                worst_event = event_kind;
+            }
+            event_start = event_end;
         }
         if let Some(pending) = &self.pending_pack_download
             && pending.handle.is_finished()
@@ -1204,6 +1225,8 @@ impl AppCore {
         }
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1000.0;
         game.last_update_phases.net_decode_ms = ms(t_net);
+        game.last_update_phases.net_worst_event_ms = worst_event_secs * 1000.0;
+        game.last_update_phases.net_worst_event = worst_event;
 
         // Enqueue everything that needs meshing; newly lit columns marked
         // their dirty bits in GameState::update_light. Visibility itself is

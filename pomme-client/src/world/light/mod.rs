@@ -25,7 +25,7 @@ use block::BlockLightEngine;
 use data::{DataLayer, LAYER_BYTES};
 use engine::LightEngine;
 use sky::SkyLightEngine;
-use sources::ChunkSkyLightSources;
+pub(crate) use sources::ChunkSkyLightSources;
 use storage::StorageCore;
 pub(crate) use storage::{LightPos, SectionKey};
 use world::StoreWorld;
@@ -243,12 +243,19 @@ impl LevelLightEngine {
         }
     }
 
-    /// Registers a freshly loaded chunk column: builds its sky-source
+    /// Registers a freshly loaded chunk column: adopts its sky-source
     /// heightmap (vanilla fills sources at chunk-data apply, before the
-    /// queued light task) and creates its light column from any layers the
-    /// engine already stores (border sections lit by loaded neighbors), so
-    /// later publishes only need to touch changed sections.
-    pub fn on_chunk_loaded(&mut self, store: &mut ChunkStore, pos: (i32, i32)) {
+    /// queued light task; pomme scans it on the net task so the column walk
+    /// never lands in the frame's event drain) and creates its light column
+    /// from any layers the engine already stores (border sections lit by
+    /// loaded neighbors), so later publishes only need to touch changed
+    /// sections.
+    pub fn on_chunk_loaded(
+        &mut self,
+        store: &ChunkStore,
+        pos: (i32, i32),
+        sources: ChunkSkyLightSources,
+    ) {
         let count = self.light_section_count();
         let min_section_y = self.min_section_y;
         let key_at = |index: usize| SectionKey::new(pos.0, min_section_y - 1 + index as i32, pos.1);
@@ -270,14 +277,7 @@ impl LevelLightEngine {
                 .sky
                 .column_top(pos)
                 .map(|top| top - (self.min_section_y - 1));
-            let guard = crossbeam_epoch::pin();
-            if let Some(chunk) = store
-                .shared
-                .get_chunk_guard(azalea_core::position::ChunkPos::new(pos.0, pos.1), &guard)
-            {
-                sky.sources
-                    .insert(pos, ChunkSkyLightSources::fill_from(store.min_y(), chunk));
-            }
+            sky.sources.insert(pos, sources);
         }
         store.shared.set_light_data(
             azalea_core::position::ChunkPos::new(pos.0, pos.1),
