@@ -131,13 +131,13 @@ async fn ping_inner(address: &str) -> Result<ServerStatus, Box<dyn std::error::E
 
     let version = parsed
         .get("version")
-        .and_then(|v| {
-            v.get("protocol")
-                .and_then(|p| p.as_i64())
-                .and_then(|p| i32::try_from(p).ok())
-                .and_then(pomme_protocol::ProtocolVersion::from_protocol)
-                .map(|v| v.name.to_string())
-                .or_else(|| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        .map(|v| {
+            resolve_version_name(
+                v.get("protocol")
+                    .and_then(|p| p.as_i64())
+                    .and_then(|p| i32::try_from(p).ok()),
+                v.get("name").and_then(|n| n.as_str()),
+            )
         })
         .unwrap_or_default();
 
@@ -149,6 +149,25 @@ async fn ping_inner(address: &str) -> Result<ServerStatus, Box<dyn std::error::E
         motd,
         version,
     })
+}
+
+/// The version name shown and launched for a pinged server: the self-reported
+/// name when it names a supported version speaking the same protocol (1.21.9
+/// and 1.21.10 share 773), else the protocol's newest name, else the raw
+/// reported string. The result feeds `launch_game --version`, so a supported
+/// protocol must always resolve to a `VERSIONS` name.
+fn resolve_version_name(protocol: Option<i32>, reported: Option<&str>) -> String {
+    use pomme_protocol::ProtocolVersion;
+    protocol
+        .and_then(|p| {
+            reported
+                .and_then(ProtocolVersion::from_name)
+                .filter(|v| v.protocol == p)
+                .or_else(|| ProtocolVersion::from_protocol(p))
+        })
+        .map(|v| v.name.to_string())
+        .or_else(|| reported.map(str::to_string))
+        .unwrap_or_default()
 }
 
 fn parse_address(address: &str) -> (String, u16) {
@@ -196,4 +215,28 @@ async fn read_varint(stream: &mut TcpStream) -> Result<i32, Box<dyn std::error::
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_name_resolution() {
+        // The self-reported name wins when it names the same protocol.
+        assert_eq!(resolve_version_name(Some(773), Some("1.21.9")), "1.21.9");
+        assert_eq!(resolve_version_name(Some(773), Some("1.21.10")), "1.21.10");
+        assert_eq!(resolve_version_name(Some(775), Some("26.1.1")), "26.1.1");
+        // Junk or protocol-mismatched names fall back to the newest name.
+        assert_eq!(
+            resolve_version_name(Some(773), Some("Paper 1.21.9")),
+            "1.21.10"
+        );
+        assert_eq!(resolve_version_name(Some(773), None), "1.21.10");
+        assert_eq!(resolve_version_name(Some(776), Some("1.21.10")), "26.2");
+        // Unsupported protocols show the raw reported string.
+        assert_eq!(resolve_version_name(Some(1), Some("1.8.9")), "1.8.9");
+        assert_eq!(resolve_version_name(None, Some("weird")), "weird");
+        assert_eq!(resolve_version_name(None, None), "");
+    }
 }
