@@ -10,6 +10,23 @@ use super::sender::PacketSender;
 use crate::entity::components::Position;
 use crate::ui::text::format_text_spans;
 
+/// Dimension info from a login/respawn registry entry. `has_skylight` lives
+/// in azalea's flattened extras; missing defaults to true (overworld-like).
+fn dimension_info(
+    dim: &azalea_core::registry_holder::dimension_type::DimensionKindElement,
+) -> NetworkEvent {
+    NetworkEvent::DimensionInfo {
+        height: dim.height,
+        min_y: dim.min_y,
+        has_skylight: dim
+            ._extra
+            .get("has_skylight")
+            .and_then(|tag| tag.byte())
+            .map(|b| b != 0)
+            .unwrap_or(true),
+    }
+}
+
 pub fn handle_game_packet(
     packet: &ClientboundGamePacket,
     sender: &PacketSender,
@@ -20,10 +37,7 @@ pub fn handle_game_packet(
     match packet {
         ClientboundGamePacket::Login(p) => {
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
-                let _ = event_tx.try_send(NetworkEvent::DimensionInfo {
-                    height: dim.height,
-                    min_y: dim.min_y,
-                });
+                let _ = event_tx.try_send(dimension_info(dim));
             }
             let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                 game_mode: p.common.game_type as u8,
@@ -43,10 +57,7 @@ pub fn handle_game_packet(
                 pos: ChunkPos::new(p.x, p.z),
                 data: p.chunk_data.data.clone(),
                 heightmaps: p.chunk_data.heightmaps.clone(),
-                sky_light: p.light_data.sky_updates.clone(),
-                block_light: p.light_data.block_updates.clone(),
-                sky_y_mask: p.light_data.sky_y_mask.clone(),
-                block_y_mask: p.light_data.block_y_mask.clone(),
+                light: (&p.light_data).into(),
             });
             let chunk_pos = ChunkPos::new(p.x, p.z);
             let entries: Vec<_> = p
@@ -107,6 +118,12 @@ pub fn handle_game_packet(
                 pos: p.pos,
                 kind: p.block_entity_type,
                 nbt,
+            });
+        }
+        ClientboundGamePacket::LightUpdate(p) => {
+            let _ = event_tx.try_send(NetworkEvent::LightUpdate {
+                pos: ChunkPos::new(p.x, p.z),
+                light: (&p.light_data).into(),
             });
         }
         ClientboundGamePacket::ForgetLevelChunk(p) => {
@@ -538,10 +555,7 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::Respawn(p) => {
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
-                let _ = event_tx.try_send(NetworkEvent::DimensionInfo {
-                    height: dim.height,
-                    min_y: dim.min_y,
-                });
+                let _ = event_tx.try_send(dimension_info(dim));
             }
             let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                 game_mode: p.common.game_type as u8,

@@ -19,7 +19,8 @@ const OVERWORLD_MIN_Y: i32 = -64;
 /// chunk's mesh samples (see `MeshDispatcher::enqueue`) and, by symmetry, the
 /// set that must re-mesh when `pos` changes. Add the diagonals here when the
 /// corner-sample TODO(chunk-light) lands, so the mesh snapshot and the re-mesh
-/// set stay in sync.
+/// set stay in sync (vanilla's `enableChunkLight` dirties the full 3x3 via
+/// `setSectionRangeDirty`).
 pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 5] {
     [
         pos,
@@ -36,34 +37,73 @@ pub enum ChunkError {
     Parse(String),
 }
 
+/// A column's published light, written by the light engine and snapshotted
+/// (via `Arc`) by the mesher. Sections are light sections: one padding
+/// section below the world, `height/16` block sections, one above.
 #[derive(Clone)]
 pub struct ChunkLightData {
     pub sky_sections: Vec<Option<Box<[u8; 2048]>>>,
     pub block_sections: Vec<Option<Box<[u8; 2048]>>>,
     pub min_y: i32,
+    /// Whether the dimension has skylight; without it sky reads 0 (vanilla's
+    /// dummy sky listener).
+    pub has_sky: bool,
+    /// One above the column's highest sky section holding data, as an index
+    /// into `sky_sections`; `None` means no sky data is tracked and the whole
+    /// column reads as open sky.
+    pub sky_top_section: Option<i32>,
 }
 
 impl ChunkLightData {
+    /// Vanilla `SkyLightSectionStorage.getLightValue` on the visible buffer:
+    /// at/above the column's top section is implicit 15, below it missing
+    /// layers defer upward to the nearest stored layer's bottom plane.
     pub fn get_sky_light(&self, x: i32, y: i32, z: i32) -> u8 {
-        self.get_nibble(&self.sky_sections, x, y, z)
+        if !self.has_sky {
+            return 0;
+        }
+        let Some(top) = self.sky_top_section else {
+            return 15;
+        };
+        let mut index = (y - self.min_y).div_euclid(16) + 1;
+        if index >= top {
+            return 15;
+        }
+        let mut local_y = (y - self.min_y).rem_euclid(16);
+        loop {
+            if let Some(data) = usize::try_from(index)
+                .ok()
+                .and_then(|i| self.sky_sections.get(i))
+                .and_then(Option::as_deref)
+            {
+                return Self::nibble(data, x, local_y, z);
+            }
+            index += 1;
+            if index >= top {
+                return 15;
+            }
+            // Walking up reads the found layer's bottom plane (vanilla
+            // flattens the block position's Y).
+            local_y = 0;
+        }
     }
 
     pub fn get_block_light(&self, x: i32, y: i32, z: i32) -> u8 {
-        self.get_nibble(&self.block_sections, x, y, z)
+        let index = (y - self.min_y).div_euclid(16) + 1;
+        match usize::try_from(index)
+            .ok()
+            .and_then(|i| self.block_sections.get(i))
+            .and_then(Option::as_deref)
+        {
+            Some(data) => Self::nibble(data, x, (y - self.min_y).rem_euclid(16), z),
+            None => 0,
+        }
     }
 
-    fn get_nibble(&self, sections: &[Option<Box<[u8; 2048]>>], x: i32, y: i32, z: i32) -> u8 {
-        let section_idx = ((y - self.min_y + 16) / 16) as usize;
-        if section_idx >= sections.len() {
-            return 15;
-        }
-        let Some(data) = &sections[section_idx] else {
-            return 15;
-        };
+    fn nibble(data: &[u8; 2048], x: i32, local_y: i32, z: i32) -> u8 {
         let lx = x.rem_euclid(16) as usize;
-        let ly = y.rem_euclid(16) as usize;
         let lz = z.rem_euclid(16) as usize;
-        let idx = ly * 256 + lz * 16 + lx;
+        let idx = local_y as usize * 256 + lz * 16 + lx;
         let byte = data[idx / 2];
         if idx.is_multiple_of(2) {
             byte & 0x0F
@@ -110,52 +150,6 @@ impl ChunkStore {
             .map_err(|e| ChunkError::Parse(e.to_string()))
     }
 
-    pub fn store_light(
-        &mut self,
-        pos: ChunkPos,
-        sky_updates: &[Box<[u8]>],
-        block_updates: &[Box<[u8]>],
-        sky_y_mask: &azalea_core::bitset::BitSet,
-        block_y_mask: &azalea_core::bitset::BitSet,
-    ) {
-        let num_sections = (self.chunk_storage.height() / 16 + 2) as usize;
-        let mut sky_sections = vec![None; num_sections];
-        let mut block_sections = vec![None; num_sections];
-
-        let mut sky_idx = 0usize;
-        for (i, section) in sky_sections.iter_mut().enumerate().take(num_sections) {
-            if i < sky_y_mask.len() && sky_y_mask.index(i) {
-                if sky_idx < sky_updates.len() && sky_updates[sky_idx].len() == 2048 {
-                    let mut arr = Box::new([0u8; 2048]);
-                    arr.copy_from_slice(&sky_updates[sky_idx]);
-                    *section = Some(arr);
-                }
-                sky_idx += 1;
-            }
-        }
-
-        let mut block_idx = 0usize;
-        for (i, section) in block_sections.iter_mut().enumerate().take(num_sections) {
-            if i < block_y_mask.len() && block_y_mask.index(i) {
-                if block_idx < block_updates.len() && block_updates[block_idx].len() == 2048 {
-                    let mut arr = Box::new([0u8; 2048]);
-                    arr.copy_from_slice(&block_updates[block_idx]);
-                    *section = Some(arr);
-                }
-                block_idx += 1;
-            }
-        }
-
-        self.light_data.insert(
-            (pos.x, pos.z),
-            Arc::new(ChunkLightData {
-                sky_sections,
-                block_sections,
-                min_y: self.chunk_storage.min_y(),
-            }),
-        );
-    }
-
     pub fn get_sky_light(&self, x: i32, y: i32, z: i32) -> u8 {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -194,17 +188,41 @@ impl ChunkStore {
     }
 
     pub fn set_block_state(&self, x: i32, y: i32, z: i32, state: BlockState) {
+        self.set_block_state_tracked(x, y, z, state);
+    }
+
+    /// Sets a block and reports what vanilla `LevelChunk.setBlockState` feeds
+    /// the light engine: the previous state, plus whether the section flipped
+    /// between empty and non-empty. No-op writes (missing chunk, out-of-range
+    /// y) return the new state and no flip.
+    pub fn set_block_state_tracked(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: BlockState,
+    ) -> (BlockState, Option<bool>) {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let Some(chunk_lock) = self.get_chunk(&chunk_pos) else {
-            return;
+            return (state, None);
         };
         let mut chunk = chunk_lock.write();
+        let section_index = (y - self.min_y()).div_euclid(16);
+        let Some(section) = usize::try_from(section_index)
+            .ok()
+            .filter(|&i| i < chunk.sections.len())
+        else {
+            return (state, None);
+        };
+        let was_empty = chunk.sections[section].block_count == 0;
         let block_pos = azalea_core::position::ChunkBlockPos {
             x: x.rem_euclid(16) as u8,
             y,
             z: z.rem_euclid(16) as u8,
         };
-        chunk.set_block_state(&block_pos, state, self.chunk_storage.min_y());
+        let old = chunk.get_and_set_block_state(&block_pos, state, self.chunk_storage.min_y());
+        let is_empty = chunk.sections[section].block_count == 0;
+        (old, (was_empty != is_empty).then_some(is_empty))
     }
 
     pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> BlockState {
@@ -228,6 +246,24 @@ impl ChunkStore {
     /// `0..section_count`).
     pub fn section_count(&self) -> i32 {
         (self.height() / 16) as i32
+    }
+
+    /// Whether the block section at world section-y has only air (vanilla
+    /// `LevelChunkSection.hasOnlyAir`; azalea tracks per-section block
+    /// counts). Missing chunks and out-of-range sections read as empty.
+    pub fn section_is_empty(&self, pos: (i32, i32), section_y: i32) -> bool {
+        let Some(chunk) = self.get_chunk(&ChunkPos::new(pos.0, pos.1)) else {
+            return true;
+        };
+        let index = section_y - (self.min_y() >> 4);
+        let chunk = chunk.read();
+        match usize::try_from(index)
+            .ok()
+            .and_then(|i| chunk.sections.get(i))
+        {
+            Some(section) => section.block_count == 0,
+            None => true,
+        }
     }
 
     /// Top non-motion-blocking Y for the column (vanilla MOTION_BLOCKING
@@ -268,7 +304,9 @@ impl ChunkStore {
 }
 
 pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i32) -> BlockState {
-    let section_idx = ((y - min_y) / 16) as usize;
+    // div_euclid so below-world y maps out of range (-> AIR) instead of
+    // truncating into section 0; vanilla getSectionIndex floors.
+    let section_idx = (y - min_y).div_euclid(16) as usize;
     if section_idx >= chunk.sections.len() {
         return BlockState::AIR;
     }

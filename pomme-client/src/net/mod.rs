@@ -20,6 +20,35 @@ use simdnbt::owned::NbtCompound;
 use crate::entity::components::Position;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
 
+/// A packet's per-column light payload (chunk load or standalone update):
+/// present sections listed in `*_updates`, selected by `*_y_mask`, with
+/// `empty_*_y_mask` marking explicitly-zero sections.
+pub struct PacketLightData {
+    pub sky_updates: Arc<Box<[Box<[u8]>]>>,
+    pub block_updates: Arc<Box<[Box<[u8]>]>>,
+    pub sky_y_mask: azalea_core::bitset::BitSet,
+    pub block_y_mask: azalea_core::bitset::BitSet,
+    pub empty_sky_y_mask: azalea_core::bitset::BitSet,
+    pub empty_block_y_mask: azalea_core::bitset::BitSet,
+}
+
+impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData>
+    for PacketLightData
+{
+    fn from(
+        data: &azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData,
+    ) -> Self {
+        Self {
+            sky_updates: data.sky_updates.clone(),
+            block_updates: data.block_updates.clone(),
+            sky_y_mask: data.sky_y_mask.clone(),
+            block_y_mask: data.block_y_mask.clone(),
+            empty_sky_y_mask: data.empty_sky_y_mask.clone(),
+            empty_block_y_mask: data.empty_block_y_mask.clone(),
+        }
+    }
+}
+
 pub enum NetworkEvent {
     Connected,
     Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
@@ -29,15 +58,18 @@ pub enum NetworkEvent {
     DimensionInfo {
         height: u32,
         min_y: i32,
+        has_skylight: bool,
     },
     ChunkLoaded {
         pos: ChunkPos,
         data: Arc<Box<[u8]>>,
         heightmaps: Vec<(HeightmapKind, Box<[u64]>)>,
-        sky_light: Arc<Box<[Box<[u8]>]>>,
-        block_light: Arc<Box<[Box<[u8]>]>>,
-        sky_y_mask: azalea_core::bitset::BitSet,
-        block_y_mask: azalea_core::bitset::BitSet,
+        light: PacketLightData,
+    },
+    /// Standalone server light correction (`ClientboundLightUpdate`).
+    LightUpdate {
+        pos: ChunkPos,
+        light: PacketLightData,
     },
     ChunkUnloaded {
         pos: ChunkPos,
