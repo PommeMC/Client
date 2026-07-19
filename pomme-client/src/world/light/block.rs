@@ -1,12 +1,12 @@
-//! Vanilla `BlockLightEngine` plus the generic drive loop from
-//! `LightEngine.runLightUpdates` (checkNode drain, decrease/increase passes
-//! with the emission self-seed and staleness guard).
+//! Vanilla `BlockLightEngine`; the generic drive loop lives in
+//! [`LightEngine`].
 
 use std::collections::{HashSet, VecDeque};
 
 use azalea_block::BlockState;
 
 use super::data::DataLayer;
+use super::engine::LightEngine;
 use super::opacity;
 use super::queue::{self as entry, Dir};
 use super::storage::{LightPos, NoHooks, SectionKey, StorageCore};
@@ -47,44 +47,35 @@ impl BlockLightEngine {
         self.storage.set_light_enabled(column, enable);
     }
 
-    /// First half of vanilla `runLightUpdates`: drain the check set, run the
-    /// decrease pass, and apply queued/removed sections. The caller publishes
-    /// changed sections (vanilla `swapSectionMap`), then runs
-    /// [`Self::finish_updates`].
-    pub fn begin_updates(&mut self, world: &impl LightBlockGetter) {
-        let nodes: Vec<LightPos> = self.nodes_to_check.drain().collect();
-        for pos in nodes {
-            self.check_node(world, pos);
+    fn emission(&self, pos: LightPos, state: BlockState) -> u8 {
+        let emission = block::light_props(state).emission;
+        if emission > 0 && self.storage.light_on_in_section(pos.section()) {
+            emission
+        } else {
+            0
         }
-        self.propagate_decreases(world);
-        world.clear_cache();
+    }
+}
+
+impl LightEngine for BlockLightEngine {
+    fn storage(&mut self) -> &mut StorageCore {
+        &mut self.storage
+    }
+
+    fn nodes_to_check(&mut self) -> &mut HashSet<LightPos> {
+        &mut self.nodes_to_check
+    }
+
+    fn increase_queue(&mut self) -> &mut VecDeque<(LightPos, u64)> {
+        &mut self.increase_queue
+    }
+
+    fn decrease_queue(&mut self) -> &mut VecDeque<(LightPos, u64)> {
+        &mut self.decrease_queue
+    }
+
+    fn mark_new_inconsistencies(&mut self) {
         self.storage.mark_new_inconsistencies(&mut NoHooks);
-    }
-
-    /// Second half of vanilla `runLightUpdates`: the increase pass.
-    pub fn finish_updates(&mut self, world: &impl LightBlockGetter) {
-        while let Some((from, data)) = self.increase_queue.pop_front() {
-            // Sections can drop out between enqueue and drain (unload tasks
-            // processed by mark_new_inconsistencies mid-run).
-            if !self.storage.storing_light_for_section(from.section()) {
-                continue;
-            }
-            let mut from_level = self.storage.get_stored_level(from);
-            let target = entry::get_from_level(data);
-            if entry::is_increase_from_emission(data) && from_level < target {
-                self.storage.set_stored_level(from, target);
-                from_level = target;
-            }
-            if from_level == target {
-                self.propagate_increase(world, from, data, from_level);
-            }
-        }
-    }
-
-    fn propagate_decreases(&mut self, world: &impl LightBlockGetter) {
-        while let Some((from, data)) = self.decrease_queue.pop_front() {
-            self.propagate_decrease(world, from, data);
-        }
     }
 
     fn check_node(&mut self, world: &impl LightBlockGetter, pos: LightPos) {
@@ -201,15 +192,6 @@ impl BlockLightEngine {
                     entry::increase_only_one_direction(to_level, false, dir.opposite()),
                 ));
             }
-        }
-    }
-
-    fn emission(&self, pos: LightPos, state: BlockState) -> u8 {
-        let emission = block::light_props(state).emission;
-        if emission > 0 && self.storage.light_on_in_section(pos.section()) {
-            emission
-        } else {
-            0
         }
     }
 }
