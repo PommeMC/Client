@@ -8,6 +8,15 @@ pub const SIZE_Y: usize = 32;
 pub const CHUNK_RING_SIZE: usize = MAX_SIZE * MAX_SIZE;
 pub const SECTION_RING_SIZE: usize = MAX_SIZE * MAX_SIZE * SIZE_Y;
 
+/// Bit for a section's slot in the per-column `u32` masks (dirty set, GPU
+/// visibility). The masks cap the supported height at `SIZE_Y` (32) sections;
+/// out-of-range indices yield an empty bit so taller dimensions degrade to
+/// never meshing/drawing those sections instead of aliasing a lower one.
+#[inline]
+pub fn section_bit(si: u32) -> u32 {
+    1u32.checked_shl(si).unwrap_or(0)
+}
+
 /// Java `java.util.Random` (`LegacyRandomSource`) reimplementation: a 48-bit
 /// LCG matching the JVM bit-for-bit so seeded sequences line up with vanilla.
 ///

@@ -1344,11 +1344,12 @@ impl AppCore {
                     .on_block_dirty(&game.chunk_store, b.x, b.y, b.z);
                 dirty_sections_for_block(&mut sections, b.x, b.y, b.z, min_y, n);
             }
-            // Player edits are always adjacent (lod 0).
+            // Player edits are always adjacent (lod 0) and mesh on this
+            // thread so they show this frame, like vanilla's compileSync.
             let min_y_section = min_y.div_euclid(16);
             for (col, si) in sections {
                 let spos = ChunkSectionPos::new(col.x, min_y_section + si, col.z);
-                game.enqueue_section_edit(spos, 0);
+                game.mesh_edit_now(spos, 0);
             }
         }
         // Menus consume their own clicks later in the frame, so only clear

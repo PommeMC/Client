@@ -10,6 +10,9 @@ use crate::renderer::hiz::HizPipeline;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 use crate::util::{CHUNK_RING_SIZE as MAX_SIZE_SQ, MAX_RD, MAX_SIZE, SIZE_Y};
 
+/// Bytes of one frame's visibility bitset: one `u32` mask per column slot.
+const MASK_BYTES: u64 = (MAX_SIZE_SQ * 4) as u64;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VisibilityUniform {
@@ -48,7 +51,7 @@ impl PerFrameData {
         frame_idx: usize,
     ) -> Self {
         let ubo_size = std::mem::size_of::<VisibilityUniform>() as u64;
-        let sbo_size = (MAX_SIZE_SQ * 4) as u64;
+        let sbo_size = MASK_BYTES;
 
         let (uniform_buffer, uniform_allocation) = util::create_host_buffer(
             device,
@@ -381,7 +384,7 @@ impl VisibilityPipeline {
         if !self.executed[frame] {
             return None;
         }
-        let size_in_bytes = MAX_SIZE_SQ * 4;
+        let size_in_bytes = MASK_BYTES as usize;
         let mapped = self.per_frame[frame]
             .readback_allocation
             .mapped_slice()
@@ -408,7 +411,7 @@ impl VisibilityPipeline {
         let frame_data = &mut self.per_frame[frame];
 
         // 1. Clear the output storage buffer to all zeros
-        cmd.fill_buffer(frame_data.output_buffer, 0, (MAX_SIZE_SQ * 4) as u64, 0);
+        cmd.fill_buffer(frame_data.output_buffer, 0, MASK_BYTES, 0);
 
         // 2. Barrier to make sure fill command completes before compute writes to SBO
         let clear_barrier = vk::BufferMemoryBarrier {
@@ -418,7 +421,7 @@ impl VisibilityPipeline {
             dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
             buffer: frame_data.output_buffer,
             offset: 0,
-            size: (MAX_SIZE_SQ * 4) as u64,
+            size: MASK_BYTES,
             ..Default::default()
         };
         cmd.pipeline_barrier(
@@ -505,7 +508,7 @@ impl VisibilityPipeline {
             dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
             buffer: frame_data.output_buffer,
             offset: 0,
-            size: (MAX_SIZE_SQ * 4) as u64,
+            size: MASK_BYTES,
             ..Default::default()
         };
         cmd.pipeline_barrier(
@@ -524,7 +527,7 @@ impl VisibilityPipeline {
             &[vk::BufferCopy {
                 src_offset: 0,
                 dst_offset: 0,
-                size: (MAX_SIZE_SQ * 4) as u64,
+                size: MASK_BYTES,
             }],
         );
     }

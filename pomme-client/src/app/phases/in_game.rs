@@ -502,6 +502,10 @@ impl GameState {
         self.meshing.enqueue_section_edit(pos, lod);
     }
 
+    pub fn mesh_edit_now(&mut self, pos: ChunkSectionPos, lod: u32) {
+        self.meshing.mesh_edit_now(pos, lod);
+    }
+
     /// Enqueue every loaded column's not-yet-meshed sections (re-meshing the
     /// whole column on a lod/content change). Like vanilla, every section in
     /// render distance meshes regardless of visibility — occlusion gates only

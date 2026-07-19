@@ -13,7 +13,7 @@ use super::section::LocalSection;
 use crate::renderer::Renderer;
 use crate::renderer::chunk::atlas::AtlasUVMap;
 use crate::resource_pack::ResourcePackManager;
-use crate::util::{ChunkRing, SectionRing};
+use crate::util::{ChunkRing, SectionRing, section_bit};
 use crate::world::block::registry::BlockRegistry;
 use crate::world::chunk::SharedChunkStore;
 /// Per-section lock-ordered metadata, aligned to 64 bytes to eliminate false
@@ -87,6 +87,11 @@ pub struct ChunkMeshing {
     /// Per-column rescan cache: the lod last stamped by a full section visit.
     col_lod: HashMap<ChunkPos, u32>,
     result_rx: crossbeam_channel::Receiver<SectionMeshData>,
+    /// These three are kept alongside the workers' clones so `mesh_edit_now`
+    /// can run a job on the calling thread.
+    result_tx: crossbeam_channel::Sender<SectionMeshData>,
+    registry: Arc<BlockRegistry>,
+    uv_map: Arc<AtlasUVMap>,
     queue: Arc<MeshQueue>,
     workers: Vec<std::thread::JoinHandle<()>>,
     next_epoch: AtomicU64,
@@ -175,6 +180,9 @@ impl ChunkMeshing {
             store: shared_chunk_store,
             col_lod: HashMap::new(),
             result_rx,
+            result_tx,
+            registry,
+            uv_map,
             queue,
             workers,
             next_epoch: AtomicU64::new(1),
@@ -236,7 +244,7 @@ impl ChunkMeshing {
         let new_ver = meta.ver.fetch_add(1, Ordering::Release) + 1;
         self.update_set
             .get(chunk_pos)
-            .fetch_or(1 << rel_y, Ordering::Release);
+            .fetch_or(section_bit(rel_y), Ordering::Release);
         new_ver
     }
     pub fn enqueue_section_edit(&mut self, pos: ChunkSectionPos, lod: u32) {
@@ -248,7 +256,31 @@ impl ChunkMeshing {
         meta.ver.fetch_add(1, Ordering::Release);
         self.update_set
             .get(chunk_pos)
-            .fetch_or(1 << rel_y, Ordering::Release);
+            .fetch_or(section_bit(rel_y), Ordering::Release);
+    }
+    /// Meshes an edited section on the calling thread (vanilla `compileSync`
+    /// under `PrioritizeChunkUpdates.PLAYER_AFFECTED`): the result reaches the
+    /// normal drain and uploads later this same frame, so a player's own
+    /// break/place never shows the async round-trip's lag.
+    pub fn mesh_edit_now(&mut self, pos: ChunkSectionPos, lod: u32) {
+        self.enqueue_section_edit(pos, lod);
+        PendingJob {
+            pos,
+            upload_epoch: self.next_epoch.fetch_add(1, Ordering::Relaxed),
+        }
+        .run(
+            &self.store,
+            &self.section_meta,
+            &self.update_set,
+            &self.registry,
+            &self.uv_map,
+            &self.grass_colormap,
+            &self.foliage_colormap,
+            &self.dry_foliage_colormap,
+            &self.biome_climate,
+            &self.result_tx,
+            0.0,
+        );
     }
     /// Per-frame rescan of the dirty bits, distance-sorted nearest to camera.
     /// Visibility never gates meshing (occlusion gates only drawing, like
@@ -297,7 +329,7 @@ impl ChunkMeshing {
                 let meta = self.section_meta.get(spos);
                 let current_lod = meta.target_lod.load(Ordering::Acquire) as u32;
                 let lod_changed = current_lod != lod;
-                let is_dirty = (active_mask & (1 << si)) != 0;
+                let is_dirty = (active_mask & section_bit(si as u32)) != 0;
                 let packed_pos = meta.pos.load(Ordering::Acquire);
                 let identity_changed = packed_pos != pack_section_pos(spos);
                 if is_dirty || lod_changed || identity_changed {
@@ -308,7 +340,7 @@ impl ChunkMeshing {
                     if !is_dirty {
                         self.update_set
                             .get(pos)
-                            .fetch_or(1 << si, Ordering::Release);
+                            .fetch_or(section_bit(si as u32), Ordering::Release);
                     }
                     if lod_changed {
                         meta.target_lod.store(lod as u8, Ordering::Release);
@@ -377,7 +409,7 @@ impl<'a> Drop for ReMarkGuard<'a> {
         if !self.defused {
             self.update_set
                 .get(self.pos)
-                .fetch_or(1 << self.rel_y, Ordering::Release);
+                .fetch_or(section_bit(self.rel_y), Ordering::Release);
         }
     }
 }
@@ -404,7 +436,7 @@ impl PendingJob {
         // dropped.
         update_set
             .get(chunk_pos)
-            .fetch_and(!(1 << rel_y), Ordering::Acquire);
+            .fetch_and(!section_bit(rel_y), Ordering::Acquire);
         let meta = section_meta.get(self.pos);
         let claim_ver = meta.ver.load(Ordering::Acquire);
         let claim_pos_packed = meta.pos.load(Ordering::Acquire);

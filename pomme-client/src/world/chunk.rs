@@ -162,6 +162,11 @@ impl SharedChunkStore {
         if view_distance > MAX_RD {
             tracing::warn!("view distance {view_distance} exceeds ring capacity {MAX_RD}");
         }
+        if height / 16 > SIZE_Y as u32 {
+            tracing::warn!(
+                "dimension height {height} exceeds the {SIZE_Y}-section masks; sections above won't mesh or draw"
+            );
+        }
         Self {
             height,
             min_y,

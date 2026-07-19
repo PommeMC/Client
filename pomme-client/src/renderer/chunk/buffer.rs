@@ -9,7 +9,7 @@ use pyronyx::vk;
 use super::dispatcher::pack_section_pos;
 use super::mesher::{ChunkAABB, PackedVertex, SectionMeshData};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
-use crate::util::ChunkRing;
+use crate::util::{ChunkRing, section_bit};
 
 const BUCKET_VERTICES: u32 = 32768;
 const BUCKET_INDICES: u32 = 49152;
@@ -1358,7 +1358,7 @@ impl ChunkBufferStore {
                     .unwrap_or(u32::MAX);
 
                 for sec in &alloc.sections {
-                    if col_vis & (1u32 << sec.section_index) == 0 {
+                    if col_vis & section_bit(sec.section_index as u32) == 0 {
                         continue;
                     }
                     let vis = Self::section_visibility(nearby, sec, now);
@@ -1570,7 +1570,7 @@ impl ChunkBufferStore {
             let nearby = self.column_nearby(*pos, eye);
             for sec in &alloc.sections {
                 if sec.water_index_count == 0
-                    || col_vis & (1u32 << sec.section_index) == 0
+                    || col_vis & section_bit(sec.section_index as u32) == 0
                     || !aabb_in_frustum(&sec.aabb, sec.origin, frustum, eye)
                 {
                     continue;
