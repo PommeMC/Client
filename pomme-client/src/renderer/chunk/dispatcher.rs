@@ -237,16 +237,16 @@ impl ChunkMeshing {
     /// distance-sorted nearest to camera.
     pub fn rescan_mesh_jobs(
         &mut self,
-        shared_chunk_store: &SharedChunkStore,
+        loaded: &std::collections::HashSet<ChunkPos>,
         player_chunk: ChunkPos,
         visibility: &ChunkRing<u32>,
         visibility_center: ChunkPos,
         camera_pos: &DVec3,
     ) {
-        let min_y_section = shared_chunk_store.min_section_y();
-        let section_count = shared_chunk_store.section_count();
+        let min_y_section = self.store.min_section_y();
+        let section_count = self.store.section_count();
         let mut candidate_jobs = Vec::new();
-        for pos in shared_chunk_store.loaded_positions() {
+        for &pos in loaded {
             let vis_mask = visibility
                 .get_in_range(pos, visibility_center)
                 .copied()
@@ -340,6 +340,7 @@ impl PendingJob {
         dry_foliage_colormap: &Arc<Colormap>,
         biome_climate: &Arc<HashMap<u32, BiomeClimate>>,
         tx: &crossbeam_channel::Sender<SectionMeshData>,
+        queue_ms: f32,
     ) {
         let chunk_pos = ChunkPos::new(self.pos.x, self.pos.z);
         let rel_y = shared_chunk_store.section_y_index(self.pos.y);
@@ -373,7 +374,8 @@ impl PendingJob {
             min_y: shared_chunk_store.min_y(),
             spos: claim_pos,
         };
-        let mesh = mesh_section(
+        let meshed_at = std::time::Instant::now();
+        let mut mesh = mesh_section(
             &snapshot,
             claim_pos,
             registry,
@@ -382,6 +384,8 @@ impl PendingJob {
             claim_ver,
             self.upload_epoch,
         );
+        mesh.queue_ms = queue_ms;
+        mesh.mesh_ms = meshed_at.elapsed().as_secs_f32() * 1000.0;
         // Meshing finished: keep the guard from re-marking, then hand off.
         guard.defused = true;
         let _ = tx.send(mesh);
@@ -390,6 +394,9 @@ impl PendingJob {
 struct QueueState {
     tasks: Box<[PendingJob]>,
     head: AtomicU32,
+    /// When this batch was enqueued; a claimed job's queue wait is measured
+    /// from here (batches are rebuilt per frame, so it is per-job accurate).
+    created_at: std::time::Instant,
 }
 struct MeshQueue {
     state: Atomic<QueueState>,
@@ -409,6 +416,7 @@ impl MeshQueue {
             state: Atomic::init(QueueState {
                 tasks: vec![].into_boxed_slice(),
                 head: AtomicU32::new(0),
+                created_at: std::time::Instant::now(),
             }),
             closed: AtomicBool::new(false),
         }
@@ -417,6 +425,7 @@ impl MeshQueue {
         let new_state = QueueState {
             tasks: jobs.into_boxed_slice(),
             head: AtomicU32::new(0),
+            created_at: std::time::Instant::now(),
         };
         let guard = epoch::pin();
         let old = self
@@ -455,7 +464,7 @@ impl MeshQueue {
         tx: crossbeam_channel::Sender<SectionMeshData>,
     ) {
         loop {
-            let job = loop {
+            let (job, queue_ms) = loop {
                 if self.closed.load(Ordering::Relaxed) {
                     return;
                 }
@@ -463,7 +472,10 @@ impl MeshQueue {
                 let state = unsafe { self.state.load(Ordering::Acquire, &guard).as_ref().unwrap() };
                 let idx = state.head.fetch_add(1, Ordering::AcqRel);
                 if let Some(job) = state.tasks.get(idx as usize) {
-                    break job.clone();
+                    break (
+                        job.clone(),
+                        state.created_at.elapsed().as_secs_f32() * 1000.0,
+                    );
                 }
                 drop(guard);
                 thread::park();
@@ -480,6 +492,7 @@ impl MeshQueue {
                     &dry_foliage_colormap,
                     &biome_climate,
                     &tx,
+                    queue_ms,
                 )
             }))
             .is_err()

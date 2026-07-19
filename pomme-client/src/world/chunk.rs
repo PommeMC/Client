@@ -1,12 +1,11 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 use azalea_block::BlockState;
 use azalea_core::heightmap_kind::HeightmapKind;
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_world::chunk::Chunk;
 use crossbeam_epoch::{self as epoch, Atomic, Owned};
-use thiserror::Error;
 
 use super::block_entity::StoredBlockEntity;
 use crate::util::{ChunkRing, MAX_RD, SIZE_Y};
@@ -28,12 +27,6 @@ pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 5] {
         ChunkPos::new(pos.x, pos.z - 1),
         ChunkPos::new(pos.x, pos.z + 1),
     ]
-}
-
-#[derive(Error, Debug)]
-pub enum ChunkError {
-    #[error("failed to parse chunk data: {0}")]
-    Parse(String),
 }
 
 /// A column's published light, written by the light engine and snapshotted
@@ -112,29 +105,15 @@ impl ChunkLightData {
     }
 }
 
-pub const fn pack_chunk_pos(pos: ChunkPos) -> u64 {
-    let x = (pos.x as u64) & 0x0000_0000_FFFF_FFFF;
-    let z = (pos.z as u64) & 0x0000_0000_FFFF_FFFF;
-    (x << 32) | z
-}
-
-pub const fn unpack_chunk_pos(val: u64) -> ChunkPos {
-    let x = (val >> 32) as i32;
-    let z = val as i32;
-    ChunkPos { x, z }
-}
-
 /// Shared, lock-free chunk store accessible by main thread and worker threads
 /// via `crossbeam-epoch`.
 ///
 /// Concurrency contract: any thread may read, but all writes
-/// (`load_chunk`, `set_block_state*`, `set_light_data`, `update_light_data`,
+/// (`insert_chunk`, `set_block_state*`, `set_light_data`, `update_light_data`,
 /// `unload_chunk`) must stay on the main thread. Mutation is clone-on-write
 /// with an unconditional `swap`, so two concurrent writers to the same slot
 /// would silently lose one update.
 pub struct SharedChunkStore {
-    view_center: AtomicU64,
-    pub(crate) chunk_radius: u32,
     chunks: ChunkRing<Atomic<Chunk>>,
     pub light_data: ChunkRing<Atomic<ChunkLightData>>,
     height: u32,
@@ -155,43 +134,11 @@ impl SharedChunkStore {
             tracing::warn!("view distance {view_distance} exceeds ring capacity {MAX_RD}");
         }
         Self {
-            view_center: AtomicU64::new(pack_chunk_pos(ChunkPos::new(0, 0))),
-            chunk_radius: MAX_RD,
             height,
             min_y,
             chunks: ChunkRing::from_fn(|_, _| Atomic::null()),
             light_data: ChunkRing::from_fn(|_, _| Atomic::null()),
         }
-    }
-
-    pub fn update_view_center(&self, view_center: ChunkPos) {
-        self.view_center
-            .store(pack_chunk_pos(view_center), Ordering::Release);
-    }
-
-    pub fn view_center(&self) -> ChunkPos {
-        unpack_chunk_pos(self.view_center.load(Ordering::Acquire))
-    }
-
-    pub fn loaded_positions(&self) -> Vec<ChunkPos> {
-        let guard = epoch::pin();
-        let center = self.view_center();
-        let r = self.chunk_radius as i32;
-        let mut list = Vec::new();
-        for x in (center.x - r)..=(center.x + r) {
-            for z in (center.z - r)..=(center.z + r) {
-                let pos = ChunkPos::new(x, z);
-                if !self
-                    .chunks
-                    .get(pos)
-                    .load(Ordering::Acquire, &guard)
-                    .is_null()
-                {
-                    list.push(pos);
-                }
-            }
-        }
-        list
     }
 
     pub fn has_chunk(&self, pos: ChunkPos) -> bool {
@@ -225,19 +172,10 @@ impl SharedChunkStore {
         }
     }
 
-    pub fn load_chunk(
-        &self,
-        pos: ChunkPos,
-        data: &[u8],
-        heightmaps: &[(HeightmapKind, Box<[u64]>)],
-    ) -> Result<(), ChunkError> {
-        let mut cursor = std::io::Cursor::new(data);
-        let chunk =
-            Chunk::read_with_dimension_height(&mut cursor, self.height, self.min_y, heightmaps)
-                .map_err(|e| ChunkError::Parse(e.to_string()))?;
+    /// Publishes a chunk parsed on the net thread.
+    pub fn insert_chunk(&self, pos: ChunkPos, chunk: Chunk) {
         let guard = epoch::pin();
         Self::publish(self.chunks.get(pos), chunk, &guard);
-        Ok(())
     }
 
     pub fn get_light_guard<'g>(
@@ -440,10 +378,13 @@ impl SharedChunkStore {
     }
 }
 
-/// Main-thread-only ChunkStore holding shared lock-free chunk store and
-/// main-thread block entities map.
+/// Main-thread-only ChunkStore holding shared lock-free chunk store, the
+/// loaded-column set, and the block entities map.
 pub struct ChunkStore {
     pub shared: Arc<SharedChunkStore>,
+    /// Columns currently published in the ring, so per-frame consumers
+    /// (rescan, HUD) iterate the live set instead of scanning every slot.
+    loaded: std::collections::HashSet<ChunkPos>,
     pub block_entities: std::collections::HashMap<BlockPos, StoredBlockEntity>,
 }
 
@@ -451,6 +392,7 @@ impl ChunkStore {
     pub fn new(view_distance: u32) -> Self {
         Self {
             shared: Arc::new(SharedChunkStore::new(view_distance)),
+            loaded: std::collections::HashSet::new(),
             block_entities: std::collections::HashMap::new(),
         }
     }
@@ -462,35 +404,32 @@ impl ChunkStore {
                 height,
                 min_y,
             )),
+            loaded: std::collections::HashSet::new(),
             block_entities: std::collections::HashMap::new(),
         }
     }
 
     pub fn unload_chunk(&mut self, pos: &ChunkPos) {
         self.shared.unload_chunk(pos);
+        self.loaded.remove(pos);
         let cx = pos.x;
         let cz = pos.z;
         self.block_entities
             .retain(|bp, _| bp.x.div_euclid(16) != cx || bp.z.div_euclid(16) != cz);
     }
 
-    pub fn set_center(&mut self, pos: ChunkPos) {
-        self.shared.update_view_center(pos);
+    pub fn loaded_positions(&self) -> impl Iterator<Item = ChunkPos> + '_ {
+        self.loaded.iter().copied()
+    }
+
+    pub fn loaded_set(&self) -> &std::collections::HashSet<ChunkPos> {
+        &self.loaded
     }
 
     #[inline]
-    pub fn loaded_positions(&self) -> Vec<ChunkPos> {
-        self.shared.loaded_positions()
-    }
-
-    #[inline]
-    pub fn load_chunk(
-        &self,
-        pos: ChunkPos,
-        data: &[u8],
-        heightmaps: &[(HeightmapKind, Box<[u64]>)],
-    ) -> Result<(), ChunkError> {
-        self.shared.load_chunk(pos, data, heightmaps)
+    pub fn insert_chunk(&mut self, pos: ChunkPos, chunk: Chunk) {
+        self.shared.insert_chunk(pos, chunk);
+        self.loaded.insert(pos);
     }
 
     #[inline]

@@ -271,7 +271,7 @@ fn radius_from_chunk_count(count: u32) -> u32 {
 pub struct UpdatePhases {
     pub update_ms: f32,
     pub net_decode_ms: f32,
-    pub visibility_ms: f32,
+    pub light_ms: f32,
     pub rescan_ms: f32,
     pub mesh_drain_ms: f32,
     pub upload_ms: f32,
@@ -417,6 +417,9 @@ pub struct ChunkLoadBench {
     /// Phase split of the current run's worst frame so far.
     worst_breakdown: FrameBreakdown,
     frame_samples: u32,
+    mesh_ms_sum: f32,
+    queue_ms_sum: f32,
+    mesh_jobs: u32,
     /// How many runs have finished (warmup + measured).
     runs_done: u32,
     completed: Vec<ChunkLoadRun>,
@@ -461,10 +464,23 @@ impl ChunkLoadBench {
             frame_ms_max: 0.0,
             worst_breakdown: FrameBreakdown::default(),
             frame_samples: 0,
+            mesh_ms_sum: 0.0,
+            queue_ms_sum: 0.0,
+            mesh_jobs: 0,
             runs_done: 0,
             completed: Vec::new(),
             gpu_loaded_count: 0,
             client_cached_count: 0,
+        }
+    }
+
+    /// Record one drained mesh job's worker timing; only counted while the
+    /// timed load phase is running.
+    pub fn record_mesh(&mut self, queue_ms: f32, mesh_ms: f32) {
+        if matches!(self.phase, ChunkPhase::Load) {
+            self.queue_ms_sum += queue_ms;
+            self.mesh_ms_sum += mesh_ms;
+            self.mesh_jobs += 1;
         }
     }
 
@@ -500,6 +516,9 @@ impl ChunkLoadBench {
                     self.frame_ms_sum = 0.0;
                     self.frame_ms_max = 0.0;
                     self.frame_samples = 0;
+                    self.mesh_ms_sum = 0.0;
+                    self.queue_ms_sum = 0.0;
+                    self.mesh_jobs = 0;
 
                     ChunkLoadStep::StartTiming
                 } else {
@@ -550,12 +569,9 @@ impl ChunkLoadBench {
                         avg_frame_ms: self.frame_ms_sum / self.frame_samples.max(1) as f32,
                         worst_frame_ms: self.frame_ms_max,
                         chunk_count: self.baseline_count,
-                        // TODO: per-job mesh/queue timing went away with the
-                        // section dispatcher rewrite; re-feed these when the
-                        // dispatcher reports worker timings again.
-                        mesh_total_secs: 0.0,
-                        mesh_avg_ms: 0.0,
-                        queue_avg_ms: 0.0,
+                        mesh_total_secs: self.mesh_ms_sum / 1000.0,
+                        mesh_avg_ms: self.mesh_ms_sum / self.mesh_jobs.max(1) as f32,
+                        queue_avg_ms: self.queue_ms_sum / self.mesh_jobs.max(1) as f32,
                         worst_frame_breakdown: self.worst_breakdown.clone(),
                     });
 
@@ -574,6 +590,9 @@ impl ChunkLoadBench {
                     self.frame_ms_max = 0.0;
                     self.worst_breakdown = FrameBreakdown::default();
                     self.frame_samples = 0;
+                    self.mesh_ms_sum = 0.0;
+                    self.queue_ms_sum = 0.0;
+                    self.mesh_jobs = 0;
 
                     ChunkLoadStep::StartTiming
                 } else {

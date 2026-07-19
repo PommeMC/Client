@@ -514,7 +514,7 @@ impl GameState {
     /// frame to drain it.
     pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos) {
         self.meshing.rescan_mesh_jobs(
-            &self.chunk_store.shared,
+            self.chunk_store.loaded_set(),
             player_chunk,
             &self.visibility_mask,
             self.visibility_center,
@@ -734,7 +734,9 @@ pub fn update_game(
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
+    let t_light = std::time::Instant::now();
     game.update_light();
+    game.last_update_phases.light_ms = t_light.elapsed().as_secs_f32() * 1000.0;
 
     let partial_tick = core.tick_accumulator / TICK_RATE;
 
@@ -774,7 +776,12 @@ pub fn update_game(
             .lerp(game.player.eye_pos(), partial_tick as f64),
     );
 
+    let t_drain = std::time::Instant::now();
     for mesh in game.meshing.drain_results() {
+        // Stale meshes count too: worker time spent is worker time spent.
+        if let Some(bench) = &mut game.chunk_load_bench {
+            bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
+        }
         // Drop a mesh built from an out-of-date snapshot. Edits (priority lane,
         // single section) are keyed per section so editing one section never
         // drops a sibling's in-flight result; bulk loads keep the section content gen.
@@ -790,8 +797,11 @@ pub fn update_game(
         }
         gfx.renderer.mesh_queue.push_back(mesh);
     }
+    game.last_update_phases.mesh_drain_ms = t_drain.elapsed().as_secs_f32() * 1000.0;
 
+    let t_upload = std::time::Instant::now();
     gfx.renderer.upload_mesh_batch();
+    game.last_update_phases.upload_ms = t_upload.elapsed().as_secs_f32() * 1000.0;
 
     // Per-frame FOV interpolation; set before the frustum/view-projection reads.
     gfx.renderer.set_render_partial_tick(partial_tick);
@@ -1113,7 +1123,7 @@ pub fn update_game(
 
     if let Some(mut bench) = game.chunk_load_bench.take() {
         let count = gfx.renderer.loaded_chunk_count();
-        let client_cached = game.chunk_store.loaded_positions().len() as u32;
+        let client_cached = game.chunk_store.loaded_set().len() as u32;
         match bench.update(
             count,
             client_cached,

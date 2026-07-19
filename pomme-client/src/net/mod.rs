@@ -10,7 +10,6 @@ pub mod translate;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_core::heightmap_kind::HeightmapKind;
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_inventory::ItemStack;
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
@@ -62,8 +61,8 @@ pub enum NetworkEvent {
     },
     ChunkLoaded {
         pos: ChunkPos,
-        data: Arc<Box<[u8]>>,
-        heightmaps: Vec<(HeightmapKind, Box<[u64]>)>,
+        /// Parsed on the net task so bursts don't spike the main thread.
+        chunk: Box<azalea_world::chunk::Chunk>,
         light: PacketLightData,
     },
     /// Standalone server light correction (`ClientboundLightUpdate`).

@@ -152,6 +152,10 @@ pub struct SectionMeshData {
     /// in-flight bulk mesh can never clobber a section a newer edit already
     /// uploaded (the edit always enqueues a higher epoch after its write).
     pub upload_epoch: u64,
+    /// Worker-side stamps: time waiting in the mesh queue and time meshing.
+    /// Aggregated by the chunk-load benchmark.
+    pub queue_ms: f32,
+    pub mesh_ms: f32,
 }
 impl SectionMeshData {
     pub fn is_empty(&self) -> bool {
@@ -776,6 +780,8 @@ pub(crate) fn mesh_section(
         water_indices: sink.water,
         content_gen,
         upload_epoch,
+        queue_ms: 0.0,
+        mesh_ms: 0.0,
     }
 }
 #[allow(clippy::too_many_arguments)]

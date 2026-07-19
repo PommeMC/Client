@@ -399,16 +399,8 @@ impl AppCore {
                         Arc::clone(&game.biome_climate),
                     );
                 }
-                NetworkEvent::ChunkLoaded {
-                    pos,
-                    data,
-                    heightmaps,
-                    light,
-                } => {
-                    if let Err(e) = game.chunk_store.load_chunk(pos, &data, &heightmaps) {
-                        tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
-                        continue;
-                    }
+                NetworkEvent::ChunkLoaded { pos, chunk, light } => {
+                    game.chunk_store.insert_chunk(pos, *chunk);
                     game.light_engine
                         .on_chunk_loaded(&mut game.chunk_store, (pos.x, pos.z));
                     // The column meshes once its queued light applies (vanilla
@@ -431,8 +423,6 @@ impl AppCore {
                 }
                 NetworkEvent::ChunkCacheCenter { x, z } => {
                     tracing::debug!("Chunk cache center: [{x}, {z}]");
-                    game.chunk_store
-                        .set_center(azalea_core::position::ChunkPos::new(x, z));
                 }
                 NetworkEvent::PlayerPosition { change, relative } => {
                     fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
@@ -478,12 +468,6 @@ impl AppCore {
                     game.player.look_dir = new_look_dir;
                     game.player.prev_look_dir = game.player.look_dir;
                     game.interaction.on_teleport();
-                    let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
-                    game.chunk_store
-                        .set_center(azalea_core::position::ChunkPos::new(
-                            to_chunk_coord(new_position.x),
-                            to_chunk_coord(new_position.z),
-                        ));
                     renderer.reset_camera(new_position, new_look_dir);
                     if !game.position_set {
                         game.position_set = true;
