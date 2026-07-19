@@ -73,21 +73,24 @@ impl DataLayer {
         self.data.is_none()
     }
 
+    /// A full layer of the homogeneous default, both nibbles packed per byte.
+    fn default_bytes(&self) -> Box<[u8; LAYER_BYTES]> {
+        let nibble = self.default & 0xF;
+        Box::new([nibble | nibble << 4; LAYER_BYTES])
+    }
+
     fn materialize(&mut self) -> &mut [u8; LAYER_BYTES] {
-        self.data.get_or_insert_with(|| {
-            let packed = self.default & 0xF | (self.default & 0xF) << 4;
-            Box::new([packed; LAYER_BYTES])
-        })
+        if self.data.is_none() {
+            self.data = Some(self.default_bytes());
+        }
+        self.data.as_mut().unwrap()
     }
 
     /// The layer as raw nibble bytes, materializing homogeneous layers.
     pub fn to_bytes(&self) -> Box<[u8; LAYER_BYTES]> {
         match &self.data {
             Some(data) => data.clone(),
-            None => {
-                let packed = self.default & 0xF | (self.default & 0xF) << 4;
-                Box::new([packed; LAYER_BYTES])
-            }
+            None => self.default_bytes(),
         }
     }
 }

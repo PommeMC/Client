@@ -57,6 +57,14 @@ impl SectionKey {
         Self::new(self.x + dx, self.y + dy, self.z + dz)
     }
 
+    /// This section and its 26 neighbors (vanilla
+    /// `setSectionDirtyWithNeighbors` / `queueSectionData` dirtying).
+    pub fn with_neighbors(self) -> impl Iterator<Item = SectionKey> {
+        (-1..=1).flat_map(move |dx| {
+            (-1..=1).flat_map(move |dy| (-1..=1).map(move |dz| self.offset(dx, dy, dz)))
+        })
+    }
+
     /// Vanilla `SectionPos.getZeroNode`: the column key.
     pub fn column(self) -> (i32, i32) {
         (self.x, self.z)
@@ -188,13 +196,7 @@ impl StorageCore {
     }
 
     fn mark_section_and_neighbors_affected(&mut self, key: SectionKey) {
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    self.affected_sections.insert(key.offset(dx, dy, dz));
-                }
-            }
-        }
+        self.affected_sections.extend(key.with_neighbors());
     }
 
     pub fn queue_section_data(&mut self, key: SectionKey, data: Option<DataLayer>) {

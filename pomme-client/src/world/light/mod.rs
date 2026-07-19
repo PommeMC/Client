@@ -214,7 +214,8 @@ impl LevelLightEngine {
                         self.block.queue_section_data(key, Some(layer));
                     }
                     if !enable && !matches!(entry, SectionEntry::Skip) {
-                        mark_section_with_neighbors(out, key);
+                        // Vanilla `setSectionDirtyWithNeighbors`.
+                        out.sections.extend(key.with_neighbors());
                     }
                 }
                 if enable {
@@ -303,17 +304,6 @@ impl LevelLightEngine {
             *slot = storage.layer(key).map(DataLayer::to_bytes);
         }
         out.sections.extend(storage.affected_sections.drain());
-    }
-}
-
-/// Vanilla `setSectionDirtyWithNeighbors`: the section and its 26 neighbors.
-fn mark_section_with_neighbors(out: &mut LightDirty, key: SectionKey) {
-    for dx in -1..=1 {
-        for dy in -1..=1 {
-            for dz in -1..=1 {
-                out.sections.insert(key.offset(dx, dy, dz));
-            }
-        }
     }
 }
 
@@ -473,13 +463,8 @@ mod tests {
         // Marking the section empty tears the whole neighborhood down.
         engine.update_section_status(SectionKey::new(0, 0, 0), true);
         run(&mut engine, &world);
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    let key = SectionKey::new(dx, dy, dz);
-                    assert!(!engine.storage.storing_light_for_section(key), "{key:?}");
-                }
-            }
+        for key in SectionKey::new(0, 0, 0).with_neighbors() {
+            assert!(!engine.storage.storing_light_for_section(key), "{key:?}");
         }
     }
 
