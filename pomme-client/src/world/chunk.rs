@@ -288,7 +288,9 @@ impl ChunkStore {
 }
 
 pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i32) -> BlockState {
-    let section_idx = ((y - min_y) / 16) as usize;
+    // div_euclid so below-world y maps out of range (-> AIR) instead of
+    // truncating into section 0; vanilla getSectionIndex floors.
+    let section_idx = (y - min_y).div_euclid(16) as usize;
     if section_idx >= chunk.sections.len() {
         return BlockState::AIR;
     }

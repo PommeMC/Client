@@ -218,11 +218,11 @@ impl LevelLightEngine {
                         out.sections.extend(key.with_neighbors());
                     }
                 }
+                // Vanilla applyLightData tail: sources on for both task kinds.
+                self.block.set_light_enabled(pos, true);
                 if enable {
-                    // Vanilla applyLightData + enableChunkLight: turn the
-                    // column's sources on and report each block section's
+                    // Vanilla enableChunkLight: report each block section's
                     // emptiness, then schedule the column's meshes.
-                    self.block.set_light_enabled(pos, true);
                     for section_y in self.min_section_y..self.min_section_y + self.section_count {
                         let key = SectionKey::new(pos.0, section_y, pos.1);
                         let empty = store.section_is_empty(pos, section_y);
