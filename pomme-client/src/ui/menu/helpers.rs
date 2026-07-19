@@ -77,6 +77,38 @@ pub(super) fn button(
     hovered
 }
 
+/// Full-screen frosted backdrop shared by the code and texture editors.
+pub(super) fn push_backdrop(elements: &mut Vec<MenuElement>, sw: f32, sh: f32) {
+    elements.push(MenuElement::FrostedRect {
+        x: 0.0,
+        y: 0.0,
+        w: sw,
+        h: sh,
+        corner_radius: 0.0,
+        tint: [0.035, 0.04, 0.08, 0.92],
+    });
+}
+
+/// Left-aligned "\u{203a} {status}" console line; shows "Ready" when empty.
+pub(super) fn push_status_line(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    fs: f32,
+    status: &str,
+    pal: &Pal,
+) {
+    let status = if status.is_empty() { "Ready" } else { status };
+    elements.push(MenuElement::Text {
+        x,
+        y,
+        text: format!("\u{203a} {status}"),
+        scale: fs,
+        color: pal.dim,
+        centered: false,
+    });
+}
+
 pub(super) fn empty_result(blur: f32) -> MainMenuResult {
     MainMenuResult {
         elements: Vec::new(),

@@ -76,7 +76,9 @@ impl MainMenu {
         let items: Vec<ItemKind> = all_block_items()
             .iter()
             .copied()
-            .filter(|k| needle.is_empty() || item_resource_name(*k).to_lowercase().contains(&needle))
+            .filter(|k| {
+                needle.is_empty() || item_resource_name(*k).to_lowercase().contains(&needle)
+            })
             .collect();
 
         let row_count = items.len().div_ceil(cols);
@@ -91,28 +93,21 @@ impl MainMenu {
         let mut any_hovered = false;
         let mut any_clicked = false;
 
-        elements.push(MenuElement::FrostedRect {
-            x: 0.0,
-            y: 0.0,
-            w: sw,
-            h: sh,
-            corner_radius: 0.0,
-            tint: [0.035, 0.04, 0.08, 0.92],
-        });
+        push_backdrop(&mut elements, sw, sh);
 
         let back_w = 64.0 * s;
         let back_rect = [x0, header_y, back_w, header_h];
-        let back_hover = common::hit_test(cursor, back_rect);
-        any_hovered |= back_hover;
-        push_panel(&mut elements, back_rect, 6.0 * s, hover_col(&pal, back_hover));
-        elements.push(MenuElement::Text {
-            x: x0 + back_w / 2.0,
-            y: header_y + (header_h - ui_fs) / 2.0,
-            text: "\u{2190} Back".into(),
-            scale: ui_fs,
-            color: if back_hover { pal.bright } else { pal.text },
-            centered: true,
-        });
+        let back_hover = button(
+            &mut elements,
+            &mut any_hovered,
+            cursor,
+            back_rect,
+            ui_fs,
+            "\u{2190} Back",
+            6.0 * s,
+            &pal,
+            false,
+        );
         if clicked && back_hover {
             self.set_screen(Screen::Main);
             return helpers::empty_result(1.0);
@@ -251,7 +246,12 @@ impl MainMenu {
                 let sw_y = ry + 3.0 * s;
                 push_panel(
                     &mut elements,
-                    [sw_x - 1.0 * s, sw_y - 1.0 * s, sw_sz + 2.0 * s, sw_sz + 2.0 * s],
+                    [
+                        sw_x - 1.0 * s,
+                        sw_y - 1.0 * s,
+                        sw_sz + 2.0 * s,
+                        sw_sz + 2.0 * s,
+                    ],
                     0.0,
                     [0.0, 0.0, 0.0, 0.4],
                 );
@@ -316,19 +316,14 @@ impl MainMenu {
             6.0 * s,
             PANEL_BG,
         );
-        let status = if self.tex_status.is_empty() {
-            "Ready"
-        } else {
-            &self.tex_status
-        };
-        elements.push(MenuElement::Text {
-            x: x0 + pad,
-            y: console_y + (console_h - ui_fs) / 2.0,
-            text: format!("\u{203a} {status}"),
-            scale: ui_fs,
-            color: pal.dim,
-            centered: false,
-        });
+        push_status_line(
+            &mut elements,
+            x0 + pad,
+            console_y + (console_h - ui_fs) / 2.0,
+            ui_fs,
+            &self.tex_status,
+            &pal,
+        );
 
         MainMenuResult {
             elements,

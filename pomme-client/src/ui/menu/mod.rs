@@ -9,11 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use azalea_registry::builtin::ItemKind;
 use serde::{Deserialize, Serialize};
 
 use crate::app::core::DisplayMode;
-use azalea_registry::builtin::ItemKind;
-
 use crate::renderer::pipelines::menu_overlay::{
     ICON_CHECK, ICON_CODE, ICON_COMMENT, ICON_CUBES, ICON_GEAR, ICON_GLOBE, ICON_LINK,
     ICON_PAINTBRUSH, ICON_TRASH, ICON_USER, MenuElement, SpriteId,
@@ -660,9 +659,13 @@ impl MainMenu {
                 Screen::Options,
             ),
             Screen::Editor => self.build_editor(screen_w, screen_h, input, &text_width_fn),
-            Screen::TextureEditor => {
-                self.build_texture_editor(screen_w, screen_h, input, &text_width_fn, block_textures_fn)
-            }
+            Screen::TextureEditor => self.build_texture_editor(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                block_textures_fn,
+            ),
         }
     }
 
