@@ -167,6 +167,9 @@ pub struct GameState {
     pub options_from_game: bool,
     pub last_render_distance: u32,
     pub server_render_distance: u32,
+    /// Mirror of the menu's Chunk Detail setting; the rescan re-meshes
+    /// columns whose lod changes when it moves.
+    pub chunk_detail: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
     pub particle_store: crate::particle::ParticleStore,
@@ -266,6 +269,7 @@ impl GameState {
             options_from_game: false,
             last_render_distance: render_distance,
             server_render_distance: 0,
+            chunk_detail: 8,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
             particle_store: {
@@ -563,7 +567,11 @@ impl GameState {
             if self.chunk_store.get_chunk(&col).is_none() {
                 continue;
             }
-            self.enqueue_section_edit(col, si, crate::app::core::chunk_lod(col, player_chunk));
+            self.enqueue_section_edit(
+                col,
+                si,
+                crate::app::core::chunk_lod(col, player_chunk, self.chunk_detail),
+            );
         }
     }
 
@@ -770,7 +778,7 @@ impl GameState {
         let n = self.chunk_store.section_count();
         let full = section_mask(n);
         for pos in self.chunk_store.loaded_positions() {
-            let lod = crate::app::core::chunk_lod(pos, player_chunk);
+            let lod = crate::app::core::chunk_lod(pos, player_chunk, self.chunk_detail);
             let content_gen = self.content_gen.get(&pos).copied().unwrap_or(0);
             // Mesh the whole column once, then nothing until a lod/content change.
             // Occlusion gates drawing, not meshing, so off-screen and hidden
@@ -1045,6 +1053,7 @@ pub fn update_game(
     core.audio.set_volumes(core.menu.category_volumes());
 
     gfx.renderer.set_vsync(core.menu.vsync);
+    game.chunk_detail = core.menu.chunk_detail;
 
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);

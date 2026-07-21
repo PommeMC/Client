@@ -1257,7 +1257,7 @@ impl AppCore {
         // Edits mesh the affected section(s) immediately on the priority lane,
         // ungated by visibility.
         for &(col, si) in &priority_remesh {
-            game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk));
+            game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk, game.chunk_detail));
         }
 
         // Refresh the frustum tiers (throttled to camera movement / new loads),
@@ -1544,16 +1544,19 @@ impl AppCore {
     }
 }
 
+/// LOD level for a column: full detail within `detail` chunks (the Chunk
+/// Detail setting), half resolution to twice that, quarter beyond.
 pub(crate) fn chunk_lod(
     pos: azalea_core::position::ChunkPos,
     player: azalea_core::position::ChunkPos,
+    detail: u32,
 ) -> u32 {
     let dx = (pos.x - player.x).unsigned_abs();
     let dz = (pos.z - player.z).unsigned_abs();
     let dist = dx.max(dz);
-    if dist <= 8 {
+    if dist <= detail {
         0
-    } else if dist <= 16 {
+    } else if dist <= detail * 2 {
         1
     } else {
         2

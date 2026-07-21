@@ -22,6 +22,8 @@ use crate::renderer::pipelines::menu_overlay::{
 struct Settings {
     gui_scale: u32,
     render_distance: u32,
+    #[serde(default = "default_chunk_detail")]
+    chunk_detail: u32,
     simulation_distance: u32,
     #[serde(default = "default_fov")]
     fov: u32,
@@ -103,6 +105,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_chunk_detail() -> u32 {
+    8
+}
+
 fn default_volume() -> f32 {
     1.0
 }
@@ -112,6 +118,7 @@ impl Default for Settings {
         Self {
             gui_scale: 0,
             render_distance: 12,
+            chunk_detail: 8,
             simulation_distance: 12,
             fov: 70,
             fov_effect_scale: 1.0,
@@ -364,6 +371,10 @@ pub struct MainMenu {
     last_click_index: Option<usize>,
     pub gui_scale_setting: u32,
     pub render_distance: u32,
+    /// Radius of full-detail meshing (LOD 0), in chunks; coarser LODs start
+    /// beyond it. Pomme-custom: vanilla has no LOD, this buys its look back
+    /// within a VRAM budget.
+    pub chunk_detail: u32,
     pub simulation_distance: u32,
     /// Server-announced view distance cap; 0 when unknown (slider runs 2..32).
     pub server_render_distance: u32,
@@ -460,6 +471,7 @@ impl MainMenu {
             last_click_index: None,
             gui_scale_setting: settings.gui_scale,
             render_distance: settings.render_distance,
+            chunk_detail: settings.chunk_detail,
             simulation_distance: settings.simulation_distance,
             server_render_distance: 0,
             fov: settings.fov,
@@ -551,6 +563,7 @@ impl MainMenu {
             &Settings {
                 gui_scale: self.gui_scale_setting,
                 render_distance: self.render_distance,
+                chunk_detail: self.chunk_detail,
                 simulation_distance: self.simulation_distance,
                 fov: self.fov,
                 fov_effect_scale: self.fov_effect_scale,
