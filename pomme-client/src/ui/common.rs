@@ -197,6 +197,25 @@ pub fn push_results_overlay(
 }
 
 /// Copy `text` to the system clipboard, returning whether it succeeded.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_clipboard(text: &str) -> bool {
+    // On Linux the selection is served by the living `Clipboard` instance and
+    // dies with it, so a detached thread holds it via `wait()` until another
+    // app takes the clipboard over (a newer copy unblocks its predecessor).
+    let text = text.to_string();
+    std::thread::Builder::new()
+        .name("clipboard".into())
+        .spawn(move || {
+            use arboard::SetExtLinux;
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                let _ = cb.set().wait().text(text);
+            }
+        })
+        .is_ok()
+}
+
+/// Copy `text` to the system clipboard, returning whether it succeeded.
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn set_clipboard(text: &str) -> bool {
     arboard::Clipboard::new()
         .and_then(|mut cb| cb.set_text(text.to_string()))

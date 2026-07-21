@@ -2,12 +2,11 @@ use super::*;
 use crate::resource_pack::PackCompat;
 
 /// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or
-/// two 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
+/// two 150px widgets per `Pair`.
 pub(super) enum OptRow<'a> {
     Header(&'a str),
     Big(&'a str),
     Pair(&'a str, &'a str),
-    PairLeft(&'a str),
 }
 
 fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
@@ -114,6 +113,9 @@ impl MainMenu {
         } else {
             "VSync: OFF"
         };
+        let frustum_val = self.frustum_padding;
+        let frustum_str = format!("Frustum Padding: {:.0}%", frustum_val * 100.0);
+
         let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
@@ -133,7 +135,7 @@ impl MainMenu {
             OptRow::Pair("Menu Background Blur: 50%", "Cloud Range: 128"),
             OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
-            OptRow::PairLeft("Weather Radius: 10"),
+            OptRow::Pair(&frustum_str, "Weather Radius: 10"),
             OptRow::Header("Preferences"),
             OptRow::Pair("Show Autosave Indicator: ON", "Vignette: ON"),
             OptRow::Pair("Attack Indicator: Crosshair", "Chunk Fade-in: 1.0s"),
@@ -141,10 +143,12 @@ impl MainMenu {
         let rd_frac = (self.render_distance as f32 - 2.0) / 30.0;
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
+        let frustum_frac = self.frustum_padding / 0.5;
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
             ("Simulation Distance:", sd_frac),
             ("Max Framerate:", mf_frac),
+            ("Frustum Padding:", frustum_frac),
         ];
         self.build_options_grid(
             sw,
@@ -629,7 +633,6 @@ impl MainMenu {
                     widgets.push((*a, left_x, small_w));
                     widgets.push((*b, right_x, small_w));
                 }
-                OptRow::PairLeft(a) => widgets.push((*a, left_x, small_w)),
             }
             for (label, bx, bw) in widgets {
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
@@ -765,6 +768,7 @@ impl MainMenu {
                 "Max Framerate:" => {
                     self.max_framerate = (((10.0 + v * 250.0) / 10.0).round() * 10.0) as u32
                 }
+                "Frustum Padding:" => self.frustum_padding = v * 0.5,
                 "FOV:" => self.fov = (30.0 + v * 80.0).round() as u32,
                 "FOV Effects:" => self.fov_effect_scale = v,
                 "Master Volume:" => self.master_volume = v,

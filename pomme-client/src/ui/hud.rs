@@ -20,13 +20,15 @@ pub enum ContextualBarKind<'a> {
 
 pub struct FrameTimings {
     pub frame_ms: f32,
-    pub fence_ms: f32,
-    pub acquire_ms: f32,
     pub cull_ms: f32,
-    pub draw_ms: f32,
-    pub present_ms: f32,
+    pub gui_bake_ms: f32,
+    pub terrain_ms: f32,
+    pub entities_ms: f32,
+    pub translucent_ms: f32,
+    pub ui_ms: f32,
+    pub hiz_ms: f32,
+    pub visibility_ms: f32,
 }
-
 pub struct DebugInfo<'a> {
     pub fps: u32,
     pub position: DVec3,
@@ -41,20 +43,17 @@ pub struct DebugInfo<'a> {
     pub chunk_count: u32,
     pub sections_drawn: u32,
     pub occlusion_on: bool,
-    /// Mesh-scheduling tiers (visible, margin, hidden) of loaded columns when
-    /// the visibility gate is active; `None` while it falls back to meshing
-    /// all.
-    pub mesh_gate: Option<(u32, u32, u32)>,
+    /// Total sections across loaded columns, the denominator for the
+    /// sections-drawn readout.
+    pub sections_total: u32,
     pub gpu_name: &'a str,
     pub vulkan_version: &'a str,
     pub screen_w: u32,
     pub screen_h: u32,
     pub timings: Option<FrameTimings>,
 }
-
 const CROSSHAIR_SIZE: f32 = 10.0;
 const CROSSHAIR_THICKNESS: f32 = 2.0;
-
 const HOTBAR_W: f32 = 182.0;
 const HOTBAR_H: f32 = 22.0;
 const SELECTION_W: f32 = 24.0;
@@ -64,7 +63,6 @@ const ICON_SIZE: f32 = 9.0;
 const ICON_STRIDE: f32 = 8.0;
 const XP_BAR_W: f32 = 182.0;
 const XP_BAR_H: f32 = 5.0;
-
 pub fn max_gui_scale(screen_w: f32, screen_h: f32) -> u32 {
     let mut scale = 1;
     while (screen_w / (scale + 1) as f32) >= 320.0 && (screen_h / (scale + 1) as f32) >= 240.0 {
@@ -72,7 +70,6 @@ pub fn max_gui_scale(screen_w: f32, screen_h: f32) -> u32 {
     }
     scale
 }
-
 pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32) -> f32 {
     let max = max_gui_scale(screen_w, screen_h);
     if setting == 0 {
@@ -81,7 +78,6 @@ pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32) -> f32 {
         setting.min(max) as f32
     }
 }
-
 #[allow(clippy::too_many_arguments)]
 pub fn build_hud(
     elements: &mut Vec<MenuElement>,
@@ -108,20 +104,16 @@ pub fn build_hud(
     let gs = gui_scale(screen_w, screen_h, gui_scale_setting);
     let cx = screen_w / 2.0;
     let cy = screen_h / 2.0;
-
     if first_person {
         build_crosshair(elements, cx, cy);
     }
-
     if let Some(info) = debug {
         build_debug_overlay(elements, info, gs, text_width_fn);
     }
-
     let hotbar_w = HOTBAR_W * gs;
     let hotbar_h = HOTBAR_H * gs;
     let hotbar_x = (cx - hotbar_w / 2.0).round();
     let hotbar_y = (screen_h - hotbar_h).round();
-
     elements.push(MenuElement::Image {
         x: hotbar_x,
         y: hotbar_y,
@@ -130,7 +122,6 @@ pub fn build_hud(
         sprite: SpriteId::Hotbar,
         tint: WHITE,
     });
-
     let sel_w = SELECTION_W * gs;
     let sel_h = SELECTION_H * gs;
     let sel_x = (hotbar_x - 1.0 * gs + selected_slot as f32 * SLOT_STRIDE * gs).round();
@@ -143,7 +134,6 @@ pub fn build_hud(
         sprite: SpriteId::HotbarSelection,
         tint: WHITE,
     });
-
     let item_size = 16.0 * gs;
     for (i, item) in hotbar.iter().enumerate().take(9) {
         if let ItemStack::Present(data) = item {
@@ -162,7 +152,6 @@ pub fn build_hud(
             }
         }
     }
-
     let status_bar_y = (hotbar_y - (XP_BAR_H + 1.0 + 2.0) * gs).round();
     let is_survival = crate::player::is_survival(game_mode);
     if is_survival {
@@ -188,7 +177,6 @@ pub fn build_hud(
             SpriteId::FoodHalf,
             gs,
         );
-
         if armor > 0 {
             let armor_y = (status_bar_y - (ICON_SIZE + 1.0) * gs).round();
             build_status_bar(
@@ -445,7 +433,6 @@ fn build_crosshair(elements: &mut Vec<MenuElement>, cx: f32, cy: f32) {
         color: WHITE,
     });
 }
-
 #[allow(clippy::too_many_arguments)]
 fn build_status_bar(
     elements: &mut Vec<MenuElement>,
@@ -464,7 +451,6 @@ fn build_status_bar(
     let halves = value.ceil().max(0.0) as u32;
     let full_icons = (halves / 2) as u8;
     let has_half = halves % 2 == 1;
-
     for i in 0..10u8 {
         let x = if right_to_left {
             icon_row_x_rtl(x_start, i as i32, gs)
@@ -472,7 +458,6 @@ fn build_status_bar(
             (x_start + i as f32 * stride).round()
         };
         let iy = (y - icon_size).round();
-
         elements.push(MenuElement::Image {
             x,
             y: iy,
@@ -481,7 +466,6 @@ fn build_status_bar(
             sprite: bg,
             tint: WHITE,
         });
-
         let overlay = if i < full_icons {
             Some(full)
         } else if i == full_icons && has_half {
@@ -510,7 +494,6 @@ fn build_debug_overlay(
 ) {
     let fs = super::common::FONT_SIZE * gs;
     let pad = 4.0 * gs;
-
     let pos = info.position;
     let bx = pos.x.floor() as i32;
     let by = pos.y.floor() as i32;
@@ -520,7 +503,6 @@ fn build_debug_overlay(
     let facing = facing_name(info.y_rot_deg);
     let y_rot_deg = info.y_rot_deg;
     let x_rot_deg = info.x_rot_deg;
-
     let mut left_lines: Vec<String> = vec![
         format!("Pomme ({}fps)", info.fps),
         String::new(),
@@ -537,16 +519,11 @@ fn build_debug_overlay(
         String::new(),
         format!("Chunks: {} loaded", info.chunk_count),
         format!(
-            "Sections drawn: {} (occlusion {})",
+            "Sections drawn: {} / {} (occlusion {})",
             info.sections_drawn,
+            info.sections_total,
             if info.occlusion_on { "on" } else { "off" }
         ),
-        match info.mesh_gate {
-            Some((vis, margin, hidden)) => {
-                format!("Mesh gate: vis {vis} / margin {margin} / hidden {hidden}")
-            }
-            None => "Mesh gate: off (meshing all)".to_string(),
-        },
     ];
 
     if let Some((target, face, name, props)) = &info.target_block {
@@ -567,15 +544,17 @@ fn build_debug_overlay(
         format!("GPU: {}", info.gpu_name),
         format!("Display: {}x{}", info.screen_w, info.screen_h),
     ];
-
     if let Some(t) = &info.timings {
         right_lines.push(String::new());
         right_lines.push(format!("Frame: {:.2}ms", t.frame_ms));
-        right_lines.push(format!("  Fence: {:.2}ms", t.fence_ms));
-        right_lines.push(format!("  Acquire: {:.2}ms", t.acquire_ms));
         right_lines.push(format!("  Cull: {:.2}ms", t.cull_ms));
-        right_lines.push(format!("  Draw: {:.2}ms", t.draw_ms));
-        right_lines.push(format!("  Present: {:.2}ms", t.present_ms));
+        right_lines.push(format!("  GuiBake: {:.2}ms", t.gui_bake_ms));
+        right_lines.push(format!("  Terrain: {:.2}ms", t.terrain_ms));
+        right_lines.push(format!("  Entities: {:.2}ms", t.entities_ms));
+        right_lines.push(format!("  Translucent: {:.2}ms", t.translucent_ms));
+        right_lines.push(format!("  UI: {:.2}ms", t.ui_ms));
+        right_lines.push(format!("  HIZ: {:.2}ms", t.hiz_ms));
+        right_lines.push(format!("  Visibility: {:.2}ms", t.visibility_ms));
     }
     let right_x = info.screen_w as f32 - pad;
     push_debug_lines(
@@ -588,7 +567,6 @@ fn build_debug_overlay(
         text_width_fn,
     );
 }
-
 fn push_debug_lines(
     elements: &mut Vec<MenuElement>,
     lines: &[String],
@@ -619,7 +597,6 @@ fn push_debug_lines(
         });
     }
 }
-
 fn facing_name(y_rot_deg: f32) -> &'static str {
     let deg = y_rot_deg.rem_euclid(360.0) as u32;
     match deg {

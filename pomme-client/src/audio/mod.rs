@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
+use rodio::mixer::Mixer;
 use rodio::source::ChannelVolume;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
 
@@ -110,11 +111,69 @@ struct Output {
     sink: MixerDeviceSink,
 }
 
+/// Gain shape for a fire-and-forget play: a plain sink volume, or per-channel
+/// volumes for spatialized stereo.
+enum PlayGain {
+    Volume(f32),
+    Channels(Vec<f32>),
+}
+
+/// A resolved sound for the play worker: gains and pitch are computed by the
+/// caller; the worker only opens, decodes, and starts the file.
+struct PlayCmd {
+    key: String,
+    speed: f32,
+    gain: PlayGain,
+}
+
+/// Opens and starts fire-and-forget sounds off the main thread: a cold
+/// `File::open` + ogg header decode can take 10-20ms (observed as worst-frame
+/// spikes when a server sound landed in the event drain).
+fn run_play_worker(
+    rx: crossbeam_channel::Receiver<PlayCmd>,
+    mixer: Mixer,
+    jar_assets_dir: PathBuf,
+    asset_index: Option<AssetIndex>,
+) {
+    while let Ok(cmd) = rx.recv() {
+        let Some(source) = open_decoder(&jar_assets_dir, &asset_index, &cmd.key) else {
+            continue;
+        };
+        let sink = Player::connect_new(&mixer);
+        sink.set_speed(cmd.speed);
+        match cmd.gain {
+            PlayGain::Volume(v) => {
+                sink.set_volume(v);
+                sink.append(source);
+            }
+            PlayGain::Channels(volumes) => sink.append(ChannelVolume::new(source, volumes)),
+        }
+        sink.detach();
+    }
+}
+
+fn open_decoder(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    key: &str,
+) -> Option<Decoder<BufReader<File>>> {
+    let path = resolve_asset_path(jar_assets_dir, asset_index, key);
+    let file = File::open(&path)
+        .map_err(|e| tracing::warn!("failed to open sound {}: {e}", path.display()))
+        .ok()?;
+    Decoder::new(BufReader::new(file))
+        .map_err(|e| tracing::warn!("failed to decode sound {}: {e}", path.display()))
+        .ok()
+}
+
 /// Plays menu and in-world sounds, resolving `.ogg` files through the same
 /// asset pipeline used for textures. Degrades to a silent no-op when no audio
 /// output device is available.
 pub struct AudioEngine {
     output: Option<Output>,
+    /// Fire-and-forget plays go to the worker thread; `None` when audio is
+    /// disabled.
+    play_tx: Option<crossbeam_channel::Sender<PlayCmd>>,
     jar_assets_dir: PathBuf,
     asset_index: Option<AssetIndex>,
     sounds: SoundsIndex,
@@ -144,8 +203,20 @@ impl AudioEngine {
             }
         };
         let sounds = SoundsIndex::load(jar_assets_dir, &asset_index);
+        let play_tx = output.as_ref().map(|o| {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let mixer = o.sink.mixer().clone();
+            let dir = jar_assets_dir.to_path_buf();
+            let index = asset_index.clone();
+            std::thread::Builder::new()
+                .name("audio-play".into())
+                .spawn(move || run_play_worker(rx, mixer, dir, index))
+                .expect("spawn audio-play thread");
+            tx
+        });
         Self {
             output,
+            play_tx,
             jar_assets_dir: jar_assets_dir.to_path_buf(),
             asset_index,
             sounds,
@@ -199,12 +270,19 @@ impl AudioEngine {
     /// Plays the vanilla button click: MASTER category at the fixed `forUI`
     /// volume.
     pub fn play_ui_click(&self) {
-        if let Some((sink, entry_volume)) = self.make_sink(UI_CLICK_EVENT) {
-            sink.set_volume(
+        let Some(play_tx) = self.play_tx.as_ref() else {
+            return;
+        };
+        let Some((name, entry_volume)) = self.choose_variant(UI_CLICK_EVENT, None) else {
+            return;
+        };
+        let _ = play_tx.send(PlayCmd {
+            key: sound_asset_key(&name),
+            speed: 1.0,
+            gain: PlayGain::Volume(
                 self.category_gain(SoundCategory::Master) * UI_CLICK_VOLUME * entry_volume,
-            );
-            sink.detach();
-        }
+            ),
+        });
     }
 
     /// Plays a positional world sound at `pos`, mixed for its category and
@@ -218,10 +296,10 @@ impl AudioEngine {
         pitch: f32,
         seed: u64,
     ) {
-        let Some(output) = self.output.as_ref() else {
+        let Some(play_tx) = self.play_tx.as_ref() else {
             return;
         };
-        let Some((source, entry_volume)) = self.decode_sound(sound, seed) else {
+        let Some((key, entry_volume)) = self.resolve_sound(sound, seed) else {
             return;
         };
         let emitter: [f32; 3] = pos.as_vec3().into();
@@ -243,13 +321,11 @@ impl AudioEngine {
         let base =
             self.category_gain(SoundCategory::from_index(category)) * instance_volume * dist_gain;
 
-        let sink = Player::connect_new(output.sink.mixer());
-        sink.set_speed(pitch.max(0.01));
-        sink.append(ChannelVolume::new(
-            source,
-            vec![base * left_pan, base * right_pan],
-        ));
-        sink.detach();
+        let _ = play_tx.send(PlayCmd {
+            key,
+            speed: pitch.max(0.01),
+            gain: PlayGain::Channels(vec![base * left_pan, base * right_pan]),
+        });
     }
 
     /// Begins menu music. Idempotent, so it is safe to call every frame.
@@ -303,31 +379,31 @@ impl AudioEngine {
 
     /// Decodes a weighted-random variant of `event` into a queued sink,
     /// returned with the variant's per-entry volume for the caller to
-    /// apply.
+    /// apply. Synchronous (the caller keeps the sink handle); only menu
+    /// music uses it, where a load hitch can't land mid-game.
     fn make_sink(&self, event: &str) -> Option<(Player, f32)> {
         let output = self.output.as_ref()?;
-        let (source, volume) = self.decode_event(event, None)?;
+        let (name, volume) = self.choose_variant(event, None)?;
+        let source = open_decoder(
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &sound_asset_key(&name),
+        )?;
         let sink = Player::connect_new(output.sink.mixer());
         sink.append(source);
         Some((sink, volume))
     }
 
-    fn decode_sound(&self, sound: &SoundRef, seed: u64) -> Option<(Decoder<BufReader<File>>, f32)> {
+    /// Resolves a sound ref to its `.ogg` asset key and per-entry volume
+    /// without touching the filesystem (the play worker does the open/decode).
+    fn resolve_sound(&self, sound: &SoundRef, seed: u64) -> Option<(String, f32)> {
         match sound {
-            SoundRef::Event(name) => self.decode_event(name, Some(seed)),
-            SoundRef::Direct(path) => Some((self.open_decoder(&sound_asset_key(path))?, 1.0)),
+            SoundRef::Event(name) => {
+                let (variant, volume) = self.choose_variant(name, Some(seed))?;
+                Some((sound_asset_key(&variant), volume))
+            }
+            SoundRef::Direct(path) => Some((sound_asset_key(path), 1.0)),
         }
-    }
-
-    /// Resolves `event` to a variant (seeded when `seed` is set, else random)
-    /// and decodes its `.ogg`, returning the decoder and per-entry volume.
-    fn decode_event(
-        &self,
-        event: &str,
-        seed: Option<u64>,
-    ) -> Option<(Decoder<BufReader<File>>, f32)> {
-        let (name, volume) = self.choose_variant(event, seed)?;
-        Some((self.open_decoder(&sound_asset_key(&name))?, volume))
     }
 
     fn choose_variant(&self, event: &str, seed: Option<u64>) -> Option<(String, f32)> {
@@ -348,16 +424,6 @@ impl AudioEngine {
         }
         let first = &variants[0];
         Some((first.name.clone(), first.volume))
-    }
-
-    fn open_decoder(&self, key: &str) -> Option<Decoder<BufReader<File>>> {
-        let path = resolve_asset_path(&self.jar_assets_dir, &self.asset_index, key);
-        let file = File::open(&path)
-            .map_err(|e| tracing::warn!("failed to open sound {}: {e}", path.display()))
-            .ok()?;
-        Decoder::new(BufReader::new(file))
-            .map_err(|e| tracing::warn!("failed to decode sound {}: {e}", path.display()))
-            .ok()
     }
 }
 

@@ -46,6 +46,11 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[
     khr::portability_subset::NAME,
 ];
 
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceFeatures {
+    pub timestamp_queries: bool,
+}
+
 pub struct VulkanContext {
     pub instance: vk::Instance,
     pub surface: vk::SurfaceKHR,
@@ -71,6 +76,7 @@ pub struct VulkanContext {
 
     pub gpu_name: String,
     pub vulkan_version: String,
+    pub features: DeviceFeatures,
 }
 
 impl VulkanContext {
@@ -167,6 +173,49 @@ impl VulkanContext {
         };
         tracing::info!("GPU: {gpu_name} ({vulkan_version})");
 
+        let properties = physical_device.get_properties();
+        let family_props = physical_device.get_queue_family_properties();
+        let graphics_family_props = family_props[graphics_family as usize];
+
+        let base_features = physical_device.get_features();
+        let fill_mode_non_solid = base_features.fill_mode_non_solid == vk::TRUE;
+        let draw_indirect_first_instance = base_features.draw_indirect_first_instance == vk::TRUE;
+
+        let queue_supports_timestamps = graphics_family_props.timestamp_valid_bits > 0;
+        let timestamp_queries = properties.limits.timestamp_compute_and_graphics == vk::TRUE
+            && properties.limits.timestamp_period > 0.0
+            && queue_supports_timestamps;
+
+        if fill_mode_non_solid {
+            tracing::info!("fillModeNonSolid supported, wireframe mode available");
+        } else {
+            tracing::warn!("fillModeNonSolid not supported, wireframe mode disabled");
+        }
+
+        if timestamp_queries {
+            tracing::info!(
+                "Timestamp queries supported (period: {} ns, queue timestampValidBits: {})",
+                properties.limits.timestamp_period,
+                graphics_family_props.timestamp_valid_bits
+            );
+        } else {
+            tracing::warn!(
+                "Timestamp queries not supported (period: {} ns, queue timestampValidBits: {})",
+                properties.limits.timestamp_period,
+                graphics_family_props.timestamp_valid_bits
+            );
+        }
+
+        if draw_indirect_first_instance {
+            tracing::info!("drawIndirectFirstInstance supported, chunk fade-in available");
+        } else {
+            tracing::warn!(
+                "drawIndirectFirstInstance not supported, chunk fade-in may display incorrectly"
+            );
+        }
+
+        let features = DeviceFeatures { timestamp_queries };
+
         let queue_priority = 1.0f32;
 
         let queue_create_infos: &[_] = if graphics_family == present_family {
@@ -206,11 +255,20 @@ impl VulkanContext {
         let device_extension_names: Vec<*const c_char> =
             DEVICE_EXTENSIONS.iter().map(|ext| ext.as_ptr()).collect();
 
+        let mut enabled_features = vk::PhysicalDeviceFeatures::default();
+        if fill_mode_non_solid {
+            enabled_features.fill_mode_non_solid = vk::TRUE;
+        }
+        if draw_indirect_first_instance {
+            enabled_features.draw_indirect_first_instance = vk::TRUE;
+        }
+
         let device_info = vk::DeviceCreateInfo {
             queue_create_info_count: queue_create_infos.len() as u32,
             queue_create_infos: queue_create_infos.as_ptr(),
             enabled_extension_count: device_extension_names.len() as u32,
             enabled_extension_names: device_extension_names.as_ptr(),
+            enabled_features: &enabled_features,
             ..Default::default()
         }
         .next(&mut vk12_features);
@@ -279,6 +337,7 @@ impl VulkanContext {
             debug_messenger,
             gpu_name,
             vulkan_version,
+            features,
         })
     }
 

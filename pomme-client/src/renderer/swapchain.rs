@@ -245,7 +245,7 @@ fn create_depth_resources(
         array_layers: 1,
         samples: vk::SampleCountFlags::Type1,
         tiling: vk::ImageTiling::Optimal,
-        usage: vk::ImageUsageFlags::DepthStencilAttachment,
+        usage: vk::ImageUsageFlags::DepthStencilAttachment | vk::ImageUsageFlags::Sampled,
         ..Default::default()
     };
 

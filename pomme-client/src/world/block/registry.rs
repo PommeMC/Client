@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use azalea_block::BlockState;
 use serde::{Deserialize, Serialize};
@@ -64,17 +65,32 @@ impl FaceTextures {
     }
 }
 
+/// `state_flags` bits.
+const FLAG_OCCLUDES: u8 = 1;
+const FLAG_FULL_CUBE: u8 = 1 << 1;
+
 #[derive(Clone)]
 pub struct BlockRegistry {
-    textures: HashMap<String, FaceTextures>,
-    baked: HashMap<String, HashMap<String, BakedModel>>,
-    multipart: HashMap<String, Vec<model::MultipartEntry>>,
-    item_models: HashMap<String, BakedModel>,
+    textures: HashMap<String, Arc<FaceTextures>>,
+    baked: HashMap<String, HashMap<String, Arc<BakedModel>>>,
+    /// Arc-wrapped so the per-dispatcher registry clone shares rather than
+    /// deep-copies data the mesher never reads (it uses the dense tables).
+    multipart: Arc<HashMap<String, Vec<model::MultipartEntry>>>,
+    item_models: Arc<HashMap<String, BakedModel>>,
     flat_item_textures: std::collections::HashSet<String>,
     flat_item_texture_keys: HashMap<String, String>,
     /// Block name -> its single `BlockState`, for one-state blocks (see
     /// `placeable_block_for_item`).
     placeable_blocks: HashMap<&'static str, BlockState>,
+    /// Dense per-state caches indexed by state id in the block-table space
+    /// identified by `built_table` (see [`Self::build_state_tables`]): they
+    /// replace the name-hash plus variant-match work the mesher would
+    /// otherwise pay on every lookup, many times per block face.
+    state_models: Vec<Option<Arc<BakedModel>>>,
+    state_multipart: Vec<Option<Arc<[model::BakedQuad]>>>,
+    state_textures: Vec<Option<Arc<FaceTextures>>>,
+    state_flags: Vec<u8>,
+    built_table: usize,
 }
 
 impl BlockRegistry {
@@ -119,15 +135,74 @@ impl BlockRegistry {
         let (item_models, flat_item_textures, flat_item_texture_keys) =
             model::bake_item_models(jar_assets_dir, asset_index, packs);
 
-        Self {
-            textures,
-            baked,
-            multipart,
-            item_models,
+        let mut registry = Self {
+            textures: textures
+                .into_iter()
+                .map(|(k, v)| (k, Arc::new(v)))
+                .collect(),
+            baked: baked
+                .into_iter()
+                .map(|(k, variants)| {
+                    (
+                        k,
+                        variants
+                            .into_iter()
+                            .map(|(vk, m)| (vk, Arc::new(m)))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            multipart: Arc::new(multipart),
+            item_models: Arc::new(item_models),
             flat_item_textures,
             flat_item_texture_keys,
             placeable_blocks: build_placeable_blocks(),
-        }
+            state_models: Vec::new(),
+            state_multipart: Vec::new(),
+            state_textures: Vec::new(),
+            state_flags: Vec::new(),
+            built_table: 0,
+        };
+        registry.build_state_tables();
+        registry
+    }
+
+    /// Builds the dense per-state caches against the active block table.
+    /// Must run again after `set_active_protocol` switches the id space; the
+    /// `DimensionInfo` handler does, before any chunk meshes.
+    pub fn build_state_tables(&mut self) {
+        let states = (0..super::state_count() as u32).map(|id| super::try_state(id).unwrap());
+        self.state_models = states
+            .clone()
+            .map(|s| self.lookup_model(s).cloned())
+            .collect();
+        self.state_multipart = states.clone().map(|s| self.lookup_multipart(s)).collect();
+        self.state_textures = states
+            .clone()
+            .map(|s| self.textures.get(super::block_id(s)).cloned())
+            .collect();
+        self.state_flags = self
+            .state_models
+            .iter()
+            .map(|m| {
+                m.as_deref().map_or(0, |m| {
+                    (m.occludes as u8 * FLAG_OCCLUDES) | (m.is_full_cube as u8 * FLAG_FULL_CUBE)
+                })
+            })
+            .collect();
+        self.built_table = super::table_id();
+    }
+
+    /// The dense-table index for `state`, valid only while the table the
+    /// caches were built against is still active.
+    #[inline]
+    fn state_index(&self, state: BlockState) -> usize {
+        debug_assert_eq!(
+            self.built_table,
+            super::table_id(),
+            "block state tables are stale; rebuild after a protocol switch"
+        );
+        u32::from(state) as usize
     }
 
     /// Resolves a held item's registry name (unprefixed, e.g. `"stone"`) to the
@@ -149,11 +224,45 @@ impl BlockRegistry {
         self.flat_item_texture_keys.get(name).map(String::as_str)
     }
 
+    #[inline]
     pub fn get_textures(&self, state: BlockState) -> Option<&FaceTextures> {
-        self.textures.get(super::block_id(state))
+        self.state_textures.get(self.state_index(state))?.as_deref()
     }
 
+    #[inline]
     pub fn get_baked_model(&self, state: BlockState) -> Option<&BakedModel> {
+        self.state_models.get(self.state_index(state))?.as_deref()
+    }
+
+    #[inline]
+    pub fn get_multipart_quads(&self, state: BlockState) -> Option<&[model::BakedQuad]> {
+        self.state_multipart
+            .get(self.state_index(state))?
+            .as_deref()
+    }
+
+    #[inline]
+    pub fn is_opaque_full_cube(&self, state: BlockState) -> bool {
+        self.flags(state) & FLAG_FULL_CUBE != 0
+    }
+
+    /// Whether `state` culls a neighbor's adjacent face. Unlike
+    /// [`Self::is_opaque_full_cube`], non-occluding blocks like leaves return
+    /// false even though they bake as full cubes.
+    #[inline]
+    pub fn occludes_neighbor(&self, state: BlockState) -> bool {
+        self.flags(state) & FLAG_OCCLUDES != 0
+    }
+
+    #[inline]
+    fn flags(&self, state: BlockState) -> u8 {
+        self.state_flags
+            .get(self.state_index(state))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn lookup_model(&self, state: BlockState) -> Option<&Arc<BakedModel>> {
         let variants = self.baked.get(super::block_id(state))?;
 
         if variants.len() == 1 {
@@ -173,7 +282,7 @@ impl BlockRegistry {
             .or_else(|| variants.values().next())
     }
 
-    pub fn get_multipart_quads(&self, state: BlockState) -> Option<Vec<&model::BakedQuad>> {
+    fn lookup_multipart(&self, state: BlockState) -> Option<Arc<[model::BakedQuad]>> {
         let entries = self.multipart.get(super::block_id(state))?;
         let props = super::block_properties(state);
 
@@ -181,29 +290,15 @@ impl BlockRegistry {
         for entry in entries {
             let when = entry.when.iter().map(|(k, v)| (k.as_str(), v.as_str()));
             if constraints_match(props, when) {
-                quads.extend(entry.quads.iter());
+                quads.extend(entry.quads.iter().cloned());
             }
         }
 
-        if quads.is_empty() { None } else { Some(quads) }
-    }
-
-    fn baked_model_flag(&self, state: BlockState, f: impl Fn(&BakedModel) -> bool) -> bool {
-        if super::is_air(state) {
-            return false;
+        if quads.is_empty() {
+            None
+        } else {
+            Some(quads.into())
         }
-        self.get_baked_model(state).map(f).unwrap_or(false)
-    }
-
-    pub fn is_opaque_full_cube(&self, state: BlockState) -> bool {
-        self.baked_model_flag(state, |m| m.is_full_cube)
-    }
-
-    /// Whether `state` culls a neighbor's adjacent face. Unlike
-    /// [`Self::is_opaque_full_cube`], non-occluding blocks like leaves return
-    /// false even though they bake as full cubes.
-    pub fn occludes_neighbor(&self, state: BlockState) -> bool {
-        self.baked_model_flag(state, |m| m.occludes)
     }
 
     pub fn texture_names(&self) -> impl Iterator<Item = &str> + '_ {

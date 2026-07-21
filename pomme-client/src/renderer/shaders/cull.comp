@@ -2,6 +2,9 @@
 
 layout(local_size_x = 64) in;
 
+layout(constant_id = 0) const int MAX_RD = 64;
+const int MAX_SIZE = MAX_RD * 2 + 1;
+
 struct ChunkMeta {
     vec4 aabb_min;
     vec4 aabb_max;
@@ -38,6 +41,14 @@ layout(set = 0, binding = 1) uniform FrustumBuf {
     float frac_x;
     float frac_y;
     float frac_z;
+    // The Hi-Z visibility mask this dispatch reads (written three frames ago
+    // by visibility.comp): the center/min-section it was computed with, and
+    // whether the slot has ever been written (0 = fail open, skip the test).
+    int mask_center_x;
+    int mask_center_z;
+    int mask_min_section;
+    int mask_section_count;
+    uint mask_valid;
 };
 
 layout(set = 0, binding = 2) writeonly buffer IndirectBuf {
@@ -54,6 +65,12 @@ layout(set = 0, binding = 4) writeonly buffer IndirectCutoutBuf {
 
 layout(set = 0, binding = 5) buffer CutoutCountBuf {
     uint cutout_draw_count;
+};
+
+// Per-column section bitset from visibility.comp; same ring layout as the CPU
+// ChunkRing (slot = rem_euclid(MAX_SIZE) per axis).
+layout(set = 0, binding = 6) readonly buffer VisMaskBuf {
+    uint vis_mask[];
 };
 
 // Emit one indexed draw covering [first..first+count) for this section. The
@@ -93,6 +110,23 @@ void main() {
                 + p.z * (p.z >= 0.0 ? mx.z : mn.z)
                 + p.w;
         if (d < 0.0) return;
+    }
+
+    // Hi-Z occlusion: drop the section only when the mask proves it hidden.
+    // Out-of-window columns and out-of-range section layers fail open (the
+    // mask's slots alias beyond +-MAX_RD of its own center).
+    if (mask_valid != 0u) {
+        int cx = m.origin.x >> 4;
+        int cz = m.origin.z >> 4;
+        int dy = (m.origin.y >> 4) - mask_min_section;
+        if (abs(cx - mask_center_x) <= MAX_RD && abs(cz - mask_center_z) <= MAX_RD
+            && dy >= 0 && dy < min(mask_section_count, 32)) {
+            int rx = cx % MAX_SIZE;
+            if (rx < 0) rx += MAX_SIZE;
+            int rz = cz % MAX_SIZE;
+            if (rz < 0) rz += MAX_SIZE;
+            if ((vis_mask[rx * MAX_SIZE + rz] & (1u << uint(dy))) == 0u) return;
+        }
     }
 
     // Indices split solid-first.

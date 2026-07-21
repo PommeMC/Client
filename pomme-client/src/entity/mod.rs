@@ -432,7 +432,7 @@ fn tick_item_physics(id: i32, entity: &mut ItemEntity, chunk_store: &ChunkStore)
     let block_y = entity.position.y.floor() as i32;
     let block_z = entity.position.z.floor() as i32;
     let chunk_pos = ChunkPos::new(block_x.div_euclid(16), block_z.div_euclid(16));
-    if chunk_store.get_chunk(&chunk_pos).is_none() {
+    if !chunk_store.shared.has_chunk(chunk_pos) {
         // Don't simulate (and fall) through unloaded terrain.
         return;
     }

@@ -48,14 +48,20 @@ pub struct App {
     core: AppCore,
     occluded: bool,
     fps_limiter: FramerateLimiter,
+    /// Monitor refresh period, re-queried periodically; `None` until known.
+    /// Paces vsynced frames to land just before the vblank.
+    refresh_period_ns: Option<u64>,
+    /// Frame counter gating the refresh re-query (queries when it wraps to 0).
+    refresh_poll: u32,
 }
 
-/// Port of vanilla `FramerateLimiter`: paces to a target fps by sleeping most
-/// of the wait (with an adaptive margin for oversleep) then spinning the rest.
+/// Port of vanilla `FramerateLimiter`: paces to a target period by sleeping
+/// most of the wait (with an adaptive margin for oversleep) then spinning the
+/// rest.
 struct FramerateLimiter {
     last_frame: Instant,
     average_overshoot_ns: u64,
-    last_limit: u32,
+    last_period: u64,
 }
 
 impl FramerateLimiter {
@@ -67,16 +73,20 @@ impl FramerateLimiter {
         Self {
             last_frame: Instant::now(),
             average_overshoot_ns: 0,
-            last_limit: 0,
+            last_period: 0,
         }
     }
 
-    fn limit_display_fps(&mut self, framerate_limit: u32) {
-        let target_time =
-            self.last_frame + Duration::from_nanos(1_000_000_000 / framerate_limit.max(1) as u64);
-        if framerate_limit != self.last_limit {
+    /// Sleeps until `last_frame + period + credit`. `credit` extends the wait
+    /// by time the frame lost blocked on the display (vsync backpressure):
+    /// that block isn't real work, so crediting it back delays the next
+    /// frame's input sampling and render to just before the vblank deadline,
+    /// keeping displayed input fresh.
+    fn pace(&mut self, period_ns: u64, credit_ns: u64) {
+        let target_time = self.last_frame + Duration::from_nanos(period_ns + credit_ns);
+        if period_ns != self.last_period {
             self.average_overshoot_ns = 0;
-            self.last_limit = framerate_limit;
+            self.last_period = period_ns;
         }
         loop {
             let now = Instant::now();
@@ -123,6 +133,8 @@ impl App {
             core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
             occluded: false,
             fps_limiter: FramerateLimiter::new(),
+            refresh_period_ns: None,
+            refresh_poll: 0,
         }
     }
 
@@ -628,14 +640,43 @@ impl ApplicationHandler for App {
                 });
 
                 let limit = self.effective_framerate_limit();
+                let mut vblank_block_ns = 0u64;
                 if let Some(gfx) = self.phase.gfx_mut() {
                     if !gfx.window.is_visible().unwrap_or(true) {
                         gfx.window.set_visible(true);
                     }
                     gfx.window.request_redraw();
+                    if self.refresh_poll == 0 {
+                        self.refresh_period_ns = gfx
+                            .window
+                            .current_monitor()
+                            .and_then(|m| m.refresh_rate_millihertz())
+                            .filter(|&mhz| mhz > 0)
+                            .map(|mhz| 1_000_000_000_000 / mhz as u64);
+                    }
+                    self.refresh_poll = (self.refresh_poll + 1) % 60;
+                    // Under FIFO the vblank backpressure lands in the acquire
+                    // wait (present only enqueues). The fence wait is real
+                    // GPU-bound work and must not be credited, or a slow GPU
+                    // would be paced below what it can deliver.
+                    vblank_block_ns = (gfx.renderer.last_acquire_ms() as f64 * 1e6) as u64;
                 }
-                if let Some(fps) = limit {
-                    self.fps_limiter.limit_display_fps(fps);
+
+                let cap_ns = limit.map(|fps| 1_000_000_000 / fps.max(1) as u64);
+                let vsync_ns = if self.core.menu.vsync {
+                    self.refresh_period_ns
+                } else {
+                    None
+                };
+                if let Some(period_ns) = [cap_ns, vsync_ns].into_iter().flatten().max() {
+                    // Credit only under vsync (with a safety margin so a slow
+                    // frame still makes its vblank).
+                    let credit_ns = if vsync_ns.is_some() {
+                        vblank_block_ns.saturating_sub(500_000).min(period_ns)
+                    } else {
+                        0
+                    };
+                    self.fps_limiter.pace(period_ns, credit_ns);
                 }
             }
             _ => {}

@@ -3,6 +3,7 @@ use std::ops::Add;
 use std::sync::Arc;
 use std::time::Instant;
 
+use azalea_core::position::ChunkSectionPos;
 use azalea_protocol::packets::game::{
     ServerboundClientCommand, ServerboundGamePacket, s_client_command, s_client_tick_end,
 };
@@ -34,9 +35,7 @@ pub struct PendingPackDownload {
     pub hash: String,
     pub handle: std::thread::JoinHandle<PackDownloadResult>,
 }
-
 pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::PackError>;
-
 struct PlayerSkinResult {
     uuid: uuid::Uuid,
     textures: Option<String>,
@@ -103,7 +102,6 @@ fn queue_light_apply(
             enable,
         });
 }
-
 /// Mirror of vanilla `LevelExtractor.setBlockDirty`: a block at (x,y,z) dirties
 /// its own 16³ section plus any neighbour section it touches when on a boundary
 /// (the 3×3×3-block cascade → up to a few sections). Pushes deduped
@@ -133,14 +131,12 @@ fn dirty_sections_for_block(
         }
     }
 }
-
 #[derive(Clone, Copy, PartialEq)]
 pub enum DisplayMode {
     Windowed,
     Borderless,
     Fullscreen,
 }
-
 impl DisplayMode {
     pub fn cycle(self) -> Self {
         match self {
@@ -150,7 +146,6 @@ impl DisplayMode {
         }
     }
 }
-
 #[derive(Default, PartialEq)]
 pub struct PlayerInputState {
     forward: bool,
@@ -161,7 +156,6 @@ pub struct PlayerInputState {
     shift: bool,
     sprint: bool,
 }
-
 pub struct AppCore {
     pub user: UserData,
     pub presence: Option<DiscordPresence>,
@@ -181,7 +175,6 @@ pub struct AppCore {
     player_skin_rx: crossbeam_channel::Receiver<PlayerSkinResult>,
     requested_player_skins: HashMap<uuid::Uuid, Option<String>>,
 }
-
 impl AppCore {
     pub fn new(
         version: String,
@@ -191,7 +184,6 @@ impl AppCore {
         user: UserData,
     ) -> Self {
         let resource_packs = ResourcePackManager::new(&data_dirs.game_dir);
-
         let menu = MainMenu::new(
             &data_dirs.game_dir,
             Arc::clone(&tokio_rt),
@@ -199,17 +191,14 @@ impl AppCore {
             version.clone(),
             user.access_token.clone(),
         );
-
         let asset_index =
             AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, &version);
-
         let audio = crate::audio::AudioEngine::new(
             &data_dirs.jar_assets_dir,
             asset_index.clone(),
             menu.category_volumes(),
         );
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
-
         Self {
             user,
             presence,
@@ -230,7 +219,6 @@ impl AppCore {
             requested_player_skins: HashMap::new(),
         }
     }
-
     pub fn build_menu_input(&mut self) -> MenuInput {
         MenuInput {
             cursor: self.input.cursor_pos(),
@@ -249,7 +237,6 @@ impl AppCore {
             scroll_delta: self.input.consume_menu_scroll(),
         }
     }
-
     pub fn apply_display_mode(&mut self, window: &Window) {
         match self.display_mode {
             DisplayMode::Windowed => {
@@ -274,7 +261,6 @@ impl AppCore {
             }
         }
     }
-
     pub fn apply_cursor_grab(&self, window: &Window, game: Option<&mut GameState>) {
         let captured =
             game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
@@ -288,7 +274,6 @@ impl AppCore {
             window.set_cursor_visible(true);
         }
     }
-
     pub fn send_respawn(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
         connection
             .packet_tx
@@ -297,15 +282,12 @@ impl AppCore {
                     action: s_client_command::Action::PerformRespawn,
                 },
             ));
-
         game.death_confirm = false;
         game.respawn_sent = true;
     }
-
     pub fn send_chat_message(&self, connection: &ConnectionHandle, msg: String) {
         let _ = connection.chat_tx.try_send(msg);
     }
-
     fn queue_player_skin(&mut self, uuid: uuid::Uuid, textures: Option<String>) {
         if self.requested_player_skins.get(&uuid) == Some(&textures) {
             return;
@@ -334,7 +316,6 @@ impl AppCore {
             });
         });
     }
-
     fn drain_player_skin_results(&mut self, renderer: &mut Renderer) {
         while let Ok(skin) = self.player_skin_rx.try_recv() {
             if self.requested_player_skins.get(&skin.uuid) != Some(&skin.textures) {
@@ -350,12 +331,10 @@ impl AppCore {
             }
         }
     }
-
     fn remove_player_skin(&mut self, renderer: &mut Renderer, uuid: &uuid::Uuid) {
         self.requested_player_skins.remove(uuid);
         renderer.remove_player_entity_skin(uuid);
     }
-
     pub fn drain_network_events(
         &mut self,
         connection: &ConnectionHandle,
@@ -375,12 +354,24 @@ impl AppCore {
         let mut disconnect_reason: Option<String> = None;
         let mut processed = 0u32;
         self.drain_player_skin_results(renderer);
-
+        // Empty the channel before applying (see `GameState::pending_events`
+        // for why nothing may stay in it); only the applying is budgeted, and
+        // leftovers keep their order for next frame.
         while let Ok(event) = rx.try_recv() {
-            processed += 1;
-            if processed > 4096 {
+            game.pending_events.push_back(event);
+        }
+        const NET_DRAIN_BUDGET_SECS: f32 = 0.003;
+        // Record the worst single apply for the bench breakdown, timed by
+        // boundary stamps so the loop stays at one clock read per event.
+        let mut worst_event = "";
+        let mut worst_event_secs = 0.0f32;
+        let mut event_start = t_net.elapsed().as_secs_f32();
+        while processed < 4096 && event_start < NET_DRAIN_BUDGET_SECS {
+            let Some(event) = game.pending_events.pop_front() else {
                 break;
-            }
+            };
+            processed += 1;
+            let event_kind = event.kind();
             match event {
                 NetworkEvent::Connected => {
                     if let Some(state) = connect_phase.as_deref_mut() {
@@ -393,7 +384,7 @@ impl AppCore {
                 NetworkEvent::BiomeColors { colors } => {
                     tracing::info!("Received {} biome climate entries", colors.len());
                     game.biome_climate = Arc::new(colors);
-                    game.mesh_dispatcher
+                    game.meshing
                         .set_biome_climate(Arc::clone(&game.biome_climate));
                 }
                 NetworkEvent::DimensionInfo {
@@ -415,21 +406,28 @@ impl AppCore {
                     game.xp_display_start_tick = i64::MIN;
 
                     renderer.clear_chunk_meshes();
-                    game.mesh_dispatcher =
-                        renderer.create_mesh_dispatcher(Arc::clone(&game.biome_climate), None);
+                    // The server's protocol may have switched the block-table
+                    // id space; the dispatcher's registry clone inherits the
+                    // rebuilt tables.
+                    renderer.rebuild_block_state_tables();
+                    game.meshing.recreate_dispatcher(
+                        renderer,
+                        Arc::clone(&game.chunk_store.shared),
+                        Arc::clone(&game.biome_climate),
+                    );
                 }
                 NetworkEvent::ChunkLoaded {
                     pos,
-                    data,
-                    heightmaps,
+                    chunk,
                     light,
+                    sky_sources,
                 } => {
-                    if let Err(e) = game.chunk_store.load_chunk(pos, &data, &heightmaps) {
-                        tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
-                        continue;
-                    }
-                    game.light_engine
-                        .on_chunk_loaded(&mut game.chunk_store, (pos.x, pos.z));
+                    game.chunk_store.insert_chunk(pos, *chunk);
+                    game.light_engine.on_chunk_loaded(
+                        &game.chunk_store,
+                        (pos.x, pos.z),
+                        sky_sources,
+                    );
                     // The column meshes once its queued light applies (vanilla
                     // schedules the rebuild from enableChunkLight, not here).
                     queue_light_apply(game, pos, &light, true);
@@ -445,32 +443,21 @@ impl AppCore {
                             pos: (pos.x, pos.z),
                         });
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
-                    game.content_gen.remove(&pos);
-                    game.meshed.remove(&pos);
-                    game.vis_mask.remove(&pos);
-                    game.vis_tiers.remove(&pos);
-                    game.section_gen.retain(|(p, _), _| *p != pos);
-                    game.section_vis.retain(|(p, _), _| *p != pos);
-                    game.section_vis_epoch.retain(|(p, _), _| *p != pos);
-
+                    game.meshing.on_chunk_unload(pos);
                     renderer.remove_chunk_mesh(&pos);
                 }
                 NetworkEvent::ChunkCacheCenter { x, z } => {
                     tracing::debug!("Chunk cache center: [{x}, {z}]");
-                    game.chunk_store
-                        .set_center(azalea_core::position::ChunkPos::new(x, z));
                 }
                 NetworkEvent::PlayerPosition { change, relative } => {
                     fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
                         if is_relative { base + value } else { value }
                     }
-
                     let new_position = Position::new(
                         resolve(game.player.position.x, relative.x, change.pos.x),
                         resolve(game.player.position.y, relative.y, change.pos.y),
                         resolve(game.player.position.z, relative.z, change.pos.z),
                     );
-
                     let new_look_dir = LookDirection::new(
                         resolve(
                             game.player.look_dir.y_rot_deg(),
@@ -483,7 +470,6 @@ impl AppCore {
                             change.look_direction.x_rot(),
                         ),
                     );
-
                     let new_velocity = {
                         let mut new_velocity = game.player.velocity;
                         if relative.rotate_delta {
@@ -491,7 +477,6 @@ impl AppCore {
                                 game.player.look_dir.x_rot_deg() - new_look_dir.x_rot_deg();
                             let y_rot_delta =
                                 game.player.look_dir.y_rot_deg() - new_look_dir.y_rot_deg();
-
                             new_velocity = new_velocity
                                 .x_rot(x_rot_delta.to_radians() as f64)
                                 .y_rot(y_rot_delta.to_radians() as f64);
@@ -502,23 +487,13 @@ impl AppCore {
                             resolve(new_velocity.z, relative.delta_z, change.delta.z),
                         )
                     };
-
                     game.player.position = new_position;
                     game.player.prev_position = game.player.position;
                     game.player.velocity = new_velocity;
                     game.player.look_dir = new_look_dir;
                     game.player.prev_look_dir = game.player.look_dir;
                     game.interaction.on_teleport();
-
-                    let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
-                    game.chunk_store
-                        .set_center(azalea_core::position::ChunkPos::new(
-                            to_chunk_coord(new_position.x),
-                            to_chunk_coord(new_position.z),
-                        ));
-
                     renderer.reset_camera(new_position, new_look_dir);
-
                     if !game.position_set {
                         game.position_set = true;
                         tracing::info!(
@@ -528,7 +503,6 @@ impl AppCore {
                             new_position.z
                         );
                     }
-
                     connection.packet_tx.send(ServerboundGamePacket::MovePlayerPosRot(
                         azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
                             pos: new_position.into(),
@@ -557,7 +531,6 @@ impl AppCore {
                         game.death_instant = Instant::now();
                         game.death_confirm = false;
                         game.respawn_sent = false;
-
                         let _ = window.set_cursor_grab(CursorGrabMode::None);
                         window.set_cursor_visible(true);
                     }
@@ -759,7 +732,7 @@ impl AppCore {
                             pos.x.div_euclid(16),
                             pos.z.div_euclid(16),
                         );
-                        if game.chunk_store.get_chunk(&chunk_pos).is_some() {
+                        if game.chunk_store.shared.has_chunk(chunk_pos) {
                             game.chunk_store.block_entities.insert(
                                 pos,
                                 crate::world::block_entity::StoredBlockEntity { kind, nbt },
@@ -802,7 +775,6 @@ impl AppCore {
                     let pos = (entity_id == game.player.entity_id)
                         .then_some(game.player.position + dvec3(0.0, 1.0, 0.0))
                         .or_else(|| game.entity_store.living.get(&entity_id).map(|e| e.position));
-
                     if let Some(pos) = pos {
                         self.audio
                             .play_world_sound(&sound, category, pos, volume, pitch, seed);
@@ -1025,7 +997,6 @@ impl AppCore {
                     count,
                 } => {
                     let mesh = renderer.ensure_item_mesh(&item_name);
-
                     game.item_entity_store.set_item_data(
                         id,
                         item_name,
@@ -1138,7 +1109,6 @@ impl AppCore {
                     game.death_instant = Instant::now();
                     game.death_confirm = false;
                     game.respawn_sent = false;
-
                     let _ = window.set_cursor_grab(CursorGrabMode::None);
                     window.set_cursor_visible(true);
                 }
@@ -1199,14 +1169,19 @@ impl AppCore {
                     game.tab_list.set_header_footer(header, footer);
                 }
             }
+            let event_end = t_net.elapsed().as_secs_f32();
+            let event_secs = event_end - event_start;
+            if event_secs > worst_event_secs {
+                worst_event_secs = event_secs;
+                worst_event = event_kind;
+            }
+            event_start = event_end;
         }
-
         if let Some(pending) = &self.pending_pack_download
             && pending.handle.is_finished()
         {
             let pending = self.pending_pack_download.take().unwrap();
             let result = pending.handle.join();
-
             use azalea_protocol::packets::game::s_resource_pack;
             let action = match result {
                 Err(_) => {
@@ -1234,7 +1209,6 @@ impl AppCore {
                     s_resource_pack::Action::SuccessfullyLoaded
                 }
             };
-
             connection
                 .packet_tx
                 .send(ServerboundGamePacket::ResourcePack(
@@ -1245,34 +1219,32 @@ impl AppCore {
                 ));
             self.menu.active_packs = self.resource_packs.active_pack_info();
         }
-
         let player_chunk = game.player_chunk();
+        let min_y_section = game.chunk_store.min_section_y();
         // Edits mesh the affected section(s) immediately on the priority lane,
         // ungated by visibility.
         for &(col, si) in &priority_remesh {
-            game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk));
+            let spos = ChunkSectionPos::new(col.x, min_y_section + si, col.z);
+            game.enqueue_section_edit(spos, chunk_lod(col, player_chunk));
         }
-
-        // Refresh the frustum tiers (throttled to camera movement / new loads),
-        // then enqueue everything that needs meshing — visible-first, with hidden
-        // columns backfilled at a bounded rate so the world still completes.
-        // New chunk loads mark themselves dirty when their queued light
-        // applies (GameState::update_light), which raises this flag.
-        let loads_happened = std::mem::take(&mut game.pending_load_rescan);
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1000.0;
         game.last_update_phases.net_decode_ms = ms(t_net);
+        game.last_update_phases.net_worst_event_ms = worst_event_secs * 1000.0;
+        game.last_update_phases.net_worst_event = worst_event;
 
-        let t_vis = std::time::Instant::now();
-        game.update_visibility(renderer, player_chunk, loads_happened);
-        game.last_update_phases.visibility_ms = ms(t_vis);
-
+        // Enqueue everything that needs meshing; newly lit columns marked
+        // their dirty bits in GameState::update_light. Visibility itself is
+        // GPU-side (the Hi-Z pass), so no CPU visibility refresh runs here.
         let t_rescan = std::time::Instant::now();
-        game.rescan_mesh_jobs(player_chunk);
+        game.rescan_mesh_jobs(
+            player_chunk,
+            &renderer.camera_frustum_planes(),
+            renderer.camera_render_position(),
+        );
         game.last_update_phases.rescan_ms = ms(t_rescan);
 
         disconnect_reason
     }
-
     pub fn tick_physics(
         &mut self,
         renderer: &mut Renderer,
@@ -1282,17 +1254,14 @@ impl AppCore {
         if game.dead {
             return;
         }
-
         // Open menus only release the keys; the simulation keeps ticking. The
         // chunk-load benchmark also freezes the player so every run measures the
         // same fixed origin.
         let input_live = game.input_live() && game.chunk_load_bench.is_none();
         let neutral = InputState::released();
         let input = if input_live { &self.input } else { &neutral };
-
         game.player.prev_look_dir = game.player.look_dir;
         game.player.look_dir = renderer.camera_look_dir();
-
         game.player.prev_position = game.player.position;
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
@@ -1305,7 +1274,6 @@ impl AppCore {
             game.interaction.slow_due_to_using_item(),
         );
         game.entity_store.tick_living();
-
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
@@ -1316,7 +1284,6 @@ impl AppCore {
             &mut game.player_prev_walk_speed,
         );
         game.player.tick_bob(dx, dz);
-
         renderer.set_base_fov(self.menu.fov as f32);
         let fov_effect_scale = self.menu.fov_effect();
         renderer.update_fov_mod(compute_fov_modifier(&game.player, fov_effect_scale));
@@ -1327,11 +1294,9 @@ impl AppCore {
         } else {
             1.0
         });
-
         Self::send_input_packet(input, connection, game);
         self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
-
         let eye_pos = game.player.eye_pos();
         game.interaction.update_target(
             eye_pos,
@@ -1340,7 +1305,6 @@ impl AppCore {
             &game.entity_store,
             crate::player::is_creative(game.player.game_mode),
         );
-
         let held_stack = match game
             .player
             .inventory
@@ -1355,7 +1319,6 @@ impl AppCore {
             renderer.registry().placeable_block_for_item(&name)
         });
         let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
-
         let dirty = game.interaction.tick(
             input,
             &game.chunk_store,
@@ -1389,29 +1352,19 @@ impl AppCore {
                     .on_block_dirty(&game.chunk_store, b.x, b.y, b.z);
                 dirty_sections_for_block(&mut sections, b.x, b.y, b.z, min_y, n);
             }
-            // One span per column so each column builds its mesh snapshot
-            // once (the sections of an edit are contiguous per column).
-            let mut spans: Vec<(azalea_core::position::ChunkPos, i32, i32)> = Vec::new();
+            // Player edits are always adjacent (lod 0) and mesh on this
+            // thread so they show this frame, like vanilla's compileSync.
+            let min_y_section = min_y.div_euclid(16);
             for (col, si) in sections {
-                match spans.iter_mut().find(|(c, ..)| *c == col) {
-                    Some((_, lo, hi)) => {
-                        *lo = (*lo).min(si);
-                        *hi = (*hi).max(si);
-                    }
-                    None => spans.push((col, si, si)),
-                }
-            }
-            for (col, lo, hi) in spans {
-                game.mesh_sections_edit_now(renderer, col, lo..hi + 1);
+                let spos = ChunkSectionPos::new(col.x, min_y_section + si, col.z);
+                game.mesh_edit_now(spos, 0);
             }
         }
-
         // Menus consume their own clicks later in the frame, so only clear
         // them when the simulation saw the live input.
         if input_live {
             self.input.clear_just_pressed_actions();
         }
-
         // Marks the end of the client tick (1.21.2+). Must be the last packet of
         // the tick: servers and anti-cheat batch our movement between these to
         // tick-align it, so omitting it makes them reject/rubber-band movement.
@@ -1421,12 +1374,9 @@ impl AppCore {
                 s_client_tick_end::ServerboundClientTickEnd,
             ));
     }
-
     fn send_input_packet(input: &InputState, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
-
         let analog_move = input.get_gamepad_left_analog().unwrap_or(glam::Vec2::ZERO);
-
         let current = PlayerInputState {
             forward: input.key_pressed(KeyCode::KeyW) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
             backward: input.key_pressed(KeyCode::KeyS) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
@@ -1436,7 +1386,6 @@ impl AppCore {
             shift: input.performing_action(Action::Sneak),
             sprint: game.player.sprinting,
         };
-
         if current != game.last_sent_input {
             sender.send(ServerboundGamePacket::PlayerInput(
                 azalea_protocol::packets::game::s_player_input::ServerboundPlayerInput {
@@ -1452,7 +1401,6 @@ impl AppCore {
             game.last_sent_input = current;
         }
     }
-
     pub fn send_sprint_command(&self, connection: &ConnectionHandle, game: &mut GameState) {
         let sprinting = game.player.sprinting;
         if sprinting != game.was_sprinting {
@@ -1472,15 +1420,12 @@ impl AppCore {
             game.was_sprinting = sprinting;
         }
     }
-
     pub fn send_position_packet(&self, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
         use azalea_protocol::common::movements::MoveFlags;
         use azalea_protocol::packets::game::*;
-
         let pos = game.player.position;
         let look_dir = game.player.look_dir;
-
         let dx = pos.x - game.last_sent_pos.x;
         let dy = pos.y - game.last_sent_pos.y;
         let dz = pos.z - game.last_sent_pos.z;
@@ -1489,12 +1434,10 @@ impl AppCore {
             || game.position_send_counter >= POSITION_SEND_INTERVAL;
         let rot_changed = (look_dir.y_rot_deg() - game.last_sent_look_dir.y_rot_deg()) != 0.0
             || (look_dir.x_rot_deg() - game.last_sent_look_dir.x_rot_deg()) != 0.0;
-
         let flags = MoveFlags {
             on_ground: game.player.on_ground,
             horizontal_collision: game.player.horizontal_collision,
         };
-
         if pos_changed && rot_changed {
             sender.send(ServerboundGamePacket::MovePlayerPosRot(
                 ServerboundMovePlayerPosRot {
@@ -1524,7 +1467,6 @@ impl AppCore {
                 ServerboundMovePlayerStatusOnly { flags },
             ));
         }
-
         if pos_changed {
             game.last_sent_pos = pos;
             game.position_send_counter = 0;
@@ -1536,7 +1478,6 @@ impl AppCore {
         game.last_sent_horizontal_collision = game.player.horizontal_collision;
     }
 }
-
 pub(crate) fn chunk_lod(
     pos: azalea_core::position::ChunkPos,
     player: azalea_core::position::ChunkPos,
@@ -1552,7 +1493,6 @@ pub(crate) fn chunk_lod(
         2
     }
 }
-
 /// Vanilla `AbstractClientPlayer.getFieldOfViewModifier`. `effect_scale` is the
 /// `fovEffectScale` accessibility value (1.0 = full effect).
 fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {

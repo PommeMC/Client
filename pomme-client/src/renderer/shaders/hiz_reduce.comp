@@ -1,0 +1,31 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0, r32f) readonly uniform image2D input_mip;
+layout(binding = 1, r32f) writeonly uniform image2D output_mip;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(output_mip);
+    if (pos.x >= size.x || pos.y >= size.y) {
+        return;
+    }
+    
+    ivec2 src_pos = pos * 2;
+    ivec2 src_size = imageSize(input_mip);
+
+    // Output dims are floor(input/2), so an odd input dimension leaves a last
+    // row/column no 2x2 footprint covers; widen the edge texel to 3 there or
+    // the max is underestimated and geometry gets wrongly culled.
+    int nx = (src_size.x & 1) != 0 && pos.x == size.x - 1 ? 3 : 2;
+    int ny = (src_size.y & 1) != 0 && pos.y == size.y - 1 ? 3 : 2;
+
+    float max_d = 0.0;
+    for (int y = 0; y < ny; y++) {
+        for (int x = 0; x < nx; x++) {
+            ivec2 p = min(src_pos + ivec2(x, y), src_size - 1);
+            max_d = max(max_d, imageLoad(input_mip, p).r);
+        }
+    }
+
+    imageStore(output_mip, pos, vec4(max_d, 0.0, 0.0, 0.0));
+}

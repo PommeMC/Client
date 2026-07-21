@@ -703,6 +703,16 @@ fn table() -> &'static Vec<BlockData> {
         .expect("world::block::init must be called before use")
 }
 
+/// Identity of the active block table, for caches keyed by its id space
+/// (compare across a `set_active_protocol` switch).
+pub fn table_id() -> usize {
+    std::ptr::from_ref(table()) as usize
+}
+
+pub fn state_count() -> usize {
+    table().len()
+}
+
 fn block_data(state: BlockState) -> &'static BlockData {
     static UNKNOWN: std::sync::LazyLock<BlockData> = std::sync::LazyLock::new(|| BlockData {
         id: "unknown",

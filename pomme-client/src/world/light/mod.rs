@@ -19,14 +19,13 @@ mod storage;
 mod world;
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::Arc;
 
 use azalea_block::BlockState;
 use block::BlockLightEngine;
 use data::{DataLayer, LAYER_BYTES};
 use engine::LightEngine;
 use sky::SkyLightEngine;
-use sources::ChunkSkyLightSources;
+pub(crate) use sources::ChunkSkyLightSources;
 use storage::StorageCore;
 pub(crate) use storage::{LightPos, SectionKey};
 use world::StoreWorld;
@@ -244,12 +243,19 @@ impl LevelLightEngine {
         }
     }
 
-    /// Registers a freshly loaded chunk column: builds its sky-source
+    /// Registers a freshly loaded chunk column: adopts its sky-source
     /// heightmap (vanilla fills sources at chunk-data apply, before the
-    /// queued light task) and creates its light column from any layers the
-    /// engine already stores (border sections lit by loaded neighbors), so
-    /// later publishes only need to touch changed sections.
-    pub fn on_chunk_loaded(&mut self, store: &mut ChunkStore, pos: (i32, i32)) {
+    /// queued light task; pomme scans it on the net task so the column walk
+    /// never lands in the frame's event drain) and creates its light column
+    /// from any layers the engine already stores (border sections lit by
+    /// loaded neighbors), so later publishes only need to touch changed
+    /// sections.
+    pub fn on_chunk_loaded(
+        &mut self,
+        store: &ChunkStore,
+        pos: (i32, i32),
+        sources: ChunkSkyLightSources,
+    ) {
         let count = self.light_section_count();
         let min_section_y = self.min_section_y;
         let key_at = |index: usize| SectionKey::new(pos.0, min_section_y - 1 + index as i32, pos.1);
@@ -271,24 +277,17 @@ impl LevelLightEngine {
                 .sky
                 .column_top(pos)
                 .map(|top| top - (self.min_section_y - 1));
-            if let Some(chunk) =
-                store.get_chunk(&azalea_core::position::ChunkPos::new(pos.0, pos.1))
-            {
-                sky.sources.insert(
-                    pos,
-                    ChunkSkyLightSources::fill_from(store.min_y(), &chunk.read()),
-                );
-            }
+            sky.sources.insert(pos, sources);
         }
-        store.light_data.insert(
-            pos,
-            Arc::new(ChunkLightData {
+        store.shared.set_light_data(
+            azalea_core::position::ChunkPos::new(pos.0, pos.1),
+            ChunkLightData {
                 sky_sections,
                 block_sections,
                 min_y: store.min_y(),
                 has_sky: self.sky.is_some(),
                 sky_top_section,
-            }),
+            },
         );
     }
 
@@ -456,33 +455,43 @@ impl LevelLightEngine {
     ) {
         let count = (section_count + 2) as usize;
         let changed: Vec<SectionKey> = storage.changed_sections.drain().collect();
+        // Group per column: the store publishes light clone-on-write, so each
+        // column should republish once for all its changed sections.
+        let mut by_column: std::collections::HashMap<(i32, i32), Vec<SectionKey>> =
+            std::collections::HashMap::new();
         for key in changed {
+            by_column.entry(key.column()).or_default().push(key);
+        }
+        for (column_pos, keys) in by_column {
             // Columns without chunk data have no ChunkLightData; their layers
             // republish via on_chunk_loaded when the chunk arrives.
-            let Some(column) = store.light_data.get_mut(&key.column()) else {
-                continue;
-            };
-            let index = key.y - (min_section_y - 1);
-            debug_assert!(
-                (0..count as i32).contains(&index),
-                "light section {index} outside 0..{count}"
+            store.shared.update_light_data(
+                azalea_core::position::ChunkPos::new(column_pos.0, column_pos.1),
+                |column| {
+                    for &key in &keys {
+                        let index = key.y - (min_section_y - 1);
+                        debug_assert!(
+                            (0..count as i32).contains(&index),
+                            "light section {index} outside 0..{count}"
+                        );
+                        if !(0..count as i32).contains(&index) {
+                            continue;
+                        }
+                        let slot = match layer {
+                            LayerKind::Block => &mut column.block_sections[index as usize],
+                            LayerKind::Sky => &mut column.sky_sections[index as usize],
+                        };
+                        *slot = storage.layer(key).map(DataLayer::to_bytes);
+                    }
+                    // A column's top only moves when one of its own sections
+                    // changed, so refreshing it per publish keeps it current.
+                    if let Some(sky) = sky {
+                        column.sky_top_section = sky
+                            .column_top(column_pos)
+                            .map(|top| top - (min_section_y - 1));
+                    }
+                },
             );
-            if !(0..count as i32).contains(&index) {
-                continue;
-            }
-            let column = Arc::make_mut(column);
-            let slot = match layer {
-                LayerKind::Block => &mut column.block_sections[index as usize],
-                LayerKind::Sky => &mut column.sky_sections[index as usize],
-            };
-            *slot = storage.layer(key).map(DataLayer::to_bytes);
-            // A column's top only moves when one of its own sections
-            // changed, so refreshing it per changed key keeps it current.
-            if let Some(sky) = sky {
-                column.sky_top_section = sky
-                    .column_top(key.column())
-                    .map(|top| top - (min_section_y - 1));
-            }
         }
         out.sections.extend(storage.affected_sections.drain());
     }

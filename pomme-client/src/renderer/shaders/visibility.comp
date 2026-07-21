@@ -1,0 +1,176 @@
+#version 450 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+
+layout(constant_id = 0) const int MAX_RD = 64;
+const int MAX_SIZE = MAX_RD * 2 + 1;
+
+struct Uniform {
+    mat4 view_proj;
+    ivec4 vis_center;     // x,z = center in section coords, y = min_y in sections, w = max_y in sections
+    vec4 camera_pos;
+    int radius;
+    int section_count;    // Number of section layers (<= 32, one bit each)
+    int padding0;
+    int padding1;
+    vec4 frustum_planes[6];
+};
+
+layout(set = 0, binding = 0, std430) buffer Visible {
+    uint visible[];
+};
+
+layout(set = 0, binding = 1, std140) uniform UniformBlock {
+    Uniform ubo;
+};
+
+layout(set = 1, binding = 0) uniform sampler2D hiz;
+
+void main() {
+    const float CHUNK_SIZE = 16.0;
+    const float SECTION_HEIGHT = 16.0;
+    
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    
+    int rx = gid.x;
+    int section_y = gid.y;
+    int rz = gid.z;
+    
+    // section_y also bounds the 1u << section_y below (32 bits per column).
+    if (rx < 0 || rx >= MAX_SIZE ||
+        section_y < 0 || section_y >= min(ubo.section_count, 32) ||
+        rz < 0 || rz >= MAX_SIZE) {
+        return;
+    }
+    
+    int chunk_index = rx * MAX_SIZE + rz;
+    
+    // Convert ring index (rx, rz) to world chunk position.
+    // CPU uses rem_euclid, so many world positions map to the same ring index.
+    // Pick the candidate closest to vis_center.
+    int cand_x0 = rx;
+    int cand_x1 = rx + MAX_SIZE;
+    int cand_x2 = rx - MAX_SIZE;
+    
+    int d0 = abs(cand_x0 - ubo.vis_center.x);
+    int d1 = abs(cand_x1 - ubo.vis_center.x);
+    int d2 = abs(cand_x2 - ubo.vis_center.x);
+    
+    int world_chunk_x;
+    if (d0 <= d1 && d0 <= d2) world_chunk_x = cand_x0;
+    else if (d1 <= d2) world_chunk_x = cand_x1;
+    else world_chunk_x = cand_x2;
+    
+    int cand_z0 = rz;
+    int cand_z1 = rz + MAX_SIZE;
+    int cand_z2 = rz - MAX_SIZE;
+    
+    int e0 = abs(cand_z0 - ubo.vis_center.z);
+    int e1 = abs(cand_z1 - ubo.vis_center.z);
+    int e2 = abs(cand_z2 - ubo.vis_center.z);
+    
+    int world_chunk_z;
+    if (e0 <= e1 && e0 <= e2) world_chunk_z = cand_z0;
+    else if (e1 <= e2) world_chunk_z = cand_z1;
+    else world_chunk_z = cand_z2;
+    
+    int dy = section_y;
+    
+    float min_y = float(ubo.vis_center.y) * SECTION_HEIGHT + float(dy) * SECTION_HEIGHT;
+    float max_y = min_y + SECTION_HEIGHT;
+    
+    vec3 base = vec3(
+        float(world_chunk_x) * CHUNK_SIZE,
+        min_y,
+        float(world_chunk_z) * CHUNK_SIZE
+    );
+    
+    vec3 bmin = vec3(base.x, min_y, base.z);
+    vec3 bmax = vec3(base.x + CHUNK_SIZE, max_y, base.z + CHUNK_SIZE);
+    
+    vec3 corners_ws[8];
+    corners_ws[0] = vec3(bmin.x, bmin.y, bmin.z);
+    corners_ws[1] = vec3(bmax.x, bmin.y, bmin.z);
+    corners_ws[2] = vec3(bmin.x, bmax.y, bmin.z);
+    corners_ws[3] = vec3(bmax.x, bmax.y, bmin.z);
+    corners_ws[4] = vec3(bmin.x, bmin.y, bmax.z);
+    corners_ws[5] = vec3(bmax.x, bmin.y, bmax.z);
+    corners_ws[6] = vec3(bmin.x, bmax.y, bmax.z);
+    corners_ws[7] = vec3(bmax.x, bmax.y, bmax.z);
+    
+    // The mask starts all-visible and only a proven Hi-Z occlusion clears a
+    // bit: it is consumed three frames later against a newer camera, and any
+    // stale claim of occlusion shows as missing terrain. Every uncertain path
+    // below is therefore a bare return (the bit stays set).
+
+    for (int plane = 0; plane < 6; plane++) {
+        // Frustum plane: dot(plane.xyz, point) + plane.w >= 0 means inside
+        // The 6 planes are: left, right, bottom, top, near, far
+        // (These match what Camera::frustum_planes() returns)
+
+        // n-p vertex: pick the corner furthest in the plane's normal direction
+        vec3 n_p = vec3(
+            ubo.frustum_planes[plane].x >= 0.0 ? bmax.x : bmin.x,
+            ubo.frustum_planes[plane].y >= 0.0 ? bmax.y : bmin.y,
+            ubo.frustum_planes[plane].z >= 0.0 ? bmax.z : bmin.z
+        );
+
+        // Camera-relative
+        vec3 rel = n_p - ubo.camera_pos.xyz;
+
+        float d = dot(ubo.frustum_planes[plane].xyz, rel) + ubo.frustum_planes[plane].w;
+        if (d < 0.0) {
+            // Outside this frame's frustum, so the depth pyramid holds no
+            // occluder for it; the cull pass frustum-tests with the live
+            // camera, so a stale reject here must not read as occlusion.
+            return;
+        }
+    }
+
+    // Screen-space bounds for HiZ
+    vec2 min_xy = vec2(1.0);
+    vec2 max_xy = vec2(0.0);
+    float near_depth = 1.0;
+
+    for (int i = 0; i < 8; i++) {
+        vec3 rel = corners_ws[i] - ubo.camera_pos.xyz;
+        vec4 clip = ubo.view_proj * vec4(rel, 1.0);
+        if (clip.w <= 0.0) {
+            // A corner at or behind the camera plane: the projected rect is
+            // unbounded, so the section can't be occlusion-tested.
+            return;
+        }
+        vec3 ndc = clip.xyz / clip.w;
+        vec2 uv = ndc.xy * 0.5 + vec2(0.5);
+
+        min_xy = min(min_xy, uv);
+        max_xy = max(max_xy, uv);
+        near_depth = min(near_depth, ndc.z);
+    }
+
+    min_xy = clamp(min_xy, vec2(0.0), vec2(1.0));
+    max_xy = clamp(max_xy, vec2(0.0), vec2(1.0));
+
+    vec2 extent = max_xy - min_xy;
+    if (extent.x <= 0.0 || extent.y <= 0.0) {
+        // Degenerate (edge-on or fully off one side after clamping).
+        return;
+    }
+
+    // HiZ occlusion test
+    ivec2 tex_size = textureSize(hiz, 0);
+    vec2 texel_size = extent * vec2(tex_size);
+    float mip = clamp(floor(log2(max(texel_size.x, texel_size.y))), 0.0, float(textureQueryLevels(hiz) - 1));
+
+    vec4 rect = vec4(min_xy.x, min_xy.y, max_xy.x, max_xy.y);
+
+    float sample1 = textureLod(hiz, rect.xy, mip).x;
+    float sample2 = textureLod(hiz, rect.zy, mip).x;
+    float sample3 = textureLod(hiz, rect.xw, mip).x;
+    float sample4 = textureLod(hiz, rect.zw, mip).x;
+    float max_z = max(max(sample1, sample2), max(sample3, sample4));
+
+    if (near_depth > max_z) {
+        atomicAnd(visible[chunk_index], ~(1u << uint(section_y)));
+    }
+}
