@@ -479,7 +479,7 @@ impl Renderer {
             gui_item_atlas,
             chunk_buffers,
             render_finished_per_image,
-            screenshot: screenshot::ScreenshotCapture::default(),
+            screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
             vsync,
             width: swapchain_extent.width,

@@ -421,8 +421,8 @@ impl MainMenu {
             "Add Server",
             true,
         ) {
-            clear_field(&mut self.edit_name);
-            clear_field(&mut self.edit_address);
+            self.edit_name.clear();
+            self.edit_address.clear();
             self.set_screen(Screen::AddServer);
             self.focused_field = Some(0);
             self.edit_name.set_focused(true);
@@ -970,7 +970,7 @@ impl MainMenu {
         if !input.tab {
             return;
         }
-        let old = self.focused_field.and_then(|i| self.focus_target(i));
+        self.unfocus_current_field();
         let next = helpers::step_ring(
             self.focused_field.map(usize::from),
             field_count as usize,
@@ -978,11 +978,14 @@ impl MainMenu {
         ) as u8;
         self.focused_field = Some(next);
         self.last_field_click = None;
-        if let Some(t) = old {
-            self.field_mut(t).set_focused(false);
-        }
         if let Some(t) = self.focus_target(next) {
             self.field_mut(t).set_focused(true);
+        }
+    }
+
+    fn unfocus_current_field(&mut self) {
+        if let Some(t) = self.focused_field.and_then(|i| self.focus_target(i)) {
+            self.field_mut(t).set_focused(false);
         }
     }
 
@@ -1009,16 +1012,20 @@ impl MainMenu {
         let text_x = x + pad;
         let wf = |s: &str| text_width_fn(s, fs);
         let hit = common::hit_test(input.cursor, [x, y, w, h]);
+        // Vanilla `findClickedPositionInText` floors the mouse x first.
+        let rel_x = input.cursor.0.floor() - text_x;
 
         if input.clicked && hit {
             let now = Instant::now();
             let is_double = self.last_field_click == Some(field_idx)
                 && now.duration_since(self.last_field_click_time).as_millis() < DOUBLE_CLICK_MS;
             let was_focused = self.focused_field == Some(field_idx);
+            if !was_focused {
+                self.unfocus_current_field();
+            }
             self.focused_field = Some(field_idx);
             self.last_field_click = Some(field_idx);
             self.last_field_click_time = now;
-            let rel_x = input.cursor.0 - text_x;
             let f = self.field_mut(target);
             if !was_focused {
                 f.set_focused(true);
@@ -1030,8 +1037,11 @@ impl MainMenu {
             } else {
                 f.on_click(pos, input.shift, inner_w, &wf);
             }
+        } else if input.clicked && self.focused_field == Some(field_idx) {
+            // Vanilla clears widget focus on a click that lands elsewhere.
+            self.unfocus_current_field();
+            self.focused_field = None;
         } else if self.focused_field == Some(field_idx) && input.mouse_held && !input.clicked {
-            let rel_x = input.cursor.0 - text_x;
             let f = self.field_mut(target);
             let pos = f.pos_from_click(rel_x, inner_w, &wf);
             f.on_drag(pos, inner_w, &wf);

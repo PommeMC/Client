@@ -570,7 +570,9 @@ impl GameState {
                     switcher.cycle();
                 } else if self.input_live() {
                     // Sent unconditionally on apply; the server refuses
-                    // without permission (vanilla also shows a local error).
+                    // without permission.
+                    // TODO: gate on permission level once pomme tracks it
+                    // (vanilla canSwitchGameMode / debug.gamemodes.error).
                     self.game_mode_switcher =
                         Some(crate::ui::game_mode_switcher::GameModeSwitcherState::open(
                             self.player.game_mode,
@@ -1355,16 +1357,27 @@ pub fn update_game(
     // G quick actions, F4 spectator shader effects, C/X creative saved
     // hotbars, spectator hotbar select.
 
-    // Finished F2 captures announce in chat (vanilla screenshot.success).
+    // Finished F2 captures announce in chat (vanilla screenshot.success: bare
+    // filename, underlined).
+    // TODO: vanilla makes the filename a clickable open-file link; pomme chat
+    // has no click handling yet.
+    use crate::ui::text::TextSpan;
     for result in gfx.renderer.take_screenshot_messages() {
-        let line = match result {
-            Ok(path) => format!("Saved screenshot as {path}"),
-            Err(err) => format!("Couldn't save screenshot: {err}"),
+        let spans = match result {
+            Ok(name) => {
+                let mut file = TextSpan::new(name, common::WHITE);
+                file.underline = true;
+                vec![
+                    TextSpan::new("Saved screenshot as ".into(), common::WHITE),
+                    file,
+                ]
+            }
+            Err(err) => vec![TextSpan::new(
+                format!("Couldn't save screenshot: {err}"),
+                common::WHITE,
+            )],
         };
-        game.chat.push_message(vec![crate::ui::text::TextSpan::new(
-            line,
-            [1.0, 1.0, 1.0, 1.0],
-        )]);
+        game.chat.push_message(spans);
     }
 
     // F3+A: drop every mesh and re-enqueue all loaded columns.
@@ -1423,7 +1436,9 @@ pub fn update_game(
             ));
     }
 
-    core.input.text_capture = game.wants_text_input();
+    // Chat counts as text capture too, so digits/E/Q/F type instead of acting
+    // as game keys (vanilla suppresses KeyMappings while any screen is open).
+    core.input.text_capture = game.wants_text_input() || game.chat.is_open();
     core.input.menu_capture = game.gui_open();
 
     // The F3+F4 switcher shows the mouse cursor while open.
@@ -1886,7 +1901,10 @@ pub fn update_game(
     }
 
     if game.options_from_game {
-        let menu_input = core.build_menu_input();
+        let mut menu_input = core.build_menu_input();
+        // Chat consumed the enter/tab latches earlier this frame; hand them on.
+        menu_input.enter = enter;
+        menu_input.tab = tab;
         let r = &gfx.renderer;
         let result = core
             .menu

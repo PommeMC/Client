@@ -370,7 +370,7 @@ impl MainMenu {
         if submit {
             let name = self.add_friend_name.value().trim().to_string();
             if !name.is_empty() {
-                clear_field(&mut self.add_friend_name);
+                self.add_friend_name.clear();
                 self.friend_mutate(FriendAction::AddByName(name));
             }
         }

@@ -623,7 +623,7 @@ impl MainMenu {
         self.set_screen(Screen::Friends);
         self.scroll_offset = 0.0;
         self.friend_tab = FriendTab::Friends;
-        clear_field(&mut self.add_friend_name);
+        self.add_friend_name.clear();
         self.pending_remove = None;
         *self.action_error.write() = None;
         self.refresh_friends_now();

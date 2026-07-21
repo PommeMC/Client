@@ -68,6 +68,9 @@ pub struct ChatState {
     suggest_index: usize,
     suggest_anchor: String,
     suggest_applied: bool,
+    /// Vanilla `setAllowSuggestions(false)` after a history recall: the popup
+    /// stays hidden until the next real edit.
+    allow_suggestions: bool,
     last_computed: String,
     /// Monotonic tab-complete transaction id (vanilla `pendingSuggestionsId`).
     /// Never reset, so a response from a previous chat session can't match.
@@ -94,6 +97,7 @@ impl ChatState {
             suggest_index: 0,
             suggest_anchor: String::new(),
             suggest_applied: false,
+            allow_suggestions: true,
             last_computed: String::new(),
             next_suggest_id: 0,
             awaiting: None,
@@ -182,6 +186,7 @@ impl ChatState {
             self.input.set_value(&entry, inner_w, width_fn);
         }
         self.history_pos = target;
+        self.allow_suggestions = false;
     }
 
     /// Vanilla `ChatComponent.addRecentChat`: consecutive duplicates collapse.
@@ -305,8 +310,13 @@ impl ChatState {
         }
 
         let mut clipboard = SystemClipboard;
+        let before_edits = self.input.value().to_string();
         for ev in events {
             self.input.handle(ev, &mut clipboard, inner_w, width_fn);
+        }
+        // A real edit re-enables the popup (vanilla `onEdited`).
+        if self.input.value() != before_edits {
+            self.allow_suggestions = true;
         }
 
         // Tab applies the highlighted completion; further Tabs cycle the list.
@@ -330,7 +340,8 @@ impl ChatState {
         }
 
         if self.input.value() != self.last_computed {
-            self.recompute_suggestions(tree);
+            // While suppressed, recompute without the tree: clears the popup.
+            self.recompute_suggestions(tree.filter(|_| self.allow_suggestions));
         }
 
         if enter {

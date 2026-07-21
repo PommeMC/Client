@@ -253,6 +253,9 @@ impl InputState {
                 if self.action_just_pressed(Action::OpenChat) {
                     if !game.paused && !game.gui_open() && !game.chat.is_open() {
                         game.chat.open();
+                        // The frame flag is written at end of update; set it now
+                        // so keys later in this same event batch already type.
+                        self.text_capture = true;
                         should_apply_cursor_grab = true;
                     }
 
@@ -261,6 +264,7 @@ impl InputState {
                 if self.action_just_pressed(Action::OpenCommands) {
                     if !game.paused && !game.gui_open() && !game.chat.is_open() {
                         game.chat.open_with_slash();
+                        self.text_capture = true;
                         should_apply_cursor_grab = true;
                     }
 

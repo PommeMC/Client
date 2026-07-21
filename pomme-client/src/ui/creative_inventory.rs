@@ -289,6 +289,15 @@ impl CreativeState {
             .set_focused(matches!(self.tab, CreativeTab::Search));
     }
 
+    /// Vanilla `selectTab`: switching tab (to or from search) resets the
+    /// scroll and empties the search box.
+    fn select_tab(&mut self, tab: CreativeTab) {
+        self.tab = tab;
+        self.scroll = 0.0;
+        self.search.clear();
+        self.sync_search_focus();
+    }
+
     /// Discards the carried stack and any pending drag/double-click state.
     /// Must run whenever the screen closes, or a stale drag would re-commit on
     /// reopen.
@@ -340,9 +349,7 @@ pub fn build_creative_inventory(
     // tab without typing the character (`ignoreTextInput`).
     let jumped_to_search = chat_key && !matches!(state.tab, CreativeTab::Search);
     if jumped_to_search {
-        state.tab = CreativeTab::Search;
-        state.scroll = 0.0;
-        state.sync_search_focus();
+        state.select_tab(CreativeTab::Search);
     }
 
     // Hovered-slot hotbar swap (vanilla checkHotbarKeyPressed / the creative
@@ -386,9 +393,7 @@ pub fn build_creative_inventory(
     if let Some(new_tab) = tab_hit
         && new_tab != state.tab
     {
-        state.tab = new_tab;
-        state.scroll = 0.0;
-        state.sync_search_focus();
+        state.select_tab(new_tab);
     }
 
     draw_tabs(elements, state, ox, oy, scale, true);

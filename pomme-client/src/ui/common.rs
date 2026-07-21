@@ -215,9 +215,10 @@ pub(crate) const FIELD_SELECTION: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 /// Selection highlight, display text, and caret for one text-field frame
 /// (`EditBox.renderWidget`): blue block behind the shown slice, then a
 /// `bar_w`-wide caret bar in insert mode or a trailing `_` glyph otherwise.
-/// `pad_y` extends the selection/caret rects past the text line on both sides.
-/// `ghost` is chat's inline suggestion suffix, drawn one `bar_w` left of the
-/// caret (vanilla draws it at `cursorX - 1`, under the caret).
+/// `pad_y` is the scaled-pixel unit for the vanilla overdraw: selection/caret
+/// rects span `textY-1 .. textY+lineHeight+1` (one above, two below the 8px
+/// glyph line). `ghost` is chat's inline suggestion suffix, drawn one `bar_w`
+/// left of the caret (vanilla draws it at `cursorX - 1`, under the caret).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_field_text(
     elements: &mut Vec<MenuElement>,
@@ -239,7 +240,7 @@ pub(crate) fn push_field_text(
             x: x0,
             y: text_y - pad_y,
             w: x1 - x0,
-            h: fs + 2.0 * pad_y,
+            h: fs + 3.0 * pad_y,
             corner_radius: 0.0,
             color: FIELD_SELECTION,
         });
@@ -269,13 +270,14 @@ pub(crate) fn push_field_text(
                 x: caret_x,
                 y: text_y - pad_y,
                 w: bar_w,
-                h: fs + 2.0 * pad_y,
+                h: fs + 3.0 * pad_y,
                 corner_radius: 0.0,
                 color: caret_color,
             });
         } else {
+            // Vanilla appends the `_` one pixel after the text (`drawX += 1`).
             elements.push(MenuElement::Text {
-                x: caret_x,
+                x: caret_x + bar_w,
                 y: text_y,
                 text: "_".into(),
                 scale: fs,

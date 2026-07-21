@@ -1291,6 +1291,8 @@ impl AppCore {
         game: &mut GameState,
     ) {
         if game.dead {
+            // Q/F presses queued while dead must not fire on respawn.
+            self.input.clear_click_counts();
             return;
         }
 
@@ -1305,14 +1307,17 @@ impl AppCore {
             let spectator = game.player.game_mode == 3;
             while self.input.consume_click(Action::DropItem) {
                 let whole_stack = self.input.ctrl_held();
-                if !spectator
-                    && game
+                if !spectator {
+                    // Vanilla `LocalPlayer.drop` always sends the action packet;
+                    // only the swing is gated on something actually dropping.
+                    crate::player::interaction::send_drop(&connection.packet_tx, whole_stack);
+                    if game
                         .player
                         .inventory
                         .remove_from_selected(self.input.selected_slot(), whole_stack)
-                {
-                    crate::player::interaction::send_drop(&connection.packet_tx, whole_stack);
-                    crate::player::interaction::send_swing(&connection.packet_tx);
+                    {
+                        crate::player::interaction::send_swing(&connection.packet_tx);
+                    }
                 }
             }
             while self.input.consume_click(Action::SwapOffhand) {

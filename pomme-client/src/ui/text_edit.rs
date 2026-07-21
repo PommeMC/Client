@@ -80,7 +80,6 @@ pub struct TextFieldState {
     highlight_pos: usize,
     display_pos: usize,
     max_length: usize,
-    focused: bool,
     focused_time: Instant,
 }
 
@@ -92,13 +91,17 @@ impl TextFieldState {
             highlight_pos: 0,
             display_pos: 0,
             max_length,
-            focused: false,
             focused_time: Instant::now(),
         }
     }
 
     pub fn value(&self) -> &str {
         &self.value
+    }
+
+    /// Reset to empty; geometry-free (empty text needs no scroll).
+    pub fn clear(&mut self) {
+        self.set_value("", 0.0, &|_| 0.0);
     }
 
     pub fn set_value(&mut self, value: &str, inner_w: f32, width_fn: &dyn Fn(&str) -> f32) {
@@ -291,7 +294,10 @@ impl TextFieldState {
     }
 
     fn scroll_to(&mut self, pos: usize, inner_w: f32, width_fn: &dyn Fn(&str) -> f32) {
-        self.display_pos = self.display_pos.min(self.value.len());
+        // Callers mutate `value` before scrolling; replacing a selection that
+        // started left of the window can leave `display_pos` mid-char in the
+        // new string, so snap down before slicing.
+        self.display_pos = floor_char_boundary(&self.value, self.display_pos.min(self.value.len()));
         let displayed_len =
             plain_substr_by_width(&self.value[self.display_pos..], inner_w, false, width_fn).len();
         let last_pos = displayed_len + self.display_pos;
@@ -405,14 +411,15 @@ impl TextFieldState {
     }
 
     /// `findClickedPositionInText`: `rel_x` is the click x relative to the text
-    /// origin (mouse_x - text_x). Honors `display_pos`.
+    /// origin, with the mouse x floored before subtracting like vanilla
+    /// (`floor(mouse_x) - text_x`). Honors `display_pos`.
     pub fn pos_from_click(
         &self,
         rel_x: f32,
         inner_w: f32,
         width_fn: &dyn Fn(&str) -> f32,
     ) -> usize {
-        let position_in_text = rel_x.floor().min(inner_w);
+        let position_in_text = rel_x.min(inner_w);
         let displayed = &self.value[self.display_pos..];
         self.display_pos + plain_substr_by_width(displayed, position_in_text, false, width_fn).len()
     }
@@ -438,8 +445,9 @@ impl TextFieldState {
         self.move_cursor_to(pos, true, inner_w, width_fn);
     }
 
+    /// Restarts the caret blink on focus gain (vanilla `setFocused`). Focus
+    /// itself lives with the owning screen, which passes it to `render_info`.
     pub fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
         if focused {
             self.focused_time = Instant::now();
         }
@@ -803,5 +811,27 @@ mod tests {
         // Vanilla's forward word scan strips trailing spaces, so the trailing
         // space is included in the selection.
         assert_eq!(f.get_highlighted(), "bar ");
+    }
+
+    #[test]
+    fn replace_selection_with_stale_window_does_not_panic() {
+        // Narrow window (3 chars) over 20 é. Home puts the caret (and window)
+        // at 0; Shift+End extends the selection to the end and scrolls the
+        // window right past the anchor. Pasting then replaces the whole value
+        // while `display_pos` still points at a byte offset that is mid-char
+        // in the pasted string; scroll_to must re-snap before slicing.
+        let inner = 18.0f32;
+        let pasted = format!("a{}", "\u{e9}".repeat(17));
+        let mut clip = MockClipboard(pasted.clone());
+        let mut f = TextFieldState::new(256);
+        f.set_value(&"\u{e9}".repeat(20), inner, W);
+        f.key_pressed(KeyCode::Home, &plain(), &mut clip, inner, W);
+        let mut shift = plain();
+        shift.shift = true;
+        f.key_pressed(KeyCode::End, &shift, &mut clip, inner, W);
+        let mut ctrl = plain();
+        ctrl.ctrl = true;
+        f.key_pressed(KeyCode::KeyV, &ctrl, &mut clip, inner, W);
+        assert_eq!(f.value(), pasted);
     }
 }

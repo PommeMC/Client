@@ -26,29 +26,29 @@ struct PendingCapture {
 pub struct ScreenshotCapture {
     armed: bool,
     pending: Vec<PendingCapture>,
+    game_dir: PathBuf,
     result_tx: Sender<Result<String, String>>,
     result_rx: Receiver<Result<String, String>>,
 }
 
-impl Default for ScreenshotCapture {
-    fn default() -> Self {
+impl ScreenshotCapture {
+    pub fn new(game_dir: PathBuf) -> Self {
         let (result_tx, result_rx) = channel();
         Self {
             armed: false,
             pending: Vec::new(),
+            game_dir,
             result_tx,
             result_rx,
         }
     }
-}
 
-impl ScreenshotCapture {
     /// Arm a one-shot capture; recorded on the next presented frame.
     pub fn arm(&mut self) {
         self.armed = true;
     }
 
-    /// Drain completed captures: `Ok(relative filename)` or `Err(message)`.
+    /// Drain completed captures: `Ok(bare filename)` or `Err(message)`.
     pub fn drain_results(&mut self) -> Vec<Result<String, String>> {
         self.result_rx.try_iter().collect()
     }
@@ -205,8 +205,9 @@ impl ScreenshotCapture {
 
         let tx = self.result_tx.clone();
         let (w, h, bgra) = (cap.width, cap.height, cap.bgra);
+        let dir = self.game_dir.join("screenshots");
         std::thread::spawn(move || {
-            let _ = tx.send(encode_and_write(&pixels, w, h, bgra));
+            let _ = tx.send(encode_and_write(&pixels, w, h, bgra, &dir));
         });
     }
 
@@ -224,7 +225,13 @@ fn is_bgra(format: vk::Format) -> bool {
     matches!(format, vk::Format::B8G8R8A8Srgb | vk::Format::B8G8R8A8Unorm)
 }
 
-fn encode_and_write(pixels: &[u8], width: u32, height: u32, bgra: bool) -> Result<String, String> {
+fn encode_and_write(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    bgra: bool,
+    dir: &Path,
+) -> Result<String, String> {
     // Vanilla screenshots are opaque RGB; drop alpha and reorder BGRA if needed.
     let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
     for px in pixels.chunks_exact(4) {
@@ -235,28 +242,27 @@ fn encode_and_write(pixels: &[u8], width: u32, height: u32, bgra: bool) -> Resul
         }
     }
 
-    let (path, relative) = next_filename()?;
+    let (path, name) = next_filename(dir)?;
     write_png(&path, &rgb, width, height)?;
-    Ok(relative)
+    Ok(name)
 }
 
-/// `Screenshot.getFilename`: `screenshots/<timestamp>.png`, suffixed `_1`,
-/// `_2`, ... on collision.
-fn next_filename() -> Result<(PathBuf, String), String> {
-    let dir = PathBuf::from("screenshots");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+/// `Screenshot.getFile`: `<game dir>/screenshots/<timestamp>.png`; on
+/// collision the counter starts at 2 (`name.png`, `name_2.png`, ...).
+fn next_filename(dir: &Path) -> Result<(PathBuf, String), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 
     let stamp = timestamp();
-    let mut n = 0u32;
+    let mut n = 1u32;
     loop {
-        let name = if n == 0 {
+        let name = if n == 1 {
             format!("{stamp}.png")
         } else {
             format!("{stamp}_{n}.png")
         };
         let path = dir.join(&name);
         if !path.exists() {
-            return Ok((path, format!("screenshots/{name}")));
+            return Ok((path, name));
         }
         n += 1;
     }

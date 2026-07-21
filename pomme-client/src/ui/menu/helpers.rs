@@ -150,14 +150,9 @@ pub(super) fn push_text_field(
         h,
     });
     common::push_field_text(
-        elements, &info, displayed, text_x, text_y, fs, gs, 0.0, WHITE, None, &wf,
+        elements, &info, displayed, text_x, text_y, fs, gs, gs, WHITE, None, &wf,
     );
     elements.push(MenuElement::ScissorPop);
-}
-
-/// Reset a text field to empty; geometry-free (empty text needs no scroll).
-pub(super) fn clear_field(field: &mut TextFieldState) {
-    field.set_value("", 0.0, &|_| 0.0);
 }
 
 /// One Tab step around a focus ring of `n` widgets (`None` = nothing focused

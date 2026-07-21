@@ -872,7 +872,7 @@ impl MainMenu {
         use crate::resource_pack::PackSource;
 
         if input.escape {
-            clear_field(&mut self.pack_search);
+            self.pack_search.clear();
             self.set_screen(Screen::Options);
             return empty_result(2.0);
         }
@@ -1147,7 +1147,7 @@ impl MainMenu {
         );
         any_hovered |= h;
         if clicked && h {
-            clear_field(&mut self.pack_search);
+            self.pack_search.clear();
             self.set_screen(Screen::Options);
         }
 
