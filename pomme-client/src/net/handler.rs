@@ -39,8 +39,12 @@ pub fn handle_game_packet(
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
                 let _ = event_tx.try_send(dimension_info(dim));
             }
+            let _ = event_tx.try_send(NetworkEvent::DimensionName {
+                name: p.common.dimension.to_string(),
+            });
             let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                 game_mode: p.common.game_type as u8,
+                previous: Some(p.common.previous_game_type.0.map(|m| m.to_id())),
             });
             let _ = event_tx.try_send(NetworkEvent::PlayerLogin {
                 entity_id: p.player_id.0,
@@ -303,6 +307,7 @@ pub fn handle_game_packet(
                 EventType::ChangeGameMode => {
                     let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                         game_mode: p.param as u8,
+                        previous: None,
                     });
                 }
                 EventType::StartRaining
@@ -557,8 +562,12 @@ pub fn handle_game_packet(
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
                 let _ = event_tx.try_send(dimension_info(dim));
             }
+            let _ = event_tx.try_send(NetworkEvent::DimensionName {
+                name: p.common.dimension.to_string(),
+            });
             let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                 game_mode: p.common.game_type as u8,
+                previous: Some(p.common.previous_game_type.0.map(|m| m.to_id())),
             });
         }
         ClientboundGamePacket::PlayerCombatKill(p) => {

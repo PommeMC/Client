@@ -1357,9 +1357,30 @@ fn send_action(
     ));
 }
 
-fn send_swing(sender: &PacketSender) {
+pub(crate) fn send_swing(sender: &PacketSender) {
     use azalea_protocol::packets::game::s_swing::ServerboundSwing;
     sender.send(ServerboundGamePacket::Swing(ServerboundSwing {
         hand: InteractionHand::MainHand,
     }));
+}
+
+/// Q / Ctrl+Q, vanilla `LocalPlayer.drop`'s player-action packet.
+pub(crate) fn send_drop(sender: &PacketSender, whole_stack: bool) {
+    let action = if whole_stack {
+        Action::DropAllItems
+    } else {
+        Action::DropItem
+    };
+    send_action(sender, action, BlockPos::default(), Direction::Down, 0);
+}
+
+/// F, vanilla `Minecraft.handleKeybinds`' offhand swap.
+pub(crate) fn send_swap_offhand(sender: &PacketSender) {
+    send_action(
+        sender,
+        Action::SwapItemWithOffhand,
+        BlockPos::default(),
+        Direction::Down,
+        0,
+    );
 }

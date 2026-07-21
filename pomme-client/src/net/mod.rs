@@ -189,6 +189,13 @@ pub enum NetworkEvent {
     },
     GameModeChanged {
         game_mode: u8,
+        /// `Some` = authoritative previous mode from login/respawn (which may
+        /// itself be absent); `None` = derive from the mode being replaced
+        /// (the GameEvent packet carries no previous mode).
+        previous: Option<Option<u8>>,
+    },
+    DimensionName {
+        name: String,
     },
     PlayerAbilitiesChanged {
         flying: bool,

@@ -236,16 +236,12 @@ impl AppCore {
             cursor: self.input.cursor_pos(),
             clicked: self.input.left_just_pressed(),
             mouse_held: self.input.left_held(),
-            typed_chars: self.input.drain_typed_chars(),
-            backspace: self.input.backspace_pressed(),
+            events: self.input.drain_text_events(),
+            shift: self.input.shift_held(),
             enter: self.input.enter_pressed(),
             escape: self.input.escape_pressed(),
             tab: self.input.tab_pressed(),
             f5: self.input.f5_pressed(),
-            select_all: self.input.select_all_pressed(),
-            copy: self.input.copy_pressed(),
-            cut: self.input.cut_pressed(),
-            undo: self.input.undo_pressed(),
             scroll_delta: self.input.consume_menu_scroll(),
         }
     }
@@ -417,6 +413,9 @@ impl AppCore {
                     renderer.clear_chunk_meshes();
                     game.mesh_dispatcher =
                         renderer.create_mesh_dispatcher(Arc::clone(&game.biome_climate), None);
+                }
+                NetworkEvent::DimensionName { name } => {
+                    game.dimension = name;
                 }
                 NetworkEvent::ChunkLoaded {
                     pos,
@@ -808,8 +807,20 @@ impl AppCore {
                             .play_world_sound(&sound, category, pos, volume, pitch, seed);
                     }
                 }
-                NetworkEvent::GameModeChanged { game_mode } => {
+                NetworkEvent::GameModeChanged {
+                    game_mode,
+                    previous,
+                } => {
                     tracing::info!("Game mode changed to {game_mode}");
+                    // Vanilla `setLocalMode`: an in-game change records the
+                    // replaced mode; login/respawn set it from the packet.
+                    match previous {
+                        Some(p) => game.previous_game_mode = p,
+                        None if game_mode != game.player.game_mode => {
+                            game.previous_game_mode = Some(game.player.game_mode);
+                        }
+                        None => {}
+                    }
                     game.player.game_mode = game_mode;
                     if game.inventory_open || game.creative_inventory_open {
                         match game_mode {
@@ -1287,6 +1298,32 @@ impl AppCore {
         // chunk-load benchmark also freezes the player so every run measures the
         // same fixed origin.
         let input_live = game.input_live() && game.chunk_load_bench.is_none();
+
+        // Vanilla Minecraft.handleKeybinds: drop and offhand-swap consume the
+        // queued key presses each tick; spectators consume without acting.
+        if input_live {
+            let spectator = game.player.game_mode == 3;
+            while self.input.consume_click(Action::DropItem) {
+                let whole_stack = self.input.ctrl_held();
+                if !spectator
+                    && game
+                        .player
+                        .inventory
+                        .remove_from_selected(self.input.selected_slot(), whole_stack)
+                {
+                    crate::player::interaction::send_drop(&connection.packet_tx, whole_stack);
+                    crate::player::interaction::send_swing(&connection.packet_tx);
+                }
+            }
+            while self.input.consume_click(Action::SwapOffhand) {
+                if !spectator {
+                    crate::player::interaction::send_swap_offhand(&connection.packet_tx);
+                }
+            }
+        }
+        // A press queued while a menu or chat was open must not fire later.
+        self.input.clear_click_counts();
+
         let neutral = InputState::released();
         let input = if input_live { &self.input } else { &neutral };
 

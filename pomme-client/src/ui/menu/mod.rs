@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use winit::keyboard::KeyCode;
 
 use crate::app::core::DisplayMode;
 use crate::renderer::CloudMode;
@@ -17,6 +18,7 @@ use crate::renderer::pipelines::menu_overlay::{
     ICON_PAINTBRUSH, ICON_UNIVERSAL_ACCESS, ICON_USER, ICON_USERS, MenuElement, SpriteId,
     TooltipLine,
 };
+use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
 #[derive(Serialize, Deserialize)]
 struct Settings {
@@ -160,6 +162,7 @@ fn save_settings(game_dir: &Path, settings: &Settings) {
 }
 
 use helpers::*;
+use servers::TextTarget;
 
 use super::common;
 use super::common::WHITE;
@@ -216,17 +219,33 @@ pub struct MenuInput {
     pub cursor: (f32, f32),
     pub clicked: bool,
     pub mouse_held: bool,
-    pub typed_chars: Vec<char>,
-    pub backspace: bool,
+    /// Ordered key/char events for the focused text field, mirroring vanilla's
+    /// `keyPressed` + `charTyped` pair (drained once per frame in
+    /// `build_menu_input`).
+    pub events: Vec<TextInputEvent>,
+    /// Shift held this frame, for Shift+Tab reverse focus and shift-click
+    /// select.
+    pub shift: bool,
     pub enter: bool,
     pub escape: bool,
     pub tab: bool,
     pub f5: bool,
-    pub select_all: bool,
-    pub copy: bool,
-    pub cut: bool,
-    pub undo: bool,
     pub scroll_delta: f32,
+}
+
+impl MenuInput {
+    /// `InputWithModifiers.isSelection`: Enter / NumpadEnter (folded into
+    /// `enter`) or Space with no modifiers activates the focused widget.
+    pub fn activate(&self) -> bool {
+        self.enter
+            || self.events.iter().any(|e| {
+                matches!(
+                    e,
+                    TextInputEvent::Key { code: KeyCode::Space, mods }
+                        if !mods.ctrl && !mods.alt && !mods.super_key && !mods.shift
+                )
+            })
+    }
 }
 
 const HEADER_H: f32 = 33.0;
@@ -329,8 +348,8 @@ pub struct MainMenu {
     screen: Screen,
     server_list: ServerList,
     selected_server: Option<usize>,
-    edit_name: String,
-    edit_address: String,
+    edit_name: TextFieldState,
+    edit_address: TextFieldState,
     last_mp_ip: String,
     ping_results: PingResults,
     ping_generation: PingGeneration,
@@ -340,7 +359,7 @@ pub struct MainMenu {
     last_face_count: usize,
     face_dirty_since: Option<Instant>,
     friend_tab: FriendTab,
-    add_friend_name: String,
+    add_friend_name: TextFieldState,
     action_error: ActionError,
     pending_remove: Option<(String, String)>,
     rt: Arc<tokio::runtime::Runtime>,
@@ -352,12 +371,18 @@ pub struct MainMenu {
     theme: PanoramaTheme,
     transition: Option<ThemeTransition>,
     scroll_offset: f32,
+    /// Which text field of the current form has keyboard focus (index within
+    /// the form). Separate from `focus` (button/widget focus ring).
     focused_field: Option<u8>,
-    field_all_selected: bool,
     last_field_click_time: Instant,
     last_field_click: Option<u8>,
+    /// Ctrl+Z history per field index (pomme extra; vanilla EditBox has none).
     field_undo_stack: Vec<(u8, String)>,
-    cursor_blink: Instant,
+    /// Keyboard focus index into the current screen's focusable widgets
+    /// (buttons). `focusable_count` records how many the last frame built, so
+    /// Tab can wrap before the count for this frame is known.
+    focus: Option<usize>,
+    focusable_count: usize,
     last_click_time: Instant,
     /// Steady clock for label scroll animation.
     created: Instant,
@@ -405,8 +430,17 @@ pub struct MainMenu {
     pub pack_toggle: Option<(String, bool)>,
     pub rescan_packs: bool,
     pub reload_assets: bool,
-    pack_search: String,
+    pack_search: TextFieldState,
 }
+
+/// Vanilla EditBox max lengths (UTF-16 units): server name uses the EditBox
+/// default (`EditBox.maxLength = 32`), the address is `128` per
+/// `ManageServerScreen`/`DirectJoinServerScreen`. Friend name has no vanilla
+/// analog, so cap at a Minecraft username length.
+const MAX_NAME: usize = 32;
+const MAX_ADDRESS: usize = 128;
+const MAX_FRIEND: usize = 16;
+const MAX_SEARCH: usize = 128;
 
 impl MainMenu {
     pub fn new(
@@ -426,8 +460,8 @@ impl MainMenu {
             screen: Screen::Main,
             server_list,
             selected_server: None,
-            edit_name: String::new(),
-            edit_address: String::new(),
+            edit_name: TextFieldState::new(MAX_NAME),
+            edit_address: TextFieldState::new(MAX_ADDRESS),
             last_mp_ip: String::new(),
             ping_results,
             ping_generation: Default::default(),
@@ -437,7 +471,7 @@ impl MainMenu {
             last_face_count: 0,
             face_dirty_since: None,
             friend_tab: FriendTab::Friends,
-            add_friend_name: String::new(),
+            add_friend_name: TextFieldState::new(MAX_FRIEND),
             action_error: Default::default(),
             pending_remove: None,
             rt,
@@ -448,11 +482,11 @@ impl MainMenu {
             transition: None,
             scroll_offset: 0.0,
             focused_field: None,
-            field_all_selected: false,
             last_field_click_time: Instant::now(),
             last_field_click: None,
             field_undo_stack: Vec::new(),
-            cursor_blink: Instant::now(),
+            focus: None,
+            focusable_count: 0,
             last_click_time: Instant::now(),
             created: Instant::now(),
             last_click_index: None,
@@ -498,17 +532,17 @@ impl MainMenu {
             pack_toggle: None,
             rescan_packs: false,
             reload_assets: false,
-            pack_search: String::new(),
+            pack_search: TextFieldState::new(MAX_SEARCH),
         }
     }
 
     fn set_screen(&mut self, screen: Screen) {
         self.screen = screen;
         self.focused_field = None;
-        self.field_all_selected = false;
+        self.focus = None;
+        self.focusable_count = 0;
         self.last_field_click = None;
         self.field_undo_stack.clear();
-        self.cursor_blink = Instant::now();
         // Favicons and friend faces share one GPU atlas; force a rebuild on
         // screen change so the correct set loads for the screen we're entering.
         self.last_favicon_count = usize::MAX;
@@ -589,7 +623,7 @@ impl MainMenu {
         self.set_screen(Screen::Friends);
         self.scroll_offset = 0.0;
         self.friend_tab = FriendTab::Friends;
-        self.add_friend_name.clear();
+        clear_field(&mut self.add_friend_name);
         self.pending_remove = None;
         *self.action_error.write() = None;
         self.refresh_friends_now();
@@ -688,6 +722,35 @@ impl MainMenu {
 
     pub fn show_disconnect(&mut self, reason: String) {
         self.set_screen(Screen::Disconnected(reason));
+    }
+
+    /// Advance the button focus ring on Tab / Shift+Tab. Wrapping uses last
+    /// frame's widget count, since this frame's isn't known until the immediate
+    /// mode build finishes; the count is stable frame-to-frame.
+    fn focus_advance(&mut self, input: &MenuInput) {
+        if !input.tab {
+            return;
+        }
+        let n = self.focusable_count;
+        self.focus = (n != 0).then(|| helpers::step_ring(self.focus, n, input.shift));
+    }
+
+    fn make_focus_ctx(&self, input: &MenuInput) -> FocusCtx {
+        FocusCtx {
+            next_index: 0,
+            focus: self.focus,
+            activate: input.activate(),
+            fired: false,
+        }
+    }
+
+    /// Record how many focusable widgets this frame built and drop a stale
+    /// focus index that now points past the end.
+    fn finish_focus(&mut self, ctx: &FocusCtx) {
+        self.focusable_count = ctx.next_index;
+        if self.focus.is_some_and(|f| f >= ctx.next_index) {
+            self.focus = None;
+        }
     }
 
     pub fn build(

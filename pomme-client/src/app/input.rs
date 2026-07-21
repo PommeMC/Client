@@ -30,6 +30,8 @@ pub enum Action {
     OpenChat,
     OpenCommands,
     Close,
+    DropItem,
+    SwapOffhand,
 }
 
 pub struct InputState {
@@ -43,20 +45,31 @@ pub struct InputState {
     middle_click: ClickState,
     cursor_pos: (f32, f32),
     cursor_moved: bool,
-    typed_chars: Vec<char>,
     menu_scroll: f32,
     /// A focused text field (anvil rename, creative search) is capturing
     /// keyboard input this frame: letter/digit hotkeys must type, not act.
     pub text_capture: bool,
-    backspace_pressed: bool,
+    /// A container screen (inventory, chest, creative) is open: it consumes
+    /// hotbar digits and the drop/swap keys, like vanilla screens do.
+    pub menu_capture: bool,
+    /// Keys pressed since the last `end_frame`, including OS key repeats:
+    /// vanilla dispatches GLFW repeats to screens and debug chords.
+    just_pressed: HashSet<KeyCode>,
+    /// Per-action press counters mirroring vanilla `KeyMapping.click`, so a
+    /// key repeating faster than the tick rate still fires once per press.
+    click_counts: HashMap<Action, u32>,
+    /// Ordered key/char events for focused text fields, mirroring vanilla's
+    /// `keyPressed` + `charTyped` callback pair. Drained once per frame by
+    /// whichever screen owns the focused field.
+    text_events: Vec<crate::ui::text_edit::TextInputEvent>,
     enter_pressed: bool,
     escape_pressed: bool,
     tab_pressed: bool,
     f5_pressed: bool,
-    select_all_pressed: bool,
-    copy_pressed: bool,
-    cut_pressed: bool,
-    undo_pressed: bool,
+    up_pressed: bool,
+    down_pressed: bool,
+    page_up_pressed: bool,
+    page_down_pressed: bool,
     gamepad_manager: Option<Gilrs>,
     weak_rumble_effect: Option<Effect>,
     strong_rumble_effect: Option<Effect>,
@@ -122,18 +135,20 @@ impl InputState {
             middle_click: ClickState::default(),
             cursor_pos: (0.0, 0.0),
             cursor_moved: false,
-            typed_chars: Vec::new(),
             menu_scroll: 0.0,
             text_capture: false,
-            backspace_pressed: false,
+            menu_capture: false,
+            just_pressed: HashSet::new(),
+            click_counts: HashMap::new(),
+            text_events: Vec::new(),
             enter_pressed: false,
             escape_pressed: false,
             tab_pressed: false,
             f5_pressed: false,
-            select_all_pressed: false,
-            copy_pressed: false,
-            cut_pressed: false,
-            undo_pressed: false,
+            up_pressed: false,
+            down_pressed: false,
+            page_up_pressed: false,
+            page_down_pressed: false,
             gamepad_manager,
             weak_rumble_effect: weak_effect,
             strong_rumble_effect: strong_effect,
@@ -171,6 +186,7 @@ impl InputState {
                         && !game.dead
                         && game.player.game_mode != 3
                         && !game.chat.is_open()
+                        && game.game_mode_switcher.is_none()
                     {
                         if crate::player::is_creative(game.player.game_mode) {
                             game.creative_inventory_open = true;
@@ -183,7 +199,11 @@ impl InputState {
                     self.recent_actions.remove(&Action::ToggleInventory);
                 }
                 if self.action_just_pressed(Action::OpenMenu) {
-                    if game.chunk_load_bench.is_some() {
+                    if game.game_mode_switcher.is_some() {
+                        // Esc cancels the F3+F4 switcher without applying.
+                        game.game_mode_switcher = None;
+                        should_apply_cursor_grab = true;
+                    } else if game.chunk_load_bench.is_some() {
                         // Cancel a running benchmark instead of opening the menu;
                         // update_game restores the render distance next frame.
                         game.chunk_load_abort = true;
@@ -200,7 +220,7 @@ impl InputState {
                                     game.pause_screen = PauseScreen::Benchmark
                                 }
                                 PauseScreen::Benchmark => game.pause_screen = PauseScreen::Main,
-                                PauseScreen::Main => game.paused = false,
+                                PauseScreen::Main | PauseScreen::Hidden => game.paused = false,
                             }
                         } else {
                             game.paused = true;
@@ -375,6 +395,9 @@ impl InputState {
             Action::OpenCommands => self.key_pressed(KeyCode::Slash),
             // Controller-only; keyboard Escape closes via OpenMenu and the chat path.
             Action::Close => self.gamepad_button_down(Button::East),
+            // Click-count driven (`consume_click`); held state only.
+            Action::DropItem => self.key_pressed(KeyCode::KeyQ),
+            Action::SwapOffhand => self.key_pressed(KeyCode::KeyF),
         }
     }
 
@@ -425,6 +448,43 @@ impl InputState {
         self.pressed.contains(&key)
     }
 
+    /// Pressed since the last `end_frame`, OS key repeats included (vanilla
+    /// screens and debug chords receive GLFW repeat events).
+    pub fn key_just_pressed(&self, key: KeyCode) -> bool {
+        self.just_pressed.contains(&key)
+    }
+
+    /// Hotbar digit pressed since the last `end_frame`, for container swaps.
+    pub fn hotbar_key_just_pressed(&self) -> Option<u8> {
+        self.just_pressed.iter().find_map(|&c| hotbar_slot(c))
+    }
+
+    /// Consume one queued press of `action`, vanilla `KeyMapping.consumeClick`.
+    pub fn consume_click(&mut self, action: Action) -> bool {
+        match self.click_counts.get_mut(&action) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn clear_click_counts(&mut self) {
+        self.click_counts.clear();
+    }
+
+    /// Frame-scoped input state; called once at the end of each redraw so a
+    /// latch set outside its consumer's screen can't fire later.
+    pub fn end_frame(&mut self) {
+        self.just_pressed.clear();
+        self.up_pressed = false;
+        self.down_pressed = false;
+        self.page_up_pressed = false;
+        self.page_down_pressed = false;
+        self.text_events.clear();
+    }
+
     pub fn weak_rumble_for_instant(&self) -> Result<(), gilrs::ff::Error> {
         self.weak_rumble_effect
             .as_ref()
@@ -442,7 +502,9 @@ impl InputState {
             match event.state {
                 ElementState::Pressed => {
                     self.pressed.insert(code);
+                    self.just_pressed.insert(code);
                     if !self.text_capture
+                        && !self.menu_capture
                         && let Some(slot) = hotbar_slot(code)
                     {
                         self.selected_slot = slot;
@@ -450,6 +512,12 @@ impl InputState {
                     match code {
                         KeyCode::KeyE if !self.text_capture => {
                             self.recent_actions.insert(Action::ToggleInventory, true);
+                        }
+                        KeyCode::KeyQ if !self.text_capture && !self.menu_capture => {
+                            *self.click_counts.entry(Action::DropItem).or_insert(0) += 1;
+                        }
+                        KeyCode::KeyF if !self.text_capture && !self.menu_capture => {
+                            *self.click_counts.entry(Action::SwapOffhand).or_insert(0) += 1;
                         }
                         KeyCode::Escape => {
                             self.recent_actions.insert(Action::OpenMenu, true);
@@ -483,56 +551,58 @@ impl InputState {
             return;
         }
 
+        // The ordered event stream for caret-editing text fields. Chars are
+        // suppressed while the edit modifier is held, like GLFW's char
+        // callback for Ctrl (Cmd) chords.
+        if let PhysicalKey::Code(code) = event.physical_key {
+            self.text_events
+                .push(crate::ui::text_edit::TextInputEvent::Key {
+                    code,
+                    mods: self.key_mods(),
+                });
+        }
+        let state = self.modifiers.state();
+        if let Some(text) = &event.text
+            && !state.control_key()
+            && !state.super_key()
+        {
+            for ch in text.chars() {
+                if !ch.is_control() {
+                    self.text_events
+                        .push(crate::ui::text_edit::TextInputEvent::Char(ch));
+                }
+            }
+        }
+
         if let PhysicalKey::Code(code) = event.physical_key {
             match code {
-                KeyCode::Backspace => self.backspace_pressed = true,
                 KeyCode::Enter | KeyCode::NumpadEnter => self.enter_pressed = true,
                 KeyCode::Escape => self.escape_pressed = true,
                 KeyCode::Tab => self.tab_pressed = true,
                 KeyCode::F5 => self.f5_pressed = true,
-                KeyCode::KeyV if self.modifiers.state().control_key() => {
-                    if let Ok(mut cb) = arboard::Clipboard::new()
-                        && let Ok(text) = cb.get_text()
-                    {
-                        for ch in text.chars() {
-                            if !ch.is_control() {
-                                self.typed_chars.push(ch);
-                            }
-                        }
-                    }
-                    return;
-                }
-                KeyCode::KeyA if self.modifiers.state().control_key() => {
-                    self.select_all_pressed = true;
-                    return;
-                }
-                KeyCode::KeyC if self.modifiers.state().control_key() => {
-                    self.copy_pressed = true;
-                    return;
-                }
-                KeyCode::KeyX if self.modifiers.state().control_key() => {
-                    self.cut_pressed = true;
-                    return;
-                }
-                KeyCode::KeyZ if self.modifiers.state().control_key() => {
-                    self.undo_pressed = true;
-                    return;
-                }
+                // Chat history/scroll keys; latched here so OS key repeat
+                // works like vanilla.
+                KeyCode::ArrowUp => self.up_pressed = true,
+                KeyCode::ArrowDown => self.down_pressed = true,
+                KeyCode::PageUp => self.page_up_pressed = true,
+                KeyCode::PageDown => self.page_down_pressed = true,
                 _ => {}
-            }
-        }
-
-        if let Some(text) = &event.text {
-            for ch in text.chars() {
-                if !ch.is_control() {
-                    self.typed_chars.push(ch);
-                }
             }
         }
     }
 
-    pub fn drain_typed_chars(&mut self) -> Vec<char> {
-        std::mem::take(&mut self.typed_chars)
+    pub fn drain_text_events(&mut self) -> Vec<crate::ui::text_edit::TextInputEvent> {
+        std::mem::take(&mut self.text_events)
+    }
+
+    pub fn key_mods(&self) -> crate::ui::text_edit::KeyMods {
+        let state = self.modifiers.state();
+        crate::ui::text_edit::KeyMods {
+            shift: state.shift_key(),
+            ctrl: state.control_key(),
+            alt: state.alt_key(),
+            super_key: state.super_key(),
+        }
     }
 
     pub fn consume_menu_scroll(&mut self) -> f32 {
@@ -543,10 +613,6 @@ impl InputState {
 
     pub fn on_menu_scroll(&mut self, delta: f32) {
         self.menu_scroll += delta;
-    }
-
-    pub fn backspace_pressed(&mut self) -> bool {
-        std::mem::take(&mut self.backspace_pressed)
     }
 
     pub fn enter_pressed(&mut self) -> bool {
@@ -565,24 +631,28 @@ impl InputState {
         self.modifiers.state().shift_key()
     }
 
+    pub fn ctrl_held(&self) -> bool {
+        self.modifiers.state().control_key()
+    }
+
     pub fn f5_pressed(&mut self) -> bool {
         std::mem::take(&mut self.f5_pressed)
     }
 
-    pub fn select_all_pressed(&mut self) -> bool {
-        std::mem::take(&mut self.select_all_pressed)
+    pub fn up_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.up_pressed)
     }
 
-    pub fn copy_pressed(&mut self) -> bool {
-        std::mem::take(&mut self.copy_pressed)
+    pub fn down_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.down_pressed)
     }
 
-    pub fn cut_pressed(&mut self) -> bool {
-        std::mem::take(&mut self.cut_pressed)
+    pub fn page_up_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.page_up_pressed)
     }
 
-    pub fn undo_pressed(&mut self) -> bool {
-        std::mem::take(&mut self.undo_pressed)
+    pub fn page_down_pressed(&mut self) -> bool {
+        std::mem::take(&mut self.page_down_pressed)
     }
 
     pub fn selected_slot(&self) -> u8 {

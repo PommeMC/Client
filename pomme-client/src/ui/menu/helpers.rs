@@ -95,6 +95,10 @@ pub(super) fn push_button(
     hovered
 }
 
+/// Renders a `TextFieldState` (vanilla EditBox port): border, background, the
+/// horizontally-scrolled display window, the selection highlight, and the caret
+/// (1px bar in insert mode, trailing `_` glyph otherwise), blinking per
+/// `render_info`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_text_field(
     elements: &mut Vec<MenuElement>,
@@ -104,10 +108,8 @@ pub(super) fn push_text_field(
     h: f32,
     fs: f32,
     gs: f32,
-    text: &str,
+    field: &TextFieldState,
     focused: bool,
-    all_selected: bool,
-    cursor_blink: &Instant,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) {
     let border = if focused {
@@ -133,62 +135,130 @@ pub(super) fn push_text_field(
     });
 
     let pad = 4.0 * gs;
+    let text_x = x + pad;
     let text_y = y + (h - fs) / 2.0;
     let inner_w = w - pad * 2.0;
-
-    let (visible_text, text_w) = fit_text_end(text, fs, inner_w, text_width_fn);
+    let wf = |s: &str| text_width_fn(s, fs);
+    let info = field.render_info(inner_w, focused, &wf);
+    let value = field.value();
+    let displayed = &value[info.display_start..info.display_end];
 
     elements.push(MenuElement::ScissorPush {
-        x: x + pad,
+        x: text_x,
         y,
         w: inner_w,
         h,
     });
-
-    if focused && all_selected && !visible_text.is_empty() {
-        elements.push(MenuElement::Rect {
-            x: x + pad,
-            y: text_y,
-            w: text_w,
-            h: fs,
-            corner_radius: 0.0,
-            color: [0.3, 0.5, 0.9, 0.6],
-        });
-    }
-
-    elements.push(MenuElement::Text {
-        x: x + pad,
-        y: text_y,
-        text: visible_text.into(),
-        scale: fs,
-        color: WHITE,
-        centered: false,
-    });
-
-    if focused && !all_selected {
-        common::push_cursor_blink(elements, cursor_blink, x + pad, text_y, gs, fs, text_w);
-    }
-
+    common::push_field_text(
+        elements, &info, displayed, text_x, text_y, fs, gs, 0.0, WHITE, None, &wf,
+    );
     elements.push(MenuElement::ScissorPop);
 }
 
-fn fit_text_end<'a>(
-    text: &'a str,
-    fs: f32,
-    max_w: f32,
-    text_width_fn: &dyn Fn(&str, f32) -> f32,
-) -> (&'a str, f32) {
-    let full_w = text_width_fn(text, fs);
-    if full_w <= max_w {
-        return (text, full_w);
+/// Reset a text field to empty; geometry-free (empty text needs no scroll).
+pub(super) fn clear_field(field: &mut TextFieldState) {
+    field.set_value("", 0.0, &|_| 0.0);
+}
+
+/// One Tab step around a focus ring of `n` widgets (`None` = nothing focused
+/// yet), wrapping at the ends. `n` must be non-zero.
+pub(super) fn step_ring(cur: Option<usize>, n: usize, reverse: bool) -> usize {
+    match cur {
+        Some(f) if reverse => (f + n - 1) % n,
+        Some(f) => (f + 1) % n,
+        None if reverse => n - 1,
+        None => 0,
     }
-    for (i, _) in text.char_indices() {
-        let w = text_width_fn(&text[i..], fs);
-        if w <= max_w {
-            return (&text[i..], w);
+}
+
+/// Feed a keyboard-focused but unmoused widget its own center as the cursor,
+/// so the hover sprite paints (vanilla treats focused == hovered).
+pub(super) fn focus_cursor(
+    focused: bool,
+    hovered: bool,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    cursor: (f32, f32),
+) -> (f32, f32) {
+    if focused && !hovered {
+        (x + w / 2.0, y + h / 2.0)
+    } else {
+        cursor
+    }
+}
+
+/// Per-frame keyboard focus state threaded through a screen's widget builders.
+pub(super) struct FocusCtx {
+    /// Running index assigned to each focusable as it is built.
+    pub(super) next_index: usize,
+    /// The focused widget index (from `MainMenu::focus`), if any.
+    pub(super) focus: Option<usize>,
+    /// Enter / Space pressed this frame (`InputWithModifiers.isSelection`).
+    pub(super) activate: bool,
+    /// Set once a keyboard activation fires, so the click sound still plays.
+    pub(super) fired: bool,
+}
+
+impl FocusCtx {
+    fn take_index(&mut self) -> usize {
+        let i = self.next_index;
+        self.next_index += 1;
+        i
+    }
+
+    /// Claim the next focus index (only enabled widgets join the ring, matching
+    /// vanilla Tab navigation) and report whether it is the focused one.
+    pub(super) fn focused(&mut self, enabled: bool) -> bool {
+        if !enabled {
+            return false;
         }
+        let idx = self.take_index();
+        self.focus == Some(idx)
     }
-    ("", 0.0)
+}
+
+/// A focusable vanilla-style button. Assigns itself the next focus index,
+/// paints the hover sprite when keyboard-focused (vanilla treats focused ==
+/// hovered), and returns whether it was activated this frame — a mouse click on
+/// it, or Enter/Space while focused.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_button_f(
+    elements: &mut Vec<MenuElement>,
+    ctx: &mut FocusCtx,
+    any_hovered: &mut bool,
+    cursor: (f32, f32),
+    clicked: bool,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    gs: f32,
+    label: &str,
+    enabled: bool,
+) -> bool {
+    let focused = ctx.focused(enabled);
+    let real_hovered = enabled && common::hit_test(cursor, [x, y, w, h]);
+    let draw_cursor = focus_cursor(focused, real_hovered, x, y, w, h, cursor);
+    common::push_button(
+        elements,
+        draw_cursor,
+        x,
+        y,
+        w,
+        h,
+        gs,
+        common::FONT_SIZE * gs,
+        label,
+        enabled,
+    );
+    *any_hovered |= real_hovered;
+    let keyboard = focused && ctx.activate;
+    if keyboard {
+        ctx.fired = true;
+    }
+    (real_hovered && clicked) || keyboard
 }
 
 #[allow(clippy::too_many_arguments)]

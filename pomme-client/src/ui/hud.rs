@@ -502,7 +502,7 @@ fn build_status_bar(
     }
 }
 
-fn build_debug_overlay(
+pub fn build_debug_overlay(
     elements: &mut Vec<MenuElement>,
     info: &DebugInfo<'_>,
     gs: f32,

@@ -39,6 +39,7 @@ const SCROLLBAR_HANDLE_PAD: f32 = 2.0;
 const SCROLLBAR_HIT_W: f32 = 14.0;
 const SEARCH_BOX_X: f32 = 82.0;
 const SEARCH_BOX_Y: f32 = 6.0;
+const SEARCH_BOX_W: f32 = 80.0;
 const SEARCH_BOX_H: f32 = 9.0;
 const TAB_W: f32 = 26.0;
 const TAB_H: f32 = 32.0;
@@ -253,14 +254,13 @@ const TABS: [CreativeTab; 12] = [
 pub struct CreativeState {
     pub tab: CreativeTab,
     pub scroll: f32,
-    pub search: String,
+    pub search: crate::ui::text_edit::TextFieldState,
     /// Client-side carried stack (the item riding the cursor). Creative-only.
     pub cursor_item: ItemStack,
     /// Active click-drag distribution, if a button is held across slots.
     drag: Option<DragState>,
     /// Last left-click (slot, time) for double-click detection.
     last_left_click: Option<(u16, Instant)>,
-    cursor_blink: Instant,
     scroll_dragging: bool,
 }
 
@@ -274,17 +274,19 @@ impl CreativeState {
         Self {
             tab: CreativeTab::BuildingBlocks,
             scroll: 0.0,
-            search: String::new(),
+            // Vanilla search box: 50 chars.
+            search: crate::ui::text_edit::TextFieldState::new(50),
             cursor_item: ItemStack::Empty,
             drag: None,
             last_left_click: None,
-            cursor_blink: Instant::now(),
             scroll_dragging: false,
         }
     }
 
-    fn reset_blink(&mut self) {
-        self.cursor_blink = Instant::now();
+    /// The search box is focused exactly while the search tab is selected.
+    fn sync_search_focus(&mut self) {
+        self.search
+            .set_focused(matches!(self.tab, CreativeTab::Search));
     }
 
     /// Discards the carried stack and any pending drag/double-click state.
@@ -323,8 +325,10 @@ pub fn build_creative_inventory(
     middle_clicked: bool,
     right_clicked: bool,
     scroll_delta: f32,
-    typed_chars: &[char],
-    backspace: bool,
+    events: &[crate::ui::text_edit::TextInputEvent],
+    chat_key: bool,
+    hotbar_swap: Option<u8>,
+    swap_offhand: bool,
     inventory: &Inventory,
     gs: f32,
     advanced_tooltips: bool,
@@ -332,18 +336,30 @@ pub fn build_creative_inventory(
     right_held: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> CreativeAction {
-    if state.tab.captures_typing() {
-        if backspace {
-            state.search.pop();
-            state.reset_blink();
-        }
-        for &ch in typed_chars {
-            if state.search.len() < 50 && !ch.is_control() {
-                state.search.push(ch);
-                state.reset_blink();
-            }
-        }
+    // Vanilla creative keyPressed: T on a non-search tab jumps to the search
+    // tab without typing the character (`ignoreTextInput`).
+    let jumped_to_search = chat_key && !matches!(state.tab, CreativeTab::Search);
+    if jumped_to_search {
+        state.tab = CreativeTab::Search;
+        state.scroll = 0.0;
+        state.sync_search_focus();
     }
+
+    // Hovered-slot hotbar swap (vanilla checkHotbarKeyPressed / the creative
+    // slotClicked SWAP branch). The search tab only swaps on digits; F types.
+    let swap_target: Option<u16> = if state.cursor_item.is_present() {
+        None
+    } else {
+        let hotbar = hotbar_swap.map(|i| crate::player::inventory::HOTBAR_START as u16 + i as u16);
+        if matches!(state.tab, CreativeTab::Search) {
+            hotbar
+        } else {
+            swap_offhand
+                .then_some(crate::player::inventory::OFFHAND as u16)
+                .or(hotbar)
+        }
+    };
+    let mut swap_consumed_digit = false;
 
     let scale = gs.min(screen_w / TEX_W).min(screen_h / TEX_H);
     let inv_w = TEX_W * scale;
@@ -372,7 +388,7 @@ pub fn build_creative_inventory(
     {
         state.tab = new_tab;
         state.scroll = 0.0;
-        state.reset_blink();
+        state.sync_search_focus();
     }
 
     draw_tabs(elements, state, ox, oy, scale, true);
@@ -441,15 +457,7 @@ pub fn build_creative_inventory(
         let item_offset = scroll_row_offset * GRID_COLS;
 
         if matches!(state.tab, CreativeTab::Search) {
-            draw_search_box(
-                elements,
-                &state.search,
-                &state.cursor_blink,
-                ox,
-                oy,
-                scale,
-                text_width_fn,
-            );
+            draw_search_box(elements, &state.search, ox, oy, scale, text_width_fn);
         }
 
         for row in 0..GRID_ROWS {
@@ -466,7 +474,18 @@ pub fn build_creative_inventory(
                 let hovered = push_slot(elements, slot_x, slot_y, size, scale, cursor, &item, None);
                 if hovered {
                     push_item_tooltip(elements, &item, &tt);
-                    if middle_clicked
+                    if let Some(target) = swap_target
+                        && matches!(action, CreativeAction::None)
+                        && let ItemStack::Present(data) = &item
+                    {
+                        // Vanilla creative slotClicked SWAP: the target slot
+                        // gets a full stack of the display item.
+                        action = CreativeAction::SetSlot(
+                            target,
+                            stack_with_count(data, data.kind.max_stack_size()),
+                        );
+                        swap_consumed_digit = hotbar_swap.is_some();
+                    } else if middle_clicked
                         && state.cursor_item.is_empty()
                         && let ItemStack::Present(data) = &item
                     {
@@ -571,6 +590,50 @@ pub fn build_creative_inventory(
                 // Empty cursor: pick up / take half immediately.
                 action = apply_slot_action(state, inventory, hit.slot, kind);
             }
+        }
+    }
+
+    // TODO: Q over a hovered item should drop it into the world (vanilla
+    // sends SetCreativeModeSlot with slot -1 via handleCreativeModeItemDrop).
+
+    // Keyboard hotbar swap on a hovered real slot (vanilla routes it through
+    // AbstractContainerScreen.checkHotbarKeyPressed → inventoryMenu SWAP).
+    if let Some(target) = swap_target
+        && matches!(action, CreativeAction::None)
+        && state.drag.is_none()
+        && let Some(hit) = &real_hit
+        && hit.slot != SLOT_TRASH
+        && hit.slot != target
+    {
+        let hovered_item = inventory.slot(hit.slot as usize).clone();
+        let target_item = inventory.slot(target as usize).clone();
+        let placeable = match &target_item {
+            ItemStack::Present(d) => may_place(hit.slot, d),
+            ItemStack::Empty => true,
+        };
+        if placeable && (hovered_item.is_present() || target_item.is_present()) {
+            action =
+                CreativeAction::SetSlots(vec![(hit.slot, target_item), (target, hovered_item)]);
+            swap_consumed_digit = hotbar_swap.is_some();
+        }
+    }
+
+    if state.tab.captures_typing() && !jumped_to_search {
+        // A digit consumed by a swap must not type (vanilla ignoreTextInput).
+        let skip_digit = swap_consumed_digit
+            .then(|| hotbar_swap.map(|i| char::from(b'1' + i)))
+            .flatten();
+        let mut clipboard = crate::ui::text_edit::SystemClipboard;
+        let inner_w = SEARCH_BOX_W * scale;
+        let fs = FONT_SIZE * scale;
+        let wf = |t: &str| text_width_fn(t, fs);
+        for ev in events {
+            if let crate::ui::text_edit::TextInputEvent::Char(c) = ev
+                && Some(*c) == skip_digit
+            {
+                continue;
+            }
+            state.search.handle(ev, &mut clipboard, inner_w, &wf);
         }
     }
 
@@ -1286,8 +1349,7 @@ fn draw_inventory_layout(
 
 fn draw_search_box(
     elements: &mut Vec<MenuElement>,
-    text: &str,
-    cursor_blink: &Instant,
+    field: &crate::ui::text_edit::TextFieldState,
     ox: f32,
     oy: f32,
     scale: f32,
@@ -1299,25 +1361,23 @@ fn draw_search_box(
     let pad = 1.0 * scale;
     let fs = FONT_SIZE * scale;
     let text_y = y + (h - fs) / 2.0;
-    elements.push(MenuElement::Text {
-        x: x + pad,
-        y: text_y,
-        text: text.into(),
-        scale: fs,
-        color: WHITE,
-        centered: false,
-    });
-    if cursor_blink.elapsed().as_millis() % 1000 < 500 {
-        let caret_x = x + pad + text_width_fn(text, fs);
-        elements.push(MenuElement::Text {
-            x: caret_x,
-            y: text_y,
-            text: "_".into(),
-            scale: fs,
-            color: WHITE,
-            centered: false,
-        });
-    }
+    let wf = |t: &str| text_width_fn(t, fs);
+    let info = field.render_info(SEARCH_BOX_W * scale, true, &wf);
+    let shown = &field.value()[info.display_start..info.display_end];
+
+    crate::ui::common::push_field_text(
+        elements,
+        &info,
+        shown,
+        x + pad,
+        text_y,
+        fs,
+        scale,
+        scale,
+        WHITE,
+        None,
+        &wf,
+    );
 }
 
 /// Returns `true` if the click was consumed by the scrollbar.
@@ -1384,7 +1444,7 @@ fn visible_items(state: &CreativeState) -> Vec<ItemStack> {
     match state.tab.meta().items {
         ItemSource::Static(list) => list.iter().map(|&kind| stack_of(kind)).collect(),
         ItemSource::Search => {
-            let raw = state.search.to_lowercase();
+            let raw = state.search.value().to_lowercase();
             let needle = raw.strip_prefix('#').unwrap_or(&raw);
             search_items_cached()
                 .iter()

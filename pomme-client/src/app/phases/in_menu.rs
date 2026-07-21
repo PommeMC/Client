@@ -23,6 +23,14 @@ pub fn update_menu(
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
 
+    // No chat in the menus; F2 results just log.
+    for result in gfx.renderer.take_screenshot_messages() {
+        match result {
+            Ok(path) => tracing::info!("Saved screenshot as {path}"),
+            Err(err) => tracing::warn!("Couldn't save screenshot: {err}"),
+        }
+    }
+
     let menu_input = core.build_menu_input();
 
     let result = core.menu.build(sw, sh, &menu_input, |t, s| {

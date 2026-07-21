@@ -6,7 +6,9 @@
 
 use azalea_inventory::components::{EquipmentSlot, Equippable};
 use azalea_inventory::item::MaxStackSizeExt;
-use azalea_inventory::operations::{ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick};
+use azalea_inventory::operations::{
+    ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
+};
 use azalea_inventory::{ItemStack, ItemStackData, Menu, Player, SlotList};
 use azalea_registry::builtin::ItemKind;
 
@@ -59,6 +61,22 @@ impl ContainerKind {
             Self::Anvil => Some(2),
             Self::Furnace | Self::Chest { .. } | Self::ShulkerBox | Self::Enchantment => None,
         }
+    }
+
+    /// Menu slot holding hotbar index `i` (0-8), the SWAP click target.
+    pub fn hotbar_menu_slot(self, i: u8) -> u16 {
+        match self {
+            // The player menu's offhand slot sits after the hotbar.
+            Self::Player => 36 + i as u16,
+            _ => (self.slot_count() - 9) as u16 + i as u16,
+        }
+    }
+
+    /// The offhand's menu slot, only present in the player menu. Other menus
+    /// reach the offhand through the player inventory directly, which slot
+    /// prediction can't see.
+    pub fn offhand_menu_slot(self) -> Option<u16> {
+        matches!(self, Self::Player).then_some(45)
     }
 
     /// Per-slot stack limit where a menu overrides the item's own maximum
@@ -167,6 +185,7 @@ pub fn apply_click(
     slots: &[ItemStack],
     cursor: &mut ItemStack,
     op: &ClickOperation,
+    creative: bool,
 ) -> Vec<(u16, ItemStack)> {
     // Crafting-result clicks need recipe logic; leave them to the server.
     if op
@@ -187,7 +206,7 @@ pub fn apply_click(
         return Vec::new();
     }
     let mut menu = kind.build_menu(slots);
-    apply_op(kind, &mut menu, cursor, op);
+    apply_op(kind, &mut menu, cursor, op, creative);
 
     let mut changed = Vec::new();
     for (i, before) in slots.iter().enumerate() {
@@ -261,7 +280,13 @@ pub fn drag_slot_eligible(
     it.is_empty() || same_item(cursor, it)
 }
 
-fn apply_op(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack, op: &ClickOperation) {
+fn apply_op(
+    kind: ContainerKind,
+    menu: &mut Menu,
+    cursor: &mut ItemStack,
+    op: &ClickOperation,
+    creative: bool,
+) {
     match op {
         ClickOperation::Pickup(p) => match p {
             PickupClick::Left { slot: Some(s) } => {
@@ -282,12 +307,71 @@ fn apply_op(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack, op: &C
             quick_move(kind, menu, s);
         }
         ClickOperation::PickupAll(_) => pickup_all(kind, menu, cursor),
-        // Drag is handled at the send site; the rest have no UI path yet.
-        ClickOperation::Swap(_)
-        | ClickOperation::Throw(_)
-        | ClickOperation::QuickCraft(_)
-        | ClickOperation::Clone(_) => {}
+        ClickOperation::Swap(s) => {
+            let target = match s.target_slot {
+                i @ 0..=8 => Some(kind.hotbar_menu_slot(i) as usize),
+                40 => kind.offhand_menu_slot().map(usize::from),
+                _ => None,
+            };
+            // Unmappable target (offhand outside the player menu): leave the
+            // swap to the server.
+            let Some(target) = target else {
+                return;
+            };
+            swap_click(kind, menu, s.source_slot as usize, target);
+        }
+        ClickOperation::Throw(t) => {
+            // Vanilla THROW only acts with an empty cursor.
+            if cursor.is_present() {
+                return;
+            }
+            match t {
+                ThrowClick::Single { slot } => {
+                    let mut item = take_slot(menu, *slot as usize);
+                    shrink(&mut item, 1);
+                    put_slot(menu, *slot as usize, item);
+                }
+                ThrowClick::All { slot } => put_slot(menu, *slot as usize, ItemStack::Empty),
+            }
+        }
+        ClickOperation::Clone(c) => {
+            // Vanilla CLONE: creative only, empty cursor, fills to a full stack.
+            if creative
+                && cursor.is_empty()
+                && let Some(ItemStack::Present(d)) = menu.slot(c.slot as usize)
+            {
+                let mut full = d.clone();
+                full.count = full.kind.max_stack_size();
+                *cursor = ItemStack::Present(full);
+            }
+        }
+        // Drag is handled at the send site.
+        ClickOperation::QuickCraft(_) => {}
     }
+}
+
+/// Vanilla `doClick` SWAP: exchange the hovered slot with a hotbar/offhand
+/// slot (`held` in vanilla terms), respecting `mayPlace` and slot limits.
+fn swap_click(kind: ContainerKind, menu: &mut Menu, source: usize, target: usize) {
+    let held = take_slot(menu, target);
+    let slot_item = take_slot(menu, source);
+    let (new_slot, new_held) = match (held, slot_item) {
+        (ItemStack::Empty, ItemStack::Empty) => (ItemStack::Empty, ItemStack::Empty),
+        (ItemStack::Empty, item) => (ItemStack::Empty, item),
+        (held @ ItemStack::Present(_), slot_item) => {
+            let h = held.as_present().unwrap();
+            let max = h.kind.max_stack_size().min(kind.slot_limit(source));
+            if !kind.may_place(source, h) || h.count > max {
+                // Over-limit swaps re-add overflow to the inventory
+                // server-side; not predicted.
+                (slot_item, held)
+            } else {
+                (held, slot_item)
+            }
+        }
+    };
+    put_slot(menu, source, new_slot);
+    put_slot(menu, target, new_held);
 }
 
 /// Left/right click on a slot, following vanilla `doClick` PICKUP: `primary` is

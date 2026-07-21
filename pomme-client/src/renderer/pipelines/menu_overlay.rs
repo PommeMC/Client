@@ -1598,6 +1598,9 @@ pub enum SpriteId {
     LocatorArrowUp1,
     LocatorArrowDown0,
     LocatorArrowDown1,
+    GameModeSwitcherBackground,
+    GameModeSwitcherSlot,
+    GameModeSwitcherSelection,
     InventoryBackground,
     CraftingTableBackground,
     FurnaceBackground,
@@ -1795,6 +1798,21 @@ fn build_sprite_atlas(
         (
             SpriteId::Hotbar,
             "minecraft/textures/gui/sprites/hud/hotbar.png",
+            0.0,
+        ),
+        (
+            SpriteId::GameModeSwitcherBackground,
+            "minecraft/textures/gui/container/gamemode_switcher.png",
+            0.0,
+        ),
+        (
+            SpriteId::GameModeSwitcherSlot,
+            "minecraft/textures/gui/sprites/gamemode_switcher/slot.png",
+            0.0,
+        ),
+        (
+            SpriteId::GameModeSwitcherSelection,
+            "minecraft/textures/gui/sprites/gamemode_switcher/selection.png",
             0.0,
         ),
         (

@@ -279,13 +279,27 @@ impl ApplicationHandler for App {
             // TODO: Migrate _fully_ to Action system
             WindowEvent::KeyboardInput { event, .. } => {
                 self.phase.transition(|mut app| {
+                    // F3 held suppresses global keys (vanilla
+                    // handleGlobalKeyPress); press only, no repeat.
                     if let Some(Gfx { window, .. }) = app.gfx_mut()
                         && event.state.is_pressed()
+                        && !event.repeat
+                        && !self.core.input.key_pressed(KeyCode::F3)
                         && let PhysicalKey::Code(KeyCode::F11) = event.physical_key
                     {
                         self.core.display_mode = self.core.display_mode.cycle();
                         self.core.menu.display_mode = self.core.display_mode;
                         self.core.apply_display_mode(window);
+                    }
+                    // F2 screenshot works in every phase, like vanilla.
+                    // TODO: Ctrl+F2 panoramic screenshot
+                    if let Some(Gfx { renderer, .. }) = app.gfx_mut()
+                        && event.state.is_pressed()
+                        && !event.repeat
+                        && !self.core.input.key_pressed(KeyCode::F3)
+                        && let PhysicalKey::Code(KeyCode::F2) = event.physical_key
+                    {
+                        renderer.request_screenshot();
                     }
 
                     self.core.input.on_key_event(&event);
@@ -333,16 +347,14 @@ impl ApplicationHandler for App {
                             connection,
                             mut game,
                         } => {
+                            // No repeat filter: vanilla dispatches GLFW repeats
+                            // to screens and debug chords alike.
                             if event.state.is_pressed()
-                                && !event.repeat
                                 && let PhysicalKey::Code(code) = event.physical_key
                             {
-                                if code == KeyCode::KeyH && self.core.input.key_pressed(KeyCode::F3)
-                                {
-                                    game.advanced_item_tooltips = !game.advanced_item_tooltips;
-                                } else if game.options_from_game {
+                                if game.options_from_game {
                                     let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                    if !game.handle_debug_key(code, f3_held) {
+                                    if !game.handle_debug_key(code, f3_held, &connection) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
                                 } else if game.chat.is_open() {
@@ -357,7 +369,7 @@ impl ApplicationHandler for App {
                                         }
                                         _ => {
                                             let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                            if !game.handle_debug_key(code, f3_held) {
+                                            if !game.handle_debug_key(code, f3_held, &connection) {
                                                 self.core.input.on_menu_key_event(&event);
                                             }
                                         }
@@ -374,7 +386,7 @@ impl ApplicationHandler for App {
                                         }
                                         _ => {
                                             let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                            if !game.handle_debug_key(code, f3_held) {
+                                            if !game.handle_debug_key(code, f3_held, &connection) {
                                                 self.core.input.on_menu_key_event(&event);
                                             }
                                         }
@@ -384,11 +396,27 @@ impl ApplicationHandler for App {
                                     // focus; keys type into it. Escape still
                                     // closes via the OpenMenu action.
                                     let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                    if !game.handle_debug_key(code, f3_held) {
+                                    if !game.handle_debug_key(code, f3_held, &connection) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
                                 } else {
                                     match code {
+                                        // F3+Esc pauses without opening the
+                                        // menu (vanilla pauseGame(true)).
+                                        KeyCode::Escape
+                                            if self.core.input.key_pressed(KeyCode::F3)
+                                                && game.input_live() =>
+                                        {
+                                            game.paused = true;
+                                            game.pause_screen =
+                                                crate::ui::pause::PauseScreen::Hidden;
+                                            game.f3_chord_consumed = true;
+                                            self.core
+                                                .input
+                                                .clear_action(crate::app::input::Action::OpenMenu);
+                                            self.core
+                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
+                                        }
                                         KeyCode::Escape
                                             if game.death_confirm
                                                 && game
@@ -402,10 +430,16 @@ impl ApplicationHandler for App {
                                         }
                                         _ => {
                                             let f3_held = self.core.input.key_pressed(KeyCode::F3);
-                                            game.handle_debug_key(code, f3_held);
+                                            game.handle_debug_key(code, f3_held, &connection);
                                         }
                                     }
                                 }
+                            } else if !event.state.is_pressed()
+                                && matches!(event.physical_key, PhysicalKey::Code(KeyCode::F3))
+                            {
+                                // Overlay toggles on F3 release, unless a chord
+                                // consumed it; runs in every in-game sub-state.
+                                game.handle_f3_release(&connection);
                             }
 
                             AppPhase::InGame {
@@ -423,7 +457,7 @@ impl ApplicationHandler for App {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
                 };
-                match self.phase.get() {
+                match self.phase.get_mut() {
                     AppPhase::InMenu { .. } | AppPhase::Connecting { .. } => {
                         self.core.input.on_menu_scroll(scroll);
                     }
@@ -432,7 +466,11 @@ impl ApplicationHandler for App {
                     {
                         self.core.input.on_menu_scroll(scroll);
                     }
-                    // TODO: open chat should capture scroll (chat history scrolling)
+                    // Open chat captures the wheel for backlog scrolling
+                    // (vanilla ChatScreen.mouseScrolled, clamped to ±1).
+                    AppPhase::InGame { game, .. } if game.chat.is_open() => {
+                        game.chat.scroll_chat(scroll.signum() as i32);
+                    }
                     AppPhase::InGame { game, .. } if game.input_live() => {
                         self.core.input.on_scroll(scroll)
                     }
@@ -626,6 +664,8 @@ impl ApplicationHandler for App {
                         }
                     }
                 });
+
+                core.input.end_frame();
 
                 let limit = self.effective_framerate_limit();
                 if let Some(gfx) = self.phase.gfx_mut() {
