@@ -245,8 +245,12 @@ pub fn handle_game_packet(
             }
         }
         ClientboundGamePacket::PlayerAbilities(p) => {
+            // TODO: invulnerable and instant_break flags
             let _ = event_tx.try_send(NetworkEvent::PlayerAbilitiesChanged {
                 flying: p.flags.flying,
+                can_fly: p.flags.can_fly,
+                flying_speed: p.flying_speed,
+                walking_speed: p.walking_speed,
             });
         }
         ClientboundGamePacket::SystemChat(p) if !p.overlay => {

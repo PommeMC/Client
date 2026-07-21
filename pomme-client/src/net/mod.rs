@@ -192,6 +192,9 @@ pub enum NetworkEvent {
     },
     PlayerAbilitiesChanged {
         flying: bool,
+        can_fly: bool,
+        flying_speed: f32,
+        walking_speed: f32,
     },
     ServerViewDistance {
         distance: u32,

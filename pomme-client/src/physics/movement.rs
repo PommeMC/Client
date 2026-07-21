@@ -1,5 +1,6 @@
 // TODO: fall damage - track fall distance, reset on water entry, apply damage
-// on ground impact
+// on ground impact; Player.causeFallDamage returns false when may_fly, and
+// fall distance resets every tick while flying
 
 use glam::{DVec3, dvec3};
 use winit::keyboard::KeyCode;
@@ -34,8 +35,12 @@ const STEP_HEIGHT: f64 = 0.6;
 pub const PLAYER_HALF_WIDTH: f64 = 0.3;
 pub const PLAYER_HEIGHT: f64 = 1.8;
 const SPRINT_JUMP_BOOST: f64 = 0.2;
+const FLYING_VERTICAL_FRICTION: f64 = 0.6;
+// Vanilla Player.getFlyingSpeed: sprinting while airborne (not flying).
+const SPRINT_AIR_ACCELERATION: f64 = 0.025_999_999_f32 as f64;
 const SPRINT_HUNGER_THRESHOLD: u32 = 6;
 const DEFAULT_SPRINT_WINDOW: u32 = 7;
+const FLY_TOGGLE_WINDOW: u32 = 7;
 const MINOR_COLLISION_ANGLE: f64 = 0.13962634;
 
 pub fn tick(
@@ -72,6 +77,22 @@ pub fn tick(
 
     let (sin_y_rot, cos_y_rot) = (player.look_dir.y_rot_rad() as f64).sin_cos();
 
+    update_fly_state(player, input, sin_y_rot, cos_y_rot);
+
+    if player.flying {
+        let mut input_ya = 0.0f32;
+        if input.performing_action(input::Action::Sneak) {
+            input_ya -= 1.0;
+        }
+        if input.performing_action(input::Action::Jump) {
+            input_ya += 1.0;
+        }
+        if input_ya != 0.0 {
+            // Vanilla does this math in f32 before widening.
+            player.velocity.y += f64::from(input_ya * player.fly_speed * 3.0);
+        }
+    }
+
     if player.in_water {
         tick_water(
             player,
@@ -95,7 +116,53 @@ pub fn tick(
     }
 
     player.tick_air_supply();
+
+    // Touching down cancels flight, even in creative.
+    if player.on_ground && player.flying && player.game_mode != 3 {
+        player.flying = false;
+        player.abilities_dirty = true;
+    }
+
     player.was_forward_pressed = forward_pressed;
+    player.was_jump_pressed = input.performing_action(input::Action::Jump);
+}
+
+// Vanilla `LocalPlayer.aiStep`: a fresh jump press arms the toggle window;
+// a second one inside it toggles flight.
+fn update_fly_state(player: &mut LocalPlayer, input: &InputState, sin_y_rot: f64, cos_y_rot: f64) {
+    if player.may_fly {
+        if player.game_mode == 3 {
+            // Spectator flight is forced on. TODO: spectator noclip
+            if !player.flying {
+                player.flying = true;
+                player.abilities_dirty = true;
+            }
+        } else if !player.was_jump_pressed && input.performing_action(input::Action::Jump) {
+            if player.jump_trigger_time == 0 {
+                player.jump_trigger_time = FLY_TOGGLE_WINDOW;
+            } else if !player.swimming {
+                player.flying = !player.flying;
+                if player.flying && player.on_ground {
+                    jump_from_ground(player, sin_y_rot, cos_y_rot);
+                }
+                player.abilities_dirty = true;
+                player.jump_trigger_time = 0;
+            }
+        }
+    }
+    // Vanilla decrements after the toggle check (unlike sprint_toggle_timer).
+    if player.jump_trigger_time > 0 {
+        player.jump_trigger_time -= 1;
+    }
+}
+
+fn jump_from_ground(player: &mut LocalPlayer, sin_y_rot: f64, cos_y_rot: f64) {
+    player.velocity.y = JUMP_VELOCITY.max(player.velocity.y);
+
+    if player.sprinting {
+        player.velocity.x -= sin_y_rot * SPRINT_JUMP_BOOST;
+        player.velocity.z += cos_y_rot * SPRINT_JUMP_BOOST;
+    }
 }
 
 fn tick_land(
@@ -108,13 +175,10 @@ fn tick_land(
     cos_y_rot: f64,
 ) {
     if player.on_ground && input.performing_action(input::Action::Jump) {
-        player.velocity.y = JUMP_VELOCITY.max(player.velocity.y);
-
-        if player.sprinting {
-            player.velocity.x -= sin_y_rot * SPRINT_JUMP_BOOST;
-            player.velocity.z += cos_y_rot * SPRINT_JUMP_BOOST;
-        }
+        jump_from_ground(player, sin_y_rot, cos_y_rot);
     }
+
+    let saved_vy = player.velocity.y;
 
     let speed = if player.sprinting {
         MOVEMENT_SPEED * (1.0 + SPRINT_SPEED_MODIFIER)
@@ -122,7 +186,7 @@ fn tick_land(
         MOVEMENT_SPEED
     };
 
-    let accel = friction_influenced_speed(speed, player.on_ground, BLOCK_FRICTION);
+    let accel = friction_influenced_speed(speed, player, BLOCK_FRICTION);
     let (move_x, move_z) = world_movement(forward, strafe, sin_y_rot, cos_y_rot);
     player.velocity.x += move_x * accel;
     player.velocity.z += move_z * accel;
@@ -147,6 +211,8 @@ fn tick_land(
     };
     player.velocity.x *= h_friction;
     player.velocity.z *= h_friction;
+
+    overwrite_flying_vy(player, saved_vy);
 }
 
 fn tick_water(
@@ -176,6 +242,8 @@ fn tick_water(
         player.velocity.y += (target_vy - player.velocity.y) * boost;
     }
 
+    let saved_vy = player.velocity.y;
+
     apply_collision(
         player,
         input,
@@ -201,6 +269,17 @@ fn tick_water(
     };
     player.velocity.y -= gravity;
     player.velocity.y *= WATER_VERTICAL_DRAG;
+
+    overwrite_flying_vy(player, saved_vy);
+}
+
+// Vanilla Player.travel: while flying the travel step runs normally (gravity
+// and water physics included) but its vertical result is discarded, replaced
+// with the pre-travel vy decayed by 0.6.
+fn overwrite_flying_vy(player: &mut LocalPlayer, saved_vy: f64) {
+    if player.flying {
+        player.velocity.y = saved_vy * FLYING_VERTICAL_FRICTION;
+    }
 }
 
 fn apply_collision(
@@ -223,6 +302,7 @@ fn apply_collision(
         *player.velocity,
         input.performing_action(input::Action::Sneak),
         player.on_ground,
+        player.flying,
     );
     let step_height = if player.on_ground { STEP_HEIGHT } else { 0.0 };
     let (resolved, on_ground) = resolve_collision(chunk_store, aabb, delta.into(), step_height);
@@ -301,10 +381,11 @@ fn update_sprint_state(
     }
 }
 
-// Forces the crouch pose under ceilings too low to stand in; flying, riding
-// and sleeping aren't simulated.
+// Forces the crouch pose under ceilings too low to stand in; riding and
+// sleeping aren't simulated.
 fn update_crouch_state(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkStore) {
     player.crouching = player.game_mode != 3
+        && !player.flying
         && !player.swimming
         && can_fit_with_height(chunk_store, player.position.into(), CROUCH_HEIGHT)
         && (input.performing_action(input::Action::Sneak)
@@ -326,8 +407,9 @@ fn back_off_from_edge(
     delta: DVec3,
     shift_down: bool,
     on_ground: bool,
+    flying: bool,
 ) -> DVec3 {
-    if !shift_down || delta.y > 0.0 {
+    if !shift_down || flying || delta.y > 0.0 {
         return delta;
     }
     // TODO: fall distance - falling less than the step height still counts
@@ -395,13 +477,23 @@ fn world_movement(forward: f64, strafe: f64, sin_y_rot: f64, cos_y_rot: f64) -> 
     )
 }
 
-fn friction_influenced_speed(speed: f64, on_ground: bool, block_friction: f64) -> f64 {
-    if on_ground {
+fn friction_influenced_speed(speed: f64, player: &LocalPlayer, block_friction: f64) -> f64 {
+    if player.on_ground {
         if block_friction > BLOCK_FRICTION {
             speed * (GROUND_ACCEL_FACTOR / block_friction.powi(3))
         } else {
             speed
         }
+    } else if player.flying {
+        // Vanilla Player.getFlyingSpeed.
+        let fly_speed = f64::from(player.fly_speed);
+        if player.sprinting {
+            fly_speed * 2.0
+        } else {
+            fly_speed
+        }
+    } else if player.sprinting {
+        SPRINT_AIR_ACCELERATION
     } else {
         AIR_ACCELERATION
     }
