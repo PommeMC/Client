@@ -11,7 +11,7 @@ use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
-use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE, input};
+use crate::app::{TICK_RATE, input};
 use crate::audio::{CATEGORY_PLAYERS, SoundRef};
 use crate::benchmark::{
     Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep, UploadHandle,
@@ -243,11 +243,15 @@ pub struct MeshedCol {
 }
 
 impl GameState {
-    pub fn new(renderer: &Renderer, resource_packs: &ResourcePackManager) -> Self {
+    pub fn new(
+        renderer: &Renderer,
+        resource_packs: &ResourcePackManager,
+        render_distance: u32,
+    ) -> Self {
         let biome_climate = Arc::new(HashMap::new());
         let mesh_dispatcher = renderer.create_mesh_dispatcher(biome_climate, Some(resource_packs));
 
-        let chunk_store = ChunkStore::new(DEFAULT_RENDER_DISTANCE);
+        let chunk_store = ChunkStore::new(render_distance);
         Self {
             light_engine: crate::world::light::LevelLightEngine::new(
                 chunk_store.height(),
@@ -260,7 +264,7 @@ impl GameState {
             position_set: false,
             player_loaded_sent: false,
             options_from_game: false,
-            last_render_distance: DEFAULT_RENDER_DISTANCE,
+            last_render_distance: render_distance,
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -524,7 +528,7 @@ impl GameState {
     /// work: columns whose chunk-load light applied go through the
     /// content-gen path like chunk loads (the visibility rescan enqueues
     /// them tier-gated), individual lit sections remesh on the priority lane.
-    pub fn update_light(&mut self) {
+    pub fn update_light(&mut self, chunk_detail: u32) {
         let mut dirty = crate::world::light::LightDirty::default();
         self.light_engine
             .poll_and_run(&mut self.chunk_store, &mut dirty);
@@ -559,7 +563,11 @@ impl GameState {
             if self.chunk_store.get_chunk(&col).is_none() {
                 continue;
             }
-            self.enqueue_section_edit(col, si, crate::app::core::chunk_lod(col, player_chunk));
+            self.enqueue_section_edit(
+                col,
+                si,
+                crate::app::core::chunk_lod(col, player_chunk, chunk_detail),
+            );
         }
     }
 
@@ -762,11 +770,11 @@ impl GameState {
     /// render distance meshes regardless of visibility — occlusion gates only
     /// drawing — and the queue orders the backlog nearest-first. Runs every
     /// frame to drain it.
-    pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos) {
+    pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos, chunk_detail: u32) {
         let n = self.chunk_store.section_count();
         let full = section_mask(n);
         for pos in self.chunk_store.loaded_positions() {
-            let lod = crate::app::core::chunk_lod(pos, player_chunk);
+            let lod = crate::app::core::chunk_lod(pos, player_chunk, chunk_detail);
             let content_gen = self.content_gen.get(&pos).copied().unwrap_or(0);
             // Mesh the whole column once, then nothing until a lod/content change.
             // Occlusion gates drawing, not meshing, so off-screen and hidden
@@ -1140,7 +1148,7 @@ pub fn update_game(
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
-    game.update_light();
+    game.update_light(core.menu.chunk_detail);
 
     let partial_tick = core.tick_accumulator / TICK_RATE;
 
@@ -1605,6 +1613,7 @@ pub fn update_game(
     }
 
     if game.options_from_game {
+        core.menu.server_render_distance = game.server_render_distance;
         let menu_input = core.build_menu_input();
         let r = &gfx.renderer;
         let result = core

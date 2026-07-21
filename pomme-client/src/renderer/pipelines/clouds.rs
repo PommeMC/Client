@@ -5,7 +5,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
-use crate::renderer::camera::{Camera, CameraUniform, CloudMode, FAR};
+use crate::renderer::camera::{Camera, CameraUniform, CloudMode, MIN_FAR};
 use crate::renderer::pipelines::sky::SkyState;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
@@ -21,13 +21,13 @@ const SCROLL_PER_TICK: f32 = 0.030_000_001;
 const Z_BIAS: f64 = 3.96;
 
 /// Distance (blocks) by which cloud alpha fades to zero (vanilla
-/// `FogCloudsEnd`). Kept just below the camera far plane so the fade completes
+/// `FogCloudsEnd`). Kept just below the far-plane floor so the fade completes
 /// before clouds would clip at it into a hard circle.
 // TODO: vanilla reaches its full `cloudRange` (128 chunks / 2048 blocks). Here
-// the fixed camera far plane (`camera::FAR` = 1000) caps the usable reach;
-// matching vanilla would mean raising it, which affects depth precision and fog
-// globally.
-const CLOUD_FADE_END: f32 = FAR * 0.96;
+// the far-plane floor (`camera::MIN_FAR`) caps the reach so the instance
+// buffers stay a fixed size; matching vanilla means a cloud-range option that
+// also raises the floor, like vanilla's `depthFar` does.
+const CLOUD_FADE_END: f32 = MIN_FAR * 0.96;
 /// Disc radius in cells: `ceil(CLOUD_FADE_END / CELL_SIZE)`.
 const RADIUS_CELLS: i32 = (CLOUD_FADE_END as i32 + CELL_SIZE as i32 - 1) / CELL_SIZE as i32;
 
