@@ -1048,6 +1048,8 @@ impl Renderer {
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
     ) -> Result<(), RendererError> {
+        // Refresh the far plane before this frame's view/projection and fog.
+        self.camera.set_render_distance(render_distance);
         let held_item = held_item.map(|(name, light)| {
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
             pipelines::held_item::HeldItemInfo {

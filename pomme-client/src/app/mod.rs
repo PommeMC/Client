@@ -39,7 +39,6 @@ pub enum WindowError {
 
 const TICK_RATE: f32 = 1.0 / 20.0;
 const TICK_RATE_MS: u32 = 1000 / 20;
-const DEFAULT_RENDER_DISTANCE: u32 = 12;
 const POSITION_SEND_INTERVAL: u32 = 20;
 const POSITION_THRESHOLD_SQ: f64 = 4.0e-8;
 
@@ -224,7 +223,11 @@ impl ApplicationHandler for App {
                         },
                     );
 
-                    let game = GameState::new(&renderer, &self.core.resource_packs);
+                    let game = GameState::new(
+                        &renderer,
+                        &self.core.resource_packs,
+                        self.core.menu.render_distance,
+                    );
 
                     let gfx = Gfx {
                         renderer: ManuallyDrop::new(renderer),
@@ -540,7 +543,11 @@ impl ApplicationHandler for App {
                             MenuUpdateResult::Connect { connect_args } => {
                                 let connection = spawn_connection(&core.tokio_rt, connect_args);
 
-                                let game = GameState::new(&gfx.renderer, &core.resource_packs);
+                                let game = GameState::new(
+                                    &gfx.renderer,
+                                    &core.resource_packs,
+                                    core.menu.render_distance,
+                                );
                                 core.apply_cursor_grab(&gfx.window, None);
 
                                 AppPhase::Connecting {
