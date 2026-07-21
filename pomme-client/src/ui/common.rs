@@ -3,6 +3,7 @@ use azalea_inventory::{ItemStack, ItemStackData};
 use crate::benchmark::UploadStatus;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
+use crate::ui::text_edit::TextFieldRenderInfo;
 
 pub const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 pub const FONT_SIZE: f32 = 8.0;
@@ -198,9 +199,93 @@ pub fn push_results_overlay(
 
 /// Copy `text` to the system clipboard, returning whether it succeeded.
 pub(crate) fn set_clipboard(text: &str) -> bool {
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.set_text(text.to_string()))
-        .is_ok()
+    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!("Failed to set clipboard: {err}");
+            false
+        }
+    }
+}
+
+/// Vanilla-EditBox selection highlight: a solid blue block behind the (white)
+/// text (`EditBox.extractWidgetRenderState` -> `graphics.textHighlight`).
+pub(crate) const FIELD_SELECTION: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// Selection highlight, display text, and caret for one text-field frame
+/// (`EditBox.renderWidget`): blue block behind the shown slice, then a
+/// `bar_w`-wide caret bar in insert mode or a trailing `_` glyph otherwise.
+/// `pad_y` is the scaled-pixel unit for the vanilla overdraw: selection/caret
+/// rects span `textY-1 .. textY+lineHeight+1` (one above, two below the 8px
+/// glyph line). `ghost` is chat's inline suggestion suffix, drawn one `bar_w`
+/// left of the caret (vanilla draws it at `cursorX - 1`, under the caret).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_field_text(
+    elements: &mut Vec<MenuElement>,
+    info: &TextFieldRenderInfo,
+    shown: &str,
+    text_x: f32,
+    text_y: f32,
+    fs: f32,
+    bar_w: f32,
+    pad_y: f32,
+    caret_color: [f32; 4],
+    ghost: Option<(&str, [f32; 4])>,
+    wf: &dyn Fn(&str) -> f32,
+) {
+    if let Some((a, b)) = info.selection {
+        let x0 = text_x + wf(&shown[..a]);
+        let x1 = text_x + wf(&shown[..b]);
+        elements.push(MenuElement::Rect {
+            x: x0,
+            y: text_y - pad_y,
+            w: x1 - x0,
+            h: fs + 3.0 * pad_y,
+            corner_radius: 0.0,
+            color: FIELD_SELECTION,
+        });
+    }
+    elements.push(MenuElement::Text {
+        x: text_x,
+        y: text_y,
+        text: shown.into(),
+        scale: fs,
+        color: WHITE,
+        centered: false,
+    });
+    let caret_x = text_x + wf(&shown[..info.caret_byte]);
+    if let Some((text, color)) = ghost {
+        elements.push(MenuElement::Text {
+            x: caret_x - bar_w,
+            y: text_y,
+            text: text.into(),
+            scale: fs,
+            color,
+            centered: false,
+        });
+    }
+    if info.caret_visible {
+        if info.insert_mode {
+            elements.push(MenuElement::Rect {
+                x: caret_x,
+                y: text_y - pad_y,
+                w: bar_w,
+                h: fs + 3.0 * pad_y,
+                corner_radius: 0.0,
+                color: caret_color,
+            });
+        } else {
+            // Vanilla appends the `_` one pixel after the text (`drawX += 1`).
+            elements.push(MenuElement::Text {
+                x: caret_x + bar_w,
+                y: text_y,
+                text: "_".into(),
+                scale: fs,
+                color: caret_color,
+                centered: false,
+            });
+        }
+    }
 }
 
 const DIGIT_WIDTH: f32 = 6.0;
@@ -521,25 +606,4 @@ pub struct SliderResult {
     pub hovered: bool,
     pub dragging: bool,
     pub new_value: Option<f32>,
-}
-
-pub fn push_cursor_blink(
-    elements: &mut Vec<MenuElement>,
-    cursor_blink: &std::time::Instant,
-    x: f32,
-    y: f32,
-    gs: f32,
-    fs: f32,
-    text_width: f32,
-) {
-    if cursor_blink.elapsed().as_millis() % 1000 < 500 {
-        elements.push(MenuElement::Rect {
-            x: x + text_width,
-            y,
-            w: 1.0 * gs,
-            h: fs,
-            corner_radius: 0.0,
-            color: WHITE,
-        });
-    }
 }

@@ -1,11 +1,12 @@
+use std::cell::OnceCell;
 use std::collections::VecDeque;
 use std::time::Instant;
 
 use super::common;
-use super::common::WHITE;
 use crate::net::commands::CommandTree;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::ui::text::TextSpan;
+use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
 const MAX_MESSAGES: usize = 100;
 const CHAT_X: f32 = 4.0;
@@ -29,21 +30,47 @@ const SUGGEST_TEXT: [f32; 4] = [0.667, 0.667, 0.667, 1.0];
 const SUGGEST_SELECTED: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
 // Vanilla EditBox suggestion color, 0xFF808080.
 const GHOST_TEXT: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
+// Vanilla EditBox caret color, 0xFFD0D0D0.
+const CARET_COLOR: [f32; 4] = [0.816, 0.816, 0.816, 1.0];
 
 struct ChatLine {
     spans: Vec<TextSpan>,
     received: Instant,
+    /// Lazily wrapped display lines (vanilla `trimmedMessages`). The wrap width
+    /// and scale-1 font metrics never change, so the cache never invalidates.
+    wrapped: OnceCell<Vec<Vec<TextSpan>>>,
+}
+
+impl ChatLine {
+    fn wrapped(&self, width0: &dyn Fn(&str) -> f32) -> &[Vec<TextSpan>] {
+        self.wrapped
+            .get_or_init(|| wrap_spans(&self.spans, CHAT_WIDTH, width0))
+    }
 }
 
 pub struct ChatState {
     messages: VecDeque<ChatLine>,
-    input: String,
+    input: TextFieldState,
     open: bool,
-    cursor_blink: Instant,
+    /// Sent messages for Up/Down recall (vanilla `recentChat`): consecutive
+    /// duplicates collapse, capped at 100.
+    sent_history: VecDeque<String>,
+    /// Index into `sent_history`; `len()` means "the draft" (vanilla
+    /// `historyPos`).
+    history_pos: usize,
+    /// The in-progress draft, saved while browsing history (vanilla
+    /// `historyBuffer`).
+    history_buffer: String,
+    /// Wrapped lines scrolled up from the bottom (vanilla `chatScrollbarPos`);
+    /// clamped against the wrapped total in `build`.
+    scroll_pos: usize,
     suggestions: Vec<String>,
     suggest_index: usize,
     suggest_anchor: String,
     suggest_applied: bool,
+    /// Vanilla `setAllowSuggestions(false)` after a history recall: the popup
+    /// stays hidden until the next real edit.
+    allow_suggestions: bool,
     last_computed: String,
     /// Monotonic tab-complete transaction id (vanilla `pendingSuggestionsId`).
     /// Never reset, so a response from a previous chat session can't match.
@@ -60,13 +87,17 @@ impl ChatState {
     pub fn new() -> Self {
         Self {
             messages: VecDeque::new(),
-            input: String::new(),
+            input: TextFieldState::new(MAX_MESSAGE_LEN),
             open: false,
-            cursor_blink: Instant::now(),
+            sent_history: VecDeque::new(),
+            history_pos: 0,
+            history_buffer: String::new(),
+            scroll_pos: 0,
             suggestions: Vec::new(),
             suggest_index: 0,
             suggest_anchor: String::new(),
             suggest_applied: false,
+            allow_suggestions: true,
             last_computed: String::new(),
             next_suggest_id: 0,
             awaiting: None,
@@ -78,10 +109,21 @@ impl ChatState {
         self.messages.push_back(ChatLine {
             spans,
             received: Instant::now(),
+            wrapped: OnceCell::new(),
         });
         if self.messages.len() > MAX_MESSAGES {
             self.messages.pop_front();
         }
+        // A new line while scrolled keeps the view anchored (vanilla
+        // ChatComponent.addMessage shifts the scrollbar by one).
+        if self.scroll_pos > 0 {
+            self.scroll_pos += 1;
+        }
+    }
+
+    /// F3+D; vanilla `clearMessages(false)` keeps the sent-message history.
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
     }
 
     pub fn is_open(&self) -> bool {
@@ -90,21 +132,71 @@ impl ChatState {
 
     pub fn open(&mut self) {
         self.open = true;
-        self.input.clear();
-        self.cursor_blink = Instant::now();
+        self.input.set_value("", f32::MAX, &|_| 0.0);
+        self.input.set_focused(true);
         self.clear_suggestions();
+        self.history_pos = self.sent_history.len();
+        self.history_buffer.clear();
     }
 
     pub fn open_with_slash(&mut self) {
         self.open = true;
-        self.input = "/".into();
-        self.cursor_blink = Instant::now();
+        self.input.set_value("/", f32::MAX, &|_| 0.0);
+        self.input.set_focused(true);
         self.clear_suggestions();
+        self.history_pos = self.sent_history.len();
+        self.history_buffer.clear();
     }
 
     pub fn close(&mut self) {
         self.open = false;
+        self.input.set_focused(false);
         self.clear_suggestions();
+        // Vanilla resets the chat scroll when the screen closes.
+        self.scroll_pos = 0;
+    }
+
+    /// Scroll the message backlog by wrapped lines; positive is up (vanilla
+    /// `scrollChat`). The upper clamp happens in `build`, where wrap counts
+    /// are known.
+    pub fn scroll_chat(&mut self, delta: i32) {
+        if self.open {
+            self.scroll_pos = self.scroll_pos.saturating_add_signed(delta as isize);
+        }
+    }
+
+    /// Up/Down sent-message recall, vanilla `ChatScreen.moveInHistory`.
+    fn move_in_history(&mut self, delta: i32, inner_w: f32, width_fn: &dyn Fn(&str) -> f32) {
+        let end = self.sent_history.len();
+        let target = self
+            .history_pos
+            .saturating_add_signed(delta as isize)
+            .min(end);
+        if target == self.history_pos {
+            return;
+        }
+        if target == end {
+            let draft = std::mem::take(&mut self.history_buffer);
+            self.input.set_value(&draft, inner_w, width_fn);
+        } else {
+            if self.history_pos == end {
+                self.history_buffer = self.input.value().to_string();
+            }
+            let entry = self.sent_history[target].clone();
+            self.input.set_value(&entry, inner_w, width_fn);
+        }
+        self.history_pos = target;
+        self.allow_suggestions = false;
+    }
+
+    /// Vanilla `ChatComponent.addRecentChat`: consecutive duplicates collapse.
+    fn add_recent_chat(&mut self, msg: &str) {
+        if self.sent_history.back().map(String::as_str) != Some(msg) {
+            self.sent_history.push_back(msg.to_string());
+            if self.sent_history.len() > MAX_MESSAGES {
+                self.sent_history.pop_front();
+            }
+        }
     }
 
     fn clear_suggestions(&mut self) {
@@ -124,17 +216,18 @@ impl ChatState {
     /// with latest-id-wins, no debounce).
     fn recompute_suggestions(&mut self, tree: Option<&CommandTree>) {
         self.clear_suggestions();
-        self.last_computed = self.input.clone();
-        if let Some(cmd) = self.input.strip_prefix('/')
+        let input = self.input.value().to_string();
+        self.last_computed = input.clone();
+        if let Some(cmd) = input.strip_prefix('/')
             && let Some(tree) = tree
         {
             let sug = tree.suggestions(cmd);
-            let cut = self.input.len() - sug.partial_len;
-            self.suggest_anchor = self.input[..cut].to_string();
+            let cut = input.len() - sug.partial_len;
+            self.suggest_anchor = input[..cut].to_string();
             self.suggestions = sug.options;
             if sug.needs_server {
                 self.next_suggest_id = self.next_suggest_id.wrapping_add(1);
-                let request = (self.next_suggest_id, self.input.clone());
+                let request = (self.next_suggest_id, input);
                 self.awaiting = Some(request.clone());
                 self.outgoing_request = Some(request);
             }
@@ -156,7 +249,7 @@ impl ChatState {
         let Some((want_id, want_input)) = &self.awaiting else {
             return;
         };
-        if id != *want_id || !self.open || self.input != *want_input {
+        if id != *want_id || !self.open || self.input.value() != *want_input {
             return;
         }
         self.awaiting = None;
@@ -164,36 +257,66 @@ impl ChatState {
             return;
         }
         // Java's StringRange counts UTF-16 units, not bytes.
-        let Some(start) = utf16_offset_to_byte(&self.input, start) else {
+        let Some(start) = utf16_offset_to_byte(self.input.value(), start) else {
             return;
         };
-        let partial = self.input[start..].to_ascii_lowercase();
-        self.suggest_anchor = self.input[..start].to_string();
+        let partial = self.input.value()[start..].to_ascii_lowercase();
+        self.suggest_anchor = self.input.value()[..start].to_string();
         self.suggestions = sort_with_partial_first(options, &partial);
         self.suggest_index = 0;
         self.suggest_applied = false;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn handle_key_input(
         &mut self,
-        typed_chars: &[char],
-        backspace: bool,
+        events: &[TextInputEvent],
         enter: bool,
         tab: bool,
         shift: bool,
+        up: bool,
+        down: bool,
+        page_up: bool,
+        page_down: bool,
+        inner_w: f32,
+        width_fn: &dyn Fn(&str) -> f32,
         tree: Option<&CommandTree>,
     ) -> Option<String> {
         if !self.open {
             return None;
         }
 
-        for ch in typed_chars {
-            self.input.push(*ch);
-            self.cursor_blink = Instant::now();
+        // Up/Down cycle the suggestion popup when it's showing, else recall
+        // sent-message history (vanilla CommandSuggestions gets keys first).
+        if up || down {
+            if !self.suggestions.is_empty() {
+                let n = self.suggestions.len();
+                self.suggest_index = if up {
+                    (self.suggest_index + n - 1) % n
+                } else {
+                    (self.suggest_index + 1) % n
+                };
+            } else if up {
+                self.move_in_history(-1, inner_w, width_fn);
+            } else {
+                self.move_in_history(1, inner_w, width_fn);
+            }
         }
-        if backspace {
-            self.input.pop();
-            self.cursor_blink = Instant::now();
+        if page_up {
+            self.scroll_chat(LINES_PER_PAGE as i32 - 1);
+        }
+        if page_down {
+            self.scroll_chat(-(LINES_PER_PAGE as i32 - 1));
+        }
+
+        let mut clipboard = SystemClipboard;
+        let before_edits = self.input.value().to_string();
+        for ev in events {
+            self.input.handle(ev, &mut clipboard, inner_w, width_fn);
+        }
+        // A real edit re-enables the popup (vanilla `onEdited`).
+        if self.input.value() != before_edits {
+            self.allow_suggestions = true;
         }
 
         // Tab applies the highlighted completion; further Tabs cycle the list.
@@ -206,30 +329,31 @@ impl ChatState {
                     (self.suggest_index + 1) % n
                 };
             }
-            self.input = format!(
+            let applied = format!(
                 "{}{}",
                 self.suggest_anchor, self.suggestions[self.suggest_index]
             );
+            self.input.set_value(&applied, inner_w, width_fn);
             self.suggest_applied = true;
-            self.last_computed = self.input.clone();
-            self.cursor_blink = Instant::now();
+            self.last_computed = applied;
             return None;
         }
 
-        if self.input != self.last_computed {
-            self.recompute_suggestions(tree);
+        if self.input.value() != self.last_computed {
+            // While suppressed, recompute without the tree: clears the popup.
+            self.recompute_suggestions(tree.filter(|_| self.allow_suggestions));
         }
 
         if enter {
-            let normalized = normalize_chat_message(&self.input);
+            let normalized = normalize_chat_message(self.input.value());
             let msg = if normalized.is_empty() {
                 None
             } else {
+                self.add_recent_chat(&normalized);
                 Some(normalized)
             };
-            self.input.clear();
-            self.open = false;
-            self.clear_suggestions();
+            self.input.set_value("", inner_w, width_fn);
+            self.close();
             return msg;
         }
 
@@ -241,14 +365,21 @@ impl ChatState {
     /// `CommandSuggestions.calculateSuggestionSuffix` (case-sensitive; the
     /// cursor is always at the end of pomme's chat input).
     fn ghost_suffix(&self) -> Option<&str> {
+        // Vanilla only shows the inline suffix with the cursor at the end.
+        if !self.input.cursor_at_end() {
+            return None;
+        }
         let selected = self.suggestions.get(self.suggest_index)?;
-        let rest = self.input.strip_prefix(self.suggest_anchor.as_str())?;
+        let rest = self
+            .input
+            .value()
+            .strip_prefix(self.suggest_anchor.as_str())?;
         let suffix = selected.strip_prefix(rest)?;
         (!suffix.is_empty()).then_some(suffix)
     }
 
     pub fn build(
-        &self,
+        &mut self,
         elements: &mut Vec<MenuElement>,
         screen_w: f32,
         screen_h: f32,
@@ -267,10 +398,19 @@ impl ChatState {
         // gui scale changes (vanilla wraps in gui-space, then scales).
         let width0 = |s: &str| text_width_fn(s, common::FONT_SIZE);
 
+        // Clamp the scroll to the wrapped backlog (vanilla scrollChat clamps
+        // against `trimmedMessages`).
+        if self.open && self.scroll_pos > 0 {
+            let total: usize = self.messages.iter().map(|m| m.wrapped(&width0).len()).sum();
+            self.scroll_pos = self.scroll_pos.min(total.saturating_sub(LINES_PER_PAGE));
+        }
+
         // Gather the visible wrapped lines newest-first; index 0 is the
-        // bottom-most line. All wrapped lines of a message share its alpha.
+        // bottom-most line, `scroll_pos` lines skipped below it. All wrapped
+        // lines of a message share its alpha.
         let mut display: Vec<(Vec<TextSpan>, f32)> = Vec::new();
-        for msg in self.messages.iter().rev() {
+        let mut skipped = 0usize;
+        'gather: for msg in self.messages.iter().rev() {
             let alpha = if self.open {
                 1.0
             } else {
@@ -279,15 +419,15 @@ impl ChatState {
             if !self.open && alpha <= 1e-5 {
                 continue;
             }
-            let wrapped = wrap_spans(&msg.spans, CHAT_WIDTH, &width0);
-            for line in wrapped.into_iter().rev() {
-                display.push((line, alpha));
-                if display.len() >= LINES_PER_PAGE {
-                    break;
+            for line in msg.wrapped(&width0).iter().rev() {
+                if skipped < self.scroll_pos {
+                    skipped += 1;
+                    continue;
                 }
-            }
-            if display.len() >= LINES_PER_PAGE {
-                break;
+                display.push((line.clone(), alpha));
+                if display.len() >= LINES_PER_PAGE {
+                    break 'gather;
+                }
             }
         }
 
@@ -339,35 +479,27 @@ impl ChatState {
                 corner_radius: 0.0,
                 color: INPUT_BG,
             });
-            elements.push(MenuElement::Text {
-                x: origin + indent,
-                y: text_y,
-                text: self.input.clone(),
-                scale: fs,
-                color: WHITE,
-                centered: false,
-            });
 
-            let tw = text_width_fn(&self.input, fs);
-            // Vanilla `EditBox` draws the suggestion at `cursorX - 1`.
-            if let Some(ghost) = self.ghost_suffix() {
-                elements.push(MenuElement::Text {
-                    x: origin + indent + tw - gs,
-                    y: text_y,
-                    text: ghost.to_string(),
-                    scale: fs,
-                    color: GHOST_TEXT,
-                    centered: false,
-                });
-            }
-            common::push_cursor_blink(
+            let text_x = origin + indent;
+            let inner_w = screen_w - text_x - 4.0 * gs;
+            let wf = |s: &str| text_width_fn(s, fs);
+            let info = self.input.render_info(inner_w, true, &wf);
+            let shown = &self.input.value()[info.display_start..info.display_end];
+
+            // The ghost is the inline suggestion suffix, shown only while the
+            // caret sits at the end of the input.
+            common::push_field_text(
                 elements,
-                &self.cursor_blink,
-                origin + indent,
+                &info,
+                shown,
+                text_x,
                 text_y,
-                gs,
                 fs,
-                tw,
+                gs,
+                gs,
+                CARET_COLOR,
+                self.ghost_suffix().map(|g| (g, GHOST_TEXT)),
+                &wf,
             );
 
             if !self.suggestions.is_empty() {
@@ -651,11 +783,15 @@ mod tests {
         assert!(lines[0].is_empty());
     }
 
+    fn set_input(chat: &mut ChatState, input: &str) {
+        chat.input.set_value(input, f32::MAX, &|_| 0.0);
+    }
+
     /// A chat awaiting a server response for `input` with request id 1.
     fn awaiting_chat(input: &str) -> ChatState {
         let mut chat = ChatState::new();
         chat.open = true;
-        chat.input = input.to_string();
+        set_input(&mut chat, input);
         chat.awaiting = Some((1, input.to_string()));
         chat
     }
@@ -684,7 +820,7 @@ mod tests {
 
         // Input changed since the request.
         let mut chat = awaiting_chat("/gamemode c");
-        chat.input = "/gamemode cr".to_string();
+        set_input(&mut chat, "/gamemode cr");
         chat.apply_server_suggestions(1, 10, vec!["creative".into()]);
         assert!(chat.suggestions.is_empty());
     }
@@ -702,17 +838,17 @@ mod tests {
     #[test]
     fn ghost_is_selected_suggestion_remainder() {
         let mut chat = ChatState::new();
-        chat.input = "/gam".to_string();
+        set_input(&mut chat, "/gam");
         chat.suggest_anchor = "/".to_string();
         chat.suggestions = vec!["gamemode".into(), "gamerule".into()];
         assert_eq!(chat.ghost_suffix(), Some("emode"));
         chat.suggest_index = 1;
         assert_eq!(chat.ghost_suffix(), Some("erule"));
         // Case mismatch shows no ghost (vanilla is case-sensitive here).
-        chat.input = "/GAM".to_string();
+        set_input(&mut chat, "/GAM");
         assert_eq!(chat.ghost_suffix(), None);
         // Fully typed suggestion leaves nothing to show.
-        chat.input = "/gamerule".to_string();
+        set_input(&mut chat, "/gamerule");
         assert_eq!(chat.ghost_suffix(), None);
     }
 
