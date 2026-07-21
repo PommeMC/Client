@@ -11,7 +11,9 @@ pub const MIN_FOV_DEGREES: f32 = 30.0;
 #[allow(dead_code)]
 pub const MAX_FOV_DEGREES: f32 = 110.0;
 const NEAR: f32 = 0.1;
-pub(crate) const FAR: f32 = 1000.0;
+/// Floor of the dynamic far plane (vanilla floors at `cloudRange * 16`
+/// instead; pomme's fixed-reach clouds derive their fade from this).
+pub(crate) const MIN_FAR: f32 = 1000.0;
 const MOUSE_SENSITIVITY: f32 = 0.15;
 /// Controller look speed in degrees per second, scaled by frame delta.
 const CONTROLLER_SENSITIVITY: f32 = 150.0;
@@ -98,6 +100,9 @@ pub struct Camera {
     bob_walk_dist: f32,
     bob_amount: f32,
     bob_enabled: bool,
+    /// Projection far plane, scaled with render distance (vanilla
+    /// `Camera.depthFar` = render distance in blocks * 4).
+    depth_far: f32,
 }
 
 impl Camera {
@@ -117,7 +122,16 @@ impl Camera {
             bob_walk_dist: 0.0,
             bob_amount: 0.0,
             bob_enabled: false,
+            depth_far: MIN_FAR,
         }
+    }
+
+    pub fn set_render_distance(&mut self, chunks: u32) {
+        self.depth_far = ((chunks * 16 * 4) as f32).max(MIN_FAR);
+    }
+
+    fn depth_far(&self) -> f32 {
+        self.depth_far
     }
 
     pub fn set_view_bob(&mut self, walk_dist: f32, bob: f32, enabled: bool) {
@@ -311,7 +325,7 @@ impl Camera {
     /// of the screen.
     pub fn frame_top_down(&mut self, radius_blocks: f32) {
         let half_fov = self.fov_radians(1.0) / 2.0;
-        let height = (radius_blocks / half_fov.tan() * 0.8).min(FAR - 64.0);
+        let height = (radius_blocks / half_fov.tan() * 0.8).min(self.depth_far - 64.0);
         self.top_down = Some(height);
     }
 
@@ -330,7 +344,7 @@ impl Camera {
             self.fov_radians(self.render_partial_tick),
             self.aspect_ratio,
             NEAR,
-            FAR,
+            self.depth_far,
         );
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
@@ -347,7 +361,7 @@ impl Camera {
             self.fov_radians(self.render_partial_tick),
             self.aspect_ratio,
             NEAR,
-            FAR,
+            self.depth_far,
         );
         proj * view
     }
@@ -372,7 +386,7 @@ impl Camera {
         let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
         let view = self.bob_matrix() * view::look_to_mat4(offset, forward, up);
-        let mut proj = proj::directx::perspective(fov, self.aspect_ratio, NEAR, FAR);
+        let mut proj = proj::directx::perspective(fov, self.aspect_ratio, NEAR, self.depth_far);
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
     }
@@ -415,7 +429,7 @@ impl CameraUniform {
         // The top-down benchmark view sits hundreds of blocks up, so push fog past the
         // far plane to keep the whole loaded area visible.
         let (fog_start, fog_end, fog_rgb) = if camera.top_down().is_some() {
-            (FAR, FAR, sky_color)
+            (camera.depth_far(), camera.depth_far(), sky_color)
         } else if eyes_in_water {
             (WATER_FOG_START, WATER_FOG_END, WATER_FOG_COLOR)
         } else {
