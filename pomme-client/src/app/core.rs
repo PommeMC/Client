@@ -822,6 +822,21 @@ impl AppCore {
                         None => {}
                     }
                     game.player.game_mode = game_mode;
+                    // Vanilla GameType.updatePlayerAbilities, applied locally on
+                    // setLocalMode (no packet).
+                    // TODO: the instabuild/invulnerable/may_build halves
+                    match game_mode {
+                        // Creative grants flight but leaves `flying` untouched.
+                        1 => game.player.may_fly = true,
+                        3 => {
+                            game.player.may_fly = true;
+                            game.player.flying = true;
+                        }
+                        _ => {
+                            game.player.may_fly = false;
+                            game.player.flying = false;
+                        }
+                    }
                     if game.inventory_open || game.creative_inventory_open {
                         match game_mode {
                             1 => {
@@ -840,8 +855,16 @@ impl AppCore {
                         }
                     }
                 }
-                NetworkEvent::PlayerAbilitiesChanged { flying } => {
+                NetworkEvent::PlayerAbilitiesChanged {
+                    flying,
+                    can_fly,
+                    flying_speed,
+                    walking_speed,
+                } => {
                     game.player.flying = flying;
+                    game.player.may_fly = can_fly;
+                    game.player.fly_speed = flying_speed;
+                    game.player.walk_speed = walking_speed;
                 }
                 NetworkEvent::ServerViewDistance { distance } => {
                     tracing::info!("Server view distance: {distance}");
@@ -1378,6 +1401,7 @@ impl AppCore {
             1.0
         });
 
+        Self::send_abilities_packet(connection, game);
         Self::send_input_packet(input, connection, game);
         self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
@@ -1470,6 +1494,22 @@ impl AppCore {
             .send(ServerboundGamePacket::ClientTickEnd(
                 s_client_tick_end::ServerboundClientTickEnd,
             ));
+    }
+
+    // Vanilla onUpdateAbilities: report a locally toggled `flying` to the
+    // server, which gates it on mayfly and corrects us via the clientbound
+    // abilities packet if rejected.
+    fn send_abilities_packet(connection: &ConnectionHandle, game: &mut GameState) {
+        if game.player.abilities_dirty {
+            connection
+                .packet_tx
+                .send(ServerboundGamePacket::PlayerAbilities(
+                azalea_protocol::packets::game::s_player_abilities::ServerboundPlayerAbilities {
+                    is_flying: game.player.flying,
+                },
+            ));
+            game.player.abilities_dirty = false;
+        }
     }
 
     fn send_input_packet(input: &InputState, connection: &ConnectionHandle, game: &mut GameState) {
