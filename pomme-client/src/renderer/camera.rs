@@ -401,10 +401,16 @@ pub struct CameraUniform {
     /// is uploaded anchor-relative, so shaders never see large floats.
     camera_pos: [f32; 4],
     fog_color: [f32; 4],
-    /// xyz: the anchor as integers (vanilla `CameraBlockPos`). Declared only
-    /// in chunk.vert, which subtracts it from the absolute integer section
-    /// origins; the other shaders keep the shorter block prefix.
+    /// xyz: the anchor as integers (vanilla `CameraBlockPos`). Read only by
+    /// chunk.vert (subtracted from the absolute integer section origins); the
+    /// other fog shaders declare it purely as padding to reach `fog_env`, and
+    /// non-fog shaders keep the shorter block prefix.
     camera_block: [i32; 4],
+    /// xy: the environmental fog band (vanilla `environmentalStart/End`,
+    /// spherical), layered by max() over the render-distance band in the .w
+    /// lanes above. Appended last so shaders that don't fog keep their
+    /// shorter block declarations.
+    fog_env: [f32; 4],
 }
 
 // Vanilla FogType.WATER defaults (EnvironmentAttributes): color 0xFF050533,
@@ -414,6 +420,13 @@ pub struct CameraUniform {
 pub const WATER_FOG_COLOR: [f32; 3] = [5.0 / 255.0, 5.0 / 255.0, 51.0 / 255.0];
 const WATER_FOG_START: f32 = -8.0;
 const WATER_FOG_END: f32 = 96.0;
+
+// Vanilla `EnvironmentAttributes` FOG_START/END_DISTANCE defaults, the
+// render-distance-independent ambient haze (overworld and End run these;
+// TODO: dimension attribute overrides - the nether is 10/96 - and the rain
+// offsets AtmosphericFogEnvironment applies to them).
+const ENV_FOG_START: f32 = 0.0;
+const ENV_FOG_END: f32 = 1024.0;
 
 impl CameraUniform {
     pub fn new(
@@ -425,25 +438,38 @@ impl CameraUniform {
         let anchor = camera.anchor();
         let offset = camera.third_person_offset();
         let pos = (*camera.position - anchor).as_vec3() + offset;
-        // Vanilla render-distance fog band: the last clamp(blocks / 10, 4, 64) blocks.
-        // The top-down benchmark view sits hundreds of blocks up, so push fog past the
-        // far plane to keep the whole loaded area visible.
-        let (fog_start, fog_end, fog_rgb) = if camera.top_down().is_some() {
-            (camera.depth_far(), camera.depth_far(), sky_color)
+        // Vanilla render-distance fog band: the last clamp(blocks / 10, 4, 64)
+        // blocks, cylindrical. The environmental band (spherical ambient haze)
+        // layers over it in the shader by max(). The top-down benchmark view
+        // sits hundreds of blocks up, so both bands push past the far plane to
+        // keep the whole loaded area visible.
+        let blocks = (render_distance_chunks * 16) as f32;
+        let span = (blocks / 10.0).clamp(4.0, 64.0);
+        let (fog_start, fog_end, env_start, env_end, fog_rgb) = if camera.top_down().is_some() {
+            let far = camera.depth_far();
+            (far, far, far, far, sky_color)
         } else if eyes_in_water {
-            (WATER_FOG_START, WATER_FOG_END, WATER_FOG_COLOR)
+            // Vanilla's water fog is the environmental pair; the
+            // render-distance band still applies on top (FogRenderer always
+            // overwrites renderDistanceStart/End after the environment runs).
+            (
+                blocks - span,
+                blocks,
+                WATER_FOG_START,
+                WATER_FOG_END,
+                WATER_FOG_COLOR,
+            )
         } else {
-            let blocks = (render_distance_chunks * 16) as f32;
-            let span = (blocks / 10.0).clamp(4.0, 64.0);
             // Fade distant terrain to the sky color so it melts into the flat sky disc
             // with no horizon edge (at night both go dark).
-            (blocks - span, blocks, sky_color)
+            (blocks - span, blocks, ENV_FOG_START, ENV_FOG_END, sky_color)
         };
         Self {
             view_proj: camera.view_projection().to_cols_array_2d(),
             camera_pos: [pos.x, pos.y, pos.z, fog_start],
             fog_color: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_end],
             camera_block: anchor.as_ivec3().extend(0).to_array(),
+            fog_env: [env_start, env_end, 0.0, 0.0],
         }
     }
 
@@ -453,6 +479,8 @@ impl CameraUniform {
             camera_pos: [0.0; 4],
             fog_color: [0.0; 4],
             camera_block: [0; 4],
+            // A zero band would read as "everything past 0 is fogged".
+            fog_env: [f32::MAX, f32::MAX, 0.0, 0.0],
         }
     }
 }

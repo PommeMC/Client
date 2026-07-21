@@ -6,6 +6,9 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 view_proj;
     vec4 camera_pos;
     vec4 fog_color;
+    // Unused here; pads fog_env to its std140 offset in the shared buffer.
+    ivec4 camera_block;
+    vec4 fog_env;
 };
 
 layout(location = 0) in vec3 position;
@@ -24,6 +27,6 @@ void main() {
     gl_Position = view_proj * vec4(rel, 1.0);
     v_uv = uv;
     v_color = color;
-    v_fog = fog_factor(rel, camera_pos.w, fog_color.w);
+    v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
 }
