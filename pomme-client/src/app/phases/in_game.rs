@@ -167,9 +167,6 @@ pub struct GameState {
     pub options_from_game: bool,
     pub last_render_distance: u32,
     pub server_render_distance: u32,
-    /// Mirror of the menu's Chunk Detail setting; the rescan re-meshes
-    /// columns whose lod changes when it moves.
-    pub chunk_detail: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
     pub particle_store: crate::particle::ParticleStore,
@@ -269,7 +266,6 @@ impl GameState {
             options_from_game: false,
             last_render_distance: render_distance,
             server_render_distance: 0,
-            chunk_detail: 8,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
             particle_store: {
@@ -532,7 +528,7 @@ impl GameState {
     /// work: columns whose chunk-load light applied go through the
     /// content-gen path like chunk loads (the visibility rescan enqueues
     /// them tier-gated), individual lit sections remesh on the priority lane.
-    pub fn update_light(&mut self) {
+    pub fn update_light(&mut self, chunk_detail: u32) {
         let mut dirty = crate::world::light::LightDirty::default();
         self.light_engine
             .poll_and_run(&mut self.chunk_store, &mut dirty);
@@ -570,7 +566,7 @@ impl GameState {
             self.enqueue_section_edit(
                 col,
                 si,
-                crate::app::core::chunk_lod(col, player_chunk, self.chunk_detail),
+                crate::app::core::chunk_lod(col, player_chunk, chunk_detail),
             );
         }
     }
@@ -774,11 +770,11 @@ impl GameState {
     /// render distance meshes regardless of visibility — occlusion gates only
     /// drawing — and the queue orders the backlog nearest-first. Runs every
     /// frame to drain it.
-    pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos) {
+    pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos, chunk_detail: u32) {
         let n = self.chunk_store.section_count();
         let full = section_mask(n);
         for pos in self.chunk_store.loaded_positions() {
-            let lod = crate::app::core::chunk_lod(pos, player_chunk, self.chunk_detail);
+            let lod = crate::app::core::chunk_lod(pos, player_chunk, chunk_detail);
             let content_gen = self.content_gen.get(&pos).copied().unwrap_or(0);
             // Mesh the whole column once, then nothing until a lod/content change.
             // Occlusion gates drawing, not meshing, so off-screen and hidden
@@ -1053,7 +1049,6 @@ pub fn update_game(
     core.audio.set_volumes(core.menu.category_volumes());
 
     gfx.renderer.set_vsync(core.menu.vsync);
-    game.chunk_detail = core.menu.chunk_detail;
 
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
@@ -1153,7 +1148,7 @@ pub fn update_game(
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
-    game.update_light();
+    game.update_light(core.menu.chunk_detail);
 
     let partial_tick = core.tick_accumulator / TICK_RATE;
 

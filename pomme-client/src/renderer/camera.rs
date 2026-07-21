@@ -130,10 +130,6 @@ impl Camera {
         self.depth_far = ((chunks * 16 * 4) as f32).max(MIN_FAR);
     }
 
-    fn depth_far(&self) -> f32 {
-        self.depth_far
-    }
-
     pub fn set_view_bob(&mut self, walk_dist: f32, bob: f32, enabled: bool) {
         self.bob_walk_dist = walk_dist;
         self.bob_amount = bob;
@@ -401,15 +397,13 @@ pub struct CameraUniform {
     /// is uploaded anchor-relative, so shaders never see large floats.
     camera_pos: [f32; 4],
     fog_color: [f32; 4],
-    /// xyz: the anchor as integers (vanilla `CameraBlockPos`). Read only by
-    /// chunk.vert (subtracted from the absolute integer section origins); the
-    /// other fog shaders declare it purely as padding to reach `fog_env`, and
-    /// non-fog shaders keep the shorter block prefix.
+    /// xyz: the anchor as integers (vanilla `CameraBlockPos`); chunk.vert
+    /// subtracts it from the absolute integer section origins.
     camera_block: [i32; 4],
     /// xy: the environmental fog band (vanilla `environmentalStart/End`,
     /// spherical), layered by max() over the render-distance band in the .w
-    /// lanes above. Appended last so shaders that don't fog keep their
-    /// shorter block declarations.
+    /// lanes above. Appended last so shaders that don't fog can keep their
+    /// shorter prefix declarations.
     fog_env: [f32; 4],
 }
 
@@ -446,7 +440,7 @@ impl CameraUniform {
         let blocks = (render_distance_chunks * 16) as f32;
         let span = (blocks / 10.0).clamp(4.0, 64.0);
         let (fog_start, fog_end, env_start, env_end, fog_rgb) = if camera.top_down().is_some() {
-            let far = camera.depth_far();
+            let far = camera.depth_far;
             (far, far, far, far, sky_color)
         } else if eyes_in_water {
             // Vanilla's water fog is the environmental pair; the

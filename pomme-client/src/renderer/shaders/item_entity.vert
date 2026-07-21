@@ -2,14 +2,7 @@
 
 #include "fog.glsl"
 
-layout(set = 0, binding = 0) uniform CameraUniform {
-    mat4 view_proj;
-    vec4 camera_pos;
-    vec4 fog_color;
-    // Unused here; pads fog_env to its std140 offset in the shared buffer.
-    ivec4 camera_block;
-    vec4 fog_env;
-};
+#include "camera_ubo.glsl"
 
 layout(push_constant) uniform PushConstants {
     mat4 model;

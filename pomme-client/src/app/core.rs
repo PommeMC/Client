@@ -834,13 +834,10 @@ impl AppCore {
                 }
                 NetworkEvent::ServerViewDistance { distance } => {
                     tracing::info!("Server view distance: {distance}");
-                    // Some servers announce min(our request, server max); an
-                    // echo of our own request carries no cap information and
-                    // would ratchet the render distance slider down.
-                    if distance < game.last_render_distance {
-                        game.server_render_distance = distance;
-                    } else if distance > game.last_render_distance {
-                        game.server_render_distance = game.server_render_distance.max(distance);
+                    if let Some(d) =
+                        server_view_distance_update(distance, game.last_render_distance)
+                    {
+                        game.server_render_distance = d;
                     }
                 }
                 NetworkEvent::ServerSimulationDistance { distance } => {
@@ -1257,7 +1254,11 @@ impl AppCore {
         // Edits mesh the affected section(s) immediately on the priority lane,
         // ungated by visibility.
         for &(col, si) in &priority_remesh {
-            game.enqueue_section_edit(col, si, chunk_lod(col, player_chunk, game.chunk_detail));
+            game.enqueue_section_edit(
+                col,
+                si,
+                chunk_lod(col, player_chunk, self.menu.chunk_detail),
+            );
         }
 
         // Refresh the frustum tiers (throttled to camera movement / new loads),
@@ -1274,7 +1275,7 @@ impl AppCore {
         game.last_update_phases.visibility_ms = ms(t_vis);
 
         let t_rescan = std::time::Instant::now();
-        game.rescan_mesh_jobs(player_chunk);
+        game.rescan_mesh_jobs(player_chunk, self.menu.chunk_detail);
         game.last_update_phases.rescan_ms = ms(t_rescan);
 
         disconnect_reason
@@ -1544,6 +1545,17 @@ impl AppCore {
     }
 }
 
+/// New `server_render_distance` for a server view-distance announcement, or
+/// `None` to keep the current one. Some servers announce min(our request,
+/// server max); an echo of our own request carries no cap information and
+/// would ratchet the render distance slider down, so only a differing value
+/// counts. It can't be an echo above the request: any such value is the
+/// server's actual view distance, including later reductions.
+pub(crate) fn server_view_distance_update(announced: u32, last_request: u32) -> Option<u32> {
+    let announced = announced.min(crate::world::chunk::MAX_VIEW_DISTANCE);
+    (announced != last_request).then_some(announced)
+}
+
 /// LOD level for a column: full detail within `detail` chunks (the Chunk
 /// Detail setting), half resolution to twice that, quarter beyond.
 pub(crate) fn chunk_lod(
@@ -1578,4 +1590,23 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
     let speed_factor: f32 = if player.sprinting { 1.3 } else { 1.0 };
     modifier *= (speed_factor + 1.0) / 2.0;
     1.0_f32.lerp(modifier, effect_scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_view_distance_update;
+
+    #[test]
+    fn server_view_distance_updates() {
+        // Echo of our own request carries no cap information.
+        assert_eq!(server_view_distance_update(12, 12), None);
+        // Below the request: min(request, cap) revealed the server cap.
+        assert_eq!(server_view_distance_update(10, 12), Some(10));
+        // Above the request: the server's actual view distance, including a
+        // reduction from an earlier higher announcement.
+        assert_eq!(server_view_distance_update(64, 12), Some(64));
+        assert_eq!(server_view_distance_update(20, 12), Some(20));
+        // Wire values past the chunk grid's extent clamp to it.
+        assert_eq!(server_view_distance_update(300, 12), Some(127));
+    }
 }

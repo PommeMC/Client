@@ -155,7 +155,7 @@ impl MainMenu {
             OptRow::Pair("Attack Indicator: Crosshair", "Chunk Fade-in: 1.0s"),
         ];
         let rd_frac = ((self.render_distance as f32 - 2.0) / (rd_max as f32 - 2.0)).clamp(0.0, 1.0);
-        let cd_frac = (self.chunk_detail as f32 - 8.0) / 40.0;
+        let cd_frac = ((self.chunk_detail as f32 - 8.0) / 40.0).clamp(0.0, 1.0);
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let sliders: &[(&str, f32)] = &[
