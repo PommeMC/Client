@@ -11,7 +11,7 @@ use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
-use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE, input};
+use crate::app::{TICK_RATE, input};
 use crate::audio::{CATEGORY_PLAYERS, SoundRef};
 use crate::benchmark::{
     Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep, UploadHandle,
@@ -243,11 +243,15 @@ pub struct MeshedCol {
 }
 
 impl GameState {
-    pub fn new(renderer: &Renderer, resource_packs: &ResourcePackManager) -> Self {
+    pub fn new(
+        renderer: &Renderer,
+        resource_packs: &ResourcePackManager,
+        render_distance: u32,
+    ) -> Self {
         let biome_climate = Arc::new(HashMap::new());
         let mesh_dispatcher = renderer.create_mesh_dispatcher(biome_climate, Some(resource_packs));
 
-        let chunk_store = ChunkStore::new(DEFAULT_RENDER_DISTANCE);
+        let chunk_store = ChunkStore::new(render_distance);
         Self {
             light_engine: crate::world::light::LevelLightEngine::new(
                 chunk_store.height(),
@@ -260,7 +264,7 @@ impl GameState {
             position_set: false,
             player_loaded_sent: false,
             options_from_game: false,
-            last_render_distance: DEFAULT_RENDER_DISTANCE,
+            last_render_distance: render_distance,
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -1605,6 +1609,7 @@ pub fn update_game(
     }
 
     if game.options_from_game {
+        core.menu.server_render_distance = game.server_render_distance;
         let menu_input = core.build_menu_input();
         let r = &gfx.renderer;
         let result = core

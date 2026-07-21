@@ -834,7 +834,14 @@ impl AppCore {
                 }
                 NetworkEvent::ServerViewDistance { distance } => {
                     tracing::info!("Server view distance: {distance}");
-                    game.server_render_distance = distance;
+                    // Some servers announce min(our request, server max); an
+                    // echo of our own request carries no cap information and
+                    // would ratchet the render distance slider down.
+                    if distance < game.last_render_distance {
+                        game.server_render_distance = distance;
+                    } else if distance > game.last_render_distance {
+                        game.server_render_distance = game.server_render_distance.max(distance);
+                    }
                 }
                 NetworkEvent::ServerSimulationDistance { distance } => {
                     tracing::info!("Server simulation distance: {distance}");

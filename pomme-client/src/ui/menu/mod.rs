@@ -365,6 +365,8 @@ pub struct MainMenu {
     pub gui_scale_setting: u32,
     pub render_distance: u32,
     pub simulation_distance: u32,
+    /// Server-announced view distance cap; 0 when unknown (slider runs 2..32).
+    pub server_render_distance: u32,
     pub fov: u32,
     /// FOV Effects slider fraction (0..1); squared by `fov_effect()`.
     pub fov_effect_scale: f32,
@@ -459,6 +461,7 @@ impl MainMenu {
             gui_scale_setting: settings.gui_scale,
             render_distance: settings.render_distance,
             simulation_distance: settings.simulation_distance,
+            server_render_distance: 0,
             fov: settings.fov,
             fov_effect_scale: settings.fov_effect_scale,
             view_bobbing: settings.view_bobbing,
@@ -581,6 +584,8 @@ impl MainMenu {
     }
 
     pub fn open_options(&mut self) {
+        // Stale after a disconnect; the in-game path re-sets it every frame.
+        self.server_render_distance = 0;
         self.set_screen(Screen::Options);
     }
 

@@ -42,6 +42,12 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                 game_mode: p.common.game_type as u8,
             });
+            let _ = event_tx.try_send(NetworkEvent::ServerViewDistance {
+                distance: p.chunk_radius,
+            });
+            let _ = event_tx.try_send(NetworkEvent::ServerSimulationDistance {
+                distance: p.simulation_distance,
+            });
             let _ = event_tx.try_send(NetworkEvent::PlayerLogin {
                 entity_id: p.player_id.0,
             });

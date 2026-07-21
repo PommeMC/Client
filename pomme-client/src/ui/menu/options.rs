@@ -85,6 +85,16 @@ impl MainMenu {
         }
     }
 
+    /// Upper bound of the render distance slider: the server-announced view
+    /// distance while connected (can exceed 32), 32 otherwise.
+    fn render_distance_max(&self) -> u32 {
+        if self.server_render_distance > 0 {
+            self.server_render_distance.max(3)
+        } else {
+            32
+        }
+    }
+
     pub(super) fn build_options_video(
         &mut self,
         sw: f32,
@@ -97,7 +107,11 @@ impl MainMenu {
             DisplayMode::Borderless => "Fullscreen: Borderless",
             DisplayMode::Fullscreen => "Fullscreen: Exclusive",
         };
-        let rd = format!("Render Distance: {} chunks", self.render_distance);
+        let rd_max = self.render_distance_max();
+        let rd = format!(
+            "Render Distance: {} chunks",
+            self.render_distance.min(rd_max)
+        );
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
             "Max Framerate: Unlimited".to_string()
@@ -138,7 +152,7 @@ impl MainMenu {
             OptRow::Pair("Show Autosave Indicator: ON", "Vignette: ON"),
             OptRow::Pair("Attack Indicator: Crosshair", "Chunk Fade-in: 1.0s"),
         ];
-        let rd_frac = (self.render_distance as f32 - 2.0) / 30.0;
+        let rd_frac = ((self.render_distance as f32 - 2.0) / (rd_max as f32 - 2.0)).clamp(0.0, 1.0);
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let sliders: &[(&str, f32)] = &[
@@ -758,7 +772,10 @@ impl MainMenu {
         for (prefix, value) in &slider_results {
             let v = *value;
             match *prefix {
-                "Render Distance:" => self.render_distance = (2.0 + v * 30.0).round() as u32,
+                "Render Distance:" => {
+                    let max = self.render_distance_max() as f32;
+                    self.render_distance = (2.0 + v * (max - 2.0)).round() as u32
+                }
                 "Simulation Distance:" => {
                     self.simulation_distance = (5.0 + v * 27.0).round() as u32
                 }
