@@ -1607,6 +1607,6 @@ mod tests {
         assert_eq!(server_view_distance_update(64, 12), Some(64));
         assert_eq!(server_view_distance_update(20, 12), Some(20));
         // Wire values past the chunk grid's extent clamp to it.
-        assert_eq!(server_view_distance_update(300, 12), Some(127));
+        assert_eq!(server_view_distance_update(300, 12), Some(128));
     }
 }

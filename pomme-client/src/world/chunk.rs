@@ -120,9 +120,9 @@ pub struct ChunkStore {
     pub block_entities: std::collections::HashMap<BlockPos, StoredBlockEntity>,
 }
 
-/// The 127-chunk max extended-view-distance servers allow; server
+/// The 128-chunk max extended-view-distance servers allow; server
 /// announcements clamp to it and the chunk grid is sized for it.
-pub const MAX_VIEW_DISTANCE: u32 = 127;
+pub const MAX_VIEW_DISTANCE: u32 = 128;
 
 impl ChunkStore {
     pub fn new(view_distance: u32) -> Self {
