@@ -1,0 +1,14 @@
+[package]
+name = "plugin-loader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+stabby = { workspace = true, features = ["libloading"] }
+thiserror.workspace = true
+libloading = ">=0.7.3, <0.10" # Should match stabby's version of libloading
+
+plugin-api.workspace = true
+
+tracing.workspace = true
+tracing-shared.workspace = true

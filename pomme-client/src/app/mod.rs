@@ -127,6 +127,7 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<(), WindowError> {
+        self.core.plugins.init_all();
         let event_loop = EventLoop::new()?;
         event_loop.run_app(self)?;
         Ok(())

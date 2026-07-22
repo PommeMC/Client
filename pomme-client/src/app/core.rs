@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Add;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,6 +8,8 @@ use azalea_protocol::packets::game::{
     ServerboundClientCommand, ServerboundGamePacket, s_client_command, s_client_tick_end,
 };
 use glam::{FloatExt, dvec3};
+use plugin_loader::Plugins;
+use tracing_shared::SharedLogger;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
 
@@ -177,6 +180,7 @@ pub struct AppCore {
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
+    pub plugins: Plugins,
     player_skin_tx: crossbeam_channel::Sender<PlayerSkinResult>,
     player_skin_rx: crossbeam_channel::Receiver<PlayerSkinResult>,
     requested_player_skins: HashMap<uuid::Uuid, Option<String>>,
@@ -210,6 +214,12 @@ impl AppCore {
         );
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
 
+        let logger = SharedLogger::new();
+        let plugins = Plugins::load(
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/debug/")),
+            &logger,
+        );
+
         Self {
             user,
             presence,
@@ -225,6 +235,7 @@ impl AppCore {
             audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
+            plugins,
             player_skin_tx,
             player_skin_rx,
             requested_player_skins: HashMap::new(),
