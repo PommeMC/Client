@@ -39,6 +39,7 @@ const FLYING_VERTICAL_FRICTION: f64 = 0.6;
 // Vanilla Player.getFlyingSpeed: sprinting while airborne (not flying).
 const SPRINT_AIR_ACCELERATION: f64 = 0.025_999_999_f32 as f64;
 const SPRINT_HUNGER_THRESHOLD: u32 = 6;
+const JUMP_DELAY_TICKS: u32 = 10;
 const DEFAULT_SPRINT_WINDOW: u32 = 7;
 const FLY_TOGGLE_WINDOW: u32 = 7;
 const MINOR_COLLISION_ANGLE: f64 = 0.13962634;
@@ -50,6 +51,16 @@ pub fn tick(
     use_speed_multiplier: f64,
     slow_due_to_using_item: bool,
 ) {
+    let jump_held = input.performing_action(input::Action::Jump);
+
+    // Vanilla `LivingEntity.aiStep`.
+    if player.no_jump_delay > 0 {
+        player.no_jump_delay -= 1;
+    }
+    if !jump_held {
+        player.no_jump_delay = 0;
+    }
+
     player.update_water_state(chunk_store);
     update_crouch_state(player, input, chunk_store);
     player.tick_eye_height();
@@ -124,7 +135,7 @@ pub fn tick(
     }
 
     player.was_forward_pressed = forward_pressed;
-    player.was_jump_pressed = input.performing_action(input::Action::Jump);
+    player.was_jump_pressed = jump_held;
 }
 
 // Vanilla `LocalPlayer.aiStep`: a fresh jump press arms the toggle window;
@@ -174,8 +185,16 @@ fn tick_land(
     sin_y_rot: f64,
     cos_y_rot: f64,
 ) {
-    if player.on_ground && input.performing_action(input::Action::Jump) {
+    // Vanilla `travelInAir` samples on-ground once before the move and reuses
+    // it for the end-of-tick drag, so a jump launches with ground friction.
+    let on_ground_at_start = player.on_ground;
+
+    if on_ground_at_start
+        && input.performing_action(input::Action::Jump)
+        && player.no_jump_delay == 0
+    {
         jump_from_ground(player, sin_y_rot, cos_y_rot);
+        player.no_jump_delay = JUMP_DELAY_TICKS;
     }
 
     let saved_vy = player.velocity.y;
@@ -204,7 +223,7 @@ fn tick_land(
     player.velocity.y -= GRAVITY;
     player.velocity.y *= VERTICAL_DRAG as f64;
 
-    let h_friction = if player.on_ground {
+    let h_friction = if on_ground_at_start {
         GROUND_FRICTION
     } else {
         HORIZONTAL_DRAG
