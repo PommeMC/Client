@@ -207,6 +207,7 @@ impl ApplicationHandler for App {
                 }
 
                 self.core.apply_cursor_grab(&window, None);
+                self.core.plugins.fire_client_started();
 
                 if let Some(server_ip) = quick_access_multiplayer {
                     let connection = spawn_connection(
@@ -268,12 +269,12 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+            WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
             WindowEvent::Resized(new_size) => {
-                if let Some(app_rt) = self.phase.gfx_mut() {
-                    app_rt.renderer.resize(new_size);
+                if let Some(gfx) = self.phase.gfx_mut() {
+                    gfx.renderer.resize(new_size);
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -705,5 +706,11 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.core.plugins.fire_client_stopping();
     }
 }

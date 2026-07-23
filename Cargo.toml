@@ -7,7 +7,12 @@ members = [
     "pomme-block",
     "pomme-protocol",
     "tools/blockgen",
-    "tools/protogen"
+    "tools/protogen",
+
+    "plugin-api",
+    "plugin-loader",
+    "plugin-macros",
+    "plugin-example",
 ]
 
 [workspace.dependencies]
@@ -28,7 +33,14 @@ glam = "0.33"
 # client
 pyronyx = "=0.3.2"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-shared = "0.1"
+
+plugin-api = { path = "./plugin-api" }
+plugin-loader = { path = "./plugin-loader" }
+plugin-macros = { path = "./plugin-macros" }
+
+stabby = "=72.1.16"
 
 # azalea lags crates.io releases; track the 26.2 branch from git.
 # azalea-block is replaced by the pomme-block shim (pomme owns block data);

@@ -13,6 +13,7 @@ launcher-pre-pr:
     @pnpm --filter pomme-launcher pre-pr
 
 client-dev *args:
+    @cargo build -p plugin-example
     @cargo run -p pomme-client {{ args }}
 
 # Optimized release client for accurate benchmarking (supplies the launch token the guard needs).

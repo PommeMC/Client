@@ -1,3 +1,4 @@
+use crate::app::TICK_RATE;
 use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
 use crate::net::connection::ConnectArgs;
@@ -19,6 +20,15 @@ pub fn update_menu(
 
     core.audio.start_menu_music();
     core.audio.update_menu_music(dt);
+
+    core.tick_accumulator += dt;
+    while core.tick_accumulator >= TICK_RATE {
+        core.plugins.fire_client_tick_start();
+
+        core.tick_accumulator -= TICK_RATE;
+
+        core.plugins.fire_client_tick_end();
+    }
 
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;

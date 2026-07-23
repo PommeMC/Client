@@ -1,0 +1,9 @@
+[package]
+name = "plugin-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+stabby.workspace = true
+tracing-shared.workspace = true
+plugin-macros.workspace = true

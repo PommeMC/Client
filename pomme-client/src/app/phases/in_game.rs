@@ -1336,6 +1336,8 @@ pub fn update_game(
     // Menus never pause the simulation; tick_physics substitutes neutral input.
     core.tick_accumulator += dt;
     while core.tick_accumulator >= TICK_RATE {
+        core.plugins.fire_client_tick_start();
+
         game.tick_count = game.tick_count.wrapping_add(1);
         core.tick_physics(&mut gfx.renderer, connection, game);
         game.item_entity_store.tick(&game.chunk_store);
@@ -1350,6 +1352,8 @@ pub fn update_game(
             game.xp_display_start_tick = game.tick_count as i64;
         }
         core.tick_accumulator -= TICK_RATE;
+
+        core.plugins.fire_client_tick_end();
     }
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
