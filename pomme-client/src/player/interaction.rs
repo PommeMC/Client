@@ -106,6 +106,9 @@ pub struct InteractionState {
     pending_predictions: HashMap<BlockPos, ServerVerifiedState>,
     is_destroying: bool,
     destroy_pos: BlockPos,
+    /// Held stack captured when the break started, vanilla `destroyingItem`;
+    /// a mid-mine change of item or components restarts the break.
+    destroying_item: Option<ItemStackData>,
     destroy_progress: f32,
     destroy_ticks: f32,
     destroy_delay: u32,
@@ -136,6 +139,7 @@ impl InteractionState {
                 y: -1,
                 z: -1,
             },
+            destroying_item: None,
             destroy_progress: 0.0,
             destroy_ticks: 0.0,
             destroy_delay: 0,
@@ -376,6 +380,7 @@ impl InteractionState {
                 player_pos,
                 on_ground,
                 creative,
+                held_stack,
                 effects,
                 &mut dirty_chunks,
             );
@@ -389,6 +394,7 @@ impl InteractionState {
                 player_pos,
                 on_ground,
                 creative,
+                held_stack,
                 effects,
                 &mut dirty_chunks,
             );
@@ -459,6 +465,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        held_stack: Option<&ItemStackData>,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -496,6 +503,7 @@ impl InteractionState {
             player_pos,
             on_ground,
             creative,
+            held_stack,
             effects,
             dirty_chunks,
         );
@@ -511,6 +519,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        held_stack: Option<&ItemStackData>,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -539,6 +548,7 @@ impl InteractionState {
             player_pos,
             on_ground,
             creative,
+            held_stack,
             effects,
             dirty_chunks,
         );
@@ -855,6 +865,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        held_stack: Option<&ItemStackData>,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -898,7 +909,7 @@ impl InteractionState {
             return;
         }
 
-        if self.is_destroying && self.destroy_pos == hit.block_pos {
+        if self.is_destroying && self.same_destroy_target(hit.block_pos, held_stack) {
             return;
         }
 
@@ -924,6 +935,7 @@ impl InteractionState {
 
         self.is_destroying = true;
         self.destroy_pos = hit.block_pos;
+        self.destroying_item = held_stack.cloned();
         self.destroy_progress = 0.0;
         self.destroy_ticks = 0.0;
     }
@@ -938,6 +950,7 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        held_stack: Option<&ItemStackData>,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -946,7 +959,7 @@ impl InteractionState {
             return;
         }
 
-        if self.destroy_pos != hit.block_pos {
+        if !self.same_destroy_target(hit.block_pos, held_stack) {
             self.start_destroy_block(
                 hit,
                 chunks,
@@ -955,6 +968,7 @@ impl InteractionState {
                 player_pos,
                 on_ground,
                 creative,
+                held_stack,
                 effects,
                 dirty_chunks,
             );
@@ -1012,6 +1026,12 @@ impl InteractionState {
         }
     }
 
+    /// Vanilla `MultiPlayerGameMode.sameDestroyTarget`: still mining the same
+    /// block with the same item.
+    fn same_destroy_target(&self, pos: BlockPos, held: Option<&ItemStackData>) -> bool {
+        self.destroy_pos == pos && same_item_same_components(held, self.destroying_item.as_ref())
+    }
+
     fn stop_destroying(&mut self, sender: &PacketSender) {
         if self.is_destroying {
             send_action(
@@ -1024,6 +1044,16 @@ impl InteractionState {
             self.is_destroying = false;
             self.destroy_progress = 0.0;
         }
+    }
+}
+
+/// Vanilla `ItemStack.isSameItemSameComponents`: item type and components,
+/// never the count. `None` is the empty hand.
+fn same_item_same_components(a: Option<&ItemStackData>, b: Option<&ItemStackData>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.kind == b.kind && a.component_patch == b.component_patch,
+        _ => false,
     }
 }
 
@@ -1383,4 +1413,34 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
         Direction::Down,
         0,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stack(kind: ItemKind, count: i32) -> ItemStackData {
+        ItemStackData {
+            kind,
+            count,
+            component_patch: Default::default(),
+        }
+    }
+
+    /// Vanilla `isSameItemSameComponents`: count never matters, the item type
+    /// does, and the empty hand only matches itself.
+    #[test]
+    fn item_comparison_ignores_count() {
+        let a = stack(ItemKind::Stone, 1);
+        assert!(same_item_same_components(
+            Some(&a),
+            Some(&stack(ItemKind::Stone, 64))
+        ));
+        assert!(!same_item_same_components(
+            Some(&a),
+            Some(&stack(ItemKind::Dirt, 1))
+        ));
+        assert!(!same_item_same_components(Some(&a), None));
+        assert!(same_item_same_components(None, None));
+    }
 }
