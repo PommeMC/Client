@@ -28,6 +28,14 @@ struct OverlayVertex {
     uv: [f32; 2],
 }
 
+/// Maps the wrapped crack UV into one stage's row of the vertical atlas.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct OverlayPush {
+    v_base: f32,
+    v_scale: f32,
+}
+
 pub struct BlockOverlayPipeline {
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
@@ -67,10 +75,17 @@ impl BlockOverlayPipeline {
             vk::ShaderStageFlags::Fragment,
         );
 
+        let push_range = vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::Fragment,
+            offset: 0,
+            size: size_of::<OverlayPush>() as u32,
+        };
         let layouts = [camera_layout, texture_layout];
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
+            push_constant_range_count: 1,
+            push_constant_ranges: &push_range,
             ..Default::default()
         };
         let pipeline_layout = device
@@ -230,7 +245,7 @@ impl BlockOverlayPipeline {
         anchor: glam::DVec3,
         stage: u32,
     ) {
-        let vertices = build_overlay_vertices(registry, state, block_pos, anchor, stage);
+        let vertices = build_overlay_vertices(registry, state, block_pos, anchor);
         if vertices.is_empty() {
             return;
         }
@@ -238,6 +253,16 @@ impl BlockOverlayPipeline {
         self.vertex_allocation.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+        let push = OverlayPush {
+            v_base: stage as f32 / STAGE_COUNT as f32,
+            v_scale: 1.0 / STAGE_COUNT as f32,
+        };
+        cmd.push_constants(
+            self.pipeline_layout,
+            vk::ShaderStageFlags::Fragment,
+            0,
+            bytemuck::bytes_of(&push),
+        );
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
@@ -301,10 +326,9 @@ fn build_overlay_vertices(
     state: BlockState,
     pos: &BlockPos,
     anchor: glam::DVec3,
-    stage: u32,
 ) -> Vec<OverlayVertex> {
-    // Anchor-relative (see Camera::anchor); the crack-UV projection is
-    // min-normalized per quad, so the rebase doesn't shift the texture.
+    // Anchor-relative (see Camera::anchor); the crack UVs are projected from
+    // block-local coordinates, so the rebase never touches the texture.
     let origin = (glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) - anchor)
         .as_vec3()
         .to_array();
@@ -312,17 +336,17 @@ fn build_overlay_vertices(
 
     if let Some(model) = registry.get_baked_model(state) {
         for quad in &model.quads {
-            push_quad(&mut verts, origin, quad, stage);
+            push_quad(&mut verts, origin, quad);
         }
     } else if let Some(quads) = registry.get_multipart_quads(state) {
         for quad in quads {
-            push_quad(&mut verts, origin, quad, stage);
+            push_quad(&mut verts, origin, quad);
         }
     } else if registry.get_textures(state).is_some() {
         // Blocks rendered as a plain opaque cube (no baked model): crack a unit cube.
         for dir in CUBE_FACE_DIRS {
             let (positions, _, _) = cube_face_geometry(dir);
-            push_face(&mut verts, origin, &positions, dir, stage);
+            push_face(&mut verts, origin, &positions, dir);
         }
     }
 
@@ -336,43 +360,27 @@ fn build_overlay_vertices(
     verts
 }
 
-fn push_quad(verts: &mut Vec<OverlayVertex>, origin: [f32; 3], quad: &BakedQuad, stage: u32) {
+fn push_quad(verts: &mut Vec<OverlayVertex>, origin: [f32; 3], quad: &BakedQuad) {
     let dir = quad
         .cullface
         .unwrap_or_else(|| nearest_direction(&quad.positions));
-    push_face(verts, origin, &quad.positions, dir, stage);
+    push_face(verts, origin, &quad.positions, dir);
 }
 
 /// Emits one quad (two triangles, six vertices) with crack UVs projected from
-/// the vertex world positions for `dir`, normalized into this stage's atlas
-/// tile.
+/// the block-local vertex positions for `dir`, anchoring the crack pattern to
+/// the block corner like vanilla's inverted block pose. The raw (possibly
+/// negative) UVs are wrapped into the stage's atlas row by the fragment
+/// shader, standing in for vanilla's REPEAT sampler.
 fn push_face(
     verts: &mut Vec<OverlayVertex>,
     origin: [f32; 3],
     positions: &[[f32; 3]; 4],
     dir: Direction,
-    stage: u32,
 ) {
-    let world: [Vec3; 4] = std::array::from_fn(|i| {
-        Vec3::new(
-            origin[0] + positions[i][0],
-            origin[1] + positions[i][1],
-            origin[2] + positions[i][2],
-        )
-    });
-    let mut uv: [[f32; 2]; 4] = std::array::from_fn(|i| project_crack_uv(world[i], dir));
-
-    // 1 world unit maps to one crack tile, so a partial face shows a matching
-    // fraction. Shift to the quad's min so the tile lands in [0,1] (the vertical
-    // atlas can't wrap V across stages) and offset V into this stage's row.
-    let min_u = uv.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min);
-    let min_v = uv.iter().map(|c| c[1]).fold(f32::INFINITY, f32::min);
-    let v_scale = 1.0 / STAGE_COUNT as f32;
-    let v_base = stage as f32 * v_scale;
-    for c in &mut uv {
-        c[0] -= min_u;
-        c[1] = v_base + (c[1] - min_v) * v_scale;
-    }
+    let local: [Vec3; 4] = std::array::from_fn(|i| Vec3::from_array(positions[i]));
+    let world: [Vec3; 4] = std::array::from_fn(|i| Vec3::from_array(origin) + local[i]);
+    let uv: [[f32; 2]; 4] = std::array::from_fn(|i| project_crack_uv(local[i], dir));
 
     for &idx in &[0usize, 1, 2, 0, 2, 3] {
         verts.push(OverlayVertex {
@@ -654,6 +662,31 @@ mod tests {
             let vs = std::array::from_fn(|i| uv[i][1]);
             assert!((span(us) - 1.0).abs() < 1e-4, "{dir:?} u span {}", span(us));
             assert!((span(vs) - 1.0).abs() < 1e-4, "{dir:?} v span {}", span(vs));
+        }
+    }
+
+    /// Partial faces sample their own block-local sub-region of the crack
+    /// tile, regardless of where the block sits in the world.
+    #[test]
+    fn partial_face_keeps_block_local_uvs() {
+        let positions = [
+            [6.0 / 16.0, 1.0, 6.0 / 16.0],
+            [6.0 / 16.0, 1.0, 10.0 / 16.0],
+            [10.0 / 16.0, 1.0, 10.0 / 16.0],
+            [10.0 / 16.0, 1.0, 6.0 / 16.0],
+        ];
+        let mut near = Vec::new();
+        let mut far = Vec::new();
+        push_face(&mut near, [0.0; 3], &positions, Direction::Up);
+        push_face(&mut far, [123.0, -40.0, 987.0], &positions, Direction::Up);
+
+        // Up faces project u = x, v = z.
+        for vert in &near {
+            assert!((vert.uv[0] - vert.position[0]).abs() < 1e-4, "u != x");
+            assert!((vert.uv[1] - vert.position[2]).abs() < 1e-4, "v != z");
+        }
+        for (a, b) in near.iter().zip(&far) {
+            assert_eq!(a.uv, b.uv, "origin leaked into crack UVs");
         }
     }
 }
