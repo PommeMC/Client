@@ -1,59 +1,63 @@
-use plugin_api::Plugin;
+use std::time::{Duration, Instant};
 
-// #[plugin]
+use plugin_api::{Plugin, plugin};
+
+#[plugin]
 struct ExamplePlugin {
     total_ticks: u64,
+
+    second_start: Instant,
+    ticks_this_second: u32,
+
+    tick_start: Instant,
+    total_tick_time: Duration,
 }
 
 impl Plugin for ExamplePlugin {
     fn new() -> Self {
-        Self { total_ticks: 0 }
+        let now = Instant::now();
+
+        Self {
+            total_ticks: 0,
+
+            second_start: now,
+            ticks_this_second: 0,
+
+            tick_start: now,
+            total_tick_time: Duration::ZERO,
+        }
     }
 
     fn on_client_started(&mut self) {
-        let span = tracing::info_span!("on_client_started");
-        let _enter = span.enter();
-        tracing::info!("Client is about to tick.");
+        tracing::info!("Started");
     }
 
     fn on_client_stopping(&mut self) {
-        let span = tracing::info_span!("on_client_stopping");
-        let _enter = span.enter();
-        tracing::info!("Client is stopping. Total ticks: {}", self.total_ticks);
+        tracing::info!("Stopping");
+        tracing::info!("Total ticks: {}", self.total_ticks);
     }
 
     fn on_client_tick_start(&mut self) {
-        let span = tracing::info_span!("on_client_tick_start");
-        let _enter = span.enter();
-        tracing::info!("Client tick started.");
+        self.tick_start = Instant::now();
     }
 
     fn on_client_tick_end(&mut self) {
-        let span = tracing::info_span!("on_client_tick_end");
-        let _enter = span.enter();
-        tracing::info!("Client tick ended");
         self.total_ticks += 1;
+        self.ticks_this_second += 1;
+
+        self.total_tick_time += self.tick_start.elapsed();
+
+        let elapsed = self.second_start.elapsed();
+
+        if elapsed >= Duration::from_secs(1) {
+            let tps = self.ticks_this_second as f64 / elapsed.as_secs_f64();
+            let mspt = self.total_tick_time.as_secs_f64() * 1000.0 / self.ticks_this_second as f64;
+
+            tracing::info!("TPS: {:.2} | MSPT: {:.2}", tps, mspt);
+
+            self.second_start = Instant::now();
+            self.ticks_this_second = 0;
+            self.total_tick_time = Duration::ZERO;
+        }
     }
 }
-
-#[::stabby::export]
-pub extern "C" fn load_plugin() -> ::plugin_api::PluginModule {
-    ::plugin_api::PluginModule {
-        name: env!("CARGO_PKG_NAME").into(),
-        version: ::plugin_api::meta::Version {
-            major: ::plugin_api::meta::parse_u32(env!("CARGO_PKG_VERSION_MAJOR")),
-            minor: ::plugin_api::meta::parse_u32(env!("CARGO_PKG_VERSION_MINOR")),
-            patch: ::plugin_api::meta::parse_u32(env!("CARGO_PKG_VERSION_PATCH")),
-        },
-        plugin: ::stabby::boxed::Box::new(<ExamplePlugin as Plugin>::new()).into(),
-    }
-}
-
-#[unsafe(no_mangle)]
-pub static PLUGIN_MARKER: ::plugin_api::meta::PluginMarker =
-    ::plugin_api::meta::PLUGIN_MARKER_VALUE;
-#[unsafe(no_mangle)]
-pub static PLUGIN_API_VERSION: ::plugin_api::meta::PluginApiVersion =
-    ::plugin_api::meta::PLUGIN_API_VERSION_VALUE;
-
-pub use ::plugin_api::meta::setup_shared_logger_ref;

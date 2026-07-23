@@ -12,10 +12,10 @@ pub fn plugin(_attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream>
         pub extern "C" fn load_plugin() -> ::plugin_api::PluginModule {
             ::plugin_api::PluginModule {
                 name: env!("CARGO_PKG_NAME").into(),
-                version: ::plugin_api::Version {
-                    major: ::plugin_api::parse_u32(env!("CARGO_PKG_VERSION_MAJOR")),
-                    minor: ::plugin_api::parse_u32(env!("CARGO_PKG_VERSION_MINOR")),
-                    patch: ::plugin_api::parse_u32(env!("CARGO_PKG_VERSION_PATCH")),
+                version: ::plugin_api::meta::Version {
+                    major: ::plugin_api::meta::parse_u32(env!("CARGO_PKG_VERSION_MAJOR")),
+                    minor: ::plugin_api::meta::parse_u32(env!("CARGO_PKG_VERSION_MINOR")),
+                    patch: ::plugin_api::meta::parse_u32(env!("CARGO_PKG_VERSION_PATCH")),
                 },
                 plugin: ::stabby::boxed::Box::new(<ExamplePlugin as Plugin>::new()).into(),
             }
