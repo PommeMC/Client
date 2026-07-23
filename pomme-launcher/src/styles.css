@@ -2706,6 +2706,223 @@ body {
   cursor: wait;
 }
 
+.creatable-select {
+  display: flex;
+  align-items: stretch;
+  background: var(--glass-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
+  overflow: hidden;
+}
+
+.creatable-select:hover:has(.creatable-select-selected),
+.creatable-select:has(.creatable-select-toggle:hover) {
+  border-color: var(--border-light);
+}
+
+.creatable-select:focus-within:has(.creatable-select-input:focus) {
+  border-color: var(--border-glow);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.creatable-select .creatable-select-selected {
+  display: flex;
+  padding: 11px 14px;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: transparent;
+  border: none;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+}
+
+.creatable-select .creatable-select-input {
+  flex: 1;
+  align-self: stretch;
+  padding: 11px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font-body);
+  outline: none;
+  min-width: 0;
+}
+
+.creatable-select .creatable-select-input:focus {
+  box-shadow: none;
+}
+
+.creatable-select .creatable-select-toggle {
+  width: 40px;
+  flex-shrink: 0;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition:
+    background 0.15s,
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.creatable-select .creatable-select-toggle:focus {
+  outline: none;
+}
+
+/* ═══ Note Viewer ═══ */
+
+.note-viewer {
+  animation: fade-in 0.25s ease;
+}
+
+.note-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--glass);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 16px;
+}
+
+.note-back:hover {
+  background: var(--glass-hover);
+  color: var(--text);
+  border-color: var(--border-light);
+}
+
+.note-header-banner {
+  position: relative;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  aspect-ratio: 13 / 4;
+  min-height: 150px;
+  margin-bottom: 20px;
+}
+
+.note-header-banner::before {
+  content: "";
+  position: absolute;
+  inset: -12px;
+  background: linear-gradient(135deg, #112237 0%, #0f3822 100%);
+  background-image: inherit;
+  background-size: cover;
+  background-position: center;
+  filter: blur(10px);
+  z-index: 0;
+}
+
+.note-header-gradient {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(8, 12, 20, 0.28) 0%,
+    rgba(74, 222, 128, 0.22) 55%,
+    rgba(6, 10, 18, 0.88) 100%
+  );
+}
+
+.note-header-content {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  padding: 22px;
+}
+
+.note-header-title {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--text);
+  line-height: 1.15;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+}
+
+.note-body {
+  background: var(--glass);
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.8;
+}
+
+.note-body h1,
+.note-body h2,
+.note-body h3 {
+  color: var(--text);
+  margin: 20px 0 8px;
+  letter-spacing: 1px;
+}
+
+.note-body h1 {
+  font-size: 22px;
+}
+
+.note-body h2 {
+  font-size: 18px;
+}
+
+.note-body h3 {
+  font-size: 15px;
+}
+
+.note-body p {
+  margin-bottom: 10px;
+}
+
+.note-body ul,
+.note-body ol {
+  padding-left: 20px;
+  margin-bottom: 10px;
+}
+
+.note-body li {
+  margin-bottom: 4px;
+}
+
+.note-body a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.note-body a:hover {
+  text-decoration: underline;
+}
+
+.note-body img {
+  max-width: 100%;
+  border-radius: var(--radius);
+  margin: 12px 0;
+}
+
 /* ═══ Settings Page ═══ */
 
 .settings-page {
