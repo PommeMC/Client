@@ -54,6 +54,7 @@ pub struct LocalPlayer {
     pub fly_speed: f32,
     pub walk_speed: f32,
     pub jump_trigger_time: u32,
+    pub no_jump_delay: u32,
     pub was_jump_pressed: bool,
     /// Vanilla `onUpdateAbilities`: a locally toggled `flying` still has to be
     /// reported to the server via `ServerboundPlayerAbilities`.
@@ -99,6 +100,7 @@ impl LocalPlayer {
             fly_speed: 0.05,
             walk_speed: 0.1,
             jump_trigger_time: 0,
+            no_jump_delay: 0,
             was_jump_pressed: false,
             abilities_dirty: false,
             eye_height: STANDING_EYE_HEIGHT,
