@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use glam::{Mat4, Quat, Vec3};
 use serde::Deserialize;
 
 use super::registry::{FaceTextures, Tint};
@@ -408,32 +409,63 @@ pub fn bake_item_models(
             continue;
         };
 
-        let raw_path =
-            find_first_model_string(&json).or_else(|| find_first_string_for_key(&json, "base"));
-        let Some(raw_path) = raw_path else { continue };
-        let path = raw_path
-            .strip_prefix("minecraft:")
-            .unwrap_or(&raw_path)
-            .to_string();
+        let parts = collect_model_parts(&json);
+        let Some(first) = parts.first() else { continue };
 
-        let resolved = resolve_model(&path, jar_assets_dir, asset_index, &mut model_cache, packs);
-
-        if resolved.elements.is_empty() {
-            if let Some(value) = resolved.textures.get("layer0") {
-                let stripped = value.strip_prefix("minecraft:").unwrap_or(value);
-                let key = if let Some(rest) = stripped.strip_prefix("block/") {
-                    rest.to_string()
-                } else {
-                    item_textures.insert(stripped.to_string());
-                    stripped.to_string()
-                };
-                flat_keys.insert(item_name.to_string(), key);
+        if parts.len() == 1 {
+            let resolved = resolve_model(
+                &first.path,
+                jar_assets_dir,
+                asset_index,
+                &mut model_cache,
+                packs,
+            );
+            if resolved.elements.is_empty() {
+                if let Some(value) = resolved.textures.get("layer0") {
+                    let stripped = strip_mc_prefix(value);
+                    let key = if let Some(rest) = stripped.strip_prefix("block/") {
+                        rest.to_string()
+                    } else {
+                        item_textures.insert(stripped.to_string());
+                        stripped.to_string()
+                    };
+                    flat_keys.insert(item_name.to_string(), key);
+                }
+                continue;
             }
-            continue;
         }
 
         let tint = determine_tint(item_name);
-        if let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) {
+        let mut merged: Option<BakedModel> = None;
+        for part in &parts {
+            let resolved = resolve_model(
+                &part.path,
+                jar_assets_dir,
+                asset_index,
+                &mut model_cache,
+                packs,
+            );
+            let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) else {
+                continue;
+            };
+            if let Some(m) = part.transform {
+                for quad in &mut baked.quads {
+                    for p in &mut quad.positions {
+                        *p = m.transform_point3(Vec3::from_array(*p)).to_array();
+                    }
+                }
+            }
+            merged = Some(match merged.take() {
+                None => baked,
+                Some(mut model) => {
+                    model.quads.extend(baked.quads);
+                    model.is_full_cube = false;
+                    model.occludes = false;
+                    model
+                }
+            });
+        }
+        if let Some(mut baked) = merged {
             apply_gui_lambert(&mut baked.quads, BLOCK_GUI_ROTATION_DEG);
             item_models.insert(item_name.to_string(), baked);
         }
@@ -679,6 +711,106 @@ enum UvPattern {
     Down,
     North,
     SouthWestEast,
+}
+
+struct ModelPart {
+    path: String,
+    transform: Option<Mat4>,
+}
+
+/// Model references to bake for one item. `minecraft:composite` contributes
+/// every child, with the children's `transformation`s composed parent-to-child
+/// (vanilla `CompositeModel.Unbaked.bake`); anything else keeps the old
+/// first-model-string heuristic, which for select/condition trees picks one
+/// representative state.
+fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
+    let mut parts = Vec::new();
+    if let Some(node) = json.get("model") {
+        collect_parts_from_node(node, None, &mut parts);
+    }
+    if parts.is_empty()
+        && let Some(path) =
+            find_first_model_string(json).or_else(|| find_first_string_for_key(json, "base"))
+    {
+        parts.push(ModelPart {
+            path: strip_mc_prefix(&path).to_string(),
+            transform: None,
+        });
+    }
+    parts
+}
+
+fn collect_parts_from_node(
+    node: &serde_json::Value,
+    parent_transform: Option<Mat4>,
+    parts: &mut Vec<ModelPart>,
+) {
+    let transform = match (
+        parent_transform,
+        node.get("transformation").map(parse_item_transformation),
+    ) {
+        (Some(parent), Some(own)) => Some(parent * own),
+        (parent, own) => parent.or(own),
+    };
+    let node_type = node
+        .get("type")
+        .and_then(|t| t.as_str())
+        .map(|t| t.strip_prefix("minecraft:").unwrap_or(t));
+    match node_type {
+        Some("composite") => {
+            if let Some(models) = node.get("models").and_then(|m| m.as_array()) {
+                for child in models {
+                    collect_parts_from_node(child, transform, parts);
+                }
+            }
+        }
+        Some("model") => {
+            if let Some(path) = node.get("model").and_then(|m| m.as_str()) {
+                parts.push(ModelPart {
+                    path: strip_mc_prefix(path).to_string(),
+                    transform,
+                });
+            }
+        }
+        // Other node types are left for the caller's whole-file fallback.
+        _ => {}
+    }
+}
+
+/// Vanilla `Transformation.compose` (Transformation.java:103): `translation ·
+/// leftRotation · scale · rightRotation`, translation in block units. The
+/// codec's raw-matrix alternative is unused by vanilla assets and ignored.
+fn parse_item_transformation(json: &serde_json::Value) -> Mat4 {
+    let quat = |key: &str| {
+        json.get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                let get = |i: usize| arr.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                Quat::from_xyzw(get(0), get(1), get(2), get(3))
+            })
+            .unwrap_or(Quat::IDENTITY)
+    };
+    let vec3 = |key: &str, default: Vec3| json.get(key).map_or(default, |v| parse_vec3(v, default));
+    Mat4::from_translation(vec3("translation", Vec3::ZERO))
+        * Mat4::from_quat(quat("left_rotation"))
+        * Mat4::from_scale(vec3("scale", Vec3::ONE))
+        * Mat4::from_quat(quat("right_rotation"))
+}
+
+pub fn parse_vec3(value: &serde_json::Value, default: Vec3) -> Vec3 {
+    let Some(arr) = value.as_array() else {
+        return default;
+    };
+    let get = |i: usize| arr.get(i).and_then(|v| v.as_f64()).map(|v| v as f32);
+    Vec3::new(
+        get(0).unwrap_or(default.x),
+        get(1).unwrap_or(default.y),
+        get(2).unwrap_or(default.z),
+    )
+}
+
+pub fn strip_mc_prefix(s: &str) -> &str {
+    s.strip_prefix("minecraft:").unwrap_or(s)
 }
 
 pub fn find_first_model_string(json: &serde_json::Value) -> Option<String> {
@@ -1303,5 +1435,74 @@ fn determine_tint(block_name: &str) -> Tint {
         Tint::Foliage
     } else {
         Tint::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bed shape: a composite item model contributes every child, the
+    /// foot carrying its one-block translation.
+    #[test]
+    fn composite_item_collects_all_parts() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "model": {
+                    "type": "minecraft:composite",
+                    "models": [
+                        {"type": "minecraft:model", "model": "minecraft:block/red_bed_head"},
+                        {
+                            "type": "minecraft:model",
+                            "model": "minecraft:block/red_bed_foot",
+                            "transformation": {"translation": [0.0, 0.0, 1.0]}
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].path, "block/red_bed_head");
+        assert!(parts[0].transform.is_none());
+        assert_eq!(parts[1].path, "block/red_bed_foot");
+        let moved = parts[1].transform.unwrap().transform_point3(Vec3::ZERO);
+        assert!((moved - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    /// Non-composite trees (bundles' select/condition) keep the old
+    /// first-model-string behavior.
+    #[test]
+    fn select_item_falls_back_to_first_model() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "model": {
+                    "type": "minecraft:select",
+                    "cases": [
+                        {"model": {"type": "minecraft:model", "model": "minecraft:item/bundle_open"}}
+                    ],
+                    "fallback": {"type": "minecraft:model", "model": "minecraft:item/bundle"}
+                }
+            }"#,
+        )
+        .unwrap();
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].transform.is_none());
+        let legacy = find_first_model_string(&json).unwrap();
+        assert_eq!(parts[0].path, strip_mc_prefix(&legacy));
+    }
+
+    #[test]
+    fn plain_item_is_a_single_part() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"model": {"type": "minecraft:model", "model": "minecraft:block/oak_stairs"}}"#,
+        )
+        .unwrap();
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].path, "block/oak_stairs");
+        assert!(parts[0].transform.is_none());
     }
 }
