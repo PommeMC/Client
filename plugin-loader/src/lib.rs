@@ -5,9 +5,9 @@ use libloading::Library;
 use plugin_api::meta::{
     LOAD_PLUGIN_FN_NAME, LoadPluginFn, PLUGIN_API_VERSION_SYMBOL_NAME, PLUGIN_API_VERSION_VALUE,
     PLUGIN_MARKER_SYMBOL_NAME, PLUGIN_MARKER_VALUE, PluginApiVersion, PluginMarker,
-    SETUP_LOGGER_FN_NAME, SetupLoggerFn,
+    SETUP_LOGGER_FN_NAME, SetupLoggerFn, Version,
 };
-use plugin_api::{SPlugin, SPluginDynMut as _, Version};
+use plugin_api::{SPlugin, SPluginDynMut as _};
 use stabby::boxed::Box as SBox;
 use stabby::dynptr;
 use stabby::libloading::StabbyLibrary;
@@ -32,17 +32,22 @@ pub struct Plugins {
 }
 
 impl Plugins {
-    pub fn load(directory: &Path, shared_logger: &SharedLogger) -> Self {
+    fn new(plugins: Vec<LoadedPlugin>) -> Self {
+        Self { plugins }
+    }
+
+    pub fn load(directory: &Path) -> Self {
         let mut loaded = Vec::new();
 
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(err) => {
                 tracing::error!("Failed to read plugin directory {directory:?}: {err}");
-                return Self { plugins: loaded };
+                return Self::new(loaded);
             }
         };
 
+        let logger = SharedLogger::new();
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
@@ -130,7 +135,7 @@ impl Plugins {
                         continue;
                     }
                 };
-            setup_logger(shared_logger);
+            setup_logger(&logger);
 
             loaded.push(LoadedPlugin {
                 name: plugin.name.as_str(),
@@ -140,16 +145,38 @@ impl Plugins {
             });
         }
 
-        let slf = Self { plugins: loaded };
+        let slf = Self::new(loaded);
 
-        tracing::info!("Loaded plugins: {}", slf);
+        tracing::info!("Loaded {} plugins: {}", slf.plugins.len(), slf);
 
         slf
     }
 
-    pub fn init_all(&mut self) {
+    #[inline]
+    pub fn fire_client_started(&mut self) {
         for plugin in &mut self.plugins {
-            plugin.plugin.on_init();
+            plugin.plugin.on_client_started();
+        }
+    }
+
+    #[inline]
+    pub fn fire_client_stopping(&mut self) {
+        for plugin in &mut self.plugins {
+            plugin.plugin.on_client_stopping();
+        }
+    }
+
+    #[inline]
+    pub fn fire_client_tick_start(&mut self) {
+        for plugin in &mut self.plugins {
+            plugin.plugin.on_client_tick_start();
+        }
+    }
+
+    #[inline]
+    pub fn fire_client_tick_end(&mut self) {
+        for plugin in &mut self.plugins {
+            plugin.plugin.on_client_tick_end();
         }
     }
 }

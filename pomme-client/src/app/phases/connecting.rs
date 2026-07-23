@@ -1,5 +1,6 @@
 use azalea_protocol::packets::game::ServerboundGamePacket;
 
+use crate::app::TICK_RATE;
 use crate::app::core::AppCore;
 use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama};
@@ -59,6 +60,28 @@ pub fn update_connecting(
         if ready {
             return ConnectingUpdateResult::JoinGame;
         }
+    }
+
+    core.tick_accumulator += dt;
+    while core.tick_accumulator >= TICK_RATE {
+        core.plugins.fire_client_tick_start();
+
+        game.tick_count = game.tick_count.wrapping_add(1);
+        core.tick_physics(&mut gfx.renderer, connection, game);
+        game.item_entity_store.tick(&game.chunk_store);
+        game.particle_store.tick(&game.chunk_store);
+        game.block_entity_anim.tick();
+        if let Some(c) = &mut game.open_container
+            && let Some(state) = &mut c.enchant
+        {
+            state.tick(&c.slots, &c.data);
+            // Vanilla `EnchantmentScreen.containerTick` keeps the XP bar
+            // prioritized while the screen is open.
+            game.xp_display_start_tick = game.tick_count as i64;
+        }
+        core.tick_accumulator -= TICK_RATE;
+
+        core.plugins.fire_client_tick_end();
     }
 
     let status_text = match connect_phase {

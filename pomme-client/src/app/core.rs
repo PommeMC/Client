@@ -9,7 +9,6 @@ use azalea_protocol::packets::game::{
 };
 use glam::{FloatExt, dvec3};
 use plugin_loader::Plugins;
-use tracing_shared::SharedLogger;
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window};
 
@@ -214,11 +213,10 @@ impl AppCore {
         );
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
 
-        let logger = SharedLogger::new();
-        let plugins = Plugins::load(
-            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/debug/")),
-            &logger,
-        );
+        let plugins = Plugins::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../target/debug/"
+        )));
 
         Self {
             user,
