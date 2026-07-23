@@ -5,7 +5,9 @@ use azalea_core::direction::Direction;
 use azalea_core::position::BlockPos;
 use azalea_entity::dimensions::EntityDimensions;
 use azalea_inventory::ItemStackData;
-use azalea_inventory::components::{Consumable, Food, ItemUseAnimation, UseEffects};
+use azalea_inventory::components::{
+    Consumable, Food, ItemUseAnimation, Tool, ToolRule, UseEffects,
+};
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
 use azalea_protocol::packets::game::s_interact::InteractionHand;
@@ -13,7 +15,9 @@ use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerA
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use azalea_registry::builtin::ItemKind;
+use azalea_registry::HolderSet;
+use azalea_registry::builtin::{BlockKind, ItemKind};
+use azalea_registry::identifier::Identifier;
 use glam::{DVec3, Vec3, dvec3};
 use pomme_protocol::wire;
 
@@ -875,7 +879,7 @@ impl InteractionState {
             return;
         }
 
-        let progress = destroy_progress(state, on_ground, creative);
+        let progress = destroy_progress(state, on_ground, creative, held_stack);
 
         if progress >= 1.0 {
             if self.is_destroying {
@@ -981,7 +985,7 @@ impl InteractionState {
             return;
         }
 
-        self.destroy_progress += destroy_progress(state, on_ground, creative);
+        self.destroy_progress += destroy_progress(state, on_ground, creative, held_stack);
         if self.destroy_ticks % 4.0 == 0.0 {
             play_hit_sound(audio, state, hit.block_pos);
         }
@@ -1075,7 +1079,15 @@ fn opens_menu(state: BlockState) -> bool {
         || id.ends_with("anvil")
 }
 
-fn destroy_progress(state: BlockState, on_ground: bool, creative: bool) -> f32 {
+/// Vanilla `BlockBehaviour.getDestroyProgress` with `Player.getDestroySpeed`
+/// as the numerator: the held tool's mining speed over hardness, divided by 30
+/// with the correct tool for drops and 100 without.
+fn destroy_progress(
+    state: BlockState,
+    on_ground: bool,
+    creative: bool,
+    held_stack: Option<&ItemStackData>,
+) -> f32 {
     if creative {
         return 1.0;
     }
@@ -1089,17 +1101,54 @@ fn destroy_progress(state: BlockState, on_ground: bool, creative: bool) -> f32 {
         return 1.0;
     }
 
-    let mut speed = 1.0_f32;
+    let tool = held_stack.and_then(stack_component::<Tool>);
+    let tool = tool.as_ref();
+    let kind = state.as_block_kind();
+
+    let mut speed = tool.map_or(1.0, |t| tool_mining_speed(t, kind));
+    // TODO: the `getDestroySpeed` modifier chain (mining efficiency, haste /
+    // mining fatigue, block break speed, submerged mining speed) needs
+    // attribute and mob-effect tracking.
     if !on_ground {
         speed /= 5.0;
     }
 
-    let divisor = if behavior.requires_correct_tool_for_drops {
-        100.0
-    } else {
-        30.0
-    };
+    let correct_tool = !behavior.requires_correct_tool_for_drops
+        || tool.is_some_and(|t| tool_correct_for_drops(t, kind));
+    let divisor = if correct_tool { 30.0 } else { 100.0 };
     speed / hardness / divisor
+}
+
+/// Vanilla `Tool.getMiningSpeed`: first rule with a speed that covers the
+/// block wins, else the default.
+fn tool_mining_speed(tool: &Tool, kind: BlockKind) -> f32 {
+    first_rule_value(tool, kind, |r| r.speed).unwrap_or(tool.default_mining_speed)
+}
+
+/// Vanilla `Tool.isCorrectForDrops`: first rule with a verdict that covers
+/// the block wins, else false.
+fn tool_correct_for_drops(tool: &Tool, kind: BlockKind) -> bool {
+    first_rule_value(tool, kind, |r| r.correct_for_drops).unwrap_or(false)
+}
+
+fn first_rule_value<T: Copy>(
+    tool: &Tool,
+    kind: BlockKind,
+    field: impl Fn(&ToolRule) -> Option<T>,
+) -> Option<T> {
+    tool.rules
+        .iter()
+        .find_map(|rule| field(rule).filter(|_| holder_set_contains(&rule.blocks, kind)))
+}
+
+/// `Named` sets reference a block tag whose contents aren't on the wire, and
+/// pomme keeps no synced tag data, so they conservatively match nothing
+/// (azalea's item defaults inline every tag as `Direct`).
+fn holder_set_contains(set: &HolderSet<BlockKind, Identifier>, kind: BlockKind) -> bool {
+    match set {
+        HolderSet::Direct { contents } => contents.contains(&kind),
+        HolderSet::Named { .. } => false,
+    }
 }
 
 /// Plays a block's mining hit sound, matching vanilla
@@ -1442,5 +1491,60 @@ mod tests {
         ));
         assert!(!same_item_same_components(Some(&a), None));
         assert!(same_item_same_components(None, None));
+    }
+
+    fn rule(blocks: Vec<BlockKind>, speed: Option<f32>, correct: Option<bool>) -> ToolRule {
+        ToolRule {
+            blocks: HolderSet::Direct { contents: blocks },
+            speed,
+            correct_for_drops: correct,
+        }
+    }
+
+    /// Vanilla rule resolution: the first matching rule with the queried
+    /// field wins, and each field resolves independently.
+    #[test]
+    fn tool_rules_first_match_per_field() {
+        let tool = Tool {
+            rules: vec![
+                rule(vec![BlockKind::Obsidian], None, Some(false)),
+                rule(
+                    vec![BlockKind::Stone, BlockKind::Obsidian],
+                    Some(4.0),
+                    Some(true),
+                ),
+            ],
+            default_mining_speed: 1.5,
+            ..Tool::new()
+        };
+        assert_eq!(tool_mining_speed(&tool, BlockKind::Stone), 4.0);
+        assert!(tool_correct_for_drops(&tool, BlockKind::Stone));
+        // The speedless first rule is skipped for speed but wins for drops.
+        assert_eq!(tool_mining_speed(&tool, BlockKind::Obsidian), 4.0);
+        assert!(!tool_correct_for_drops(&tool, BlockKind::Obsidian));
+        // No matching rule: default speed, not correct for drops.
+        assert_eq!(tool_mining_speed(&tool, BlockKind::Dirt), 1.5);
+        assert!(!tool_correct_for_drops(&tool, BlockKind::Dirt));
+    }
+
+    #[test]
+    fn named_holder_set_matches_nothing() {
+        let set = HolderSet::Named {
+            key: Identifier::new("minecraft:mineable/pickaxe"),
+            contents: vec![],
+        };
+        assert!(!holder_set_contains(&set, BlockKind::Stone));
+    }
+
+    /// The generated iron pickaxe default resolves like vanilla: fast and
+    /// correct on stone, default speed on dirt.
+    #[test]
+    fn iron_pickaxe_default_tool() {
+        let pickaxe = stack(ItemKind::IronPickaxe, 1);
+        let tool = stack_component::<Tool>(&pickaxe).expect("iron pickaxe has a tool component");
+        assert_eq!(tool_mining_speed(&tool, BlockKind::Stone), 6.0);
+        assert!(tool_correct_for_drops(&tool, BlockKind::Stone));
+        assert_eq!(tool_mining_speed(&tool, BlockKind::Dirt), 1.0);
+        assert!(!tool_correct_for_drops(&tool, BlockKind::Dirt));
     }
 }
