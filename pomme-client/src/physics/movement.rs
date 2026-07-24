@@ -40,6 +40,10 @@ const FLYING_VERTICAL_FRICTION: f64 = 0.6;
 const SPRINT_AIR_ACCELERATION: f64 = 0.025_999_999_f32 as f64;
 const SPRINT_HUNGER_THRESHOLD: u32 = 6;
 const JUMP_DELAY_TICKS: u32 = 10;
+// Vanilla `Entity.getFluidJumpThreshold`; always 0.4 for the player.
+const FLUID_JUMP_THRESHOLD: f64 = 0.4;
+// Vanilla `LivingEntity.jumpInLiquid` adds 0.04f.
+const LIQUID_JUMP_ACCELERATION: f64 = 0.04_f32 as f64;
 const DEFAULT_SPRINT_WINDOW: u32 = 7;
 const FLY_TOGGLE_WINDOW: u32 = 7;
 const MINOR_COLLISION_ANGLE: f64 = 0.13962634;
@@ -56,9 +60,6 @@ pub fn tick(
     // Vanilla `LivingEntity.aiStep`.
     if player.no_jump_delay > 0 {
         player.no_jump_delay -= 1;
-    }
-    if !jump_held {
-        player.no_jump_delay = 0;
     }
 
     player.update_water_state(chunk_store);
@@ -95,13 +96,29 @@ pub fn tick(
         if input.performing_action(input::Action::Sneak) {
             input_ya -= 1.0;
         }
-        if input.performing_action(input::Action::Jump) {
+        if jump_held {
             input_ya += 1.0;
         }
         if input_ya != 0.0 {
             // Vanilla does this math in f32 before widening.
             player.velocity.y += f64::from(input_ya * player.fly_speed * 3.0);
         }
+    }
+
+    // Vanilla `LivingEntity.aiStep`: swim upward when submerged past the jump
+    // threshold, otherwise a full jump off the ground or the shallow-fluid floor.
+    if jump_held {
+        let in_water = player.in_water && player.fluid_height > 0.0;
+        if in_water && (!player.on_ground || player.fluid_height > FLUID_JUMP_THRESHOLD) {
+            player.velocity.y += LIQUID_JUMP_ACCELERATION;
+        } else if (player.on_ground || (in_water && player.fluid_height <= FLUID_JUMP_THRESHOLD))
+            && player.no_jump_delay == 0
+        {
+            jump_from_ground(player, sin_y_rot, cos_y_rot);
+            player.no_jump_delay = JUMP_DELAY_TICKS;
+        }
+    } else {
+        player.no_jump_delay = 0;
     }
 
     if player.in_water {
@@ -189,14 +206,6 @@ fn tick_land(
     // it for the end-of-tick drag, so a jump launches with ground friction.
     let on_ground_at_start = player.on_ground;
 
-    if on_ground_at_start
-        && input.performing_action(input::Action::Jump)
-        && player.no_jump_delay == 0
-    {
-        jump_from_ground(player, sin_y_rot, cos_y_rot);
-        player.no_jump_delay = JUMP_DELAY_TICKS;
-    }
-
     let saved_vy = player.velocity.y;
 
     let speed = if player.sprinting {
@@ -243,9 +252,6 @@ fn tick_water(
     sin_y_rot: f64,
     cos_y_rot: f64,
 ) {
-    if input.performing_action(input::Action::Jump) {
-        player.velocity.y += 0.04;
-    }
     if input.performing_action(input::Action::Sneak) {
         player.velocity.y -= 0.04;
     }
