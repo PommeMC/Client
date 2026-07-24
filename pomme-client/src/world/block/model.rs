@@ -188,7 +188,7 @@ impl Direction {
         d
     }
 
-    fn shade_light(&self) -> f32 {
+    pub(crate) fn shade_light(&self) -> f32 {
         match self {
             Direction::Up => 1.0,
             Direction::Down => 0.5,
@@ -1031,83 +1031,52 @@ fn check_full_cube(quads: &[BakedQuad]) -> bool {
     dirs.iter().all(|&d| d)
 }
 
-fn face_positions(dir: Direction, from: [f32; 3], to: [f32; 3]) -> [[f32; 3]; 4] {
-    // CCW winding when viewed from outside, matching chunk pipeline backface
-    // culling
+/// Vanilla `FaceInfo`: the per-face vertex order all the UV rules are defined
+/// against. Every face winds CCW viewed from outside, which the chunk
+/// pipeline's backface culling needs.
+pub(crate) fn face_positions(dir: Direction, from: [f32; 3], to: [f32; 3]) -> [[f32; 3]; 4] {
+    let [x0, y0, z0] = from;
+    let [x1, y1, z1] = to;
     match dir {
-        Direction::Up => [
-            [from[0], to[1], to[2]],
-            [to[0], to[1], to[2]],
-            [to[0], to[1], from[2]],
-            [from[0], to[1], from[2]],
-        ],
-        Direction::Down => [
-            [from[0], from[1], from[2]],
-            [to[0], from[1], from[2]],
-            [to[0], from[1], to[2]],
-            [from[0], from[1], to[2]],
-        ],
-        Direction::North => [
-            [from[0], from[1], from[2]],
-            [from[0], to[1], from[2]],
-            [to[0], to[1], from[2]],
-            [to[0], from[1], from[2]],
-        ],
-        Direction::South => [
-            [to[0], from[1], to[2]],
-            [to[0], to[1], to[2]],
-            [from[0], to[1], to[2]],
-            [from[0], from[1], to[2]],
-        ],
-        Direction::West => [
-            [from[0], from[1], to[2]],
-            [from[0], to[1], to[2]],
-            [from[0], to[1], from[2]],
-            [from[0], from[1], from[2]],
-        ],
-        Direction::East => [
-            [to[0], from[1], from[2]],
-            [to[0], to[1], from[2]],
-            [to[0], to[1], to[2]],
-            [to[0], from[1], to[2]],
-        ],
+        Direction::Down => [[x0, y0, z1], [x0, y0, z0], [x1, y0, z0], [x1, y0, z1]],
+        Direction::Up => [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]],
+        Direction::North => [[x1, y1, z0], [x1, y0, z0], [x0, y0, z0], [x0, y1, z0]],
+        Direction::South => [[x0, y1, z1], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1]],
+        Direction::West => [[x0, y1, z0], [x0, y0, z0], [x0, y0, z1], [x0, y1, z1]],
+        Direction::East => [[x1, y1, z1], [x1, y0, z1], [x1, y0, z0], [x1, y1, z0]],
     }
 }
 
-fn face_uvs(
+pub(crate) fn face_uvs(
     dir: Direction,
     from: [f32; 3],
     to: [f32; 3],
     explicit_uv: Option<&[f32; 4]>,
     rotation: Option<i32>,
 ) -> [[f32; 2]; 4] {
+    // Vanilla `FaceBakery.defaultFaceUV`, normalized to 0..1: some faces
+    // sample a window reflected about the texture center.
     let (u1, v1, u2, v2) = if let Some(uv) = explicit_uv {
         (uv[0] / 16.0, uv[1] / 16.0, uv[2] / 16.0, uv[3] / 16.0)
     } else {
         match dir {
-            Direction::Up | Direction::Down => (from[0], from[2], to[0], to[2]),
-            Direction::North | Direction::South => (from[0], 1.0 - to[1], to[0], 1.0 - from[1]),
-            Direction::East | Direction::West => (from[2], 1.0 - to[1], to[2], 1.0 - from[1]),
+            Direction::Down => (from[0], 1.0 - to[2], to[0], 1.0 - from[2]),
+            Direction::Up => (from[0], from[2], to[0], to[2]),
+            Direction::North => (1.0 - to[0], 1.0 - to[1], 1.0 - from[0], 1.0 - from[1]),
+            Direction::South => (from[0], 1.0 - to[1], to[0], 1.0 - from[1]),
+            Direction::West => (from[2], 1.0 - to[1], to[2], 1.0 - from[1]),
+            Direction::East => (1.0 - to[2], 1.0 - to[1], 1.0 - from[2], 1.0 - from[1]),
         }
     };
 
-    let mut uvs = match dir {
-        Direction::Up => [[u1, v2], [u2, v2], [u2, v1], [u1, v1]],
-        Direction::Down => [[u1, v1], [u2, v1], [u2, v2], [u1, v2]],
-        Direction::North => [[u1, v2], [u1, v1], [u2, v1], [u2, v2]],
-        Direction::South | Direction::West | Direction::East => {
-            [[u2, v2], [u2, v1], [u1, v1], [u1, v2]]
-        }
-    };
-
-    if let Some(rot) = rotation {
-        let steps = ((rot % 360 + 360) % 360) / 90;
-        for _ in 0..steps {
-            uvs.rotate_right(1);
-        }
-    }
-
-    uvs
+    // Vanilla `CuboidFace.UVs` corner cycle, identical for every face (the
+    // per-face variation lives in `face_positions`' vertex order).
+    // `Quadrant.rotateVertexIndex` shifts each vertex forward through the
+    // cycle, spinning the texture clockwise per 90 degrees viewed from
+    // outside the block.
+    let cycle = [[u1, v1], [u1, v2], [u2, v2], [u2, v1]];
+    let shift = rotation.map_or(0, |r| r.rem_euclid(360) / 90) as usize;
+    std::array::from_fn(|i| cycle[(i + shift) % 4])
 }
 
 fn apply_element_rotation(
@@ -1303,5 +1272,118 @@ fn determine_tint(block_name: &str) -> Tint {
         Tint::Foliage
     } else {
         Tint::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIRS: [Direction; 6] = [
+        Direction::Down,
+        Direction::Up,
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ];
+
+    /// The (right, up) axes of each face viewed from outside the block:
+    /// sky-up for the sides, and vanilla's map orientation for up/down.
+    /// `right x up` is the outward normal.
+    fn face_axes(dir: Direction) -> ([f32; 3], [f32; 3]) {
+        match dir {
+            Direction::Down => ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            Direction::Up => ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
+            Direction::North => ([-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            Direction::South => ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            Direction::West => ([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+            Direction::East => ([0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
+        }
+    }
+
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    /// Quads must stay CCW viewed from outside for backface culling.
+    #[test]
+    fn face_winding_is_ccw_from_outside() {
+        for dir in DIRS {
+            let p = face_positions(dir, [0.0; 3], [1.0; 3]);
+            let e1: [f32; 3] = std::array::from_fn(|i| p[1][i] - p[0][i]);
+            let e2: [f32; 3] = std::array::from_fn(|i| p[2][i] - p[0][i]);
+            let normal = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            let outward = dir.offset().map(|c| c as f32);
+            assert!(dot(normal, outward) > 0.0, "{dir:?} winds the wrong way");
+        }
+    }
+
+    /// Every face must show the full-tile texture upright at rotation 0 and
+    /// spin it clockwise per 90 degrees, vanilla's `FaceInfo` +
+    /// `CuboidFace.UVs` + `Quadrant` behavior (the piston's side faces use
+    /// 90/270 and read 180 degrees off when the direction is inverted).
+    #[test]
+    fn face_uvs_show_upright_clockwise_rotated_texture() {
+        // Image corners in clockwise order; screen corner `s` under a
+        // clockwise rotation by `steps` shows image corner `(s - steps) % 4`.
+        const IMAGE_CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        for dir in DIRS {
+            let (right, up) = face_axes(dir);
+            let positions = face_positions(dir, [0.0; 3], [1.0; 3]);
+            for (rot, steps) in [
+                (None, 0),
+                (Some(0), 0),
+                (Some(90), 1),
+                (Some(180), 2),
+                (Some(270), 3),
+            ] {
+                let uvs = face_uvs(dir, [0.0; 3], [1.0; 3], Some(&[0.0, 0.0, 16.0, 16.0]), rot);
+                let mid = |axis: [f32; 3]| {
+                    let coords = positions.map(|p| dot(p, axis));
+                    (coords.iter().copied().fold(f32::INFINITY, f32::min)
+                        + coords.iter().copied().fold(f32::NEG_INFINITY, f32::max))
+                        / 2.0
+                };
+                let (right_mid, up_mid) = (mid(right), mid(up));
+                for (p, uv) in positions.iter().zip(uvs) {
+                    let screen_corner = match (dot(*p, right) > right_mid, dot(*p, up) > up_mid) {
+                        (false, true) => 0,
+                        (true, true) => 1,
+                        (true, false) => 2,
+                        (false, false) => 3,
+                    };
+                    let expected = IMAGE_CORNERS[(screen_corner + 4 - steps) % 4];
+                    assert_eq!(uv, expected, "{dir:?} rotation {rot:?} vertex {p:?}");
+                }
+            }
+        }
+    }
+
+    /// Default UV windows per face, vanilla `FaceBakery.defaultFaceUV`: the
+    /// down/north/east windows reflect about the texture center.
+    #[test]
+    fn default_uv_windows_match_vanilla() {
+        let from = [2.0 / 16.0, 3.0 / 16.0, 4.0 / 16.0];
+        let to = [8.0 / 16.0, 9.0 / 16.0, 10.0 / 16.0];
+        let expected = [
+            (Direction::Down, (0.125, 0.375, 0.5, 0.75)),
+            (Direction::Up, (0.125, 0.25, 0.5, 0.625)),
+            (Direction::North, (0.5, 0.4375, 0.875, 0.8125)),
+            (Direction::South, (0.125, 0.4375, 0.5, 0.8125)),
+            (Direction::West, (0.25, 0.4375, 0.625, 0.8125)),
+            (Direction::East, (0.375, 0.4375, 0.75, 0.8125)),
+        ];
+        for (dir, (u1, v1, u2, v2)) in expected {
+            let uvs = face_uvs(dir, from, to, None, None);
+            // The cycle assigns vertex 0 the (u1, v1) corner and vertex 2 the
+            // (u2, v2) corner.
+            assert_eq!(uvs[0], [u1, v1], "{dir:?} window origin");
+            assert_eq!(uvs[2], [u2, v2], "{dir:?} window extent");
+        }
     }
 }
