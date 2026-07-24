@@ -1,4 +1,5 @@
 use azalea_protocol::packets::game::ServerboundGamePacket;
+use pomme_gui::types::Position;
 
 use crate::app::core::AppCore;
 use crate::app::phases::in_game::GameState;
@@ -119,6 +120,10 @@ pub fn update_connecting(
         elements,
         core.input.cursor_pos(),
         false,
+        gfx.gui.extract_render_state(Position::new(
+            core.input.cursor_pos().0 as i32,
+            core.input.cursor_pos().1 as i32,
+        )),
     ) {
         tracing::error!("Render error: {e}");
     }

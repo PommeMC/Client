@@ -87,6 +87,8 @@ fn main() {
         ("particle.frag", shaderc::ShaderKind::Fragment),
         ("clouds.vert", shaderc::ShaderKind::Vertex),
         ("clouds.frag", shaderc::ShaderKind::Fragment),
+        ("gui_rect.vert", shaderc::ShaderKind::Vertex),
+        ("gui_rect.frag", shaderc::ShaderKind::Fragment),
     ];
 
     for (file, kind) in &shaders {
