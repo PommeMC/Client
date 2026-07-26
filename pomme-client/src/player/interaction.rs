@@ -1532,7 +1532,7 @@ mod tests {
     /// correct on stone, default speed on dirt.
     #[test]
     fn iron_pickaxe_default_tool() {
-        let pickaxe = stack(ItemKind::IronPickaxe, 1);
+        let pickaxe = ItemStackData::new(ItemKind::IronPickaxe, 1);
         let tool = stack_component::<Tool>(&pickaxe).expect("iron pickaxe has a tool component");
         assert_eq!(tool_mining_speed(&tool, BlockKind::Stone), 6.0);
         assert!(tool_correct_for_drops(&tool, BlockKind::Stone));
