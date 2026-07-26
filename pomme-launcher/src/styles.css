@@ -2480,6 +2480,71 @@ body {
   border-color: var(--border-light);
 }
 
+.creatable-select {
+  align-items: stretch;
+  overflow: hidden;
+  cursor: default;
+}
+
+.creatable-select:hover:has(.creatable-select-selected),
+.creatable-select:has(.creatable-select-toggle:hover) {
+  border-color: var(--border-light);
+}
+
+.creatable-select:focus-within:has(.creatable-select-input:focus) {
+  border-color: var(--border-glow);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.creatable-select-selected {
+  display: flex;
+  padding: 11px 14px;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: transparent;
+  border: none;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.creatable-select-input {
+  flex: 1;
+  align-self: stretch;
+  padding: 11px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font-body);
+  outline: none;
+  min-width: 0;
+}
+
+.creatable-select-input:focus {
+  box-shadow: none;
+}
+
+.creatable-select-toggle {
+  width: 40px;
+  flex-shrink: 0;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.creatable-select-toggle:focus {
+  outline: none;
+}
+
 .custom-select-arrow {
   font-size: 14px;
   color: var(--text-muted);
