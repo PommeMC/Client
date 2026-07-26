@@ -1283,6 +1283,8 @@ fn determine_tint(block_name: &str) -> Tint {
 
 #[cfg(test)]
 mod tests {
+    use glam::Vec3;
+
     use super::*;
 
     const DIRS: [Direction; 6] = [
@@ -1297,35 +1299,25 @@ mod tests {
     /// The (right, up) axes of each face viewed from outside the block:
     /// sky-up for the sides, and vanilla's map orientation for up/down.
     /// `right x up` is the outward normal.
-    fn face_axes(dir: Direction) -> ([f32; 3], [f32; 3]) {
+    fn face_axes(dir: Direction) -> (Vec3, Vec3) {
         match dir {
-            Direction::Down => ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
-            Direction::Up => ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
-            Direction::North => ([-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
-            Direction::South => ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
-            Direction::West => ([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
-            Direction::East => ([0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
+            Direction::Down => (Vec3::X, Vec3::Z),
+            Direction::Up => (Vec3::X, Vec3::NEG_Z),
+            Direction::North => (Vec3::NEG_X, Vec3::Y),
+            Direction::South => (Vec3::X, Vec3::Y),
+            Direction::West => (Vec3::Z, Vec3::Y),
+            Direction::East => (Vec3::NEG_Z, Vec3::Y),
         }
-    }
-
-    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
     }
 
     /// Quads must stay CCW viewed from outside for backface culling.
     #[test]
     fn face_winding_is_ccw_from_outside() {
         for dir in DIRS {
-            let p = face_positions(dir, [0.0; 3], [1.0; 3]);
-            let e1: [f32; 3] = std::array::from_fn(|i| p[1][i] - p[0][i]);
-            let e2: [f32; 3] = std::array::from_fn(|i| p[2][i] - p[0][i]);
-            let normal = [
-                e1[1] * e2[2] - e1[2] * e2[1],
-                e1[2] * e2[0] - e1[0] * e2[2],
-                e1[0] * e2[1] - e1[1] * e2[0],
-            ];
-            let outward = dir.offset().map(|c| c as f32);
-            assert!(dot(normal, outward) > 0.0, "{dir:?} winds the wrong way");
+            let p = face_positions(dir, [0.0; 3], [1.0; 3]).map(Vec3::from_array);
+            let normal = (p[1] - p[0]).cross(p[2] - p[0]);
+            let outward = Vec3::from_array(dir.offset().map(|c| c as f32));
+            assert!(normal.dot(outward) > 0.0, "{dir:?} winds the wrong way");
         }
     }
 
@@ -1340,7 +1332,7 @@ mod tests {
         const IMAGE_CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         for dir in DIRS {
             let (right, up) = face_axes(dir);
-            let positions = face_positions(dir, [0.0; 3], [1.0; 3]);
+            let positions = face_positions(dir, [0.0; 3], [1.0; 3]).map(Vec3::from_array);
             for (rot, steps) in [
                 (None, 0),
                 (Some(0), 0),
@@ -1349,15 +1341,15 @@ mod tests {
                 (Some(270), 3),
             ] {
                 let uvs = face_uvs(dir, [0.0; 3], [1.0; 3], Some(&[0.0, 0.0, 16.0, 16.0]), rot);
-                let mid = |axis: [f32; 3]| {
-                    let coords = positions.map(|p| dot(p, axis));
+                let mid = |axis: Vec3| {
+                    let coords = positions.map(|p| p.dot(axis));
                     (coords.iter().copied().fold(f32::INFINITY, f32::min)
                         + coords.iter().copied().fold(f32::NEG_INFINITY, f32::max))
                         / 2.0
                 };
                 let (right_mid, up_mid) = (mid(right), mid(up));
                 for (p, uv) in positions.iter().zip(uvs) {
-                    let screen_corner = match (dot(*p, right) > right_mid, dot(*p, up) > up_mid) {
+                    let screen_corner = match (p.dot(right) > right_mid, p.dot(up) > up_mid) {
                         (false, true) => 0,
                         (true, true) => 1,
                         (true, false) => 2,
