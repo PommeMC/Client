@@ -1419,26 +1419,18 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
 mod tests {
     use super::*;
 
-    fn stack(kind: ItemKind, count: i32) -> ItemStackData {
-        ItemStackData {
-            kind,
-            count,
-            component_patch: Default::default(),
-        }
-    }
-
     /// Vanilla `isSameItemSameComponents`: count never matters, the item type
     /// does, and the empty hand only matches itself.
     #[test]
     fn item_comparison_ignores_count() {
-        let a = stack(ItemKind::Stone, 1);
+        let a = ItemStackData::new(ItemKind::Stone, 1);
         assert!(same_item_same_components(
             Some(&a),
-            Some(&stack(ItemKind::Stone, 64))
+            Some(&ItemStackData::new(ItemKind::Stone, 64))
         ));
         assert!(!same_item_same_components(
             Some(&a),
-            Some(&stack(ItemKind::Dirt, 1))
+            Some(&ItemStackData::new(ItemKind::Dirt, 1))
         ));
         assert!(!same_item_same_components(Some(&a), None));
         assert!(same_item_same_components(None, None));
