@@ -723,15 +723,22 @@ fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
         collect_parts_from_node(node, None, &mut parts);
     }
     if parts.is_empty()
-        && let Some(path) =
-            find_first_model_string(json).or_else(|| find_first_string_for_key(json, "base"))
+        && let Some(path) = first_item_model_ref(json)
     {
         parts.push(ModelPart {
-            path: strip_mc_prefix(&path).to_string(),
+            path,
             transform: None,
         });
     }
     parts
+}
+
+/// First `model` reference in an item definition, falling back to a special
+/// renderer's `base`.
+pub fn first_item_model_ref(json: &serde_json::Value) -> Option<String> {
+    find_first_model_string(json)
+        .or_else(|| find_first_string_for_key(json, "base"))
+        .map(|path| strip_mc_prefix(&path).to_string())
 }
 
 fn collect_parts_from_node(

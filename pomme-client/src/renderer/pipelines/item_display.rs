@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 
 use glam::{Mat4, Vec3};
 
-use crate::world::block::model::{
-    find_first_model_string, find_first_string_for_key, parse_vec3, strip_mc_prefix,
-};
+use crate::world::block::model::{first_item_model_ref, parse_vec3, strip_mc_prefix};
 
 const MODEL_PARENT_LIMIT: u32 = 16;
 
@@ -75,9 +73,7 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
 
 fn resolve_item_model_path(name: &str, items_dir: &Path) -> Option<String> {
     let item_json = read_json(&items_dir.join(format!("{name}.json")))?;
-    let model_path = find_first_model_string(&item_json)
-        .or_else(|| find_first_string_for_key(&item_json, "base"))?;
-    Some(strip_mc_prefix(&model_path).to_string())
+    first_item_model_ref(&item_json)
 }
 
 fn parse_display_transform(json: &serde_json::Value) -> Option<DisplayTransform> {
