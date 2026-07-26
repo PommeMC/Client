@@ -1075,7 +1075,13 @@ pub(crate) fn face_uvs(
     // cycle, spinning the texture clockwise per 90 degrees viewed from
     // outside the block.
     let cycle = [[u1, v1], [u1, v2], [u2, v2], [u2, v1]];
-    let shift = rotation.map_or(0, |r| r.rem_euclid(360) / 90) as usize;
+    let shift = rotation.map_or(0, |r| {
+        if r % 90 != 0 {
+            // Vanilla `Quadrant.parseJson` rejects the whole model instead.
+            tracing::warn!("face uv rotation {r} is not a multiple of 90, truncating");
+        }
+        r.rem_euclid(360) / 90
+    }) as usize;
     std::array::from_fn(|i| cycle[(i + shift) % 4])
 }
 
