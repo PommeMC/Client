@@ -15,9 +15,7 @@ use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerA
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use azalea_registry::HolderSet;
 use azalea_registry::builtin::{BlockKind, ItemKind};
-use azalea_registry::identifier::Identifier;
 use glam::{DVec3, Vec3, dvec3};
 use pomme_protocol::wire;
 
@@ -1138,17 +1136,7 @@ fn first_rule_value<T: Copy>(
 ) -> Option<T> {
     tool.rules
         .iter()
-        .find_map(|rule| field(rule).filter(|_| holder_set_contains(&rule.blocks, kind)))
-}
-
-/// `Named` sets reference a block tag whose contents aren't on the wire, and
-/// pomme keeps no synced tag data, so they conservatively match nothing
-/// (azalea's item defaults inline every tag as `Direct`).
-fn holder_set_contains(set: &HolderSet<BlockKind, Identifier>, kind: BlockKind) -> bool {
-    match set {
-        HolderSet::Direct { contents } => contents.contains(&kind),
-        HolderSet::Named { .. } => false,
-    }
+        .find_map(|rule| field(rule).filter(|_| rule.blocks.contains(kind)))
 }
 
 /// Plays a block's mining hit sound, matching vanilla
@@ -1466,6 +1454,9 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
 
 #[cfg(test)]
 mod tests {
+    use azalea_registry::HolderSet;
+    use azalea_registry::identifier::Identifier;
+
     use super::*;
 
     /// Vanilla `isSameItemSameComponents`: count never matters, the item type
@@ -1519,13 +1510,17 @@ mod tests {
         assert!(!tool_correct_for_drops(&tool, BlockKind::Dirt));
     }
 
+    /// Anchor on azalea's `HolderSet::contains`: `Named` sets reference a
+    /// block tag whose contents aren't on the wire and are never populated,
+    /// so tool rules sent with tags conservatively match nothing (azalea's
+    /// item defaults inline every tag as `Direct`).
     #[test]
     fn named_holder_set_matches_nothing() {
-        let set = HolderSet::Named {
+        let set: HolderSet<BlockKind, Identifier> = HolderSet::Named {
             key: Identifier::new("minecraft:mineable/pickaxe"),
             contents: vec![],
         };
-        assert!(!holder_set_contains(&set, BlockKind::Stone));
+        assert!(!set.contains(BlockKind::Stone));
     }
 
     /// The generated iron pickaxe default resolves like vanilla: fast and
