@@ -2507,7 +2507,6 @@ body {
   font-size: 13px;
   color: var(--text);
   cursor: pointer;
-  transition: all 0.2s;
   text-align: left;
 }
 
@@ -2540,10 +2539,6 @@ body {
   border: none;
   cursor: pointer;
   color: var(--text-muted);
-  transition:
-    background 0.15s,
-    color 0.15s,
-    border-color 0.15s;
 }
 
 .creatable-select-toggle:focus {
