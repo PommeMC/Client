@@ -410,29 +410,8 @@ pub fn bake_item_models(
         };
 
         let parts = collect_model_parts(&json);
-        let Some(first) = parts.first() else { continue };
-
-        if parts.len() == 1 {
-            let resolved = resolve_model(
-                &first.path,
-                jar_assets_dir,
-                asset_index,
-                &mut model_cache,
-                packs,
-            );
-            if resolved.elements.is_empty() {
-                if let Some(value) = resolved.textures.get("layer0") {
-                    let stripped = strip_mc_prefix(value);
-                    let key = if let Some(rest) = stripped.strip_prefix("block/") {
-                        rest.to_string()
-                    } else {
-                        item_textures.insert(stripped.to_string());
-                        stripped.to_string()
-                    };
-                    flat_keys.insert(item_name.to_string(), key);
-                }
-                continue;
-            }
+        if parts.is_empty() {
+            continue;
         }
 
         let tint = determine_tint(item_name);
@@ -445,6 +424,21 @@ pub fn bake_item_models(
                 &mut model_cache,
                 packs,
             );
+            // A flat sprite (layer0, no elements) only makes sense as the
+            // sole part; `merged` stays empty so no 3D model is inserted.
+            if parts.len() == 1 && resolved.elements.is_empty() {
+                if let Some(value) = resolved.textures.get("layer0") {
+                    let stripped = strip_mc_prefix(value);
+                    let key = if let Some(rest) = stripped.strip_prefix("block/") {
+                        rest.to_string()
+                    } else {
+                        item_textures.insert(stripped.to_string());
+                        stripped.to_string()
+                    };
+                    flat_keys.insert(item_name.to_string(), key);
+                }
+                break;
+            }
             let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) else {
                 continue;
             };
@@ -755,7 +749,7 @@ fn collect_parts_from_node(
     let node_type = node
         .get("type")
         .and_then(|t| t.as_str())
-        .map(|t| t.strip_prefix("minecraft:").unwrap_or(t));
+        .map(strip_mc_prefix);
     match node_type {
         Some("composite") => {
             if let Some(models) = node.get("models").and_then(|m| m.as_array()) {
@@ -779,7 +773,8 @@ fn collect_parts_from_node(
 
 /// Vanilla `Transformation.compose` (Transformation.java:103): `translation ·
 /// leftRotation · scale · rightRotation`, translation in block units. The
-/// codec's raw-matrix alternative is unused by vanilla assets and ignored.
+/// codec's raw-matrix and axis-angle quaternion alternatives are unused by
+/// vanilla assets and ignored.
 fn parse_item_transformation(json: &serde_json::Value) -> Mat4 {
     let quat = |key: &str| {
         json.get(key)
