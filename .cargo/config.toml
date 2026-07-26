@@ -1,0 +1,4 @@
+# linux (rust 1.90+) already links with lld and macos ships a fast linker;
+# msvc's link.exe is the slow one, so swap in the toolchain-bundled lld there.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
