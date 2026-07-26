@@ -1052,7 +1052,7 @@ impl InteractionState {
 fn same_item_same_components(a: Option<&ItemStackData>, b: Option<&ItemStackData>) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some(a), Some(b)) => a.kind == b.kind && a.component_patch == b.component_patch,
+        (Some(a), Some(b)) => a.is_same_item_and_components(b),
         _ => false,
     }
 }
