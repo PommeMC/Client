@@ -46,8 +46,8 @@ pub struct BlockOverlayPipeline {
     texture_set: vk::DescriptorSet,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Allocation>,
-    vertex_buffer: vk::Buffer,
-    vertex_allocation: Allocation,
+    vertex_buffers: Vec<vk::Buffer>,
+    vertex_allocations: Vec<Allocation>,
     atlas_image: vk::Image,
     atlas_view: vk::ImageView,
     atlas_sampler: vk::Sampler,
@@ -201,13 +201,19 @@ impl BlockOverlayPipeline {
             MAX_OVERLAY_VERTS
         ];
         let bytes = bytemuck::cast_slice::<OverlayVertex, u8>(&placeholder);
-        let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
-            device,
-            allocator,
-            bytes,
-            vk::BufferUsageFlags::VertexBuffer,
-            "block_overlay_vertices",
-        );
+        let mut vertex_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut vertex_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let (buf, alloc) = util::create_mapped_buffer(
+                device,
+                allocator,
+                bytes,
+                vk::BufferUsageFlags::VertexBuffer,
+                "block_overlay_vertices",
+            );
+            vertex_buffers.push(buf);
+            vertex_allocations.push(alloc);
+        }
 
         Self {
             pipeline,
@@ -219,8 +225,8 @@ impl BlockOverlayPipeline {
             texture_set,
             camera_buffers,
             camera_allocations,
-            vertex_buffer,
-            vertex_allocation,
+            vertex_buffers,
+            vertex_allocations,
             atlas_image,
             atlas_view,
             atlas_sampler,
@@ -249,8 +255,10 @@ impl BlockOverlayPipeline {
         if vertices.is_empty() {
             return;
         }
+        // TODO: one overlay per frame; multiple draws would need a write cursor.
         let bytes = bytemuck::cast_slice::<OverlayVertex, u8>(&vertices);
-        self.vertex_allocation.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
+        self.vertex_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
+            .copy_from_slice(bytes);
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
         let push = OverlayPush {
@@ -270,7 +278,7 @@ impl BlockOverlayPipeline {
             &[self.camera_sets[frame], self.texture_set],
             &[],
         );
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+        cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
         cmd.draw(vertices.len() as u32, 1, 0, 0);
     }
 
@@ -288,14 +296,14 @@ impl BlockOverlayPipeline {
                     std::mem::zeroed()
                 }))
                 .ok();
-        }
 
-        device.destroy_buffer(self.vertex_buffer, None);
-        alloc
-            .free(std::mem::replace(&mut self.vertex_allocation, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
+            device.destroy_buffer(self.vertex_buffers[i], None);
+            alloc
+                .free(std::mem::replace(&mut self.vertex_allocations[i], unsafe {
+                    std::mem::zeroed()
+                }))
+                .ok();
+        }
 
         device.destroy_sampler(self.atlas_sampler, None);
         device.destroy_image_view(self.atlas_view, None);
