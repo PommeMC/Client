@@ -21,7 +21,7 @@ The goal is a lightweight, performant alternative to the official Java client.
 
 - **Vulkan rendering**: chunk meshing, GPU frustum and cave-occlusion culling, smooth lighting, water/lava, entities and mobs, block entities, weather, clouds, sky, block overlays, hand animation
 - **Vanilla-exact physics**: sprinting, swimming, drowning, collision, all matched against decompiled source
-- **Full protocol support**: connects to 26.2 servers via azalea-protocol, handles chunk streaming, block updates, chat
+- **Multi-version protocol support**: connects to vanilla servers from 1.21.9 through 26.2, with per-version packet-id and registry tables generated from the decompiled reference; handles chunk streaming, block updates, chat
 - **Microsoft authentication**: sign in with your Microsoft account, tokens stored in the OS keyring
 - **HUD & menus**: health, hunger, air bubbles, hotbar, F3 debug, chat, pause menu, options, server list
 - **Launcher**: Tauri-based launcher with frosted glass UI, multi-account management, Mojang patch notes, installation manager
@@ -29,8 +29,10 @@ The goal is a lightweight, performant alternative to the official Java client.
 ## Architecture
 
 ```bash
-pomme-client/    # Minecraft client (Rust, Vulkan)
-pomme-launcher/  # Launcher app (Tauri, React, TypeScript)
+pomme-client/         # Minecraft client (Rust, Vulkan)
+pomme-launcher/       # Launcher app (Tauri, React, TypeScript)
+pomme-protocol/       # Per-version protocol data and wire encoding
+pomme-gpu-allocator/  # Vendored fork of the gpu-allocator crate
 ```
 
 The client is a standalone binary that receives launch arguments from
@@ -100,6 +102,15 @@ Running the standalone client requires minecraft assets, for which you have 2 op
      --versions-dir $PWD/reference/versions \
      --game-dir $PWD/reference/game-dir
    ```
+
+## Development commands
+
+Run `just` with no arguments to list every recipe. The common ones:
+
+- `just client-dev` / `just client-build` / `just client-release`: run, build, or benchmark the client; flags forward after `--`, e.g. `just client-dev -- --username Steve`
+- `just launcher-dev` / `just launcher-build`: run or bundle the launcher
+- `just client-pre-pr` / `just launcher-pre-pr`: the fmt, clippy, and test checks CI enforces
+- `just protogen` / `just registrygen` / `just blockgen` / `just lightgen`: regenerate a version's packet-id, registry, block-state, and light tables from `reference/<version>/`
 
 ## Contributing
 
