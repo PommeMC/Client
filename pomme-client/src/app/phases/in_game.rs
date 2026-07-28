@@ -461,6 +461,11 @@ impl GameState {
                 self.chat.clear_messages();
                 true
             }
+            KeyCode::KeyF => {
+                let enabled = crate::renderer::camera::toggle_fog();
+                self.debug_feedback(if enabled { "Fog: ON" } else { "Fog: OFF" });
+                true
+            }
             KeyCode::KeyG => {
                 self.show_chunk_borders = !self.show_chunk_borders;
                 self.debug_feedback(if self.show_chunk_borders {

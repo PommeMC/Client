@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use glam::camera::rh::{proj, view};
 use glam::{DVec3, FloatExt, Mat4, Vec3};
 
@@ -429,6 +431,15 @@ const WATER_FOG_END: f32 = 96.0;
 const ENV_FOG_START: f32 = 0.0;
 const ENV_FOG_END: f32 = 1024.0;
 
+/// Session-only fog kill switch, vanilla's `FogRenderer.toggleFog` (the F3+F
+/// debug chord; not a saved setting, and a static exactly like vanilla's).
+static FOG_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Flip the fog toggle, returning the new state.
+pub fn toggle_fog() -> bool {
+    !FOG_ENABLED.fetch_xor(true, Ordering::Relaxed)
+}
+
 /// Milliseconds since the first call this session, as u32 (wraps after ~49
 /// days). The chunk shaders compute section fade-in from per-section upload
 /// stamps against this clock (`camera_block.w`), so both sides must use this
@@ -458,7 +469,13 @@ impl CameraUniform {
         // keep the whole loaded area visible.
         let blocks = (render_distance_chunks * 16) as f32;
         let span = (blocks / 10.0).clamp(4.0, 64.0);
-        let (fog_start, fog_end, env_start, env_end, fog_rgb) = if camera.top_down().is_some() {
+        let fog_off = !FOG_ENABLED.load(Ordering::Relaxed);
+        let (fog_start, fog_end, env_start, env_end, fog_rgb) = if fog_off {
+            // F3+F: bands that never start kill every fog (water included),
+            // matching vanilla's toggleFog early-out. `linear_fog_value`
+            // returns 0 before its division for dist <= start, so MAX is safe.
+            (f32::MAX, f32::MAX, f32::MAX, f32::MAX, sky_color)
+        } else if camera.top_down().is_some() {
             let far = camera.depth_far;
             (far, far, far, far, sky_color)
         } else if eyes_in_water {
