@@ -53,7 +53,7 @@ impl MainMenu {
 
         let on_friends = self.friend_tab == FriendTab::Friends;
         if on_friends {
-            self.handle_text_input(input, 1);
+            self.cycle_fields(input, 1);
         }
         let popup_open = self.pending_remove.is_some();
 
@@ -96,16 +96,12 @@ impl MainMenu {
             cursor: (-1.0, -1.0),
             clicked: false,
             mouse_held: false,
-            typed_chars: Vec::new(),
-            backspace: false,
+            events: Vec::new(),
+            shift: false,
             enter: false,
             escape: false,
             tab: false,
             f5: false,
-            select_all: false,
-            copy: false,
-            cut: false,
-            undo: false,
             scroll_delta: 0.0,
         };
         let mut elements = self
@@ -332,21 +328,21 @@ impl MainMenu {
         // `lw - 20(button) - 3(gap)`, 20px send button flush right.
         let field_y = content_y + 3.0 * gs;
         let field_w = lw - 23.0 * gs;
-        push_text_field(
+        self.text_field(
             elements,
+            TextTarget::AddFriend,
+            0,
+            input,
             lx,
             field_y,
             field_w,
             field_h,
             fs,
             gs,
-            &self.add_friend_name,
-            self.focused_field == Some(0),
-            self.focused_field == Some(0) && self.field_all_selected,
-            &self.cursor_blink,
             text_width_fn,
         );
-        if self.add_friend_name.is_empty() {
+        // Vanilla EditBox hint: shown only while empty and unfocused.
+        if self.add_friend_name.value().is_empty() && self.focused_field != Some(0) {
             elements.push(MenuElement::Text {
                 x: lx + 4.0 * gs,
                 y: field_y + (field_h - fs) / 2.0,
@@ -355,9 +351,6 @@ impl MainMenu {
                 color: MSG_DIM,
                 centered: false,
             });
-        }
-        if clicked && common::hit_test(cursor, [lx, field_y, field_w, field_h]) {
-            self.on_field_click(0);
         }
         let send_hit = icon_button(
             elements,
@@ -375,7 +368,7 @@ impl MainMenu {
         );
         let submit = (clicked && send_hit) || (self.focused_field == Some(0) && input.enter);
         if submit {
-            let name = self.add_friend_name.trim().to_string();
+            let name = self.add_friend_name.value().trim().to_string();
             if !name.is_empty() {
                 self.add_friend_name.clear();
                 self.friend_mutate(FriendAction::AddByName(name));

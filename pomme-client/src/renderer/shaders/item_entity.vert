@@ -2,11 +2,7 @@
 
 #include "fog.glsl"
 
-layout(set = 0, binding = 0) uniform CameraUniform {
-    mat4 view_proj;
-    vec4 camera_pos;
-    vec4 fog_color;
-};
+#include "camera_ubo.glsl"
 
 layout(push_constant) uniform PushConstants {
     mat4 model;
@@ -29,6 +25,6 @@ void main() {
     v_tex_coords = tex_coords;
     v_light = light_tint.r;
     v_tint = light_tint.gba;
-    v_fog = fog_factor(rel, camera_pos.w, fog_color.w);
+    v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
 }

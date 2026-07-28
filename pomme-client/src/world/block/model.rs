@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use glam::{Mat4, Quat, Vec3};
 use serde::Deserialize;
 
 use super::registry::{FaceTextures, Tint};
@@ -188,7 +189,7 @@ impl Direction {
         d
     }
 
-    fn shade_light(&self) -> f32 {
+    pub(crate) fn shade_light(&self) -> f32 {
         match self {
             Direction::Up => 1.0,
             Direction::Down => 0.5,
@@ -408,32 +409,57 @@ pub fn bake_item_models(
             continue;
         };
 
-        let raw_path =
-            find_first_model_string(&json).or_else(|| find_first_string_for_key(&json, "base"));
-        let Some(raw_path) = raw_path else { continue };
-        let path = raw_path
-            .strip_prefix("minecraft:")
-            .unwrap_or(&raw_path)
-            .to_string();
-
-        let resolved = resolve_model(&path, jar_assets_dir, asset_index, &mut model_cache, packs);
-
-        if resolved.elements.is_empty() {
-            if let Some(value) = resolved.textures.get("layer0") {
-                let stripped = value.strip_prefix("minecraft:").unwrap_or(value);
-                let key = if let Some(rest) = stripped.strip_prefix("block/") {
-                    rest.to_string()
-                } else {
-                    item_textures.insert(stripped.to_string());
-                    stripped.to_string()
-                };
-                flat_keys.insert(item_name.to_string(), key);
-            }
+        let parts = collect_model_parts(&json);
+        if parts.is_empty() {
             continue;
         }
 
         let tint = determine_tint(item_name);
-        if let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) {
+        let mut merged: Option<BakedModel> = None;
+        for part in &parts {
+            let resolved = resolve_model(
+                &part.path,
+                jar_assets_dir,
+                asset_index,
+                &mut model_cache,
+                packs,
+            );
+            // A flat sprite (layer0, no elements) only makes sense as the
+            // sole part; `merged` stays empty so no 3D model is inserted.
+            if parts.len() == 1 && resolved.elements.is_empty() {
+                if let Some(value) = resolved.textures.get("layer0") {
+                    let stripped = strip_mc_prefix(value);
+                    let key = if let Some(rest) = stripped.strip_prefix("block/") {
+                        rest.to_string()
+                    } else {
+                        item_textures.insert(stripped.to_string());
+                        stripped.to_string()
+                    };
+                    flat_keys.insert(item_name.to_string(), key);
+                }
+                break;
+            }
+            let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) else {
+                continue;
+            };
+            if let Some(m) = part.transform {
+                for quad in &mut baked.quads {
+                    for p in &mut quad.positions {
+                        *p = m.transform_point3(Vec3::from_array(*p)).to_array();
+                    }
+                }
+            }
+            merged = Some(match merged.take() {
+                None => baked,
+                Some(mut model) => {
+                    model.quads.extend(baked.quads);
+                    model.is_full_cube = false;
+                    model.occludes = false;
+                    model
+                }
+            });
+        }
+        if let Some(mut baked) = merged {
             apply_gui_lambert(&mut baked.quads, BLOCK_GUI_ROTATION_DEG);
             item_models.insert(item_name.to_string(), baked);
         }
@@ -679,6 +705,114 @@ enum UvPattern {
     Down,
     North,
     SouthWestEast,
+}
+
+struct ModelPart {
+    path: String,
+    transform: Option<Mat4>,
+}
+
+/// Model references to bake for one item. `minecraft:composite` contributes
+/// every child, with the children's `transformation`s composed parent-to-child
+/// (vanilla `CompositeModel.Unbaked.bake`); anything else keeps the old
+/// first-model-string heuristic, which for select/condition trees picks one
+/// representative state.
+fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
+    let mut parts = Vec::new();
+    if let Some(node) = json.get("model") {
+        collect_parts_from_node(node, None, &mut parts);
+    }
+    if parts.is_empty()
+        && let Some(path) = first_item_model_ref(json)
+    {
+        parts.push(ModelPart {
+            path,
+            transform: None,
+        });
+    }
+    parts
+}
+
+/// First `model` reference in an item definition, falling back to a special
+/// renderer's `base`.
+pub fn first_item_model_ref(json: &serde_json::Value) -> Option<String> {
+    find_first_model_string(json)
+        .or_else(|| find_first_string_for_key(json, "base"))
+        .map(|path| strip_mc_prefix(&path).to_string())
+}
+
+fn collect_parts_from_node(
+    node: &serde_json::Value,
+    parent_transform: Option<Mat4>,
+    parts: &mut Vec<ModelPart>,
+) {
+    let transform = match (
+        parent_transform,
+        node.get("transformation").map(parse_item_transformation),
+    ) {
+        (Some(parent), Some(own)) => Some(parent * own),
+        (parent, own) => parent.or(own),
+    };
+    let node_type = node
+        .get("type")
+        .and_then(|t| t.as_str())
+        .map(strip_mc_prefix);
+    match node_type {
+        Some("composite") => {
+            if let Some(models) = node.get("models").and_then(|m| m.as_array()) {
+                for child in models {
+                    collect_parts_from_node(child, transform, parts);
+                }
+            }
+        }
+        Some("model") => {
+            if let Some(path) = node.get("model").and_then(|m| m.as_str()) {
+                parts.push(ModelPart {
+                    path: strip_mc_prefix(path).to_string(),
+                    transform,
+                });
+            }
+        }
+        // Other node types are left for the caller's whole-file fallback.
+        _ => {}
+    }
+}
+
+/// Vanilla `Transformation.compose` (Transformation.java:103): `translation ·
+/// leftRotation · scale · rightRotation`, translation in block units. The
+/// codec's raw-matrix and axis-angle quaternion alternatives are unused by
+/// vanilla assets and ignored.
+fn parse_item_transformation(json: &serde_json::Value) -> Mat4 {
+    let quat = |key: &str| {
+        json.get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                let get = |i: usize| arr.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                Quat::from_xyzw(get(0), get(1), get(2), get(3))
+            })
+            .unwrap_or(Quat::IDENTITY)
+    };
+    let vec3 = |key: &str, default: Vec3| json.get(key).map_or(default, |v| parse_vec3(v, default));
+    Mat4::from_translation(vec3("translation", Vec3::ZERO))
+        * Mat4::from_quat(quat("left_rotation"))
+        * Mat4::from_scale(vec3("scale", Vec3::ONE))
+        * Mat4::from_quat(quat("right_rotation"))
+}
+
+pub fn parse_vec3(value: &serde_json::Value, default: Vec3) -> Vec3 {
+    let Some(arr) = value.as_array() else {
+        return default;
+    };
+    let get = |i: usize| arr.get(i).and_then(|v| v.as_f64()).map(|v| v as f32);
+    Vec3::new(
+        get(0).unwrap_or(default.x),
+        get(1).unwrap_or(default.y),
+        get(2).unwrap_or(default.z),
+    )
+}
+
+pub fn strip_mc_prefix(s: &str) -> &str {
+    s.strip_prefix("minecraft:").unwrap_or(s)
 }
 
 pub fn find_first_model_string(json: &serde_json::Value) -> Option<String> {
@@ -1031,83 +1165,58 @@ fn check_full_cube(quads: &[BakedQuad]) -> bool {
     dirs.iter().all(|&d| d)
 }
 
-fn face_positions(dir: Direction, from: [f32; 3], to: [f32; 3]) -> [[f32; 3]; 4] {
-    // CCW winding when viewed from outside, matching chunk pipeline backface
-    // culling
+/// Vanilla `FaceInfo`: the per-face vertex order all the UV rules are defined
+/// against. Every face winds CCW viewed from outside, which the chunk
+/// pipeline's backface culling needs.
+pub(crate) fn face_positions(dir: Direction, from: [f32; 3], to: [f32; 3]) -> [[f32; 3]; 4] {
+    let [x0, y0, z0] = from;
+    let [x1, y1, z1] = to;
     match dir {
-        Direction::Up => [
-            [from[0], to[1], to[2]],
-            [to[0], to[1], to[2]],
-            [to[0], to[1], from[2]],
-            [from[0], to[1], from[2]],
-        ],
-        Direction::Down => [
-            [from[0], from[1], from[2]],
-            [to[0], from[1], from[2]],
-            [to[0], from[1], to[2]],
-            [from[0], from[1], to[2]],
-        ],
-        Direction::North => [
-            [from[0], from[1], from[2]],
-            [from[0], to[1], from[2]],
-            [to[0], to[1], from[2]],
-            [to[0], from[1], from[2]],
-        ],
-        Direction::South => [
-            [to[0], from[1], to[2]],
-            [to[0], to[1], to[2]],
-            [from[0], to[1], to[2]],
-            [from[0], from[1], to[2]],
-        ],
-        Direction::West => [
-            [from[0], from[1], to[2]],
-            [from[0], to[1], to[2]],
-            [from[0], to[1], from[2]],
-            [from[0], from[1], from[2]],
-        ],
-        Direction::East => [
-            [to[0], from[1], from[2]],
-            [to[0], to[1], from[2]],
-            [to[0], to[1], to[2]],
-            [to[0], from[1], to[2]],
-        ],
+        Direction::Down => [[x0, y0, z1], [x0, y0, z0], [x1, y0, z0], [x1, y0, z1]],
+        Direction::Up => [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]],
+        Direction::North => [[x1, y1, z0], [x1, y0, z0], [x0, y0, z0], [x0, y1, z0]],
+        Direction::South => [[x0, y1, z1], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1]],
+        Direction::West => [[x0, y1, z0], [x0, y0, z0], [x0, y0, z1], [x0, y1, z1]],
+        Direction::East => [[x1, y1, z1], [x1, y0, z1], [x1, y0, z0], [x1, y1, z0]],
     }
 }
 
-fn face_uvs(
+pub(crate) fn face_uvs(
     dir: Direction,
     from: [f32; 3],
     to: [f32; 3],
     explicit_uv: Option<&[f32; 4]>,
     rotation: Option<i32>,
 ) -> [[f32; 2]; 4] {
+    // Vanilla `FaceBakery.defaultFaceUV`, normalized to 0..1: some faces
+    // sample a window reflected about the texture center.
     let (u1, v1, u2, v2) = if let Some(uv) = explicit_uv {
         (uv[0] / 16.0, uv[1] / 16.0, uv[2] / 16.0, uv[3] / 16.0)
     } else {
         match dir {
-            Direction::Up | Direction::Down => (from[0], from[2], to[0], to[2]),
-            Direction::North | Direction::South => (from[0], 1.0 - to[1], to[0], 1.0 - from[1]),
-            Direction::East | Direction::West => (from[2], 1.0 - to[1], to[2], 1.0 - from[1]),
+            Direction::Down => (from[0], 1.0 - to[2], to[0], 1.0 - from[2]),
+            Direction::Up => (from[0], from[2], to[0], to[2]),
+            Direction::North => (1.0 - to[0], 1.0 - to[1], 1.0 - from[0], 1.0 - from[1]),
+            Direction::South => (from[0], 1.0 - to[1], to[0], 1.0 - from[1]),
+            Direction::West => (from[2], 1.0 - to[1], to[2], 1.0 - from[1]),
+            Direction::East => (1.0 - to[2], 1.0 - to[1], 1.0 - from[2], 1.0 - from[1]),
         }
     };
 
-    let mut uvs = match dir {
-        Direction::Up => [[u1, v2], [u2, v2], [u2, v1], [u1, v1]],
-        Direction::Down => [[u1, v1], [u2, v1], [u2, v2], [u1, v2]],
-        Direction::North => [[u1, v2], [u1, v1], [u2, v1], [u2, v2]],
-        Direction::South | Direction::West | Direction::East => {
-            [[u2, v2], [u2, v1], [u1, v1], [u1, v2]]
+    // Vanilla `CuboidFace.UVs` corner cycle, identical for every face (the
+    // per-face variation lives in `face_positions`' vertex order).
+    // `Quadrant.rotateVertexIndex` shifts each vertex forward through the
+    // cycle, spinning the texture clockwise per 90 degrees viewed from
+    // outside the block.
+    let cycle = [[u1, v1], [u1, v2], [u2, v2], [u2, v1]];
+    let shift = rotation.map_or(0, |r| {
+        if r % 90 != 0 {
+            // Vanilla `Quadrant.parseJson` rejects the whole model instead.
+            tracing::warn!("face uv rotation {r} is not a multiple of 90, truncating");
         }
-    };
-
-    if let Some(rot) = rotation {
-        let steps = ((rot % 360 + 360) % 360) / 90;
-        for _ in 0..steps {
-            uvs.rotate_right(1);
-        }
-    }
-
-    uvs
+        r.rem_euclid(360) / 90
+    }) as usize;
+    std::array::from_fn(|i| cycle[(i + shift) % 4])
 }
 
 fn apply_element_rotation(
@@ -1303,5 +1412,172 @@ fn determine_tint(block_name: &str) -> Tint {
         Tint::Foliage
     } else {
         Tint::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIRS: [Direction; 6] = [
+        Direction::Down,
+        Direction::Up,
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ];
+
+    /// The (right, up) axes of each face viewed from outside the block:
+    /// sky-up for the sides, and vanilla's map orientation for up/down.
+    /// `right x up` is the outward normal.
+    fn face_axes(dir: Direction) -> (Vec3, Vec3) {
+        match dir {
+            Direction::Down => (Vec3::X, Vec3::Z),
+            Direction::Up => (Vec3::X, Vec3::NEG_Z),
+            Direction::North => (Vec3::NEG_X, Vec3::Y),
+            Direction::South => (Vec3::X, Vec3::Y),
+            Direction::West => (Vec3::Z, Vec3::Y),
+            Direction::East => (Vec3::NEG_Z, Vec3::Y),
+        }
+    }
+
+    /// Quads must stay CCW viewed from outside for backface culling.
+    #[test]
+    fn face_winding_is_ccw_from_outside() {
+        for dir in DIRS {
+            let p = face_positions(dir, [0.0; 3], [1.0; 3]).map(Vec3::from_array);
+            let normal = (p[1] - p[0]).cross(p[2] - p[0]);
+            let outward = Vec3::from_array(dir.offset().map(|c| c as f32));
+            assert!(normal.dot(outward) > 0.0, "{dir:?} winds the wrong way");
+        }
+    }
+
+    /// Every face must show the full-tile texture upright at rotation 0 and
+    /// spin it clockwise per 90 degrees, vanilla's `FaceInfo` +
+    /// `CuboidFace.UVs` + `Quadrant` behavior (the piston's side faces use
+    /// 90/270 and read 180 degrees off when the direction is inverted).
+    #[test]
+    fn face_uvs_show_upright_clockwise_rotated_texture() {
+        // Image corners in clockwise order; screen corner `s` under a
+        // clockwise rotation by `steps` shows image corner `(s - steps) % 4`.
+        const IMAGE_CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        for dir in DIRS {
+            let (right, up) = face_axes(dir);
+            let positions = face_positions(dir, [0.0; 3], [1.0; 3]).map(Vec3::from_array);
+            for (rot, steps) in [
+                (None, 0),
+                (Some(0), 0),
+                (Some(90), 1),
+                (Some(180), 2),
+                (Some(270), 3),
+            ] {
+                let uvs = face_uvs(dir, [0.0; 3], [1.0; 3], Some(&[0.0, 0.0, 16.0, 16.0]), rot);
+                let mid = |axis: Vec3| {
+                    let coords = positions.map(|p| p.dot(axis));
+                    (coords.iter().copied().fold(f32::INFINITY, f32::min)
+                        + coords.iter().copied().fold(f32::NEG_INFINITY, f32::max))
+                        / 2.0
+                };
+                let (right_mid, up_mid) = (mid(right), mid(up));
+                for (p, uv) in positions.iter().zip(uvs) {
+                    let screen_corner = match (p.dot(right) > right_mid, p.dot(up) > up_mid) {
+                        (false, true) => 0,
+                        (true, true) => 1,
+                        (true, false) => 2,
+                        (false, false) => 3,
+                    };
+                    let expected = IMAGE_CORNERS[(screen_corner + 4 - steps) % 4];
+                    assert_eq!(uv, expected, "{dir:?} rotation {rot:?} vertex {p:?}");
+                }
+            }
+        }
+    }
+
+    /// Default UV windows per face, vanilla `FaceBakery.defaultFaceUV`: the
+    /// down/north/east windows reflect about the texture center.
+    #[test]
+    fn default_uv_windows_match_vanilla() {
+        let from = [2.0 / 16.0, 3.0 / 16.0, 4.0 / 16.0];
+        let to = [8.0 / 16.0, 9.0 / 16.0, 10.0 / 16.0];
+        let expected = [
+            (Direction::Down, (0.125, 0.375, 0.5, 0.75)),
+            (Direction::Up, (0.125, 0.25, 0.5, 0.625)),
+            (Direction::North, (0.5, 0.4375, 0.875, 0.8125)),
+            (Direction::South, (0.125, 0.4375, 0.5, 0.8125)),
+            (Direction::West, (0.25, 0.4375, 0.625, 0.8125)),
+            (Direction::East, (0.375, 0.4375, 0.75, 0.8125)),
+        ];
+        for (dir, (u1, v1, u2, v2)) in expected {
+            let uvs = face_uvs(dir, from, to, None, None);
+            // The cycle assigns vertex 0 the (u1, v1) corner and vertex 2 the
+            // (u2, v2) corner.
+            assert_eq!(uvs[0], [u1, v1], "{dir:?} window origin");
+            assert_eq!(uvs[2], [u2, v2], "{dir:?} window extent");
+        }
+    }
+
+    /// The bed shape: a composite item model contributes every child, the
+    /// foot carrying its one-block translation.
+    #[test]
+    fn composite_item_collects_all_parts() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "model": {
+                    "type": "minecraft:composite",
+                    "models": [
+                        {"type": "minecraft:model", "model": "minecraft:block/red_bed_head"},
+                        {
+                            "type": "minecraft:model",
+                            "model": "minecraft:block/red_bed_foot",
+                            "transformation": {"translation": [0.0, 0.0, 1.0]}
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].path, "block/red_bed_head");
+        assert!(parts[0].transform.is_none());
+        assert_eq!(parts[1].path, "block/red_bed_foot");
+        let moved = parts[1].transform.unwrap().transform_point3(Vec3::ZERO);
+        assert!((moved - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    /// Non-composite trees (bundles' select/condition) keep the old
+    /// first-model-string behavior.
+    #[test]
+    fn select_item_falls_back_to_first_model() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "model": {
+                    "type": "minecraft:select",
+                    "cases": [
+                        {"model": {"type": "minecraft:model", "model": "minecraft:item/bundle_open"}}
+                    ],
+                    "fallback": {"type": "minecraft:model", "model": "minecraft:item/bundle"}
+                }
+            }"#,
+        )
+        .unwrap();
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].transform.is_none());
+        let legacy = find_first_model_string(&json).unwrap();
+        assert_eq!(parts[0].path, strip_mc_prefix(&legacy));
+    }
+
+    #[test]
+    fn plain_item_is_a_single_part() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"model": {"type": "minecraft:model", "model": "minecraft:block/oak_stairs"}}"#,
+        )
+        .unwrap();
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].path, "block/oak_stairs");
+        assert!(parts[0].transform.is_none());
     }
 }

@@ -5,6 +5,7 @@ mod context;
 pub mod entity_model;
 pub mod hiz;
 pub mod pipelines;
+mod screenshot;
 pub(crate) mod shader;
 mod swapchain;
 pub(crate) mod timings;
@@ -183,6 +184,7 @@ pub struct Renderer {
     block_entity_pipeline: BlockEntityPipeline,
     chunk_buffers: ChunkBufferStore,
     render_finished_per_image: Vec<vk::Semaphore>,
+    screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
     vsync: bool,
     width: u32,
@@ -533,6 +535,7 @@ impl Renderer {
             gui_item_atlas,
             chunk_buffers,
             render_finished_per_image,
+            screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
             vsync,
             width: swapchain_extent.width,
@@ -1007,6 +1010,17 @@ impl Renderer {
         self.chunk_buffers.meta_rebuild_ms()
     }
 
+    /// Arm a vanilla F2 screenshot; captured on the next presented frame.
+    pub fn request_screenshot(&mut self) {
+        self.screenshot.arm();
+    }
+
+    /// Drain finished screenshots: `Ok(relative filename)` or `Err(message)`.
+    /// The caller turns each into a chat line.
+    pub fn take_screenshot_messages(&mut self) -> Vec<Result<String, String>> {
+        self.screenshot.drain_results()
+    }
+
     pub fn wait_for_all_frames(&self) {
         let _ = self
             .ctx
@@ -1128,6 +1142,8 @@ impl Renderer {
         height: u32,
         extra_radians: f32,
     ) -> Result<(), RendererError> {
+        // Refresh the far plane before this frame's view/projection and fog.
+        self.camera.set_render_distance(render_distance);
         let held_item = held_item.map(|(name, light)| {
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
             pipelines::held_item::HeldItemInfo {
@@ -1423,7 +1439,11 @@ impl Renderer {
                 )
                 .unwrap();
         }
+        // Fence signalled: reclaim chunk slices the GPU is now provably done with,
+        // and read back any screenshot copy recorded for this frame index.
         self.chunk_buffers.begin_frame();
+        self.screenshot
+            .collect_ready(frame, &self.ctx.device, &self.ctx.allocator);
 
         let t_acquire = std::time::Instant::now();
         let image = match self.ctx.device.acquire_next_image(
@@ -1926,6 +1946,17 @@ impl Renderer {
         }
         frame_start_timer.end();
 
+        // Image is now in PresentSrcKHR; grab it before present if F2 was pressed.
+        self.screenshot.record_if_armed(
+            &self.ctx.device,
+            &self.ctx.allocator,
+            cmd,
+            frame,
+            self.swapchain.images[image_index as usize],
+            self.swapchain.extent,
+            self.swapchain.format.format,
+        );
+
         self.gui_item_atlas.end_frame();
         cmd.end()?;
         let submit_info = vk::SubmitInfo {
@@ -2337,6 +2368,8 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         let _ = self.ctx.device.wait_idle();
 
+        self.screenshot
+            .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_buffers
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_pipeline

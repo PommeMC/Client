@@ -61,6 +61,24 @@ impl Inventory {
     pub fn offhand(&self) -> &ItemStack {
         self.slot(OFFHAND)
     }
+
+    /// Remove one item (or the whole stack) from the selected hotbar slot,
+    /// vanilla `Inventory.removeFromSelected`. Returns whether anything was
+    /// removed; the server spawns the dropped item entity.
+    pub fn remove_from_selected(&mut self, selected: u8, whole_stack: bool) -> bool {
+        let index = HOTBAR_START + (selected as usize).min(8);
+        match &mut self.slots[index] {
+            ItemStack::Present(data) if data.count > 0 => {
+                if whole_stack || data.count == 1 {
+                    self.slots[index] = ItemStack::Empty;
+                } else {
+                    data.count -= 1;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 pub fn item_resource_name(kind: ItemKind) -> String {

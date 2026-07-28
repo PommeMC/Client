@@ -1,10 +1,24 @@
-// Distances live in the camera UBO's spare .w lanes; cylindrical metric like vanilla.
-// Vanilla's linear render-distance band: the last `clamp(blocks/10, 4, 64)` blocks fade
-// into the sky color, keeping the near/mid field crisp (no all-distance haze).
-float fog_factor(vec3 rel, float fog_start, float fog_end) {
-    float dist = max(length(rel.xz), abs(rel.y));
-    float band = fog_end > fog_start ? (dist - fog_start) / (fog_end - fog_start) : 0.0;
-    return clamp(band, 0.0, 1.0);
+// Vanilla's two-band fog (core include/fog.glsl): the render-distance band
+// rides in the camera UBO's spare .w lanes (cylindrical, the last
+// `clamp(blocks/10, 4, 64)` blocks), the RD-independent environmental band in
+// `fog_env.xy` (spherical, the ambient haze); whichever is denser wins.
+float linear_fog_value(float dist, float fog_start, float fog_end) {
+    if (dist <= fog_start) {
+        return 0.0;
+    }
+    if (dist >= fog_end) {
+        return 1.0;
+    }
+    return (dist - fog_start) / (fog_end - fog_start);
+}
+
+float total_fog_value(vec3 rel, vec4 fog_env, float rd_start, float rd_end) {
+    float spherical = length(rel);
+    float cylindrical = max(length(rel.xz), abs(rel.y));
+    return max(
+        linear_fog_value(spherical, fog_env.x, fog_env.y),
+        linear_fog_value(cylindrical, rd_start, rd_end)
+    );
 }
 
 vec3 apply_fog(vec3 color, float fog, vec3 fog_color) {

@@ -7,37 +7,43 @@ use std::time::Instant;
 use azalea_inventory::components::{CustomName, ItemName};
 use azalea_inventory::{ItemStack, ItemStackData};
 
-use super::common::{FONT_SIZE, WHITE};
+use super::common::{FONT_SIZE, WHITE, push_field_text};
 use super::container::{
     ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_cursor_stack, push_panel,
     resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
+/// Vanilla `AnvilScreen` name field length (UTF-16 units).
 const MAX_NAME_LENGTH: usize = 50;
+/// The field's inner width in GUI units; editing measures unscaled and the
+/// renderer scales, which stays consistent because glyph widths scale
+/// linearly.
+const FIELD_INNER_W: f32 = 103.0;
 const COST_GREEN: [f32; 4] = [0.502, 1.0, 0.125, 1.0];
 const COST_RED: [f32; 4] = [1.0, 0.376, 0.376, 1.0];
 
 /// The rename field's client state (vanilla `AnvilScreen.name` +
 /// `AnvilMenu.itemName`), kept on the open container.
 pub struct AnvilState {
-    pub text: String,
+    pub field: TextFieldState,
     /// The last name accepted and sent to the server.
     sent: String,
     /// Input slot 0 as last seen, to detect changes (vanilla `slotChanged`
     /// resets the field text whenever the slot is set).
     last_input: ItemStack,
-    blink: Instant,
 }
 
 impl AnvilState {
     pub fn new() -> Self {
+        let mut field = TextFieldState::new(MAX_NAME_LENGTH);
+        field.set_focused(true);
         Self {
-            text: String::new(),
+            field,
             sent: String::new(),
             last_input: ItemStack::Empty,
-            blink: Instant::now(),
         }
     }
 }
@@ -62,31 +68,27 @@ fn hover_name(data: &ItemStackData) -> String {
 pub fn update_rename(
     state: &mut AnvilState,
     slots: &[ItemStack],
-    typed: &[char],
-    backspace: bool,
+    events: &[TextInputEvent],
+    width_fn: &dyn Fn(&str) -> f32,
 ) -> Option<String> {
     let input = slots.first().cloned().unwrap_or(ItemStack::Empty);
     if input != state.last_input {
-        state.text = input.as_present().map(hover_name).unwrap_or_default();
+        let name = input.as_present().map(hover_name).unwrap_or_default();
+        state.field.set_value(&name, FIELD_INNER_W, width_fn);
         state.last_input = input.clone();
-        state.blink = Instant::now();
     }
     let ItemStack::Present(data) = &input else {
         return None;
     };
 
-    if backspace && state.text.pop().is_some() {
-        state.blink = Instant::now();
-    }
-    for &ch in typed {
-        // Vanilla's allowed-chat-character filter plus the 50-char cap.
-        if state.text.chars().count() < MAX_NAME_LENGTH && ch >= ' ' && ch != '\x7f' && ch != '§' {
-            state.text.push(ch);
-            state.blink = Instant::now();
-        }
+    let mut clipboard = SystemClipboard;
+    for ev in events {
+        state
+            .field
+            .handle(ev, &mut clipboard, FIELD_INNER_W, width_fn);
     }
 
-    let mut name = state.text.clone();
+    let mut name = state.field.value().to_string();
     if data.get_component::<CustomName>().is_none() && name == hover_name(data) {
         name = String::new();
     }
@@ -189,9 +191,8 @@ pub fn build_anvil(
     }
 }
 
-/// The rename text at (62,24): white shadowed, right-shifted inside its
-/// 103-wide clip when overflowing (vanilla's EditBox keeps the end-of-text
-/// cursor in view), with a blinking append caret while editable.
+/// The rename text at (62,24): white shadowed inside its 103-wide clip, with
+/// vanilla EditBox caret, selection, and caret-following horizontal scroll.
 fn push_name_text(
     elements: &mut Vec<MenuElement>,
     panel: &Panel,
@@ -202,11 +203,11 @@ fn push_name_text(
     let s = panel.scale;
     let fs = FONT_SIZE * s;
     let field_x = panel.ox + 62.0 * s;
-    let field_w = 103.0 * s;
+    let field_w = FIELD_INNER_W * s;
     let text_y = panel.oy + 24.0 * s;
-    let tw = text_width_fn(&state.text, fs);
-    let caret_w = text_width_fn("_", fs);
-    let shift = (field_w - tw - caret_w).min(0.0);
+    let wf = |t: &str| text_width_fn(t, fs);
+    let info = state.field.render_info(field_w, editable, &wf);
+    let shown = &state.field.value()[info.display_start..info.display_end];
 
     elements.push(MenuElement::ScissorPush {
         x: field_x,
@@ -214,24 +215,9 @@ fn push_name_text(
         w: field_w,
         h: 16.0 * s,
     });
-    elements.push(MenuElement::Text {
-        x: field_x + shift,
-        y: text_y,
-        text: state.text.clone(),
-        scale: fs,
-        color: WHITE,
-        centered: false,
-    });
-    if editable && state.blink.elapsed().as_millis() % 1000 < 500 {
-        elements.push(MenuElement::Text {
-            x: field_x + shift + tw,
-            y: text_y,
-            text: "_".into(),
-            scale: fs,
-            color: WHITE,
-            centered: false,
-        });
-    }
+    push_field_text(
+        elements, &info, shown, field_x, text_y, fs, s, s, WHITE, None, &wf,
+    );
     elements.push(MenuElement::ScissorPop);
 }
 

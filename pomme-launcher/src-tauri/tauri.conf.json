@@ -1,6 +1,6 @@
 {
   "productName": "Pomme Launcher",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.pomme.launcher",
   "build": {
     "frontendDist": "../dist",

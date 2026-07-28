@@ -1,7 +1,9 @@
 //! Small shared utilities.
 use azalea_core::position::{ChunkPos, ChunkSectionPos};
 
-pub const MAX_RD: u32 = 64;
+/// The 128-chunk max extended-view-distance servers allow; server
+/// announcements clamp to it and the rings are sized for it.
+pub const MAX_RD: u32 = 128;
 
 pub const MAX_SIZE: usize = (MAX_RD * 2 + 1) as usize;
 pub const SIZE_Y: usize = 32;

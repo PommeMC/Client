@@ -68,8 +68,18 @@ pub fn handle_game_packet(
                     p.common.dimension
                 );
             }
+            let _ = event_tx.try_send(NetworkEvent::DimensionName {
+                name: p.common.dimension.to_string(),
+            });
             let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                 game_mode: p.common.game_type as u8,
+                previous: Some(p.common.previous_game_type.0.map(|m| m.to_id())),
+            });
+            let _ = event_tx.try_send(NetworkEvent::ServerViewDistance {
+                distance: p.chunk_radius,
+            });
+            let _ = event_tx.try_send(NetworkEvent::ServerSimulationDistance {
+                distance: p.simulation_distance,
             });
             let _ = event_tx.try_send(NetworkEvent::PlayerLogin {
                 entity_id: p.player_id.0,
@@ -294,8 +304,12 @@ pub fn handle_game_packet(
             }
         }
         ClientboundGamePacket::PlayerAbilities(p) => {
+            // TODO: invulnerable and instant_break flags
             let _ = event_tx.try_send(NetworkEvent::PlayerAbilitiesChanged {
                 flying: p.flags.flying,
+                can_fly: p.flags.can_fly,
+                flying_speed: p.flying_speed,
+                walking_speed: p.walking_speed,
             });
         }
         ClientboundGamePacket::SystemChat(p) if !p.overlay => {
@@ -352,6 +366,7 @@ pub fn handle_game_packet(
                 EventType::ChangeGameMode => {
                     let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                         game_mode: p.param as u8,
+                        previous: None,
                     });
                 }
                 EventType::StartRaining
@@ -611,8 +626,12 @@ pub fn handle_game_packet(
                     p.common.dimension
                 );
             }
+            let _ = event_tx.try_send(NetworkEvent::DimensionName {
+                name: p.common.dimension.to_string(),
+            });
             let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                 game_mode: p.common.game_type as u8,
+                previous: Some(p.common.previous_game_type.0.map(|m| m.to_id())),
             });
         }
         ClientboundGamePacket::PlayerCombatKill(p) => {

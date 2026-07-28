@@ -358,10 +358,19 @@ impl MainMenu {
         let row1_w = top_w * 3.0 + gap * 2.0;
         let row1_x = (screen_w - row1_w) / 2.0;
 
-        if push_button(
+        // Prefill geometry for the edit forms opened from these buttons.
+        let form_inner = FORM_W * gs - 8.0 * gs;
+        let wf = |s: &str| text_width_fn(s, fs);
+
+        self.focus_advance(input);
+        let mut ctx = self.make_focus_ctx(input);
+
+        if push_button_f(
             &mut elements,
+            &mut ctx,
             &mut any_hovered,
             cursor,
+            clicked,
             row1_x,
             footer_y,
             top_w,
@@ -369,8 +378,7 @@ impl MainMenu {
             gs,
             "Join Server",
             has_sel,
-        ) && clicked
-            && let Some(idx) = self.selected_server
+        ) && let Some(idx) = self.selected_server
             && let Some(server) = self.server_list.servers.get(idx)
         {
             action = MenuAction::Connect {
@@ -379,10 +387,12 @@ impl MainMenu {
                 protocol: join_protocol(&ping_results, &server.address, server.protocol),
             };
         }
-        if push_button(
+        if push_button_f(
             &mut elements,
+            &mut ctx,
             &mut any_hovered,
             cursor,
+            clicked,
             row1_x + top_w + gap,
             footer_y,
             top_w,
@@ -390,16 +400,19 @@ impl MainMenu {
             gs,
             "Direct Connect",
             true,
-        ) && clicked
-        {
-            self.edit_address = self.last_mp_ip.clone();
+        ) {
+            self.edit_address
+                .set_value(&self.last_mp_ip, form_inner, &wf);
             self.set_screen(Screen::DirectConnect);
             self.focused_field = Some(0);
+            self.edit_address.set_focused(true);
         }
-        if push_button(
+        if push_button_f(
             &mut elements,
+            &mut ctx,
             &mut any_hovered,
             cursor,
+            clicked,
             row1_x + (top_w + gap) * 2.0,
             footer_y,
             top_w,
@@ -407,22 +420,24 @@ impl MainMenu {
             gs,
             "Add Server",
             true,
-        ) && clicked
-        {
+        ) {
             self.edit_name.clear();
             self.edit_address.clear();
             self.set_screen(Screen::AddServer);
             self.focused_field = Some(0);
+            self.edit_name.set_focused(true);
         }
 
         let row2_y = footer_y + btn_h + gap;
         let row2_w = bot_w * 4.0 + gap * 3.0;
         let row2_x = (screen_w - row2_w) / 2.0;
 
-        if push_button(
+        if push_button_f(
             &mut elements,
+            &mut ctx,
             &mut any_hovered,
             cursor,
+            clicked,
             row2_x,
             row2_y,
             bot_w,
@@ -430,19 +445,22 @@ impl MainMenu {
             gs,
             "Edit",
             has_sel,
-        ) && clicked
-            && let Some(idx) = self.selected_server
+        ) && let Some(idx) = self.selected_server
             && let Some(server) = self.server_list.servers.get(idx)
         {
-            self.edit_name = server.name.clone();
-            self.edit_address = server.address.clone();
+            self.edit_name.set_value(&server.name, form_inner, &wf);
+            self.edit_address
+                .set_value(&server.address, form_inner, &wf);
             self.set_screen(Screen::EditServer(idx));
             self.focused_field = Some(0);
+            self.edit_name.set_focused(true);
         }
-        if push_button(
+        if push_button_f(
             &mut elements,
+            &mut ctx,
             &mut any_hovered,
             cursor,
+            clicked,
             row2_x + bot_w + gap,
             row2_y,
             bot_w,
@@ -450,15 +468,16 @@ impl MainMenu {
             gs,
             "Delete",
             has_sel,
-        ) && clicked
-            && let Some(idx) = self.selected_server
+        ) && let Some(idx) = self.selected_server
         {
             self.set_screen(Screen::ConfirmDelete(idx));
         }
-        if push_button(
+        if push_button_f(
             &mut elements,
+            &mut ctx,
             &mut any_hovered,
             cursor,
+            clicked,
             row2_x + (bot_w + gap) * 2.0,
             row2_y,
             bot_w,
@@ -466,14 +485,15 @@ impl MainMenu {
             gs,
             "Refresh",
             true,
-        ) && clicked
-        {
+        ) {
             self.refresh_servers();
         }
-        if push_button(
+        if push_button_f(
             &mut elements,
+            &mut ctx,
             &mut any_hovered,
             cursor,
+            clicked,
             row2_x + (bot_w + gap) * 3.0,
             row2_y,
             bot_w,
@@ -481,10 +501,11 @@ impl MainMenu {
             gs,
             "Back",
             true,
-        ) && clicked
-        {
+        ) {
             self.set_screen(Screen::Main);
         }
+
+        self.finish_focus(&ctx);
 
         push_bottom_text(
             &mut elements,
@@ -499,7 +520,7 @@ impl MainMenu {
             action,
             cursor_pointer: any_hovered,
             blur: 2.0,
-            clicked_button: input.clicked && any_hovered,
+            clicked_button: (input.clicked && any_hovered) || ctx.fired,
         }
     }
 
@@ -558,10 +579,14 @@ impl MainMenu {
         let btn_x = (screen_w - form_w) / 2.0;
         let btn_y = cy + fs * 2.0 + 44.0 * gs;
 
-        if push_button(
+        self.focus_advance(input);
+        let mut ctx = self.make_focus_ctx(input);
+        if push_button_f(
             &mut elements,
+            &mut ctx,
             &mut any_hovered,
             cursor,
+            clicked,
             btn_x,
             btn_y,
             form_w,
@@ -569,16 +594,17 @@ impl MainMenu {
             gs,
             "Delete",
             true,
-        ) && clicked
-        {
+        ) {
             self.server_list.remove(idx);
             self.selected_server = None;
             self.set_screen(Screen::ServerList);
         }
-        if push_button(
+        if push_button_f(
             &mut elements,
+            &mut ctx,
             &mut any_hovered,
             cursor,
+            clicked,
             btn_x,
             btn_y + btn_h + gap,
             form_w,
@@ -586,10 +612,10 @@ impl MainMenu {
             gs,
             "Cancel",
             true,
-        ) && clicked
-        {
+        ) {
             self.set_screen(Screen::ServerList);
         }
+        self.finish_focus(&ctx);
 
         push_bottom_text(
             &mut elements,
@@ -604,7 +630,7 @@ impl MainMenu {
             action: MenuAction::None,
             cursor_pointer: any_hovered,
             blur: 2.0,
-            clicked_button: input.clicked && any_hovered,
+            clicked_button: (input.clicked && any_hovered) || ctx.fired,
         }
     }
 
@@ -629,7 +655,7 @@ impl MainMenu {
             return empty_result(2.0);
         }
 
-        self.handle_text_input(input, 1);
+        self.cycle_fields(input, 1);
 
         let mut elements = Vec::new();
         let mut action = MenuAction::None;
@@ -659,26 +685,23 @@ impl MainMenu {
         });
         y += fs + 4.0 * gs;
 
-        push_text_field(
+        self.text_field(
             &mut elements,
+            TextTarget::EditAddress,
+            0,
+            input,
             form_x,
             y,
             form_w,
             field_h,
             fs,
             gs,
-            &self.edit_address,
-            self.focused_field == Some(0),
-            self.focused_field == Some(0) && self.field_all_selected,
-            &self.cursor_blink,
             text_width_fn,
         );
-        if clicked && common::hit_test(cursor, [form_x, y, form_w, field_h]) {
-            self.on_field_click(0);
-        }
         y += field_h + 28.0 * gs;
 
-        let valid = is_valid_address(&self.edit_address);
+        let address = self.edit_address.value().to_string();
+        let valid = is_valid_address(&address);
         let enter_submit = input.enter && valid;
 
         if (push_button(
@@ -695,17 +718,17 @@ impl MainMenu {
         ) && clicked)
             || enter_submit
         {
-            self.last_mp_ip = self.edit_address.clone();
+            self.last_mp_ip = address.clone();
             let persisted = self
                 .server_list
                 .servers
                 .iter()
-                .find(|s| s.address == self.edit_address)
+                .find(|s| s.address == address)
                 .and_then(|s| s.protocol);
             action = MenuAction::Connect {
-                server: self.edit_address.clone(),
+                server: address.clone(),
                 username: self.username.clone(),
-                protocol: join_protocol(&self.ping_results.read(), &self.edit_address, persisted),
+                protocol: join_protocol(&self.ping_results.read(), &address, persisted),
             };
         }
         y += btn_h + gap;
@@ -763,7 +786,7 @@ impl MainMenu {
             return empty_result(2.0);
         }
 
-        self.handle_text_input(input, 2);
+        self.cycle_fields(input, 2);
 
         let mut elements = Vec::new();
         let mut any_hovered = false;
@@ -792,23 +815,19 @@ impl MainMenu {
         });
         y += fs + 4.0 * gs;
 
-        push_text_field(
+        self.text_field(
             &mut elements,
+            TextTarget::EditName,
+            0,
+            input,
             form_x,
             y,
             form_w,
             field_h,
             fs,
             gs,
-            &self.edit_name,
-            self.focused_field == Some(0),
-            self.focused_field == Some(0) && self.field_all_selected,
-            &self.cursor_blink,
             text_width_fn,
         );
-        if clicked && common::hit_test(cursor, [form_x, y, form_w, field_h]) {
-            self.on_field_click(0);
-        }
         y += field_h + 12.0 * gs;
 
         elements.push(MenuElement::Text {
@@ -821,26 +840,24 @@ impl MainMenu {
         });
         y += fs + 4.0 * gs;
 
-        push_text_field(
+        self.text_field(
             &mut elements,
+            TextTarget::EditAddress,
+            1,
+            input,
             form_x,
             y,
             form_w,
             field_h,
             fs,
             gs,
-            &self.edit_address,
-            self.focused_field == Some(1),
-            self.focused_field == Some(1) && self.field_all_selected,
-            &self.cursor_blink,
             text_width_fn,
         );
-        if clicked && common::hit_test(cursor, [form_x, y, form_w, field_h]) {
-            self.on_field_click(1);
-        }
         y += field_h + 28.0 * gs;
 
-        let valid = is_valid_address(&self.edit_address);
+        let name_val = self.edit_name.value().to_string();
+        let address = self.edit_address.value().to_string();
+        let valid = is_valid_address(&address);
         if push_button(
             &mut elements,
             &mut any_hovered,
@@ -854,14 +871,14 @@ impl MainMenu {
             valid,
         ) && clicked
         {
-            let name = if self.edit_name.is_empty() {
+            let name = if name_val.is_empty() {
                 "Minecraft Server".to_string()
             } else {
-                self.edit_name.clone()
+                name_val.clone()
             };
             let mut entry = ServerEntry {
                 name,
-                address: self.edit_address.clone(),
+                address: address.clone(),
                 protocol: None,
                 extra: Default::default(),
             };
@@ -914,94 +931,184 @@ impl MainMenu {
         }
     }
 
-    pub(super) fn on_field_click(&mut self, field_idx: u8) {
-        let now = Instant::now();
-        let is_double = self.last_field_click == Some(field_idx)
-            && now.duration_since(self.last_field_click_time).as_millis() < DOUBLE_CLICK_MS;
-        self.focused_field = Some(field_idx);
-        self.cursor_blink = now;
-        self.field_all_selected = is_double;
-        self.last_field_click = Some(field_idx);
-        self.last_field_click_time = now;
-    }
-
-    pub(super) fn handle_text_input(&mut self, input: &MenuInput, field_count: u8) {
-        if input.tab {
-            self.focused_field = Some(match self.focused_field {
-                Some(f) => (f + 1) % field_count,
-                None => 0,
-            });
-            self.field_all_selected = false;
-            self.cursor_blink = Instant::now();
-        }
-
-        let Some(field_idx) = self.focused_field else {
-            return;
-        };
-        let target = match (&self.screen, field_idx) {
-            (Screen::AddServer | Screen::EditServer(_), 0) => TextTarget::EditName,
-            (Screen::AddServer | Screen::EditServer(_), 1) => TextTarget::EditAddress,
-            (Screen::DirectConnect, 0) => TextTarget::EditAddress,
-            (Screen::OptionsResourcePacks, 0) => TextTarget::PackSearch,
-            (Screen::Friends, 0) => TextTarget::AddFriend,
-            _ => return,
-        };
-        let text: &mut String = match target {
+    fn field_mut(&mut self, target: TextTarget) -> &mut TextFieldState {
+        match target {
             TextTarget::EditName => &mut self.edit_name,
             TextTarget::EditAddress => &mut self.edit_address,
             TextTarget::PackSearch => &mut self.pack_search,
             TextTarget::AddFriend => &mut self.add_friend_name,
-        };
+        }
+    }
 
-        if input.copy && !text.is_empty() {
-            write_clipboard(text);
+    fn field_ref(&self, target: TextTarget) -> &TextFieldState {
+        match target {
+            TextTarget::EditName => &self.edit_name,
+            TextTarget::EditAddress => &self.edit_address,
+            TextTarget::PackSearch => &self.pack_search,
+            TextTarget::AddFriend => &self.add_friend_name,
+        }
+    }
+
+    /// The backing text field for a form field index on the current screen.
+    fn focus_target(&self, field_idx: u8) -> Option<TextTarget> {
+        match (&self.screen, field_idx) {
+            (Screen::AddServer | Screen::EditServer(_), 0) => Some(TextTarget::EditName),
+            (Screen::AddServer | Screen::EditServer(_), 1) => Some(TextTarget::EditAddress),
+            (Screen::DirectConnect, 0) => Some(TextTarget::EditAddress),
+            (Screen::OptionsResourcePacks, 0) => Some(TextTarget::PackSearch),
+            (Screen::Friends, 0) => Some(TextTarget::AddFriend),
+            _ => None,
+        }
+    }
+
+    /// Tab / Shift+Tab cycle keyboard focus between a form's `field_count` text
+    /// fields (vanilla `changeFocus`). Sub-1000 forms don't unify buttons into
+    /// this ring yet.
+    // TODO: fold form buttons into the focus ring so Tab moves field->button
+    // like vanilla TabNavigation.
+    pub(super) fn cycle_fields(&mut self, input: &MenuInput, field_count: u8) {
+        if !input.tab {
+            return;
+        }
+        self.unfocus_current_field();
+        let next = helpers::step_ring(
+            self.focused_field.map(usize::from),
+            field_count as usize,
+            input.shift,
+        ) as u8;
+        self.focused_field = Some(next);
+        self.last_field_click = None;
+        if let Some(t) = self.focus_target(next) {
+            self.field_mut(t).set_focused(true);
+        }
+    }
+
+    fn unfocus_current_field(&mut self) {
+        if let Some(t) = self.focused_field.and_then(|i| self.focus_target(i)) {
+            self.field_mut(t).set_focused(false);
+        }
+    }
+
+    /// Handle the pointer, feed the keyboard event stream, then render one text
+    /// field. Input and rendering share the same `inner_w`, so the horizontal
+    /// scroll (`display_pos`) stays consistent.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn text_field(
+        &mut self,
+        elements: &mut Vec<MenuElement>,
+        target: TextTarget,
+        field_idx: u8,
+        input: &MenuInput,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        fs: f32,
+        gs: f32,
+        text_width_fn: &dyn Fn(&str, f32) -> f32,
+    ) {
+        let pad = 4.0 * gs;
+        let inner_w = w - pad * 2.0;
+        let text_x = x + pad;
+        let wf = |s: &str| text_width_fn(s, fs);
+        let hit = common::hit_test(input.cursor, [x, y, w, h]);
+        // Vanilla `findClickedPositionInText` floors the mouse x first.
+        let rel_x = input.cursor.0.floor() - text_x;
+
+        if input.clicked && hit {
+            let now = Instant::now();
+            let is_double = self.last_field_click == Some(field_idx)
+                && now.duration_since(self.last_field_click_time).as_millis() < DOUBLE_CLICK_MS;
+            let was_focused = self.focused_field == Some(field_idx);
+            if !was_focused {
+                self.unfocus_current_field();
+            }
+            self.focused_field = Some(field_idx);
+            self.last_field_click = Some(field_idx);
+            self.last_field_click_time = now;
+            let f = self.field_mut(target);
+            if !was_focused {
+                f.set_focused(true);
+            }
+            let pos = f.pos_from_click(rel_x, inner_w, &wf);
+            if is_double {
+                // Vanilla double-click selects the word (not the whole field).
+                f.select_word_at(pos, inner_w, &wf);
+            } else {
+                f.on_click(pos, input.shift, inner_w, &wf);
+            }
+        } else if input.clicked && self.focused_field == Some(field_idx) {
+            // Vanilla clears widget focus on a click that lands elsewhere.
+            self.unfocus_current_field();
+            self.focused_field = None;
+        } else if self.focused_field == Some(field_idx) && input.mouse_held && !input.clicked {
+            let f = self.field_mut(target);
+            let pos = f.pos_from_click(rel_x, inner_w, &wf);
+            f.on_drag(pos, inner_w, &wf);
         }
 
-        if input.cut && !text.is_empty() && write_clipboard(text) {
-            text.clear();
-            self.field_all_selected = false;
+        if self.focused_field == Some(field_idx) {
+            self.apply_text_events(target, field_idx, input, inner_w, &wf);
         }
 
-        if input.undo
-            && let Some(pos) = self
+        let focused = self.focused_field == Some(field_idx);
+        push_text_field(
+            elements,
+            x,
+            y,
+            w,
+            h,
+            fs,
+            gs,
+            self.field_ref(target),
+            focused,
+            text_width_fn,
+        );
+    }
+
+    /// Feed the frame's key/char events to the focused field, snapshotting for
+    /// the pomme-only Ctrl+Z undo stack.
+    fn apply_text_events(
+        &mut self,
+        target: TextTarget,
+        field_idx: u8,
+        input: &MenuInput,
+        inner_w: f32,
+        wf: &dyn Fn(&str) -> f32,
+    ) {
+        // Ctrl+Z: pomme extra (vanilla EditBox has no undo). Intercept before
+        // the field sees the stream.
+        let undo = input.events.iter().any(|e| {
+            matches!(
+                e,
+                TextInputEvent::Key { code: KeyCode::KeyZ, mods }
+                    if mods.edit_shortcut() && !mods.shift
+            )
+        });
+        if undo {
+            if let Some(pos) = self
                 .field_undo_stack
                 .iter()
                 .rposition(|(f, _)| *f == field_idx)
-        {
-            let (_, prev) = self.field_undo_stack.remove(pos);
-            *text = prev;
-            self.field_all_selected = false;
-            self.cursor_blink = Instant::now();
+            {
+                let (_, prev) = self.field_undo_stack.remove(pos);
+                self.field_mut(target).set_value(&prev, inner_w, wf);
+            }
             return;
         }
-
-        if input.select_all {
-            self.field_all_selected = !text.is_empty();
+        if input.events.is_empty() {
+            return;
         }
-
-        let old_text = text.clone();
-
-        if !input.typed_chars.is_empty() {
-            if self.field_all_selected {
-                text.clear();
-                self.field_all_selected = false;
-            }
-            for ch in &input.typed_chars {
-                text.push(*ch);
+        let before = self.field_mut(target).value().to_string();
+        {
+            let mut clipboard = SystemClipboard;
+            let f = self.field_mut(target);
+            for ev in &input.events {
+                f.handle(ev, &mut clipboard, inner_w, wf);
             }
         }
-        if input.backspace {
-            if self.field_all_selected {
-                text.clear();
-                self.field_all_selected = false;
-            } else {
-                text.pop();
-            }
-        }
-
-        if *text != old_text {
-            push_undo(&mut self.field_undo_stack, field_idx, old_text);
-            self.cursor_blink = Instant::now();
+        if self.field_mut(target).value() != before {
+            push_undo(&mut self.field_undo_stack, field_idx, before);
         }
     }
 
@@ -1050,10 +1157,14 @@ impl MainMenu {
         });
 
         let btn_y = top_y + title_size + gap + body_size + gap * 2.0;
-        if push_button(
+        self.focus_advance(input);
+        let mut ctx = self.make_focus_ctx(input);
+        if push_button_f(
             &mut elements,
+            &mut ctx,
             &mut any_hovered,
             input.cursor,
+            input.clicked,
             cx - btn_w / 2.0,
             btn_y,
             btn_w,
@@ -1061,24 +1172,25 @@ impl MainMenu {
             gs,
             "Back to Menu",
             true,
-        ) && input.clicked
-        {
+        ) {
             self.set_screen(Screen::Main);
         }
+        self.finish_focus(&ctx);
 
         MainMenuResult {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
             blur: 2.0,
-            clicked_button: input.clicked && any_hovered,
+            clicked_button: (input.clicked && any_hovered) || ctx.fired,
         }
     }
 }
 
 const UNDO_STACK_LIMIT: usize = 50;
 
-enum TextTarget {
+#[derive(Clone, Copy)]
+pub(super) enum TextTarget {
     EditName,
     EditAddress,
     PackSearch,

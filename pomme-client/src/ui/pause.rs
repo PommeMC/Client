@@ -15,6 +15,8 @@ pub enum PauseScreen {
     Main,
     Benchmark,
     ChunkLoader,
+    /// F3+Esc: paused with no menu rendered (vanilla `pauseGame(true)`).
+    Hidden,
 }
 
 #[derive(Clone, Copy)]
@@ -43,6 +45,8 @@ pub fn build_pause_menu(
     server_rd: u32,
 ) -> PauseAction {
     match screen {
+        // The F3+Esc pause renders nothing; update_game skips building it.
+        PauseScreen::Hidden => PauseAction::None,
         PauseScreen::Main => build_main(elements, screen_w, screen_h, cursor, clicked, gs),
         PauseScreen::Benchmark => build_submenu(
             elements,

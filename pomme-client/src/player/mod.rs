@@ -48,7 +48,17 @@ pub struct LocalPlayer {
     pub inventory: Inventory,
     pub sprinting: bool,
     pub crouching: bool,
+    // TODO: remaining Abilities fields - invulnerable, instabuild, may_build
     pub flying: bool,
+    pub may_fly: bool,
+    pub fly_speed: f32,
+    pub walk_speed: f32,
+    pub jump_trigger_time: u32,
+    pub no_jump_delay: u32,
+    pub was_jump_pressed: bool,
+    /// Vanilla `onUpdateAbilities`: a locally toggled `flying` still has to be
+    /// reported to the server via `ServerboundPlayerAbilities`.
+    pub abilities_dirty: bool,
     pub eye_height: f64,
     pub prev_eye_height: f64,
     pub walk_dist: f32,
@@ -59,6 +69,8 @@ pub struct LocalPlayer {
     pub sprint_toggle_timer: u32,
     pub was_forward_pressed: bool,
     pub in_water: bool,
+    /// Vanilla `getFluidHeight(WATER)`: water surface height above the feet.
+    pub fluid_height: f64,
     pub eyes_in_water: bool,
     pub swimming: bool,
     pub air_supply: i32,
@@ -86,6 +98,13 @@ impl LocalPlayer {
             sprinting: false,
             crouching: false,
             flying: false,
+            may_fly: false,
+            fly_speed: 0.05,
+            walk_speed: 0.1,
+            jump_trigger_time: 0,
+            no_jump_delay: 0,
+            was_jump_pressed: false,
+            abilities_dirty: false,
             eye_height: STANDING_EYE_HEIGHT,
             prev_eye_height: STANDING_EYE_HEIGHT,
             walk_dist: 0.0,
@@ -96,6 +115,7 @@ impl LocalPlayer {
             sprint_toggle_timer: 0,
             was_forward_pressed: false,
             in_water: false,
+            fluid_height: 0.0,
             eyes_in_water: false,
             swimming: false,
             air_supply: MAX_AIR_SUPPLY,
@@ -171,20 +191,35 @@ impl LocalPlayer {
         let height = self.height();
         let eye_height = self.target_eye_height();
 
-        let min_x = (self.position.x - half_w).floor() as i32;
-        let max_x = (self.position.x + half_w).floor() as i32;
-        let min_y = self.position.y.floor() as i32;
-        let max_y = (self.position.y + height).floor() as i32;
-        let min_z = (self.position.z - half_w).floor() as i32;
-        let max_z = (self.position.z + half_w).floor() as i32;
+        // Vanilla `EntityFluidInteraction.update`: scan the bounding box
+        // deflated by 0.001; a block's fluid column is `amount / 9` of a
+        // block, or a full block when more water sits directly above.
+        const MARGIN: f64 = 0.001;
+        let feet_y = self.position.y;
+        let x0 = (self.position.x - half_w + MARGIN).floor() as i32;
+        let x1 = (self.position.x + half_w - MARGIN).ceil() as i32 - 1;
+        let y0 = (feet_y + MARGIN).floor() as i32;
+        let y1 = (feet_y + height - MARGIN).ceil() as i32 - 1;
+        let z0 = (self.position.z - half_w + MARGIN).floor() as i32;
+        let z1 = (self.position.z + half_w - MARGIN).ceil() as i32 - 1;
 
-        let mut touching_water = false;
-        'water_check: for bx in min_x..=max_x {
-            for by in min_y..=max_y {
-                for bz in min_z..=max_z {
-                    if is_water_block(chunks.get_block_state(bx, by, bz)) {
-                        touching_water = true;
-                        break 'water_check;
+        let mut fluid_height = 0.0f64;
+        for bx in x0..=x1 {
+            for by in y0..=y1 {
+                for bz in z0..=z1 {
+                    let f = fluid(chunks.get_block_state(bx, by, bz));
+                    if f.kind != FluidKind::Water {
+                        continue;
+                    }
+                    let block_height = if is_water_block(chunks.get_block_state(bx, by + 1, bz)) {
+                        1.0
+                    } else {
+                        // f32 to match vanilla's float math.
+                        f64::from(f.amount as f32 / 9.0)
+                    };
+                    let fluid_top = f64::from(by) + block_height;
+                    if fluid_top >= feet_y + MARGIN {
+                        fluid_height = fluid_height.max(fluid_top - feet_y);
                     }
                 }
             }
@@ -194,7 +229,9 @@ impl LocalPlayer {
         let eye_x = self.position.x.floor() as i32;
         let eye_z = self.position.z.floor() as i32;
 
-        self.in_water = touching_water;
+        self.fluid_height = fluid_height;
+        // Vanilla `wasTouchingWater` is exactly "fluid height > 0".
+        self.in_water = fluid_height > 0.0;
         self.eyes_in_water = is_water_block(chunks.get_block_state(eye_x, eye_y, eye_z));
         self.swimming = self.sprinting && self.in_water && self.eyes_in_water;
     }

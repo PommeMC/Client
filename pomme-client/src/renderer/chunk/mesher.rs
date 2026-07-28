@@ -8,7 +8,7 @@ use pyronyx::vk;
 use super::greedy;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::section::LocalSection;
-use crate::world::block::model::{BakedModel, Direction};
+use crate::world::block::model::{BakedModel, Direction, face_positions, face_uvs};
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
 use crate::world::block::{block_id, is_air};
 use crate::world::chunk::ChunkStore;
@@ -1293,214 +1293,73 @@ fn compute_face_ao(
     lz: i32,
     dir: Direction,
 ) -> [f32; 4] {
-    let s = |dx: i32, dy: i32, dz: i32| -> f32 {
+    let s = |[dx, dy, dz]: [i32; 3]| -> f32 {
         shade_brightness(
             snapshot.section.get_block_state(lx + dx, ly + dy, lz + dz),
             registry,
         )
     };
-    let l = |dx: i32, dy: i32, dz: i32| -> f32 { snapshot.get_light(lx + dx, ly + dy, lz + dz) };
-    let dir_shade = match dir {
-        Direction::Up => 1.0,
-        Direction::Down => 0.5,
-        Direction::North | Direction::South => 0.8,
-        Direction::East | Direction::West => 0.6,
+    let l = |[dx, dy, dz]: [i32; 3]| -> f32 { snapshot.get_light(lx + dx, ly + dy, lz + dz) };
+
+    let shade0 = s(corners0_offset(dir));
+
+    // Each vertex's (side1, side2, corner) neighbour offsets, in
+    // `face_positions`' vertex order.
+    let rows: [[[i32; 3]; 3]; 4] = match dir {
+        Direction::Up => [
+            [[0, 1, -1], [-1, 1, 0], [-1, 1, -1]],
+            [[0, 1, 1], [-1, 1, 0], [-1, 1, 1]],
+            [[0, 1, 1], [1, 1, 0], [1, 1, 1]],
+            [[0, 1, -1], [1, 1, 0], [1, 1, -1]],
+        ],
+        Direction::Down => [
+            [[0, -1, 1], [-1, -1, 0], [-1, -1, 1]],
+            [[0, -1, -1], [-1, -1, 0], [-1, -1, -1]],
+            [[0, -1, -1], [1, -1, 0], [1, -1, -1]],
+            [[0, -1, 1], [1, -1, 0], [1, -1, 1]],
+        ],
+        Direction::North => [
+            [[1, 0, -1], [0, 1, -1], [1, 1, -1]],
+            [[1, 0, -1], [0, -1, -1], [1, -1, -1]],
+            [[-1, 0, -1], [0, -1, -1], [-1, -1, -1]],
+            [[-1, 0, -1], [0, 1, -1], [-1, 1, -1]],
+        ],
+        Direction::South => [
+            [[-1, 0, 1], [0, 1, 1], [-1, 1, 1]],
+            [[-1, 0, 1], [0, -1, 1], [-1, -1, 1]],
+            [[1, 0, 1], [0, -1, 1], [1, -1, 1]],
+            [[1, 0, 1], [0, 1, 1], [1, 1, 1]],
+        ],
+        Direction::West => [
+            [[-1, 0, -1], [-1, 1, 0], [-1, 1, -1]],
+            [[-1, 0, -1], [-1, -1, 0], [-1, -1, -1]],
+            [[-1, 0, 1], [-1, -1, 0], [-1, -1, 1]],
+            [[-1, 0, 1], [-1, 1, 0], [-1, 1, 1]],
+        ],
+        Direction::East => [
+            [[1, 0, 1], [1, 1, 0], [1, 1, 1]],
+            [[1, 0, 1], [1, -1, 0], [1, -1, 1]],
+            [[1, 0, -1], [1, -1, 0], [1, -1, -1]],
+            [[1, 0, -1], [1, 1, 0], [1, 1, -1]],
+        ],
     };
-    let c0 = corners0_offset(dir);
-    let shade0 = s(c0[0], c0[1], c0[2]);
-    let vertex_ao = |side1: f32, side2: f32, corner: f32| -> f32 {
-        super::block_ao::vertex_brightness(side1, side2, corner, shade0)
-    };
-    let (ao, lights) = match dir {
-        Direction::Up => {
-            let n = [0, 1, 0];
-            (
-                [
-                    vertex_ao(s(0, 1, 1), s(-1, 1, 0), s(-1, 1, 1)),
-                    vertex_ao(s(0, 1, 1), s(1, 1, 0), s(1, 1, 1)),
-                    vertex_ao(s(0, 1, -1), s(1, 1, 0), s(1, 1, -1)),
-                    vertex_ao(s(0, 1, -1), s(-1, 1, 0), s(-1, 1, -1)),
-                ],
-                [
-                    avg4(l(n[0], n[1], n[2]), l(0, 1, 1), l(-1, 1, 0), l(-1, 1, 1)),
-                    avg4(l(n[0], n[1], n[2]), l(0, 1, 1), l(1, 1, 0), l(1, 1, 1)),
-                    avg4(l(n[0], n[1], n[2]), l(0, 1, -1), l(1, 1, 0), l(1, 1, -1)),
-                    avg4(l(n[0], n[1], n[2]), l(0, 1, -1), l(-1, 1, 0), l(-1, 1, -1)),
-                ],
-            )
-        }
-        Direction::Down => {
-            let n = [0, -1, 0];
-            (
-                [
-                    vertex_ao(s(0, -1, -1), s(-1, -1, 0), s(-1, -1, -1)),
-                    vertex_ao(s(0, -1, -1), s(1, -1, 0), s(1, -1, -1)),
-                    vertex_ao(s(0, -1, 1), s(1, -1, 0), s(1, -1, 1)),
-                    vertex_ao(s(0, -1, 1), s(-1, -1, 0), s(-1, -1, 1)),
-                ],
-                [
-                    avg4(
-                        l(n[0], n[1], n[2]),
-                        l(0, -1, -1),
-                        l(-1, -1, 0),
-                        l(-1, -1, -1),
-                    ),
-                    avg4(l(n[0], n[1], n[2]), l(0, -1, -1), l(1, -1, 0), l(1, -1, -1)),
-                    avg4(l(n[0], n[1], n[2]), l(0, -1, 1), l(1, -1, 0), l(1, -1, 1)),
-                    avg4(l(n[0], n[1], n[2]), l(0, -1, 1), l(-1, -1, 0), l(-1, -1, 1)),
-                ],
-            )
-        }
-        Direction::North => {
-            let n = [0, 0, -1];
-            (
-                [
-                    vertex_ao(s(-1, 0, -1), s(0, -1, -1), s(-1, -1, -1)),
-                    vertex_ao(s(-1, 0, -1), s(0, 1, -1), s(-1, 1, -1)),
-                    vertex_ao(s(1, 0, -1), s(0, 1, -1), s(1, 1, -1)),
-                    vertex_ao(s(1, 0, -1), s(0, -1, -1), s(1, -1, -1)),
-                ],
-                [
-                    avg4(
-                        l(n[0], n[1], n[2]),
-                        l(-1, 0, -1),
-                        l(0, -1, -1),
-                        l(-1, -1, -1),
-                    ),
-                    avg4(l(n[0], n[1], n[2]), l(-1, 0, -1), l(0, 1, -1), l(-1, 1, -1)),
-                    avg4(l(n[0], n[1], n[2]), l(1, 0, -1), l(0, 1, -1), l(1, 1, -1)),
-                    avg4(l(n[0], n[1], n[2]), l(1, 0, -1), l(0, -1, -1), l(1, -1, -1)),
-                ],
-            )
-        }
-        Direction::South => {
-            let n = [0, 0, 1];
-            (
-                [
-                    vertex_ao(s(1, 0, 1), s(0, -1, 1), s(1, -1, 1)),
-                    vertex_ao(s(1, 0, 1), s(0, 1, 1), s(1, 1, 1)),
-                    vertex_ao(s(-1, 0, 1), s(0, 1, 1), s(-1, 1, 1)),
-                    vertex_ao(s(-1, 0, 1), s(0, -1, 1), s(-1, -1, 1)),
-                ],
-                [
-                    avg4(l(n[0], n[1], n[2]), l(1, 0, 1), l(0, -1, 1), l(1, -1, 1)),
-                    avg4(l(n[0], n[1], n[2]), l(1, 0, 1), l(0, 1, 1), l(1, 1, 1)),
-                    avg4(l(n[0], n[1], n[2]), l(-1, 0, 1), l(0, 1, 1), l(-1, 1, 1)),
-                    avg4(l(n[0], n[1], n[2]), l(-1, 0, 1), l(0, -1, 1), l(-1, -1, 1)),
-                ],
-            )
-        }
-        Direction::East => {
-            let n = [1, 0, 0];
-            (
-                [
-                    vertex_ao(s(1, 0, -1), s(1, -1, 0), s(1, -1, -1)),
-                    vertex_ao(s(1, 0, -1), s(1, 1, 0), s(1, 1, -1)),
-                    vertex_ao(s(1, 0, 1), s(1, 1, 0), s(1, 1, 1)),
-                    vertex_ao(s(1, 0, 1), s(1, -1, 0), s(1, -1, 1)),
-                ],
-                [
-                    avg4(l(n[0], n[1], n[2]), l(1, 0, -1), l(1, -1, 0), l(1, -1, -1)),
-                    avg4(l(n[0], n[1], n[2]), l(1, 0, -1), l(1, 1, 0), l(1, 1, -1)),
-                    avg4(l(n[0], n[1], n[2]), l(1, 0, 1), l(1, 1, 0), l(1, 1, 1)),
-                    avg4(l(n[0], n[1], n[2]), l(1, 0, 1), l(1, -1, 0), l(1, -1, 1)),
-                ],
-            )
-        }
-        Direction::West => {
-            let n = [-1, 0, 0];
-            (
-                [
-                    vertex_ao(s(-1, 0, 1), s(-1, -1, 0), s(-1, -1, 1)),
-                    vertex_ao(s(-1, 0, 1), s(-1, 1, 0), s(-1, 1, 1)),
-                    vertex_ao(s(-1, 0, -1), s(-1, 1, 0), s(-1, 1, -1)),
-                    vertex_ao(s(-1, 0, -1), s(-1, -1, 0), s(-1, -1, -1)),
-                ],
-                [
-                    avg4(l(n[0], n[1], n[2]), l(-1, 0, 1), l(-1, -1, 0), l(-1, -1, 1)),
-                    avg4(l(n[0], n[1], n[2]), l(-1, 0, 1), l(-1, 1, 0), l(-1, 1, 1)),
-                    avg4(l(n[0], n[1], n[2]), l(-1, 0, -1), l(-1, 1, 0), l(-1, 1, -1)),
-                    avg4(
-                        l(n[0], n[1], n[2]),
-                        l(-1, 0, -1),
-                        l(-1, -1, 0),
-                        l(-1, -1, -1),
-                    ),
-                ],
-            )
-        }
-    };
-    [
-        ao[0] * lights[0] * dir_shade,
-        ao[1] * lights[1] * dir_shade,
-        ao[2] * lights[2] * dir_shade,
-        ao[3] * lights[3] * dir_shade,
-    ]
+
+    let n = dir.offset();
+    let dir_shade = dir.shade_light();
+    rows.map(|[side1, side2, corner]| {
+        let ao = super::block_ao::vertex_brightness(s(side1), s(side2), s(corner), shade0);
+        let light = avg4(l(n), l(side1), l(side2), l(corner));
+        ao * light * dir_shade
+    })
 }
 fn avg4(a: f32, b: f32, c: f32, d: f32) -> f32 {
     (a + b + c + d) * 0.25
 }
 pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4], f32) {
-    match dir {
-        Direction::Up => (
-            [
-                [0.0, 1.0, 1.0],
-                [1.0, 1.0, 1.0],
-                [1.0, 1.0, 0.0],
-                [0.0, 1.0, 0.0],
-            ],
-            [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
-            1.0,
-        ),
-        Direction::Down => (
-            [
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [1.0, 0.0, 1.0],
-                [0.0, 0.0, 1.0],
-            ],
-            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-            0.5,
-        ),
-        Direction::North => (
-            [
-                [0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [1.0, 1.0, 0.0],
-                [1.0, 0.0, 0.0],
-            ],
-            [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
-            0.8,
-        ),
-        Direction::South => (
-            [
-                [1.0, 0.0, 1.0],
-                [1.0, 1.0, 1.0],
-                [0.0, 1.0, 1.0],
-                [0.0, 0.0, 1.0],
-            ],
-            [[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
-            0.8,
-        ),
-        Direction::East => (
-            [
-                [1.0, 0.0, 0.0],
-                [1.0, 1.0, 0.0],
-                [1.0, 1.0, 1.0],
-                [1.0, 0.0, 1.0],
-            ],
-            [[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
-            0.6,
-        ),
-        Direction::West => (
-            [
-                [0.0, 0.0, 1.0],
-                [0.0, 1.0, 1.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0],
-            ],
-            [[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
-            0.6,
-        ),
-    }
+    let (from, to) = ([0.0; 3], [1.0; 3]);
+    (
+        face_positions(dir, from, to),
+        face_uvs(dir, from, to, None, None),
+        dir.shade_light(),
+    )
 }

@@ -244,16 +244,12 @@ impl AppCore {
             cursor: self.input.cursor_pos(),
             clicked: self.input.left_just_pressed(),
             mouse_held: self.input.left_held(),
-            typed_chars: self.input.drain_typed_chars(),
-            backspace: self.input.backspace_pressed(),
+            events: self.input.drain_text_events(),
+            shift: self.input.shift_held(),
             enter: self.input.enter_pressed(),
             escape: self.input.escape_pressed(),
             tab: self.input.tab_pressed(),
             f5: self.input.f5_pressed(),
-            select_all: self.input.select_all_pressed(),
-            copy: self.input.copy_pressed(),
-            cut: self.input.cut_pressed(),
-            undo: self.input.undo_pressed(),
             scroll_delta: self.input.consume_menu_scroll(),
         }
     }
@@ -438,6 +434,9 @@ impl AppCore {
                         Arc::clone(&game.chunk_store.shared),
                         Arc::clone(&game.biome_climate),
                     );
+                }
+                NetworkEvent::DimensionName { name } => {
+                    game.dimension = name;
                 }
                 NetworkEvent::ChunkLoaded {
                     pos,
@@ -814,9 +813,36 @@ impl AppCore {
                             .play_world_sound(&sound, category, pos, volume, pitch, seed);
                     }
                 }
-                NetworkEvent::GameModeChanged { game_mode } => {
+                NetworkEvent::GameModeChanged {
+                    game_mode,
+                    previous,
+                } => {
                     tracing::info!("Game mode changed to {game_mode}");
+                    // Vanilla `setLocalMode`: an in-game change records the
+                    // replaced mode; login/respawn set it from the packet.
+                    match previous {
+                        Some(p) => game.previous_game_mode = p,
+                        None if game_mode != game.player.game_mode => {
+                            game.previous_game_mode = Some(game.player.game_mode);
+                        }
+                        None => {}
+                    }
                     game.player.game_mode = game_mode;
+                    // Vanilla GameType.updatePlayerAbilities, applied locally on
+                    // setLocalMode (no packet).
+                    // TODO: the instabuild/invulnerable/may_build halves
+                    match game_mode {
+                        // Creative grants flight but leaves `flying` untouched.
+                        1 => game.player.may_fly = true,
+                        3 => {
+                            game.player.may_fly = true;
+                            game.player.flying = true;
+                        }
+                        _ => {
+                            game.player.may_fly = false;
+                            game.player.flying = false;
+                        }
+                    }
                     if game.inventory_open || game.creative_inventory_open {
                         match game_mode {
                             1 => {
@@ -835,12 +861,24 @@ impl AppCore {
                         }
                     }
                 }
-                NetworkEvent::PlayerAbilitiesChanged { flying } => {
+                NetworkEvent::PlayerAbilitiesChanged {
+                    flying,
+                    can_fly,
+                    flying_speed,
+                    walking_speed,
+                } => {
                     game.player.flying = flying;
+                    game.player.may_fly = can_fly;
+                    game.player.fly_speed = flying_speed;
+                    game.player.walk_speed = walking_speed;
                 }
                 NetworkEvent::ServerViewDistance { distance } => {
                     tracing::info!("Server view distance: {distance}");
-                    game.server_render_distance = distance;
+                    if let Some(d) =
+                        server_view_distance_update(distance, game.last_render_distance)
+                    {
+                        game.server_render_distance = d;
+                    }
                 }
                 NetworkEvent::ServerSimulationDistance { distance } => {
                     tracing::info!("Server simulation distance: {distance}");
@@ -1259,7 +1297,7 @@ impl AppCore {
         // ungated by visibility.
         for &(col, si) in &priority_remesh {
             let spos = ChunkSectionPos::new(col.x, min_y_section + si, col.z);
-            game.enqueue_section_edit(spos, chunk_lod(col, player_chunk));
+            game.enqueue_section_edit(spos, chunk_lod(col, player_chunk, self.menu.chunk_detail));
         }
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1000.0;
         game.last_update_phases.net_decode_ms = ms(t_net);
@@ -1272,6 +1310,7 @@ impl AppCore {
         let t_rescan = std::time::Instant::now();
         game.rescan_mesh_jobs(
             player_chunk,
+            self.menu.chunk_detail,
             &renderer.camera_frustum_planes(),
             renderer.camera_render_position(),
         );
@@ -1286,12 +1325,43 @@ impl AppCore {
         game: &mut GameState,
     ) {
         if game.dead {
+            // Q/F presses queued while dead must not fire on respawn.
+            self.input.clear_click_counts();
             return;
         }
         // Open menus only release the keys; the simulation keeps ticking. The
         // chunk-load benchmark also freezes the player so every run measures the
         // same fixed origin.
         let input_live = game.input_live() && game.chunk_load_bench.is_none();
+
+        // Vanilla Minecraft.handleKeybinds: drop and offhand-swap consume the
+        // queued key presses each tick; spectators consume without acting.
+        if input_live {
+            let spectator = game.player.game_mode == 3;
+            while self.input.consume_click(Action::DropItem) {
+                let whole_stack = self.input.ctrl_held();
+                if !spectator {
+                    // Vanilla `LocalPlayer.drop` always sends the action packet;
+                    // only the swing is gated on something actually dropping.
+                    crate::player::interaction::send_drop(&connection.packet_tx, whole_stack);
+                    if game
+                        .player
+                        .inventory
+                        .remove_from_selected(self.input.selected_slot(), whole_stack)
+                    {
+                        crate::player::interaction::send_swing(&connection.packet_tx);
+                    }
+                }
+            }
+            while self.input.consume_click(Action::SwapOffhand) {
+                if !spectator {
+                    crate::player::interaction::send_swap_offhand(&connection.packet_tx);
+                }
+            }
+        }
+        // A press queued while a menu or chat was open must not fire later.
+        self.input.clear_click_counts();
+
         let neutral = InputState::released();
         let input = if input_live { &self.input } else { &neutral };
         game.player.prev_look_dir = game.player.look_dir;
@@ -1328,6 +1398,7 @@ impl AppCore {
         } else {
             1.0
         });
+        Self::send_abilities_packet(connection, game);
         Self::send_input_packet(input, connection, game);
         self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
@@ -1408,6 +1479,22 @@ impl AppCore {
                 s_client_tick_end::ServerboundClientTickEnd,
             ));
     }
+    // Vanilla onUpdateAbilities: report a locally toggled `flying` to the
+    // server, which gates it on mayfly and corrects us via the clientbound
+    // abilities packet if rejected.
+    fn send_abilities_packet(connection: &ConnectionHandle, game: &mut GameState) {
+        if game.player.abilities_dirty {
+            connection
+                .packet_tx
+                .send(ServerboundGamePacket::PlayerAbilities(
+                azalea_protocol::packets::game::s_player_abilities::ServerboundPlayerAbilities {
+                    is_flying: game.player.flying,
+                },
+            ));
+            game.player.abilities_dirty = false;
+        }
+    }
+
     fn send_input_packet(input: &InputState, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
         let analog_move = input.get_gamepad_left_analog().unwrap_or(glam::Vec2::ZERO);
@@ -1512,16 +1599,30 @@ impl AppCore {
         game.last_sent_horizontal_collision = game.player.horizontal_collision;
     }
 }
+/// New `server_render_distance` for a server view-distance announcement, or
+/// `None` to keep the current one. Some servers announce min(our request,
+/// server max); an echo of our own request carries no cap information and
+/// would ratchet the render distance slider down, so only a differing value
+/// counts. It can't be an echo above the request: any such value is the
+/// server's actual view distance, including later reductions.
+pub(crate) fn server_view_distance_update(announced: u32, last_request: u32) -> Option<u32> {
+    let announced = announced.min(crate::util::MAX_RD);
+    (announced != last_request).then_some(announced)
+}
+
+/// LOD level for a column: full detail within `detail` chunks (the Chunk
+/// Detail setting), half resolution to twice that, quarter beyond.
 pub(crate) fn chunk_lod(
     pos: azalea_core::position::ChunkPos,
     player: azalea_core::position::ChunkPos,
+    detail: u32,
 ) -> u32 {
     let dx = (pos.x - player.x).unsigned_abs();
     let dz = (pos.z - player.z).unsigned_abs();
     let dist = dx.max(dz);
-    if dist <= 8 {
+    if dist <= detail {
         0
-    } else if dist <= 16 {
+    } else if dist <= detail * 2 {
         1
     } else {
         2
@@ -1542,4 +1643,23 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
     let speed_factor: f32 = if player.sprinting { 1.3 } else { 1.0 };
     modifier *= (speed_factor + 1.0) / 2.0;
     1.0_f32.lerp(modifier, effect_scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_view_distance_update;
+
+    #[test]
+    fn server_view_distance_updates() {
+        // Echo of our own request carries no cap information.
+        assert_eq!(server_view_distance_update(12, 12), None);
+        // Below the request: min(request, cap) revealed the server cap.
+        assert_eq!(server_view_distance_update(10, 12), Some(10));
+        // Above the request: the server's actual view distance, including a
+        // reduction from an earlier higher announcement.
+        assert_eq!(server_view_distance_update(64, 12), Some(64));
+        assert_eq!(server_view_distance_update(20, 12), Some(20));
+        // Wire values past the chunk grid's extent clamp to it.
+        assert_eq!(server_view_distance_update(300, 12), Some(128));
+    }
 }

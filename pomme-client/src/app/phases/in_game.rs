@@ -11,7 +11,7 @@ use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
-use crate::app::{DEFAULT_RENDER_DISTANCE, TICK_RATE, input};
+use crate::app::{TICK_RATE, input};
 use crate::audio::{CATEGORY_PLAYERS, SoundRef};
 use crate::benchmark::{
     Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep, UploadHandle,
@@ -157,6 +157,22 @@ pub struct GameState {
     pub show_debug: bool,
     pub show_chunk_borders: bool,
     pub advanced_item_tooltips: bool,
+    /// F1 (vanilla `hideGui`): the HUD, chat, and overlays don't render.
+    pub hide_gui: bool,
+    /// A chord fired while F3 was held, so releasing F3 must not toggle the
+    /// overlay (vanilla `usedDebugKeyAsModifier`).
+    pub f3_chord_consumed: bool,
+    /// Set by F3+A; consumed by `update_game` to re-mesh every loaded chunk.
+    pub pending_chunk_reload: bool,
+    /// Game mode before the last change (vanilla `previousLocalPlayerMode`),
+    /// the F3+N return target.
+    pub previous_game_mode: Option<u8>,
+    /// Current dimension identifier (e.g. "minecraft:overworld"), for F3+C.
+    pub dimension: String,
+    /// F3+F4 game-mode switcher overlay, while open.
+    pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
+    /// Last frame's switcher presence, to re-apply the cursor grab on change.
+    switcher_was_open: bool,
     pub last_sent_input: PlayerInputState,
     pub last_sent_pos: Position,
     pub last_sent_look_dir: LookDirection,
@@ -191,8 +207,12 @@ pub struct GameState {
 }
 
 impl GameState {
-    pub fn new(renderer: &Renderer, resource_packs: &ResourcePackManager) -> Self {
-        let chunk_store = ChunkStore::new(DEFAULT_RENDER_DISTANCE);
+    pub fn new(
+        renderer: &Renderer,
+        resource_packs: &ResourcePackManager,
+        render_distance: u32,
+    ) -> Self {
+        let chunk_store = ChunkStore::new(render_distance);
         let biome_climate = Arc::new(HashMap::new());
         let meshing = ChunkMeshing::new(
             renderer,
@@ -211,7 +231,7 @@ impl GameState {
             position_set: false,
             player_loaded_sent: false,
             options_from_game: false,
-            last_render_distance: DEFAULT_RENDER_DISTANCE,
+            last_render_distance: render_distance,
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -261,6 +281,13 @@ impl GameState {
             show_debug: false,
             show_chunk_borders: false,
             advanced_item_tooltips: false,
+            hide_gui: false,
+            f3_chord_consumed: false,
+            pending_chunk_reload: false,
+            previous_game_mode: None,
+            dimension: String::new(),
+            game_mode_switcher: None,
+            switcher_was_open: false,
             last_sent_input: PlayerInputState::default(),
             last_sent_pos: Position::default(),
             last_sent_look_dir: LookDirection::default(),
@@ -281,7 +308,10 @@ impl GameState {
     }
 
     pub fn gui_open(&self) -> bool {
-        self.inventory_open || self.creative_inventory_open || self.open_container.is_some()
+        self.inventory_open
+            || self.creative_inventory_open
+            || self.open_container.is_some()
+            || self.game_mode_switcher.is_some()
     }
 
     /// The container menu the player currently has open (0 = survival
@@ -384,20 +414,193 @@ impl GameState {
             && self.chunk_load_result.is_none()
     }
 
-    /// F3-family debug toggles; these fire even while a menu is open,
-    /// matching vanilla KeyboardHandler. Returns true if handled.
-    pub fn handle_debug_key(&mut self, code: winit::keyboard::KeyCode, f3_held: bool) -> bool {
+    /// F3-family debug chords; these fire even while a menu is open, matching
+    /// vanilla KeyboardHandler. Returns true if handled. The overlay itself
+    /// toggles in [`Self::handle_f3_release`], not here.
+    // TODO: vanilla gates hitbox/border/copy chords on the server's
+    // reducedDebugInfo flag, which pomme doesn't track yet.
+    pub fn handle_debug_key(
+        &mut self,
+        code: winit::keyboard::KeyCode,
+        f3_held: bool,
+        connection: &ConnectionHandle,
+    ) -> bool {
         use winit::keyboard::KeyCode;
-        match code {
-            KeyCode::F3 => {
-                self.show_debug = !self.show_debug;
-            }
-            KeyCode::KeyG if f3_held => {
-                self.show_chunk_borders = !self.show_chunk_borders;
-            }
-            _ => return false,
+        if code == KeyCode::F3 {
+            // Consumed, but acts on release so chords can suppress it.
+            return true;
         }
-        true
+        if !f3_held {
+            return false;
+        }
+        let handled = match code {
+            KeyCode::KeyA => {
+                self.pending_chunk_reload = true;
+                self.debug_feedback("Reloading all chunks");
+                true
+            }
+            // TODO: F3+B show hitboxes (no entity hitbox renderer yet)
+            KeyCode::KeyC => {
+                // Vanilla also crashes the game when held for 10s; not ported.
+                let p = &self.player;
+                let cmd = format!(
+                    "/execute in {} run tp @s {:.2} {:.2} {:.2} {:.2} {:.2}",
+                    self.dimension,
+                    p.position.x,
+                    p.position.y,
+                    p.position.z,
+                    p.look_dir.y_rot_deg(),
+                    p.look_dir.x_rot_deg(),
+                );
+                if common::set_clipboard(&cmd) {
+                    self.debug_feedback("Copied location to clipboard");
+                }
+                true
+            }
+            KeyCode::KeyD => {
+                self.chat.clear_messages();
+                true
+            }
+            KeyCode::KeyG => {
+                self.show_chunk_borders = !self.show_chunk_borders;
+                self.debug_feedback(if self.show_chunk_borders {
+                    "Chunk borders: shown"
+                } else {
+                    "Chunk borders: hidden"
+                });
+                true
+            }
+            KeyCode::KeyH => {
+                self.advanced_item_tooltips = !self.advanced_item_tooltips;
+                self.debug_feedback(if self.advanced_item_tooltips {
+                    "Advanced tooltips: shown"
+                } else {
+                    "Advanced tooltips: hidden"
+                });
+                true
+            }
+            KeyCode::KeyI => {
+                // TODO: entity variant and server-side NBT query (vanilla
+                // copyRecreateCommand with addNbt/pullFromServer)
+                if let Some(HitResult::Block(t)) = self.interaction.target {
+                    let state = self.chunk_store.get_block_state(
+                        t.block_pos.x,
+                        t.block_pos.y,
+                        t.block_pos.z,
+                    );
+                    let props = crate::world::block::block_properties(state)
+                        .entries()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let block = crate::world::block::block_id(state);
+                    let desc = if props.is_empty() {
+                        block.to_string()
+                    } else {
+                        format!("{block}[{props}]")
+                    };
+                    let cmd = format!(
+                        "/setblock {} {} {} {desc}",
+                        t.block_pos.x, t.block_pos.y, t.block_pos.z
+                    );
+                    if common::set_clipboard(&cmd) {
+                        self.debug_feedback("Copied client-side block data to clipboard");
+                    }
+                }
+                true
+            }
+            KeyCode::F4 => {
+                if let Some(switcher) = &mut self.game_mode_switcher {
+                    switcher.cycle();
+                } else if self.input_live() {
+                    // Sent unconditionally on apply; the server refuses
+                    // without permission.
+                    // TODO: gate on permission level once pomme tracks it
+                    // (vanilla canSwitchGameMode / debug.gamemodes.error).
+                    self.game_mode_switcher =
+                        Some(crate::ui::game_mode_switcher::GameModeSwitcherState::open(
+                            self.player.game_mode,
+                            self.previous_game_mode,
+                        ));
+                }
+                true
+            }
+            KeyCode::KeyN => {
+                // Sent unconditionally; the server refuses without permission.
+                use azalea_core::game_type::GameMode;
+                let target = if self.player.game_mode != 3 {
+                    GameMode::Spectator
+                } else {
+                    self.previous_game_mode
+                        .and_then(GameMode::from_id)
+                        .unwrap_or(GameMode::Creative)
+                };
+                connection
+                    .packet_tx
+                    .send(ServerboundGamePacket::ChangeGameMode(
+                    azalea_protocol::packets::game::s_change_game_mode::ServerboundChangeGameMode {
+                        mode: target,
+                    },
+                ));
+                true
+            }
+            KeyCode::KeyV => {
+                self.debug_feedback("Client version info:");
+                self.chat.push_message(vec![crate::ui::text::TextSpan::new(
+                    format!("Pomme Client {}", env!("CARGO_PKG_VERSION")),
+                    [1.0, 1.0, 1.0, 1.0],
+                )]);
+                true
+            }
+            // TODO: F3+F6 debug options screen, F3+P pause-on-lost-focus,
+            // F3+S dump dynamic textures, F3+T resource pack reload,
+            // F3+L profiler, F3+1..4 debug charts (no backing features),
+            // F3+O occlusion toggle (needs a Hi-Z bypass flag in the cull)
+            _ => false,
+        };
+        self.f3_chord_consumed |= handled;
+        handled
+    }
+
+    /// Vanilla toggles the debug overlay when F3 is released, unless a chord
+    /// key consumed it as a modifier while held (KeyboardHandler.keyPress).
+    /// An open game-mode switcher applies its selection instead.
+    pub fn handle_f3_release(&mut self, connection: &ConnectionHandle) {
+        if let Some(switcher) = self.game_mode_switcher.take() {
+            use azalea_core::game_type::GameMode;
+            if switcher.selected != self.player.game_mode
+                && let Some(mode) = GameMode::from_id(switcher.selected)
+            {
+                connection
+                    .packet_tx
+                    .send(ServerboundGamePacket::ChangeGameMode(
+                    azalea_protocol::packets::game::s_change_game_mode::ServerboundChangeGameMode {
+                        mode,
+                    },
+                ));
+            }
+            self.f3_chord_consumed = false;
+            return;
+        }
+        if self.f3_chord_consumed {
+            self.f3_chord_consumed = false;
+        } else {
+            self.show_debug = !self.show_debug;
+        }
+    }
+
+    /// Yellow bold "[Debug]:" prefix plus a plain message, vanilla
+    /// `debugFeedback`.
+    fn debug_feedback(&mut self, message: &str) {
+        use crate::ui::text::TextSpan;
+        let yellow = [1.0, 1.0, 85.0 / 255.0, 1.0];
+        let mut prefix = TextSpan::new("[Debug]:".into(), yellow);
+        prefix.bold = true;
+        self.chat.push_message(vec![
+            prefix,
+            TextSpan::new(" ".into(), [1.0, 1.0, 1.0, 1.0]),
+            TextSpan::new(message.into(), [1.0, 1.0, 1.0, 1.0]),
+        ]);
     }
 
     pub fn sync_render_distance(&mut self, connection: &ConnectionHandle, render_distance: u32) {
@@ -454,7 +657,7 @@ impl GameState {
     /// work: columns whose chunk-load light applied go through the
     /// content-gen path like chunk loads (the rescan enqueues them
     /// nearest-first), individual lit sections remesh on the priority lane.
-    pub fn update_light(&mut self) {
+    pub fn update_light(&mut self, chunk_detail: u32) {
         let mut dirty = crate::world::light::LightDirty::default();
         self.light_engine
             .poll_and_run(&mut self.chunk_store, &mut dirty);
@@ -490,7 +693,7 @@ impl GameState {
             }
             self.enqueue_section_edit(
                 ChunkSectionPos::new(key.x, key.y, key.z),
-                crate::app::core::chunk_lod(col, player_chunk),
+                crate::app::core::chunk_lod(col, player_chunk, chunk_detail),
             );
         }
     }
@@ -514,11 +717,17 @@ impl GameState {
     pub fn rescan_mesh_jobs(
         &mut self,
         player_chunk: ChunkPos,
+        chunk_detail: u32,
         frustum: &[[f32; 4]; 6],
         eye: glam::DVec3,
     ) {
-        self.meshing
-            .rescan_mesh_jobs(self.chunk_store.loaded_set(), player_chunk, frustum, eye);
+        self.meshing.rescan_mesh_jobs(
+            self.chunk_store.loaded_set(),
+            player_chunk,
+            chunk_detail,
+            frustum,
+            eye,
+        );
     }
 }
 
@@ -644,7 +853,13 @@ fn send_container_clicks(
             },
             other => {
                 let mut cursor = std::mem::take(&mut game.cursor_item);
-                let changed = menu_click::apply_click(kind, game.menu_slots(), &mut cursor, other);
+                let changed = menu_click::apply_click(
+                    kind,
+                    game.menu_slots(),
+                    &mut cursor,
+                    other,
+                    crate::player::is_creative(game.player.game_mode),
+                );
                 game.cursor_item = cursor;
                 for (s, item) in &changed {
                     game.set_menu_slot(*s as usize, item.clone());
@@ -734,22 +949,82 @@ pub fn update_game(
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
     let t_light = std::time::Instant::now();
-    game.update_light();
+    game.update_light(core.menu.chunk_detail);
     game.last_update_phases.light_ms = t_light.elapsed().as_secs_f32() * 1000.0;
+
+    // F1 (vanilla keyToggleGui); only while no screen or chat is open.
+    if core.input.key_just_pressed(winit::keyboard::KeyCode::F1) && game.input_live() {
+        game.hide_gui = !game.hide_gui;
+    }
+    // TODO: remaining vanilla keybinds with no backing feature yet:
+    // L advancements, P social interactions, O friends overlay (in-game),
+    // G quick actions, F4 spectator shader effects, C/X creative saved
+    // hotbars, spectator hotbar select.
+
+    // Finished F2 captures announce in chat (vanilla screenshot.success: bare
+    // filename, underlined).
+    // TODO: vanilla makes the filename a clickable open-file link; pomme chat
+    // has no click handling yet.
+    use crate::ui::text::TextSpan;
+    for result in gfx.renderer.take_screenshot_messages() {
+        let spans = match result {
+            Ok(name) => {
+                let mut file = TextSpan::new(name, common::WHITE);
+                file.underline = true;
+                vec![
+                    TextSpan::new("Saved screenshot as ".into(), common::WHITE),
+                    file,
+                ]
+            }
+            Err(err) => vec![TextSpan::new(
+                format!("Couldn't save screenshot: {err}"),
+                common::WHITE,
+            )],
+        };
+        game.chat.push_message(spans);
+    }
+
+    // F3+A: drop every mesh and re-enqueue all loaded columns.
+    if game.pending_chunk_reload {
+        game.pending_chunk_reload = false;
+        gfx.renderer.clear_chunk_meshes();
+        game.meshing.clear();
+    }
 
     let partial_tick = core.tick_accumulator / TICK_RATE;
 
-    let typed = core.input.drain_typed_chars();
-    let backspace = core.input.backspace_pressed();
     let enter = core.input.enter_pressed();
     let tab = core.input.tab_pressed();
     let shift = core.input.shift_held();
+    let up = core.input.up_pressed();
+    let down = core.input.down_pressed();
+    let page_up = core.input.page_up_pressed();
+    let page_down = core.input.page_down_pressed();
+    // The ordered key/char stream goes to whichever text consumer owns this
+    // frame; menus (in-game options) drain it themselves in build_menu_input.
+    let text_events = if game.chat.is_open() || game.wants_text_input() {
+        core.input.drain_text_events()
+    } else {
+        Vec::new()
+    };
+    let text_sw = gfx.renderer.screen_width() as f32;
+    let text_gs = hud::gui_scale(
+        text_sw,
+        gfx.renderer.screen_height() as f32,
+        core.menu.gui_scale_setting,
+    );
+    let text_fs = common::FONT_SIZE * text_gs;
     if let Some(msg) = game.chat.handle_key_input(
-        &typed,
-        backspace,
+        &text_events,
         enter,
         tab,
         shift,
+        up,
+        down,
+        page_up,
+        page_down,
+        text_sw - 12.0 * text_gs,
+        &|s| gfx.renderer.menu_text_width(s, text_fs),
         game.command_tree.as_deref(),
     ) {
         core.send_chat_message(connection, msg);
@@ -763,7 +1038,17 @@ pub fn update_game(
             ));
     }
 
-    core.input.text_capture = game.wants_text_input();
+    // Chat counts as text capture too, so digits/E/Q/F type instead of acting
+    // as game keys (vanilla suppresses KeyMappings while any screen is open).
+    core.input.text_capture = game.wants_text_input() || game.chat.is_open();
+    core.input.menu_capture = game.gui_open();
+
+    // The F3+F4 switcher shows the mouse cursor while open.
+    let switcher_open = game.game_mode_switcher.is_some();
+    if switcher_open != game.switcher_was_open {
+        game.switcher_was_open = switcher_open;
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
 
     let mut close_inventory = false;
     let mut pause_action = PauseAction::None;
@@ -893,12 +1178,18 @@ pub fn update_game(
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
-    if !benchmark_running {
+    if !benchmark_running && game.hide_gui {
+        // F1: vanilla still renders the debug overlay with the GUI hidden.
+        if let Some(info) = debug.as_ref() {
+            hud::build_debug_overlay(&mut elements, info, gs, &|t, s| {
+                gfx.renderer.menu_text_width(t, s)
+            });
+        }
+    } else if !benchmark_running {
         let is_survival = crate::player::is_survival(game.player.game_mode);
         let air_bubbles = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
             .filter(|_| is_survival);
-        // TODO: gate the pop sound on HUD visibility if a hide-HUD toggle (F1) is
-        // added.
+        // The pop sound only plays while the bubbles render (HUD visible).
         if let Some(bubbles) = &air_bubbles {
             if !game.player.eyes_in_water {
                 game.last_bubble_pop_sound_played = 0;
@@ -992,6 +1283,7 @@ pub fn update_game(
     }
 
     if core.input.performing_action(input::Action::ViewPlayerList)
+        && !game.hide_gui
         && !game.paused
         && !game.gui_open()
         && !game.chat.is_open()
@@ -1004,6 +1296,17 @@ pub fn update_game(
             &game.tab_list,
             gs,
             &|t, s| r.menu_text_width(t, s),
+        );
+    }
+
+    if let Some(switcher) = &mut game.game_mode_switcher {
+        crate::ui::game_mode_switcher::build_game_mode_switcher(
+            &mut elements,
+            switcher,
+            sw,
+            sh,
+            core.input.cursor_pos(),
+            gs,
         );
     }
 
@@ -1284,7 +1587,11 @@ pub fn update_game(
     }
 
     if game.options_from_game {
-        let menu_input = core.build_menu_input();
+        core.menu.server_render_distance = game.server_render_distance;
+        let mut menu_input = core.build_menu_input();
+        // Chat consumed the enter/tab latches earlier this frame; hand them on.
+        menu_input.enter = enter;
+        menu_input.tab = tab;
         let r = &gfx.renderer;
         let result = core
             .menu
@@ -1322,7 +1629,7 @@ pub fn update_game(
             )
         };
         core.input.clear_just_pressed_actions();
-    } else if game.paused {
+    } else if game.paused && !matches!(game.pause_screen, PauseScreen::Hidden) {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed();
         pause_action = pause::build_pause_menu(
@@ -1341,6 +1648,8 @@ pub fn update_game(
     let mut player_preview = None;
     let mut book_preview = None;
     if game.inventory_open || game.open_container.is_some() {
+        // Key shortcuts stay quiet while a text field (anvil rename) types.
+        let keys_live = !game.wants_text_input();
         let input = crate::ui::container::ContainerInput {
             left_pressed: core.input.left_just_pressed(),
             right_pressed: core.input.right_just_pressed(),
@@ -1348,12 +1657,21 @@ pub fn update_game(
             left_held: core.input.left_held(),
             right_held: core.input.right_held(),
             shift: core.input.shift_held(),
+            hotbar_swap: keys_live
+                .then(|| core.input.hotbar_key_just_pressed())
+                .flatten(),
+            swap_offhand: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
+            throw: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyQ),
+            throw_all: core.input.ctrl_held(),
         };
         // The anvil rename field consumes this frame's typing; a changed
         // accepted name goes to the server (vanilla `onNameChanged`).
         if let Some(c) = &mut game.open_container
             && let Some(state) = &mut c.anvil
-            && let Some(name) = crate::ui::anvil::update_rename(state, &c.slots, &typed, backspace)
+            && let Some(name) =
+                crate::ui::anvil::update_rename(state, &c.slots, &text_events, &|s| {
+                    gfx.renderer.menu_text_width(s, common::FONT_SIZE)
+                })
         {
             use azalea_protocol::packets::game::s_rename_item::ServerboundRenameItem;
             connection
@@ -1518,8 +1836,10 @@ pub fn update_game(
             middle_clicked,
             right_clicked,
             scroll_delta,
-            &typed,
-            backspace,
+            &text_events,
+            core.input.key_just_pressed(winit::keyboard::KeyCode::KeyT),
+            core.input.hotbar_key_just_pressed(),
+            core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
             &game.player.inventory,
             gs,
             game.advanced_item_tooltips,
@@ -1559,9 +1879,13 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
-    game.chat.build(&mut elements, sw, sh, gs, &|t, s| {
-        gfx.renderer.menu_text_width(t, s)
-    });
+    // F1 hides the closed-chat overlay; an open chat is a screen and renders
+    // regardless (vanilla Hud.extractChat vs ChatScreen).
+    if !game.hide_gui || game.chat.is_open() {
+        game.chat.build(&mut elements, sw, sh, gs, &|t, s| {
+            gfx.renderer.menu_text_width(t, s)
+        });
+    }
 
     // Chat consumes keys, not clicks; nothing else clears them while only chat
     // is open, so drop them here to keep stray clicks out of the live sim.

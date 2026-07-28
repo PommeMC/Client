@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use azalea_inventory::ItemStack;
 use azalea_inventory::operations::{
-    ClickOperation, PickupAllClick, PickupClick, QuickCraftClick, QuickCraftKind, QuickCraftStatus,
-    QuickMoveClick,
+    ClickOperation, CloneClick, PickupAllClick, PickupClick, QuickCraftClick, QuickCraftKind,
+    QuickCraftStatus, QuickMoveClick, SwapClick, ThrowClick,
 };
 
 use super::common::{
@@ -41,6 +41,14 @@ pub struct ContainerInput {
     pub left_held: bool,
     pub right_held: bool,
     pub shift: bool,
+    /// Hotbar digit pressed this frame (vanilla `keyHotbarSlots` swap).
+    pub hotbar_swap: Option<u8>,
+    /// F pressed: swap the hovered slot with the offhand.
+    pub swap_offhand: bool,
+    /// Q pressed: throw from the hovered slot.
+    pub throw: bool,
+    /// Ctrl held with Q: throw the whole stack.
+    pub throw_all: bool,
 }
 
 /// The centered container panel's placement on screen.
@@ -313,6 +321,47 @@ pub fn push_cursor_stack(
     }
 }
 
+/// Keyboard shortcuts on the hovered slot, vanilla
+/// `AbstractContainerScreen.keyPressed`: with an empty cursor, F / 1-9 swap it
+/// with the offhand / a hotbar slot; over an item, middle-click CLONEs and
+/// Q THROWs (Ctrl = whole stack).
+fn resolve_key_ops(
+    input: &ContainerInput,
+    hovered: Option<u16>,
+    slots: &[ItemStack],
+    cursor_item: &ItemStack,
+) -> Vec<ClickOperation> {
+    let mut ops = Vec::new();
+    let Some(slot) = hovered else {
+        return ops;
+    };
+    if cursor_item.is_empty() {
+        if input.swap_offhand {
+            ops.push(ClickOperation::Swap(SwapClick {
+                source_slot: slot,
+                target_slot: 40,
+            }));
+        } else if let Some(i) = input.hotbar_swap {
+            ops.push(ClickOperation::Swap(SwapClick {
+                source_slot: slot,
+                target_slot: i,
+            }));
+        }
+    }
+    if slots.get(slot as usize).is_some_and(ItemStack::is_present) {
+        if input.middle_pressed {
+            ops.push(ClickOperation::Clone(CloneClick { slot }));
+        } else if input.throw {
+            ops.push(ClickOperation::Throw(if input.throw_all {
+                ThrowClick::All { slot }
+            } else {
+                ThrowClick::Single { slot }
+            }));
+        }
+    }
+    ops
+}
+
 /// Turns this frame's input + hover into container-click operations, driving
 /// the drag state machine. The server applies and resyncs, so no local
 /// prediction. Returns the ops and whether an empty-handed click landed
@@ -331,7 +380,7 @@ pub fn resolve_gesture(
 ) -> (Vec<ClickOperation>, bool) {
     let carrying = cursor_item.is_present();
     let outside = !panel.contains(cursor);
-    let mut ops = Vec::new();
+    let mut ops = resolve_key_ops(input, hovered, slots, cursor_item);
 
     if let Some((drag_kind, covered)) = drag {
         let held = matches!(

@@ -46,10 +46,12 @@ fn main() {
             content,
         })
     });
-    println!(
-        "cargo:rerun-if-changed={}",
-        shader_dir.join("fog.glsl").display()
-    );
+    for include in ["fog.glsl", "camera_ubo.glsl"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            shader_dir.join(include).display()
+        );
+    }
 
     let shaders = [
         ("chunk.vert", shaderc::ShaderKind::Vertex),

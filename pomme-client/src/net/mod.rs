@@ -190,9 +190,19 @@ pub enum NetworkEvent {
     },
     GameModeChanged {
         game_mode: u8,
+        /// `Some` = authoritative previous mode from login/respawn (which may
+        /// itself be absent); `None` = derive from the mode being replaced
+        /// (the GameEvent packet carries no previous mode).
+        previous: Option<Option<u8>>,
+    },
+    DimensionName {
+        name: String,
     },
     PlayerAbilitiesChanged {
         flying: bool,
+        can_fly: bool,
+        flying_speed: f32,
+        walking_speed: f32,
     },
     ServerViewDistance {
         distance: u32,
@@ -374,6 +384,7 @@ impl NetworkEvent {
             NetworkEvent::Registries(_) => "registries",
             NetworkEvent::BiomeColors { .. } => "biome_colors",
             NetworkEvent::DimensionInfo { .. } => "dimension_info",
+            NetworkEvent::DimensionName { .. } => "dimension_name",
             NetworkEvent::ChunkLoaded { .. } => "chunk_loaded",
             NetworkEvent::LightUpdate { .. } => "light_update",
             NetworkEvent::ChunkUnloaded { .. } => "chunk_unloaded",

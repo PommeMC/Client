@@ -190,11 +190,19 @@ impl MainMenu {
         });
         cy += 1.0 + 16.0 * s;
 
+        // TODO: fold the bottom icon rows into the focus ring too (arrow-key
+        // nearest-rect navigation is still deferred).
+        self.focus_advance(input);
+        let mut ctx = self.make_focus_ctx(input);
+
         for (i, def) in buttons.iter().enumerate() {
             let by = cy + i as f32 * (btn_h + btn_gap);
             let rect = [btn_x, by, content_w, btn_h];
+            let focused = ctx.focused(true);
             let hovered = common::hit_test(cursor, rect);
             any_hovered |= hovered;
+            // Keyboard focus shows the same highlight as hover (vanilla).
+            let active = hovered || focused;
 
             elements.push(MenuElement::Rect {
                 x: rect[0],
@@ -202,7 +210,7 @@ impl MainMenu {
                 w: rect[2],
                 h: rect[3],
                 corner_radius: btn_r,
-                color: if hovered { glass_hover } else { glass },
+                color: if active { glass_hover } else { glass },
             });
 
             let bar_margin = btn_h * 0.18;
@@ -216,7 +224,7 @@ impl MainMenu {
                     accent[0],
                     accent[1],
                     accent[2],
-                    if hovered { 0.9 } else { 0.12 },
+                    if active { 0.9 } else { 0.12 },
                 ],
             });
 
@@ -225,11 +233,11 @@ impl MainMenu {
                 y: rect[1] + (rect[3] - font_size) / 2.0,
                 text: def.label.into(),
                 scale: font_size,
-                color: if hovered { text_bright } else { text_col },
+                color: if active { text_bright } else { text_col },
                 centered: false,
             });
 
-            if clicked && hovered {
+            if (clicked && hovered) || (focused && ctx.activate) {
                 any_clicked = true;
                 if def.id == 2 {
                     action = MenuAction::Quit;
@@ -526,6 +534,8 @@ impl MainMenu {
                 self.transition = None;
             }
         }
+
+        self.finish_focus(&ctx);
 
         MainMenuResult {
             elements,

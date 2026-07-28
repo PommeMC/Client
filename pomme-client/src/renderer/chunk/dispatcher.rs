@@ -293,6 +293,7 @@ impl ChunkMeshing {
         &mut self,
         loaded: &std::collections::HashSet<ChunkPos>,
         player_chunk: ChunkPos,
+        chunk_detail: u32,
         frustum: &[[f32; 4]; 6],
         eye: DVec3,
     ) {
@@ -305,7 +306,7 @@ impl ChunkMeshing {
         let mut active_cols: Vec<(ChunkPos, u32, u32)> = Vec::new();
         for &pos in loaded {
             let active_mask = self.update_set.get(pos).load(Ordering::Acquire);
-            let lod = crate::app::core::chunk_lod(pos, player_chunk);
+            let lod = crate::app::core::chunk_lod(pos, player_chunk, chunk_detail);
             // Fast path: a present cache entry means a previous full visit
             // stamped every section's identity, so with nothing dirty and the
             // lod unchanged the section loop has no work.

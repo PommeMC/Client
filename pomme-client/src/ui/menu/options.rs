@@ -2,11 +2,12 @@ use super::*;
 use crate::resource_pack::PackCompat;
 
 /// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or
-/// two 150px widgets per `Pair`.
+/// two 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
 pub(super) enum OptRow<'a> {
     Header(&'a str),
     Big(&'a str),
     Pair(&'a str, &'a str),
+    PairLeft(&'a str),
 }
 
 fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
@@ -84,6 +85,16 @@ impl MainMenu {
         }
     }
 
+    /// Upper bound of the render distance slider: the server-announced view
+    /// distance while connected (can exceed 32), 32 otherwise.
+    fn render_distance_max(&self) -> u32 {
+        if self.server_render_distance > 0 {
+            self.server_render_distance.max(3)
+        } else {
+            32
+        }
+    }
+
     pub(super) fn build_options_video(
         &mut self,
         sw: f32,
@@ -96,7 +107,12 @@ impl MainMenu {
             DisplayMode::Borderless => "Fullscreen: Borderless",
             DisplayMode::Fullscreen => "Fullscreen: Exclusive",
         };
-        let rd = format!("Render Distance: {} chunks", self.render_distance);
+        let rd_max = self.render_distance_max();
+        let rd = format!(
+            "Render Distance: {} chunks",
+            self.render_distance.min(rd_max)
+        );
+        let cd = format!("Chunk Detail: {} chunks", self.chunk_detail);
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
             "Max Framerate: Unlimited".to_string()
@@ -130,6 +146,7 @@ impl MainMenu {
             // TODO: static stub, not wired (see mesher::enqueue).
             OptRow::Pair("Prioritize Chunk Updates: None", &sd),
             OptRow::Pair("Smooth Lighting: ON", &clouds_label),
+            OptRow::PairLeft(&cd),
             OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
             OptRow::Pair("Entity Shadows: ON", "Entity Distance: 100%"),
             OptRow::Pair("Menu Background Blur: 50%", "Cloud Range: 128"),
@@ -140,12 +157,14 @@ impl MainMenu {
             OptRow::Pair("Show Autosave Indicator: ON", "Vignette: ON"),
             OptRow::Pair("Attack Indicator: Crosshair", "Chunk Fade-in: 1.0s"),
         ];
-        let rd_frac = (self.render_distance as f32 - 2.0) / 30.0;
+        let rd_frac = ((self.render_distance as f32 - 2.0) / (rd_max as f32 - 2.0)).clamp(0.0, 1.0);
+        let cd_frac = ((self.chunk_detail as f32 - 8.0) / 40.0).clamp(0.0, 1.0);
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let frustum_frac = self.frustum_padding / 0.5;
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
+            ("Chunk Detail:", cd_frac),
             ("Simulation Distance:", sd_frac),
             ("Max Framerate:", mf_frac),
             ("Frustum Padding:", frustum_frac),
@@ -612,6 +631,9 @@ impl MainMenu {
             });
         }
 
+        self.focus_advance(input);
+        let mut ctx = self.make_focus_ctx(input);
+
         let mut y_cursor = top_y;
         for (i, row) in rows.iter().enumerate() {
             let by = y_cursor + btn_dy;
@@ -633,6 +655,7 @@ impl MainMenu {
                     widgets.push((*a, left_x, small_w));
                     widgets.push((*b, right_x, small_w));
                 }
+                OptRow::PairLeft(a) => widgets.push((*a, left_x, small_w)),
             }
             for (label, bx, bw) in widgets {
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
@@ -665,9 +688,12 @@ impl MainMenu {
                     continue;
                 }
 
-                let h = common::push_button_scrolling(
+                let focused = ctx.focused(true);
+                let h = common::hit_test(cursor, [bx, by, bw, btn_h]);
+                let draw_cursor = helpers::focus_cursor(focused, h, bx, by, bw, btn_h, cursor);
+                common::push_button_scrolling(
                     &mut elements,
-                    cursor,
+                    draw_cursor,
                     bx,
                     by,
                     bw,
@@ -682,7 +708,7 @@ impl MainMenu {
                 if h && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
                     common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
                 }
-                if clicked && h {
+                if (clicked && h) || (focused && ctx.activate) {
                     any_clicked = true;
                     if let Some((_, target)) = nav.iter().find(|(l, _)| *l == label) {
                         if matches!(target, Screen::OptionsResourcePacks) {
@@ -691,6 +717,7 @@ impl MainMenu {
                         self.set_screen(target.clone_screen());
                         if matches!(self.screen, Screen::OptionsResourcePacks) {
                             self.focused_field = Some(0);
+                            self.pack_search.set_focused(true);
                         }
                     }
                     if label.starts_with("GUI Scale:") {
@@ -761,7 +788,11 @@ impl MainMenu {
         for (prefix, value) in &slider_results {
             let v = *value;
             match *prefix {
-                "Render Distance:" => self.render_distance = (2.0 + v * 30.0).round() as u32,
+                "Render Distance:" => {
+                    let max = self.render_distance_max() as f32;
+                    self.render_distance = (2.0 + v * (max - 2.0)).round() as u32
+                }
+                "Chunk Detail:" => self.chunk_detail = (8.0 + v * 40.0).round() as u32,
                 "Simulation Distance:" => {
                     self.simulation_distance = (5.0 + v * 27.0).round() as u32
                 }
@@ -819,9 +850,20 @@ impl MainMenu {
         }
 
         let done_w = 200.0 * gs;
-        let h = common::push_button_scrolling(
-            &mut elements,
+        let done_focused = ctx.focused(true);
+        let done_h = common::hit_test(cursor, [cx - done_w / 2.0, done_y, done_w, btn_h]);
+        let done_cursor = helpers::focus_cursor(
+            done_focused,
+            done_h,
+            cx - done_w / 2.0,
+            done_y,
+            done_w,
+            btn_h,
             cursor,
+        );
+        common::push_button_scrolling(
+            &mut elements,
+            done_cursor,
             cx - done_w / 2.0,
             done_y,
             done_w,
@@ -832,11 +874,12 @@ impl MainMenu {
             true,
             &label_scroll,
         );
-        any_hovered |= h;
-        if clicked && h {
+        any_hovered |= done_h;
+        if (clicked && done_h) || (done_focused && ctx.activate) {
             any_clicked = true;
             self.set_screen(back);
         }
+        self.finish_focus(&ctx);
 
         MainMenuResult {
             elements,
@@ -862,7 +905,7 @@ impl MainMenu {
             return empty_result(2.0);
         }
 
-        self.handle_text_input(input, 1);
+        self.cycle_fields(input, 1);
 
         let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
         let fs = common::FONT_SIZE * gs;
@@ -911,26 +954,29 @@ impl MainMenu {
         header_y += fs + pad;
 
         let field_x = cx - list_w / 2.0;
-        push_text_field(
+        self.text_field(
             &mut elements,
+            TextTarget::PackSearch,
+            0,
+            input,
             field_x,
             header_y,
             list_w,
             field_h,
             fs,
             gs,
-            if self.pack_search.is_empty() {
-                "Search..."
-            } else {
-                &self.pack_search
-            },
-            self.focused_field == Some(0),
-            self.focused_field == Some(0) && self.field_all_selected,
-            &self.cursor_blink,
             text_width_fn,
         );
-        if clicked && common::hit_test(cursor, [field_x, header_y, list_w, field_h]) {
-            self.on_field_click(0);
+        // Vanilla EditBox hint: shown only while empty and unfocused.
+        if self.pack_search.value().is_empty() && self.focused_field != Some(0) {
+            elements.push(MenuElement::Text {
+                x: field_x + 4.0 * gs,
+                y: header_y + (field_h - fs) / 2.0,
+                text: "Search...".into(),
+                scale: fs,
+                color: COL_DIM,
+                centered: false,
+            });
         }
         header_y += field_h + pad;
 
@@ -968,7 +1014,7 @@ impl MainMenu {
 
         let entries_top = list_top + label_h + pad;
 
-        let search_lower = self.pack_search.to_lowercase();
+        let search_lower = self.pack_search.value().to_lowercase();
         let available: Vec<_> = self
             .available_packs
             .iter()
@@ -1224,29 +1270,32 @@ impl MainMenu {
         });
 
         let done_w = 200.0 * gs;
-        let h = common::push_button(
+        self.focus_advance(input);
+        let mut ctx = self.make_focus_ctx(input);
+        if push_button_f(
             &mut elements,
+            &mut ctx,
+            &mut any_hovered,
             input.cursor,
+            input.clicked,
             cx - done_w / 2.0,
             done_y,
             done_w,
             btn_h,
             gs,
-            fs,
             "Done",
             true,
-        );
-        any_hovered |= h;
-        if input.clicked && h {
+        ) {
             self.set_screen(back);
         }
+        self.finish_focus(&ctx);
 
         MainMenuResult {
             elements,
             action: MenuAction::None,
             cursor_pointer: any_hovered,
             blur: 2.0,
-            clicked_button: false,
+            clicked_button: ctx.fired,
         }
     }
 }
