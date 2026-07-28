@@ -31,8 +31,6 @@ pub struct PerFrameData {
     pub uniform_allocation: Allocation,
     pub output_buffer: vk::Buffer,
     pub output_allocation: Allocation,
-    pub readback_buffer: vk::Buffer,
-    pub readback_allocation: Allocation,
     pub frame_descriptor_set: vk::DescriptorSet,
     pub hiz_descriptor_set: vk::DescriptorSet,
     pub vis_center: ChunkPos,
@@ -72,14 +70,6 @@ impl PerFrameData {
             sbo_size,
             vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::TransferSrc,
             &format!("visibility_output_sbo_{}", frame_idx),
-        );
-
-        let (readback_buffer, readback_allocation) = util::create_readback_buffer(
-            device,
-            allocator,
-            sbo_size,
-            vk::BufferUsageFlags::TransferDst,
-            &format!("visibility_readback_{}", frame_idx),
         );
 
         // Allocate frame descriptor set
@@ -159,8 +149,6 @@ impl PerFrameData {
             uniform_allocation,
             output_buffer,
             output_allocation,
-            readback_buffer,
-            readback_allocation,
             frame_descriptor_set,
             hiz_descriptor_set,
             vis_center: ChunkPos::default(),
@@ -178,10 +166,6 @@ impl PerFrameData {
 
         device.destroy_buffer(self.output_buffer, None);
         let allocation = std::mem::take(&mut self.output_allocation);
-        alloc.free(allocation).ok();
-
-        device.destroy_buffer(self.readback_buffer, None);
-        let allocation = std::mem::take(&mut self.readback_allocation);
         alloc.free(allocation).ok();
     }
 }
@@ -391,25 +375,6 @@ impl VisibilityPipeline {
         self.executed = [false; MAX_FRAMES_IN_FLIGHT];
     }
 
-    /// The frame slot's visibility bitset, or `None` while the slot has never
-    /// been written (its buffer is zeroed, i.e. "all occluded" — callers must
-    /// fail open to fully visible instead).
-    pub fn readback(&self, frame: usize) -> Option<&[u32]> {
-        if !self.executed[frame] {
-            return None;
-        }
-        let size_in_bytes = MASK_BYTES as usize;
-        let mapped = self.per_frame[frame]
-            .readback_allocation
-            .mapped_slice()
-            .unwrap();
-        Some(bytemuck::cast_slice(&mapped[..size_in_bytes]))
-    }
-
-    pub fn vis_center(&self, frame: usize) -> ChunkPos {
-        self.per_frame[frame].vis_center
-    }
-
     /// The slot's mask decode parameters `(center, min_section,
     /// section_count)` for the GPU cull, or `None` (fail open) while the slot
     /// has never been written.
@@ -547,11 +512,11 @@ impl VisibilityPipeline {
 
         cmd.dispatch(groups_x, groups_y, groups_z);
 
-        // 6. Make the mask write visible to the readback copy below AND to
-        // the cull dispatch that reads this buffer three frames from now.
-        let sbo_copy_barrier = vk::BufferMemoryBarrier {
+        // 6. Make the mask write visible to the cull dispatch that reads this
+        // buffer three frames from now.
+        let mask_barrier = vk::BufferMemoryBarrier {
             src_access_mask: vk::AccessFlags::ShaderWrite,
-            dst_access_mask: vk::AccessFlags::TransferRead | vk::AccessFlags::ShaderRead,
+            dst_access_mask: vk::AccessFlags::ShaderRead,
             src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
             dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
             buffer: frame_data.output_buffer,
@@ -561,22 +526,11 @@ impl VisibilityPipeline {
         };
         cmd.pipeline_barrier(
             vk::PipelineStageFlags::ComputeShader,
-            vk::PipelineStageFlags::Transfer | vk::PipelineStageFlags::ComputeShader,
+            vk::PipelineStageFlags::ComputeShader,
             vk::DependencyFlags::empty(),
             &[],
-            &[sbo_copy_barrier],
+            &[mask_barrier],
             &[],
-        );
-
-        // 7. Copy output to CPU readback buffer
-        cmd.copy_buffer(
-            frame_data.output_buffer,
-            frame_data.readback_buffer,
-            &[vk::BufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size: MASK_BYTES,
-            }],
         );
     }
 

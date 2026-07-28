@@ -58,7 +58,6 @@ use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::renderer::timings::{RenderTimings, Timer, Timestamp};
-use crate::util::ChunkRing;
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
@@ -194,10 +193,6 @@ pub struct Renderer {
     last_timings: RenderTimings,
     hiz_pipeline: HizPipeline,
     visibility_pipeline: VisibilityPipeline,
-    /// Per-section draw mask refreshed each frame from the GPU visibility
-    /// readback (all-visible until the pass has run). Persistent to avoid a
-    /// per-frame ring allocation.
-    visibility_mask: ChunkRing<u32>,
     /// CPU wait in the last frame's `acquire_next_image`: where FIFO vblank
     /// backpressure lands, consumed by the vsync frame pacer.
     last_acquire_ms: f32,
@@ -550,7 +545,6 @@ impl Renderer {
             },
             hiz_pipeline,
             visibility_pipeline,
-            visibility_mask: ChunkRing::new(u32::MAX),
             last_acquire_ms: 0.0,
         })
     }
@@ -1029,10 +1023,12 @@ impl Renderer {
     }
 
     pub fn stage_mesh_batch(&mut self) -> Vec<(ChunkSectionPos, u64)> {
+        let eye = self.camera_render_position();
         self.chunk_buffers.stage_mesh_batch(
             &self.ctx.device,
             &self.ctx.allocator,
             &mut self.mesh_queue,
+            eye,
         )
     }
 
@@ -1563,16 +1559,6 @@ impl Renderer {
         let timer = Timer::new(cmd, timer_pool);
         let frame_start_timer = timer.scope(Timestamp::FrameStart, Timestamp::FrameEnd);
 
-        // Fail open to all-visible: readback() is None until this slot's
-        // visibility pass has run, and an all-zero mask would cull every
-        // section's draw. (Only water's CPU gate reads this ring; the opaque
-        // cull reads the slot's GPU mask buffer directly.)
-        if let Some(readback) = self.visibility_pipeline.readback(frame) {
-            self.visibility_mask.buf.copy_from_slice(readback);
-        } else {
-            self.visibility_mask.buf.fill(u32::MAX);
-        }
-        let visibility_center = self.visibility_pipeline.vis_center(frame);
         // Sampled before this frame's visibility execute below: it describes
         // the three-frame-old mask still in the slot's buffer when the cull
         // dispatch reads it.
@@ -1771,18 +1757,10 @@ impl Renderer {
 
                 // Translucent water draws after opaque terrain and entities so it
                 // blends over them; depth-tested (occluded by geometry in front)
-                // but doesn't write depth. CPU frustum-culled, reusing the entity
-                // frustum/eye.
+                // but doesn't write depth. GPU-culled and bucket-ordered
+                // back-to-front by the cull/scan/emit chain.
                 self.chunk_pipeline.bind_water(cmd, frame);
-                self.chunk_buffers.draw_water(
-                    cmd,
-                    self.chunk_pipeline.pipeline_layout,
-                    &ent_frustum,
-                    anchor,
-                    eye,
-                    &self.visibility_mask,
-                    visibility_center,
-                );
+                self.chunk_buffers.draw_water(cmd, frame);
 
                 // Clouds draw after opaque world geometry (so terrain occludes
                 // them) and before weather, depth-tested against the scene.

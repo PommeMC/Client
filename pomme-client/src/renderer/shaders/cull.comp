@@ -5,20 +5,7 @@ layout(local_size_x = 64) in;
 layout(constant_id = 0) const int MAX_RD = 64;
 const int MAX_SIZE = MAX_RD * 2 + 1;
 
-struct ChunkMeta {
-    vec4 aabb_min;
-    vec4 aabb_max;
-    // Quads per pass in the section's vertex slice, solid first then cutout;
-    // draws run against the shared static quad index buffer (6 indices and 4
-    // vertices per quad, first_index always 0).
-    uint solid_quads;
-    uint cutout_quads;
-    int vertex_offset;
-    uint visibility;
-    // ivec3 + uint pack into one 16-byte slot, matching the Rust layout.
-    ivec3 origin;
-    uint _pad;
-};
+#include "chunk_meta.glsl"
 
 struct DrawCmd {
     uint index_count;
@@ -52,6 +39,11 @@ layout(set = 0, binding = 1) uniform FrustumBuf {
     int mask_min_section;
     int mask_section_count;
     uint mask_valid;
+    // Player column + render distance for the column cull (0 = off).
+    int player_cx;
+    int player_cz;
+    uint limit_rd;
+    uint _pad0;
 };
 
 layout(set = 0, binding = 2) writeonly buffer IndirectBuf {
@@ -74,6 +66,18 @@ layout(set = 0, binding = 5) buffer CutoutCountBuf {
 // ChunkRing (slot = rem_euclid(MAX_SIZE) per axis).
 layout(set = 0, binding = 6) readonly buffer VisMaskBuf {
     uint vis_mask[];
+};
+
+// Water ordering scratch: reverse-distance bucket counts, with the candidate
+// counter one slot past them. The scan pass turns counts into offsets, the
+// emit pass turns candidates into ordered draws.
+layout(set = 0, binding = 7) buffer WaterBuckets {
+    uint water_buckets[];
+};
+
+layout(set = 0, binding = 8) writeonly buffer WaterCandidates {
+    // Packed (meta slot << 9) | bucket.
+    uint water_candidates[];
 };
 
 // Emit one indexed draw of `quads` quads starting at `vertex_offset` against
@@ -99,7 +103,14 @@ void main() {
     if (idx >= chunk_count) return;
 
     ChunkMeta m = chunks[idx];
-    if (m.solid_quads == 0u && m.cutout_quads == 0u) return;
+    if (m.solid_quads == 0u && m.cutout_quads == 0u && m.water_quads == 0u) return;
+
+    // Columns beyond the render distance never draw.
+    if (limit_rd > 0u) {
+        int dx = abs((m.origin.x >> 4) - player_cx);
+        int dz = abs((m.origin.z >> 4) - player_cz);
+        if (uint(max(dx, dz)) > limit_rd) return;
+    }
 
     vec3 base = vec3(m.origin - ivec3(cam_x, cam_y, cam_z))
         - vec3(frac_x, frac_y, frac_z);
@@ -136,4 +147,18 @@ void main() {
     // vertex_offset past the solid quads.
     emit(m.solid_quads, m.vertex_offset, idx, false);
     emit(m.cutout_quads, m.vertex_offset + int(m.solid_quads * 4u), idx, true);
+
+    // Water joins the bucketed translucent list: reverse Manhattan distance
+    // (in sections) as the sort key, so far buckets land first in the emit
+    // pass's output and blending runs back-to-front.
+    if (m.water_quads != 0u) {
+        ivec3 sec = m.origin >> 4;
+        ivec3 cam_sec = ivec3(cam_x, cam_y, cam_z) >> 4;
+        int dist = abs(sec.x - cam_sec.x) + abs(sec.y - cam_sec.y) + abs(sec.z - cam_sec.z);
+        int last = int(WATER_BUCKETS) - 1;
+        uint bucket = uint(last - min(dist, last));
+        atomicAdd(water_buckets[bucket], 1u);
+        uint ci = atomicAdd(water_buckets[WATER_BUCKETS], 1u);
+        water_candidates[ci] = (idx << 9) | bucket;
+    }
 }

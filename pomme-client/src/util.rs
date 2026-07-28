@@ -92,14 +92,6 @@ pub struct ChunkRing<T> {
 }
 
 impl<T> ChunkRing<T> {
-    /// Creates a new ChunkRing with all elements initialized to `init`.
-    pub fn new(init: T) -> Self
-    where
-        T: Copy,
-    {
-        Self::from_fn(|_, _| init)
-    }
-
     /// Creates a new ChunkRing using a function to initialize each element.
     /// The function receives (x, z) coordinates in the ring's local space.
     pub fn from_fn(mut init: impl FnMut(usize, usize) -> T) -> Self {
@@ -121,17 +113,6 @@ impl<T> ChunkRing<T> {
         let z = pos.z.rem_euclid(MAX_SIZE as i32) as usize;
         let idx = x * MAX_SIZE + z;
         &self.buf[idx]
-    }
-
-    /// `get`, but `None` when `pos` is outside the ring's addressable window
-    /// around `center`. Slots carry no position tag and alias every MAX_SIZE,
-    /// so reading beyond ±MAX_RD of the writer's center returns another
-    /// position's slot.
-    #[inline]
-    pub fn get_in_range(&self, pos: ChunkPos, center: ChunkPos) -> Option<&T> {
-        let in_range =
-            (pos.x - center.x).abs() <= MAX_RD as i32 && (pos.z - center.z).abs() <= MAX_RD as i32;
-        in_range.then(|| self.get(pos))
     }
 }
 

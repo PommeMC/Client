@@ -179,25 +179,6 @@ pub fn create_host_buffer(
     )
 }
 
-/// A buffer the CPU reads back from the GPU: `GpuToCpu` memory is
-/// host-cached, where `CpuToGpu` is typically write-combined (uncached reads).
-pub fn create_readback_buffer(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    size: u64,
-    usage: vk::BufferUsageFlags,
-    name: &str,
-) -> (vk::Buffer, Allocation) {
-    create_buffer(
-        device,
-        allocator,
-        size,
-        usage,
-        MemoryLocation::GpuToCpu,
-        name,
-    )
-}
-
 fn create_buffer(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,

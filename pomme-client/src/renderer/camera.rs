@@ -429,6 +429,18 @@ const WATER_FOG_END: f32 = 96.0;
 const ENV_FOG_START: f32 = 0.0;
 const ENV_FOG_END: f32 = 1024.0;
 
+/// Milliseconds since the first call this session, as u32 (wraps after ~49
+/// days). The chunk shaders compute section fade-in from per-section upload
+/// stamps against this clock (`camera_block.w`), so both sides must use this
+/// same epoch.
+pub fn session_millis() -> u32 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u32
+}
+
 impl CameraUniform {
     pub fn new(
         camera: &Camera,
@@ -469,7 +481,8 @@ impl CameraUniform {
             view_proj: camera.view_projection().to_cols_array_2d(),
             camera_pos: [pos.x, pos.y, pos.z, fog_start],
             fog_color: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_end],
-            camera_block: anchor.as_ivec3().extend(0).to_array(),
+            // The w lane carries the session clock for shader-side fades.
+            camera_block: anchor.as_ivec3().extend(session_millis() as i32).to_array(),
             fog_env: [env_start, env_end, 0.0, 0.0],
         }
     }
