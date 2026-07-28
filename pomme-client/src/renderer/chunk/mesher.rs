@@ -6,7 +6,7 @@ use azalea_core::position::ChunkSectionPos;
 use pyronyx::vk;
 
 use super::greedy;
-use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
+use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, WHITE_TEXTURE};
 use crate::renderer::chunk::section::LocalSection;
 use crate::world::block::model::{BakedModel, Direction, face_positions, face_uvs};
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
@@ -129,6 +129,21 @@ pub const fn pack_tint_shifted(rgb: [f32; 3]) -> u32 {
     (channel(rgb[0]) << 8) | (channel(rgb[1]) << 16) | (channel(rgb[2]) << 24)
 }
 pub const PACKED_WHITE_SHIFTED: u32 = pack_tint_shifted([1.0, 1.0, 1.0]);
+
+/// Fold a sprite's average color into a packed tint's lanes for flat-color
+/// LOD faces. The shader raises tint to the 2.2 power while sampled texels
+/// pass through linearly, so the average is inverse-gamma-encoded here to
+/// land back on its true value — otherwise flat faces render ~half as bright
+/// as their textured neighbors.
+fn mul_tint(packed: u32, rgb: [f32; 3]) -> u32 {
+    let ch = |shift: u32| ((packed >> shift) & 0xFF) as f32 / 255.0;
+    let enc = |c: f32| c.powf(1.0 / 2.2);
+    pack_tint_shifted([
+        ch(8) * enc(rgb[0]),
+        ch(16) * enc(rgb[1]),
+        ch(24) * enc(rgb[2]),
+    ])
+}
 /// One 16³ section's geometry as a pure quad list (4 vertices per quad, no
 /// indices): vertices are grouped `[solid quads][cutout quads][water quads]`
 /// so each pass draws a contiguous vertex range against the shared static
@@ -697,54 +712,30 @@ pub(crate) fn mesh_section(
     let mut logged_missing: std::collections::HashSet<&'static str> =
         std::collections::HashSet::new();
     let step = 1i32 << lod;
-    let step_usize = step as usize;
-    let type_map = if lod == 0 {
-        Some(BlockTypeMap::build(snapshot, registry))
-    } else {
-        None
-    };
-    if let Some(ref tm) = type_map {
-        // Greedy geometry is opaque full cubes only, so it lands in the solid pass.
-        greedy_mesh_section(&mut sink.solid, snapshot, registry, tm, uv_map)
+    if lod > 0 {
+        mesh_lod_cells(&mut sink, snapshot, registry, uv_map, step);
+        return finalize_section(sink, spos, relative_si, content_gen, upload_epoch);
     }
+    let type_map = BlockTypeMap::build(snapshot, registry);
+    // Greedy geometry is opaque full cubes only, so it lands in the solid pass.
+    greedy_mesh_section(&mut sink.solid, snapshot, registry, &type_map, uv_map);
     // 2. Complex & Fluid Pass (Block-by-Block)
-    for local_z in (0..16).step_by(step_usize) {
-        for local_x in (0..16).step_by(step_usize) {
-            for local_y in (0..16).step_by(step_usize) {
-                let mut state = snapshot.section.get_block_state(local_x, local_y, local_z);
-                let mut kind = classify_block(state);
-                // LOD Air Look-ahead
-                if lod > 0 && matches!(kind, BlockKind::Air) {
-                    let end_y = (local_y + step).min(16);
-                    for try_y in (local_y + 1)..end_y {
-                        let s = snapshot.section.get_block_state(local_x, try_y, local_z);
-                        let k = classify_block(s);
-                        if !matches!(k, BlockKind::Air) {
-                            state = s;
-                            kind = k;
-                            break;
-                        }
-                    }
-                }
+    for local_z in 0..16 {
+        for local_x in 0..16 {
+            for local_y in 0..16 {
+                let state = snapshot.section.get_block_state(local_x, local_y, local_z);
+                let kind = classify_block(state);
                 if matches!(kind, BlockKind::Air) {
                     continue;
                 }
-                // CULLING: Skip blocks already handled by the greedy mesher
-                if lod == 0
-                    && let Some(ref tm) = type_map
-                    && tm.get_id(state) != 0
-                {
+                // Skip blocks already handled by the greedy mesher.
+                if type_map.get_id(state) != 0 {
                     continue;
                 }
                 // Section-local vertex base (matching the origin the buffer derives),
                 // so positions never pass through absolute f32 world space.
                 let block_pos = [local_x as f32, local_y as f32, local_z as f32];
-                if lod > 0 {
-                    emit_lod_cube(
-                        &mut sink, block_pos, state, snapshot, registry, uv_map, local_x, local_y,
-                        local_z, step,
-                    );
-                } else if let BlockKind::Water | BlockKind::Lava = kind {
+                if let BlockKind::Water | BlockKind::Lava = kind {
                     emit_fluid(
                         &mut sink, kind, block_pos, state, snapshot, registry, uv_map, local_x,
                         local_y, local_z,
@@ -777,9 +768,19 @@ pub(crate) fn mesh_section(
         }
     }
 
-    // Finalize: pack the pass groups back to back (solid, cutout, water —
-    // recording the quad counts), take the section-local AABB from the float
-    // positions, then quantize.
+    finalize_section(sink, spos, relative_si, content_gen, upload_epoch)
+}
+
+/// Pack the pass groups back to back (solid, cutout, water — recording the
+/// quad counts), take the section-local AABB from the float positions, then
+/// quantize.
+fn finalize_section(
+    sink: MeshSink,
+    spos: ChunkSectionPos,
+    relative_si: i32,
+    content_gen: u64,
+    upload_epoch: u64,
+) -> SectionMeshData {
     let all_verts = || {
         sink.solid
             .iter()
@@ -1086,67 +1087,186 @@ fn emit_multipart(
         );
     }
 }
+/// What occupies a LOD cell's neighbor, deciding face culling: drawn LOD
+/// cubes are full-size and opaque, so a `Solid` neighbor fully covers the
+/// shared face. `Outside` (past the section) keeps the face — conservative
+/// overdraw beats holes at borders where the padding can't answer.
+#[derive(Clone, Copy, PartialEq)]
+enum LodNeighbor {
+    Empty,
+    Solid,
+    Fluid,
+    Outside,
+}
+
+/// LOD sections render one cube per step³ cell, colored by the cell's
+/// *dominant* block: aggregate sampling (any non-air occupies, most frequent
+/// state wins), so thin features neither vanish nor shimmer — the DH/Voxy
+/// downsampling model.
+fn mesh_lod_cells(
+    sink: &mut MeshSink,
+    snapshot: &SectionStoreSnapshot,
+    registry: &BlockRegistry,
+    uv_map: &AtlasUVMap,
+    step: i32,
+) {
+    let cells = (16 / step) as usize;
+    let cell_at = |cx: usize, cy: usize, cz: usize| (cy * cells + cz) * cells + cx;
+    let mut grid: Vec<Option<BlockState>> = vec![None; cells * cells * cells];
+    let mut surface: Vec<(BlockState, u8)> = Vec::new();
+    let mut all: Vec<(BlockState, u8)> = Vec::new();
+    fn vote(counts: &mut Vec<(BlockState, u8)>, state: BlockState) {
+        match counts.iter_mut().find(|(s, _)| *s == state) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((state, 1)),
+        }
+    }
+    fn dominant(counts: &[(BlockState, u8)]) -> Option<BlockState> {
+        counts.iter().max_by_key(|&&(_, n)| n).map(|&(s, _)| s)
+    }
+    for cy in 0..cells {
+        for cz in 0..cells {
+            for cx in 0..cells {
+                surface.clear();
+                all.clear();
+                // The surface vote counts each XZ column's topmost block when
+                // air sits directly above it — the block actually seen from
+                // above — so a one-block grass skin over dirt reads as grass,
+                // not the dirt that outnumbers it. Fully buried cells (side or
+                // underside exposure only) fall back to the all-blocks vote.
+                let ly_base = cy as i32 * step;
+                for oz in 0..step {
+                    for ox in 0..step {
+                        let lx = cx as i32 * step + ox;
+                        let lz = cz as i32 * step + oz;
+                        let mut top: Option<(BlockState, i32)> = None;
+                        for oy in 0..step {
+                            let state = snapshot.section.get_block_state(lx, ly_base + oy, lz);
+                            if matches!(classify_block(state), BlockKind::Air) {
+                                continue;
+                            }
+                            vote(&mut all, state);
+                            top = Some((state, oy));
+                        }
+                        if let Some((state, top_oy)) = top {
+                            // The topmost block has air above it by
+                            // construction unless it sits at the cell
+                            // ceiling, where the row above (section padding
+                            // at worst) decides.
+                            let exposed = top_oy < step - 1
+                                || matches!(
+                                    classify_block(snapshot.section.get_block_state(
+                                        lx,
+                                        ly_base + step,
+                                        lz
+                                    )),
+                                    BlockKind::Air
+                                );
+                            if exposed {
+                                vote(&mut surface, state);
+                            }
+                        }
+                    }
+                }
+                grid[cell_at(cx, cy, cz)] = dominant(&surface).or_else(|| dominant(&all));
+            }
+        }
+    }
+
+    let neighbor_of = |cx: i32, cy: i32, cz: i32| -> LodNeighbor {
+        let range = 0..cells as i32;
+        if !range.contains(&cx) || !range.contains(&cy) || !range.contains(&cz) {
+            return LodNeighbor::Outside;
+        }
+        match grid[cell_at(cx as usize, cy as usize, cz as usize)] {
+            None => LodNeighbor::Empty,
+            Some(s) if matches!(classify_block(s), BlockKind::Water | BlockKind::Lava) => {
+                LodNeighbor::Fluid
+            }
+            Some(_) => LodNeighbor::Solid,
+        }
+    };
+
+    for cy in 0..cells {
+        for cz in 0..cells {
+            for cx in 0..cells {
+                let Some(state) = grid[cell_at(cx, cy, cz)] else {
+                    continue;
+                };
+                let neighbor = |dir: Direction| {
+                    let o = dir.offset();
+                    neighbor_of(cx as i32 + o[0], cy as i32 + o[1], cz as i32 + o[2])
+                };
+                emit_lod_cube(
+                    sink,
+                    state,
+                    snapshot,
+                    registry,
+                    uv_map,
+                    [cx as i32 * step, cy as i32 * step, cz as i32 * step],
+                    step,
+                    neighbor,
+                );
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_lod_cube(
     sink: &mut MeshSink,
-    block_pos: [f32; 3],
     state: azalea_block::BlockState,
     snapshot: &SectionStoreSnapshot,
     registry: &BlockRegistry,
     uv_map: &AtlasUVMap,
-    lx: i32,
-    ly: i32,
-    lz: i32,
+    cell_base: [i32; 3],
     step: i32,
+    neighbor: impl Fn(Direction) -> LodNeighbor,
 ) {
+    let [lx, ly, lz] = cell_base;
     let is_fluid = matches!(classify_block(state), BlockKind::Water | BlockKind::Lava);
-    // We have to do this otherwise there becomes a visible seam at the LOD border
-    let fluid_top = if is_fluid {
-        let above = snapshot.section.get_block_state(lx, ly + 1, lz);
-        if matches!(classify_block(above), BlockKind::Water | BlockKind::Lava) {
-            1.0
-        } else {
-            FLUID_MAX_HEIGHT
-        }
+    // A lowered fluid surface only where nothing fluid sits above, or a seam
+    // shows at the LOD border.
+    let fluid_top = if is_fluid && neighbor(Direction::Up) != LodNeighbor::Fluid {
+        FLUID_MAX_HEIGHT
     } else {
         1.0
     };
     for dir in &CUBE_FACE_DIRS {
-        let offset = dir.offset();
-        // Cull against the adjacent cube's representative (its low corner,
-        // `step` away), since that cell decides whether the neighbor cube is
-        // drawn at all. Negative faces at the section's low border sample past
-        // the one-block padding and read AIR, keeping the face — conservative
-        // overdraw beats holes there.
-        let nx = lx + offset[0] * step;
-        let ny = ly + offset[1] * step;
-        let nz = lz + offset[2] * step;
-        let neighbor = snapshot.section.get_block_state(nx, ny, nz);
-        if registry.occludes_neighbor(neighbor) {
-            continue;
-        }
-        if is_fluid && matches!(classify_block(neighbor), BlockKind::Water | BlockKind::Lava) {
+        // A solid neighbor cube fully covers the shared face; fluids also cull
+        // against each other (no internal water faces).
+        let covered = match neighbor(*dir) {
+            LodNeighbor::Solid => true,
+            LodNeighbor::Fluid => is_fluid,
+            LodNeighbor::Empty | LodNeighbor::Outside => false,
+        };
+        if covered {
             continue;
         }
         let (region, tint) =
             block_face_tex_tint(state, *dir, uv_map, snapshot, registry, lx, ly, lz);
+        // Past 2x, magnified sprites read as pixel mush: distant cubes render
+        // as the sprite's average color instead (a white texel carries the
+        // color through the tint lanes), the DH flat-color model.
+        let (region, tint) = if step >= 4 {
+            (uv_map.get_region(WHITE_TEXTURE), mul_tint(tint, region.avg))
+        } else {
+            (region, tint)
+        };
         let (positions, uvs, light) = cube_face_geometry(*dir);
         let s = step as f32;
         let sy = if is_fluid { fluid_top } else { s };
-        let quad: [ChunkVertex; 4] = core::array::from_fn(|i| ChunkVertex {
-            position: [
-                block_pos[0] + positions[i][0] * s,
-                block_pos[1] + positions[i][1] * sy,
-                block_pos[2] + positions[i][2] * s,
-            ],
-            tex_coords: pack_uv(
-                region.u_min + uvs[i][0] * (region.u_max - region.u_min),
-                region.v_min + uvs[i][1] * (region.v_max - region.v_min),
-            ),
-            light_tint: pack_light_tint(light, tint),
-        });
+        let scaled = positions.map(|p| [p[0] * s, p[1] * sy, p[2] * s]);
         // LOD cubes go in the solid pass (matching the full-detail cube path).
-        sink.solid.extend_from_slice(&quad);
+        emit_quad_into(
+            &mut sink.solid,
+            [lx as f32, ly as f32, lz as f32],
+            &scaled,
+            &uvs,
+            [light; 4],
+            region,
+            tint,
+        );
     }
 }
 const MISSING_TINT: u32 = pack_tint_shifted([1.0, 0.0, 1.0]);
