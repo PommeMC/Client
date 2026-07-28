@@ -568,11 +568,13 @@ fn create_pipeline(
         front_face: vk::FrontFace::CounterClockwise,
         line_width: 1.0,
         // No inflation, so this camera-ward offset is what wins the depth test.
-        // Mirror vanilla's constant-heavy crumbling offset (units 10, slope 1):
-        // a large slope pulls edge-on side faces in front of occluding neighbors.
+        // Vanilla's constant-heavy crumbling offset (units 10, slope 1): a
+        // large slope pulls edge-on side faces in front of occluding
+        // neighbors. Under reversed-Z positive bias is toward the viewer, so
+        // the signs match vanilla's GL values directly.
         depth_bias_enable: vk::TRUE,
-        depth_bias_constant_factor: -10.0,
-        depth_bias_slope_factor: -1.0,
+        depth_bias_constant_factor: 10.0,
+        depth_bias_slope_factor: 1.0,
         ..Default::default()
     };
 
@@ -584,7 +586,7 @@ fn create_pipeline(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: vk::FALSE,
-        depth_compare_op: vk::CompareOp::LessOrEqual,
+        depth_compare_op: vk::CompareOp::GreaterOrEqual,
         ..Default::default()
     };
 

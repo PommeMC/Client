@@ -1584,8 +1584,11 @@ impl Renderer {
                 },
             },
             vk::ClearValue {
+                // Reversed-Z: far is 0, so the world segment clears to 0. The
+                // mid-frame clear before the hand/HUD segment stays 1.0 (that
+                // segment keeps standard depth).
                 depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
+                    depth: 0.0,
                     stencil: 0,
                 },
             },
