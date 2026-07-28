@@ -1403,6 +1403,33 @@ impl Renderer {
             })
     }
 
+    /// Begin the load-variant render pass (color preserved from the ended
+    /// pass) and restore the frame's viewport/scissor, resuming drawing
+    /// mid-frame.
+    fn resume_load_pass(
+        &self,
+        cmd: vk::CommandBuffer,
+        image_index: u32,
+        clear_values: &[vk::ClearValue; 2],
+        viewport: vk::Viewport,
+        scissor: vk::Rect2D,
+    ) {
+        let info = vk::RenderPassBeginInfo {
+            render_pass: self.swapchain.render_pass_load,
+            framebuffer: self.swapchain.framebuffers_load[image_index as usize],
+            render_area: vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: self.swapchain.extent,
+            },
+            clear_value_count: clear_values.len() as u32,
+            clear_values: clear_values.as_ptr(),
+            ..Default::default()
+        };
+        cmd.begin_render_pass(&info, vk::SubpassContents::Inline);
+        cmd.set_viewport(0, &[viewport]);
+        cmd.set_scissor(0, &[scissor]);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_frame(
         &mut self,
@@ -1577,6 +1604,14 @@ impl Renderer {
             );
             cull_timer.end();
         }
+        // Reversed-Z world: far is 0, so the world pass clears depth to 0;
+        // the hand/HUD segment resumes in the load pass with a standard 1.0
+        // clear. Menu frames are standard-depth throughout (skin/book
+        // previews test Less).
+        let depth_clear = match &mode {
+            RenderMode::World { .. } => 0.0,
+            RenderMode::MainMenu { .. } => 1.0,
+        };
         let clear_values = [
             vk::ClearValue {
                 color: vk::ClearColorValue {
@@ -1584,11 +1619,8 @@ impl Renderer {
                 },
             },
             vk::ClearValue {
-                // Reversed-Z: far is 0, so the world segment clears to 0. The
-                // mid-frame clear before the hand/HUD segment stays 1.0 (that
-                // segment keeps standard depth).
                 depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 0.0,
+                    depth: depth_clear,
                     stencil: 0,
                 },
             },
@@ -1769,6 +1801,80 @@ impl Renderer {
                 }
                 translucent_timer.end();
 
+                // World geometry is complete: end the pass so the Hi-Z copy
+                // samples the stored depth before the hand/HUD segment
+                // rewrites it (in-pass, the mid-frame depth clear would feed
+                // the pyramid a wiped buffer and disable occlusion).
+                cmd.end_render_pass();
+
+                let hiz_timer = timer.scope(Timestamp::HizStart, Timestamp::HizEnd);
+                self.hiz_pipeline.execute(
+                    cmd,
+                    frame,
+                    self.swapchain.depth_image,
+                    self.swapchain.extent,
+                );
+                hiz_timer.end();
+                let visibility_timer =
+                    timer.scope(Timestamp::VisibilityStart, Timestamp::VisibilityEnd);
+                self.visibility_pipeline.execute(
+                    cmd,
+                    frame,
+                    &self.camera,
+                    *render_distance,
+                    height,
+                    min_y,
+                    extra_radians,
+                );
+                visibility_timer.end();
+
+                // Two hazards before resuming: the load pass clears the depth
+                // the Hi-Z copy samples (WAR, execution-only), and the world
+                // pass left the color image in PresentSrcKHR while the load
+                // pass expects ColorAttachmentOptimal.
+                let color_barrier = vk::ImageMemoryBarrier {
+                    src_access_mask: vk::AccessFlags::ColorAttachmentWrite,
+                    dst_access_mask: vk::AccessFlags::ColorAttachmentRead
+                        | vk::AccessFlags::ColorAttachmentWrite,
+                    old_layout: vk::ImageLayout::PresentSrcKHR,
+                    new_layout: vk::ImageLayout::ColorAttachmentOptimal,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    image: self.swapchain.images[image_index as usize],
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::Color,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    ..Default::default()
+                };
+                cmd.pipeline_barrier(
+                    vk::PipelineStageFlags::ColorAttachmentOutput
+                        | vk::PipelineStageFlags::ComputeShader,
+                    vk::PipelineStageFlags::ColorAttachmentOutput
+                        | vk::PipelineStageFlags::EarlyFragmentTests
+                        | vk::PipelineStageFlags::LateFragmentTests,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[color_barrier],
+                );
+
+                // Resume for the hand/HUD segment, which draws with standard
+                // depth against the load pass's fresh 1.0 clear.
+                let ui_clear_values = [
+                    clear_values[0],
+                    vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue {
+                            depth: 1.0,
+                            stencil: 0,
+                        },
+                    },
+                ];
+                self.resume_load_pass(cmd, image_index, &ui_clear_values, viewport, scissor);
+
                 let clear_attachment = vk::ClearAttachment {
                     aspect_mask: vk::ImageAspectFlags::Depth,
                     color_attachment: 0,
@@ -1779,12 +1885,6 @@ impl Renderer {
                         },
                     },
                 };
-                let clear_rect = vk::ClearRect {
-                    rect: scissor,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                };
-                cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
 
                 let ui_timer = timer.scope(Timestamp::UiStart, Timestamp::UiEnd);
                 if self.camera.mode == camera::CameraMode::FirstPerson
@@ -1880,20 +1980,7 @@ impl Renderer {
                         iterations,
                     );
 
-                    let load_rp_info = vk::RenderPassBeginInfo {
-                        render_pass: self.swapchain.render_pass_load,
-                        framebuffer: self.swapchain.framebuffers_load[image_index as usize],
-                        render_area: vk::Rect2D {
-                            offset: vk::Offset2D { x: 0, y: 0 },
-                            extent: self.swapchain.extent,
-                        },
-                        clear_value_count: clear_values.len() as u32,
-                        clear_values: clear_values.as_ptr(),
-                        ..Default::default()
-                    };
-                    cmd.begin_render_pass(&load_rp_info, vk::SubpassContents::Inline);
-                    cmd.set_viewport(0, &[viewport]);
-                    cmd.set_scissor(0, &[scissor]);
+                    self.resume_load_pass(cmd, image_index, &clear_values, viewport, scissor);
                 }
 
                 if *show_skin {
@@ -1921,32 +2008,6 @@ impl Renderer {
         }
 
         cmd.end_render_pass();
-
-        if let RenderMode::World {
-            render_distance, ..
-        } = &mode
-        {
-            let hiz_timer = timer.scope(Timestamp::HizStart, Timestamp::HizEnd);
-            self.hiz_pipeline.execute(
-                cmd,
-                frame,
-                self.swapchain.depth_image,
-                self.swapchain.extent,
-            );
-            hiz_timer.end();
-            let visibility_timer =
-                timer.scope(Timestamp::VisibilityStart, Timestamp::VisibilityEnd);
-            self.visibility_pipeline.execute(
-                cmd,
-                frame,
-                &self.camera,
-                *render_distance,
-                height,
-                min_y,
-                extra_radians,
-            );
-            visibility_timer.end();
-        }
         frame_start_timer.end();
 
         // Image is now in PresentSrcKHR; grab it before present if F2 was pressed.

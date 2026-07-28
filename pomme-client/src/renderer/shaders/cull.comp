@@ -8,13 +8,16 @@ const int MAX_SIZE = MAX_RD * 2 + 1;
 struct ChunkMeta {
     vec4 aabb_min;
     vec4 aabb_max;
-    uint index_count;
-    uint first_index;
+    // Quads per pass in the section's vertex slice, solid first then cutout;
+    // draws run against the shared static quad index buffer (6 indices and 4
+    // vertices per quad, first_index always 0).
+    uint solid_quads;
+    uint cutout_quads;
     int vertex_offset;
     uint visibility;
     // ivec3 + uint pack into one 16-byte slot, matching the Rust layout.
     ivec3 origin;
-    uint solid_index_count;
+    uint _pad;
 };
 
 struct DrawCmd {
@@ -73,15 +76,15 @@ layout(set = 0, binding = 6) readonly buffer VisMaskBuf {
     uint vis_mask[];
 };
 
-// Emit one indexed draw covering [first..first+count) for this section. The
-// per-instance attributes (origin + fade) come from meta entry `idx`, routed via
-// first_instance.
-void emit(uint count, uint first, int vertex_offset, uint idx, bool cutout) {
-    if (count == 0u) return;
+// Emit one indexed draw of `quads` quads starting at `vertex_offset` against
+// the shared quad index buffer. The per-instance attributes (origin + fade)
+// come from meta entry `idx`, routed via first_instance.
+void emit(uint quads, int vertex_offset, uint idx, bool cutout) {
+    if (quads == 0u) return;
     DrawCmd d;
-    d.index_count = count;
+    d.index_count = quads * 6u;
     d.instance_count = 1u;
-    d.first_index = first;
+    d.first_index = 0u;
     d.vertex_offset = vertex_offset;
     d.first_instance = idx;
     if (cutout) {
@@ -96,7 +99,7 @@ void main() {
     if (idx >= chunk_count) return;
 
     ChunkMeta m = chunks[idx];
-    if (m.index_count == 0u) return;
+    if (m.solid_quads == 0u && m.cutout_quads == 0u) return;
 
     vec3 base = vec3(m.origin - ivec3(cam_x, cam_y, cam_z))
         - vec3(frac_x, frac_y, frac_z);
@@ -129,8 +132,8 @@ void main() {
         }
     }
 
-    // Indices split solid-first.
-    uint solid_count = m.solid_index_count;
-    emit(solid_count, m.first_index, m.vertex_offset, idx, false);
-    emit(m.index_count - solid_count, m.first_index + solid_count, m.vertex_offset, idx, true);
+    // The vertex slice is grouped solid-first; the cutout draw rebases its
+    // vertex_offset past the solid quads.
+    emit(m.solid_quads, m.vertex_offset, idx, false);
+    emit(m.cutout_quads, m.vertex_offset + int(m.solid_quads * 4u), idx, true);
 }

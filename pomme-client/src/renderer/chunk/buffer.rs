@@ -12,11 +12,11 @@ use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 use crate::util::{ChunkRing, section_bit};
 
 const BUCKET_VERTICES: u32 = 32768;
-const BUCKET_INDICES: u32 = 49152;
 const VERTEX_SIZE: u64 = size_of::<PackedVertex>() as u64;
-const INDEX_SIZE: u64 = size_of::<u32>() as u64;
-const BYTES_PER_BUCKET: u64 =
-    BUCKET_VERTICES as u64 * VERTEX_SIZE + BUCKET_INDICES as u64 * INDEX_SIZE;
+const BYTES_PER_BUCKET: u64 = BUCKET_VERTICES as u64 * VERTEX_SIZE;
+/// Initial capacity (in quads) of the shared static quad index buffer; grown
+/// by doubling if a single section's pass ever exceeds it.
+const INITIAL_QUAD_INDEX_QUADS: u32 = 16384;
 const MIN_BUCKETS: u32 = 128;
 // A full-world reload (dimension change, render-distance toggle) transiently
 // holds both worlds: unloaded slices stay allocated until their frame deadline
@@ -136,8 +136,12 @@ struct ChunkMeta {
     /// Section-local vertex bounds; the cull shader rebases them via `origin`.
     aabb_min: [f32; 4],
     aabb_max: [f32; 4],
-    index_count: u32,
-    first_index: u32,
+    /// Leading solid-pass quads of the section's vertex slice; the cull shader
+    /// derives each pass's draw against the shared quad index buffer from
+    /// these (6 indices and 4 vertices per quad).
+    solid_quads: u32,
+    /// Cutout-pass quads following the solid group.
+    cutout_quads: u32,
     vertex_offset: i32,
     visibility: u32,
     /// Absolute section origin as integers (vanilla `ChunkPosition`), bound
@@ -145,25 +149,15 @@ struct ChunkMeta {
     /// camera block position in integer math, so no large f32 is ever
     /// formed.
     origin: [i32; 3],
-    /// Read by the cull shader to split the solid/cutout draws; fills the
-    /// fourth lane of `origin`'s 16-byte slot, keeping the struct at 64 bytes.
-    solid_index_count: u32,
+    /// Fills the fourth lane of `origin`'s 16-byte slot, keeping the struct at
+    /// 64 bytes.
+    _pad: u32,
 }
 
 /// Copy already-packed `verts` into `dst` starting at byte `off`.
 fn write_verts(dst: &mut [u8], off: usize, verts: &[PackedVertex]) {
     let bytes: &[u8] = bytemuck::cast_slice(verts);
     dst[off..off + bytes.len()].copy_from_slice(bytes);
-}
-
-/// Copy a section's opaque indices immediately followed by its water indices
-/// into `dst` starting at byte `off`, returning the total bytes written.
-fn write_indices(dst: &mut [u8], off: usize, opaque: &[u32], water: &[u32]) -> usize {
-    let opaque: &[u8] = bytemuck::cast_slice(opaque);
-    let water: &[u8] = bytemuck::cast_slice(water);
-    dst[off..off + opaque.len()].copy_from_slice(opaque);
-    dst[off + opaque.len()..off + opaque.len() + water.len()].copy_from_slice(water);
-    opaque.len() + water.len()
 }
 
 /// Vertex input for the chunk pipeline: binding 0 is the packed per-vertex
@@ -299,30 +293,23 @@ struct FrustumData {
     mask_valid: u32,
 }
 
-/// One uploaded 16³ section: a self-contained indexed draw plus its tight AABB.
-/// `first_index`/`index_count` are the section's index slice and
-/// `vertex_offset` its vertex slice base; `vtx_len` is the slice length, kept
-/// so the slices can be returned to the free-lists on removal. `uploaded_at`
-/// drives the per-section fade so editing one section never re-fades the rest
-/// of the column.
+/// One uploaded 16³ section: a vertex slice of whole quads grouped
+/// `[solid][cutout][water]`, drawn against the shared quad index buffer, plus
+/// its tight AABB. `vertex_offset` is the slice base and `vtx_len` its length,
+/// kept so the slice can be returned to the free-list on removal.
+/// `uploaded_at` drives the per-section fade so editing one section never
+/// re-fades the rest of the column.
 struct SectionAlloc {
     section_index: i32,
     aabb: ChunkAABB,
     /// Section world origin (`chunk*16`, `min_y + si*16`), used to rebase the
     /// quantized vertices and passed to the GPU via `ChunkMeta.origin`.
     origin: [i32; 3],
-    first_index: u32,
-    /// Opaque index count (the GPU-culled draw); water is excluded.
-    index_count: u32,
-    /// Leading indices belonging to the solid (no-discard) pass; the rest are
-    /// cutout. Passed to the GPU via `ChunkMeta.origin[3]`.
-    solid_index_count: u32,
-    /// Translucent water index slice, stored right after the opaque indices in
-    /// the same index allocation. Drawn in a separate blended pass.
-    water_first_index: u32,
-    water_index_count: u32,
-    /// Total allocated index slice length (opaque + water), for freeing.
-    idx_len: u32,
+    /// Quads per pass, in slice order: solid (no-discard), cutout (discard),
+    /// then translucent water (separate blended pass).
+    solid_quads: u32,
+    cutout_quads: u32,
+    water_quads: u32,
     vertex_offset: i32,
     vtx_len: u32,
     uploaded_at: std::time::Instant,
@@ -335,20 +322,17 @@ struct ChunkAlloc {
     sections: Vec<SectionAlloc>,
 }
 
-/// The `(vertex_offset, vtx_len, first_index, idx_len)` pool slice a section
-/// occupies, in the shape [`ChunkBufferStore::retire_slices`] consumes.
-fn slice_of(s: &SectionAlloc) -> (u32, u32, u32, u32) {
-    (s.vertex_offset as u32, s.vtx_len, s.first_index, s.idx_len)
+/// The `(vertex_offset, vtx_len)` pool slice a section occupies, in the shape
+/// [`ChunkBufferStore::retire_slices`] consumes.
+fn slice_of(s: &SectionAlloc) -> (u32, u32) {
+    (s.vertex_offset as u32, s.vtx_len)
 }
 
 /// One accepted section's payload, waiting for `record_copies` to write it
-/// into the frame's staging slab (its pool slices are already reserved).
+/// into the frame's staging slab (its pool slice is already reserved).
 struct PendingCopy {
     vertices: Vec<PackedVertex>,
-    indices: Vec<u32>,
-    water_indices: Vec<u32>,
     vtx_off: u32,
-    idx_off: u32,
 }
 
 pub struct ChunkBufferStore {
@@ -357,8 +341,20 @@ pub struct ChunkBufferStore {
     max_meta: usize,
     vertex_buffer: vk::Buffer,
     vertex_alloc: Allocation,
-    index_buffer: vk::Buffer,
-    index_alloc: Allocation,
+    /// Shared static index buffer holding the repeating `0,1,2,2,3,0` quad
+    /// pattern; every pass of every section draws against it with
+    /// `first_index = 0` and its own `vertex_offset`, so sections store no
+    /// indices at all. Grown by `ensure_quad_index_capacity`.
+    quad_index_buffer: vk::Buffer,
+    quad_index_alloc: Allocation,
+    /// Quad capacity of `quad_index_buffer`; 0 until first created.
+    quad_index_quads: u32,
+    /// Host pattern source for the staged path, kept alive until the next
+    /// growth so the copy recorded by `record_copies` can't outlive it.
+    quad_index_src: Option<(vk::Buffer, Allocation)>,
+    /// A (re)created quad index buffer whose pattern copy hasn't been
+    /// recorded into a frame command buffer yet.
+    quad_index_copy_pending: bool,
     /// Per-frame staging slabs: slot `frame` is only rewritten after that
     /// slot's fence was waited, so the copies recorded into the frame command
     /// buffer never race a previous frame's transfer reads.
@@ -369,14 +365,12 @@ pub struct ChunkBufferStore {
     /// Sections accepted by `stage_mesh_batch` (pool slices already reserved),
     /// written and recorded into the frame command buffer by `record_copies`.
     pending_copies: Vec<PendingCopy>,
-    /// Bytes `pending_copies` will occupy in each staging half, so a staging
+    /// Bytes `pending_copies` will occupy in the staging slab, so a staging
     /// pass that carried over (skipped frame) still bounds the next batch.
     pending_v_bytes: usize,
-    pending_i_bytes: usize,
 
-    /// Exact-size sub-allocators over the vertex and index pools (in elements).
+    /// Exact-size sub-allocator over the vertex pool (in vertices).
     vtx_free: FreeList,
-    idx_free: FreeList,
     chunks: HashMap<ChunkPos, ChunkAlloc>,
     /// Time spent in `reclaim_retired`'s GPU wait during the last
     /// `stage_mesh_batch`, for the benchmark's upload breakdown.
@@ -430,7 +424,7 @@ pub struct ChunkBufferStore {
     /// Slices freed by a re-mesh or unload, each tagged with the `frame_seq` at
     /// which it's safe to reclaim (`MAX_FRAMES_IN_FLIGHT` out, so no in-flight
     /// frame still draws it). Drained in `begin_frame`.
-    pending_free: VecDeque<(u64, (u32, u32, u32, u32))>,
+    pending_free: VecDeque<(u64, (u32, u32))>,
     /// Last player column / render distance the draw list was rebuilt for; a
     /// change re-marks the meta dirty so the `limit_rd` column cull re-runs.
     last_player_chunk: ChunkPos,
@@ -445,43 +439,26 @@ impl ChunkBufferStore {
     ) -> Self {
         let total_buckets = compute_bucket_count(physical_device);
         let vertex_size = total_buckets as u64 * BUCKET_VERTICES as u64 * VERTEX_SIZE;
-        let index_size = total_buckets as u64 * BUCKET_INDICES as u64 * INDEX_SIZE;
 
         let dev_props = physical_device.get_properties();
         let use_staging = dev_props.device_type == vk::PhysicalDeviceType::DiscreteGpu;
 
-        let (vertex_buffer, vertex_alloc, index_buffer, index_alloc) = if use_staging {
-            let (vb, va) = util::create_device_buffer(
+        let (vertex_buffer, vertex_alloc) = if use_staging {
+            util::create_device_buffer(
                 device,
                 allocator,
                 vertex_size,
                 vk::BufferUsageFlags::VertexBuffer,
                 "vertex_pool",
-            );
-            let (ib, ia) = util::create_device_buffer(
-                device,
-                allocator,
-                index_size,
-                vk::BufferUsageFlags::IndexBuffer,
-                "index_pool",
-            );
-            (vb, va, ib, ia)
+            )
         } else {
-            let (vb, va) = util::create_host_buffer(
+            util::create_host_buffer(
                 device,
                 allocator,
                 vertex_size,
                 vk::BufferUsageFlags::VertexBuffer,
                 "vertex_pool",
-            );
-            let (ib, ia) = util::create_host_buffer(
-                device,
-                allocator,
-                index_size,
-                vk::BufferUsageFlags::IndexBuffer,
-                "index_pool",
-            );
-            (vb, va, ib, ia)
+            )
         };
 
         // Discrete GPUs batch a frame's uploads through this buffer in one
@@ -509,19 +486,17 @@ impl ChunkBufferStore {
         }
 
         tracing::info!(
-            "Chunk buffers: {} (vertex={} MB, index={} MB, staging={} KB)",
+            "Chunk buffers: {} (vertex={} MB, staging={} KB)",
             if use_staging {
                 "DEVICE_LOCAL + staging"
             } else {
                 "HOST_VISIBLE"
             },
             vertex_size / (1024 * 1024),
-            index_size / (1024 * 1024),
             staging_size / 1024,
         );
 
         let vtx_free = FreeList::new(total_buckets * BUCKET_VERTICES);
-        let idx_free = FreeList::new(total_buckets * BUCKET_INDICES);
 
         // Per-section packing yields many more draws than buckets, so pre-size
         // generously: growth (`ensure_meta_capacity`) needs a `device.wait_idle`
@@ -761,21 +736,22 @@ impl ChunkBufferStore {
             device.update_descriptor_sets(&writes, &[]);
         }
 
-        Self {
+        let mut this = Self {
             max_meta,
             vertex_buffer,
             vertex_alloc,
-            index_buffer,
-            index_alloc,
+            quad_index_buffer: vk::Buffer::null(),
+            quad_index_alloc: unsafe { std::mem::zeroed() },
+            quad_index_quads: 0,
+            quad_index_src: None,
+            quad_index_copy_pending: false,
             staging_buffers,
             staging_allocs,
             staging_size,
             use_staging,
             pending_copies: Vec::new(),
             pending_v_bytes: 0,
-            pending_i_bytes: 0,
             vtx_free,
-            idx_free,
             chunks: HashMap::new(),
             last_reclaim_ms: 0.0,
             cached_meta: Vec::new(),
@@ -807,7 +783,86 @@ impl ChunkBufferStore {
             pending_free: VecDeque::new(),
             last_player_chunk: ChunkPos::new(0, 0),
             last_limit_rd: None,
+        };
+        this.ensure_quad_index_capacity(device, allocator, INITIAL_QUAD_INDEX_QUADS);
+        this
+    }
+
+    /// Make sure the shared static quad index buffer covers `quads` quads for
+    /// a single draw. Growth doubles and only a record-size section triggers
+    /// it, so the `wait_idle` needed to swap out the referenced buffer stays a
+    /// rare safety net. The staged path's pattern copy is recorded by the next
+    /// `record_copies`, which precedes the frame's draws.
+    fn ensure_quad_index_capacity(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        quads: u32,
+    ) {
+        if quads <= self.quad_index_quads {
+            return;
         }
+        let new_quads = quads.next_power_of_two().max(INITIAL_QUAD_INDEX_QUADS);
+        let size = new_quads as u64 * 6 * size_of::<u32>() as u64;
+
+        if self.quad_index_quads > 0 {
+            // In-flight frames may still reference the old buffer (and the
+            // staged path's copy source).
+            device.wait_idle().ok();
+            let mut alloc = allocator.lock().unwrap();
+            device.destroy_buffer(self.quad_index_buffer, None);
+            alloc
+                .free(std::mem::replace(&mut self.quad_index_alloc, unsafe {
+                    std::mem::zeroed()
+                }))
+                .ok();
+            if let Some((buf, allocation)) = self.quad_index_src.take() {
+                device.destroy_buffer(buf, None);
+                alloc.free(allocation).ok();
+            }
+        }
+
+        let mut pattern: Vec<u32> = Vec::with_capacity(new_quads as usize * 6);
+        for q in 0..new_quads {
+            let base = q * 4;
+            pattern.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(&pattern);
+
+        let create = if self.use_staging {
+            util::create_device_buffer
+        } else {
+            util::create_host_buffer
+        };
+        let (buf, mut alloc) = create(
+            device,
+            allocator,
+            size,
+            vk::BufferUsageFlags::IndexBuffer,
+            "quad_index",
+        );
+        if self.use_staging {
+            let (src_buf, mut src_alloc) = util::create_host_buffer(
+                device,
+                allocator,
+                size,
+                vk::BufferUsageFlags::TransferSrc,
+                "quad_index_src",
+            );
+            src_alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
+            self.quad_index_src = Some((src_buf, src_alloc));
+            self.quad_index_copy_pending = true;
+        } else {
+            alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
+        }
+        self.quad_index_buffer = buf;
+        self.quad_index_alloc = alloc;
+        self.quad_index_quads = new_quads;
+        tracing::info!(
+            "Quad index buffer: {} quads ({} KB)",
+            new_quads,
+            size / 1024
+        );
     }
 
     /// Sections drawn last time this frame slot ran (post frustum + occlusion
@@ -831,37 +886,41 @@ impl ChunkBufferStore {
     /// frame's vertex/index reads see them. Runs after the frame fence wait,
     /// so rewriting the slab can't race an in-flight transfer.
     pub fn record_copies(&mut self, cmd: vk::CommandBuffer, frame: usize) {
-        if self.pending_copies.is_empty() {
+        // One-shot pattern upload for a (re)created quad index buffer; it
+        // precedes the frame's draws in the same command buffer, so the
+        // barrier below covers it.
+        let quad_copy = self.quad_index_copy_pending;
+        if quad_copy {
+            self.quad_index_copy_pending = false;
+            let (src, _) = self.quad_index_src.as_ref().unwrap();
+            let copy = [vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: self.quad_index_quads as u64 * 6 * size_of::<u32>() as u64,
+            }];
+            cmd.copy_buffer(*src, self.quad_index_buffer, &copy);
+        }
+        if self.pending_copies.is_empty() && !quad_copy {
             return;
         }
-        let staging_half = self.staging_size as usize / 2;
-        let mut copy_v: Vec<vk::BufferCopy> = Vec::with_capacity(self.pending_copies.len());
-        let mut copy_i: Vec<vk::BufferCopy> = Vec::with_capacity(self.pending_copies.len());
-        let mut stg_v = 0usize;
-        let mut stg_i = staging_half;
-        {
-            let buf = self.staging_allocs[frame].mapped_slice_mut().unwrap();
-            for pending in &self.pending_copies {
-                write_verts(buf, stg_v, &pending.vertices);
-                let vbytes = pending.vertices.len() * VERTEX_SIZE as usize;
-                copy_v.push(vk::BufferCopy {
-                    src_offset: stg_v as u64,
-                    dst_offset: pending.vtx_off as u64 * VERTEX_SIZE,
-                    size: vbytes as u64,
-                });
-                stg_v += vbytes;
-
-                let ibytes = write_indices(buf, stg_i, &pending.indices, &pending.water_indices);
-                copy_i.push(vk::BufferCopy {
-                    src_offset: stg_i as u64,
-                    dst_offset: pending.idx_off as u64 * INDEX_SIZE,
-                    size: ibytes as u64,
-                });
-                stg_i += ibytes;
+        if !self.pending_copies.is_empty() {
+            let mut copy_v: Vec<vk::BufferCopy> = Vec::with_capacity(self.pending_copies.len());
+            let mut stg_v = 0usize;
+            {
+                let buf = self.staging_allocs[frame].mapped_slice_mut().unwrap();
+                for pending in &self.pending_copies {
+                    write_verts(buf, stg_v, &pending.vertices);
+                    let vbytes = pending.vertices.len() * VERTEX_SIZE as usize;
+                    copy_v.push(vk::BufferCopy {
+                        src_offset: stg_v as u64,
+                        dst_offset: pending.vtx_off as u64 * VERTEX_SIZE,
+                        size: vbytes as u64,
+                    });
+                    stg_v += vbytes;
+                }
             }
+            cmd.copy_buffer(self.staging_buffers[frame], self.vertex_buffer, &copy_v);
         }
-        cmd.copy_buffer(self.staging_buffers[frame], self.vertex_buffer, &copy_v);
-        cmd.copy_buffer(self.staging_buffers[frame], self.index_buffer, &copy_i);
         let barrier = vk::MemoryBarrier {
             src_access_mask: vk::AccessFlags::TransferWrite,
             dst_access_mask: vk::AccessFlags::VertexAttributeRead | vk::AccessFlags::IndexRead,
@@ -882,7 +941,6 @@ impl ChunkBufferStore {
     fn drop_pending_copies(&mut self) {
         self.pending_copies.clear();
         self.pending_v_bytes = 0;
-        self.pending_i_bytes = 0;
     }
 
     /// Drain `mesh_queue` into the GPU pools, newest-epoch-per-section wins.
@@ -922,7 +980,7 @@ impl ChunkBufferStore {
         }
 
         let mut uploaded_info: Vec<(ChunkSectionPos, u64)> = Vec::new();
-        let staging_half = self.staging_size as usize / 2;
+        let staging_budget = self.staging_size as usize;
 
         struct BatchEntry {
             mesh: SectionMeshData,
@@ -930,15 +988,12 @@ impl ChunkBufferStore {
             si: i32,
             was_present: bool,
             vtx_off: u32,
-            idx_off: u32,
             vcount: u32,
-            icount: u32,
         }
         let mut entries: Vec<BatchEntry> = Vec::new();
 
         // Include copies carried over from a skipped frame in the budget.
         let mut current_v_bytes = self.pending_v_bytes;
-        let mut current_i_bytes = self.pending_i_bytes;
         while let Some(mesh) = mesh_queue.front() {
             let col_pos = ChunkPos::new(mesh.spos.x, mesh.spos.z);
             let si = mesh.relative_si;
@@ -966,41 +1021,36 @@ impl ChunkBufferStore {
                 continue;
             }
             let vcount = mesh.vertices.len() as u32;
-            // Opaque and water indices share one slice (opaque first, water after).
-            let icount = (mesh.indices.len() + mesh.water_indices.len()) as u32;
             if self.use_staging {
                 let v_bytes = vcount as usize * VERTEX_SIZE as usize;
-                let i_bytes = icount as usize * INDEX_SIZE as usize;
-                // A section too large for one staging half is skipped, not overflowed.
-                if v_bytes > staging_half || i_bytes > staging_half {
+                // A section too large for the staging slab is skipped, not overflowed.
+                if v_bytes > staging_budget {
                     tracing::warn!(
-                        "Section {:?} too large for staging ({} v / {} i bytes), skipping",
+                        "Section {:?} too large for staging ({} bytes), skipping",
                         mesh.spos,
                         v_bytes,
-                        i_bytes,
                     );
                     mesh_queue.pop_front();
                     continue;
                 }
                 // This transfer's staging budget is full; leave the rest queued.
-                if current_v_bytes + v_bytes > staging_half
-                    || current_i_bytes + i_bytes > staging_half
-                {
+                if current_v_bytes + v_bytes > staging_budget {
                     break;
                 }
                 current_v_bytes += v_bytes;
-                current_i_bytes += i_bytes;
             }
+            // The shared quad index buffer must cover the section's largest
+            // single-pass draw.
+            let max_quads = mesh
+                .solid_quads
+                .max(mesh.cutout_quads)
+                .max(mesh.water_quads);
+            self.ensure_quad_index_capacity(device, allocator, max_quads);
             let Some(vtx_off) = self.alloc_vertices(device, vcount) else {
                 tracing::debug!(
                     "Vertex pool full, stopping upload batch for {:?}",
                     mesh.spos
                 );
-                break;
-            };
-            let Some(idx_off) = self.alloc_indices(device, icount) else {
-                self.vtx_free.free_region(vtx_off, vcount);
-                tracing::debug!("Index pool full, stopping upload batch for {:?}", mesh.spos);
                 break;
             };
             let mesh = mesh_queue.pop_front().unwrap();
@@ -1012,9 +1062,7 @@ impl ChunkBufferStore {
                 si,
                 was_present,
                 vtx_off,
-                idx_off,
                 vcount,
-                icount,
             });
         }
 
@@ -1035,12 +1083,9 @@ impl ChunkBufferStore {
                 section_index: entry.si,
                 aabb: entry.mesh.aabb,
                 origin: [spos.x * 16, spos.y * 16, spos.z * 16],
-                first_index: entry.idx_off,
-                index_count: entry.mesh.indices.len() as u32,
-                solid_index_count: entry.mesh.solid_index_count,
-                water_first_index: entry.idx_off + entry.mesh.indices.len() as u32,
-                water_index_count: entry.mesh.water_indices.len() as u32,
-                idx_len: entry.icount,
+                solid_quads: entry.mesh.solid_quads,
+                cutout_quads: entry.mesh.cutout_quads,
+                water_quads: entry.mesh.water_quads,
                 vertex_offset: entry.vtx_off as i32,
                 vtx_len: entry.vcount,
                 // A re-meshed section swaps instantly; a freshly revealed one fades in.
@@ -1064,30 +1109,16 @@ impl ChunkBufferStore {
         if self.use_staging {
             for entry in &mut entries {
                 self.pending_v_bytes += entry.mesh.vertices.len() * VERTEX_SIZE as usize;
-                self.pending_i_bytes += (entry.mesh.indices.len() + entry.mesh.water_indices.len())
-                    * INDEX_SIZE as usize;
                 self.pending_copies.push(PendingCopy {
                     vertices: std::mem::take(&mut entry.mesh.vertices),
-                    indices: std::mem::take(&mut entry.mesh.indices),
-                    water_indices: std::mem::take(&mut entry.mesh.water_indices),
                     vtx_off: entry.vtx_off,
-                    idx_off: entry.idx_off,
                 });
             }
         } else {
-            {
-                let vbuf = self.vertex_alloc.mapped_slice_mut().unwrap();
-                for entry in &entries {
-                    let base = entry.vtx_off as usize * VERTEX_SIZE as usize;
-                    write_verts(vbuf, base, &entry.mesh.vertices);
-                }
-            }
-            {
-                let ibuf = self.index_alloc.mapped_slice_mut().unwrap();
-                for entry in &entries {
-                    let off = entry.idx_off as usize * INDEX_SIZE as usize;
-                    write_indices(ibuf, off, &entry.mesh.indices, &entry.mesh.water_indices);
-                }
+            let vbuf = self.vertex_alloc.mapped_slice_mut().unwrap();
+            for entry in &entries {
+                let base = entry.vtx_off as usize * VERTEX_SIZE as usize;
+                write_verts(vbuf, base, &entry.mesh.vertices);
             }
         }
 
@@ -1218,15 +1249,6 @@ impl ChunkBufferStore {
             .flatten()
     }
 
-    fn alloc_indices(&mut self, device: &vk::Device, count: u32) -> Option<u32> {
-        if let Some(off) = self.idx_free.alloc(count) {
-            return Some(off);
-        }
-        self.reclaim_retired(device)
-            .then(|| self.idx_free.alloc(count))
-            .flatten()
-    }
-
     /// Emergency reclaim when a pool runs dry: waits the GPU out and returns
     /// every retired slice immediately instead of at its frame deadline.
     /// False when there was nothing to reclaim.
@@ -1243,10 +1265,9 @@ impl ChunkBufferStore {
         true
     }
 
-    /// Return one slice's vertex and index ranges to the pools.
-    fn free_slice(&mut self, (vo, vl, io, il): (u32, u32, u32, u32)) {
+    /// Return one slice's vertex range to the pool.
+    fn free_slice(&mut self, (vo, vl): (u32, u32)) {
         self.vtx_free.free_region(vo, vl);
-        self.idx_free.free_region(io, il);
     }
 
     /// Remove the section at `si` from `col_pos` if present, retiring its GPU
@@ -1269,11 +1290,11 @@ impl ChunkBufferStore {
         was_present
     }
 
-    /// Defer returning slices to the pools until `MAX_FRAMES_IN_FLIGHT` frames
+    /// Defer returning slices to the pool until `MAX_FRAMES_IN_FLIGHT` frames
     /// have passed, so the GPU can't still be reading them from an in-flight
     /// frame. Use for slices that were potentially drawn (re-mesh replacement,
     /// chunk unload).
-    fn retire_slices(&mut self, slices: impl IntoIterator<Item = (u32, u32, u32, u32)>) {
+    fn retire_slices(&mut self, slices: impl IntoIterator<Item = (u32, u32)>) {
         let retire_at = self.frame_seq + MAX_FRAMES_IN_FLIGHT as u64;
         for slice in slices {
             self.pending_free.push_back((retire_at, slice));
@@ -1306,7 +1327,6 @@ impl ChunkBufferStore {
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.vtx_free.reset();
-        self.idx_free.reset();
         self.pending_free.clear();
         // Staged copies target pool offsets that just died with the pools.
         self.drop_pending_copies();
@@ -1401,12 +1421,12 @@ impl ChunkBufferStore {
                     self.cached_meta.push(ChunkMeta {
                         aabb_min: sec.aabb.min,
                         aabb_max: sec.aabb.max,
-                        index_count: sec.index_count,
-                        first_index: sec.first_index,
+                        solid_quads: sec.solid_quads,
+                        cutout_quads: sec.cutout_quads,
                         vertex_offset: sec.vertex_offset,
                         visibility: vis.to_bits(),
                         origin: sec.origin,
-                        solid_index_count: sec.solid_index_count,
+                        _pad: 0,
                     });
                 }
             }
@@ -1541,7 +1561,7 @@ impl ChunkBufferStore {
         // Binding 0: packed vertex pool. Binding 1: the meta buffer, read per
         // instance for the section origin + fade (indexed by `first_instance`).
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer, self.meta_buffers[frame]], &[0, 0]);
-        cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
+        cmd.bind_index_buffer(self.quad_index_buffer, 0, vk::IndexType::Uint32);
         if cfg!(target_os = "macos") {
             cmd.draw_indexed_indirect(indirect, 0, max_draws, size_of::<DrawCommand>() as u32);
         } else {
@@ -1569,8 +1589,8 @@ impl ChunkBufferStore {
     }
 
     /// Draw the translucent water of every section that survives a CPU frustum
-    /// cull. Reuses the shared vertex/index buffers (water indices live right
-    /// after the opaque ones in each section's slice); the caller binds the
+    /// cull. Reuses the shared vertex pool and quad index buffer (water quads
+    /// sit at the end of each section's vertex slice); the caller binds the
     /// blended water pipeline first. Not GPU-culled — water sections are a
     /// small subset, so a per-section draw is cheap and keeps the opaque
     /// indirect path untouched.
@@ -1599,7 +1619,7 @@ impl ChunkBufferStore {
         }
 
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
-        cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
+        cmd.bind_index_buffer(self.quad_index_buffer, 0, vk::IndexType::Uint32);
 
         let now = std::time::Instant::now();
         for (pos, alloc) in self.chunks.iter() {
@@ -1610,7 +1630,7 @@ impl ChunkBufferStore {
                 .unwrap_or(u32::MAX);
             let nearby = self.column_nearby(*pos, eye);
             for sec in &alloc.sections {
-                if sec.water_index_count == 0
+                if sec.water_quads == 0
                     || col_vis & section_bit(sec.section_index as u32) == 0
                     || !aabb_in_frustum(&sec.aabb, sec.origin, frustum, eye)
                 {
@@ -1626,10 +1646,10 @@ impl ChunkBufferStore {
                     bytemuck::bytes_of(&origin_fade),
                 );
                 cmd.draw_indexed(
-                    sec.water_index_count,
+                    sec.water_quads * 6,
                     1,
-                    sec.water_first_index,
-                    sec.vertex_offset,
+                    0,
+                    sec.vertex_offset + ((sec.solid_quads + sec.cutout_quads) * 4) as i32,
                     0,
                 );
             }
@@ -1640,18 +1660,24 @@ impl ChunkBufferStore {
         let mut alloc = allocator.lock().unwrap();
 
         device.destroy_buffer(self.vertex_buffer, None);
-        device.destroy_buffer(self.index_buffer, None);
 
         alloc
             .free(std::mem::replace(&mut self.vertex_alloc, unsafe {
                 std::mem::zeroed()
             }))
             .ok();
-        alloc
-            .free(std::mem::replace(&mut self.index_alloc, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
+        if self.quad_index_quads > 0 {
+            device.destroy_buffer(self.quad_index_buffer, None);
+            alloc
+                .free(std::mem::replace(&mut self.quad_index_alloc, unsafe {
+                    std::mem::zeroed()
+                }))
+                .ok();
+        }
+        if let Some((buf, allocation)) = self.quad_index_src.take() {
+            device.destroy_buffer(buf, None);
+            alloc.free(allocation).ok();
+        }
 
         for i in 0..MAX_FRAMES_IN_FLIGHT {
             device.destroy_buffer(self.meta_buffers[i], None);

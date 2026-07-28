@@ -93,7 +93,7 @@ fn pack_vertex(v: &ChunkVertex) -> PackedVertex {
     }
 }
 
-fn section_aabb(verts: &[ChunkVertex]) -> ChunkAABB {
+fn section_aabb<'a>(verts: impl Iterator<Item = &'a ChunkVertex>) -> ChunkAABB {
     let mut mn = [f32::MAX; 3];
     let mut mx = [f32::MIN; 3];
     for v in verts {
@@ -129,20 +129,22 @@ pub const fn pack_tint_shifted(rgb: [f32; 3]) -> u32 {
     (channel(rgb[0]) << 8) | (channel(rgb[1]) << 16) | (channel(rgb[2]) << 24)
 }
 pub const PACKED_WHITE_SHIFTED: u32 = pack_tint_shifted([1.0, 1.0, 1.0]);
-/// One 16³ section's geometry. Indices are section-local (0-based into
-/// `vertices`) so each section can be uploaded as a self-contained draw with
-/// its own tight AABB, giving per-section cull granularity instead of
-/// per-column.
+/// One 16³ section's geometry as a pure quad list (4 vertices per quad, no
+/// indices): vertices are grouped `[solid quads][cutout quads][water quads]`
+/// so each pass draws a contiguous vertex range against the shared static
+/// quad index buffer (`0,1,2,2,3,0` per quad, `vertex_offset` rebases).
 pub struct SectionMeshData {
     pub spos: ChunkSectionPos,
     pub relative_si: i32,
+    /// Length is `4 * (solid + cutout + water)` quads.
     pub vertices: Vec<PackedVertex>,
     /// Section-local bounds of the un-quantized vertices, for culling.
     pub aabb: ChunkAABB,
-    /// Solid indices first, then cutout.
-    pub indices: Vec<u32>,
-    pub solid_index_count: u32,
-    pub water_indices: Vec<u32>,
+    /// Quads per pass, in slice order: solid (no-discard), cutout (discard),
+    /// then translucent water (separate blended pass).
+    pub solid_quads: u32,
+    pub cutout_quads: u32,
+    pub water_quads: u32,
     /// Content generation this mesh was built from (see
     /// `GameState::content_gen`). Lets the drain drop a stale result whose
     /// column has since been edited.
@@ -159,20 +161,42 @@ pub struct SectionMeshData {
 }
 impl SectionMeshData {
     pub fn is_empty(&self) -> bool {
-        self.vertices.is_empty() || (self.indices.is_empty() && self.water_indices.is_empty())
+        self.vertices.is_empty()
     }
 }
 
-/// Per-section meshing accumulator: one shared vertex pool plus separate solid,
-/// cutout, and water index lists. Finalized into a [`SectionMeshData`] with
-/// solid and cutout concatenated solid-first; water stays separate for the
-/// blended pass.
+/// Per-section meshing accumulator: one vertex list per pass, each holding
+/// whole quads (4 vertices). Finalized into a [`SectionMeshData`] by packing
+/// the three lists back to back.
 #[derive(Default)]
 struct MeshSink {
-    vertices: Vec<ChunkVertex>,
-    solid: Vec<u32>,
-    cutout: Vec<u32>,
-    water: Vec<u32>,
+    solid: Vec<ChunkVertex>,
+    cutout: Vec<ChunkVertex>,
+    water: Vec<ChunkVertex>,
+}
+
+impl MeshSink {
+    /// Vertex list a quad goes in: solid sprites render in the no-discard
+    /// pass, everything else in the discard (cutout) pass.
+    fn pass_for(&mut self, opaque: bool) -> &mut Vec<ChunkVertex> {
+        if opaque {
+            &mut self.solid
+        } else {
+            &mut self.cutout
+        }
+    }
+}
+
+/// Append one quad's vertices. When the smooth-lighting diagonal flip fires
+/// (vanilla's anisotropy fix), the quad is rotated by one vertex instead of
+/// re-indexed, so the shared `0,1,2,2,3,0` index pattern triangulates on the
+/// other diagonal; rotation preserves winding.
+fn push_quad(dst: &mut Vec<ChunkVertex>, quad: [ChunkVertex; 4], lights: [f32; 4]) {
+    if lights[0] + lights[2] > lights[1] + lights[3] {
+        dst.extend_from_slice(&[quad[1], quad[2], quad[3], quad[0]]);
+    } else {
+        dst.extend_from_slice(&quad);
+    }
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub enum GrassColorModifier {
@@ -589,8 +613,7 @@ fn face_texture_name(textures: &FaceTextures, face: greedy::Face) -> &str {
 use super::block_ao::AO_BRIGHTNESS;
 #[allow(clippy::too_many_arguments)]
 fn greedy_mesh_section(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+    solid: &mut Vec<ChunkVertex>,
     snapshot: &SectionStoreSnapshot,
     registry: &BlockRegistry,
     type_map: &BlockTypeMap,
@@ -642,24 +665,21 @@ fn greedy_mesh_section(
             let lights: [f32; 4] = core::array::from_fn(|i| {
                 AO_BRIGHTNESS[ao[i] as usize] * (quad.light[i] as f32 / 255.0) * dir_shade
             });
-            let base = vertices.len() as u32;
             let u_span = region.u_max - region.u_min;
             let v_span = region.v_max - region.v_min;
-            for (i, (pos, uv)) in verts_uvs.iter().enumerate() {
-                vertices.push(ChunkVertex {
+            let quad_verts: [ChunkVertex; 4] = core::array::from_fn(|i| {
+                let (pos, uv) = verts_uvs[i];
+                ChunkVertex {
                     // Greedy quads are already section-local.
-                    position: *pos,
+                    position: pos,
                     tex_coords: pack_uv(
                         region.u_min + uv[0] * u_span,
                         region.v_min + uv[1] * v_span,
                     ),
                     light_tint: pack_light_tint(lights[i], tint),
-                });
-            }
-            indices.extend_from_slice(&quad_indices(
-                base,
-                lights[0] + lights[2] > lights[1] + lights[3],
-            ));
+                }
+            });
+            push_quad(solid, quad_verts, lights);
         }
     }
 }
@@ -685,14 +705,7 @@ pub(crate) fn mesh_section(
     };
     if let Some(ref tm) = type_map {
         // Greedy geometry is opaque full cubes only, so it lands in the solid pass.
-        greedy_mesh_section(
-            &mut sink.vertices,
-            &mut sink.solid,
-            snapshot,
-            registry,
-            tm,
-            uv_map,
-        )
+        greedy_mesh_section(&mut sink.solid, snapshot, registry, tm, uv_map)
     }
     // 2. Complex & Fluid Pass (Block-by-Block)
     for local_z in (0..16).step_by(step_usize) {
@@ -764,20 +777,25 @@ pub(crate) fn mesh_section(
         }
     }
 
-    // Finalize: concatenate cutout after solid (recording the split), take the
-    // section-local AABB from the float positions, then quantize.
-    let solid_index_count = sink.solid.len() as u32;
-    sink.solid.extend_from_slice(&sink.cutout);
-    let aabb = section_aabb(&sink.vertices);
-    let vertices: Vec<PackedVertex> = sink.vertices.iter().map(pack_vertex).collect();
+    // Finalize: pack the pass groups back to back (solid, cutout, water —
+    // recording the quad counts), take the section-local AABB from the float
+    // positions, then quantize.
+    let all_verts = || {
+        sink.solid
+            .iter()
+            .chain(sink.cutout.iter())
+            .chain(sink.water.iter())
+    };
+    let aabb = section_aabb(all_verts());
+    let vertices: Vec<PackedVertex> = all_verts().map(pack_vertex).collect();
     SectionMeshData {
         spos,
         relative_si,
         vertices,
         aabb,
-        indices: sink.solid,
-        solid_index_count,
-        water_indices: sink.water,
+        solid_quads: (sink.solid.len() / 4) as u32,
+        cutout_quads: (sink.cutout.len() / 4) as u32,
+        water_quads: (sink.water.len() / 4) as u32,
         content_gen,
         upload_epoch,
         queue_ms: 0.0,
@@ -984,16 +1002,10 @@ fn emit_fluid(
         block_face_tex_tint(state, Direction::Up, uv_map, snapshot, registry, lx, ly, lz);
 
     // Water is translucent (separate blended pass); lava is opaque.
-    let MeshSink {
-        vertices,
-        solid,
-        water,
-        ..
-    } = sink;
-    let indices = if matches!(kind, BlockKind::Water) {
-        water
+    let dst = if matches!(kind, BlockKind::Water) {
+        &mut sink.water
     } else {
-        solid
+        &mut sink.solid
     };
 
     for dir in &CUBE_FACE_DIRS {
@@ -1014,16 +1026,13 @@ fn emit_fluid(
             for p in &mut positions {
                 p[1] = FLUID_MAX_HEIGHT;
             }
-            emit_face_into(
-                vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
-            );
+            emit_quad_into(dst, block_pos, &positions, &uvs, [light; 4], region, tint);
             // Vanilla's backward up-face: the surface seen from below (underwater
             // looking up). Reversed winding so it survives back-face culling.
             let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
             let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
-            emit_face_into(
-                vertices,
-                indices,
+            emit_quad_into(
+                dst,
                 block_pos,
                 &rev_positions,
                 &rev_uvs,
@@ -1033,9 +1042,7 @@ fn emit_fluid(
             );
             continue;
         }
-        emit_face_into(
-            vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
-        );
+        emit_quad_into(dst, block_pos, &positions, &uvs, [light; 4], region, tint);
     }
 }
 #[allow(clippy::too_many_arguments)]
@@ -1126,23 +1133,20 @@ fn emit_lod_cube(
         let (positions, uvs, light) = cube_face_geometry(*dir);
         let s = step as f32;
         let sy = if is_fluid { fluid_top } else { s };
-        let base = sink.vertices.len() as u32;
-        for i in 0..4 {
-            sink.vertices.push(ChunkVertex {
-                position: [
-                    block_pos[0] + positions[i][0] * s,
-                    block_pos[1] + positions[i][1] * sy,
-                    block_pos[2] + positions[i][2] * s,
-                ],
-                tex_coords: pack_uv(
-                    region.u_min + uvs[i][0] * (region.u_max - region.u_min),
-                    region.v_min + uvs[i][1] * (region.v_max - region.v_min),
-                ),
-                light_tint: pack_light_tint(light, tint),
-            });
-        }
-        // LOD cubes go in the solid pass (matching the un-split single-list path).
-        sink.solid.extend_from_slice(&quad_indices(base, false));
+        let quad: [ChunkVertex; 4] = core::array::from_fn(|i| ChunkVertex {
+            position: [
+                block_pos[0] + positions[i][0] * s,
+                block_pos[1] + positions[i][1] * sy,
+                block_pos[2] + positions[i][2] * s,
+            ],
+            tex_coords: pack_uv(
+                region.u_min + uvs[i][0] * (region.u_max - region.u_min),
+                region.v_min + uvs[i][1] * (region.v_max - region.v_min),
+            ),
+            light_tint: pack_light_tint(light, tint),
+        });
+        // LOD cubes go in the solid pass (matching the full-detail cube path).
+        sink.solid.extend_from_slice(&quad);
     }
 }
 const MISSING_TINT: u32 = pack_tint_shifted([1.0, 0.0, 1.0]);
@@ -1166,20 +1170,17 @@ fn emit_missing_cube(
             continue;
         }
         let (positions, _, light) = cube_face_geometry(*dir);
-        let base = sink.vertices.len() as u32;
-        for pos in &positions {
-            sink.vertices.push(ChunkVertex {
-                position: [
-                    block_pos[0] + pos[0],
-                    block_pos[1] + pos[1],
-                    block_pos[2] + pos[2],
-                ],
-                tex_coords: pack_uv(0.0, 0.0),
-                light_tint: pack_light_tint(light, MISSING_TINT),
-            });
-        }
+        let quad: [ChunkVertex; 4] = core::array::from_fn(|i| ChunkVertex {
+            position: [
+                block_pos[0] + positions[i][0],
+                block_pos[1] + positions[i][1],
+                block_pos[2] + positions[i][2],
+            ],
+            tex_coords: pack_uv(0.0, 0.0),
+            light_tint: pack_light_tint(light, MISSING_TINT),
+        });
         // The missing tile is a solid checker, so the cube goes in the solid pass.
-        sink.solid.extend_from_slice(&quad_indices(base, false));
+        sink.solid.extend_from_slice(&quad);
     }
 }
 pub(crate) const CUBE_FACE_DIRS: [Direction; 6] = [
@@ -1190,18 +1191,8 @@ pub(crate) const CUBE_FACE_DIRS: [Direction; 6] = [
     Direction::East,
     Direction::West,
 ];
-/// The six indices for a quad's two triangles starting at `base`. `flip` swaps
-/// the split diagonal (vanilla's AO-driven winding flip).
-#[inline]
-fn quad_indices(base: u32, flip: bool) -> [u32; 6] {
-    if flip {
-        [base + 1, base + 2, base + 3, base + 3, base, base + 1]
-    } else {
-        [base, base + 1, base + 2, base + 2, base + 3, base]
-    }
-}
-/// Emit a face into the index list picked by the quad's sprite opacity
-/// (solid vs cutout pass). Fluids route explicitly via [`emit_face_into`].
+/// Emit a face into the vertex list picked by the quad's sprite opacity
+/// (solid vs cutout pass). Fluids route explicitly via [`emit_quad_into`].
 #[allow(clippy::too_many_arguments)]
 fn emit_face(
     sink: &mut MeshSink,
@@ -1212,23 +1203,20 @@ fn emit_face(
     region: AtlasRegion,
     tint: u32,
 ) {
-    let opaque = region.opaque;
-    let MeshSink {
-        vertices,
-        solid,
-        cutout,
-        ..
-    } = sink;
-    let indices = if opaque { solid } else { cutout };
-    emit_face_into(
-        vertices, indices, block_pos, positions, uvs, lights, region, tint,
+    emit_quad_into(
+        sink.pass_for(region.opaque),
+        block_pos,
+        positions,
+        uvs,
+        lights,
+        region,
+        tint,
     );
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit_face_into(
-    vertices: &mut Vec<ChunkVertex>,
-    indices: &mut Vec<u32>,
+fn emit_quad_into(
+    dst: &mut Vec<ChunkVertex>,
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
     uvs: &[[f32; 2]; 4],
@@ -1236,27 +1224,21 @@ fn emit_face_into(
     region: AtlasRegion,
     tint: u32,
 ) {
-    let base = vertices.len() as u32;
     let u_span = region.u_max - region.u_min;
     let v_span = region.v_max - region.v_min;
-    for i in 0..4 {
-        vertices.push(ChunkVertex {
-            position: [
-                block_pos[0] + positions[i][0],
-                block_pos[1] + positions[i][1],
-                block_pos[2] + positions[i][2],
-            ],
-            tex_coords: pack_uv(
-                region.u_min + uvs[i][0] * u_span,
-                region.v_min + uvs[i][1] * v_span,
-            ),
-            light_tint: pack_light_tint(lights[i], tint),
-        });
-    }
-    indices.extend_from_slice(&quad_indices(
-        base,
-        lights[0] + lights[2] > lights[1] + lights[3],
-    ));
+    let quad: [ChunkVertex; 4] = core::array::from_fn(|i| ChunkVertex {
+        position: [
+            block_pos[0] + positions[i][0],
+            block_pos[1] + positions[i][1],
+            block_pos[2] + positions[i][2],
+        ],
+        tex_coords: pack_uv(
+            region.u_min + uvs[i][0] * u_span,
+            region.v_min + uvs[i][1] * v_span,
+        ),
+        light_tint: pack_light_tint(lights[i], tint),
+    });
+    push_quad(dst, quad, lights);
 }
 fn shade_brightness(state: azalea_block::BlockState, registry: &BlockRegistry) -> f32 {
     // TODO: non-occluding full cubes (leaves, glass, ice) still darken adjacent

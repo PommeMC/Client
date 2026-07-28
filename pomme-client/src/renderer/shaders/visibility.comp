@@ -120,10 +120,11 @@ void main() {
         }
     }
 
-    // Screen-space bounds for HiZ
+    // Screen-space bounds for HiZ. Reversed-Z: larger depth = nearer, so the
+    // section's nearest point is the max over the corners.
     vec2 min_xy = vec2(1.0);
     vec2 max_xy = vec2(0.0);
-    float near_depth = 1.0;
+    float near_depth = 0.0;
 
     for (int i = 0; i < 8; i++) {
         vec3 rel = corners_ws[i] - ubo.camera_pos.xyz;
@@ -138,7 +139,7 @@ void main() {
 
         min_xy = min(min_xy, uv);
         max_xy = max(max_xy, uv);
-        near_depth = min(near_depth, ndc.z);
+        near_depth = max(near_depth, ndc.z);
     }
 
     min_xy = clamp(min_xy, vec2(0.0), vec2(1.0));
@@ -178,9 +179,12 @@ void main() {
     float sample2 = textureLod(hiz, rect.zy, float(mip)).x;
     float sample3 = textureLod(hiz, rect.xw, float(mip)).x;
     float sample4 = textureLod(hiz, rect.zw, float(mip)).x;
-    float max_z = max(max(sample1, sample2), max(sample3, sample4));
+    // Reversed-Z: the pyramid holds min (farthest); occluded when the
+    // section's nearest point is still farther (smaller) than every
+    // occluder in the rect.
+    float far_z = min(min(sample1, sample2), min(sample3, sample4));
 
-    if (near_depth > max_z) {
+    if (near_depth < far_z) {
         atomicAnd(visible[chunk_index], ~(1u << uint(section_y)));
     }
 }
