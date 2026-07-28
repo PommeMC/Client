@@ -426,7 +426,7 @@ fn build_pipeline(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: if depth_write { vk::TRUE } else { vk::FALSE },
-        depth_compare_op: vk::CompareOp::LessOrEqual,
+        depth_compare_op: vk::CompareOp::GreaterOrEqual,
         ..Default::default()
     };
 

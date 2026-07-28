@@ -243,6 +243,9 @@ impl Camera {
         Self::planes_from_view_projection(self.view_projection_with_fov(fov))
     }
 
+    // With the infinite-reverse projection the r3±r2 rows both yield near-side
+    // planes and no far plane exists — sections are bounded by load distance
+    // instead. The zero-length guard below keeps any degenerate row inert.
     fn planes_from_view_projection(m: Mat4) -> [[f32; 4]; 6] {
         let mt = m.transpose();
         let r0 = mt.x_axis;
@@ -336,11 +339,10 @@ impl Camera {
     pub fn sky_view_projection(&self) -> Mat4 {
         let (forward, up) = self.view_basis();
         let view = view::look_to_mat4(Vec3::ZERO, forward, up);
-        let mut proj = proj::directx::perspective(
+        let mut proj = proj::directx::perspective_infinite_reverse(
             self.fov_radians(self.render_partial_tick),
             self.aspect_ratio,
             NEAR,
-            self.depth_far,
         );
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
@@ -378,11 +380,16 @@ impl Camera {
         self.fov_radians(self.render_partial_tick).to_degrees()
     }
 
+    /// Reversed-Z with an infinite far plane (near maps to depth 1, infinity
+    /// to 0): floating-point depth keeps its precision spread over the whole
+    /// range, so distant terrain never z-fights. World-pass pipelines test
+    /// `Greater*` and the depth attachment clears to 0.0 to match;
+    /// `depth_far` remains the fog/culling horizon only.
     pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
         let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
         let view = self.bob_matrix() * view::look_to_mat4(offset, forward, up);
-        let mut proj = proj::directx::perspective(fov, self.aspect_ratio, NEAR, self.depth_far);
+        let mut proj = proj::directx::perspective_infinite_reverse(fov, self.aspect_ratio, NEAR);
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
     }
