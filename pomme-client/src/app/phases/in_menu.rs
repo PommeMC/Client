@@ -69,6 +69,11 @@ pub fn update_menu(
         result.elements,
         core.input.cursor_pos(),
         core.menu.is_main_screen(),
+        gfx.gui
+            .extract_render_state(pomme_gui::types::Position::new(
+                core.input.cursor_pos().0 as i32,
+                core.input.cursor_pos().1 as i32,
+            )),
     ) {
         tracing::error!("Render error: {e}");
     }

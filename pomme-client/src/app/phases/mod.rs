@@ -2,6 +2,7 @@ use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::time::Instant;
 
+use pomme_gui::Gui;
 use winit::window::Window;
 
 use crate::app::phases::in_game::GameState;
@@ -21,6 +22,7 @@ pub struct Gfx {
     // Window does not require `ManuallyDrop` because it is dropped normally after the renderer by
     // the compiler.
     pub window: Arc<Window>,
+    pub gui: Gui,
     pub last_frame: Instant,
     pub fps_counter: FpsCounter,
 }
