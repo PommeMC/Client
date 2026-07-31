@@ -1,10 +1,13 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use azalea_block::BlockState;
 use azalea_core::heightmap_kind::HeightmapKind;
-use azalea_core::position::{BlockPos, ChunkPos};
-use azalea_world::chunk::Chunk;
+use azalea_core::position::{BlockPos, ChunkBlockPos, ChunkPos, ChunkSectionBlockPos};
+use azalea_world::Section;
+use azalea_world::chunk::{Chunk, section_index};
+use azalea_world::heightmap::{Heightmap, is_heightmap_opaque};
 use crossbeam_epoch::{self as epoch, Atomic, Owned};
 
 use super::block_entity::StoredBlockEntity;
@@ -34,10 +37,13 @@ pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 9] {
 /// A column's published light, written by the light engine and snapshotted
 /// (via `Arc`) by the mesher. Sections are light sections: one padding
 /// section below the world, `height/16` block sections, one above.
+/// Layers are `Arc`'d so the per-publish clone-on-write copy of a column is
+/// refcount bumps, not up to 52 * 2 KB of memcpy; a publish replaces whole
+/// layers rather than mutating them.
 #[derive(Clone)]
 pub struct ChunkLightData {
-    pub sky_sections: Vec<Option<Box<[u8; 2048]>>>,
-    pub block_sections: Vec<Option<Box<[u8; 2048]>>>,
+    pub sky_sections: Vec<Option<Arc<[u8; 2048]>>>,
+    pub block_sections: Vec<Option<Arc<[u8; 2048]>>>,
     pub min_y: i32,
     /// Whether the dimension has skylight; without it sky reads 0 (vanilla's
     /// dummy sky listener).
@@ -107,6 +113,105 @@ impl ChunkLightData {
     }
 }
 
+/// Pomme-owned column: azalea's parsed sections wrapped in `Arc` so the
+/// clone-on-write edit path copies the 24-pointer spine plus exactly one
+/// section (`Arc::make_mut`), instead of deep-cloning every palette in the
+/// column per block write.
+pub struct PommeChunk {
+    pub sections: Box<[Arc<Section>]>,
+    pub heightmaps: HashMap<HeightmapKind, Heightmap>,
+}
+
+impl PommeChunk {
+    /// Wraps a freshly parsed azalea chunk (net thread); sections move into
+    /// their `Arc`s without copying.
+    pub fn from_azalea(chunk: Chunk) -> Self {
+        Self {
+            sections: chunk
+                .sections
+                .into_vec()
+                .into_iter()
+                .map(Arc::new)
+                .collect(),
+            heightmaps: chunk.heightmaps,
+        }
+    }
+
+    /// Cheap spine + heightmap copy for clone-on-write publication; the
+    /// sections themselves stay shared until one is edited.
+    fn clone_spine(&self) -> Self {
+        Self {
+            sections: self.sections.clone(),
+            heightmaps: self.heightmaps.clone(),
+        }
+    }
+
+    /// Port of azalea `Chunk::get_and_set_block_state` onto the Arc'd
+    /// sections: palette set + `block_count` upkeep on a `make_mut` copy of
+    /// the one target section, then the heightmap update.
+    pub fn get_and_set_block_state(
+        &mut self,
+        pos: &ChunkBlockPos,
+        state: BlockState,
+        min_y: i32,
+    ) -> BlockState {
+        let Some(section) = self.sections.get_mut(section_index(pos.y, min_y) as usize) else {
+            return BlockState::AIR;
+        };
+        let previous_state =
+            Arc::make_mut(section).get_and_set_block_state(ChunkSectionBlockPos::from(pos), state);
+
+        for heightmap in self.heightmaps.values_mut() {
+            update_heightmap(heightmap, pos, state, &self.sections);
+        }
+
+        previous_state
+    }
+}
+
+/// Port of azalea `Heightmap::update` against the Arc'd section spine (the
+/// upstream signature needs a contiguous `&[Section]`); all the pieces it
+/// composes are public.
+fn update_heightmap(
+    heightmap: &mut Heightmap,
+    pos: &ChunkBlockPos,
+    block_state: BlockState,
+    sections: &[Arc<Section>],
+) -> bool {
+    let first_available_y = heightmap.get_first_available(pos.x, pos.z);
+    if pos.y <= first_available_y - 2 {
+        return false;
+    }
+    if is_heightmap_opaque(heightmap.kind, block_state) {
+        // increase y
+        if pos.y >= first_available_y {
+            heightmap.set_height(pos.x, pos.z, pos.y + 1);
+            return true;
+        }
+    } else if first_available_y - 1 == pos.y {
+        // decrease y: scan down for the next opaque block
+        for y in (heightmap.min_y..pos.y).rev() {
+            let state = sections
+                .get(section_index(y, heightmap.min_y) as usize)
+                .map(|s| {
+                    s.get_block_state(ChunkSectionBlockPos::from(&ChunkBlockPos::new(
+                        pos.x, y, pos.z,
+                    )))
+                })
+                .unwrap_or_default();
+            if is_heightmap_opaque(heightmap.kind, state) {
+                heightmap.set_height(pos.x, pos.z, y + 1);
+                return true;
+            }
+        }
+
+        heightmap.set_height(pos.x, pos.z, heightmap.min_y);
+        return true;
+    }
+
+    false
+}
+
 /// Shared, lock-free chunk store accessible by main thread and worker threads
 /// via `crossbeam-epoch`.
 ///
@@ -115,11 +220,49 @@ impl ChunkLightData {
 /// `unload_chunk`) must stay on the main thread. Mutation is clone-on-write
 /// with an unconditional `swap`, so two concurrent writers to the same slot
 /// would silently lose one update.
+///
+/// Ring slots alias every `MAX_SIZE` chunks, so each slot carries an occupant
+/// tag (vanilla `ClientChunkCache.Storage` keeps the same invariant via
+/// `isValidChunk`): reads return `None` on a tag mismatch, and an unload for
+/// a position the slot no longer holds is a no-op instead of destroying the
+/// current occupant (e.g. a server forget arriving after a long-teleport
+/// alias already replaced the column).
 pub struct SharedChunkStore {
-    chunks: ChunkRing<Atomic<Chunk>>,
+    chunks: ChunkRing<Atomic<PommeChunk>>,
     pub light_data: ChunkRing<Atomic<ChunkLightData>>,
+    /// Packed occupant position per slot (`pack_chunk_pos`), `TAG_EMPTY` when
+    /// vacant. One ring serves both data rings: light only ever exists for a
+    /// loaded chunk column.
+    tags: ChunkRing<AtomicU64>,
     height: u32,
     min_y: i32,
+}
+
+/// Sentinel for a vacant slot: chunk (`i32::MIN`, `i32::MIN`) is outside any
+/// reachable world (the border caps at ~±1.9M chunks).
+const TAG_EMPTY: u64 = pack_chunk_pos(ChunkPos {
+    x: i32::MIN,
+    z: i32::MIN,
+});
+
+const fn pack_chunk_pos(pos: ChunkPos) -> u64 {
+    ((pos.z as u32 as u64) << 32) | (pos.x as u32 as u64)
+}
+
+const fn unpack_chunk_pos(tag: u64) -> ChunkPos {
+    ChunkPos {
+        x: tag as u32 as i32,
+        z: (tag >> 32) as u32 as i32,
+    }
+}
+
+/// Swaps `slot` to null and retires the previous occupant, if any.
+fn clear_slot<T: Send + Sync + 'static>(slot: &Atomic<T>, guard: &epoch::Guard) {
+    let old = slot.swap(epoch::Shared::null(), Ordering::Release, guard);
+    if !old.is_null() {
+        // SAFETY: unlinked from the ring; pinned readers are waited out.
+        unsafe { guard.defer_destroy(old) };
+    }
 }
 
 /// Drains a ring's slots, dropping every published value. Only sound with
@@ -157,10 +300,9 @@ impl SharedChunkStore {
     }
 
     pub fn new_with_dimension(view_distance: u32, height: u32, min_y: i32) -> Self {
-        // The rings are fixed at MAX_SIZE (= 2 * MAX_RD + 1) slots per axis and
-        // slots carry no position tag, so positions MAX_SIZE apart alias. The
-        // radius is pinned to MAX_RD: anything wider would silently read the
-        // wrong chunk.
+        // The rings are fixed at MAX_SIZE (= 2 * MAX_RD + 1) slots per axis;
+        // the occupant tags catch aliasing, but a view distance past MAX_RD
+        // would evict live columns, so it is still clamped upstream.
         if view_distance > MAX_RD {
             tracing::warn!("view distance {view_distance} exceeds ring capacity {MAX_RD}");
         }
@@ -174,20 +316,47 @@ impl SharedChunkStore {
             min_y,
             chunks: ChunkRing::from_fn(|_, _| Atomic::null()),
             light_data: ChunkRing::from_fn(|_, _| Atomic::null()),
+            tags: ChunkRing::from_fn(|_, _| AtomicU64::new(TAG_EMPTY)),
         }
+    }
+
+    /// Whether `pos`'s ring slot currently holds `pos`. Cross-thread readers
+    /// pair this with a re-check after the pointer load (see
+    /// [`Self::get_chunk_guard`]); the main-thread writers use it alone.
+    #[inline]
+    fn tag_matches(&self, pos: ChunkPos) -> bool {
+        self.tags.get(pos).load(Ordering::Acquire) == pack_chunk_pos(pos)
+    }
+
+    /// The position currently occupying `pos`'s ring slot, if any.
+    pub fn slot_occupant(&self, pos: ChunkPos) -> Option<ChunkPos> {
+        let tag = self.tags.get(pos).load(Ordering::Acquire);
+        (tag != TAG_EMPTY).then(|| unpack_chunk_pos(tag))
     }
 
     pub fn has_chunk(&self, pos: ChunkPos) -> bool {
         let guard = epoch::pin();
-        !self
-            .chunks
-            .get(pos)
-            .load(Ordering::Acquire, &guard)
-            .is_null()
+        self.get_chunk_guard(pos, &guard).is_some()
     }
 
-    pub fn get_chunk_guard<'g>(&self, pos: ChunkPos, guard: &'g epoch::Guard) -> Option<&'g Chunk> {
+    pub fn get_chunk_guard<'g>(
+        &self,
+        pos: ChunkPos,
+        guard: &'g epoch::Guard,
+    ) -> Option<&'g PommeChunk> {
+        // Tag check, pointer load, tag re-check: writers store the tag with
+        // Release strictly before (evict/unload) or after (insert) the slot
+        // swap, so a pointer read that observes a swap for a *different*
+        // position also observes a tag that fails one of the two checks. A
+        // single check would race the evict path (old tag read, new pointer
+        // loaded).
+        if !self.tag_matches(pos) {
+            return None;
+        }
         let shared = self.chunks.get(pos).load(Ordering::Acquire, guard);
+        if !self.tag_matches(pos) {
+            return None;
+        }
         // SAFETY: loaded under `guard`, which the returned reference borrows,
         // so a concurrent swap's defer_destroy can't run while it lives.
         unsafe { shared.as_ref() }
@@ -208,10 +377,21 @@ impl SharedChunkStore {
         }
     }
 
-    /// Publishes a chunk parsed on the net thread.
-    pub fn insert_chunk(&self, pos: ChunkPos, chunk: Chunk) {
+    /// Publishes a chunk parsed on the net thread (main-thread write; see the
+    /// struct-level contract).
+    pub fn insert_chunk(&self, pos: ChunkPos, chunk: PommeChunk) {
         let guard = epoch::pin();
+        let tag = self.tags.get(pos);
+        // Taking the slot over from an alias: blank the tag first so readers
+        // of the old position reject the window where the pointer already
+        // belongs to `pos`, and drop the alias's light so readers of `pos`
+        // never see it before this column's own light publishes.
+        if tag.load(Ordering::Relaxed) != pack_chunk_pos(pos) {
+            tag.store(TAG_EMPTY, Ordering::Release);
+            clear_slot(self.light_data.get(pos), &guard);
+        }
         Self::publish(self.chunks.get(pos), chunk, &guard);
+        tag.store(pack_chunk_pos(pos), Ordering::Release);
     }
 
     pub fn get_light_guard<'g>(
@@ -219,7 +399,14 @@ impl SharedChunkStore {
         pos: ChunkPos,
         guard: &'g epoch::Guard,
     ) -> Option<&'g ChunkLightData> {
+        // Same check/load/re-check protocol as `get_chunk_guard`.
+        if !self.tag_matches(pos) {
+            return None;
+        }
         let shared = self.light_data.get(pos).load(Ordering::Acquire, guard);
+        if !self.tag_matches(pos) {
+            return None;
+        }
         // SAFETY: loaded under `guard`, which the returned reference borrows.
         unsafe { shared.as_ref() }
     }
@@ -269,27 +456,17 @@ impl SharedChunkStore {
     }
 
     pub fn unload_chunk(&self, pos: &ChunkPos) {
+        // A forget for a position the slot no longer holds (evicted by an
+        // aliasing insert) must not destroy the current occupant.
+        if !self.tag_matches(*pos) {
+            return;
+        }
+        // Tag goes first (readers of `pos` start missing before the pointers
+        // die), then the data.
+        self.tags.get(*pos).store(TAG_EMPTY, Ordering::Release);
         let guard = epoch::pin();
-        let old_chunk =
-            self.chunks
-                .get(*pos)
-                .swap(epoch::Shared::null(), Ordering::Release, &guard);
-        if !old_chunk.is_null() {
-            // SAFETY: unlinked from the ring; pinned readers are waited out.
-            unsafe {
-                guard.defer_destroy(old_chunk);
-            }
-        }
-        let old_light =
-            self.light_data
-                .get(*pos)
-                .swap(epoch::Shared::null(), Ordering::Release, &guard);
-        if !old_light.is_null() {
-            // SAFETY: unlinked from the ring; pinned readers are waited out.
-            unsafe {
-                guard.defer_destroy(old_light);
-            }
-        }
+        clear_slot(self.chunks.get(*pos), &guard);
+        clear_slot(self.light_data.get(*pos), &guard);
     }
 
     pub fn set_block_state(&self, x: i32, y: i32, z: i32, state: BlockState) {
@@ -321,7 +498,7 @@ impl SharedChunkStore {
         else {
             return (state, None);
         };
-        let mut chunk = clone_chunk(chunk_ref);
+        let mut chunk = chunk_ref.clone_spine();
         let was_empty = chunk.sections[section].block_count == 0;
         let block_pos = azalea_core::position::ChunkBlockPos {
             x: x.rem_euclid(16) as u8,
@@ -402,14 +579,22 @@ impl SharedChunkStore {
         let Some(chunk_ref) = self.get_chunk_guard(chunk_pos, &guard) else {
             return 0;
         };
-        let biome_pos = azalea_core::position::ChunkBiomePos {
-            x: (x.rem_euclid(16) / 4) as u8,
-            y,
-            z: (z.rem_euclid(16) / 4) as u8,
+        // Same lookup azalea `Chunk::get_biome` performs (section by block y,
+        // cell y = block y & 3), inlined against the Arc'd sections.
+        if y < self.min_y {
+            return 0;
+        }
+        let Some(section) = chunk_ref
+            .sections
+            .get(section_index(y, self.min_y) as usize)
+        else {
+            return 0;
         };
-        let biome = chunk_ref
-            .get_biome(biome_pos, self.min_y)
-            .unwrap_or_default();
+        let biome = section.get_biome(azalea_core::position::ChunkSectionBiomePos {
+            x: (x.rem_euclid(16) / 4) as u8,
+            y: (y & 0b11) as u8,
+            z: (z.rem_euclid(16) / 4) as u8,
+        });
         u32::from(biome)
     }
 }
@@ -467,7 +652,7 @@ impl ChunkStore {
     }
 
     #[inline]
-    pub fn insert_chunk(&mut self, pos: ChunkPos, chunk: Chunk) {
+    pub fn insert_chunk(&mut self, pos: ChunkPos, chunk: PommeChunk) {
         self.shared.insert_chunk(pos, chunk);
         self.loaded.insert(pos);
     }
@@ -539,16 +724,13 @@ impl ChunkStore {
     }
 }
 
-/// azalea's `Chunk` doesn't derive `Clone`; both of its fields do, so the
-/// clone-on-write path builds the copy field-wise.
-fn clone_chunk(chunk: &Chunk) -> Chunk {
-    Chunk {
-        sections: chunk.sections.clone(),
-        heightmaps: chunk.heightmaps.clone(),
-    }
-}
-
-pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i32) -> BlockState {
+pub fn block_state_from_section(
+    chunk: &PommeChunk,
+    x: i32,
+    y: i32,
+    z: i32,
+    min_y: i32,
+) -> BlockState {
     // div_euclid so below-world y maps out of range (-> AIR) instead of
     // truncating into section 0; vanilla getSectionIndex floors.
     let section_idx = (y - min_y).div_euclid(16) as usize;
@@ -563,4 +745,46 @@ pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i3
         y: local_y,
         z: local_z,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::MAX_SIZE;
+
+    #[test]
+    fn chunk_pos_tag_roundtrips() {
+        for pos in [
+            ChunkPos::new(0, 0),
+            ChunkPos::new(-1, -1),
+            ChunkPos::new(1_874_999, -1_874_999),
+        ] {
+            let tag = pack_chunk_pos(pos);
+            assert_ne!(tag, TAG_EMPTY);
+            assert_eq!(unpack_chunk_pos(tag), pos);
+        }
+    }
+
+    #[test]
+    fn stale_unload_spares_the_alias_occupant() {
+        let store = SharedChunkStore::new(8);
+        let a = ChunkPos::new(0, 0);
+        let b = ChunkPos::new(MAX_SIZE as i32, 0);
+        store.insert_chunk(a, PommeChunk::from_azalea(Chunk::default()));
+        assert!(store.has_chunk(a));
+        assert_eq!(store.slot_occupant(b), Some(a));
+
+        // B takes A's slot (long teleport); A stops resolving immediately.
+        store.insert_chunk(b, PommeChunk::from_azalea(Chunk::default()));
+        assert!(store.has_chunk(b));
+        assert!(!store.has_chunk(a));
+
+        // The server's late forget for A must not destroy B.
+        store.unload_chunk(&a);
+        assert!(store.has_chunk(b));
+
+        store.unload_chunk(&b);
+        assert!(!store.has_chunk(b));
+        assert_eq!(store.slot_occupant(b), None);
+    }
 }

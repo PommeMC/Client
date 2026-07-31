@@ -266,12 +266,15 @@ impl LevelLightEngine {
                 .block
                 .storage
                 .layer(key_at(index))
-                .map(DataLayer::to_bytes);
+                .map(|l| l.to_bytes().into());
         }
         let mut sky_top_section = None;
         if let Some(sky) = &mut self.sky {
             for (index, slot) in sky_sections.iter_mut().enumerate() {
-                *slot = sky.storage.layer(key_at(index)).map(DataLayer::to_bytes);
+                *slot = sky
+                    .storage
+                    .layer(key_at(index))
+                    .map(|l| l.to_bytes().into());
             }
             sky_top_section = sky
                 .sky
@@ -481,7 +484,7 @@ impl LevelLightEngine {
                             LayerKind::Block => &mut column.block_sections[index as usize],
                             LayerKind::Sky => &mut column.sky_sections[index as usize],
                         };
-                        *slot = storage.layer(key).map(DataLayer::to_bytes);
+                        *slot = storage.layer(key).map(|l| l.to_bytes().into());
                     }
                     // A column's top only moves when one of its own sections
                     // changed, so refreshing it per publish keeps it current.

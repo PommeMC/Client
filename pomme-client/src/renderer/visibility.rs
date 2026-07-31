@@ -10,164 +10,25 @@ use crate::renderer::hiz::HizPipeline;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 use crate::util::{CHUNK_RING_SIZE as MAX_SIZE_SQ, MAX_RD, MAX_SIZE, SIZE_Y};
 
-/// Bytes of one frame's visibility bitset: one `u32` mask per column slot.
+/// Bytes of the visibility bitset: one `u32` mask per column slot.
 const MASK_BYTES: u64 = (MAX_SIZE_SQ * 4) as u64;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VisibilityUniform {
     pub view_proj: [[f32; 4]; 4],
-    pub vis_center: [i32; 4], // x,z = center in section coords, y = min_section, w = max_section
-    pub camera_pos: [f32; 4],
+    pub vis_center: [i32; 4], // x,z = center in section coords, y = min_section, w = unused
+    /// Integer camera block (the frame's anchor); the shader rebases section
+    /// corners against it in integer math so no absolute world coordinate
+    /// ever passes through f32 (same convention as `FrustumData`/cull.comp).
+    pub cam_block: [i32; 4],
+    /// Eye position relative to `cam_block` (small, full precision).
+    pub camera_frac: [f32; 4],
     pub radius: i32,
     pub section_count: i32,
     pub padding0: i32,
     pub padding1: i32,
     pub frustum_planes: [[f32; 4]; 6],
-}
-
-pub struct PerFrameData {
-    pub uniform_buffer: vk::Buffer,
-    pub uniform_allocation: Allocation,
-    pub output_buffer: vk::Buffer,
-    pub output_allocation: Allocation,
-    pub frame_descriptor_set: vk::DescriptorSet,
-    pub hiz_descriptor_set: vk::DescriptorSet,
-    pub vis_center: ChunkPos,
-    /// Section layout the slot's mask was written with; the cull that reads
-    /// the mask three frames later must decode bits with these, not the
-    /// current frame's values.
-    pub mask_min_section: i32,
-    pub mask_section_count: i32,
-}
-
-impl PerFrameData {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        frame_layout: &vk::DescriptorSetLayout,
-        hiz_layout: &vk::DescriptorSetLayout,
-        frame_pool: &vk::DescriptorPool,
-        hiz_pool: &vk::DescriptorPool,
-        hiz_pipeline: &HizPipeline,
-        frame_idx: usize,
-    ) -> Self {
-        let ubo_size = std::mem::size_of::<VisibilityUniform>() as u64;
-        let sbo_size = MASK_BYTES;
-
-        let (uniform_buffer, uniform_allocation) = util::create_host_buffer(
-            device,
-            allocator,
-            ubo_size,
-            vk::BufferUsageFlags::UniformBuffer,
-            &format!("visibility_ubo_{}", frame_idx),
-        );
-
-        let (output_buffer, output_allocation) = util::create_device_buffer(
-            device,
-            allocator,
-            sbo_size,
-            vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::TransferSrc,
-            &format!("visibility_output_sbo_{}", frame_idx),
-        );
-
-        // Allocate frame descriptor set
-        let alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool: *frame_pool,
-            descriptor_set_count: 1,
-            set_layouts: frame_layout,
-            ..Default::default()
-        };
-        let mut frame_descriptor_set = vk::DescriptorSet::null();
-        device
-            .allocate_descriptor_sets(&alloc_info, slice::from_mut(&mut frame_descriptor_set))
-            .expect("failed to allocate visibility frame set");
-
-        // Update frame descriptors
-        let sbo_info = vk::DescriptorBufferInfo {
-            buffer: output_buffer,
-            offset: 0,
-            range: sbo_size,
-        };
-        let ubo_info = vk::DescriptorBufferInfo {
-            buffer: uniform_buffer,
-            offset: 0,
-            range: ubo_size,
-        };
-
-        let writes = [
-            vk::WriteDescriptorSet {
-                dst_set: frame_descriptor_set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::StorageBuffer,
-                descriptor_count: 1,
-                buffer_info: &sbo_info,
-                ..Default::default()
-            },
-            vk::WriteDescriptorSet {
-                dst_set: frame_descriptor_set,
-                dst_binding: 1,
-                descriptor_type: vk::DescriptorType::UniformBuffer,
-                descriptor_count: 1,
-                buffer_info: &ubo_info,
-                ..Default::default()
-            },
-        ];
-        device.update_descriptor_sets(&writes, &[]);
-
-        // Allocate HiZ descriptor set
-        let hiz_alloc_info = vk::DescriptorSetAllocateInfo {
-            descriptor_pool: *hiz_pool,
-            descriptor_set_count: 1,
-            set_layouts: hiz_layout,
-            ..Default::default()
-        };
-        let mut hiz_descriptor_set = vk::DescriptorSet::null();
-        device
-            .allocate_descriptor_sets(&hiz_alloc_info, slice::from_mut(&mut hiz_descriptor_set))
-            .expect("failed to allocate visibility hiz set");
-
-        // Update HiZ descriptor with the per-frame HiZ pyramid
-        let hiz_info = vk::DescriptorImageInfo {
-            sampler: hiz_pipeline.sampler(frame_idx),
-            image_view: hiz_pipeline.full_view(frame_idx),
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let hiz_write = vk::WriteDescriptorSet {
-            dst_set: hiz_descriptor_set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            image_info: &hiz_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[hiz_write], &[]);
-
-        Self {
-            uniform_buffer,
-            uniform_allocation,
-            output_buffer,
-            output_allocation,
-            frame_descriptor_set,
-            hiz_descriptor_set,
-            vis_center: ChunkPos::default(),
-            mask_min_section: 0,
-            mask_section_count: 0,
-        }
-    }
-
-    fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        let mut alloc = allocator.lock().unwrap();
-
-        device.destroy_buffer(self.uniform_buffer, None);
-        let allocation = std::mem::take(&mut self.uniform_allocation);
-        alloc.free(allocation).ok();
-
-        device.destroy_buffer(self.output_buffer, None);
-        let allocation = std::mem::take(&mut self.output_allocation);
-        alloc.free(allocation).ok();
-    }
 }
 
 pub struct VisibilityPipeline {
@@ -179,10 +40,26 @@ pub struct VisibilityPipeline {
     frame_descriptor_pool: vk::DescriptorPool,
     hiz_descriptor_pool: vk::DescriptorPool,
 
-    per_frame: [PerFrameData; MAX_FRAMES_IN_FLIGHT],
-    /// Whether `execute` has ever recorded into each frame slot; gates
-    /// `readback`.
-    executed: [bool; MAX_FRAMES_IN_FLIGHT],
+    /// Per-frame UBO slots: host-written at record time, safe because the
+    /// slot's fence was waited at frame start.
+    uniform_buffers: [vk::Buffer; MAX_FRAMES_IN_FLIGHT],
+    uniform_allocations: [Allocation; MAX_FRAMES_IN_FLIGHT],
+    frame_descriptor_sets: [vk::DescriptorSet; MAX_FRAMES_IN_FLIGHT],
+
+    /// One shared mask buffer: producer and consumer are same-queue GPU work
+    /// already ordered by submission plus the in-buffer barriers, so the cull
+    /// reads the mask written one frame ago instead of
+    /// `MAX_FRAMES_IN_FLIGHT` ago.
+    output_buffer: vk::Buffer,
+    output_allocation: Allocation,
+    hiz_descriptor_set: vk::DescriptorSet,
+
+    /// Decode parameters of the last written mask (consumed by the next
+    /// frame's cull); `executed` gates fail-open until the first write.
+    vis_center: ChunkPos,
+    mask_min_section: i32,
+    mask_section_count: i32,
+    executed: bool,
 }
 
 impl VisibilityPipeline {
@@ -307,10 +184,10 @@ impl VisibilityPipeline {
 
         let hiz_pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
+            descriptor_count: 1,
         }];
         let hiz_pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32,
+            max_sets: 1,
             pool_size_count: hiz_pool_sizes.len() as u32,
             pool_sizes: hiz_pool_sizes.as_ptr(),
             ..Default::default()
@@ -319,79 +196,150 @@ impl VisibilityPipeline {
             .create_descriptor_pool(&hiz_pool_info, None)
             .expect("failed to create visibility hiz descriptor pool");
 
-        // 5. Create per-frame data
-        let per_frame: [PerFrameData; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|i| {
-            PerFrameData::new(
+        // 5. Shared mask buffer + per-frame UBOs and sets
+        let ubo_size = std::mem::size_of::<VisibilityUniform>() as u64;
+        let (output_buffer, output_allocation) = util::create_device_buffer(
+            device,
+            allocator,
+            MASK_BYTES,
+            // TransferDst for the per-frame fill_buffer reset; never read back.
+            vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::TransferDst,
+            "visibility_output_sbo",
+        );
+
+        let mut uniform_buffers = [vk::Buffer::null(); MAX_FRAMES_IN_FLIGHT];
+        let mut uniform_allocations: [Allocation; MAX_FRAMES_IN_FLIGHT] = Default::default();
+        let mut frame_descriptor_sets = [vk::DescriptorSet::null(); MAX_FRAMES_IN_FLIGHT];
+        for i in 0..MAX_FRAMES_IN_FLIGHT {
+            let (buffer, allocation) = util::create_host_buffer(
                 device,
                 allocator,
-                &layout_frame,
-                &layout_hiz,
-                &frame_descriptor_pool,
-                &hiz_descriptor_pool,
-                hiz_pipeline,
-                i,
-            )
-        });
+                ubo_size,
+                vk::BufferUsageFlags::UniformBuffer,
+                &format!("visibility_ubo_{}", i),
+            );
+            uniform_buffers[i] = buffer;
+            uniform_allocations[i] = allocation;
 
-        Self {
+            let alloc_info = vk::DescriptorSetAllocateInfo {
+                descriptor_pool: frame_descriptor_pool,
+                descriptor_set_count: 1,
+                set_layouts: &layout_frame,
+                ..Default::default()
+            };
+            device
+                .allocate_descriptor_sets(
+                    &alloc_info,
+                    slice::from_mut(&mut frame_descriptor_sets[i]),
+                )
+                .expect("failed to allocate visibility frame set");
+
+            let sbo_info = vk::DescriptorBufferInfo {
+                buffer: output_buffer,
+                offset: 0,
+                range: MASK_BYTES,
+            };
+            let ubo_info = vk::DescriptorBufferInfo {
+                buffer,
+                offset: 0,
+                range: ubo_size,
+            };
+            let writes = [
+                vk::WriteDescriptorSet {
+                    dst_set: frame_descriptor_sets[i],
+                    dst_binding: 0,
+                    descriptor_type: vk::DescriptorType::StorageBuffer,
+                    descriptor_count: 1,
+                    buffer_info: &sbo_info,
+                    ..Default::default()
+                },
+                vk::WriteDescriptorSet {
+                    dst_set: frame_descriptor_sets[i],
+                    dst_binding: 1,
+                    descriptor_type: vk::DescriptorType::UniformBuffer,
+                    descriptor_count: 1,
+                    buffer_info: &ubo_info,
+                    ..Default::default()
+                },
+            ];
+            device.update_descriptor_sets(&writes, &[]);
+        }
+
+        let hiz_alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool: hiz_descriptor_pool,
+            descriptor_set_count: 1,
+            set_layouts: &layout_hiz,
+            ..Default::default()
+        };
+        let mut hiz_descriptor_set = vk::DescriptorSet::null();
+        device
+            .allocate_descriptor_sets(&hiz_alloc_info, slice::from_mut(&mut hiz_descriptor_set))
+            .expect("failed to allocate visibility hiz set");
+
+        let this = Self {
             layout_frame,
             layout_hiz,
             pipeline_layout,
             pipeline,
             frame_descriptor_pool,
             hiz_descriptor_pool,
-            per_frame,
-            executed: [false; MAX_FRAMES_IN_FLIGHT],
-        }
+            uniform_buffers,
+            uniform_allocations,
+            frame_descriptor_sets,
+            output_buffer,
+            output_allocation,
+            hiz_descriptor_set,
+            vis_center: ChunkPos::default(),
+            mask_min_section: 0,
+            mask_section_count: 0,
+            executed: false,
+        };
+        this.update_hiz_descriptors(device, hiz_pipeline);
+        this
     }
 
-    /// Updates all per-frame HiZ descriptors. Call this after HiZ pipeline
-    /// resize or recreation.
+    /// Points the Hi-Z descriptor at the (possibly recreated) pyramid. Call
+    /// after HiZ pipeline resize or recreation.
     pub fn update_hiz_descriptors(&self, device: &vk::Device, hiz_pipeline: &HizPipeline) {
-        for frame_idx in 0..MAX_FRAMES_IN_FLIGHT {
-            let hiz_info = vk::DescriptorImageInfo {
-                sampler: hiz_pipeline.sampler(frame_idx),
-                image_view: hiz_pipeline.full_view(frame_idx),
-                image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-            };
-
-            let write = vk::WriteDescriptorSet {
-                dst_set: self.per_frame[frame_idx].hiz_descriptor_set,
-                dst_binding: 0,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-                image_info: &hiz_info,
-                ..Default::default()
-            };
-
-            device.update_descriptor_sets(&[write], &[]);
-        }
+        let hiz_info = vk::DescriptorImageInfo {
+            sampler: hiz_pipeline.sampler(),
+            image_view: hiz_pipeline.full_view(),
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: self.hiz_descriptor_set,
+            dst_binding: 0,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            descriptor_count: 1,
+            image_info: &hiz_info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
     }
 
-    /// Forgets every slot's mask, as if none had ever been written. Call on a
-    /// world clear: the previous world's masks would otherwise keep culling
-    /// (fail closed) for up to `MAX_FRAMES_IN_FLIGHT` frames of the new one.
+    /// Forgets the mask, as if it had never been written. Call on a world
+    /// clear: the previous world's mask would otherwise keep culling (fail
+    /// closed) the first frame of the new one.
     pub fn reset(&mut self) {
-        self.executed = [false; MAX_FRAMES_IN_FLIGHT];
+        self.executed = false;
     }
 
-    /// The slot's mask decode parameters `(center, min_section,
-    /// section_count)` for the GPU cull, or `None` (fail open) while the slot
-    /// has never been written.
-    pub fn mask_params(&self, frame: usize) -> Option<(ChunkPos, i32, i32)> {
-        if !self.executed[frame] {
+    /// The mask's decode parameters `(center, min_section, section_count)`
+    /// for the GPU cull, or `None` (fail open) while it has never been
+    /// written.
+    pub fn mask_params(&self) -> Option<(ChunkPos, i32, i32)> {
+        if !self.executed {
             return None;
         }
-        let data = &self.per_frame[frame];
         Some((
-            data.vis_center,
-            data.mask_min_section,
-            data.mask_section_count,
+            self.vis_center,
+            self.mask_min_section,
+            self.mask_section_count,
         ))
     }
 
-    pub fn output_buffers(&self) -> [vk::Buffer; MAX_FRAMES_IN_FLIGHT] {
-        std::array::from_fn(|i| self.per_frame[i].output_buffer)
+    pub fn output_buffer(&self) -> vk::Buffer {
+        self.output_buffer
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -405,11 +353,10 @@ impl VisibilityPipeline {
         min_y: i32,
         extra_radians: f32,
     ) {
-        self.executed[frame] = true;
-        let frame_data = &mut self.per_frame[frame];
+        self.executed = true;
 
-        // This frame's cull dispatch read the slot's previous mask earlier in
-        // this command buffer; order that read before the clear (WAR).
+        // This frame's cull dispatch read the mask earlier in this command
+        // buffer; order that read before the clear (WAR).
         cmd.pipeline_barrier(
             vk::PipelineStageFlags::ComputeShader,
             vk::PipelineStageFlags::Transfer,
@@ -421,7 +368,7 @@ impl VisibilityPipeline {
 
         // 1. Reset the mask to all-visible; the shader only clears bits it
         // proves occluded, so fail-open paths cost no writes at all.
-        cmd.fill_buffer(frame_data.output_buffer, 0, MASK_BYTES, u32::MAX);
+        cmd.fill_buffer(self.output_buffer, 0, MASK_BYTES, u32::MAX);
 
         // 2. Barrier to make sure fill command completes before compute writes to SBO
         let clear_barrier = vk::BufferMemoryBarrier {
@@ -429,7 +376,7 @@ impl VisibilityPipeline {
             dst_access_mask: vk::AccessFlags::ShaderWrite | vk::AccessFlags::ShaderRead,
             src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
             dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-            buffer: frame_data.output_buffer,
+            buffer: self.output_buffer,
             offset: 0,
             size: MASK_BYTES,
             ..Default::default()
@@ -450,31 +397,28 @@ impl VisibilityPipeline {
         let center_section_x = (camera.position.x / 16.0).floor() as i32;
         let center_section_z = (camera.position.z / 16.0).floor() as i32;
 
-        let offset = camera.third_person_offset();
-        let pos = camera.position.as_vec3() + offset;
+        // Same anchor split the cull and chunk.vert use: integer block plus a
+        // small fractional part, so far-from-origin precision never degrades.
+        let anchor = camera.anchor();
+        let eye = *camera.position + camera.third_person_offset().as_dvec3();
+        let cam_block = anchor.as_ivec3();
+        let frac = (eye - anchor).as_vec3();
 
-        // Store vis center as chunk position for CPU-side reference
-        frame_data.vis_center = ChunkPos::new(center_section_x, center_section_z);
+        self.vis_center = ChunkPos::new(center_section_x, center_section_z);
 
         let min_section = min_y.div_euclid(16);
 
-        // Calculate vis_center in section coordinates for the shader
         // The output bitset holds one bit per section layer, so the pass caps
         // at SIZE_Y (32) layers regardless of world height.
         let section_count = (height / 16).min(SIZE_Y as u32);
-        frame_data.mask_min_section = min_section;
-        frame_data.mask_section_count = section_count as i32;
-        let max_section = min_section + section_count as i32;
+        self.mask_min_section = min_section;
+        self.mask_section_count = section_count as i32;
 
         let uniform_data = VisibilityUniform {
             view_proj: view_proj.to_cols_array_2d(),
-            vis_center: [
-                center_section_x, // center_x in section coords
-                min_section,      // min_section
-                center_section_z, // center_z in section coords
-                max_section,      // max_section
-            ],
-            camera_pos: [pos.x, pos.y, pos.z, 0.0],
+            vis_center: [center_section_x, min_section, center_section_z, 0],
+            cam_block: [cam_block.x, cam_block.y, cam_block.z, 0],
+            camera_frac: [frac.x, frac.y, frac.z, 0.0],
             radius: radius as i32,
             section_count: section_count as i32,
             padding0: 0,
@@ -483,16 +427,13 @@ impl VisibilityPipeline {
         };
 
         let ubo_bytes = bytemuck::bytes_of(&uniform_data);
-        frame_data.uniform_allocation.mapped_slice_mut().unwrap()[..ubo_bytes.len()]
+        self.uniform_allocations[frame].mapped_slice_mut().unwrap()[..ubo_bytes.len()]
             .copy_from_slice(ubo_bytes);
 
         // 4. Bind compute pipeline and sets
         cmd.bind_pipeline(vk::PipelineBindPoint::Compute, self.pipeline);
 
-        let sets = [
-            frame_data.frame_descriptor_set,
-            frame_data.hiz_descriptor_set,
-        ];
+        let sets = [self.frame_descriptor_sets[frame], self.hiz_descriptor_set];
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Compute,
             self.pipeline_layout,
@@ -513,13 +454,13 @@ impl VisibilityPipeline {
         cmd.dispatch(groups_x, groups_y, groups_z);
 
         // 6. Make the mask write visible to the cull dispatch that reads this
-        // buffer three frames from now.
+        // buffer next frame.
         let mask_barrier = vk::BufferMemoryBarrier {
             src_access_mask: vk::AccessFlags::ShaderWrite,
             dst_access_mask: vk::AccessFlags::ShaderRead,
             src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
             dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-            buffer: frame_data.output_buffer,
+            buffer: self.output_buffer,
             offset: 0,
             size: MASK_BYTES,
             ..Default::default()
@@ -542,8 +483,14 @@ impl VisibilityPipeline {
         device.destroy_descriptor_pool(self.frame_descriptor_pool, None);
         device.destroy_descriptor_pool(self.hiz_descriptor_pool, None);
 
+        let mut alloc = allocator.lock().unwrap();
+        device.destroy_buffer(self.output_buffer, None);
+        alloc.free(std::mem::take(&mut self.output_allocation)).ok();
         for i in 0..MAX_FRAMES_IN_FLIGHT {
-            self.per_frame[i].destroy(device, allocator);
+            device.destroy_buffer(self.uniform_buffers[i], None);
+            alloc
+                .free(std::mem::take(&mut self.uniform_allocations[i]))
+                .ok();
         }
     }
 }

@@ -19,9 +19,10 @@ use crate::resource_pack::ResourcePackManager;
 use crate::util::{ChunkRing, SectionRing, section_bit};
 use crate::world::block::registry::BlockRegistry;
 use crate::world::chunk::SharedChunkStore;
-/// Per-section lock-ordered metadata, aligned to 64 bytes to eliminate false
-/// sharing across adjacent sections in the cache line.
-#[repr(align(64))]
+/// Per-section lock-ordered metadata. Deliberately unpadded (24 bytes): at
+/// 64-byte alignment the 257x257x32 ring costs ~135 MB of committed RAM for
+/// atomics that are touched a handful of times per slot per frame, so the
+/// possible false sharing between adjacent slots is the cheaper trade.
 pub struct SectionMeta {
     pub ver: AtomicU64,       // Monotonic, bumped on any mutation to this slot
     pub pos: AtomicU64,       // Packed ChunkSectionPos identity of current slot occupant
@@ -42,6 +43,7 @@ pub const fn pack_section_pos(pos: ChunkSectionPos) -> u64 {
     let y = (pos.y as u64) & 0x0000_FFFF;
     x | (z << 24) | (y << 48)
 }
+#[cfg(test)]
 pub const fn unpack_section_pos(val: u64) -> ChunkSectionPos {
     let x_raw = (val & 0x00FF_FFFF) as u32;
     let z_raw = ((val >> 24) & 0x00FF_FFFF) as u32;
@@ -82,7 +84,7 @@ mod tests {
     }
 }
 pub struct ChunkMeshing {
-    /// Section metadata ring: single 64-byte cache line per section slot
+    /// Section metadata ring, one compact slot per section.
     pub section_meta: Arc<SectionRing<SectionMeta>>,
     /// Shared: workers clear/re-set bits, edits set bits
     pub update_set: Arc<ChunkRing<AtomicU32>>,
@@ -205,10 +207,14 @@ impl ChunkMeshing {
             Arc::clone(&self.dry_foliage_colormap),
         )
     }
-    /// Marks every section of every column dirty, forcing a remesh.
+    /// Marks every section of every column dirty, forcing a remesh. Only the
+    /// meshable bits: workers never clear bits past `section_count`, so any
+    /// wider mark would pin `active_mask != 0` and disable the rescan's
+    /// per-column fast path permanently.
     fn mark_all_dirty(&self) {
+        let mask = crate::util::section_mask(self.store.section_count());
         for cell in &self.update_set.buf {
-            cell.store(u32::MAX, Ordering::Release);
+            cell.store(mask, Ordering::Release);
         }
     }
     pub fn clear(&mut self) {
@@ -218,7 +224,7 @@ impl ChunkMeshing {
     pub fn on_chunk_unload(&mut self, pos: ChunkPos) {
         self.col_lod.remove(&pos);
         let min_y_sec = self.store.min_section_y();
-        for si in 0..self.store.section_count() {
+        for si in 0..crate::util::meshable_section_count(self.store.section_count()) {
             let spos = ChunkSectionPos::new(pos.x, min_y_sec + si, pos.z);
             let meta = self.section_meta.get(spos);
             meta.pos.store(u64::MAX, Ordering::Release);
@@ -231,8 +237,9 @@ impl ChunkMeshing {
         renderer: &Renderer,
         shared_chunk_store: Arc<SharedChunkStore>,
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+        resource_packs: Option<&ResourcePackManager>,
     ) {
-        *self = renderer.create_chunk_meshing(shared_chunk_store, biome_climate, None);
+        *self = renderer.create_chunk_meshing(shared_chunk_store, biome_climate, resource_packs);
     }
     pub fn set_biome_climate(&mut self, climate: Arc<HashMap<u32, BiomeClimate>>) {
         *self.biome_climate.write().unwrap() = climate;
@@ -267,23 +274,32 @@ impl ChunkMeshing {
     /// break/place never shows the async round-trip's lag.
     pub fn mesh_edit_now(&mut self, pos: ChunkSectionPos, lod: u32) {
         self.enqueue_section_edit(pos, lod);
-        PendingJob {
+        let job = PendingJob {
             pos,
             upload_epoch: self.next_epoch.fetch_add(1, Ordering::Relaxed),
+        };
+        // Same panic isolation as the worker path: a mesher bug on the inline
+        // edit lane must not take the whole client down (the ReMarkGuard
+        // re-dirties the section on unwind).
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            job.run(
+                &self.store,
+                &self.section_meta,
+                &self.update_set,
+                &self.registry,
+                &self.uv_map,
+                &self.grass_colormap,
+                &self.foliage_colormap,
+                &self.dry_foliage_colormap,
+                &self.biome_climate,
+                &self.result_tx,
+                0.0,
+            )
+        }))
+        .is_err()
+        {
+            tracing::error!("chunk mesh job panicked on the edit lane");
         }
-        .run(
-            &self.store,
-            &self.section_meta,
-            &self.update_set,
-            &self.registry,
-            &self.uv_map,
-            &self.grass_colormap,
-            &self.foliage_colormap,
-            &self.dry_foliage_colormap,
-            &self.biome_climate,
-            &self.result_tx,
-            0.0,
-        );
     }
     /// Per-frame rescan of the dirty bits, ordered in-frustum-first then
     /// nearest-first, so load bursts fill the view before the surroundings.
@@ -298,7 +314,10 @@ impl ChunkMeshing {
         eye: DVec3,
     ) {
         let min_y_section = self.store.min_section_y();
-        let section_count = self.store.section_count();
+        // Bounded by the 32-bit masks / section-ring y extent: iterating past
+        // it would stamp aliased ring slots on tall datapack dimensions and
+        // churn remeshes forever.
+        let section_count = crate::util::meshable_section_count(self.store.section_count());
 
         // Pass 1: cheap per-column screen for work, so an all-dirty burst
         // (dimension change, benchmark reset) pays the per-section walk only
@@ -392,16 +411,14 @@ impl ChunkMeshing {
     pub fn drain_results(&self) -> impl Iterator<Item = SectionMeshData> + '_ {
         self.result_rx.try_iter()
     }
-    /// Whether a drained result predates its section slot's current lifetime
-    /// (ver behind the snapshot's gen: the ring was recreated or the slot
-    /// recycled) or the slot no longer belongs to the mesh's section (chunk
-    /// unloaded sets pos to u64::MAX; an aliasing column repoints it). Every
-    /// drain site must drop such meshes; results whose ver merely advanced
-    /// stay, the newer upload supersedes them by epoch.
+    /// Whether a drained result's slot no longer belongs to the mesh's
+    /// section (chunk unloaded sets pos to u64::MAX; an aliasing column
+    /// repoints it). Every drain site must drop such meshes; results whose
+    /// slot version merely advanced stay — the buffer's `(content_gen,
+    /// epoch)` gate lets the newer snapshot supersede them.
     pub fn is_stale(&self, mesh: &SectionMeshData) -> bool {
         let meta = self.section_meta.get(mesh.spos);
-        meta.ver.load(Ordering::Acquire) < mesh.content_gen
-            || meta.pos.load(Ordering::Acquire) != pack_section_pos(mesh.spos)
+        meta.pos.load(Ordering::Acquire) != pack_section_pos(mesh.spos)
     }
     pub fn pending_jobs(&self) -> usize {
         self.queue.pending_jobs()
@@ -462,12 +479,6 @@ impl PendingJob {
             .fetch_and(!section_bit(rel_y), Ordering::Acquire);
         let meta = section_meta.get(self.pos);
         let claim_ver = meta.ver.load(Ordering::Acquire);
-        let claim_pos_packed = meta.pos.load(Ordering::Acquire);
-        let claim_pos = if claim_pos_packed != u64::MAX {
-            unpack_section_pos(claim_pos_packed)
-        } else {
-            self.pos
-        };
         let claim_lod = meta.target_lod.load(Ordering::Acquire) as u32;
         let mut guard = ReMarkGuard {
             update_set,
@@ -476,18 +487,18 @@ impl PendingJob {
             defused: false,
         };
         let snapshot = SectionStoreSnapshot {
-            section: LocalSection::new_boxed(shared_chunk_store, claim_pos),
+            section: LocalSection::new_boxed(shared_chunk_store, self.pos),
             grass_colormap: Arc::clone(grass_colormap),
             foliage_colormap: Arc::clone(foliage_colormap),
             dry_foliage_colormap: Arc::clone(dry_foliage_colormap),
             biome_climate: biome_climate.read().unwrap().clone(),
             min_y: shared_chunk_store.min_y(),
-            spos: claim_pos,
+            spos: self.pos,
         };
         let meshed_at = std::time::Instant::now();
         let mut mesh = mesh_section(
             &snapshot,
-            claim_pos,
+            self.pos,
             registry,
             uv_map,
             claim_lod,

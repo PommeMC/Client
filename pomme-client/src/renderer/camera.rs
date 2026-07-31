@@ -388,9 +388,11 @@ impl Camera {
     /// `Greater*` and the depth attachment clears to 0.0 to match;
     /// `depth_far` remains the fog/culling horizon only.
     pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
-        let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
-        let view = self.bob_matrix() * view::look_to_mat4(offset, forward, up);
+        // Zero-eye view: every consumer feeds coordinates relative to the
+        // full render eye (`position + third_person_offset`), so the view
+        // must not subtract the offset again.
+        let view = self.bob_matrix() * view::look_to_mat4(Vec3::ZERO, forward, up);
         let mut proj = proj::directx::perspective_infinite_reverse(fov, self.aspect_ratio, NEAR);
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
@@ -473,8 +475,10 @@ impl CameraUniform {
         let (fog_start, fog_end, env_start, env_end, fog_rgb) = if fog_off {
             // F3+F: bands that never start kill every fog (water included),
             // matching vanilla's toggleFog early-out. `linear_fog_value`
-            // returns 0 before its division for dist <= start, so MAX is safe.
-            (f32::MAX, f32::MAX, f32::MAX, f32::MAX, sky_color)
+            // returns 0 before its division for dist <= start, so MAX is
+            // safe. Vanilla's disabled-fog UBO carries color (0,0,0,0), so
+            // section fade-ins mix from black rather than sky.
+            (f32::MAX, f32::MAX, f32::MAX, f32::MAX, [0.0, 0.0, 0.0])
         } else if camera.top_down().is_some() {
             let far = camera.depth_far;
             (far, far, far, far, sky_color)

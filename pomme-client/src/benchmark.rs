@@ -293,7 +293,7 @@ pub struct UpdatePhases {
 
 /// Phase split of a run's single worst frame, to localize a hitch. `total_ms`
 /// is the wall-clock frame (`raw_dt`); `render_ms` the `render_frame` portion
-/// (which includes `fence_ms`, the GPU-bound wait); the `update` phases cover
+/// (which includes the GPU-bound fence wait); the `update` phases cover
 /// the rest. All sub-timings reflect the same prior frame `raw_dt` measures, so
 /// the split lines up; whatever `total_ms` exceeds the parts is time spent
 /// outside `update_game` (limiter / OS scheduling / inter-frame gap).
@@ -301,10 +301,9 @@ pub struct UpdatePhases {
 pub struct FrameBreakdown {
     pub total_ms: f32,
     pub render_ms: f32,
-    pub fence_ms: f32,
+    /// CPU wait in `acquire_next_image` (FIFO vblank backpressure).
     pub acquire_ms: f32,
     pub cull_ms: f32,
-    pub present_ms: f32,
     #[serde(flatten)]
     pub update: UpdatePhases,
 }
@@ -501,11 +500,13 @@ impl ChunkLoadBench {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         gpu_loaded: u32,
         client_cached: u32,
         frame_ms: f32,
+        acquire_ms: f32,
         timings: &RenderTimings,
         phases: UpdatePhases,
     ) -> ChunkLoadStep {
@@ -546,15 +547,11 @@ impl ChunkLoadBench {
                 self.frame_ms_sum += frame_ms;
                 if frame_ms > self.frame_ms_max {
                     self.frame_ms_max = frame_ms;
-                    // fence/acquire/present are CPU-side waits the GPU
-                    // timestamp timings no longer measure.
                     self.worst_breakdown = FrameBreakdown {
                         total_ms: frame_ms,
                         render_ms: timings.frame_ms(),
-                        fence_ms: 0.0,
-                        acquire_ms: 0.0,
+                        acquire_ms,
                         cull_ms: timings.cull_ms(),
-                        present_ms: 0.0,
                         update: phases,
                     };
                 }
@@ -603,7 +600,11 @@ impl ChunkLoadBench {
                         return ChunkLoadStep::Done(Box::new(self.aggregate()));
                     }
 
-                    // Start next timing run immediately!
+                    // Start next timing run immediately! The target
+                    // recaptures from the live cache: the server may have
+                    // streamed more columns during the previous run, and a
+                    // stale smaller target would end this one optimistically.
+                    self.baseline_count = client_cached;
                     self.start = now;
                     self.last_change = now;
                     self.last_count = 0;

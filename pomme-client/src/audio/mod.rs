@@ -204,7 +204,9 @@ impl AudioEngine {
         };
         let sounds = SoundsIndex::load(jar_assets_dir, &asset_index);
         let play_tx = output.as_ref().map(|o| {
-            let (tx, rx) = crossbeam_channel::unbounded();
+            // Bounded: one worker serializes 10-20ms cold decodes, so a
+            // sound-spamming server drops rather than queue stale audio.
+            let (tx, rx) = crossbeam_channel::bounded(64);
             let mixer = o.sink.mixer().clone();
             let dir = jar_assets_dir.to_path_buf();
             let index = asset_index.clone();
@@ -276,13 +278,16 @@ impl AudioEngine {
         let Some((name, entry_volume)) = self.choose_variant(UI_CLICK_EVENT, None) else {
             return;
         };
-        let _ = play_tx.send(PlayCmd {
-            key: sound_asset_key(&name),
-            speed: 1.0,
-            gain: PlayGain::Volume(
-                self.category_gain(SoundCategory::Master) * UI_CLICK_VOLUME * entry_volume,
-            ),
-        });
+        Self::try_play(
+            play_tx,
+            PlayCmd {
+                key: sound_asset_key(&name),
+                speed: 1.0,
+                gain: PlayGain::Volume(
+                    self.category_gain(SoundCategory::Master) * UI_CLICK_VOLUME * entry_volume,
+                ),
+            },
+        );
     }
 
     /// Plays a positional world sound at `pos`, mixed for its category and
@@ -321,11 +326,14 @@ impl AudioEngine {
         let base =
             self.category_gain(SoundCategory::from_index(category)) * instance_volume * dist_gain;
 
-        let _ = play_tx.send(PlayCmd {
-            key,
-            speed: pitch.max(0.01),
-            gain: PlayGain::Channels(vec![base * left_pan, base * right_pan]),
-        });
+        Self::try_play(
+            play_tx,
+            PlayCmd {
+                key,
+                speed: pitch.max(0.01),
+                gain: PlayGain::Channels(vec![base * left_pan, base * right_pan]),
+            },
+        );
     }
 
     /// Begins menu music. Idempotent, so it is safe to call every frame.
@@ -403,6 +411,13 @@ impl AudioEngine {
                 Some((sound_asset_key(&variant), volume))
             }
             SoundRef::Direct(path) => Some((sound_asset_key(path), 1.0)),
+        }
+    }
+
+    /// Queue a fire-and-forget play, dropping when the worker is saturated.
+    fn try_play(play_tx: &crossbeam_channel::Sender<PlayCmd>, cmd: PlayCmd) {
+        if play_tx.try_send(cmd).is_err() {
+            tracing::debug!("audio play queue full; dropped sound");
         }
     }
 

@@ -112,7 +112,11 @@ impl MainMenu {
             "Render Distance: {} chunks",
             self.render_distance.min(rd_max)
         );
-        let cd = format!("Chunk Detail: {} chunks", self.chunk_detail);
+        let cd = if self.chunk_detail == 0 {
+            "Chunk Detail: Auto".to_string()
+        } else {
+            format!("Chunk Detail: {} chunks", self.chunk_detail)
+        };
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
             "Max Framerate: Unlimited".to_string()
@@ -129,8 +133,8 @@ impl MainMenu {
         } else {
             "VSync: OFF"
         };
-        let frustum_val = self.frustum_padding;
-        let frustum_str = format!("Frustum Padding: {:.0}%", frustum_val * 100.0);
+        // The setting is radians of extra FOV; show it as degrees.
+        let frustum_str = format!("Frustum Padding: {:.0}°", self.frustum_padding.to_degrees());
 
         let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
         let rows: Vec<OptRow> = vec![
@@ -158,7 +162,12 @@ impl MainMenu {
             OptRow::Pair("Attack Indicator: Crosshair", "Chunk Fade-in: 1.0s"),
         ];
         let rd_frac = ((self.render_distance as f32 - 2.0) / (rd_max as f32 - 2.0)).clamp(0.0, 1.0);
-        let cd_frac = ((self.chunk_detail as f32 - 8.0) / 40.0).clamp(0.0, 1.0);
+        // Leftmost step = Auto (0), then the 8..48 range.
+        let cd_frac = if self.chunk_detail == 0 {
+            0.0
+        } else {
+            ((self.chunk_detail as f32 - 7.0) / 41.0).clamp(0.0, 1.0)
+        };
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let frustum_frac = self.frustum_padding / 0.5;
@@ -792,7 +801,10 @@ impl MainMenu {
                     let max = self.render_distance_max() as f32;
                     self.render_distance = (2.0 + v * (max - 2.0)).round() as u32
                 }
-                "Chunk Detail:" => self.chunk_detail = (8.0 + v * 40.0).round() as u32,
+                "Chunk Detail:" => {
+                    let d = (7.0 + v * 41.0).round() as u32;
+                    self.chunk_detail = if d < 8 { 0 } else { d };
+                }
                 "Simulation Distance:" => {
                     self.simulation_distance = (5.0 + v * 27.0).round() as u32
                 }

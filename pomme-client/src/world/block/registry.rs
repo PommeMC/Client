@@ -176,7 +176,16 @@ impl BlockRegistry {
             .clone()
             .map(|s| self.lookup_model(s).cloned())
             .collect();
-        self.state_multipart = states.clone().map(|s| self.lookup_multipart(s)).collect();
+        // Many states of one block share a matched-entry set (redstone wire's
+        // 1296 states collapse to a handful), so the built quad lists are
+        // deduped by (block, matched indices) instead of owned per state —
+        // tens of MB otherwise.
+        let mut multipart_memo: HashMap<(&'static str, Vec<u16>), Arc<[model::BakedQuad]>> =
+            HashMap::new();
+        self.state_multipart = states
+            .clone()
+            .map(|s| self.lookup_multipart(s, &mut multipart_memo))
+            .collect();
         self.state_textures = states
             .clone()
             .map(|s| self.textures.get(super::block_id(s)).cloned())
@@ -282,23 +291,39 @@ impl BlockRegistry {
             .or_else(|| variants.values().next())
     }
 
-    fn lookup_multipart(&self, state: BlockState) -> Option<Arc<[model::BakedQuad]>> {
-        let entries = self.multipart.get(super::block_id(state))?;
+    fn lookup_multipart(
+        &self,
+        state: BlockState,
+        memo: &mut HashMap<(&'static str, Vec<u16>), Arc<[model::BakedQuad]>>,
+    ) -> Option<Arc<[model::BakedQuad]>> {
+        let name = super::block_id(state);
+        let entries = self.multipart.get(name)?;
         let props = super::block_properties(state);
 
-        let mut quads = Vec::new();
-        for entry in entries {
-            let when = entry.when.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-            if constraints_match(props, when) {
-                quads.extend(entry.quads.iter().cloned());
-            }
+        let matched: Vec<u16> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                let when = entry.when.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+                constraints_match(props, when)
+            })
+            .map(|(i, _)| i as u16)
+            .collect();
+        if matched.is_empty() {
+            return None;
         }
-
-        if quads.is_empty() {
-            None
-        } else {
-            Some(quads.into())
-        }
+        let quads = Arc::clone(
+            memo.entry((name, matched))
+                .or_insert_with_key(|(_, matched)| {
+                    matched
+                        .iter()
+                        .flat_map(|&i| entries[i as usize].quads.iter().cloned())
+                        .collect()
+                }),
+        );
+        // Matched-but-quadless keeps the old None (state falls through to the
+        // plain cube path).
+        (!quads.is_empty()).then_some(quads)
     }
 
     pub fn texture_names(&self) -> impl Iterator<Item = &str> + '_ {

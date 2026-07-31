@@ -22,7 +22,7 @@ pub enum Timestamp {
     VisibilityEnd,
     Count, // Automatically tracks the total number of timestamps needed
 }
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct RenderTimings {
     pub ticks: [u64; Timestamp::Count as usize],
     pub timestamp_period: f32,
@@ -78,9 +78,10 @@ impl Timer {
         }
     }
     /// Returns a drop-guard that automatically writes the end timestamp when it
-    /// goes out of scope.
+    /// goes out of scope. Both stamps use BottomOfPipe: a TopOfPipe start
+    /// stamps before preceding work drains, overlapping the scopes.
     pub fn scope<'a>(&'a self, start: Timestamp, end: Timestamp) -> TimerScope<'a> {
-        self.write(start, vk::PipelineStageFlags::TopOfPipe);
+        self.write(start, vk::PipelineStageFlags::BottomOfPipe);
         TimerScope { timer: self, end }
     }
 }

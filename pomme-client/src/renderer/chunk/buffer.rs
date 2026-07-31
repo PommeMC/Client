@@ -7,7 +7,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use super::dispatcher::pack_section_pos;
-use super::mesher::{ChunkAABB, PackedVertex, SectionMeshData};
+use super::mesher::{ChunkAABB, FADE_DURATION_MS, PackedVertex, SectionMeshData};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
@@ -27,20 +27,23 @@ const MIN_BUCKETS: u32 = 128;
 // never hits the emergency GPU-wait reclaim; `VRAM_BUDGET_FRACTION` still
 // bounds smaller cards.
 const MAX_BUCKETS: u32 = 4096;
+/// Integrated GPUs share system RAM (reported as device-local), so their pool
+/// caps at ~512 MB instead of the discrete cards' ~1.75 GB.
+const MAX_BUCKETS_INTEGRATED: u32 = 1024;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
-/// Per-section fade-in length, shared by the opaque indirect path and water.
-const FADE_DURATION_MS: f32 = 1000.0;
-/// Columns within this squared X/Z distance of the camera render opaque
-/// immediately and never fade in.
+/// Sections whose center sits within this squared distance of the camera
+/// render opaque immediately and never fade in.
 const NEARBY_DIST_SQ: f32 = 768.0;
 
-/// Whether a column's center is within the always-near X/Z radius of the eye
-/// (vanilla `isNearby`), rebased in f64 for precision at extreme coordinates.
-/// Also suppresses the section fade-in for near columns (`column_nearby`).
-pub fn column_is_near(pos: ChunkPos, eye: DVec3) -> bool {
-    let dx = pos.x as f64 * 16.0 + 8.0 - eye.x;
-    let dz = pos.z as f64 * 16.0 + 8.0 - eye.z;
-    dx * dx + dz * dz < NEARBY_DIST_SQ as f64
+/// Whether a section's center is within the always-near radius of the eye
+/// (vanilla `isNearby`: a 3D distance on the section center, so a section 30
+/// blocks overhead still fades), rebased in f64 for precision at extreme
+/// coordinates.
+fn section_is_near(spos: ChunkSectionPos, eye: DVec3) -> bool {
+    let dx = spos.x as f64 * 16.0 + 8.0 - eye.x;
+    let dy = spos.y as f64 * 16.0 + 8.0 - eye.y;
+    let dz = spos.z as f64 * 16.0 + 8.0 - eye.z;
+    dx * dx + dy * dy + dz * dz < NEARBY_DIST_SQ as f64
 }
 
 /// First-fit free-list sub-allocator over a fixed element range, coalescing on
@@ -111,10 +114,17 @@ impl FreeList {
             }
         }
     }
+
+    /// Largest contiguous free run, for the pool-exhaustion diagnostics
+    /// (distinguishes "full" from "fragmented").
+    fn largest_free(&self) -> u32 {
+        self.free.iter().map(|&(_, n)| n).max().unwrap_or(0)
+    }
 }
 
 fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
     let mem_props = physical_device.get_memory_properties();
+    let props = physical_device.get_properties();
     let mut device_local_bytes: u64 = 0;
     for i in 0..mem_props.memory_type_count as usize {
         let mem_type = mem_props.memory_types[i];
@@ -129,8 +139,15 @@ fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
         }
     }
     let budget = (device_local_bytes as f64 * VRAM_BUDGET_FRACTION) as u64;
+    // Integrated GPUs report system RAM as their device-local heap, so the
+    // fraction would eagerly reserve gigabytes of host memory; cap them.
+    let max_buckets = if props.device_type == vk::PhysicalDeviceType::DiscreteGpu {
+        MAX_BUCKETS
+    } else {
+        MAX_BUCKETS_INTEGRATED
+    };
     let buckets = (budget / BYTES_PER_BUCKET) as u32;
-    let count = buckets.clamp(MIN_BUCKETS, MAX_BUCKETS);
+    let count = buckets.clamp(MIN_BUCKETS, max_buckets);
     tracing::info!(
         "GPU VRAM: {} MB, chunk budget: {} MB, buckets: {}",
         device_local_bytes / (1024 * 1024),
@@ -293,7 +310,7 @@ struct FrustumData {
     /// Eye position relative to `cam_block` (small, full precision).
     frac: [f32; 3],
     /// Hi-Z mask decode parameters: the center and section layout the slot's
-    /// mask was written with (three frames ago). `mask_valid = 0` skips the
+    /// mask was written with (last frame). `mask_valid = 0` skips the
     /// mask test entirely (slot never written).
     mask_center: [i32; 2],
     mask_min_section: i32,
@@ -307,6 +324,12 @@ struct FrustumData {
     _pad: u32,
 }
 
+/// `meta_slot` of a tombstone: a section whose latest accepted result was
+/// empty. The entry owns no GPU slices; it only preserves the section's
+/// `(content_gen, epoch)` floor so a slower pre-edit mesh can't resurrect
+/// geometry the empty result already replaced.
+const TOMBSTONE_SLOT: u32 = u32::MAX;
+
 /// One uploaded 16³ section: a vertex slice of whole quads grouped
 /// `[solid][cutout][water]`, drawn against the shared quad index buffer.
 /// `vertex_offset` is the slice base and `vtx_len` its length, kept so the
@@ -315,15 +338,30 @@ struct FrustumData {
 /// section's persistent meta entry.
 struct SectionAlloc {
     section_index: i32,
-    /// This section's stable slot in the GPU meta buffers; freed slots recycle
-    /// only after `MAX_FRAMES_IN_FLIGHT` frames (via `pending_free`) so an
-    /// in-flight cull never reads a repurposed entry.
+    /// This section's stable slot in the GPU meta buffers ([`TOMBSTONE_SLOT`]
+    /// for an empty section); freed slots recycle only after
+    /// `MAX_FRAMES_IN_FLIGHT` frames (via `pending_free`) so an in-flight
+    /// cull never reads a repurposed entry.
     meta_slot: u32,
     vertex_offset: i32,
     vtx_len: u32,
-    /// Upload epoch this section's geometry came from; an older upload is
-    /// rejected. See [`SectionMeshData::upload_epoch`].
+    /// Snapshot recency + upload stamp this section's geometry came from; an
+    /// upload with a lexicographically older pair is rejected. `content_gen`
+    /// (the dispatcher slot's version at claim time) orders by what the mesh
+    /// *saw*; `upload_epoch` breaks ties between jobs claiming the same
+    /// version. See [`SectionMeshData::upload_epoch`].
+    content_gen: u64,
     epoch: u64,
+}
+
+impl SectionAlloc {
+    fn is_tombstone(&self) -> bool {
+        self.meta_slot == TOMBSTONE_SLOT
+    }
+
+    fn order_key(&self) -> (u64, u64) {
+        (self.content_gen, self.epoch)
+    }
 }
 
 struct ChunkAlloc {
@@ -347,6 +385,13 @@ pub struct ChunkBufferStore {
     /// Capacity (in draws) of the per-frame meta/indirect buffers. Grown on
     /// demand because per-section packing yields many more draws than buckets.
     max_meta: usize,
+    /// Device limit on drawCount/maxDrawCount per indirect multi-draw.
+    max_draw_indirect_count: u32,
+    /// One-shot log guard for the (pathological) case where live sections
+    /// exceed that limit and draws start truncating.
+    warned_draw_cap: bool,
+    /// Rate limit for the vertex-pool-exhausted warning.
+    last_pool_warn: Option<std::time::Instant>,
     vertex_buffer: vk::Buffer,
     vertex_alloc: Allocation,
     /// Shared static index buffer holding the repeating `0,1,2,2,3,0` quad
@@ -459,6 +504,9 @@ impl ChunkBufferStore {
 
         let dev_props = physical_device.get_properties();
         let use_staging = dev_props.device_type == vk::PhysicalDeviceType::DiscreteGpu;
+        // Spec floor is 65535 even with multiDrawIndirect; meta_high_water
+        // passes it from ~RD 32, so every draw clamps to the device cap.
+        let max_draw_indirect_count = dev_props.limits.max_draw_indirect_count;
 
         let (vertex_buffer, vertex_alloc) = if use_staging {
             util::create_device_buffer(
@@ -822,10 +870,13 @@ impl ChunkBufferStore {
 
         let mut this = Self {
             max_meta,
+            max_draw_indirect_count,
+            warned_draw_cap: false,
+            last_pool_warn: None,
             vertex_buffer,
             vertex_alloc,
             quad_index_buffer: vk::Buffer::null(),
-            quad_index_alloc: unsafe { std::mem::zeroed() },
+            quad_index_alloc: Allocation::default(),
             quad_index_quads: 0,
             quad_index_src: None,
             quad_index_copy_pending: false,
@@ -902,11 +953,7 @@ impl ChunkBufferStore {
             device.wait_idle().ok();
             let mut alloc = allocator.lock().unwrap();
             device.destroy_buffer(self.quad_index_buffer, None);
-            alloc
-                .free(std::mem::replace(&mut self.quad_index_alloc, unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
+            alloc.free(std::mem::take(&mut self.quad_index_alloc)).ok();
             if let Some((buf, allocation)) = self.quad_index_src.take() {
                 device.destroy_buffer(buf, None);
                 alloc.free(allocation).ok();
@@ -1031,44 +1078,68 @@ impl ChunkBufferStore {
         self.pending_v_bytes = 0;
     }
 
+    /// Drop staged-but-unrecorded copies whose destination slice was just
+    /// retired (their section is replaced or gone). Without this, a skipped
+    /// frame's leftover copy plus an emergency reclaim re-issuing the range
+    /// would put two overlapping destination regions into one
+    /// `vkCmdCopyBuffer`, whose write order is undefined.
+    fn drop_pending_copies_for(&mut self, freed: &[(u32, u32, u32)]) {
+        if self.pending_copies.is_empty() || freed.is_empty() {
+            return;
+        }
+        let mut dropped_bytes = 0usize;
+        self.pending_copies.retain(|c| {
+            if freed.iter().any(|&(vo, ..)| vo == c.vtx_off) {
+                dropped_bytes += c.vertices.len() * VERTEX_SIZE as usize;
+                false
+            } else {
+                true
+            }
+        });
+        self.pending_v_bytes -= dropped_bytes;
+    }
+
     /// Drain `mesh_queue` into the GPU pools, newest-epoch-per-section wins.
     /// Each accepted section replaces its slot's slices; an empty mesh retires
     /// the slot and drops the column when it goes empty. CPU-only: the staging
     /// path defers its byte writes and copies to `record_copies` in the frame
     /// command buffer instead of blocking on a transfer fence. If the staging
     /// budget or a pool fills, the loop stops and leaves the rest queued for
-    /// next frame. Returns the accepted `(section pos, epoch)` list.
+    /// next frame.
     pub fn stage_mesh_batch(
         &mut self,
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
         mesh_queue: &mut VecDeque<SectionMeshData>,
         eye: DVec3,
-    ) -> Vec<(ChunkSectionPos, u64)> {
+    ) {
         self.last_reclaim_ms = 0.0;
         // Keep only the newest result per section before draining: the stale
         // check below reads `self.chunks`, which only reflects this batch's
         // uploads after the loop, so two same-section results in one drain would
-        // otherwise both be accepted and the section drawn twice.
+        // otherwise both be accepted and the section drawn twice. Recency is
+        // the `(content_gen, epoch)` pair — the slot version the mesh saw,
+        // then the enqueue stamp — because a lower-epoch job can snapshot
+        // *after* a higher-epoch one and carry the newer world state.
         // (Keyed by packed pos: azalea's ChunkSectionPos doesn't impl Hash.)
-        let mut best: HashMap<u64, u64> = HashMap::new();
+        let order = |m: &SectionMeshData| (m.content_gen, m.upload_epoch);
+        let mut best: HashMap<u64, (u64, u64)> = HashMap::new();
         for mesh in mesh_queue.iter() {
             let key = pack_section_pos(mesh.spos);
-            let epoch = best.entry(key).or_insert(mesh.upload_epoch);
-            *epoch = (*epoch).max(mesh.upload_epoch);
+            let cur = best.entry(key).or_insert_with(|| order(mesh));
+            *cur = (*cur).max(order(mesh));
         }
         if best.len() < mesh_queue.len() {
             let mut seen = HashSet::new();
             mesh_queue.retain(|m| {
                 let key = pack_section_pos(m.spos);
-                m.upload_epoch == best[&key] && seen.insert(key)
+                order(m) == best[&key] && seen.insert(key)
             });
         }
         if mesh_queue.is_empty() {
-            return Vec::new();
+            return;
         }
 
-        let mut uploaded_info: Vec<(ChunkSectionPos, u64)> = Vec::new();
         let staging_budget = self.staging_size as usize;
 
         struct BatchEntry {
@@ -1091,22 +1162,34 @@ impl ChunkBufferStore {
                 .chunks
                 .get(&col_pos)
                 .and_then(|c| c.sections.iter().find(|s| s.section_index == si))
-                .map(|s| s.epoch)
-                .unwrap_or(0);
-            // Reject a stale upload a newer edit already superseded.
-            if mesh.upload_epoch < stored {
+                .map(|s| s.order_key())
+                .unwrap_or((0, 0));
+            // Reject a stale upload a newer result already superseded.
+            if order(mesh) < stored {
                 mesh_queue.pop_front();
                 continue;
             }
             if mesh.is_empty() {
                 self.take_section(col_pos, si);
-                if self
-                    .chunks
-                    .get(&col_pos)
-                    .is_some_and(|c| c.sections.is_empty())
-                {
-                    self.chunks.remove(&col_pos);
-                }
+                // Keep a tombstone: the `(content_gen, epoch)` floor must
+                // outlive the geometry, or a slower pre-edit mesh would pass
+                // the gate above and resurrect the section the empty result
+                // just cleared. Pruned with the column on unload.
+                let (content_gen, epoch) = order(mesh);
+                self.chunks
+                    .entry(col_pos)
+                    .or_insert_with(|| ChunkAlloc {
+                        sections: Vec::new(),
+                    })
+                    .sections
+                    .push(SectionAlloc {
+                        section_index: si,
+                        meta_slot: TOMBSTONE_SLOT,
+                        vertex_offset: 0,
+                        vtx_len: 0,
+                        content_gen,
+                        epoch,
+                    });
                 mesh_queue.pop_front();
                 continue;
             }
@@ -1137,16 +1220,25 @@ impl ChunkBufferStore {
                 .max(mesh.water_quads);
             self.ensure_quad_index_capacity(device, allocator, max_quads);
             let Some(vtx_off) = self.alloc_vertices(device, vcount) else {
-                tracing::debug!(
-                    "Vertex pool full, stopping upload batch for {:?}",
-                    mesh.spos
-                );
+                // Rate-limited: exhaustion persists across frames.
+                let now = std::time::Instant::now();
+                if self
+                    .last_pool_warn
+                    .is_none_or(|t| now.duration_since(t).as_secs() >= 5)
+                {
+                    self.last_pool_warn = Some(now);
+                    tracing::warn!(
+                        "vertex pool exhausted (largest free run {} verts, wanted {});                          uploads stalled for {:?}",
+                        self.vtx_free.largest_free(),
+                        vcount,
+                        mesh.spos,
+                    );
+                }
                 break;
             };
             let meta_slot = self.alloc_meta_slot(device, allocator);
             let mesh = mesh_queue.pop_front().unwrap();
             let was_present = self.take_section(col_pos, si);
-            uploaded_info.push((mesh.spos, mesh.upload_epoch));
             entries.push(BatchEntry {
                 mesh,
                 col_pos,
@@ -1159,7 +1251,7 @@ impl ChunkBufferStore {
         }
 
         if entries.is_empty() {
-            return uploaded_info;
+            return;
         }
 
         let now_ms = crate::renderer::camera::session_millis();
@@ -1169,7 +1261,7 @@ impl ChunkBufferStore {
             // (vanilla `isNearby`); everything else fades in from its upload
             // stamp, computed shader-side against the session clock.
             let backdate =
-                !self.fade_enabled || entry.was_present || column_is_near(entry.col_pos, eye);
+                !self.fade_enabled || entry.was_present || section_is_near(entry.mesh.spos, eye);
             let uploaded_ms = if backdate {
                 now_ms.wrapping_sub(2 * FADE_DURATION_MS as u32)
             } else {
@@ -1199,6 +1291,7 @@ impl ChunkBufferStore {
                     meta_slot: entry.meta_slot,
                     vertex_offset: entry.vtx_off as i32,
                     vtx_len: entry.vcount,
+                    content_gen: entry.mesh.content_gen,
                     epoch: entry.mesh.upload_epoch,
                 });
         }
@@ -1218,8 +1311,6 @@ impl ChunkBufferStore {
                 write_verts(vbuf, base, &entry.mesh.vertices);
             }
         }
-
-        uploaded_info
     }
 
     /// Double the meta capacity: recreates the per-frame meta, indirect, and
@@ -1229,6 +1320,11 @@ impl ChunkBufferStore {
     /// rare safety net.
     fn grow_meta(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let new_max = self.max_meta * 2;
+        // cull.comp packs water candidates as (meta slot << 9) | bucket.
+        debug_assert!(
+            new_max <= 1 << 23,
+            "meta slots exceed the water candidate packing"
+        );
 
         device.wait_idle().ok();
 
@@ -1236,23 +1332,14 @@ impl ChunkBufferStore {
             let mut alloc = allocator.lock().unwrap();
             for i in 0..MAX_FRAMES_IN_FLIGHT {
                 device.destroy_buffer(self.meta_buffers[i], None);
-                alloc
-                    .free(std::mem::replace(&mut self.meta_allocs[i], unsafe {
-                        std::mem::zeroed()
-                    }))
-                    .ok();
+                alloc.free(std::mem::take(&mut self.meta_allocs[i])).ok();
                 device.destroy_buffer(self.indirect_buffers[i], None);
                 alloc
-                    .free(std::mem::replace(&mut self.indirect_allocs[i], unsafe {
-                        std::mem::zeroed()
-                    }))
+                    .free(std::mem::take(&mut self.indirect_allocs[i]))
                     .ok();
                 device.destroy_buffer(self.indirect_cutout_buffers[i], None);
                 alloc
-                    .free(std::mem::replace(
-                        &mut self.indirect_cutout_allocs[i],
-                        unsafe { std::mem::zeroed() },
-                    ))
+                    .free(std::mem::take(&mut self.indirect_cutout_allocs[i]))
                     .ok();
             }
         }
@@ -1414,12 +1501,20 @@ impl ChunkBufferStore {
     }
 
     /// Apply queued meta writes this frame slot hasn't seen yet, trimming the
-    /// queue once every slot has caught up.
+    /// queue once every slot has caught up. A backlog longer than half the
+    /// capacity (e.g. a whole world staged on the loading screen, where no
+    /// cull runs) applies as one mirror memcpy instead of a replay.
     fn apply_meta_writes(&mut self, frame: usize) {
         let buf = self.meta_allocs[frame].mapped_slice_mut().unwrap();
-        for &(slot, entry) in &self.meta_writes[self.meta_applied[frame]..] {
-            let off = slot as usize * size_of::<ChunkMeta>();
-            buf[off..off + size_of::<ChunkMeta>()].copy_from_slice(bytemuck::bytes_of(&entry));
+        let pending = &self.meta_writes[self.meta_applied[frame]..];
+        if pending.len() > self.max_meta / 2 {
+            let mirror_bytes: &[u8] = bytemuck::cast_slice(&self.meta_mirror);
+            buf[..mirror_bytes.len()].copy_from_slice(mirror_bytes);
+        } else {
+            for &(slot, entry) in pending {
+                let off = slot as usize * size_of::<ChunkMeta>();
+                buf[off..off + size_of::<ChunkMeta>()].copy_from_slice(bytemuck::bytes_of(&entry));
+            }
         }
         self.meta_applied[frame] = self.meta_writes.len();
         if self
@@ -1434,9 +1529,12 @@ impl ChunkBufferStore {
 
     /// Emergency reclaim when a pool runs dry: waits the GPU out and returns
     /// every retired slice immediately instead of at its frame deadline.
-    /// False when there was nothing to reclaim.
+    /// False when too little is pending to be worth the wait — with the pool
+    /// exhausted and remeshes trickling in, an unconditional reclaim would
+    /// `wait_idle` every frame for a handful of slices.
     fn reclaim_retired(&mut self, device: &vk::Device) -> bool {
-        if self.pending_free.is_empty() {
+        const MIN_RECLAIM_SLICES: usize = 64;
+        if self.pending_free.len() < MIN_RECLAIM_SLICES {
             return false;
         }
         let start = std::time::Instant::now();
@@ -1455,26 +1553,39 @@ impl ChunkBufferStore {
     }
 
     /// Remove the section at `si` from `col_pos` if present, zeroing its meta
-    /// entry (freed slots self-cull) and retiring its GPU slices. Returns
-    /// whether the section existed.
+    /// entry (freed slots self-cull) and retiring its GPU slices (tombstones
+    /// own none). Returns whether an entry — real or tombstone — existed,
+    /// which is exactly the fade question: only a never-seen section fades in
+    /// (vanilla `wasPreviouslyEmpty` sections appear instantly).
     fn take_section(&mut self, col_pos: ChunkPos, si: i32) -> bool {
+        let mut was_present = false;
         let mut freed = Vec::new();
         if let Some(entry) = self.chunks.get_mut(&col_pos) {
             entry.sections.retain(|s| {
                 if s.section_index == si {
-                    freed.push(slice_of(s));
+                    was_present = true;
+                    if !s.is_tombstone() {
+                        freed.push(slice_of(s));
+                    }
                     false
                 } else {
                     true
                 }
             });
         }
-        let was_present = !freed.is_empty();
+        self.retire_freed(freed);
+        was_present
+    }
+
+    /// Common teardown for replaced/unloaded sections: zero their meta
+    /// entries (freed slots self-cull), drop any staged copy into their
+    /// slices, and retire the slices.
+    fn retire_freed(&mut self, freed: Vec<(u32, u32, u32)>) {
         for &(.., slot) in &freed {
             self.queue_meta_write(slot, bytemuck::Zeroable::zeroed());
         }
+        self.drop_pending_copies_for(&freed);
         self.retire_slices(freed);
-        was_present
     }
 
     /// Defer returning slices to the pools until `MAX_FRAMES_IN_FLIGHT` frames
@@ -1493,7 +1604,6 @@ impl ChunkBufferStore {
     /// been waited (that wait guarantees the frame from `MAX_FRAMES_IN_FLIGHT`
     /// ago — and everything before it — is done on the GPU).
     pub fn begin_frame(&mut self) {
-        self.frame_seq += 1;
         while self
             .pending_free
             .front()
@@ -1504,12 +1614,23 @@ impl ChunkBufferStore {
         }
     }
 
+    /// Count a submitted frame toward the retire deadlines. Called after a
+    /// successful queue submit only: a skipped frame (swapchain out of date)
+    /// re-waits the same fence, so counting it would shave a frame off the
+    /// `MAX_FRAMES_IN_FLIGHT` margin `retire_slices` depends on.
+    pub fn frame_submitted(&mut self) {
+        self.frame_seq += 1;
+    }
+
     pub fn remove(&mut self, pos: &ChunkPos) {
         if let Some(alloc) = self.chunks.remove(pos) {
-            for sec in &alloc.sections {
-                self.queue_meta_write(sec.meta_slot, bytemuck::Zeroable::zeroed());
-            }
-            self.retire_slices(alloc.sections.iter().map(slice_of));
+            let freed = alloc
+                .sections
+                .iter()
+                .filter(|s| !s.is_tombstone())
+                .map(slice_of)
+                .collect();
+            self.retire_freed(freed);
         }
     }
 
@@ -1533,15 +1654,11 @@ impl ChunkBufferStore {
         self.chunks.len() as u32
     }
 
-    /// Wires each frame slot's Hi-Z visibility mask buffer into the cull
-    /// descriptor set (binding 6). One-time: the mask buffers are never
+    /// Wires the shared Hi-Z visibility mask buffer into every frame slot's
+    /// cull descriptor set (binding 6). One-time: the mask buffer is never
     /// recreated.
-    pub fn set_visibility_mask_buffers(
-        &mut self,
-        device: &vk::Device,
-        buffers: &[vk::Buffer; MAX_FRAMES_IN_FLIGHT],
-    ) {
-        for (i, &buffer) in buffers.iter().enumerate() {
+    pub fn set_visibility_mask_buffer(&mut self, device: &vk::Device, buffer: vk::Buffer) {
+        for i in 0..MAX_FRAMES_IN_FLIGHT {
             let (info, mut write) = desc_write(
                 self.compute_sets[i],
                 6,
@@ -1617,12 +1734,17 @@ impl ChunkBufferStore {
         // macOS draws the whole indirect buffer (no drawIndirectCount), so slots
         // the cull shader leaves unfilled must read as no-op draws, not stale data.
         #[cfg(target_os = "macos")]
-        for a in [
-            &mut self.indirect_allocs[frame],
-            &mut self.indirect_cutout_allocs[frame],
-            &mut self.water_indirect_allocs[frame],
-        ] {
-            a.mapped_slice_mut().unwrap().fill(0);
+        {
+            // Only slots below the high water are ever drawn (max_draws
+            // bounds the zero-fill).
+            let live = self.meta_high_water as usize * size_of::<DrawCommand>();
+            for a in [
+                &mut self.indirect_allocs[frame],
+                &mut self.indirect_cutout_allocs[frame],
+                &mut self.water_indirect_allocs[frame],
+            ] {
+                a.mapped_slice_mut().unwrap()[..live].fill(0);
+            }
         }
 
         // Clear the water bucket counters (+ candidate counter) before the
@@ -1699,16 +1821,32 @@ impl ChunkBufferStore {
         }
     }
 
+    /// drawCount/maxDrawCount for the indirect draws: `meta_high_water`
+    /// clamped to the device limit, with a one-shot warning once truncation
+    /// starts (draws past the cap are silently skipped by the spec).
+    fn clamped_draw_count(&mut self) -> u32 {
+        if self.meta_high_water > self.max_draw_indirect_count && !self.warned_draw_cap {
+            self.warned_draw_cap = true;
+            tracing::warn!(
+                "live section draws ({}) exceed maxDrawIndirectCount ({}); \
+                 excess draws are dropped",
+                self.meta_high_water,
+                self.max_draw_indirect_count
+            );
+        }
+        self.meta_high_water.min(self.max_draw_indirect_count)
+    }
+
     /// Issue one render layer's indirect draws. `cutout` selects the discard
     /// pass's draw list (drawn after `solid`, which lays down depth); the
     /// caller binds the matching pipeline first. Both layers share the
     /// vertex/index/meta buffers and the cull-written draw lists.
-    pub fn draw_indirect(&self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
+    pub fn draw_indirect(&mut self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
         if self.meta_high_water == 0 {
             return;
         }
 
-        let max_draws = self.meta_high_water;
+        let max_draws = self.clamped_draw_count();
         let (indirect, count) = if cutout {
             (
                 self.indirect_cutout_buffers[frame],
@@ -1741,18 +1879,19 @@ impl ChunkBufferStore {
     /// bucket. Shares the vertex pool, quad index buffer, and per-instance
     /// meta with the opaque passes; the caller binds the blended water
     /// pipeline first.
-    pub fn draw_water(&self, cmd: vk::CommandBuffer, frame: usize) {
+    pub fn draw_water(&mut self, cmd: vk::CommandBuffer, frame: usize) {
         if self.meta_high_water == 0 {
             return;
         }
 
+        let max_draws = self.clamped_draw_count();
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer, self.meta_buffers[frame]], &[0, 0]);
         cmd.bind_index_buffer(self.quad_index_buffer, 0, vk::IndexType::Uint32);
         if cfg!(target_os = "macos") {
             cmd.draw_indexed_indirect(
                 self.water_indirect_buffers[frame],
                 0,
-                self.meta_high_water,
+                max_draws,
                 size_of::<DrawCommand>() as u32,
             );
         } else {
@@ -1761,7 +1900,7 @@ impl ChunkBufferStore {
                 0,
                 self.water_count_buffers[frame],
                 0,
-                self.meta_high_water,
+                max_draws,
                 size_of::<DrawCommand>() as u32,
             );
         }
@@ -1772,18 +1911,10 @@ impl ChunkBufferStore {
 
         device.destroy_buffer(self.vertex_buffer, None);
 
-        alloc
-            .free(std::mem::replace(&mut self.vertex_alloc, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
+        alloc.free(std::mem::take(&mut self.vertex_alloc)).ok();
         if self.quad_index_quads > 0 {
             device.destroy_buffer(self.quad_index_buffer, None);
-            alloc
-                .free(std::mem::replace(&mut self.quad_index_alloc, unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
+            alloc.free(std::mem::take(&mut self.quad_index_alloc)).ok();
         }
         if let Some((buf, allocation)) = self.quad_index_src.take() {
             device.destroy_buffer(buf, None);
@@ -1802,38 +1933,18 @@ impl ChunkBufferStore {
             device.destroy_buffer(self.water_candidate_buffers[i], None);
             device.destroy_buffer(self.frustum_buffers[i], None);
 
+            alloc.free(std::mem::take(&mut self.meta_allocs[i])).ok();
             alloc
-                .free(std::mem::replace(&mut self.meta_allocs[i], unsafe {
-                    std::mem::zeroed()
-                }))
+                .free(std::mem::take(&mut self.indirect_allocs[i]))
+                .ok();
+            alloc.free(std::mem::take(&mut self.count_allocs[i])).ok();
+            alloc
+                .free(std::mem::take(&mut self.indirect_cutout_allocs[i]))
                 .ok();
             alloc
-                .free(std::mem::replace(&mut self.indirect_allocs[i], unsafe {
-                    std::mem::zeroed()
-                }))
+                .free(std::mem::take(&mut self.count_cutout_allocs[i]))
                 .ok();
-            alloc
-                .free(std::mem::replace(&mut self.count_allocs[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
-            alloc
-                .free(std::mem::replace(
-                    &mut self.indirect_cutout_allocs[i],
-                    unsafe { std::mem::zeroed() },
-                ))
-                .ok();
-            alloc
-                .free(std::mem::replace(
-                    &mut self.count_cutout_allocs[i],
-                    unsafe { std::mem::zeroed() },
-                ))
-                .ok();
-            alloc
-                .free(std::mem::replace(&mut self.frustum_allocs[i], unsafe {
-                    std::mem::zeroed()
-                }))
-                .ok();
+            alloc.free(std::mem::take(&mut self.frustum_allocs[i])).ok();
         }
         for allocation in self
             .water_indirect_allocs

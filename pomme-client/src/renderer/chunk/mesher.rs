@@ -5,11 +5,10 @@ use azalea_block::BlockState;
 use azalea_core::position::ChunkSectionPos;
 use pyronyx::vk;
 
-use super::greedy;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, WHITE_TEXTURE};
 use crate::renderer::chunk::section::LocalSection;
 use crate::world::block::model::{BakedModel, Direction, face_positions, face_uvs};
-use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
+use crate::world::block::registry::{BlockRegistry, Tint};
 use crate::world::block::{block_id, is_air};
 use crate::world::chunk::ChunkStore;
 #[repr(C)]
@@ -555,149 +554,6 @@ pub const LIGHT_TABLE: [f32; 16] = [
     0.05, 0.067, 0.085, 0.106, 0.129, 0.156, 0.188, 0.227, 0.272, 0.328, 0.393, 0.472, 0.566,
     0.679, 0.815, 1.0,
 ];
-struct GreedyBlockInfo {
-    textures: FaceTextures,
-}
-struct BlockTypeMap {
-    state_to_id: HashMap<BlockState, u16>,
-    id_to_info: Vec<GreedyBlockInfo>,
-}
-impl BlockTypeMap {
-    fn build(snapshot: &SectionStoreSnapshot, registry: &BlockRegistry) -> Self {
-        let mut state_to_id = HashMap::new();
-        let mut id_to_info: Vec<GreedyBlockInfo> = Vec::new();
-        let mut next_id = 1u16;
-        for lz in -1..17 {
-            for lx in -1..17 {
-                for ly in -1..17 {
-                    let state = snapshot.section.get_block_state(lx, ly, lz);
-                    if is_air(state) || state_to_id.contains_key(&state) {
-                        continue;
-                    }
-                    let has_baked = registry.get_baked_model(state).is_some();
-                    let has_multipart = registry.get_multipart_quads(state).is_some();
-                    if has_baked || has_multipart {
-                        state_to_id.insert(state, 0);
-                        continue;
-                    }
-                    if let Some(textures) = registry.get_textures(state) {
-                        if textures.side_overlay.is_some() || !registry.is_opaque_full_cube(state) {
-                            state_to_id.insert(state, 0);
-                            continue;
-                        }
-                        state_to_id.insert(state, next_id);
-                        id_to_info.push(GreedyBlockInfo {
-                            textures: textures.clone(),
-                        });
-                        next_id += 1;
-                    } else {
-                        state_to_id.insert(state, 0);
-                    }
-                }
-            }
-        }
-        Self {
-            state_to_id,
-            id_to_info,
-        }
-    }
-    fn get_id(&self, state: BlockState) -> u16 {
-        if is_air(state) {
-            return 0;
-        }
-        self.state_to_id.get(&state).copied().unwrap_or(0)
-    }
-    fn get_info(&self, id: u16) -> Option<&GreedyBlockInfo> {
-        if id == 0 {
-            return None;
-        }
-        self.id_to_info.get((id - 1) as usize)
-    }
-}
-const SECTION_SIZE: usize = 16;
-fn face_texture_name(textures: &FaceTextures, face: greedy::Face) -> &str {
-    match face {
-        greedy::Face::Up => &textures.top,
-        greedy::Face::Down => &textures.bottom,
-        greedy::Face::Right => &textures.east,
-        greedy::Face::Left => &textures.west,
-        greedy::Face::Front => &textures.south,
-        greedy::Face::Back => &textures.north,
-    }
-}
-use super::block_ao::AO_BRIGHTNESS;
-#[allow(clippy::too_many_arguments)]
-fn greedy_mesh_section(
-    solid: &mut Vec<ChunkVertex>,
-    snapshot: &SectionStoreSnapshot,
-    registry: &BlockRegistry,
-    type_map: &BlockTypeMap,
-    uv_map: &AtlasUVMap,
-) {
-    type M = greedy::GreedyMesher<SECTION_SIZE>;
-    let mut mesher = M::new();
-    let mut voxels = vec![0u16; M::CS_P3];
-    let mut occluders = vec![false; M::CS_P3];
-    let mut light = vec![0.0f32; M::CS_P3];
-    for ly in 0..18 {
-        for lx in 0..18 {
-            for lz in 0..18 {
-                let state = snapshot.section.blocks[lx][ly][lz];
-                let idx = greedy::pad_linearize::<SECTION_SIZE>(lx, ly, lz);
-                voxels[idx] = type_map.get_id(state);
-                occluders[idx] = registry.is_opaque_full_cube(state);
-                light[idx] = LIGHT_TABLE[snapshot.section.light[lx][ly][lz] as usize];
-            }
-        }
-    }
-    let transparent_set = std::collections::BTreeSet::new();
-    mesher.mesh(&voxels, &occluders, &light, &transparent_set);
-    for face_idx in 0..6 {
-        let face = greedy::Face::from(face_idx);
-        let dir_shade = face.shade_light();
-        for quad in &mesher.quads[face_idx] {
-            let block_id = quad.voxel_id();
-            let info = match type_map.get_info(block_id) {
-                Some(i) => i,
-                None => continue,
-            };
-            let tex_name = face_texture_name(&info.textures, face);
-            let region = uv_map.get_region(tex_name);
-            let verts_uvs = face.vertices(quad);
-            let [x0, y0, z0] = verts_uvs[0].0;
-            let lx = x0 as i32;
-            let ly = y0 as i32;
-            let lz = z0 as i32;
-            let tint = tint_color(
-                info.textures.tint,
-                snapshot.grass_tint(lx, ly, lz),
-                snapshot.foliage_tint(lx, ly, lz),
-                snapshot.dry_foliage_tint(lx, ly, lz),
-            );
-            let ao = quad.ao_levels();
-            // Per-vertex smooth light (averaged across chunk borders in the mesher); `i`
-            // matches `ao`.
-            let lights: [f32; 4] = core::array::from_fn(|i| {
-                AO_BRIGHTNESS[ao[i] as usize] * (quad.light[i] as f32 / 255.0) * dir_shade
-            });
-            let u_span = region.u_max - region.u_min;
-            let v_span = region.v_max - region.v_min;
-            let quad_verts: [ChunkVertex; 4] = core::array::from_fn(|i| {
-                let (pos, uv) = verts_uvs[i];
-                ChunkVertex {
-                    // Greedy quads are already section-local.
-                    position: pos,
-                    tex_coords: pack_uv(
-                        region.u_min + uv[0] * u_span,
-                        region.v_min + uv[1] * v_span,
-                    ),
-                    light_tint: pack_light_tint(lights[i], tint),
-                }
-            });
-            push_quad(solid, quad_verts, lights);
-        }
-    }
-}
 pub(crate) fn mesh_section(
     snapshot: &SectionStoreSnapshot,
     spos: ChunkSectionPos,
@@ -716,20 +572,12 @@ pub(crate) fn mesh_section(
         mesh_lod_cells(&mut sink, snapshot, registry, uv_map, step);
         return finalize_section(sink, spos, relative_si, content_gen, upload_epoch);
     }
-    let type_map = BlockTypeMap::build(snapshot, registry);
-    // Greedy geometry is opaque full cubes only, so it lands in the solid pass.
-    greedy_mesh_section(&mut sink.solid, snapshot, registry, &type_map, uv_map);
-    // 2. Complex & Fluid Pass (Block-by-Block)
     for local_z in 0..16 {
         for local_x in 0..16 {
             for local_y in 0..16 {
                 let state = snapshot.section.get_block_state(local_x, local_y, local_z);
                 let kind = classify_block(state);
                 if matches!(kind, BlockKind::Air) {
-                    continue;
-                }
-                // Skip blocks already handled by the greedy mesher.
-                if type_map.get_id(state) != 0 {
                     continue;
                 }
                 // Section-local vertex base (matching the origin the buffer derives),
@@ -1089,8 +937,11 @@ fn emit_multipart(
 }
 /// What occupies a LOD cell's neighbor, deciding face culling: drawn LOD
 /// cubes are full-size and opaque, so a `Solid` neighbor fully covers the
-/// shared face. `Outside` (past the section) keeps the face — conservative
-/// overdraw beats holes at borders where the padding can't answer.
+/// shared face. Vertical neighbors past the section resolve through the
+/// padding (same column, same LOD, so a covered face really is covered);
+/// horizontal ones stay `Outside` and keep the face — the adjacent column may
+/// render at a different LOD (or full detail), where a single-block sample
+/// can't prove coverage and overdraw beats holes.
 #[derive(Clone, Copy, PartialEq)]
 enum LodNeighbor {
     Empty,
@@ -1173,9 +1024,26 @@ fn mesh_lod_cells(
         }
     }
 
+    let classify_neighbor = |state: BlockState, full_cover: bool| -> LodNeighbor {
+        match classify_block(state) {
+            BlockKind::Air => LodNeighbor::Empty,
+            BlockKind::Water | BlockKind::Lava => LodNeighbor::Fluid,
+            BlockKind::Solid if full_cover => LodNeighbor::Solid,
+            BlockKind::Solid => LodNeighbor::Empty,
+        }
+    };
     let neighbor_of = |cx: i32, cy: i32, cz: i32| -> LodNeighbor {
         let range = 0..cells as i32;
-        if !range.contains(&cx) || !range.contains(&cy) || !range.contains(&cz) {
+        if !range.contains(&cy) {
+            // Vertical crossings resolve through the section padding: sample
+            // the block just past the shared face at the cell's base corner.
+            // The section above/below is the same column, so it meshes at the
+            // same LOD and any occupied cell there draws a full cube.
+            let py = if cy < 0 { -1 } else { 16 };
+            let state = snapshot.section.get_block_state(cx * step, py, cz * step);
+            return classify_neighbor(state, registry.is_opaque_full_cube(state));
+        }
+        if !range.contains(&cx) || !range.contains(&cz) {
             return LodNeighbor::Outside;
         }
         match grid[cell_at(cx as usize, cy as usize, cz as usize)] {
@@ -1257,9 +1125,16 @@ fn emit_lod_cube(
         let s = step as f32;
         let sy = if is_fluid { fluid_top } else { s };
         let scaled = positions.map(|p| [p[0] * s, p[1] * sy, p[2] * s]);
-        // LOD cubes go in the solid pass (matching the full-detail cube path).
+        // Route like the full-detail paths: water into the blended pass (it
+        // joins the GPU distance ordering), everything else by the sprite's
+        // opacity so cutout textures keep their discard pass.
+        let dst = if matches!(classify_block(state), BlockKind::Water) {
+            &mut sink.water
+        } else {
+            sink.pass_for(region.opaque)
+        };
         emit_quad_into(
-            &mut sink.solid,
+            dst,
             [lx as f32, ly as f32, lz as f32],
             &scaled,
             &uvs,

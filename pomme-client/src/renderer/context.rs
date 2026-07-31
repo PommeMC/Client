@@ -183,6 +183,7 @@ impl VulkanContext {
         let base_features = physical_device.get_features();
         let fill_mode_non_solid = base_features.fill_mode_non_solid == vk::TRUE;
         let draw_indirect_first_instance = base_features.draw_indirect_first_instance == vk::TRUE;
+        let multi_draw_indirect = base_features.multi_draw_indirect == vk::TRUE;
 
         let queue_supports_timestamps = graphics_family_props.timestamp_valid_bits > 0;
         let timestamp_queries = properties.limits.timestamp_compute_and_graphics == vk::TRUE
@@ -215,6 +216,31 @@ impl VulkanContext {
         if !draw_indirect_first_instance {
             tracing::error!(
                 "drawIndirectFirstInstance not supported; GPU-driven chunk drawing requires it"
+            );
+            return Err(ContextError::NoSuitableGpu);
+        }
+        // Every chunk draw list is a multi-draw (`vkCmdDrawIndexedIndirect*`
+        // with drawCount / maxDrawCount in the thousands), invalid without
+        // the feature.
+        if !multi_draw_indirect {
+            tracing::error!(
+                "multiDrawIndirect not supported; GPU-driven chunk drawing requires it"
+            );
+            return Err(ContextError::NoSuitableGpu);
+        }
+        // water_scan.comp is a single 512-invocation workgroup (one thread
+        // per distance bucket) and visibility.comp uses 256; the spec floor
+        // is 128, so gate explicitly rather than panicking at pipeline
+        // creation.
+        let limits = &properties.limits;
+        if limits.max_compute_work_group_invocations < 512
+            || limits.max_compute_work_group_size[0] < 512
+        {
+            tracing::error!(
+                "compute workgroup limits too small (invocations {}, size_x {}); \
+                 the water ordering scan needs 512",
+                limits.max_compute_work_group_invocations,
+                limits.max_compute_work_group_size[0]
             );
             return Err(ContextError::NoSuitableGpu);
         }
@@ -268,6 +294,7 @@ impl VulkanContext {
             enabled_features.fill_mode_non_solid = vk::TRUE;
         }
         enabled_features.draw_indirect_first_instance = vk::TRUE;
+        enabled_features.multi_draw_indirect = vk::TRUE;
 
         let device_info = vk::DeviceCreateInfo {
             queue_create_info_count: queue_create_infos.len() as u32,

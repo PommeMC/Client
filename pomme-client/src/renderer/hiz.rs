@@ -5,7 +5,7 @@ use pomme_gpu_allocator::MemoryLocation;
 use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use pyronyx::vk;
 
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader};
+use crate::renderer::shader;
 
 pub struct HizPyramidResources {
     pub pyramid_image: vk::Image,
@@ -27,7 +27,7 @@ pub struct HizPipeline {
     copy_pipeline: vk::Pipeline,
     reduce_pipeline: vk::Pipeline,
     depth_sampler: vk::Sampler,
-    frame_resources: [HizPyramidResources; MAX_FRAMES_IN_FLIGHT],
+    resources: HizPyramidResources,
     width: u32,
     height: u32,
 }
@@ -176,21 +176,22 @@ impl HizPipeline {
         let max_dim = width.max(height).max(1);
         let mip_levels = u32::BITS - max_dim.leading_zeros();
 
-        let frame_resources: [HizPyramidResources; MAX_FRAMES_IN_FLIGHT] =
-            std::array::from_fn(|i| {
-                create_frame_resources(
-                    device,
-                    allocator,
-                    width,
-                    height,
-                    mip_levels,
-                    depth_view,
-                    &copy_layout,
-                    &reduce_layout,
-                    depth_sampler,
-                    i,
-                )
-            });
+        // One pyramid serves every frame: the build and the visibility
+        // dispatch that samples it sit back to back in the same command
+        // buffer, and next frame's rebuild is ordered behind that read by
+        // submission order plus the Undefined-discard barrier's ComputeShader
+        // source stage.
+        let resources = create_pyramid_resources(
+            device,
+            allocator,
+            width,
+            height,
+            mip_levels,
+            depth_view,
+            &copy_layout,
+            &reduce_layout,
+            depth_sampler,
+        );
 
         Self {
             copy_layout,
@@ -200,7 +201,7 @@ impl HizPipeline {
             copy_pipeline,
             reduce_pipeline,
             depth_sampler,
-            frame_resources,
+            resources,
             width,
             height,
         }
@@ -215,57 +216,48 @@ impl HizPipeline {
         depth_view: vk::ImageView,
     ) {
         if self.width == width && self.height == height {
-            // Just update depth view for all frames
-            for frame_idx in 0..MAX_FRAMES_IN_FLIGHT {
-                let resources = &self.frame_resources[frame_idx];
-                let src_info = vk::DescriptorImageInfo {
-                    sampler: self.depth_sampler,
-                    image_view: depth_view,
-                    image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-                };
-                let write = vk::WriteDescriptorSet {
-                    dst_set: resources.copy_set,
-                    dst_binding: 0,
-                    descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                    descriptor_count: 1,
-                    image_info: &src_info,
-                    ..Default::default()
-                };
-                device.update_descriptor_sets(&[write], &[]);
-            }
+            // Just refresh the depth view (the depth image is recreated on
+            // every swapchain rebuild even at the same extent).
+            let src_info = vk::DescriptorImageInfo {
+                sampler: self.depth_sampler,
+                image_view: depth_view,
+                image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+            };
+            let write = vk::WriteDescriptorSet {
+                dst_set: self.resources.copy_set,
+                dst_binding: 0,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: 1,
+                image_info: &src_info,
+                ..Default::default()
+            };
+            device.update_descriptor_sets(&[write], &[]);
             return;
         }
 
-        for frame_idx in 0..MAX_FRAMES_IN_FLIGHT {
-            destroy_frame_resources(device, allocator, &mut self.frame_resources[frame_idx]);
-        }
+        destroy_pyramid_resources(device, allocator, &mut self.resources);
 
         let max_dim = width.max(height).max(1);
         let mip_levels = u32::BITS - max_dim.leading_zeros();
 
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            self.frame_resources[i] = create_frame_resources(
-                device,
-                allocator,
-                width,
-                height,
-                mip_levels,
-                depth_view,
-                &self.copy_layout,
-                &self.reduce_layout,
-                self.depth_sampler,
-                i,
-            );
-        }
+        self.resources = create_pyramid_resources(
+            device,
+            allocator,
+            width,
+            height,
+            mip_levels,
+            depth_view,
+            &self.copy_layout,
+            &self.reduce_layout,
+            self.depth_sampler,
+        );
 
         self.width = width;
         self.height = height;
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        for frame_idx in 0..MAX_FRAMES_IN_FLIGHT {
-            destroy_frame_resources(device, allocator, &mut self.frame_resources[frame_idx]);
-        }
+        destroy_pyramid_resources(device, allocator, &mut self.resources);
         device.destroy_descriptor_set_layout(self.copy_layout, None);
         device.destroy_descriptor_set_layout(self.reduce_layout, None);
         device.destroy_pipeline_layout(self.copy_pipeline_layout, None);
@@ -275,22 +267,16 @@ impl HizPipeline {
         device.destroy_sampler(self.depth_sampler, None);
     }
 
-    pub fn full_view(&self, frame_idx: usize) -> vk::ImageView {
-        self.frame_resources[frame_idx].pyramid_full_view
+    pub fn full_view(&self) -> vk::ImageView {
+        self.resources.pyramid_full_view
     }
 
-    pub fn sampler(&self, frame_idx: usize) -> vk::Sampler {
-        self.frame_resources[frame_idx].pyramid_sampler
+    pub fn sampler(&self) -> vk::Sampler {
+        self.resources.pyramid_sampler
     }
 
-    pub fn execute(
-        &self,
-        cmd: vk::CommandBuffer,
-        frame_idx: usize,
-        depth_image: vk::Image,
-        extent: vk::Extent2D,
-    ) {
-        let resources = &self.frame_resources[frame_idx];
+    pub fn execute(&self, cmd: vk::CommandBuffer, depth_image: vk::Image, extent: vk::Extent2D) {
+        let resources = &self.resources;
         if resources.pyramid_mip_levels == 0 {
             return;
         }
@@ -458,7 +444,7 @@ impl HizPipeline {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_frame_resources(
+fn create_pyramid_resources(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,
     width: u32,
@@ -468,7 +454,6 @@ fn create_frame_resources(
     copy_layout: &vk::DescriptorSetLayout,
     reduce_layout: &vk::DescriptorSetLayout,
     depth_sampler: vk::Sampler,
-    frame_idx: usize,
 ) -> HizPyramidResources {
     let image_info = vk::ImageCreateInfo {
         image_type: vk::ImageType::Type2D,
@@ -495,7 +480,7 @@ fn create_frame_resources(
         .lock()
         .unwrap()
         .allocate(&AllocationCreateDesc {
-            name: &format!("hiz_pyramid_image_{}", frame_idx),
+            name: "hiz_pyramid_image",
             requirements: mem_reqs,
             location: MemoryLocation::GpuOnly,
             linear: false,
@@ -699,7 +684,7 @@ fn create_frame_resources(
     }
 }
 
-fn destroy_frame_resources(
+fn destroy_pyramid_resources(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,
     resources: &mut HizPyramidResources,

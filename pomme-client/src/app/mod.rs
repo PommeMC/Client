@@ -716,9 +716,12 @@ impl ApplicationHandler for App {
                     None
                 };
                 if let Some(period_ns) = [cap_ns, vsync_ns].into_iter().flatten().max() {
-                    // Credit only under vsync (with a safety margin so a slow
-                    // frame still makes its vblank).
-                    let credit_ns = if vsync_ns.is_some() {
+                    // Credit only when the refresh actually sets the pace
+                    // (with a safety margin so a slow frame still makes its
+                    // vblank): under a lower fps cap the acquire block is a
+                    // fraction of the cap period, and crediting it would
+                    // jitter the loop around the cap.
+                    let credit_ns = if vsync_ns == Some(period_ns) {
                         vblank_block_ns.saturating_sub(500_000).min(period_ns)
                     } else {
                         0

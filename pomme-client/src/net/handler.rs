@@ -107,38 +107,49 @@ pub fn handle_game_packet(
                         dimension.min_y,
                         &chunk,
                     );
-                    let _ = event_tx.try_send(NetworkEvent::ChunkLoaded {
+                    let event = NetworkEvent::ChunkLoaded {
                         pos: ChunkPos::new(p.x, p.z),
-                        chunk: Box::new(chunk),
+                        chunk: Box::new(crate::world::chunk::PommeChunk::from_azalea(chunk)),
                         light: (&p.light_data).into(),
                         sky_sources,
-                    });
+                        // Bounds the payload was parsed with; the main thread
+                        // rejects a mismatch with its live store.
+                        height: dimension.height,
+                        min_y: dimension.min_y,
+                    };
+                    if event_tx.try_send(event).is_err() {
+                        tracing::warn!("event channel full; dropped chunk [{}, {}]", p.x, p.z);
+                    }
+
+                    // Block entities sync only for a parseable column:
+                    // unload prunes them by loaded column, so entries for a
+                    // never-loaded one would linger forever.
+                    let chunk_pos = ChunkPos::new(p.x, p.z);
+                    let entries: Vec<_> = p
+                        .chunk_data
+                        .block_entities
+                        .iter()
+                        .map(|be| {
+                            let local_x = ((be.packed_xz >> 4) & 0x0F) as i32;
+                            let local_z = (be.packed_xz & 0x0F) as i32;
+                            let block_pos = azalea_core::position::BlockPos {
+                                x: chunk_pos.x * 16 + local_x,
+                                y: be.y as i16 as i32,
+                                z: chunk_pos.z * 16 + local_z,
+                            };
+                            let compound = match &be.data {
+                                simdnbt::owned::Nbt::Some(base) => base.clone().as_compound(),
+                                simdnbt::owned::Nbt::None => simdnbt::owned::NbtCompound::default(),
+                            };
+                            (block_pos, be.kind, compound)
+                        })
+                        .collect();
+                    let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
                 }
                 Err(e) => {
                     tracing::error!("Failed to parse chunk [{}, {}]: {e}", p.x, p.z);
                 }
             }
-            let chunk_pos = ChunkPos::new(p.x, p.z);
-            let entries: Vec<_> = p
-                .chunk_data
-                .block_entities
-                .iter()
-                .map(|be| {
-                    let local_x = ((be.packed_xz >> 4) & 0x0F) as i32;
-                    let local_z = (be.packed_xz & 0x0F) as i32;
-                    let block_pos = azalea_core::position::BlockPos {
-                        x: chunk_pos.x * 16 + local_x,
-                        y: be.y as i16 as i32,
-                        z: chunk_pos.z * 16 + local_z,
-                    };
-                    let compound = match &be.data {
-                        simdnbt::owned::Nbt::Some(base) => base.clone().as_compound(),
-                        simdnbt::owned::Nbt::None => simdnbt::owned::NbtCompound::default(),
-                    };
-                    (block_pos, be.kind, compound)
-                })
-                .collect();
-            let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
         }
         ClientboundGamePacket::BlockEvent(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockEvent {

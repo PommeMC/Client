@@ -31,7 +31,7 @@ layout(set = 0, binding = 1) uniform FrustumBuf {
     float frac_x;
     float frac_y;
     float frac_z;
-    // The Hi-Z visibility mask this dispatch reads (written three frames ago
+    // The Hi-Z visibility mask this dispatch reads (written last frame
     // by visibility.comp): the center/min-section it was computed with, and
     // whether the slot has ever been written (0 = fail open, skip the test).
     int mask_center_x;

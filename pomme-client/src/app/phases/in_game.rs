@@ -164,6 +164,9 @@ pub struct GameState {
     pub f3_chord_consumed: bool,
     /// Set by F3+A; consumed by `update_game` to re-mesh every loaded chunk.
     pub pending_chunk_reload: bool,
+    /// F3+O: gates consuming the Hi-Z mask in the cull (the visibility pass
+    /// keeps running so re-enabling is instant); off = frustum culling only.
+    pub chunk_occlusion_enabled: bool,
     /// Game mode before the last change (vanilla `previousLocalPlayerMode`),
     /// the F3+N return target.
     pub previous_game_mode: Option<u8>,
@@ -284,6 +287,7 @@ impl GameState {
             hide_gui: false,
             f3_chord_consumed: false,
             pending_chunk_reload: false,
+            chunk_occlusion_enabled: true,
             previous_game_mode: None,
             dimension: String::new(),
             game_mode_switcher: None,
@@ -463,7 +467,11 @@ impl GameState {
             }
             KeyCode::KeyF => {
                 let enabled = crate::renderer::camera::toggle_fog();
-                self.debug_feedback(if enabled { "Fog: ON" } else { "Fog: OFF" });
+                self.debug_feedback(if enabled {
+                    "Fog: enabled"
+                } else {
+                    "Fog: disabled"
+                });
                 true
             }
             KeyCode::KeyG => {
@@ -557,10 +565,18 @@ impl GameState {
                 )]);
                 true
             }
+            KeyCode::KeyO => {
+                self.chunk_occlusion_enabled = !self.chunk_occlusion_enabled;
+                self.debug_feedback(if self.chunk_occlusion_enabled {
+                    "Occlusion culling: enabled"
+                } else {
+                    "Occlusion culling: disabled"
+                });
+                true
+            }
             // TODO: F3+F6 debug options screen, F3+P pause-on-lost-focus,
             // F3+S dump dynamic textures, F3+T resource pack reload,
-            // F3+L profiler, F3+1..4 debug charts (no backing features),
-            // F3+O occlusion toggle (needs a Hi-Z bypass flag in the cull)
+            // F3+L profiler, F3+1..4 debug charts (no backing features)
             _ => false,
         };
         self.f3_chord_consumed |= handled;
@@ -648,6 +664,23 @@ impl GameState {
         self.meshing.bump_content_gen(pos)
     }
 
+    /// Move up to a frame's cap of finished meshes into the renderer's upload
+    /// queue; leftovers stay in the channel (a load burst can ready thousands
+    /// at once, and the staging budget throttles downstream anyway). Stale
+    /// results still record their worker stats before being dropped.
+    pub fn drain_mesh_results(&mut self, renderer: &mut crate::renderer::Renderer) {
+        const DRAIN_CAP: usize = 1024;
+        for mesh in self.meshing.drain_results().take(DRAIN_CAP) {
+            if let Some(bench) = &mut self.chunk_load_bench {
+                bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
+            }
+            if self.meshing.is_stale(&mesh) {
+                continue;
+            }
+            renderer.mesh_queue.push_back(mesh);
+        }
+    }
+
     /// The chunk column the player stands in.
     pub fn player_chunk(&self) -> ChunkPos {
         ChunkPos::new(
@@ -670,7 +703,7 @@ impl GameState {
             return;
         }
         let min_section_y = self.chunk_store.min_section_y();
-        let section_count = self.chunk_store.section_count();
+        let section_count = crate::util::meshable_section_count(self.chunk_store.section_count());
         let mut bumped: Vec<ChunkPos> = Vec::new();
         for &(x, z) in &dirty.columns {
             for p in crate::world::chunk::mesh_neighborhood(ChunkPos::new(x, z)) {
@@ -954,7 +987,7 @@ pub fn update_game(
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
     let t_light = std::time::Instant::now();
-    game.update_light(core.menu.chunk_detail);
+    game.update_light(core.menu.effective_chunk_detail());
     game.last_update_phases.light_ms = t_light.elapsed().as_secs_f32() * 1000.0;
 
     // F1 (vanilla keyToggleGui); only while no screen or chat is open.
@@ -1065,22 +1098,8 @@ pub fn update_game(
             .lerp(game.player.eye_pos(), partial_tick as f64),
     );
 
-    // Bound the drain: a load burst can ready thousands of results at once,
-    // and moving them all in one frame spikes it. Leftovers stay in the
-    // channel for the next frame; the upload's staging budget throttles
-    // downstream anyway.
-    const DRAIN_CAP: usize = 1024;
     let t_drain = std::time::Instant::now();
-    for mesh in game.meshing.drain_results().take(DRAIN_CAP) {
-        // Stale meshes count too: worker time spent is worker time spent.
-        if let Some(bench) = &mut game.chunk_load_bench {
-            bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
-        }
-        if game.meshing.is_stale(&mesh) {
-            continue;
-        }
-        gfx.renderer.mesh_queue.push_back(mesh);
-    }
+    game.drain_mesh_results(&mut gfx.renderer);
     game.last_update_phases.mesh_drain_ms = t_drain.elapsed().as_secs_f32() * 1000.0;
 
     let t_upload = std::time::Instant::now();
@@ -1156,7 +1175,7 @@ pub fn update_game(
             }),
             chunk_count: gfx.renderer.loaded_chunk_count(),
             sections_drawn: gfx.renderer.sections_drawn(),
-            occlusion_on: true,
+            occlusion_on: game.chunk_occlusion_enabled,
             sections_total: game.chunk_store.section_count() as u32
                 * game.chunk_store.loaded_set().len() as u32,
             gpu_name: gfx.renderer.gpu_name(),
@@ -1414,6 +1433,7 @@ pub fn update_game(
             count,
             client_cached,
             raw_dt * 1000.0,
+            gfx.renderer.last_acquire_ms(),
             gfx.renderer.last_timings(),
             prev_phases,
         ) {
@@ -2141,6 +2161,7 @@ pub fn update_game(
         game.chunk_store.shared.min_y(),
         game.chunk_store.shared.height(),
         core.menu.frustum_padding,
+        game.chunk_occlusion_enabled,
     ) {
         tracing::error!("Render error: {e}");
     }

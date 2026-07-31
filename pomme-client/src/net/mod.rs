@@ -62,10 +62,14 @@ pub enum NetworkEvent {
     ChunkLoaded {
         pos: ChunkPos,
         /// Parsed on the net task so bursts don't spike the main thread.
-        chunk: Box<azalea_world::chunk::Chunk>,
+        chunk: Box<crate::world::chunk::PommeChunk>,
         light: PacketLightData,
         /// Sky-source heightmap, scanned on the net task for the same reason.
         sky_sources: crate::world::light::ChunkSkyLightSources,
+        /// Dimension bounds the payload was parsed with, so the main thread
+        /// can reject a chunk whose bounds drifted from the live store.
+        height: u32,
+        min_y: i32,
     },
     /// Standalone server light correction (`ClientboundLightUpdate`).
     LightUpdate {

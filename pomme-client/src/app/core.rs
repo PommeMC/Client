@@ -376,7 +376,14 @@ impl AppCore {
         while let Ok(event) = rx.try_recv() {
             game.pending_events.push_back(event);
         }
-        const NET_DRAIN_BUDGET_SECS: f32 = 0.003;
+        // Adaptive: a join burst can outpace 3ms/frame of applying and grow
+        // the backlog without bound; once it backs up past a channel's worth,
+        // spend more of the frame catching up.
+        let net_drain_budget_secs: f32 = if game.pending_events.len() > 4096 {
+            0.010
+        } else {
+            0.003
+        };
         // Record the worst single apply for the bench breakdown, timed by
         // boundary stamps so the loop stays at one clock read per event.
         // Budget from here, not t_net: a slow skin drain above must not eat
@@ -385,7 +392,7 @@ impl AppCore {
         let mut worst_event = "";
         let mut worst_event_secs = 0.0f32;
         let mut event_start = 0.0f32;
-        while processed < 4096 && event_start < NET_DRAIN_BUDGET_SECS {
+        while processed < 4096 && event_start < net_drain_budget_secs {
             let Some(event) = game.pending_events.pop_front() else {
                 break;
             };
@@ -433,6 +440,9 @@ impl AppCore {
                         renderer,
                         Arc::clone(&game.chunk_store.shared),
                         Arc::clone(&game.biome_climate),
+                        // Without the packs the colormaps silently revert to
+                        // the jar's on every dimension change.
+                        Some(&self.resource_packs),
                     );
                 }
                 NetworkEvent::DimensionName { name } => {
@@ -443,25 +453,33 @@ impl AppCore {
                     chunk,
                     light,
                     sky_sources,
+                    height,
+                    min_y,
                 } => {
-                    // Ring slots alias every MAX_SIZE chunks; evict a resident
-                    // alias first so its meshes and bookkeeping don't linger
-                    // under the new occupant (a long teleport can load the
-                    // alias before the server forgets the old column).
-                    const RING: i32 = crate::util::MAX_SIZE as i32;
-                    for dx in -1..=1 {
-                        for dz in -1..=1 {
-                            if dx == 0 && dz == 0 {
-                                continue;
-                            }
-                            let alias = azalea_core::position::ChunkPos::new(
-                                pos.x + dx * RING,
-                                pos.z + dz * RING,
-                            );
-                            if game.chunk_store.loaded_set().contains(&alias) {
-                                unload_column(game, renderer, alias);
-                            }
-                        }
+                    // A payload parsed against different bounds than the live
+                    // store (a dropped DimensionInfo event) would misindex
+                    // every section; drop it loudly instead.
+                    if height != game.chunk_store.height() || min_y != game.chunk_store.min_y() {
+                        tracing::warn!(
+                            "chunk [{}, {}] parsed with dimension bounds ({height}, {min_y}) \
+                             but the store has ({}, {}); dropping",
+                            pos.x,
+                            pos.z,
+                            game.chunk_store.height(),
+                            game.chunk_store.min_y(),
+                        );
+                        continue;
+                    }
+                    // Ring slots alias every MAX_SIZE chunks; evict the
+                    // resident alias (at any multiple, e.g. a long teleport
+                    // loads it before the server forgets the old column) so
+                    // its meshes and bookkeeping don't linger under the new
+                    // occupant. The slot tag names it exactly.
+                    if let Some(occupant) = game.chunk_store.shared.slot_occupant(pos)
+                        && occupant != pos
+                        && game.chunk_store.loaded_set().contains(&occupant)
+                    {
+                        unload_column(game, renderer, occupant);
                     }
                     game.chunk_store.insert_chunk(pos, *chunk);
                     game.light_engine.on_chunk_loaded(
@@ -1297,7 +1315,10 @@ impl AppCore {
         // ungated by visibility.
         for &(col, si) in &priority_remesh {
             let spos = ChunkSectionPos::new(col.x, min_y_section + si, col.z);
-            game.enqueue_section_edit(spos, chunk_lod(col, player_chunk, self.menu.chunk_detail));
+            game.enqueue_section_edit(
+                spos,
+                chunk_lod(col, player_chunk, self.menu.effective_chunk_detail()),
+            );
         }
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1000.0;
         game.last_update_phases.net_decode_ms = ms(t_net);
@@ -1310,7 +1331,7 @@ impl AppCore {
         let t_rescan = std::time::Instant::now();
         game.rescan_mesh_jobs(
             player_chunk,
-            self.menu.chunk_detail,
+            self.menu.effective_chunk_detail(),
             &renderer.camera_frustum_planes(),
             renderer.camera_render_position(),
         );

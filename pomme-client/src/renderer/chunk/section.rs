@@ -3,17 +3,17 @@ use azalea_core::position::{
     ChunkPos, ChunkSectionBiomePos, ChunkSectionBlockPos, ChunkSectionPos,
 };
 use azalea_registry::data::Biome;
-use azalea_world::{Chunk, Section};
+use azalea_world::Section;
 use crossbeam_epoch::{self as epoch};
 
-use crate::world::chunk::{ChunkLightData, SharedChunkStore};
+use crate::world::chunk::{ChunkLightData, PommeChunk, SharedChunkStore};
 
 /// The section at world section-y within `chunk`, or `None` when the column is
 /// absent or the y falls outside the built sections.
 #[inline]
-fn section_at(chunk: Option<&Chunk>, section_y: i32) -> Option<&Section> {
+fn section_at(chunk: Option<&PommeChunk>, section_y: i32) -> Option<&Section> {
     let idx = usize::try_from(section_y).ok()?;
-    chunk?.sections.get(idx)
+    chunk?.sections.get(idx).map(|s| s.as_ref())
 }
 
 pub struct LocalSection {
@@ -37,7 +37,7 @@ impl LocalSection {
     fn build(&mut self, shared: &SharedChunkStore, spos: ChunkSectionPos) {
         let base_y = spos.y - shared.min_section_y();
         let guard = epoch::pin();
-        let chunk_grid: [[Option<&Chunk>; 3]; 3] = std::array::from_fn(|x| {
+        let chunk_grid: [[Option<&PommeChunk>; 3]; 3] = std::array::from_fn(|x| {
             std::array::from_fn(|z| {
                 let pos = ChunkPos {
                     x: spos.x + (x as i32) - 1,
@@ -126,11 +126,13 @@ impl LocalSection {
         self.blocks[(x + 1) as usize][(y + 1) as usize][(z + 1) as usize]
     }
 
-    /// Gets a biome at local block coordinates (-1..17).
+    /// Gets a biome at local block coordinates (-4..20): the biome grid's
+    /// 6 cells per axis cover one full 4-block cell beyond the section, which
+    /// the radius-2 tint blend needs at the section edges.
     /// Returns default biome if coordinates are out of bounds.
     #[inline]
     pub fn get_biome(&self, x: i32, y: i32, z: i32) -> Biome {
-        if !(-1..17).contains(&x) || !(-1..17).contains(&y) || !(-1..17).contains(&z) {
+        if !(-4..20).contains(&x) || !(-4..20).contains(&y) || !(-4..20).contains(&z) {
             return Biome::default();
         }
         self.biomes[(x.div_euclid(4) + 1) as usize][(y.div_euclid(4) + 1) as usize]

@@ -7,8 +7,12 @@ const int MAX_SIZE = MAX_RD * 2 + 1;
 
 struct Uniform {
     mat4 view_proj;
-    ivec4 vis_center;     // x,z = center in section coords, y = min_y in sections, w = max_y in sections
-    vec4 camera_pos;
+    ivec4 vis_center;     // x,z = center in section coords, y = min_y in sections
+    // Integer camera block + fractional eye offset, the same anchor split as
+    // cull.comp/chunk.vert: corners rebase in integer math so absolute world
+    // coordinates never pass through f32.
+    ivec4 cam_block;
+    vec4 camera_frac;
     int radius;
     int section_count;    // Number of section layers (<= 32, one bit each)
     int padding0;
@@ -46,54 +50,54 @@ ivec2 texel_span(vec2 min_xy, vec2 max_xy, int mip) {
 }
 
 void main() {
-    const float CHUNK_SIZE = 16.0;
-    const float SECTION_HEIGHT = 16.0;
-    
     ivec3 gid = ivec3(gl_GlobalInvocationID);
-    
+
     int rx = gid.x;
     int section_y = gid.y;
     int rz = gid.z;
-    
+
     // section_y also bounds the 1u << section_y below (32 bits per column).
     if (rx < 0 || rx >= MAX_SIZE ||
         section_y < 0 || section_y >= min(ubo.section_count, 32) ||
         rz < 0 || rz >= MAX_SIZE) {
         return;
     }
-    
+
     int chunk_index = rx * MAX_SIZE + rz;
-    
+
     int world_chunk_x = slot_to_world(rx, ubo.vis_center.x);
     int world_chunk_z = slot_to_world(rz, ubo.vis_center.z);
 
-    int dy = section_y;
-    
-    float min_y = float(ubo.vis_center.y) * SECTION_HEIGHT + float(dy) * SECTION_HEIGHT;
-    float max_y = min_y + SECTION_HEIGHT;
-    
-    vec3 base = vec3(
-        float(world_chunk_x) * CHUNK_SIZE,
-        min_y,
-        float(world_chunk_z) * CHUNK_SIZE
+    // The ring always spans +-MAX_RD but only +-radius(+1 margin) can hold
+    // loaded columns; skip the rest of the fixed-size dispatch outright.
+    if (max(abs(world_chunk_x - ubo.vis_center.x), abs(world_chunk_z - ubo.vis_center.z))
+        > ubo.radius + 1) {
+        return;
+    }
+
+    // Section AABB relative to the camera anchor: integer block deltas first,
+    // then the small fractional eye offset.
+    ivec3 origin_block = ivec3(
+        world_chunk_x * 16,
+        (ubo.vis_center.y + section_y) * 16,
+        world_chunk_z * 16
     );
-    
-    vec3 bmin = vec3(base.x, min_y, base.z);
-    vec3 bmax = vec3(base.x + CHUNK_SIZE, max_y, base.z + CHUNK_SIZE);
-    
-    vec3 corners_ws[8];
-    corners_ws[0] = vec3(bmin.x, bmin.y, bmin.z);
-    corners_ws[1] = vec3(bmax.x, bmin.y, bmin.z);
-    corners_ws[2] = vec3(bmin.x, bmax.y, bmin.z);
-    corners_ws[3] = vec3(bmax.x, bmax.y, bmin.z);
-    corners_ws[4] = vec3(bmin.x, bmin.y, bmax.z);
-    corners_ws[5] = vec3(bmax.x, bmin.y, bmax.z);
-    corners_ws[6] = vec3(bmin.x, bmax.y, bmax.z);
-    corners_ws[7] = vec3(bmax.x, bmax.y, bmax.z);
-    
+    vec3 bmin = vec3(origin_block - ubo.cam_block.xyz) - ubo.camera_frac.xyz;
+    vec3 bmax = bmin + 16.0;
+
+    vec3 corners_rel[8];
+    corners_rel[0] = vec3(bmin.x, bmin.y, bmin.z);
+    corners_rel[1] = vec3(bmax.x, bmin.y, bmin.z);
+    corners_rel[2] = vec3(bmin.x, bmax.y, bmin.z);
+    corners_rel[3] = vec3(bmax.x, bmax.y, bmin.z);
+    corners_rel[4] = vec3(bmin.x, bmin.y, bmax.z);
+    corners_rel[5] = vec3(bmax.x, bmin.y, bmax.z);
+    corners_rel[6] = vec3(bmin.x, bmax.y, bmax.z);
+    corners_rel[7] = vec3(bmax.x, bmax.y, bmax.z);
+
     // The mask starts all-visible and only a proven Hi-Z occlusion clears a
-    // bit: it is consumed three frames later against a newer camera, and any
-    // stale claim of occlusion shows as missing terrain. Every uncertain path
+    // bit: it is consumed next frame against a newer camera, and any stale
+    // claim of occlusion shows as missing terrain. Every uncertain path
     // below is therefore a bare return (the bit stays set).
 
     for (int plane = 0; plane < 6; plane++) {
@@ -101,17 +105,16 @@ void main() {
         // The 6 planes are: left, right, bottom, top, near, far
         // (These match what Camera::frustum_planes() returns)
 
-        // n-p vertex: pick the corner furthest in the plane's normal direction
+        // n-p vertex: pick the corner furthest in the plane's normal
+        // direction (bounds are already camera-relative, matching the
+        // planes' convention).
         vec3 n_p = vec3(
             ubo.frustum_planes[plane].x >= 0.0 ? bmax.x : bmin.x,
             ubo.frustum_planes[plane].y >= 0.0 ? bmax.y : bmin.y,
             ubo.frustum_planes[plane].z >= 0.0 ? bmax.z : bmin.z
         );
 
-        // Camera-relative
-        vec3 rel = n_p - ubo.camera_pos.xyz;
-
-        float d = dot(ubo.frustum_planes[plane].xyz, rel) + ubo.frustum_planes[plane].w;
+        float d = dot(ubo.frustum_planes[plane].xyz, n_p) + ubo.frustum_planes[plane].w;
         if (d < 0.0) {
             // Outside this frame's frustum, so the depth pyramid holds no
             // occluder for it; the cull pass frustum-tests with the live
@@ -127,8 +130,7 @@ void main() {
     float near_depth = 0.0;
 
     for (int i = 0; i < 8; i++) {
-        vec3 rel = corners_ws[i] - ubo.camera_pos.xyz;
-        vec4 clip = ubo.view_proj * vec4(rel, 1.0);
+        vec4 clip = ubo.view_proj * vec4(corners_rel[i], 1.0);
         if (clip.w <= 0.0) {
             // A corner at or behind the camera plane: the projected rect is
             // unbounded, so the section can't be occlusion-tested.
@@ -142,12 +144,17 @@ void main() {
         near_depth = max(near_depth, ndc.z);
     }
 
-    min_xy = clamp(min_xy, vec2(0.0), vec2(1.0));
-    max_xy = clamp(max_xy, vec2(0.0), vec2(1.0));
+    // A rect that leaves the viewport can only be tested on its on-screen
+    // sliver; claiming occlusion for the whole section from that sliver
+    // over-culls exactly the sections about to enter view (the dilated
+    // frustum admits them on purpose). Fail open instead.
+    if (min_xy.x < 0.0 || min_xy.y < 0.0 || max_xy.x > 1.0 || max_xy.y > 1.0) {
+        return;
+    }
 
     vec2 extent = max_xy - min_xy;
     if (extent.x <= 0.0 || extent.y <= 0.0) {
-        // Degenerate (edge-on or fully off one side after clamping).
+        // Degenerate (edge-on).
         return;
     }
 

@@ -19,6 +19,26 @@ pub fn section_bit(si: u32) -> u32 {
     1u32.checked_shl(si).unwrap_or(0)
 }
 
+/// Full dirty/visibility mask for an `n`-section column, capped at the
+/// `SIZE_Y` mask width. Setting only these bits matters: bits at or above the
+/// meshable range are never cleared by workers, so a wider mask would defeat
+/// the rescan's `active_mask == 0` fast path forever.
+#[inline]
+pub fn section_mask(n: i32) -> u32 {
+    if n >= SIZE_Y as i32 {
+        u32::MAX
+    } else {
+        (1u32 << n.max(0)) - 1
+    }
+}
+
+/// Sections a column can actually mesh and draw: the world's section count
+/// bounded by the `SIZE_Y`-bit masks and the section ring's y extent.
+#[inline]
+pub fn meshable_section_count(section_count: i32) -> i32 {
+    section_count.clamp(0, SIZE_Y as i32)
+}
+
 /// Java `java.util.Random` (`LegacyRandomSource`) reimplementation: a 48-bit
 /// LCG matching the JVM bit-for-bit so seeded sequences line up with vanilla.
 ///

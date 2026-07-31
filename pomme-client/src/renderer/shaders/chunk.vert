@@ -15,8 +15,6 @@ layout(location = 3) in vec4 light_tint;
 layout(location = 4) in ivec3 in_origin;
 layout(location = 5) in uint in_uploaded_ms;
 
-// Matches FADE_DURATION_MS in renderer/chunk/buffer.rs.
-const float FADE_MS = 1000.0;
 
 layout(location = 0) out vec2 v_tex_coords;
 layout(location = 1) out float v_light;

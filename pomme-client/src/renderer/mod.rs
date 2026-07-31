@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use azalea_block::BlockState;
-use azalea_core::position::{BlockPos, ChunkPos, ChunkSectionPos};
+use azalea_core::position::{BlockPos, ChunkPos};
 pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
 use chunk::atlas::TextureAtlas;
@@ -498,8 +498,7 @@ impl Renderer {
         );
         let visibility_pipeline =
             VisibilityPipeline::new(&ctx.device, &ctx.allocator, &hiz_pipeline);
-        chunk_buffers
-            .set_visibility_mask_buffers(&ctx.device, &visibility_pipeline.output_buffers());
+        chunk_buffers.set_visibility_mask_buffer(&ctx.device, visibility_pipeline.output_buffer());
         Ok(Self {
             ctx,
             swapchain: swapchain_state,
@@ -1022,14 +1021,14 @@ impl Renderer {
             .wait_for_fences(&self.ctx.in_flight_fences, true, u64::MAX);
     }
 
-    pub fn stage_mesh_batch(&mut self) -> Vec<(ChunkSectionPos, u64)> {
+    pub fn stage_mesh_batch(&mut self) {
         let eye = self.camera_render_position();
         self.chunk_buffers.stage_mesh_batch(
             &self.ctx.device,
             &self.ctx.allocator,
             &mut self.mesh_queue,
             eye,
-        )
+        );
     }
 
     /// GPU-wait time inside the last `stage_mesh_batch` (emergency slice
@@ -1137,6 +1136,7 @@ impl Renderer {
         min_y: i32,
         height: u32,
         extra_radians: f32,
+        occlusion_enabled: bool,
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
@@ -1183,6 +1183,7 @@ impl Renderer {
             min_y,
             height,
             extra_radians,
+            occlusion_enabled,
         )
     }
 
@@ -1209,6 +1210,7 @@ impl Renderer {
             0,
             0,
             0.0,
+            true,
         )
     }
 
@@ -1399,26 +1401,32 @@ impl Renderer {
             })
     }
 
-    /// Begin the load-variant render pass (color preserved from the ended
+    /// Begin a load-variant render pass (color preserved from the ended
     /// pass) and restore the frame's viewport/scissor, resuming drawing
-    /// mid-frame.
-    fn resume_load_pass(
+    /// mid-frame. `clear_values` may be empty when the pass clears nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn resume_pass(
         &self,
         cmd: vk::CommandBuffer,
-        image_index: u32,
-        clear_values: &[vk::ClearValue; 2],
+        render_pass: vk::RenderPass,
+        framebuffer: vk::Framebuffer,
+        clear_values: &[vk::ClearValue],
         viewport: vk::Viewport,
         scissor: vk::Rect2D,
     ) {
         let info = vk::RenderPassBeginInfo {
-            render_pass: self.swapchain.render_pass_load,
-            framebuffer: self.swapchain.framebuffers_load[image_index as usize],
+            render_pass,
+            framebuffer,
             render_area: vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: self.swapchain.extent,
             },
             clear_value_count: clear_values.len() as u32,
-            clear_values: clear_values.as_ptr(),
+            clear_values: if clear_values.is_empty() {
+                std::ptr::null()
+            } else {
+                clear_values.as_ptr()
+            },
             ..Default::default()
         };
         cmd.begin_render_pass(&info, vk::SubpassContents::Inline);
@@ -1436,6 +1444,7 @@ impl Renderer {
         min_y: i32,
         height: u32,
         extra_radians: f32,
+        occlusion_enabled: bool,
     ) -> Result<(), RendererError> {
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
@@ -1519,7 +1528,6 @@ impl Renderer {
             window.set_cursor_visible(false);
         }
 
-        self.ctx.device.reset_fences(&[fence])?;
         cmd.reset(vk::CommandBufferResetFlags::empty())?;
 
         let begin_info = vk::CommandBufferBeginInfo {
@@ -1560,9 +1568,15 @@ impl Renderer {
         let frame_start_timer = timer.scope(Timestamp::FrameStart, Timestamp::FrameEnd);
 
         // Sampled before this frame's visibility execute below: it describes
-        // the three-frame-old mask still in the slot's buffer when the cull
-        // dispatch reads it.
-        let mask_params = self.visibility_pipeline.mask_params(frame);
+        // the previous frame's mask still in the shared buffer when the cull
+        // dispatch reads it. F3+O gates only the consumption (None = fail
+        // open): the visibility pass keeps writing, so re-enabling is
+        // instant.
+        let mask_params = if occlusion_enabled {
+            self.visibility_pipeline.mask_params()
+        } else {
+            None
+        };
 
         if let RenderMode::World {
             render_distance, ..
@@ -1761,37 +1775,18 @@ impl Renderer {
                 // back-to-front by the cull/scan/emit chain.
                 self.chunk_pipeline.bind_water(cmd, frame);
                 self.chunk_buffers.draw_water(cmd, frame);
-
-                // Clouds draw after opaque world geometry (so terrain occludes
-                // them) and before weather, depth-tested against the scene.
-                if !*eyes_in_water {
-                    self.cloud_pipeline
-                        .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
-                }
-
-                // Weather draws after opaque world geometry (depth-tested against
-                // terrain) but before the depth clear for the hand pass.
-                self.weather_pipeline
-                    .update_and_draw(cmd, frame, &self.camera, sky, weather);
-
-                if *show_chunk_borders {
-                    self.chunk_border_pipeline.draw(cmd, frame);
-                }
                 translucent_timer.end();
 
-                // World geometry is complete: end the pass so the Hi-Z copy
-                // samples the stored depth before the hand/HUD segment
-                // rewrites it (in-pass, the mid-frame depth clear would feed
-                // the pyramid a wiped buffer and disable occlusion).
+                // Occluder geometry is complete: end the pass so the Hi-Z
+                // copy samples the stored depth now — before clouds and
+                // weather, whose depth writes must never occlusion-cull the
+                // terrain behind them (clouds are 80% alpha), and before the
+                // hand/HUD segment's depth clear wipes the buffer.
                 cmd.end_render_pass();
 
                 let hiz_timer = timer.scope(Timestamp::HizStart, Timestamp::HizEnd);
-                self.hiz_pipeline.execute(
-                    cmd,
-                    frame,
-                    self.swapchain.depth_image,
-                    self.swapchain.extent,
-                );
+                self.hiz_pipeline
+                    .execute(cmd, self.swapchain.depth_image, self.swapchain.extent);
                 hiz_timer.end();
                 let visibility_timer =
                     timer.scope(Timestamp::VisibilityStart, Timestamp::VisibilityEnd);
@@ -1806,10 +1801,11 @@ impl Renderer {
                 );
                 visibility_timer.end();
 
-                // Two hazards before resuming: the load pass clears the depth
-                // the Hi-Z copy samples (WAR, execution-only), and the world
-                // pass left the color image in PresentSrcKHR while the load
-                // pass expects ColorAttachmentOptimal.
+                // Two hazards before resuming: the resumed pass writes the
+                // depth the Hi-Z copy samples (WAR, execution-only via the
+                // ComputeShader source stage), and the world pass left the
+                // color image in PresentSrcKHR while the load pass expects
+                // ColorAttachmentOptimal.
                 let color_barrier = vk::ImageMemoryBarrier {
                     src_access_mask: vk::AccessFlags::ColorAttachmentWrite,
                     dst_access_mask: vk::AccessFlags::ColorAttachmentRead
@@ -1840,18 +1836,35 @@ impl Renderer {
                     &[color_barrier],
                 );
 
-                // Resume for the hand/HUD segment, which draws with standard
-                // depth against the load pass's fresh 1.0 clear.
-                let ui_clear_values = [
-                    clear_values[0],
-                    vk::ClearValue {
-                        depth_stencil: vk::ClearDepthStencilValue {
-                            depth: 1.0,
-                            stencil: 0,
-                        },
-                    },
-                ];
-                self.resume_load_pass(cmd, image_index, &ui_clear_values, viewport, scissor);
+                // Resume with the world depth preserved (load_depth variant)
+                // for the passes that depth-test against terrain but must not
+                // feed the occlusion pyramid.
+                self.resume_pass(
+                    cmd,
+                    self.swapchain.render_pass_load_depth,
+                    self.swapchain.framebuffers_load[image_index as usize],
+                    &[],
+                    viewport,
+                    scissor,
+                );
+
+                let ui_timer = timer.scope(Timestamp::UiStart, Timestamp::UiEnd);
+
+                // Clouds draw after opaque world geometry (so terrain occludes
+                // them) and before weather, depth-tested against the scene.
+                if !*eyes_in_water {
+                    self.cloud_pipeline
+                        .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
+                }
+
+                // Weather draws after opaque world geometry (depth-tested against
+                // terrain) but before the depth clear for the hand pass.
+                self.weather_pipeline
+                    .update_and_draw(cmd, frame, &self.camera, sky, weather);
+
+                if *show_chunk_borders {
+                    self.chunk_border_pipeline.draw(cmd, frame);
+                }
 
                 let clear_attachment = vk::ClearAttachment {
                     aspect_mask: vk::ImageAspectFlags::Depth,
@@ -1863,8 +1876,14 @@ impl Renderer {
                         },
                     },
                 };
-
-                let ui_timer = timer.scope(Timestamp::UiStart, Timestamp::UiEnd);
+                // In-pass depth clear to standard 1.0 for the hand/HUD
+                // segment (the begin_preview_box pattern, full-frame).
+                let clear_rect = vk::ClearRect {
+                    rect: scissor,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                };
+                cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
                 if self.camera.mode == camera::CameraMode::FirstPerson
                     && self.camera.top_down().is_none()
                 {
@@ -1958,7 +1977,14 @@ impl Renderer {
                         iterations,
                     );
 
-                    self.resume_load_pass(cmd, image_index, &clear_values, viewport, scissor);
+                    self.resume_pass(
+                        cmd,
+                        self.swapchain.render_pass_load,
+                        self.swapchain.framebuffers_load[image_index as usize],
+                        &clear_values,
+                        viewport,
+                        scissor,
+                    );
                 }
 
                 if *show_skin {
@@ -2011,7 +2037,17 @@ impl Renderer {
             signal_semaphores: &render_finished,
             ..Default::default()
         };
-        self.ctx.graphics_queue.submit(&[submit_info], fence)?;
+        // The fence resets only here, right before the submit that re-signals
+        // it: an error on any earlier path leaves it signaled, so the next
+        // frame's wait returns instead of hanging forever. A failed submit
+        // after the reset is unrecoverable (device lost) — abort with the
+        // error rather than stranding every later `wait_for_fences`.
+        self.ctx.device.reset_fences(&[fence])?;
+        self.ctx
+            .graphics_queue
+            .submit(&[submit_info], fence)
+            .expect("queue submit failed (device lost?)");
+        self.chunk_buffers.frame_submitted();
 
         let present_info = vk::PresentInfoKHR {
             wait_semaphore_count: 1,

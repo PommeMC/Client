@@ -35,14 +35,8 @@ pub fn update_connecting(
     }
 
     if matches!(connect_phase, ConnectionPhase::Loading) {
-        gfx.renderer.mesh_queue.extend(
-            game.meshing
-                .drain_results()
-                .filter(|m| !game.meshing.is_stale(m)),
-        );
-        if !gfx.renderer.mesh_queue.is_empty() {
-            gfx.renderer.stage_mesh_batch();
-        }
+        game.drain_mesh_results(&mut gfx.renderer);
+        gfx.renderer.stage_mesh_batch();
         let ready = game.position_set && (game.dead || gfx.renderer.loaded_chunk_count() > 0);
 
         // Mirror vanilla's `notifyPlayerLoaded`; servers gate
