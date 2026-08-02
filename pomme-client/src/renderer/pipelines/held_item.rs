@@ -43,7 +43,12 @@ impl HeldItemPipeline {
         jar_assets_dir: &Path,
     ) -> Self {
         let shared = ItemPipelineShared::new(device, allocator, atlas, "held_item");
-        let pipeline = item_entity::create_pipeline(device, render_pass, shared.pipeline_layout);
+        let pipeline = item_entity::create_pipeline(
+            device,
+            render_pass,
+            shared.pipeline_layout,
+            vk::CompareOp::Less,
+        );
         Self {
             pipeline,
             shared,
@@ -91,8 +96,12 @@ impl HeldItemPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline =
-            item_entity::create_pipeline(device, render_pass, self.shared.pipeline_layout);
+        self.pipeline = item_entity::create_pipeline(
+            device,
+            render_pass,
+            self.shared.pipeline_layout,
+            vk::CompareOp::Less,
+        );
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {

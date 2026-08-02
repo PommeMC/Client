@@ -10,11 +10,32 @@ use super::sender::PacketSender;
 use crate::entity::components::Position;
 use crate::ui::text::format_text_spans;
 
-/// Dimension info from a login/respawn registry entry. `has_skylight` lives
-/// in azalea's flattened extras; missing defaults to true (overworld-like).
+/// Net-thread copy of the active dimension's bounds, for parsing chunk
+/// payloads before they cross to the main thread. Login/Respawn precede chunk
+/// packets, so this is always current by the time chunks arrive.
+pub struct HandlerDimension {
+    pub height: u32,
+    pub min_y: i32,
+}
+
+impl Default for HandlerDimension {
+    fn default() -> Self {
+        Self {
+            height: 384,
+            min_y: -64,
+        }
+    }
+}
+
+/// Dimension info from a login/respawn registry entry, also refreshed into the
+/// net-thread `dimension` state. `has_skylight` lives in azalea's flattened
+/// extras; missing defaults to true (overworld-like).
 fn dimension_info(
     dim: &azalea_core::registry_holder::dimension_type::DimensionKindElement,
+    dimension: &mut HandlerDimension,
 ) -> NetworkEvent {
+    dimension.height = dim.height;
+    dimension.min_y = dim.min_y;
     NetworkEvent::DimensionInfo {
         height: dim.height,
         min_y: dim.min_y,
@@ -33,11 +54,19 @@ pub fn handle_game_packet(
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
+    dimension: &mut HandlerDimension,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
-                let _ = event_tx.try_send(dimension_info(dim));
+                let _ = event_tx.try_send(dimension_info(dim, dimension));
+            } else {
+                // Without DimensionInfo the chunk parser keeps stale bounds
+                // and the main thread never rebuilds its block-state tables.
+                tracing::warn!(
+                    "Login dimension {:?} not in the registry; keeping previous dimension state",
+                    p.common.dimension
+                );
             }
             let _ = event_tx.try_send(NetworkEvent::DimensionName {
                 name: p.common.dimension.to_string(),
@@ -63,33 +92,64 @@ pub fn handle_game_packet(
                 p.z,
                 p.chunk_data.block_entities.len()
             );
-            let _ = event_tx.try_send(NetworkEvent::ChunkLoaded {
-                pos: ChunkPos::new(p.x, p.z),
-                data: p.chunk_data.data.clone(),
-                heightmaps: p.chunk_data.heightmaps.clone(),
-                light: (&p.light_data).into(),
-            });
-            let chunk_pos = ChunkPos::new(p.x, p.z);
-            let entries: Vec<_> = p
-                .chunk_data
-                .block_entities
-                .iter()
-                .map(|be| {
-                    let local_x = ((be.packed_xz >> 4) & 0x0F) as i32;
-                    let local_z = (be.packed_xz & 0x0F) as i32;
-                    let block_pos = azalea_core::position::BlockPos {
-                        x: chunk_pos.x * 16 + local_x,
-                        y: be.y as i16 as i32,
-                        z: chunk_pos.z * 16 + local_z,
+            // Parse here on the net task; a burst of arriving chunks would
+            // otherwise parse inline in the main thread's event drain and
+            // spike the frame.
+            let mut cursor = std::io::Cursor::new(&**p.chunk_data.data);
+            match azalea_world::chunk::Chunk::read_with_dimension_height(
+                &mut cursor,
+                dimension.height,
+                dimension.min_y,
+                &p.chunk_data.heightmaps,
+            ) {
+                Ok(chunk) => {
+                    let sky_sources = crate::world::light::ChunkSkyLightSources::fill_from(
+                        dimension.min_y,
+                        &chunk,
+                    );
+                    let event = NetworkEvent::ChunkLoaded {
+                        pos: ChunkPos::new(p.x, p.z),
+                        chunk: Box::new(crate::world::chunk::PommeChunk::from_azalea(chunk)),
+                        light: (&p.light_data).into(),
+                        sky_sources,
+                        // Bounds the payload was parsed with; the main thread
+                        // rejects a mismatch with its live store.
+                        height: dimension.height,
+                        min_y: dimension.min_y,
                     };
-                    let compound = match &be.data {
-                        simdnbt::owned::Nbt::Some(base) => base.clone().as_compound(),
-                        simdnbt::owned::Nbt::None => simdnbt::owned::NbtCompound::default(),
-                    };
-                    (block_pos, be.kind, compound)
-                })
-                .collect();
-            let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
+                    if event_tx.try_send(event).is_err() {
+                        tracing::warn!("event channel full; dropped chunk [{}, {}]", p.x, p.z);
+                    }
+
+                    // Block entities sync only for a parseable column:
+                    // unload prunes them by loaded column, so entries for a
+                    // never-loaded one would linger forever.
+                    let chunk_pos = ChunkPos::new(p.x, p.z);
+                    let entries: Vec<_> = p
+                        .chunk_data
+                        .block_entities
+                        .iter()
+                        .map(|be| {
+                            let local_x = ((be.packed_xz >> 4) & 0x0F) as i32;
+                            let local_z = (be.packed_xz & 0x0F) as i32;
+                            let block_pos = azalea_core::position::BlockPos {
+                                x: chunk_pos.x * 16 + local_x,
+                                y: be.y as i16 as i32,
+                                z: chunk_pos.z * 16 + local_z,
+                            };
+                            let compound = match &be.data {
+                                simdnbt::owned::Nbt::Some(base) => base.clone().as_compound(),
+                                simdnbt::owned::Nbt::None => simdnbt::owned::NbtCompound::default(),
+                            };
+                            (block_pos, be.kind, compound)
+                        })
+                        .collect();
+                    let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
+                }
+                Err(e) => {
+                    tracing::error!("Failed to parse chunk [{}, {}]: {e}", p.x, p.z);
+                }
+            }
         }
         ClientboundGamePacket::BlockEvent(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockEvent {
@@ -570,7 +630,12 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::Respawn(p) => {
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
-                let _ = event_tx.try_send(dimension_info(dim));
+                let _ = event_tx.try_send(dimension_info(dim, dimension));
+            } else {
+                tracing::warn!(
+                    "Respawn dimension {:?} not in the registry; keeping previous dimension state",
+                    p.common.dimension
+                );
             }
             let _ = event_tx.try_send(NetworkEvent::DimensionName {
                 name: p.common.dimension.to_string(),

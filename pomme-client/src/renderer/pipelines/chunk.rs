@@ -45,18 +45,9 @@ impl ChunkPipeline {
         );
 
         let layouts = [camera_layout, atlas_layout];
-        // Water pushes its section origin + fade per draw (water.vert); the
-        // indirect passes read them per-instance and ignore the range.
-        let push_range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::Vertex,
-            offset: 0,
-            size: 16,
-        };
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
-            push_constant_range_count: 1,
-            push_constant_ranges: &push_range,
             ..Default::default()
         };
         let pipeline_layout = device
@@ -324,17 +315,16 @@ fn create_water_pipeline(
         device,
         render_pass,
         layout,
-        shader::include_spirv!("water.vert.spv"),
+        shader::include_spirv!("chunk.vert.spv"),
         shader::include_spirv!("water.frag.spv"),
         &color_blend,
         false,
-        false,
+        true,
     )
 }
 
 /// Build a chunk pipeline given the shader SPIR-V, color-blend, whether it
-/// writes depth, and whether it reads the per-instance meta binding
-/// (`chunk.vert`) or only the packed vertices (`water.vert`).
+/// writes depth, and whether it reads the per-instance meta binding.
 #[allow(clippy::too_many_arguments)]
 fn create_chunk_variant(
     device: &vk::Device,
@@ -426,7 +416,7 @@ fn build_pipeline(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: if depth_write { vk::TRUE } else { vk::FALSE },
-        depth_compare_op: vk::CompareOp::LessOrEqual,
+        depth_compare_op: vk::CompareOp::GreaterOrEqual,
         ..Default::default()
     };
 

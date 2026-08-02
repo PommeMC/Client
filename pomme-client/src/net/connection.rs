@@ -606,6 +606,7 @@ async fn game_loop(
     let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
 
     let translation = super::translate::active();
+    let mut dimension = super::handler::HandlerDimension::default();
     loop {
         let raw = match reader.raw.read().await {
             Ok(raw) => raw,
@@ -631,7 +632,14 @@ async fn game_loop(
                 {
                     continue;
                 }
-                handle_game_packet(&packet, &sender, event_tx, &registry_holder, &shared_tree)
+                handle_game_packet(
+                    &packet,
+                    &sender,
+                    event_tx,
+                    &registry_holder,
+                    &shared_tree,
+                    &mut dimension,
+                )
             }
             Err(e) => skip_malformed_packet(e)?,
         }

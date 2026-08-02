@@ -2,17 +2,7 @@
 
 layout(local_size_x = 64) in;
 
-struct ChunkMeta {
-    vec4 aabb_min;
-    vec4 aabb_max;
-    uint index_count;
-    uint first_index;
-    int vertex_offset;
-    uint visibility;
-    // ivec3 + uint pack into one 16-byte slot, matching the Rust layout.
-    ivec3 origin;
-    uint solid_index_count;
-};
+#include "chunk_meta.glsl"
 
 struct DrawCmd {
     uint index_count;
@@ -28,6 +18,9 @@ layout(set = 0, binding = 0) readonly buffer MetaBuf {
 
 layout(set = 0, binding = 1) uniform FrustumBuf {
     vec4 planes[6];
+    // Camera that drew the Hi-Z pyramid this dispatch samples (last frame's);
+    // occlusion tests must project with it, not the live camera.
+    mat4 prev_view_proj;
     uint chunk_count;
     // Camera block position plus the eye's small offset from it; the
     // origins are rebased in integer math so nothing here forms a large
@@ -38,6 +31,23 @@ layout(set = 0, binding = 1) uniform FrustumBuf {
     float frac_x;
     float frac_y;
     float frac_z;
+    // The pyramid camera's anchor split, same convention as cam_*/frac_*.
+    int prev_cam_x;
+    int prev_cam_y;
+    int prev_cam_z;
+    float prev_frac_x;
+    float prev_frac_y;
+    float prev_frac_z;
+    // 0 = fail open, skip the occlusion test (no pyramid yet, world change,
+    // or F3+O off).
+    uint occlusion_valid;
+    // Player column + render distance for the column cull (0 = off).
+    int player_cx;
+    int player_cz;
+    uint limit_rd;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
 };
 
 layout(set = 0, binding = 2) writeonly buffer IndirectBuf {
@@ -56,15 +66,106 @@ layout(set = 0, binding = 5) buffer CutoutCountBuf {
     uint cutout_draw_count;
 };
 
-// Emit one indexed draw covering [first..first+count) for this section. The
-// per-instance attributes (origin + fade) come from meta entry `idx`, routed via
-// first_instance.
-void emit(uint count, uint first, int vertex_offset, uint idx, bool cutout) {
-    if (count == 0u) return;
+// Last frame's depth pyramid (reversed-Z min reduction).
+layout(set = 0, binding = 6) uniform sampler2D hiz;
+
+// Water ordering scratch: reverse-distance bucket counts, with the candidate
+// counter one slot past them. The scan pass turns counts into offsets, the
+// emit pass turns candidates into ordered draws.
+layout(set = 0, binding = 7) buffer WaterBuckets {
+    uint water_buckets[];
+};
+
+layout(set = 0, binding = 8) writeonly buffer WaterCandidates {
+    // Packed (meta slot << 9) | bucket.
+    uint water_candidates[];
+};
+
+// Texel span of the screen rect at `mip`, clamped to the mip's edge.
+ivec2 texel_span(vec2 min_xy, vec2 max_xy, int mip) {
+    ivec2 mip_size = textureSize(hiz, mip);
+    ivec2 lo = ivec2(floor(min_xy * vec2(mip_size)));
+    ivec2 hi = min(ivec2(floor(max_xy * vec2(mip_size))), mip_size - 1);
+    return hi - lo;
+}
+
+// True only when last frame's pyramid proves the pyramid-camera-relative box
+// hidden. Every uncertain path reports visible: any stale claim of occlusion
+// shows as missing terrain, so a corner behind the camera plane, a rect
+// leaving the viewport (exactly the sections entering view after a turn), or
+// a footprint too large for the pyramid all fail open.
+bool hiz_occluded(vec3 bmin, vec3 bmax) {
+    // Screen-space bounds. Reversed-Z: larger depth = nearer, so the box's
+    // nearest point is the max over the corners.
+    vec2 min_xy = vec2(1.0);
+    vec2 max_xy = vec2(0.0);
+    float near_depth = 0.0;
+
+    for (int i = 0; i < 8; i++) {
+        vec3 corner = vec3(
+            (i & 1) != 0 ? bmax.x : bmin.x,
+            (i & 2) != 0 ? bmax.y : bmin.y,
+            (i & 4) != 0 ? bmax.z : bmin.z
+        );
+        vec4 clip = prev_view_proj * vec4(corner, 1.0);
+        if (clip.w <= 0.0) {
+            // A corner at or behind the camera plane: the projected rect is
+            // unbounded.
+            return false;
+        }
+        vec3 ndc = clip.xyz / clip.w;
+        vec2 uv = ndc.xy * 0.5 + vec2(0.5);
+        min_xy = min(min_xy, uv);
+        max_xy = max(max_xy, uv);
+        near_depth = max(near_depth, ndc.z);
+    }
+
+    if (min_xy.x < 0.0 || min_xy.y < 0.0 || max_xy.x > 1.0 || max_xy.y > 1.0) {
+        return false;
+    }
+
+    vec2 extent = max_xy - min_xy;
+    if (extent.x <= 0.0 || extent.y <= 0.0) {
+        // Degenerate (edge-on).
+        return false;
+    }
+
+    vec2 texel_size = extent * vec2(textureSize(hiz, 0));
+    int levels = textureQueryLevels(hiz);
+    int mip = clamp(int(floor(log2(max(texel_size.x, texel_size.y)))), 0, levels - 1);
+
+    // The 4 corner samples cover at most a 2x2 texel block, but an
+    // arbitrarily placed rect can straddle 3 texels per axis at this mip,
+    // skipping the middle texel's depth. Step up a level when that happens;
+    // if the footprint still doesn't fit (truncated pyramid), stay visible.
+    ivec2 span = texel_span(min_xy, max_xy, mip);
+    if (span.x > 1 || span.y > 1) {
+        mip += 1;
+        if (mip >= levels) return false;
+        span = texel_span(min_xy, max_xy, mip);
+        if (span.x > 1 || span.y > 1) return false;
+    }
+
+    float sample1 = textureLod(hiz, vec2(min_xy.x, min_xy.y), float(mip)).x;
+    float sample2 = textureLod(hiz, vec2(max_xy.x, min_xy.y), float(mip)).x;
+    float sample3 = textureLod(hiz, vec2(min_xy.x, max_xy.y), float(mip)).x;
+    float sample4 = textureLod(hiz, vec2(max_xy.x, max_xy.y), float(mip)).x;
+    // Reversed-Z: the pyramid holds min (farthest); occluded when the box's
+    // nearest point is still farther (smaller) than every occluder in the
+    // rect.
+    float far_z = min(min(sample1, sample2), min(sample3, sample4));
+    return near_depth < far_z;
+}
+
+// Emit one indexed draw of `quads` quads starting at `vertex_offset` against
+// the shared quad index buffer. The per-instance attributes (origin + fade)
+// come from meta entry `idx`, routed via first_instance.
+void emit(uint quads, int vertex_offset, uint idx, bool cutout) {
+    if (quads == 0u) return;
     DrawCmd d;
-    d.index_count = count;
+    d.index_count = quads * 6u;
     d.instance_count = 1u;
-    d.first_index = first;
+    d.first_index = 0u;
     d.vertex_offset = vertex_offset;
     d.first_instance = idx;
     if (cutout) {
@@ -79,7 +180,14 @@ void main() {
     if (idx >= chunk_count) return;
 
     ChunkMeta m = chunks[idx];
-    if (m.index_count == 0u) return;
+    if (m.solid_quads == 0u && m.cutout_quads == 0u && m.water_quads == 0u) return;
+
+    // Columns beyond the render distance never draw.
+    if (limit_rd > 0u) {
+        int dx = abs((m.origin.x >> 4) - player_cx);
+        int dz = abs((m.origin.z >> 4) - player_cz);
+        if (uint(max(dx, dz)) > limit_rd) return;
+    }
 
     vec3 base = vec3(m.origin - ivec3(cam_x, cam_y, cam_z))
         - vec3(frac_x, frac_y, frac_z);
@@ -95,8 +203,30 @@ void main() {
         if (d < 0.0) return;
     }
 
-    // Indices split solid-first.
-    uint solid_count = m.solid_index_count;
-    emit(solid_count, m.first_index, m.vertex_offset, idx, false);
-    emit(m.index_count - solid_count, m.first_index + solid_count, m.vertex_offset, idx, true);
+    // Hi-Z occlusion against last frame's depth, rebased and projected with
+    // the camera that drew it.
+    if (occlusion_valid != 0u) {
+        vec3 pbase = vec3(m.origin - ivec3(prev_cam_x, prev_cam_y, prev_cam_z))
+            - vec3(prev_frac_x, prev_frac_y, prev_frac_z);
+        if (hiz_occluded(pbase + m.aabb_min.xyz, pbase + m.aabb_max.xyz)) return;
+    }
+
+    // The vertex slice is grouped solid-first; the cutout draw rebases its
+    // vertex_offset past the solid quads.
+    emit(m.solid_quads, m.vertex_offset, idx, false);
+    emit(m.cutout_quads, m.vertex_offset + int(m.solid_quads * 4u), idx, true);
+
+    // Water joins the bucketed translucent list: reverse Manhattan distance
+    // (in sections) as the sort key, so far buckets land first in the emit
+    // pass's output and blending runs back-to-front.
+    if (m.water_quads != 0u) {
+        ivec3 sec = m.origin >> 4;
+        ivec3 cam_sec = ivec3(cam_x, cam_y, cam_z) >> 4;
+        int dist = abs(sec.x - cam_sec.x) + abs(sec.y - cam_sec.y) + abs(sec.z - cam_sec.z);
+        int last = int(WATER_BUCKETS) - 1;
+        uint bucket = uint(last - min(dist, last));
+        atomicAdd(water_buckets[bucket], 1u);
+        uint ci = atomicAdd(water_buckets[WATER_BUCKETS], 1u);
+        water_candidates[ci] = (idx << 9) | bucket;
+    }
 }

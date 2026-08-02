@@ -70,6 +70,7 @@ impl GuiItemPipeline {
             atlas_render_pass,
             pipeline_layout,
             vk::FrontFace::Clockwise,
+            vk::CompareOp::Less,
         );
 
         let pool_sizes = [
@@ -194,6 +195,7 @@ impl GuiItemPipeline {
             atlas_render_pass,
             self.pipeline_layout,
             vk::FrontFace::Clockwise,
+            vk::CompareOp::Less,
         );
     }
 

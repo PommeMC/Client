@@ -1,0 +1,54 @@
+#version 450
+
+// Writes the water draw commands into their distance-bucket slots: candidates
+// come from cull.comp, offsets from water_scan.comp. Bucket order is reverse
+// distance, so ascending command index draws back-to-front.
+
+#include "chunk_meta.glsl"
+
+layout(local_size_x = 64) in;
+
+struct DrawCmd {
+    uint index_count;
+    uint instance_count;
+    uint first_index;
+    int vertex_offset;
+    uint first_instance;
+};
+
+layout(set = 0, binding = 0) readonly buffer MetaBuf {
+    ChunkMeta chunks[];
+};
+
+// Offsets after the scan; atomicAdd doubles them as per-bucket cursors. The
+// slot past the buckets is the candidate count.
+layout(set = 0, binding = 7) buffer WaterBuckets {
+    uint water_buckets[];
+};
+
+layout(set = 0, binding = 8) readonly buffer WaterCandidates {
+    uint water_candidates[];
+};
+
+layout(set = 0, binding = 9) writeonly buffer WaterIndirect {
+    DrawCmd water_draws[];
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= water_buckets[WATER_BUCKETS]) return;
+
+    uint packed = water_candidates[i];
+    uint slot = packed >> 9;
+    uint bucket = packed & 0x1FFu;
+    ChunkMeta m = chunks[slot];
+
+    DrawCmd d;
+    d.index_count = m.water_quads * 6u;
+    d.instance_count = 1u;
+    d.first_index = 0u;
+    // Water quads trail the solid and cutout groups in the vertex slice.
+    d.vertex_offset = m.vertex_offset + int((m.solid_quads + m.cutout_quads) * 4u);
+    d.first_instance = slot;
+    water_draws[atomicAdd(water_buckets[bucket], 1u)] = d;
+}
