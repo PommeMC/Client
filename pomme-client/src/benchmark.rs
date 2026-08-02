@@ -26,7 +26,6 @@ pub struct FrameSample {
     pub translucent_ms: f32,
     pub ui_ms: f32,
     pub hiz_ms: f32,
-    pub visibility_ms: f32,
     pub chunk_count: u32,
     pub entity_count: u32,
 }
@@ -42,7 +41,6 @@ pub struct SpikeSample {
     pub translucent_ms: f32,
     pub ui_ms: f32,
     pub hiz_ms: f32,
-    pub visibility_ms: f32,
     pub chunk_count: u32,
     pub entity_count: u32,
 }
@@ -81,7 +79,6 @@ pub struct BenchmarkResult {
     pub avg_translucent_ms: f32,
     pub avg_ui_ms: f32,
     pub avg_hiz_ms: f32,
-    pub avg_visibility_ms: f32,
     pub peak_chunk_count: u32,
     pub peak_entity_count: u32,
     pub spike_count: u32,
@@ -125,7 +122,6 @@ impl Benchmark {
             translucent_ms: timings.translucent_ms(),
             ui_ms: timings.ui_ms(),
             hiz_ms: timings.hiz_ms(),
-            visibility_ms: timings.visibility_ms(),
             chunk_count,
             entity_count,
         };
@@ -141,7 +137,6 @@ impl Benchmark {
                 translucent_ms: sample.translucent_ms,
                 ui_ms: sample.ui_ms,
                 hiz_ms: sample.hiz_ms,
-                visibility_ms: sample.visibility_ms,
                 chunk_count: sample.chunk_count,
                 entity_count: sample.entity_count,
             });
@@ -168,7 +163,6 @@ impl Benchmark {
         let translucent_sum: f32 = self.samples.iter().map(|s| s.translucent_ms).sum();
         let ui_sum: f32 = self.samples.iter().map(|s| s.ui_ms).sum();
         let hiz_sum: f32 = self.samples.iter().map(|s| s.hiz_ms).sum();
-        let visibility_sum: f32 = self.samples.iter().map(|s| s.visibility_ms).sum();
 
         let peak_chunks = self
             .samples
@@ -208,7 +202,6 @@ impl Benchmark {
             avg_translucent_ms: translucent_sum / count as f32,
             avg_ui_ms: ui_sum / count as f32,
             avg_hiz_ms: hiz_sum / count as f32,
-            avg_visibility_ms: visibility_sum / count as f32,
             peak_chunk_count: peak_chunks,
             peak_entity_count: peak_entities,
             spike_count: self.spikes.len() as u32,
@@ -337,6 +330,9 @@ pub struct ChunkLoadResult {
     /// is the context that makes two pastes comparable (or not).
     pub player_pos: [f64; 3],
     pub target_rd: u32,
+    /// Effective chunk-detail radius the run meshed with (Auto resolves to
+    /// the render distance); full detail out to this, LOD beyond.
+    pub chunk_detail: u32,
     /// Server-advertised cap, if it sent one (else equals `target_rd`).
     pub effective_rd: u32,
     /// Radius actually loaded, inferred from `chunk_count` — the real distance
@@ -390,6 +386,9 @@ enum ChunkPhase {
 }
 
 const SERVER_WAIT_MIN_SECS: f32 = 1.0;
+/// Base values for the server-chunk wait; both scale with the target's
+/// expected column count (see
+/// `server_wait_stable_secs`/`server_wait_max_secs`).
 const SERVER_WAIT_STABLE_SECS: f32 = 1.5;
 const SERVER_WAIT_MAX_SECS: f32 = 10.0;
 /// A timed load also finishes once the GPU count has held still this long
@@ -414,6 +413,7 @@ pub enum ChunkLoadStep {
 pub struct ChunkLoadBench {
     phase: ChunkPhase,
     target_rd: u32,
+    chunk_detail: u32,
     effective_rd: u32,
     original_rd: u32,
     gpu_name: String,
@@ -447,6 +447,7 @@ impl ChunkLoadBench {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         target_rd: u32,
+        chunk_detail: u32,
         original_rd: u32,
         server_rd: u32,
         gpu_name: &str,
@@ -464,6 +465,7 @@ impl ChunkLoadBench {
         Self {
             phase: ChunkPhase::ServerWait,
             target_rd,
+            chunk_detail,
             effective_rd,
             original_rd,
             gpu_name: gpu_name.to_owned(),
@@ -522,9 +524,10 @@ impl ChunkLoadBench {
                 }
                 let elapsed = self.reset_start.elapsed().as_secs_f32();
                 let min_elapsed = elapsed >= SERVER_WAIT_MIN_SECS;
-                let settled = self.last_change.elapsed().as_secs_f32() >= SERVER_WAIT_STABLE_SECS;
+                let settled =
+                    self.last_change.elapsed().as_secs_f32() >= self.server_wait_stable_secs();
 
-                if min_elapsed && (settled || elapsed >= SERVER_WAIT_MAX_SECS) {
+                if min_elapsed && (settled || elapsed >= self.server_wait_max_secs()) {
                     self.phase = ChunkPhase::Load;
                     self.start = Instant::now();
                     self.last_change = Instant::now();
@@ -645,6 +648,7 @@ impl ChunkLoadBench {
             timestamp: iso8601_utc_now(),
             player_pos: self.player_pos,
             target_rd: self.target_rd,
+            chunk_detail: self.chunk_detail,
             effective_rd: self.effective_rd,
             achieved_rd: radius_from_chunk_count(chunk_count),
             runs: measured.len() as u32,
@@ -680,12 +684,35 @@ impl ChunkLoadBench {
         self.original_rd
     }
 
-    pub fn target_rd(&self) -> u32 {
-        self.target_rd
-    }
-
+    /// The target clamped to the server's advertised cap; what a completed
+    /// run can actually reach.
     pub fn effective_rd(&self) -> u32 {
         self.effective_rd
+    }
+
+    /// Columns a full target-radius square holds; sizes the wait windows and
+    /// the overlay's expectation.
+    pub fn expected_columns(&self) -> u32 {
+        (self.effective_rd * 2 + 1).pow(2)
+    }
+
+    /// Cache-stability window that ends the server wait: the small-world
+    /// value doubles as the terminator on servers that cap below the target
+    /// (their chunks simply stop coming), so it must stay short; big
+    /// first-visit worlds pause longer than that mid-generation.
+    fn server_wait_stable_secs(&self) -> f32 {
+        if self.expected_columns() > 2048 {
+            5.0
+        } else {
+            SERVER_WAIT_STABLE_SECS
+        }
+    }
+
+    /// Absolute wait ceiling, proportional to how much the server may need to
+    /// generate (RD 32 ~ 18s, RD 128 ~ 2.4min, capped at 5min). Esc cancels
+    /// and restores the render distance if the server truly stalls.
+    fn server_wait_max_secs(&self) -> f32 {
+        (SERVER_WAIT_MAX_SECS + self.expected_columns() as f32 / 500.0).min(300.0)
     }
 
     /// 1-based index of the run currently in progress (warmup runs included).

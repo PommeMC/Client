@@ -10,7 +10,6 @@ pub(crate) mod shader;
 mod swapchain;
 pub(crate) mod timings;
 pub(crate) mod util;
-pub mod visibility;
 
 pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
@@ -28,7 +27,7 @@ use chunk::dispatcher::ChunkMeshing;
 use chunk::mesher::SectionMeshData;
 use context::VulkanContext;
 use glam::dvec3;
-use hiz::HizPipeline;
+use hiz::{HizPipeline, OcclusionCamera};
 use pipelines::block_entity::BlockEntityPipeline;
 pub use pipelines::block_entity::BlockEntityRenderInfo;
 use pipelines::block_overlay::BlockOverlayPipeline;
@@ -48,7 +47,6 @@ use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
 use pyronyx::vk;
 use swapchain::Swapchain;
 use thiserror::Error;
-use visibility::VisibilityPipeline;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
@@ -192,7 +190,6 @@ pub struct Renderer {
     query_reset: [bool; MAX_FRAMES_IN_FLIGHT],
     last_timings: RenderTimings,
     hiz_pipeline: HizPipeline,
-    visibility_pipeline: VisibilityPipeline,
     /// CPU wait in the last frame's `acquire_next_image`: where FIFO vblank
     /// backpressure lands, consumed by the vsync frame pacer.
     last_acquire_ms: f32,
@@ -492,13 +489,17 @@ impl Renderer {
         let hiz_pipeline = HizPipeline::new(
             &ctx.device,
             &ctx.allocator,
+            ctx.graphics_queue,
+            ctx.command_pool,
             swapchain_extent.width,
             swapchain_extent.height,
             swapchain_state.depth_view,
         );
-        let visibility_pipeline =
-            VisibilityPipeline::new(&ctx.device, &ctx.allocator, &hiz_pipeline);
-        chunk_buffers.set_visibility_mask_buffer(&ctx.device, visibility_pipeline.output_buffer());
+        chunk_buffers.set_hiz_descriptors(
+            &ctx.device,
+            hiz_pipeline.full_view(),
+            hiz_pipeline.sampler(),
+        );
         Ok(Self {
             ctx,
             swapchain: swapchain_state,
@@ -543,7 +544,6 @@ impl Renderer {
                 timestamp_mask,
             },
             hiz_pipeline,
-            visibility_pipeline,
             last_acquire_ms: 0.0,
         })
     }
@@ -801,12 +801,17 @@ impl Renderer {
         self.hiz_pipeline.resize(
             &self.ctx.device,
             &self.ctx.allocator,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
             self.width,
             self.height,
             self.swapchain.depth_view,
         );
-        self.visibility_pipeline
-            .update_hiz_descriptors(&self.ctx.device, &self.hiz_pipeline);
+        self.chunk_buffers.set_hiz_descriptors(
+            &self.ctx.device,
+            self.hiz_pipeline.full_view(),
+            self.hiz_pipeline.sampler(),
+        );
 
         let sem_info = vk::SemaphoreCreateInfo::default();
         self.render_finished_per_image = Vec::with_capacity(self.swapchain.images.len());
@@ -1053,8 +1058,8 @@ impl Renderer {
         // the fresh buffers they would draw as ghosts, and their pre-reset
         // epochs would out-rank every legitimate upload for those sections.
         self.mesh_queue.clear();
-        // The old world's visibility masks must not cull the new one.
-        self.visibility_pipeline.reset();
+        // The old world's depth pyramid must not cull the new one.
+        self.hiz_pipeline.invalidate_snapshot();
     }
 
     pub fn registry(&self) -> &BlockRegistry {
@@ -1133,9 +1138,6 @@ impl Renderer {
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
-        min_y: i32,
-        height: u32,
-        extra_radians: f32,
         occlusion_enabled: bool,
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
@@ -1180,9 +1182,6 @@ impl Renderer {
                 book_preview,
                 eyes_in_water,
             },
-            min_y,
-            height,
-            extra_radians,
             occlusion_enabled,
         )
     }
@@ -1207,9 +1206,6 @@ impl Renderer {
                 cursor,
                 show_skin,
             },
-            0,
-            0,
-            0.0,
             true,
         )
     }
@@ -1441,9 +1437,6 @@ impl Renderer {
         hide_cursor: bool,
         clear_color: [f32; 4],
         mode: RenderMode<'_>,
-        min_y: i32,
-        height: u32,
-        extra_radians: f32,
         occlusion_enabled: bool,
     ) -> Result<(), RendererError> {
         if self.swapchain_dirty {
@@ -1567,13 +1560,12 @@ impl Renderer {
         let timer = Timer::new(cmd, timer_pool);
         let frame_start_timer = timer.scope(Timestamp::FrameStart, Timestamp::FrameEnd);
 
-        // Sampled before this frame's visibility execute below: it describes
-        // the previous frame's mask still in the shared buffer when the cull
-        // dispatch reads it. F3+O gates only the consumption (None = fail
-        // open): the visibility pass keeps writing, so re-enabling is
-        // instant.
-        let mask_params = if occlusion_enabled {
-            self.visibility_pipeline.mask_params()
+        // The pyramid at this point still holds the previous frame's depth;
+        // the snapshot is the camera that drew it. F3+O gates only the
+        // consumption (None = fail open): the pyramid keeps rebuilding, so
+        // re-enabling is instant.
+        let occlusion = if occlusion_enabled {
+            self.hiz_pipeline.snapshot()
         } else {
             None
         };
@@ -1600,7 +1592,7 @@ impl Renderer {
                 self.camera_render_position(),
                 player_chunk,
                 Some(render_distance),
-                mask_params,
+                occlusion,
             );
             cull_timer.end();
         }
@@ -1788,18 +1780,16 @@ impl Renderer {
                 self.hiz_pipeline
                     .execute(cmd, self.swapchain.depth_image, self.swapchain.extent);
                 hiz_timer.end();
-                let visibility_timer =
-                    timer.scope(Timestamp::VisibilityStart, Timestamp::VisibilityEnd);
-                self.visibility_pipeline.execute(
-                    cmd,
-                    frame,
-                    &self.camera,
-                    *render_distance,
-                    height,
-                    min_y,
-                    extra_radians,
-                );
-                visibility_timer.end();
+                // Next frame's occlusion test projects with the camera that
+                // drew this depth; same anchor/eye split as the cull,
+                // third-person offset included.
+                let anchor = self.camera.anchor();
+                let eye = self.camera_render_position();
+                self.hiz_pipeline.set_snapshot(OcclusionCamera {
+                    view_proj: self.camera.view_projection().to_cols_array_2d(),
+                    cam_block: anchor.as_ivec3(),
+                    frac: (eye - anchor).as_vec3(),
+                });
 
                 // Two hazards before resuming: the resumed pass writes the
                 // depth the Hi-Z copy samples (WAR, execution-only via the
@@ -2465,8 +2455,6 @@ impl Drop for Renderer {
         self.blur_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.hiz_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.visibility_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.skin_preview
             .destroy(&self.ctx.device, &self.ctx.allocator);

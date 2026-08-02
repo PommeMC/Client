@@ -229,9 +229,8 @@ impl VulkanContext {
             return Err(ContextError::NoSuitableGpu);
         }
         // water_scan.comp is a single 512-invocation workgroup (one thread
-        // per distance bucket) and visibility.comp uses 256; the spec floor
-        // is 128, so gate explicitly rather than panicking at pipeline
-        // creation.
+        // per distance bucket); the spec floor is 128, so gate explicitly
+        // rather than panicking at pipeline creation.
         let limits = &properties.limits;
         if limits.max_compute_work_group_invocations < 512
             || limits.max_compute_work_group_size[0] < 512

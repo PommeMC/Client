@@ -8,6 +8,7 @@ use pyronyx::vk;
 
 use super::dispatcher::pack_section_pos;
 use super::mesher::{ChunkAABB, FADE_DURATION_MS, PackedVertex, SectionMeshData};
+use crate::renderer::hiz::OcclusionCamera;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
@@ -303,25 +304,29 @@ pub(crate) fn aabb_in_frustum(
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrustumData {
     planes: [[f32; 4]; 6],
+    /// View-projection the Hi-Z pyramid was drawn with (last frame's);
+    /// occlusion tests project with it, not the live camera. Placed here so
+    /// its std140 offset (96) stays 16-aligned.
+    prev_view_proj: [[f32; 4]; 4],
     chunk_count: u32,
     /// Camera block position (the render anchor as integers); the cull
     /// subtracts it from the absolute integer section origins.
     cam_block: [i32; 3],
     /// Eye position relative to `cam_block` (small, full precision).
     frac: [f32; 3],
-    /// Hi-Z mask decode parameters: the center and section layout the slot's
-    /// mask was written with (last frame). `mask_valid = 0` skips the
-    /// mask test entirely (slot never written).
-    mask_center: [i32; 2],
-    mask_min_section: i32,
-    mask_section_count: i32,
-    mask_valid: u32,
+    /// The pyramid camera's anchor split, same convention as
+    /// `cam_block`/`frac`.
+    prev_cam_block: [i32; 3],
+    prev_frac: [f32; 3],
+    /// 0 skips the occlusion test entirely (no pyramid yet, world change,
+    /// or F3+O off).
+    occlusion_valid: u32,
     /// Player column + render distance for the shader-side column cull
     /// (`limit_rd = 0` disables it); replaces the CPU rebuild's column skip.
     player_chunk: [i32; 2],
     limit_rd: u32,
     /// Pads the struct to a 16-byte multiple.
-    _pad: u32,
+    _pad: [u32; 3],
 }
 
 /// `meta_slot` of a tombstone: a section whose latest accepted result was
@@ -691,24 +696,11 @@ impl ChunkBufferStore {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create compute pipeline layout");
 
-        let spec_entries = [vk::SpecializationMapEntry {
-            constant_id: 0,
-            offset: 0,
-            size: size_of::<i32>(),
-        }];
-        let spec_data = [crate::util::MAX_RD as i32];
-        let spec_info = vk::SpecializationInfo {
-            map_entry_count: spec_entries.len() as u32,
-            map_entries: spec_entries.as_ptr(),
-            data_size: std::mem::size_of_val(&spec_data),
-            data: spec_data.as_ptr() as *const _,
-            ..Default::default()
-        };
         let compute_pipeline = create_compute_pipeline(
             device,
             compute_layout,
             shader::include_spirv!("cull.comp.spv"),
-            Some(&spec_info),
+            None,
         );
         let water_scan_pipeline = create_compute_pipeline(
             device,
@@ -727,12 +719,16 @@ impl ChunkBufferStore {
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::StorageBuffer,
                 // meta + solid indirect/count + cutout indirect/count +
-                // visibility mask + water indirect/count/buckets/candidates
-                // = 10 per frame.
-                descriptor_count: 10 * MAX_FRAMES_IN_FLIGHT as u32,
+                // water indirect/count/buckets/candidates = 9 per frame.
+                descriptor_count: 9 * MAX_FRAMES_IN_FLIGHT as u32,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UniformBuffer,
+                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::CombinedImageSampler,
+                // The Hi-Z pyramid at binding 6.
                 descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
             },
         ];
@@ -1654,28 +1650,37 @@ impl ChunkBufferStore {
         self.chunks.len() as u32
     }
 
-    /// Wires the shared Hi-Z visibility mask buffer into every frame slot's
-    /// cull descriptor set (binding 6). One-time: the mask buffer is never
-    /// recreated.
-    pub fn set_visibility_mask_buffer(&mut self, device: &vk::Device, buffer: vk::Buffer) {
+    /// Points every frame slot's cull descriptor (binding 6) at the Hi-Z
+    /// pyramid. Call at startup and again whenever the pyramid is recreated.
+    pub fn set_hiz_descriptors(
+        &mut self,
+        device: &vk::Device,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+    ) {
+        let info = vk::DescriptorImageInfo {
+            sampler,
+            image_view: view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
         for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let (info, mut write) = desc_write(
-                self.compute_sets[i],
-                6,
-                vk::DescriptorType::StorageBuffer,
-                buffer,
-                (crate::util::CHUNK_RING_SIZE * 4) as u64,
-            );
-            write.buffer_info = info.as_ptr();
+            let write = vk::WriteDescriptorSet {
+                dst_set: self.compute_sets[i],
+                dst_binding: 6,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: 1,
+                image_info: &info,
+                ..Default::default()
+            };
             device.update_descriptor_sets(&[write], &[]);
         }
     }
 
     /// `anchor` must be the same `Camera::anchor()` this frame's
     /// `CameraUniform` was built with, so the cull's block/fraction split
-    /// matches the vertex shader's. `mask` is the Hi-Z decode parameters
-    /// `(center, min_section, section_count)` of the frame slot's visibility
-    /// mask, applied GPU-side in cull.comp; `None` fails open.
+    /// matches the vertex shader's. `occlusion` is the camera snapshot the
+    /// Hi-Z pyramid was drawn with (last frame's); `None` skips the occlusion
+    /// test (fail open).
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_cull(
         &mut self,
@@ -1686,7 +1691,7 @@ impl ChunkBufferStore {
         eye: DVec3,
         player_chunk: ChunkPos,
         limit_rd: Option<u32>,
-        mask: Option<(ChunkPos, i32, i32)>,
+        occlusion: Option<OcclusionCamera>,
     ) {
         if self.meta_high_water == 0 {
             return;
@@ -1698,20 +1703,19 @@ impl ChunkBufferStore {
         self.apply_meta_writes(frame);
         let count = self.meta_high_water;
 
-        let (mask_center, mask_min_section, mask_section_count) =
-            mask.unwrap_or((ChunkPos::new(0, 0), 0, 0));
+        let occ = occlusion.unwrap_or_default();
         let frustum_data = FrustumData {
             planes: *frustum,
+            prev_view_proj: occ.view_proj,
             chunk_count: count,
             cam_block: anchor.as_ivec3().to_array(),
             frac: (eye - anchor).as_vec3().to_array(),
-            mask_center: [mask_center.x, mask_center.z],
-            mask_min_section,
-            mask_section_count,
-            mask_valid: mask.is_some() as u32,
+            prev_cam_block: occ.cam_block.to_array(),
+            prev_frac: occ.frac.to_array(),
+            occlusion_valid: occlusion.is_some() as u32,
             player_chunk: [player_chunk.x, player_chunk.z],
             limit_rd: limit_rd.unwrap_or(0),
-            _pad: 0,
+            _pad: [0; 3],
         };
         let frustum_bytes = bytemuck::bytes_of(&frustum_data);
         self.frustum_allocs[frame].mapped_slice_mut().unwrap()[..frustum_bytes.len()]
@@ -2052,16 +2056,16 @@ fn create_water_scaled_buffers(
 }
 
 fn create_cull_desc_layout(device: &vk::Device) -> vk::DescriptorSetLayout {
-    // Binding 1 is the frustum UBO; the rest are storage: meta, solid
-    // indirect/count, cutout indirect/count, Hi-Z visibility mask, water
+    // Binding 1 is the frustum UBO, binding 6 the Hi-Z pyramid; the rest are
+    // storage: meta, solid indirect/count, cutout indirect/count, water
     // buckets, candidates, indirect, count.
     let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..=10)
         .map(|binding| vk::DescriptorSetLayoutBinding {
             binding,
-            descriptor_type: if binding == 1 {
-                vk::DescriptorType::UniformBuffer
-            } else {
-                vk::DescriptorType::StorageBuffer
+            descriptor_type: match binding {
+                1 => vk::DescriptorType::UniformBuffer,
+                6 => vk::DescriptorType::CombinedImageSampler,
+                _ => vk::DescriptorType::StorageBuffer,
             },
             descriptor_count: 1,
             stage_flags: vk::ShaderStageFlags::Compute,

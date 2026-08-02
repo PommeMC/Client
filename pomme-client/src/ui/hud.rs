@@ -27,7 +27,6 @@ pub struct FrameTimings {
     pub translucent_ms: f32,
     pub ui_ms: f32,
     pub hiz_ms: f32,
-    pub visibility_ms: f32,
 }
 pub struct DebugInfo<'a> {
     pub fps: u32,
@@ -554,7 +553,6 @@ pub fn build_debug_overlay(
         right_lines.push(format!("  Translucent: {:.2}ms", t.translucent_ms));
         right_lines.push(format!("  UI: {:.2}ms", t.ui_ms));
         right_lines.push(format!("  HIZ: {:.2}ms", t.hiz_ms));
-        right_lines.push(format!("  Visibility: {:.2}ms", t.visibility_ms));
     }
     let right_x = info.screen_w as f32 - pad;
     push_debug_lines(

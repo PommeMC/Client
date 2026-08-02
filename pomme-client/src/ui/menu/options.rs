@@ -133,9 +133,6 @@ impl MainMenu {
         } else {
             "VSync: OFF"
         };
-        // The setting is radians of extra FOV; show it as degrees.
-        let frustum_str = format!("Frustum Padding: {:.0}°", self.frustum_padding.to_degrees());
-
         let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
@@ -156,7 +153,7 @@ impl MainMenu {
             OptRow::Pair("Menu Background Blur: 50%", "Cloud Range: 128"),
             OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
-            OptRow::Pair(&frustum_str, "Weather Radius: 10"),
+            OptRow::PairLeft("Weather Radius: 10"),
             OptRow::Header("Preferences"),
             OptRow::Pair("Show Autosave Indicator: ON", "Vignette: ON"),
             OptRow::Pair("Attack Indicator: Crosshair", "Chunk Fade-in: 1.0s"),
@@ -170,13 +167,11 @@ impl MainMenu {
         };
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
-        let frustum_frac = self.frustum_padding / 0.5;
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
             ("Chunk Detail:", cd_frac),
             ("Simulation Distance:", sd_frac),
             ("Max Framerate:", mf_frac),
-            ("Frustum Padding:", frustum_frac),
         ];
         self.build_options_grid(
             sw,
@@ -811,7 +806,6 @@ impl MainMenu {
                 "Max Framerate:" => {
                     self.max_framerate = (((10.0 + v * 250.0) / 10.0).round() * 10.0) as u32
                 }
-                "Frustum Padding:" => self.frustum_padding = v * 0.5,
                 "FOV:" => self.fov = (30.0 + v * 80.0).round() as u32,
                 "FOV Effects:" => self.fov_effect_scale = v,
                 "Master Volume:" => self.master_volume = v,

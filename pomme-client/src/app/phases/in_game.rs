@@ -164,8 +164,8 @@ pub struct GameState {
     pub f3_chord_consumed: bool,
     /// Set by F3+A; consumed by `update_game` to re-mesh every loaded chunk.
     pub pending_chunk_reload: bool,
-    /// F3+O: gates consuming the Hi-Z mask in the cull (the visibility pass
-    /// keeps running so re-enabling is instant); off = frustum culling only.
+    /// F3+O: gates the cull's Hi-Z occlusion test (the pyramid keeps
+    /// rebuilding so re-enabling is instant); off = frustum culling only.
     pub chunk_occlusion_enabled: bool,
     /// Game mode before the last change (vanilla `previousLocalPlayerMode`),
     /// the F3+N return target.
@@ -1191,7 +1191,6 @@ pub fn update_game(
                 translucent_ms: gfx.renderer.last_timings().translucent_ms(),
                 ui_ms: gfx.renderer.last_timings().ui_ms(),
                 hiz_ms: gfx.renderer.last_timings().hiz_ms(),
-                visibility_ms: gfx.renderer.last_timings().visibility_ms(),
             }),
         })
     } else {
@@ -1472,10 +1471,10 @@ pub fn update_game(
         let mut info_lines = Vec::new();
         info_lines.push(format!("=== CHUNK LOAD BENCHMARK ({}) ===", progress));
         if bench.resetting() {
-            let expected = (bench.target_rd() * 2 + 1).pow(2);
+            let expected = bench.expected_columns();
             info_lines.push(format!(
                 "Phase: Waiting for server chunks (Target RD: {})",
-                bench.target_rd()
+                bench.effective_rd()
             ));
             info_lines.push(format!(
                 "Chunks (Client Cache): {} / ~{}",
@@ -1490,7 +1489,7 @@ pub fn update_game(
             let expected = bench.client_cached();
             info_lines.push(format!(
                 "Phase: Timing meshing/upload (Target RD: {})",
-                bench.target_rd()
+                bench.effective_rd()
             ));
             info_lines.push(format!(
                 "Chunks (GPU Mesh): {} / {}",
@@ -1563,6 +1562,7 @@ pub fn update_game(
         };
         let mut lines = vec![
             rd_line,
+            format!("Chunk Detail: {}", result.chunk_detail),
             format!(
                 "Loaded {} chunks in {:.2}s (avg of {} runs)",
                 result.chunk_count, result.load_secs, result.runs
@@ -2158,9 +2158,6 @@ pub fn update_game(
         player_preview,
         book_preview,
         game.player.eyes_in_water,
-        game.chunk_store.shared.min_y(),
-        game.chunk_store.shared.height(),
-        core.menu.frustum_padding,
         game.chunk_occlusion_enabled,
     ) {
         tracing::error!("Render error: {e}");
@@ -2246,6 +2243,7 @@ pub fn update_game(
         PauseAction::StartChunkLoad(rd) => {
             game.chunk_load_bench = Some(ChunkLoadBench::new(
                 rd,
+                core.menu.effective_chunk_detail(),
                 core.menu.render_distance,
                 game.server_render_distance,
                 gfx.renderer.gpu_name(),

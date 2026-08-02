@@ -18,8 +18,6 @@ pub enum Timestamp {
     UiEnd,
     HizStart,
     HizEnd,
-    VisibilityStart,
-    VisibilityEnd,
     Count, // Automatically tracks the total number of timestamps needed
 }
 #[derive(Debug, Clone, Copy)]
@@ -59,9 +57,6 @@ impl RenderTimings {
     }
     pub fn hiz_ms(&self) -> f32 {
         self.duration(Timestamp::HizStart, Timestamp::HizEnd)
-    }
-    pub fn visibility_ms(&self) -> f32 {
-        self.duration(Timestamp::VisibilityStart, Timestamp::VisibilityEnd)
     }
 }
 pub struct Timer {

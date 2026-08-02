@@ -10,16 +10,16 @@ pub const SIZE_Y: usize = 32;
 pub const CHUNK_RING_SIZE: usize = MAX_SIZE * MAX_SIZE;
 pub const SECTION_RING_SIZE: usize = MAX_SIZE * MAX_SIZE * SIZE_Y;
 
-/// Bit for a section's slot in the per-column `u32` masks (dirty set, GPU
-/// visibility). The masks cap the supported height at `SIZE_Y` (32) sections;
-/// out-of-range indices yield an empty bit so taller dimensions degrade to
-/// never meshing/drawing those sections instead of aliasing a lower one.
+/// Bit for a section's slot in the per-column `u32` dirty masks. The masks
+/// cap the supported height at `SIZE_Y` (32) sections; out-of-range indices
+/// yield an empty bit so taller dimensions degrade to never meshing those
+/// sections instead of aliasing a lower one.
 #[inline]
 pub fn section_bit(si: u32) -> u32 {
     1u32.checked_shl(si).unwrap_or(0)
 }
 
-/// Full dirty/visibility mask for an `n`-section column, capped at the
+/// Full dirty mask for an `n`-section column, capped at the
 /// `SIZE_Y` mask width. Setting only these bits matters: bits at or above the
 /// meshable range are never cleared by workers, so a wider mask would defeat
 /// the rescan's `active_mask == 0` fast path forever.

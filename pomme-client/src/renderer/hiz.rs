@@ -1,11 +1,22 @@
 use std::slice;
 use std::sync::{Arc, Mutex};
 
+use glam::{IVec3, Vec3};
 use pomme_gpu_allocator::MemoryLocation;
 use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use pyronyx::vk;
 
-use crate::renderer::shader;
+use crate::renderer::{shader, util};
+
+/// Camera the pyramid's depth was drawn with; the cull's occlusion test must
+/// project section bounds with it, not the live camera. Same anchor split as
+/// `FrustumData`/chunk.vert.
+#[derive(Copy, Clone, Default)]
+pub struct OcclusionCamera {
+    pub view_proj: [[f32; 4]; 4],
+    pub cam_block: IVec3,
+    pub frac: Vec3,
+}
 
 pub struct HizPyramidResources {
     pub pyramid_image: vk::Image,
@@ -30,12 +41,17 @@ pub struct HizPipeline {
     resources: HizPyramidResources,
     width: u32,
     height: u32,
+    /// Camera of the last executed build, `None` until the pyramid first
+    /// holds this world's depth (startup, extent recreate, world clear).
+    snapshot: Option<OcclusionCamera>,
 }
 
 impl HizPipeline {
     pub fn new(
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
         width: u32,
         height: u32,
         depth_view: vk::ImageView,
@@ -173,20 +189,18 @@ impl HizPipeline {
             .create_sampler(&depth_sampler_info, None)
             .expect("failed to create hiz depth sampler");
 
-        let max_dim = width.max(height).max(1);
-        let mip_levels = u32::BITS - max_dim.leading_zeros();
-
-        // One pyramid serves every frame: the build and the visibility
-        // dispatch that samples it sit back to back in the same command
-        // buffer, and next frame's rebuild is ordered behind that read by
-        // submission order plus the Undefined-discard barrier's ComputeShader
-        // source stage.
+        // One pyramid serves every frame: the frame-start cull samples the
+        // previous frame's build (ordered across submits by the final
+        // ShaderReadOnlyOptimal barrier), and the rebuild later in the same
+        // command buffer is ordered behind that read by the
+        // Undefined-discard barrier's ComputeShader source stage.
         let resources = create_pyramid_resources(
             device,
             allocator,
+            queue,
+            command_pool,
             width,
             height,
-            mip_levels,
             depth_view,
             &copy_layout,
             &reduce_layout,
@@ -204,13 +218,35 @@ impl HizPipeline {
             resources,
             width,
             height,
+            snapshot: None,
         }
     }
 
+    /// Records the camera the pyramid was just built with; call right after
+    /// `execute`.
+    pub fn set_snapshot(&mut self, snapshot: OcclusionCamera) {
+        self.snapshot = Some(snapshot);
+    }
+
+    /// The camera of the last build, or `None` (fail open) while the pyramid
+    /// holds nothing this world drew.
+    pub fn snapshot(&self) -> Option<OcclusionCamera> {
+        self.snapshot
+    }
+
+    /// Forgets the pyramid contents, as if never built. Call on a world
+    /// clear: the previous world's depth would otherwise cull the new one.
+    pub fn invalidate_snapshot(&mut self) {
+        self.snapshot = None;
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn resize(
         &mut self,
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
         width: u32,
         height: u32,
         depth_view: vk::ImageView,
@@ -237,20 +273,19 @@ impl HizPipeline {
 
         destroy_pyramid_resources(device, allocator, &mut self.resources);
 
-        let max_dim = width.max(height).max(1);
-        let mip_levels = u32::BITS - max_dim.leading_zeros();
-
         self.resources = create_pyramid_resources(
             device,
             allocator,
+            queue,
+            command_pool,
             width,
             height,
-            mip_levels,
             depth_view,
             &self.copy_layout,
             &self.reduce_layout,
             self.depth_sampler,
         );
+        self.snapshot = None;
 
         self.width = width;
         self.height = height;
@@ -447,14 +482,17 @@ impl HizPipeline {
 fn create_pyramid_resources(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
     width: u32,
     height: u32,
-    mip_levels: u32,
     depth_view: vk::ImageView,
     copy_layout: &vk::DescriptorSetLayout,
     reduce_layout: &vk::DescriptorSetLayout,
     depth_sampler: vk::Sampler,
 ) -> HizPyramidResources {
+    let max_dim = width.max(height).max(1);
+    let mip_levels = u32::BITS - max_dim.leading_zeros();
     let image_info = vk::ImageCreateInfo {
         image_type: vk::ImageType::Type2D,
         format: vk::Format::R32Sfloat,
@@ -671,6 +709,8 @@ fn create_pyramid_resources(
         );
     }
 
+    clear_pyramid(device, queue, command_pool, pyramid_image, mip_levels);
+
     HizPyramidResources {
         pyramid_image,
         pyramid_allocation: Some(pyramid_allocation),
@@ -682,6 +722,63 @@ fn create_pyramid_resources(
         reduce_sets,
         desc_pool,
     }
+}
+
+/// One-time clear of a fresh pyramid to 0.0 (reversed-Z farthest: occludes
+/// nothing) and transition into `ShaderReadOnlyOptimal`, so the frame-start
+/// cull can bind and sample it before the first build.
+fn clear_pyramid(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    image: vk::Image,
+    mip_levels: u32,
+) {
+    let range = vk::ImageSubresourceRange {
+        aspect_mask: vk::ImageAspectFlags::Color,
+        base_mip_level: 0,
+        level_count: mip_levels,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    util::submit_one_time(device, queue, command_pool, |cmd| {
+        let to_transfer = vk::ImageMemoryBarrier {
+            image,
+            old_layout: vk::ImageLayout::Undefined,
+            new_layout: vk::ImageLayout::TransferDstOptimal,
+            src_access_mask: vk::AccessFlags::empty(),
+            dst_access_mask: vk::AccessFlags::TransferWrite,
+            subresource_range: range,
+            ..Default::default()
+        };
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::TopOfPipe,
+            vk::PipelineStageFlags::Transfer,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_transfer],
+        );
+        let clear = vk::ClearColorValue { float32: [0.0; 4] };
+        cmd.clear_color_image(image, vk::ImageLayout::TransferDstOptimal, &clear, &[range]);
+        let to_read = vk::ImageMemoryBarrier {
+            image,
+            old_layout: vk::ImageLayout::TransferDstOptimal,
+            new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+            src_access_mask: vk::AccessFlags::TransferWrite,
+            dst_access_mask: vk::AccessFlags::ShaderRead,
+            subresource_range: range,
+            ..Default::default()
+        };
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::Transfer,
+            vk::PipelineStageFlags::ComputeShader,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_read],
+        );
+    });
 }
 
 fn destroy_pyramid_resources(
