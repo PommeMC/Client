@@ -39,6 +39,7 @@ pub struct LivingEntity {
     pub is_crouching: bool,
     pub on_ground: bool,
     pub wool_color: Option<u8>,
+    /// Sheep wool shorn / bogged mushrooms shorn.
     pub is_sheared: bool,
     pub cow_variant: u8,
     pub chicken_variant: u8,
@@ -56,6 +57,8 @@ pub struct LivingEntity {
     /// Enderman screaming flag — raises the head and jitters the render
     /// position.
     pub is_creepy: bool,
+    /// Zombie-family conversion (drowning / villager cure) — body-yaw shake.
+    pub is_converting: bool,
     /// Witch drinking flag — swings the nose down toward the potion.
     pub witch_drinking: bool,
     pub villager_kind: VillagerKind,
@@ -127,6 +130,7 @@ impl LivingEntity {
             prev_squish: 0.0,
             slime_size: 1,
             is_creepy: false,
+            is_converting: false,
             witch_drinking: false,
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
@@ -596,8 +600,40 @@ impl EntityStore {
     }
 
     pub fn set_baby(&mut self, id: i32, is_baby: bool) {
-        if let Some(entity) = self.living.get_mut(&id) {
+        if let Some(entity) = self.living.get_mut(&id)
+            // On bogged, entity-data index 16 is the sheared flag, not baby.
+            && entity.entity_type != EntityKind::Bogged
+        {
             entity.is_baby = is_baby;
+        }
+    }
+
+    pub fn set_bogged_sheared(&mut self, id: i32, sheared: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Bogged
+        {
+            entity.is_sheared = sheared;
+        }
+    }
+
+    /// Zombie-family underwater conversion.
+    pub fn set_zombie_converting(&mut self, id: i32, converting: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && matches!(
+                entity.entity_type,
+                EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned
+            )
+        {
+            entity.is_converting = converting;
+        }
+    }
+
+    /// Zombie villager curing.
+    pub fn set_zombie_villager_converting(&mut self, id: i32, converting: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::ZombieVillager
+        {
+            entity.is_converting = converting;
         }
     }
 
@@ -664,7 +700,10 @@ impl EntityStore {
         level: u32,
     ) {
         if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Villager
+            && matches!(
+                entity.entity_type,
+                EntityKind::Villager | EntityKind::ZombieVillager
+            )
         {
             entity.villager_kind = kind;
             entity.villager_profession = profession;
@@ -833,5 +872,10 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
             | EntityKind::Enderman
             | EntityKind::Slime
             | EntityKind::Witch
+            | EntityKind::Husk
+            | EntityKind::Drowned
+            | EntityKind::ZombieVillager
+            | EntityKind::Stray
+            | EntityKind::Bogged
     )
 }

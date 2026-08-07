@@ -321,6 +321,18 @@ pub enum NetworkEvent {
         id: i32,
         size: i32,
     },
+    BoggedSheared {
+        id: i32,
+        sheared: bool,
+    },
+    ZombieConverting {
+        id: i32,
+        converting: bool,
+    },
+    ZombieVillagerConverting {
+        id: i32,
+        converting: bool,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,

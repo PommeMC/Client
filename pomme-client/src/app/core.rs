@@ -1118,6 +1118,16 @@ impl AppCore {
                 NetworkEvent::SlimeSize { id, size } => {
                     game.entity_store.set_slime_size(id, size);
                 }
+                NetworkEvent::BoggedSheared { id, sheared } => {
+                    game.entity_store.set_bogged_sheared(id, sheared);
+                }
+                NetworkEvent::ZombieConverting { id, converting } => {
+                    game.entity_store.set_zombie_converting(id, converting);
+                }
+                NetworkEvent::ZombieVillagerConverting { id, converting } => {
+                    game.entity_store
+                        .set_zombie_villager_converting(id, converting);
+                }
                 NetworkEvent::VillagerData {
                     id,
                     kind,
