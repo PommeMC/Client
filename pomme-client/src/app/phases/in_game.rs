@@ -2233,7 +2233,7 @@ pub fn update_game(
                 let extras = entity_extras(entity_id, e, partial_tick);
 
                 EntityRenderInfo {
-                    position: interp_pos,
+                    position: interp_pos + extras.render_offset,
                     head_y_rot_deg: lerp_angle(
                         e.prev_head_y_rot_deg,
                         e.head_y_rot_deg,
@@ -2269,6 +2269,10 @@ pub fn update_game(
                     aggressive: e.aggressive,
                     flap: extras.flap,
                     flap_speed: extras.flap_speed,
+                    is_creepy: e.is_creepy,
+                    is_holding_item: e.witch_drinking,
+                    nose_wobble_speed: extras.nose_wobble_speed,
+                    body_transform: extras.body_transform,
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
                     skip_cull: false,
@@ -2312,6 +2316,10 @@ pub fn update_game(
             aggressive: false,
             flap: 0.0,
             flap_speed: 0.0,
+            is_creepy: false,
+            is_holding_item: false,
+            nose_wobble_speed: 0.0,
+            body_transform: None,
             age_in_ticks: 0.0,
             attack_time: 0.0,
             skip_cull: true,
@@ -2785,6 +2793,9 @@ struct EntityExtras {
     head_x_rot_deg_override: Option<f32>,
     flap: f32,
     flap_speed: f32,
+    body_transform: Option<glam::Mat4>,
+    render_offset: glam::DVec3,
+    nose_wobble_speed: f32,
 }
 
 const EMPTY_EXTRAS: EntityExtras = EntityExtras {
@@ -2795,6 +2806,9 @@ const EMPTY_EXTRAS: EntityExtras = EntityExtras {
     head_x_rot_deg_override: None,
     flap: 0.0,
     flap_speed: 0.0,
+    body_transform: None,
+    render_offset: glam::DVec3::ZERO,
+    nose_wobble_speed: 0.0,
 };
 
 /// Only the first overlay slot visible, untinted.
@@ -2823,6 +2837,30 @@ fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) ->
             overlay_tints: SLOT0_TINTS,
             ..EMPTY_EXTRAS
         },
+        EntityKind::Enderman => EntityExtras {
+            overlay_tints: SLOT0_TINTS,
+            // Vanilla `EndermanRenderer.getRenderOffset`: per-frame gaussian
+            // x/z shake while screaming.
+            render_offset: if e.is_creepy {
+                glam::DVec3::new(
+                    crate::particle::next_gaussian() * 0.02,
+                    0.0,
+                    crate::particle::next_gaussian() * 0.02,
+                )
+            } else {
+                glam::DVec3::ZERO
+            },
+            ..EMPTY_EXTRAS
+        },
+        EntityKind::Slime => EntityExtras {
+            overlay_tints: SLOT0_TINTS,
+            body_transform: Some(slime_body_transform(e, alpha)),
+            ..EMPTY_EXTRAS
+        },
+        EntityKind::Witch => EntityExtras {
+            nose_wobble_speed: 0.01 * (entity_id % 10) as f32,
+            ..EMPTY_EXTRAS
+        },
         // Charged-creeper aura overlay (slot 0) only when powered.
         EntityKind::Creeper if e.powered => EntityExtras {
             overlay_tints: SLOT0_TINTS,
@@ -2830,6 +2868,18 @@ fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) ->
         },
         _ => EMPTY_EXTRAS,
     }
+}
+
+/// Vanilla `AbstractCubeMobRenderer.applySizeAndSquish` plus the slime-only
+/// `downscaleSlightly` (0.999 shrink + 0.001 lift against shell z-fighting).
+fn slime_body_transform(e: &crate::entity::LivingEntity, alpha: f32) -> glam::Mat4 {
+    let squish = e.prev_squish + (e.squish - e.prev_squish) * alpha;
+    let size = e.slime_size as f32;
+    let ss = squish / (size * 0.5 + 1.0);
+    let w = 1.0 / (ss + 1.0);
+    glam::Mat4::from_scale(glam::Vec3::splat(0.999))
+        * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.001, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::new(w * size, size / w, w * size))
 }
 
 fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {

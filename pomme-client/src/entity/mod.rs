@@ -48,6 +48,16 @@ pub struct LivingEntity {
     pub prev_flap: f32,
     pub flap_speed: f32,
     pub prev_flap_speed: f32,
+    /// Slime squish spring (vanilla `AbstractCubeMob`): negative = squashed
+    /// on landing, positive = stretched in the air.
+    pub squish: f32,
+    pub prev_squish: f32,
+    pub slime_size: u8,
+    /// Enderman screaming flag — raises the head and jitters the render
+    /// position.
+    pub is_creepy: bool,
+    /// Witch drinking flag — swings the nose down toward the potion.
+    pub witch_drinking: bool,
     pub villager_kind: VillagerKind,
     pub villager_profession: VillagerProfession,
     pub villager_level: u32,
@@ -70,6 +80,8 @@ pub struct LivingEntity {
     pub swing_time: u8,
     /// Chicken `flapping` decay factor.
     flapping: f32,
+    target_squish: f32,
+    prev_on_ground: bool,
     interp_target: Position,
     interp_look_dir: LookDirection,
     interp_steps: i32,
@@ -111,6 +123,11 @@ impl LivingEntity {
             prev_flap: 0.0,
             flap_speed: 0.0,
             prev_flap_speed: 0.0,
+            squish: 0.0,
+            prev_squish: 0.0,
+            slime_size: 1,
+            is_creepy: false,
+            witch_drinking: false,
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
             villager_level: 0,
@@ -124,6 +141,8 @@ impl LivingEntity {
             powered: false,
             swing_time: 0,
             flapping: 1.0,
+            target_squish: 0.0,
+            prev_on_ground: false,
             interp_target: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
@@ -189,6 +208,19 @@ impl LivingEntity {
         }
         self.flapping *= 0.9;
         self.flap += self.flapping * 2.0;
+    }
+
+    /// Vanilla `AbstractCubeMob.tick` squish spring; the update order matters.
+    fn tick_squish(&mut self) {
+        self.prev_squish = self.squish;
+        self.squish += (self.target_squish - self.squish) * 0.5;
+        if self.on_ground && !self.prev_on_ground {
+            self.target_squish = -0.5;
+        } else if !self.on_ground && self.prev_on_ground {
+            self.target_squish = 1.0;
+        }
+        self.prev_on_ground = self.on_ground;
+        self.target_squish *= 0.6;
     }
 
     pub fn tick_body_rotation(&mut self) {
@@ -600,6 +632,30 @@ impl EntityStore {
         }
     }
 
+    pub fn set_enderman_creepy(&mut self, id: i32, creepy: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Enderman
+        {
+            entity.is_creepy = creepy;
+        }
+    }
+
+    pub fn set_witch_drinking(&mut self, id: i32, drinking: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Witch
+        {
+            entity.witch_drinking = drinking;
+        }
+    }
+
+    pub fn set_slime_size(&mut self, id: i32, size: i32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Slime
+        {
+            entity.slime_size = size.clamp(1, 127) as u8;
+        }
+    }
+
     pub fn set_villager_data(
         &mut self,
         id: i32,
@@ -713,6 +769,7 @@ impl EntityStore {
                 &mut entity.prev_walk_anim_speed,
             );
             entity.tick_flap();
+            entity.tick_squish();
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
             if entity.eat_anim_tick > 0 {
                 entity.eat_anim_tick -= 1;
@@ -773,5 +830,8 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
             | EntityKind::Creeper
             | EntityKind::Spider
             | EntityKind::Villager
+            | EntityKind::Enderman
+            | EntityKind::Slime
+            | EntityKind::Witch
     )
 }

@@ -309,6 +309,18 @@ pub enum NetworkEvent {
         id: i32,
         variant: u8,
     },
+    EndermanCreepy {
+        id: i32,
+        creepy: bool,
+    },
+    WitchDrinking {
+        id: i32,
+        drinking: bool,
+    },
+    SlimeSize {
+        id: i32,
+        size: i32,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,

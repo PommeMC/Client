@@ -1453,16 +1453,12 @@ fn clear_head_subtree(parts: &mut [EntityPart]) {
 /// grounded (`PartPose.scaled(f).translated(0, 24.016 * (1 - f), 0)`).
 const VILLAGER_SCALE: f32 = 0.9375;
 
-pub fn bake_villager_model(no_hat: bool) -> BakedEntityModel {
-    let mut parts = villager_parts();
-    if no_hat {
-        clear_head_subtree(&mut parts);
-    }
-    // Root-only: the transform chain propagates a root's scale to child
-    // pivots and geometry like vanilla's pose stack (children would
-    // double-scale).
+/// Bakes with `VILLAGER_SCALE` applied to the roots only: the transform chain
+/// propagates a root's scale to child pivots and geometry like vanilla's pose
+/// stack (children would double-scale).
+fn bake_villager_like(mut parts: Vec<EntityPart>, tex_h: u32) -> BakedEntityModel {
     let mut scales = Vec::with_capacity(parts.len());
-    for part in &mut parts {
+    for part in parts.iter_mut() {
         let is_root = part.parent.is_none();
         if is_root {
             part.offset =
@@ -1470,9 +1466,17 @@ pub fn bake_villager_model(no_hat: bool) -> BakedEntityModel {
         }
         scales.push(if is_root { VILLAGER_SCALE } else { 1.0 });
     }
-    let mut model = bake_model(parts, 64, 64);
+    let mut model = bake_model(parts, 64, tex_h);
     model.part_scales = scales;
     model
+}
+
+pub fn bake_villager_model(no_hat: bool) -> BakedEntityModel {
+    let mut parts = villager_parts();
+    if no_hat {
+        clear_head_subtree(&mut parts);
+    }
+    bake_villager_like(parts, 64)
 }
 
 pub fn bake_baby_villager_model(no_hat: bool) -> BakedEntityModel {
@@ -1481,6 +1485,168 @@ pub fn bake_baby_villager_model(no_hat: bool) -> BakedEntityModel {
         clear_head_subtree(&mut parts);
     }
     bake_model(parts, 64, 64)
+}
+
+/// Vanilla `EndermanModel`: `HumanoidModel.createMesh` output is fully
+/// replaced, so only the literal parts below matter. The hat stays a separate
+/// child part (unlike the flattened player/zombie hats): the creepy pose
+/// shifts the head up and the hat back down so the inset overlay keeps its
+/// place. The feet sink ~1px into the ground -- vanilla.
+pub fn bake_enderman_model() -> BakedEntityModel {
+    let limb = |name: &str, pivot: Vec3, origin_y: f32, mirror: bool| {
+        vpart(
+            name,
+            None,
+            pivot,
+            vec![ModelCube {
+                mirror,
+                ..vbox((56, 0), (-1.0, origin_y, -1.0), (2.0, 30.0, 2.0))
+            }],
+        )
+    };
+    let parts = vec![
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, -13.0, 0.0),
+            vec![vbox((0, 0), (-4.0, -8.0, -4.0), (8.0, 8.0, 8.0))],
+        ),
+        vpart(
+            "hat",
+            Some(0),
+            Vec3::ZERO,
+            vec![ModelCube {
+                deformation: -0.5,
+                ..vbox((0, 16), (-4.0, -8.0, -4.0), (8.0, 8.0, 8.0))
+            }],
+        ),
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, -14.0, 0.0),
+            vec![vbox((32, 16), (-4.0, 0.0, -2.0), (8.0, 12.0, 4.0))],
+        ),
+        limb("right_arm", Vec3::new(-5.0, -12.0, 0.0), -2.0, false),
+        limb("left_arm", Vec3::new(5.0, -12.0, 0.0), -2.0, true),
+        limb("right_leg", Vec3::new(-2.0, -5.0, 0.0), 0.0, false),
+        limb("left_leg", Vec3::new(2.0, -5.0, 0.0), 0.0, true),
+    ];
+    bake_model(parts, 64, 32)
+}
+
+/// Vanilla `SlimeModel.createInnerBodyLayer`: the gel core with eyes and
+/// mouth. All parts are static; size and squish scale the whole entity via
+/// the render-info body transform.
+pub fn bake_slime_inner_model() -> BakedEntityModel {
+    let parts = vec![
+        vpart(
+            "cube",
+            None,
+            Vec3::ZERO,
+            vec![vbox((0, 16), (-3.0, 17.0, -3.0), (6.0, 6.0, 6.0))],
+        ),
+        // Eyes and mouth poke past the cube faces (z -3.5, x beyond +-3) to
+        // avoid z-fighting.
+        vpart(
+            "right_eye",
+            None,
+            Vec3::ZERO,
+            vec![vbox((32, 0), (-3.25, 18.0, -3.5), (2.0, 2.0, 2.0))],
+        ),
+        vpart(
+            "left_eye",
+            None,
+            Vec3::ZERO,
+            vec![vbox((32, 4), (1.25, 18.0, -3.5), (2.0, 2.0, 2.0))],
+        ),
+        vpart(
+            "mouth",
+            None,
+            Vec3::ZERO,
+            vec![vbox((32, 8), (0.0, 21.0, -3.5), (1.0, 1.0, 1.0))],
+        ),
+    ];
+    bake_model(parts, 64, 32)
+}
+
+/// Vanilla `SlimeModel.createOuterBodyLayer`: the translucent shell (its
+/// alpha lives in the texture). Padded with empty parts so the part list
+/// matches the inner model (`assert_part_order_matches` shares anim indices).
+pub fn bake_slime_outer_model() -> BakedEntityModel {
+    let parts = vec![
+        vpart(
+            "cube",
+            None,
+            Vec3::ZERO,
+            vec![vbox((0, 0), (-4.0, 16.0, -4.0), (8.0, 8.0, 8.0))],
+        ),
+        vpart("right_eye", None, Vec3::ZERO, vec![]),
+        vpart("left_eye", None, Vec3::ZERO, vec![]),
+        vpart("mouth", None, Vec3::ZERO, vec![]),
+    ];
+    bake_model(parts, 64, 32)
+}
+
+/// Vanilla `WitchModel`: `VillagerModel.createBodyModel()` with the hat
+/// replaced by the witch's stacked cone, a mole added to the nose, and a
+/// 64x128 sheet. The villager `hat_rim` survives vanilla's child merge but
+/// its witch.png region is fully transparent, so its cubes are dropped.
+fn witch_parts() -> Vec<EntityPart> {
+    let mut parts = villager_parts();
+    parts[1] = vpart(
+        "hat",
+        Some(0),
+        Vec3::new(-5.0, -10.03125, -5.0),
+        vec![vbox((0, 64), (0.0, 0.0, 0.0), (10.0, 2.0, 10.0))],
+    );
+    parts[2].cubes.clear(); // hat_rim
+    parts.extend([
+        EntityPart {
+            default_rotation: Vec3::new(-0.05235988, 0.0, 0.02617994),
+            ..vpart(
+                "hat2",
+                Some(1),
+                Vec3::new(1.75, -4.0, 2.0),
+                vec![vbox((0, 76), (0.0, 0.0, 0.0), (7.0, 4.0, 7.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(-0.10471976, 0.0, 0.05235988),
+            ..vpart(
+                "hat3",
+                Some(9),
+                Vec3::new(1.75, -4.0, 2.0),
+                vec![vbox((0, 87), (0.0, 0.0, 0.0), (4.0, 4.0, 4.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(-0.20943952, 0.0, 0.10471976),
+            ..vpart(
+                "hat4",
+                Some(10),
+                Vec3::new(1.75, -2.0, 2.0),
+                vec![ModelCube {
+                    deformation: 0.25,
+                    ..vbox((0, 95), (0.0, 0.0, 0.0), (1.0, 2.0, 1.0))
+                }],
+            )
+        },
+        // The mole samples the unused top-left corner of the head texture.
+        vpart(
+            "mole",
+            Some(3),
+            Vec3::new(0.0, -2.0, 0.0),
+            vec![ModelCube {
+                deformation: -0.25,
+                ..vbox((0, 0), (0.0, 3.0, -6.75), (1.0, 1.0, 1.0))
+            }],
+        ),
+    ]);
+    parts
+}
+
+pub fn bake_witch_model() -> BakedEntityModel {
+    bake_villager_like(witch_parts(), 128)
 }
 
 pub fn compute_humanoid_anim(
@@ -1820,6 +1986,99 @@ pub fn compute_villager_anim(
             _ => continue,
         };
         anim.rotation.push((i, rot));
+    }
+
+    anim
+}
+
+/// Vanilla `EndermanModel.setupAnim` on top of the humanoid walk: limb x-swing
+/// halved and clamped to +-0.4 AFTER the arm bob, tiny fixed leg y/z splay,
+/// and the creepy head raise (the hat counter-shifts so the inset overlay
+/// stays put).
+// TODO: carried-block arm pose and the humanoid attack swing once carried
+// blocks / attack animation land.
+pub fn compute_enderman_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    age_in_ticks: f32,
+    is_creepy: bool,
+) -> PartAnim {
+    let mut anim = PartAnim::default();
+    let half_clamp = |x: f32| (x * 0.5).clamp(-0.4, 0.4);
+    // Left limbs are the exact negation of the right (vanilla's `+ PI` swing
+    // phase and `side = -1` bob), and `half_clamp` is odd, so one value per
+    // pair suffices. The vanilla 2.0 * 0.5 arm-swing factors cancel.
+    let swing = (walk_pos * 0.6662).cos();
+    let (bob_x, bob_z) = bob_arm(age_in_ticks, 1.0);
+    let arm_x = half_clamp(bob_x - swing * walk_speed);
+    let leg_x = half_clamp(swing * 1.4 * walk_speed);
+
+    for (i, part) in model.parts.iter().enumerate() {
+        let rot = match part.name.as_str() {
+            "head" => {
+                if is_creepy {
+                    anim.translation.push((i, Vec3::new(0.0, -5.0, 0.0)));
+                }
+                head_rotation(head_x_rot_deg, local_head_y_rot_deg)
+            }
+            "hat" => {
+                if is_creepy {
+                    anim.translation.push((i, Vec3::new(0.0, 5.0, 0.0)));
+                }
+                continue;
+            }
+            "right_arm" => Vec3::new(arm_x, 0.0, bob_z),
+            "left_arm" => Vec3::new(-arm_x, 0.0, -bob_z),
+            "right_leg" => Vec3::new(leg_x, 0.005, 0.005),
+            "left_leg" => Vec3::new(-leg_x, -0.005, -0.005),
+            _ => continue,
+        };
+        anim.rotation.push((i, rot));
+    }
+
+    anim
+}
+
+/// Vanilla `WitchModel.setupAnim`: the villager pose (`super.setupAnim`) plus
+/// the nose. `nose_wobble_speed` is `0.01 * (entity_id % 10)` -- an id
+/// divisible by 10 means a still nose (vanilla). Drinking overrides only the
+/// x rotation and pivot; the z wobble keeps going.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_witch_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    age_in_ticks: f32,
+    nose_wobble_speed: f32,
+    is_holding_item: bool,
+) -> PartAnim {
+    let mut anim = compute_villager_anim(
+        model,
+        head_x_rot_deg,
+        local_head_y_rot_deg,
+        walk_pos,
+        walk_speed,
+        false,
+        age_in_ticks,
+    );
+
+    for (i, part) in model.parts.iter().enumerate() {
+        if part.name == "nose" {
+            let (sin, cos) = (age_in_ticks * nose_wobble_speed).sin_cos();
+            let mut rot = Vec3::new(sin * 4.5_f32.to_radians(), 0.0, cos * 2.5_f32.to_radians());
+            if is_holding_item {
+                // Vanilla moves the nose pivot from (0, -2, 0) to
+                // (0, 1, -1.5); the translation is additive.
+                anim.translation.push((i, Vec3::new(0.0, 3.0, -1.5)));
+                rot.x = -0.9;
+            }
+            anim.rotation.push((i, rot));
+        }
     }
 
     anim

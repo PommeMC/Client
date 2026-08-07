@@ -480,14 +480,22 @@ pub fn handle_game_packet(
                         sheared: (*packed & 0x10) != 0,
                     });
                 }
-                // Index 17 (Boolean) = creeper "powered"/charged flag. Disambiguated
-                // from the sheep byte above by value type.
+                // Index 17 (Boolean) = creeper powered / enderman creepy / witch
+                // drinking. Emit all three; consumers filter by entity type.
                 if item.index == 17
-                    && let azalea_entity::EntityDataValue::Boolean(powered) = &item.value
+                    && let azalea_entity::EntityDataValue::Boolean(flag) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::CreeperPowered {
                         id: p.id.0,
-                        powered: *powered,
+                        powered: *flag,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::EndermanCreepy {
+                        id: p.id.0,
+                        creepy: *flag,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::WitchDrinking {
+                        id: p.id.0,
+                        drinking: *flag,
                     });
                 }
                 // Index 2 = custom name (Optional<Component>); needed for jeb_ sheep detection.
@@ -527,14 +535,18 @@ pub fn handle_game_packet(
                         ),
                     });
                 }
-                // Index 18 on villagers = unhappy counter (head-shake while > 0).
-                // Emit unconditionally; consumer filters by entity type.
+                // Index 18 (Int) = villager unhappy counter / slime size. Emit
+                // both; consumers filter by entity type.
                 if item.index == 18
-                    && let azalea_entity::EntityDataValue::Int(counter) = &item.value
+                    && let azalea_entity::EntityDataValue::Int(value) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::VillagerUnhappy {
                         id: p.id.0,
-                        counter: *counter,
+                        counter: *value,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::SlimeSize {
+                        id: p.id.0,
+                        size: *value,
                     });
                 }
                 // Index 19 on villagers = VillagerData (type/profession/level).

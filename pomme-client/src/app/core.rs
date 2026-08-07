@@ -1109,6 +1109,15 @@ impl AppCore {
                 NetworkEvent::ChickenVariant { id, variant } => {
                     game.entity_store.set_chicken_variant(id, variant);
                 }
+                NetworkEvent::EndermanCreepy { id, creepy } => {
+                    game.entity_store.set_enderman_creepy(id, creepy);
+                }
+                NetworkEvent::WitchDrinking { id, drinking } => {
+                    game.entity_store.set_witch_drinking(id, drinking);
+                }
+                NetworkEvent::SlimeSize { id, size } => {
+                    game.entity_store.set_slime_size(id, size);
+                }
                 NetworkEvent::VillagerData {
                     id,
                     kind,
