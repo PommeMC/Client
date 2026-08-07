@@ -502,21 +502,29 @@ pub fn handle_game_packet(
                     && let azalea_entity::EntityDataValue::CowVariant(variant) = &item.value
                 {
                     use azalea_registry::DataRegistry;
-                    let resolved = registry_holder
-                        .protocol_id_to_identifier(
-                            azalea_registry::identifier::Identifier::new("minecraft:cow_variant"),
-                            variant.protocol_id(),
-                        )
-                        .map(|id| match id.path() {
-                            "temperate" => 0u8,
-                            "cold" => 1,
-                            "warm" => 2,
-                            _ => 0,
-                        })
-                        .unwrap_or(0);
                     let _ = event_tx.try_send(NetworkEvent::CowVariant {
                         id: p.id.0,
-                        variant: resolved,
+                        variant: variant_index(
+                            registry_holder,
+                            "minecraft:cow_variant",
+                            variant.protocol_id(),
+                            &["temperate", "cold", "warm"],
+                        ),
+                    });
+                }
+                // Index 18 on chickens = ChickenVariant Holder.
+                if item.index == 18
+                    && let azalea_entity::EntityDataValue::ChickenVariant(variant) = &item.value
+                {
+                    use azalea_registry::DataRegistry;
+                    let _ = event_tx.try_send(NetworkEvent::ChickenVariant {
+                        id: p.id.0,
+                        variant: variant_index(
+                            registry_holder,
+                            "minecraft:chicken_variant",
+                            variant.protocol_id(),
+                            &["temperate", "warm", "cold"],
+                        ),
                     });
                 }
                 // Index 18 on villagers = unhappy counter (head-shake while > 0).
@@ -684,6 +692,23 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedTe
     let text: String = spans.iter().map(|s| s.text.as_str()).collect();
     tracing::info!("Chat: {text}");
     let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
+}
+
+/// Resolves a variant registry holder id to its index in `order` — the
+/// renderer's texture-variant order for that mob. Unknown ids fall back to 0.
+fn variant_index(
+    registry_holder: &RegistryHolder,
+    registry: &str,
+    protocol_id: u32,
+    order: &[&str],
+) -> u8 {
+    registry_holder
+        .protocol_id_to_identifier(
+            azalea_registry::identifier::Identifier::new(registry),
+            protocol_id,
+        )
+        .and_then(|id| order.iter().position(|p| *p == id.path()))
+        .unwrap_or(0) as u8
 }
 
 fn lp_to_dvec3(v: &azalea_core::delta::LpVec3) -> glam::DVec3 {

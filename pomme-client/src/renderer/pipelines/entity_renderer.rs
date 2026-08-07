@@ -54,6 +54,9 @@ pub struct EntityRenderInfo {
     pub has_red_overlay: bool,
     /// Mob is targeting/attacking — raises zombie/skeleton arms.
     pub aggressive: bool,
+    /// Chicken wing-flap phase and 0..1 amplitude, interpolated.
+    pub flap: f32,
+    pub flap_speed: f32,
     /// Interpolated entity age in ticks; drives the undead idle arm bob.
     pub age_in_ticks: f32,
     /// Arm-swing progress 0..1; drives the zombie attack swing.
@@ -216,6 +219,7 @@ pub(super) enum BlendMode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AnimationType {
     Quadruped,
+    Chicken,
     Humanoid,
     Zombie,
     Skeleton,
@@ -259,6 +263,22 @@ fn mob_definitions() -> Vec<MobDef> {
         &["minecraft/textures/entity/cow/cow_temperate_baby.png"],
         &["minecraft/textures/entity/cow/cow_cold_baby.png"],
         &["minecraft/textures/entity/cow/cow_warm_baby.png"],
+    ];
+    // Variant order is temperate/warm/cold: the two normal-mesh variants share
+    // one VariantDef, the cold mesh gets its own. The handler's index mapping
+    // must match.
+    const CHICKEN_NORMAL_TEX: &[&[&str]] = &[
+        &[
+            "minecraft/textures/entity/chicken/chicken_temperate.png",
+            "minecraft/textures/entity/chicken.png",
+        ],
+        &["minecraft/textures/entity/chicken/chicken_warm.png"],
+    ];
+    const CHICKEN_COLD_TEX: &[&[&str]] = &[&["minecraft/textures/entity/chicken/chicken_cold.png"]];
+    const CHICKEN_BABY_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/chicken/chicken_temperate_baby.png"],
+        &["minecraft/textures/entity/chicken/chicken_warm_baby.png"],
+        &["minecraft/textures/entity/chicken/chicken_cold_baby.png"],
     ];
     const SHEEP_ADULT_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep.png"]];
     const SHEEP_BABY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep_baby.png"]];
@@ -359,6 +379,25 @@ fn mob_definitions() -> Vec<MobDef> {
                 entity_model::bake_baby_cow_model(),
                 COW_BABY_TEX,
                 64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Chicken,
+            anim: AnimationType::Chicken,
+            adult: vec![
+                opaque(entity_model::bake_chicken_model(), CHICKEN_NORMAL_TEX, 64),
+                opaque(
+                    entity_model::bake_cold_chicken_model(),
+                    CHICKEN_COLD_TEX,
+                    64,
+                ),
+            ],
+            baby: Some(opaque(
+                entity_model::bake_baby_chicken_model(),
+                CHICKEN_BABY_TEX,
+                16,
             )),
             adult_overlays: vec![],
             baby_overlays: vec![],
@@ -807,6 +846,15 @@ impl EntityRenderer {
                 info.walk_anim_speed,
                 info.head_y_offset,
                 info.head_x_rot_deg_override,
+            ),
+            AnimationType::Chicken => entity_model::compute_chicken_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.flap,
+                info.flap_speed,
             ),
             AnimationType::Humanoid => entity_model::compute_humanoid_anim(
                 model,
@@ -1274,6 +1322,7 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
     let (w, h) = match kind {
         EntityKind::Pig => (0.9, 0.9),
         EntityKind::Cow => (0.9, 1.4),
+        EntityKind::Chicken => (0.4, 0.7),
         EntityKind::Sheep => (0.9, 1.3),
         EntityKind::Zombie => (0.6, 1.95),
         EntityKind::Skeleton => (0.6, 1.99),

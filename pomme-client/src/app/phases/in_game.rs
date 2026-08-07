@@ -2267,6 +2267,8 @@ pub fn update_game(
                     head_x_rot_deg_override: extras.head_x_rot_deg_override,
                     has_red_overlay: e.hurt_time > 0,
                     aggressive: e.aggressive,
+                    flap: extras.flap,
+                    flap_speed: extras.flap_speed,
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
                     skip_cull: false,
@@ -2308,6 +2310,8 @@ pub fn update_game(
             head_x_rot_deg_override: None,
             has_red_overlay: false,
             aggressive: false,
+            flap: 0.0,
+            flap_speed: 0.0,
             age_in_ticks: 0.0,
             attack_time: 0.0,
             skip_cull: true,
@@ -2779,6 +2783,8 @@ struct EntityExtras {
     overlay_variants: [u32; MAX_OVERLAYS],
     head_y_offset: f32,
     head_x_rot_deg_override: Option<f32>,
+    flap: f32,
+    flap_speed: f32,
 }
 
 const EMPTY_EXTRAS: EntityExtras = EntityExtras {
@@ -2787,6 +2793,8 @@ const EMPTY_EXTRAS: EntityExtras = EntityExtras {
     overlay_variants: [0; MAX_OVERLAYS],
     head_y_offset: 0.0,
     head_x_rot_deg_override: None,
+    flap: 0.0,
+    flap_speed: 0.0,
 };
 
 /// Only the first overlay slot visible, untinted.
@@ -2800,6 +2808,12 @@ fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) ->
     match e.entity_type {
         EntityKind::Cow => EntityExtras {
             variant_index: e.cow_variant as u32,
+            ..EMPTY_EXTRAS
+        },
+        EntityKind::Chicken => EntityExtras {
+            variant_index: e.chicken_variant as u32,
+            flap: e.prev_flap + (e.flap - e.prev_flap) * alpha,
+            flap_speed: e.prev_flap_speed + (e.flap_speed - e.prev_flap_speed) * alpha,
             ..EMPTY_EXTRAS
         },
         EntityKind::Sheep => sheep_extras(entity_id, e, alpha),

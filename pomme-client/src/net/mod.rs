@@ -305,6 +305,10 @@ pub enum NetworkEvent {
         id: i32,
         variant: u8,
     },
+    ChickenVariant {
+        id: i32,
+        variant: u8,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,
