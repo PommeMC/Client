@@ -1298,6 +1298,325 @@ pub fn bake_baby_rabbit_model() -> BakedEntityModel {
     bake_model(baby_rabbit_parts(), 32, 32)
 }
 
+/// Vanilla `AbstractEquineModel.createBodyMesh(NONE)`, 64x64 (shared by
+/// horse, donkey/mule, skeleton/zombie horse). The body's 0.05 and the ears'
+/// -0.001 deformations are hardcoded in vanilla.
+fn equine_parts() -> Vec<EntityPart> {
+    let leg = |name: &str, x: f32, z: f32, origin: (f32, f32, f32), mirror: bool| {
+        vpart(
+            name,
+            None,
+            Vec3::new(x, 14.0, z),
+            vec![ModelCube {
+                mirror,
+                ..vbox((48, 21), origin, (4.0, 11.0, 4.0))
+            }],
+        )
+    };
+    vec![
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 11.0, 5.0),
+            vec![ModelCube {
+                deformation: 0.05,
+                ..vbox((0, 32), (-5.0, -8.0, -17.0), (10.0, 10.0, 22.0))
+            }],
+        ),
+        // The neck; look and the eat/rear poses drive this part.
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_6, 0.0, 0.0),
+            ..vpart(
+                "head_parts",
+                None,
+                Vec3::new(0.0, 4.0, -12.0),
+                vec![vbox((0, 35), (-2.05, -6.0, -2.0), (4.0, 12.0, 7.0))],
+            )
+        },
+        vpart(
+            "head",
+            Some(1),
+            Vec3::ZERO,
+            vec![vbox((0, 13), (-3.0, -11.0, -2.0), (6.0, 5.0, 7.0))],
+        ),
+        vpart(
+            "mane",
+            Some(1),
+            Vec3::ZERO,
+            vec![vbox((56, 36), (-1.0, -11.0, 5.01), (2.0, 16.0, 2.0))],
+        ),
+        vpart(
+            "upper_mouth",
+            Some(1),
+            Vec3::ZERO,
+            vec![vbox((0, 25), (-2.0, -11.0, -7.0), (4.0, 5.0, 5.0))],
+        ),
+        leg("left_hind_leg", 4.0, 7.0, (-3.0, -1.01, -1.0), true),
+        leg("right_hind_leg", -4.0, 7.0, (-1.0, -1.01, -1.0), false),
+        leg("left_front_leg", 4.0, -10.0, (-3.0, -1.01, -1.9), true),
+        leg("right_front_leg", -4.0, -10.0, (-1.0, -1.01, -1.9), false),
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_6, 0.0, 0.0),
+            ..vpart(
+                "tail",
+                Some(0),
+                Vec3::new(0.0, -5.0, 2.0),
+                vec![vbox((42, 36), (-1.5, 0.0, 0.0), (3.0, 14.0, 4.0))],
+            )
+        },
+        vpart(
+            "left_ear",
+            Some(2),
+            Vec3::ZERO,
+            vec![ModelCube {
+                deformation: -0.001,
+                ..vbox((19, 16), (0.55, -13.0, 4.0), (2.0, 3.0, 1.0))
+            }],
+        ),
+        vpart(
+            "right_ear",
+            Some(2),
+            Vec3::ZERO,
+            vec![ModelCube {
+                deformation: -0.001,
+                ..vbox((19, 16), (-2.55, -13.0, 4.0), (2.0, 3.0, 1.0))
+            }],
+        ),
+    ]
+}
+
+pub fn bake_horse_model() -> BakedEntityModel {
+    // `ModelLayers.HORSE` runs through `MeshTransformer.scaling(1.1)`; the
+    // skeleton/zombie horses use the same mesh UNSCALED. The root-scaled
+    // form keeps `setupAnim`'s pivot offsets in scaled space like vanilla
+    // (`bake_scaled` pre-scales pivots, leaving runtime deltas unscaled).
+    bake_root_scaled(equine_parts(), 1.1, 64, 64)
+}
+
+pub fn bake_undead_horse_model() -> BakedEntityModel {
+    bake_model(equine_parts(), 64, 64)
+}
+
+/// Vanilla `DonkeyModel.modifyMesh`: donkey ears replace the horse ears and
+/// two chest boxes hang off the body. `chest` false keeps the chest parts
+/// with no cubes so both variants share one part order.
+fn donkey_parts(chest: bool) -> Vec<EntityPart> {
+    let mut parts = equine_parts();
+    let ear = |name: &str, x: f32, z_rot: f32| EntityPart {
+        default_rotation: vanilla_rot(0.2617994, 0.0, z_rot),
+        ..vpart(
+            name,
+            Some(2),
+            Vec3::new(x, -10.0, 4.0),
+            vec![vbox((0, 12), (-1.0, -7.0, 0.0), (2.0, 7.0, 1.0))],
+        )
+    };
+    for replacement in [
+        ear("left_ear", 1.25, 0.2617994),
+        ear("right_ear", -1.25, -0.2617994),
+    ] {
+        let i = parts
+            .iter()
+            .position(|p| p.name == replacement.name)
+            .expect("equine mesh has both ears");
+        parts[i] = replacement;
+    }
+    let chest_part = |name: &str, x: f32, y_rot: f32| EntityPart {
+        default_rotation: Vec3::new(0.0, y_rot, 0.0),
+        ..vpart(
+            name,
+            Some(0),
+            Vec3::new(x, -8.0, 0.0),
+            if chest {
+                vec![vbox((26, 21), (-4.0, 0.0, -2.0), (8.0, 8.0, 3.0))]
+            } else {
+                vec![]
+            },
+        )
+    };
+    parts.push(chest_part("left_chest", 6.0, -std::f32::consts::FRAC_PI_2));
+    parts.push(chest_part("right_chest", -6.0, std::f32::consts::FRAC_PI_2));
+    parts
+}
+
+pub fn bake_donkey_model(scale: f32, chest: bool) -> BakedEntityModel {
+    bake_root_scaled(donkey_parts(chest), scale, 64, 64)
+}
+
+/// Vanilla `BabyHorseModel.createBabyMesh(NONE)`, 64x64 dedicated mesh — no
+/// mane or upper mouth.
+fn baby_horse_parts() -> Vec<EntityPart> {
+    let leg = |name: &str, x: f32, z: f32, uv: (u32, u32)| {
+        vpart(
+            name,
+            None,
+            Vec3::new(x, 16.0, z),
+            vec![vbox(uv, (-1.5, -1.0, -1.5), (3.0, 9.0, 3.0))],
+        )
+    };
+    vec![
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 12.5, 0.0),
+            vec![vbox((0, 13), (-4.0, -3.5, -7.0), (8.0, 7.0, 14.0))],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(-0.7418, 0.0, 0.0),
+            ..vpart(
+                "tail",
+                Some(0),
+                Vec3::new(0.0, -1.0, 7.0),
+                vec![vbox((24, 34), (-1.5, -1.5, -1.0), (3.0, 3.0, 8.0))],
+            )
+        },
+        leg("left_hind_leg", 2.4, 5.4, (12, 46)),
+        leg("right_hind_leg", -2.4, 5.4, (0, 46)),
+        leg("left_front_leg", 2.4, -5.4, (12, 34)),
+        leg("right_front_leg", -2.4, -5.4, (0, 34)),
+        EntityPart {
+            default_rotation: Vec3::new(0.6109, 0.0, 0.0),
+            ..vpart(
+                "head_parts",
+                None,
+                Vec3::new(0.0, 10.0, -6.0),
+                vec![vbox((30, 0), (-2.0, -6.0, -2.0), (4.0, 8.0, 4.0))],
+            )
+        },
+        vpart(
+            "head",
+            Some(6),
+            Vec3::new(0.0, -6.0516, -0.2951),
+            vec![vbox((0, 0), (-3.0, -3.9484, -6.705), (6.0, 4.0, 9.0))],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(0.0, 0.0, 0.2618),
+            ..vpart(
+                "left_ear",
+                Some(7),
+                Vec3::new(2.0, -4.2484, 1.9451),
+                vec![vbox((0, 4), (-1.0, -2.5, -0.8), (2.0, 3.0, 1.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(0.0, 0.0, -0.2618),
+            ..vpart(
+                "right_ear",
+                Some(7),
+                Vec3::new(-2.0, -4.2484, 1.645),
+                vec![vbox((0, 0), (-1.0, -2.5, -0.5), (2.0, 3.0, 1.0))],
+            )
+        },
+    ]
+}
+
+pub fn bake_baby_horse_model() -> BakedEntityModel {
+    bake_model(baby_horse_parts(), 64, 64)
+}
+
+/// Vanilla `BabyDonkeyModel.createBabyLayer()`, 64x64: everything hangs off
+/// `body`, with `_r1` rotation-carrier parts and cubeless chest stubs (baby
+/// donkeys/mules never show a chest).
+fn baby_donkey_parts() -> Vec<EntityPart> {
+    let leg = |name: &str, pivot: Vec3, uv: (u32, u32), origin: (f32, f32, f32)| {
+        vpart(
+            name,
+            Some(0),
+            pivot,
+            vec![vbox(uv, origin, (3.0, 8.0, 3.0))],
+        )
+    };
+    vec![
+        vpart(
+            "body",
+            None,
+            Vec3::new(1.0, 14.0, 0.0),
+            vec![vbox((0, 13), (-5.0, -3.0, -7.0), (8.0, 6.0, 14.0))],
+        ),
+        vpart("tail", Some(0), Vec3::new(0.0, -1.5, 6.5), vec![]),
+        EntityPart {
+            default_rotation: Vec3::new(-0.7418, 0.0, 0.0),
+            ..vpart(
+                "tail_r1",
+                Some(1),
+                Vec3::ZERO,
+                vec![vbox((24, 33), (-2.5, -1.0, -0.5), (3.0, 3.0, 8.0))],
+            )
+        },
+        leg(
+            "left_hind_leg",
+            Vec3::new(2.25, 3.5, 5.25),
+            (12, 44),
+            (-2.5, -1.5, -1.5),
+        ),
+        leg(
+            "right_hind_leg",
+            Vec3::new(-2.4, 3.5, 5.4),
+            (0, 44),
+            (-2.5, -1.5, -1.5),
+        ),
+        leg(
+            "left_front_leg",
+            Vec3::new(2.4, 3.5, -5.3),
+            (12, 33),
+            (-2.5, -1.5, -1.5),
+        ),
+        leg(
+            "right_front_leg",
+            Vec3::new(-2.4, 3.5, -5.4),
+            (0, 33),
+            (-2.5, -1.5, -1.5),
+        ),
+        vpart("head_parts", Some(0), Vec3::new(0.0, -3.0, -5.0), vec![]),
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_8, 0.0, 0.0),
+            ..vpart(
+                "neck_r1",
+                Some(7),
+                Vec3::ZERO,
+                vec![vbox((30, 9), (-3.0, -6.0, -3.0), (4.0, 8.0, 4.0))],
+            )
+        },
+        vpart("head", Some(7), Vec3::new(0.0, -5.0, -3.0), vec![]),
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_8, 0.0, 0.0),
+            ..vpart(
+                "head_r1",
+                Some(9),
+                Vec3::new(0.0, -1.0, 1.0),
+                vec![vbox((0, 0), (-4.0, -3.6, -8.4), (6.0, 4.0, 9.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: vanilla_rot(0.48, 0.0, 0.48),
+            ..vpart(
+                "left_ear",
+                Some(9),
+                Vec3::new(2.0, -3.5, -1.0),
+                vec![vbox((0, 0), (-2.0, -6.5, -0.3), (2.0, 7.0, 1.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: vanilla_rot(0.48, 0.0, -0.48),
+            ..vpart(
+                "right_ear",
+                Some(9),
+                Vec3::new(-2.0, -3.5, -1.0),
+                vec![ModelCube {
+                    mirror: true,
+                    ..vbox((22, 0), (-2.0, -6.5, -0.3), (2.0, 7.0, 1.0))
+                }],
+            )
+        },
+        vpart("right_chest", Some(0), Vec3::new(-1.0, 10.0, 0.0), vec![]),
+        vpart("left_chest", Some(0), Vec3::new(-1.0, 10.0, 0.0), vec![]),
+    ]
+}
+
+pub fn bake_baby_donkey_model() -> BakedEntityModel {
+    bake_model(baby_donkey_parts(), 64, 64)
+}
+
 /// Skeleton: humanoid layout with thin 2×12×2 limbs, 64×32 sheet
 /// (`SkeletonModel.createDefaultSkeletonMesh`).
 fn skeleton_parts() -> Vec<EntityPart> {
@@ -2273,6 +2592,9 @@ const VILLAGER_SCALE: f32 = 0.9375;
 /// Bakes with vanilla's `MeshTransformer.scaling(factor)` applied to the
 /// roots only: the transform chain propagates a root's scale to child pivots
 /// and geometry like vanilla's pose stack (children would double-scale).
+// TODO: pre-scaling pivots leaves runtime `PartAnim` translations unscaled
+// (vanilla scales the whole tree from the root); converge the remaining
+// callers onto `bake_root_scaled` and delete this.
 fn bake_scaled(mut parts: Vec<EntityPart>, factor: f32, tex_h: u32) -> BakedEntityModel {
     let mut scales = Vec::with_capacity(parts.len());
     for part in parts.iter_mut() {
@@ -2613,9 +2935,17 @@ fn head_rotation(head_x_rot_deg: f32, local_head_y_rot_deg: f32) -> Vec3 {
 /// `compute_part_transforms` applies). Required whenever two or more axes are
 /// set at once — single-axis rotations can be pushed directly.
 fn vanilla_rot(x: f32, y: f32, z: f32) -> Vec3 {
+    if y == 0.0 && z == 0.0 {
+        return Vec3::new(x, 0.0, 0.0);
+    }
     let rot = Quat::from_rotation_z(z) * Quat::from_rotation_y(y) * Quat::from_rotation_x(x);
     let (ex, ey, ez) = rot.to_euler(glam::EulerRot::XYZ);
     Vec3::new(ex, ey, ez)
+}
+
+/// Vanilla `Mth.lerp(delta, from, to)`.
+fn lerp(delta: f32, from: f32, to: f32) -> f32 {
+    from + delta * (to - from)
 }
 
 /// Vanilla `AnimationUtils.bobModelPart`: a gentle idle sway added to undead
@@ -3062,7 +3392,6 @@ pub fn compute_feline_anim(
     use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, FRAC_PI_6, PI};
     let b = inputs.is_baby;
     let age = if b { 0.5 } else { 1.0 };
-    let lerp = |a: f32, from: f32, to: f32| from + a * (to - from);
 
     // Vanilla-space euler + pivot-delta accumulators, seeded from the mesh
     // defaults (vanilla resetPose) with the head look applied.
@@ -3750,6 +4079,168 @@ pub fn compute_rabbit_anim(
         }
         if pos_delta[i] != Vec3::ZERO {
             anim.translation.push((i, pos_delta[i]));
+        }
+    }
+    anim
+}
+
+/// Which equine `setupAnim` hook set applies (`AbstractEquineModel` defaults
+/// vs the `BabyHorseModel` / `BabyDonkeyModel` overrides).
+#[derive(Clone, Copy, PartialEq)]
+pub enum EquineKind {
+    Adult,
+    BabyHorse,
+    BabyDonkey,
+}
+
+pub struct EquineAnimInputs {
+    pub kind: EquineKind,
+    /// Client-simulated springs (grass eating, rearing, feeding mouth sway),
+    /// lerped.
+    pub eat_anim: f32,
+    pub stand_anim: f32,
+    pub feeding_anim: f32,
+    /// Tail swish (client-local `tailCounter` RNG).
+    pub animate_tail: bool,
+}
+
+/// Vanilla `AbstractEquineModel.setupAnim` with the per-model hooks.
+// TODO: the in-water 0.2x leg-cycle damping (`state.isInWater`).
+pub fn compute_equine_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    age_in_ticks: f32,
+    inputs: &EquineAnimInputs,
+) -> PartAnim {
+    use std::f32::consts::PI;
+    let kind = inputs.kind;
+    let clamped_y_rot_rad = local_head_y_rot_deg.clamp(-20.0, 20.0).to_radians();
+    let mut head_rot_x_rad = head_x_rot_deg.to_radians();
+    if walk_speed > 0.2 {
+        head_rot_x_rad += (walk_pos * 0.8).cos() * 0.15 * walk_speed;
+    }
+    let eating = inputs.eat_anim;
+    let standing = inputs.stand_anim;
+    let i_standing = 1.0 - standing;
+    let feeding = inputs.feeding_anim;
+    let age_scale = if kind == EquineKind::Adult { 1.0 } else { 0.5 };
+
+    // Per-model hooks (vanilla `getLegStandAngle` etc.).
+    let (stand_angle, leg_y_off, leg_z_off, leg_x_rot_off, tail_x_off) = match kind {
+        EquineKind::Adult => (0.2617994, 12.0, 4.0, -std::f32::consts::FRAC_PI_3, 0.0),
+        EquineKind::BabyHorse => (
+            0.2617994,
+            4.0,
+            0.0,
+            -std::f32::consts::FRAC_PI_3,
+            -std::f32::consts::FRAC_PI_2,
+        ),
+        EquineKind::BabyDonkey => (
+            std::f32::consts::FRAC_PI_3,
+            1.0,
+            0.5,
+            0.0,
+            -std::f32::consts::FRAC_PI_4,
+        ),
+    };
+    // The baby donkey forces a -30 degree pitch and a 90 degree eating angle.
+    let (effective_pitch, eat_pose_angle) = if kind == EquineKind::BabyDonkey {
+        ((-30.0f32).to_radians(), std::f32::consts::FRAC_PI_2)
+    } else {
+        (head_rot_x_rad, 2.1816616)
+    };
+
+    let sin_age = age_in_ticks.sin();
+    let stand_or_eat = standing.max(eating);
+    let base_head_angle = (1.0 - stand_or_eat)
+        * (std::f32::consts::FRAC_PI_6 + effective_pitch + feeding * sin_age * 0.05);
+    let head_parts_x = standing * (0.2617994 + effective_pitch)
+        + eating * (eat_pose_angle + sin_age * 0.05)
+        + base_head_angle;
+    let head_parts_y = clamped_y_rot_rad * (standing + (1.0 - stand_or_eat));
+
+    // `animateHeadPartsPlacement` deltas from the per-mesh default pivot:
+    // `y += lerp(eating, lerp(standing, 0, y_stand), y_eat)` and an absolute
+    // z lerp toward `z_to` from the mesh's default z.
+    let head_parts_t = match kind {
+        EquineKind::Adult => Vec3::new(
+            0.0,
+            lerp(eating, lerp(standing, 0.0, -8.0), 7.0),
+            standing * (-4.0 - (-12.0)),
+        ),
+        EquineKind::BabyHorse => Vec3::new(
+            0.0,
+            lerp(eating, lerp(standing, 0.0, -2.0), 2.0),
+            standing * (-4.0 - (-6.0)),
+        ),
+        // Baby donkey lerps y absolutely from its default -3.
+        EquineKind::BabyDonkey => {
+            Vec3::new(0.0, eating * (-1.2 - (-3.0)), standing * (-3.6 - (-5.0)))
+        }
+    };
+
+    let leg_anim1 = (walk_pos * 0.6662 + PI).cos();
+    let leg_x_rot = leg_anim1 * 0.8 * walk_speed;
+    let stand_leg_angle = stand_angle * standing;
+    let bob = (age_in_ticks * 0.6 + PI).cos();
+    // Vanilla assigns the `r`-named value to the LEFT front leg (naming
+    // quirk) — ported verbatim.
+    let front_left_x = (leg_x_rot_off + bob) * standing + leg_x_rot * i_standing;
+    let front_right_x = (leg_x_rot_off - bob) * standing - leg_x_rot * i_standing;
+    let hind_left_x = stand_leg_angle - leg_anim1 * 0.5 * walk_speed * i_standing;
+    let hind_right_x = stand_leg_angle + leg_anim1 * 0.5 * walk_speed * i_standing;
+    let front_leg_t = Vec3::new(0.0, -leg_y_off * standing, leg_z_off * standing);
+    // Vanilla copies the left front leg's pivot onto the right absolutely
+    // (`rightFrontLeg.z = leftFrontLeg.z`); only the baby donkey's defaults
+    // differ (left -5.3, right -5.4), so re-base the right leg by the gap.
+    let front_right_t = if kind == EquineKind::BabyDonkey {
+        front_leg_t + Vec3::new(0.0, 0.0, -5.3 - (-5.4))
+    } else {
+        front_leg_t
+    };
+
+    // `BabyDonkeyModel.offsetLegPositionWhenStanding`, incl. vanilla's
+    // left-leg read for the right leg.
+    let (hind_left_t, hind_right_t) = if kind == EquineKind::BabyDonkey {
+        let left_y = 3.5 + standing * (-0.3 - 3.5);
+        let right_y = left_y + standing * (-0.3 - left_y);
+        (
+            Vec3::new(0.0, left_y - 3.5, 0.0),
+            Vec3::new(0.0, right_y - 3.5, 0.0),
+        )
+    } else {
+        (Vec3::ZERO, Vec3::ZERO)
+    };
+
+    let tail_x = tail_x_off + std::f32::consts::FRAC_PI_6 + walk_speed * 0.75;
+    let tail_y_rot = if inputs.animate_tail {
+        (age_in_ticks * 0.7).cos()
+    } else {
+        0.0
+    };
+    let tail_t = Vec3::new(0.0, walk_speed * age_scale, walk_speed * 2.0 * age_scale);
+
+    let mut anim = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        let (rot, tr) = match part.name.as_str() {
+            "head_parts" => (vanilla_rot(head_parts_x, head_parts_y, 0.0), head_parts_t),
+            "body" => (
+                Vec3::new(standing * -std::f32::consts::FRAC_PI_4, 0.0, 0.0),
+                Vec3::ZERO,
+            ),
+            "left_front_leg" => (Vec3::new(front_left_x, 0.0, 0.0), front_leg_t),
+            "right_front_leg" => (Vec3::new(front_right_x, 0.0, 0.0), front_right_t),
+            "left_hind_leg" => (Vec3::new(hind_left_x, 0.0, 0.0), hind_left_t),
+            "right_hind_leg" => (Vec3::new(hind_right_x, 0.0, 0.0), hind_right_t),
+            "tail" => (vanilla_rot(tail_x, tail_y_rot, 0.0), tail_t),
+            _ => continue,
+        };
+        anim.rotation.push((i, rot));
+        if tr != Vec3::ZERO {
+            anim.translation.push((i, tr));
         }
     }
     anim
