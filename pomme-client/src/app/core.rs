@@ -1128,6 +1128,45 @@ impl AppCore {
                     game.entity_store
                         .set_zombie_villager_converting(id, converting);
                 }
+                NetworkEvent::TamableFlags { id, sitting, tame } => {
+                    game.entity_store.set_tamable_flags(id, sitting, tame);
+                }
+                NetworkEvent::CollarColor { id, color } => {
+                    game.entity_store.set_collar_color(id, color);
+                }
+                NetworkEvent::WolfVariant { id, variant } => {
+                    game.entity_store.set_wolf_variant(id, variant);
+                }
+                NetworkEvent::WolfInterested { id, interested } => {
+                    game.entity_store.set_wolf_interested(id, interested);
+                }
+                NetworkEvent::WolfAnger { id, end_time } => {
+                    game.entity_store.set_wolf_anger(id, end_time);
+                }
+                NetworkEvent::WolfShaking { id, shaking } => {
+                    game.entity_store.set_wolf_shaking(id, shaking);
+                }
+                NetworkEvent::CatVariant { id, variant } => {
+                    game.entity_store.set_cat_variant(id, variant);
+                }
+                NetworkEvent::CatLying { id, lying } => {
+                    game.entity_store.set_cat_lying(id, lying);
+                }
+                NetworkEvent::CatRelaxed { id, relaxed } => {
+                    game.entity_store.set_cat_relaxed(id, relaxed);
+                }
+                NetworkEvent::RabbitVariant { id, variant } => {
+                    game.entity_store.set_rabbit_variant(id, variant);
+                }
+                NetworkEvent::RabbitJump { id } => {
+                    game.entity_store.start_rabbit_jump(id);
+                }
+                NetworkEvent::EntityHealth { id, health } => {
+                    game.entity_store.set_health(id, health);
+                }
+                NetworkEvent::EntitySprinting { id, sprinting } => {
+                    game.entity_store.set_sprinting(id, sprinting);
+                }
                 NetworkEvent::VillagerData {
                     id,
                     kind,
