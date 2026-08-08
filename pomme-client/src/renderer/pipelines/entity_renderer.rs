@@ -2229,21 +2229,20 @@ fn entity_visible(
 ) -> bool {
     let (w, h) = entity_bounds(info.entity_kind, info.is_baby);
     // A body transform (slime size/squish) can grow the entity well past its
-    // base bounds; scale the sphere and its center by the largest axis scale.
-    let scale = info.body_transform.map_or(1.0, |m| {
-        m.x_axis
+    // base bounds: scale the sphere and its center by the largest axis scale,
+    // and pad the radius by the translation (pure-rotation transforms still
+    // displace pivots — squid pitch, cat lie-down).
+    let (scale, shift) = info.body_transform.map_or((1.0, 0.0), |m| {
+        let s = m
+            .x_axis
             .length_squared()
             .max(m.y_axis.length_squared())
             .max(m.z_axis.length_squared())
             .sqrt()
-            .max(1.0)
+            .max(1.0);
+        (s, m.w_axis.truncate().length())
     });
-    let mut radius = (0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN) * scale;
-    // Pure-rotation transforms still displace pivots by their translation
-    // (squid pitch pivots, cat lie-down).
-    if let Some(m) = &info.body_transform {
-        radius += m.w_axis.truncate().length();
-    }
+    let radius = (0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN) * scale + shift;
     let mut q = (*info.position - eye).as_vec3();
     q.y += h * 0.5 * scale;
     // Distance-cull with the radius as margin so an oversized entity stays
