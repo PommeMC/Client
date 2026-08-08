@@ -1,4 +1,4 @@
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Vec3};
 
 use super::chunk::mesher::ChunkVertex;
 
@@ -88,10 +88,6 @@ pub struct BakedEntityModel {
 #[derive(Default)]
 pub struct PartAnim {
     pub rotation: Vec<(usize, Vec3)>,
-    /// Quaternion rotation override; takes precedence over `rotation` for a
-    /// part. Used where the engine's fixed euler order can't reproduce
-    /// vanilla's composition (e.g. spider legs with combined yaw + tilt).
-    pub rotation_quat: Vec<(usize, Quat)>,
     pub translation: Vec<(usize, Vec3)>,
 }
 
@@ -121,13 +117,6 @@ impl BakedEntityModel {
         let mut transforms = Vec::with_capacity(self.parts.len());
 
         for (i, part) in self.parts.iter().enumerate() {
-            let mut quat_rot = None;
-            for &(idx, q) in &anim.rotation_quat {
-                if idx == i {
-                    quat_rot = Some(q);
-                    break;
-                }
-            }
             let mut rot = part.default_rotation;
             for &(idx, r) in &anim.rotation {
                 if idx == i {
@@ -158,19 +147,17 @@ impl BakedEntityModel {
                 ModelConvention::BlockYUp => pivot,
             } / 16.0;
 
-            // A quaternion override expresses the exact render-space orientation
-            // directly; otherwise use vanilla's `translateAndRotate` ZYX euler
-            // product. The y-down convention conjugates it by the render-space
-            // flip (bake y-negate x matrix x-flip = vanilla `scale(-1,-1,1)`):
-            // x and y angles negate, z keeps its sign, order stays ZYX.
-            let rot_mat = match (quat_rot, self.convention) {
-                (Some(q), _) => Mat4::from_quat(q),
-                (None, ModelConvention::EntityYDown) => {
+            // Vanilla's `translateAndRotate` ZYX euler product. The y-down
+            // convention conjugates it by the render-space flip (bake
+            // y-negate x matrix x-flip = vanilla `scale(-1,-1,1)`): x and y
+            // angles negate, z keeps its sign, order stays ZYX.
+            let rot_mat = match self.convention {
+                ModelConvention::EntityYDown => {
                     Mat4::from_rotation_z(rot.z)
                         * Mat4::from_rotation_y(-rot.y)
                         * Mat4::from_rotation_x(-rot.x)
                 }
-                (None, ModelConvention::BlockYUp) => {
+                ModelConvention::BlockYUp => {
                     Mat4::from_rotation_z(rot.z)
                         * Mat4::from_rotation_y(rot.y)
                         * Mat4::from_rotation_x(rot.x)
@@ -1513,12 +1500,7 @@ pub fn compute_humanoid_anim(
 
     for (i, part) in model.parts.iter().enumerate() {
         let rot = match part.name.as_str() {
-            "head" => {
-                let rot = Quat::from_rotation_y(local_head_y_rot_deg.to_radians())
-                    * Quat::from_rotation_x(head_x_rot_deg.to_radians());
-                let (x, y, z) = rot.to_euler(glam::EulerRot::XYZ);
-                Vec3::new(x, y, z)
-            }
+            "head" => head_rotation(head_x_rot_deg, local_head_y_rot_deg),
             "body" if is_crouching => Vec3::new(0.5, 0.0, 0.0),
             "right_arm" => Vec3::new(
                 (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 2.0 * walk_speed * 0.5
@@ -1569,16 +1551,10 @@ pub fn compute_quadruped_anim(
 
     for (i, part) in model.parts.iter().enumerate() {
         let rot = match part.name.as_str() {
-            "head" => {
-                let rot = Quat::from_rotation_y(local_head_y_rot_deg.to_radians())
-                    * Quat::from_rotation_x(
-                        head_x_rot_deg_override
-                            .unwrap_or(head_x_rot_deg)
-                            .to_radians(),
-                    );
-                let (x, y, z) = rot.to_euler(glam::EulerRot::XYZ);
-                Vec3::new(x, y, z)
-            }
+            "head" => head_rotation(
+                head_x_rot_deg_override.unwrap_or(head_x_rot_deg),
+                local_head_y_rot_deg,
+            ),
             "right_hind_leg" => Vec3::new((walk_pos * 0.6662).cos() * 1.4 * walk_speed, 0.0, 0.0),
             "left_hind_leg" => Vec3::new(
                 (walk_pos * 0.6662 + std::f32::consts::PI).cos() * 1.4 * walk_speed,
@@ -1635,11 +1611,15 @@ pub fn compute_chicken_anim(
     anim
 }
 
+/// Vanilla head look, `Ry(yaw)·Rx(pitch)`: `compute_part_transforms` composes
+/// vanilla's ZYX order with the render-space sign conjugation itself, so the
+/// angles pass through unchanged.
 fn head_rotation(head_x_rot_deg: f32, local_head_y_rot_deg: f32) -> Vec3 {
-    let rot = Quat::from_rotation_y(local_head_y_rot_deg.to_radians())
-        * Quat::from_rotation_x(head_x_rot_deg.to_radians());
-    let (x, y, z) = rot.to_euler(glam::EulerRot::XYZ);
-    Vec3::new(x, y, z)
+    Vec3::new(
+        head_x_rot_deg.to_radians(),
+        local_head_y_rot_deg.to_radians(),
+        0.0,
+    )
 }
 
 /// Vanilla `AnimationUtils.bobModelPart`: a gentle idle sway added to undead
@@ -1761,39 +1741,29 @@ pub fn compute_spider_anim(
     let step = |phase: f32| ((pos + phase).sin() * 0.4).abs() * walk_speed;
     let three_half_pi = 3.0 * FRAC_PI_2;
 
-    // Each leg's exact render-space orientation = F·vanilla·F = Rz(-z)·Ry(+y)
-    // (Y unchanged under the Y-flip; X/Z negate). Build it as a quaternion so the
-    // engine reproduces vanilla's composition order exactly.
-    let leg_quat =
-        |full_y: f32, full_z: f32| Quat::from_rotation_z(-full_z) * Quat::from_rotation_y(full_y);
+    let leg_rot = |full_y: f32, full_z: f32| Vec3::new(0.0, full_y, full_z);
 
     for (i, part) in model.parts.iter().enumerate() {
         let base = part.default_rotation;
-        let q = match part.name.as_str() {
-            "head" => {
-                anim.rotation
-                    .push((i, head_rotation(head_x_rot_deg, local_head_y_rot_deg)));
-                continue;
-            }
-            "right_hind_leg" => leg_quat(base.y + swing(0.0), base.z + step(0.0)),
-            "left_hind_leg" => leg_quat(base.y - swing(0.0), base.z - step(0.0)),
-            "right_middle_hind_leg" => leg_quat(base.y + swing(PI), base.z + step(PI)),
-            "left_middle_hind_leg" => leg_quat(base.y - swing(PI), base.z - step(PI)),
+        let rot = match part.name.as_str() {
+            "head" => head_rotation(head_x_rot_deg, local_head_y_rot_deg),
+            "right_hind_leg" => leg_rot(base.y + swing(0.0), base.z + step(0.0)),
+            "left_hind_leg" => leg_rot(base.y - swing(0.0), base.z - step(0.0)),
+            "right_middle_hind_leg" => leg_rot(base.y + swing(PI), base.z + step(PI)),
+            "left_middle_hind_leg" => leg_rot(base.y - swing(PI), base.z - step(PI)),
             "right_middle_front_leg" => {
-                leg_quat(base.y + swing(FRAC_PI_2), base.z + step(FRAC_PI_2))
+                leg_rot(base.y + swing(FRAC_PI_2), base.z + step(FRAC_PI_2))
             }
-            "left_middle_front_leg" => {
-                leg_quat(base.y - swing(FRAC_PI_2), base.z - step(FRAC_PI_2))
-            }
+            "left_middle_front_leg" => leg_rot(base.y - swing(FRAC_PI_2), base.z - step(FRAC_PI_2)),
             "right_front_leg" => {
-                leg_quat(base.y + swing(three_half_pi), base.z + step(three_half_pi))
+                leg_rot(base.y + swing(three_half_pi), base.z + step(three_half_pi))
             }
             "left_front_leg" => {
-                leg_quat(base.y - swing(three_half_pi), base.z - step(three_half_pi))
+                leg_rot(base.y - swing(three_half_pi), base.z - step(three_half_pi))
             }
             _ => continue,
         };
-        anim.rotation_quat.push((i, q));
+        anim.rotation.push((i, rot));
     }
 
     anim
@@ -1818,12 +1788,12 @@ pub fn compute_villager_anim(
         let rot = match part.name.as_str() {
             "head" => {
                 if is_unhappy {
-                    // Vanilla composes ZYX: zRot = shake, yRot = yaw, xRot = 0.4.
-                    let rot = Quat::from_rotation_z(0.3 * (0.45 * age_in_ticks).sin())
-                        * Quat::from_rotation_y(local_head_y_rot_deg.to_radians())
-                        * Quat::from_rotation_x(0.4);
-                    let (x, y, z) = rot.to_euler(glam::EulerRot::XYZ);
-                    Vec3::new(x, y, z)
+                    // zRot = shake, yRot = yaw, xRot = 0.4 (looking down).
+                    Vec3::new(
+                        0.4,
+                        local_head_y_rot_deg.to_radians(),
+                        0.3 * (0.45 * age_in_ticks).sin(),
+                    )
                 } else {
                     head_rotation(head_x_rot_deg, local_head_y_rot_deg)
                 }
