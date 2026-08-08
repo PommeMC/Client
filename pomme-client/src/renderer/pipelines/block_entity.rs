@@ -11,7 +11,7 @@ use pyronyx::vk;
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
-use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim, render_x_flip};
+use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim};
 use crate::renderer::pipelines::entity_renderer::{
     BlendMode, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
@@ -537,12 +537,11 @@ impl BlockEntityPipeline {
             ) - anchor)
                 .as_vec3();
             let model_mat = match model.convention {
-                // With the 180 yaw offset the flip reproduces vanilla's
-                // block-entity `scale(1,-1,-1)`.
+                // With the 180 yaw offset and the convention's baked-in flip
+                // this reproduces vanilla's block-entity `scale(1,-1,-1)`.
                 ModelConvention::EntityYDown => {
                     glam::Mat4::from_translation(block_center)
                         * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians())
-                        * render_x_flip()
                 }
                 // Vanilla `ChestRenderer`: rotate by -facing.toYRot() about the
                 // block center; coords are relative to the block's min corner.

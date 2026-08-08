@@ -7,10 +7,10 @@ use super::chunk::mesher::ChunkVertex;
 /// feet don't z-fight the block top.
 const MODEL_REBASE_Y: f32 = 24.016;
 
-/// The X half of vanilla's `scale(-1,-1,1)` (the bake negates Y); composed
-/// innermost into the entity and block-entity model matrices. Without it
-/// every model renders left-right mirrored.
-pub(crate) fn render_x_flip() -> Mat4 {
+/// The X half of vanilla's `scale(-1,-1,1)` (the bake negates Y); prepended
+/// to every root part transform of an `EntityYDown` model. Without it every
+/// model renders left-right mirrored.
+fn render_x_flip() -> Mat4 {
     Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0))
 }
 
@@ -69,8 +69,9 @@ pub struct EntityPart {
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModelConvention {
     /// Vanilla entity convention: cube Y negated at bake, root pivots at
-    /// `(24 - y)/16` (child pivots just negate y), euler signs (-x, -y, +z).
-    /// All mob models use this.
+    /// `(24.016 - y)/16` (child pivots just negate y), and the X half of
+    /// vanilla's `scale(-1,-1,1)` prepended to root transforms — callers'
+    /// model matrices need no flip of their own. All mob models use this.
     #[default]
     EntityYDown,
     /// Vanilla block-entity literal space: y-up, coords/16 relative to the
@@ -154,14 +155,15 @@ impl BakedEntityModel {
                 ModelConvention::BlockYUp => pivot,
             } / 16.0;
 
-            // Vanilla's `translateAndRotate` ZYX euler product. The y-down
-            // convention conjugates it by the render-space flip (bake
-            // y-negate x matrix x-flip = vanilla `scale(-1,-1,1)`): x and y
-            // angles negate, z keeps its sign, order stays ZYX.
+            // Vanilla's `translateAndRotate` ZYX euler product. Only the
+            // Y-negate lives inside the part frames (the X flip is prepended
+            // outside, below), so the y-down convention conjugates rotations
+            // by diag(1,-1,1): x and z angles negate, y keeps its sign,
+            // order stays ZYX — matching the pivot's y-only mirror above.
             let rot_mat = match self.convention {
                 ModelConvention::EntityYDown => {
-                    Mat4::from_rotation_z(rot.z)
-                        * Mat4::from_rotation_y(-rot.y)
+                    Mat4::from_rotation_z(-rot.z)
+                        * Mat4::from_rotation_y(rot.y)
                         * Mat4::from_rotation_x(-rot.x)
                 }
                 ModelConvention::BlockYUp => {
@@ -177,6 +179,8 @@ impl BakedEntityModel {
 
             let transform = if let Some(parent_idx) = part.parent {
                 transforms[parent_idx] * local
+            } else if self.convention == ModelConvention::EntityYDown {
+                render_x_flip() * local
             } else {
                 local
             };
@@ -195,7 +199,7 @@ pub fn bake_model(parts: Vec<EntityPart>, tex_w: u32, tex_h: u32) -> BakedEntity
     for part in &parts {
         let start = vertices.len() as u32;
         for cube in &part.cubes {
-            generate_cube_vertices(cube, tex_w, tex_h, &mut vertices);
+            generate_cube_vertices(cube, tex_w, tex_h, FACE_ALL, true, &mut vertices);
         }
         let count = vertices.len() as u32 - start;
         part_ranges.push((start, count));
@@ -1618,11 +1622,17 @@ pub fn compute_chicken_anim(
     anim
 }
 
-/// Vanilla head look, `Ry(yaw)·Rx(pitch)`: `compute_part_transforms` composes
-/// vanilla's ZYX order with the render-space sign conjugation itself, so the
-/// angles pass through unchanged.
+/// A vanilla `(xRot, yRot, zRot)` triple, passed through unchanged:
+/// `compute_part_transforms` composes vanilla's ZYX order with the
+/// render-space sign conjugation itself. Kept as a marker for vanilla-sourced
+/// multi-axis rotations.
+fn vanilla_rot(x: f32, y: f32, z: f32) -> Vec3 {
+    Vec3::new(x, y, z)
+}
+
+/// Vanilla head look, `Ry(yaw)·Rx(pitch)`.
 fn head_rotation(head_x_rot_deg: f32, local_head_y_rot_deg: f32) -> Vec3 {
-    Vec3::new(
+    vanilla_rot(
         head_x_rot_deg.to_radians(),
         local_head_y_rot_deg.to_radians(),
         0.0,
@@ -1748,7 +1758,7 @@ pub fn compute_spider_anim(
     let step = |phase: f32| ((pos + phase).sin() * 0.4).abs() * walk_speed;
     let three_half_pi = 3.0 * FRAC_PI_2;
 
-    let leg_rot = |full_y: f32, full_z: f32| Vec3::new(0.0, full_y, full_z);
+    let leg_rot = |full_y: f32, full_z: f32| vanilla_rot(0.0, full_y, full_z);
 
     for (i, part) in model.parts.iter().enumerate() {
         let base = part.default_rotation;
@@ -1796,7 +1806,7 @@ pub fn compute_villager_anim(
             "head" => {
                 if is_unhappy {
                     // zRot = shake, yRot = yaw, xRot = 0.4 (looking down).
-                    Vec3::new(
+                    vanilla_rot(
                         0.4,
                         local_head_y_rot_deg.to_radians(),
                         0.3 * (0.45 * age_in_ticks).sin(),
@@ -1827,12 +1837,16 @@ pub fn compute_villager_anim(
 /// vanilla NORTH, SOUTH, DOWN, UP, WEST, EAST. `mirror` swaps the minX/maxX
 /// corner labels (vanilla's UV-only mirror; `push_face` also reverses the
 /// quad).
-fn cube_face_positions(cube: &ModelCube) -> [[[f32; 3]; 4]; 6] {
+fn cube_face_positions(cube: &ModelCube, y_down: bool) -> [[[f32; 3]; 4]; 6] {
     let inf = cube.deformation;
     let mut x0 = (cube.origin.x - inf) / 16.0;
     let mut x1 = (cube.origin.x + cube.size.x + inf) / 16.0;
-    let y0 = -((cube.origin.y - inf) / 16.0);
-    let y1 = -((cube.origin.y + cube.size.y + inf) / 16.0);
+    let mut y0 = (cube.origin.y - inf) / 16.0;
+    let mut y1 = (cube.origin.y + cube.size.y + inf) / 16.0;
+    if y_down {
+        y0 = -y0;
+        y1 = -y1;
+    }
     let z0 = (cube.origin.z - inf) / 16.0;
     let z1 = (cube.origin.z + cube.size.z + inf) / 16.0;
     if cube.mirror {
@@ -1859,9 +1873,9 @@ fn cube_face_positions(cube: &ModelCube) -> [[[f32; 3]; 4]; 6] {
 /// Emit one quad as two triangles with vanilla `ModelPart.Polygon` UV
 /// corners: vertex 0 gets `(u1, v0)`, then `(u0, v0)`, `(u0, v1)`,
 /// `(u1, v1)` — the rect params are used as passed (the box unwrap hands the
-/// maxY face a V-reversed rect on purpose). `mirror` reverses the quad,
-/// completing vanilla's mirror alongside the corner swap in
-/// `cube_face_positions`.
+/// maxY face a V-reversed rect on purpose). The visible half of vanilla's
+/// mirror is the minX/maxX swap in `cube_face_positions`; `mirror` here only
+/// reverses the quad to restore vanilla's winding parity.
 fn push_face(
     positions: &[[f32; 3]; 4],
     u0: f32,
@@ -1893,10 +1907,21 @@ fn push_face(
     }
 }
 
-fn generate_cube_vertices(
+/// Face-mask bits for the box emitters, by face slot (0 -Z, 1 +Z, 2 minY,
+/// 3 maxY, 4 -X, 5 +X); double-chest halves cull their seam face.
+pub(crate) const FACE_NEG_X: u8 = 1 << 4;
+pub(crate) const FACE_POS_X: u8 = 1 << 5;
+pub(crate) const FACE_ALL: u8 = 0x3F;
+
+/// Emits one vanilla `ModelPart.Cube` with the vanilla box unwrap. `y_down`
+/// picks the coordinate space: negated Y for entity models, literal y-up for
+/// block-entity models (chests).
+pub(crate) fn generate_cube_vertices(
     cube: &ModelCube,
     tex_w: u32,
     tex_h: u32,
+    faces: u8,
+    y_down: bool,
     vertices: &mut Vec<ChunkVertex>,
 ) {
     let tw = tex_w as f32;
@@ -1920,8 +1945,11 @@ fn generate_cube_vertices(
         [u + d + w, v + d, u + 2.0 * d + w, v + d + h],
     ];
 
-    let positions = cube_face_positions(cube);
-    for (pos, uv) in positions.iter().zip(&face_uv) {
+    let positions = cube_face_positions(cube, y_down);
+    for (slot, (pos, uv)) in positions.iter().zip(&face_uv).enumerate() {
+        if faces & (1 << slot) == 0 {
+            continue;
+        }
         push_face(
             pos,
             uv[0] / tw,
@@ -1936,7 +1964,10 @@ fn generate_cube_vertices(
 
 /// Like [`generate_cube_vertices`] but with explicit per-face UV rects (face
 /// order -Z, +Z, minY, maxY, -X, +X) instead of the entity box-unwrap, for
-/// block models whose texture layout isn't a box-unwrap (e.g. signs).
+/// block models whose texture layout isn't a box-unwrap (e.g. signs). Rects
+/// apply in plain corner order on every slot — unlike the box unwrap, slot 3
+/// (maxY) gets no V reversal, so an asymmetric down face needs a
+/// pre-reversed rect.
 pub(crate) fn generate_cube_vertices_faces(
     cube: &ModelCube,
     face_uvs: &[[f32; 4]; 6],
@@ -1946,7 +1977,7 @@ pub(crate) fn generate_cube_vertices_faces(
 ) {
     let tw = tex_w as f32;
     let th = tex_h as f32;
-    let positions = cube_face_positions(cube);
+    let positions = cube_face_positions(cube, true);
     for (pos, uv) in positions.iter().zip(face_uvs) {
         push_face(
             pos,
@@ -1954,7 +1985,7 @@ pub(crate) fn generate_cube_vertices_faces(
             uv[1] / th,
             uv[2] / tw,
             uv[3] / th,
-            cube.mirror,
+            false,
             vertices,
         );
     }
