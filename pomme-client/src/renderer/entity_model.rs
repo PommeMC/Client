@@ -2,6 +2,11 @@ use glam::{Mat4, Quat, Vec3};
 
 use super::chunk::mesher::ChunkVertex;
 
+/// Vanilla `EntityModel.MODEL_Y_OFFSET` (-1.501) in model pixels: re-bases the
+/// y-down ground plane (y=24) onto the y-up origin, with a 0.001-block lift so
+/// feet don't z-fight the block top.
+const MODEL_REBASE_Y: f32 = 24.016;
+
 #[derive(Clone, Copy)]
 pub struct ModelCube {
     pub origin: Vec3,
@@ -141,13 +146,13 @@ impl BakedEntityModel {
             let pivot = part.offset + extra_translation;
             let offset = match self.convention {
                 ModelConvention::EntityYDown => {
-                    // 24.016 re-bases vanilla's y-down ground plane onto the
-                    // engine's y-up origin: vanilla `EntityModel.MODEL_Y_OFFSET`
-                    // (-1.501, i.e. 24.016/16) lifts models 0.001 above the
-                    // ground so feet don't z-fight the block top. Child pivots
-                    // are relative to their parent (already re-based), so they
-                    // only mirror.
-                    let rebase = if part.parent.is_some() { 0.0 } else { 24.016 };
+                    // Child pivots are relative to their parent (already
+                    // re-based), so they only mirror.
+                    let rebase = if part.parent.is_some() {
+                        0.0
+                    } else {
+                        MODEL_REBASE_Y
+                    };
                     Vec3::new(pivot.x, rebase - pivot.y, pivot.z)
                 }
                 ModelConvention::BlockYUp => pivot,
@@ -1475,8 +1480,8 @@ fn bake_villager_like(mut parts: Vec<EntityPart>, tex_h: u32) -> BakedEntityMode
     for part in parts.iter_mut() {
         let is_root = part.parent.is_none();
         if is_root {
-            part.offset =
-                part.offset * VILLAGER_SCALE + Vec3::new(0.0, 24.016 * (1.0 - VILLAGER_SCALE), 0.0);
+            part.offset = part.offset * VILLAGER_SCALE
+                + Vec3::new(0.0, MODEL_REBASE_Y * (1.0 - VILLAGER_SCALE), 0.0);
         }
         scales.push(if is_root { VILLAGER_SCALE } else { 1.0 });
     }
