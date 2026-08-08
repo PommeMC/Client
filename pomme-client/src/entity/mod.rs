@@ -410,9 +410,9 @@ impl LivingEntity {
     /// Per-kind per-tick animation state (the kind-specific tail of vanilla
     /// `aiStep`); arms accrue as mobs land.
     fn tick_kind_anims(&mut self) {
-        #[allow(clippy::single_match)]
         match self.entity_type {
             EntityKind::Chicken => self.tick_flap(),
+            k if is_equine(&k) => self.tick_equine_anims(),
             _ => {}
         }
     }
@@ -1114,9 +1114,6 @@ impl EntityStore {
             entity.tick_kind_anims();
             entity.tick_squish();
             entity.tick_tamable_anims();
-            if is_equine(&entity.entity_type) {
-                entity.tick_equine_anims();
-            }
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
             if entity.eat_anim_tick > 0 {
                 entity.eat_anim_tick -= 1;

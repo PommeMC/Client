@@ -643,6 +643,7 @@ pub fn handle_game_packet(
                 {
                     let _ = event_tx.try_send(NetworkEvent::EntityVariant {
                         id: p.id.0,
+                        kind: EntityKind::Horse,
                         variant: *packed as u32,
                     });
                 }
