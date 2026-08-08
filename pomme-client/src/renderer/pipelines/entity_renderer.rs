@@ -1577,6 +1577,17 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::Chicken if is_baby => return (0.3, 0.4),
         EntityKind::Chicken => (0.4, 0.7),
         EntityKind::Sheep => (0.9, 1.3),
+        // Vanilla Zombie.BABY_DIMENSIONS / Villager baby: explicit 0.49x0.98,
+        // not half scale.
+        EntityKind::Zombie
+        | EntityKind::Husk
+        | EntityKind::Drowned
+        | EntityKind::ZombieVillager
+        | EntityKind::Villager
+            if is_baby =>
+        {
+            return (0.49, 0.98);
+        }
         EntityKind::Zombie
         | EntityKind::Husk
         | EntityKind::Drowned

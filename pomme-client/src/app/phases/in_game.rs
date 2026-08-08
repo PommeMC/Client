@@ -2826,7 +2826,7 @@ fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) ->
         EntityKind::Bogged => EntityExtras {
             overlay_tints: SLOT0_TINTS,
             variant_index: e.is_sheared as u32,
-            ..EMPTY_EXTRAS
+            ..Default::default()
         },
         // Always-visible slot-0 overlay (spider eyes, drowned/stray clothing).
         EntityKind::Spider | EntityKind::Drowned | EntityKind::Stray => EntityExtras {
