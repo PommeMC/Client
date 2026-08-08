@@ -585,14 +585,19 @@ pub fn handle_game_packet(
                         value: *converting,
                     });
                 }
-                // Index 19 (Boolean) = zombie villager curing.
+                // Index 19 (Boolean) = zombie villager curing / donkey-mule
+                // chest. Emit both; consumers filter by entity type.
                 if item.index == 19
-                    && let azalea_entity::EntityDataValue::Boolean(converting) = &item.value
+                    && let azalea_entity::EntityDataValue::Boolean(flag) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::MobFlag {
                         id: p.id.0,
                         flag: MobFlag::ZombieVillagerConverting,
-                        value: *converting,
+                        value: *flag,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::ChestedHorse {
+                        id: p.id.0,
+                        chest: *flag,
                     });
                 }
                 // Index 18 (Int) = villager unhappy counter / slime size /
@@ -614,8 +619,9 @@ pub fn handle_game_packet(
                         variant: *value as u32,
                     });
                 }
-                // Index 18 (Byte) on tamables = flags: bit 0x01 sitting, bit
-                // 0x04 tame.
+                // Index 18 (Byte): tamable flags (0x01 sitting, 0x04 tame) or
+                // equine flags (0x10 eating, 0x20 standing, 0x40 open mouth).
+                // Emit both; consumers filter by entity type.
                 if item.index == 18
                     && let azalea_entity::EntityDataValue::Byte(flags) = &item.value
                 {
@@ -623,6 +629,22 @@ pub fn handle_game_packet(
                         id: p.id.0,
                         sitting: (*flags & 0x01) != 0,
                         tame: (*flags & 0x04) != 0,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::EquineFlags {
+                        id: p.id.0,
+                        eating: (*flags & 0x10) != 0,
+                        standing: (*flags & 0x20) != 0,
+                        open_mouth: (*flags & 0x40) != 0,
+                    });
+                }
+                // Index 19 (Int) on horses = packed color | markings << 8.
+                if item.index == 19
+                    && let azalea_entity::EntityDataValue::Int(packed) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::EntityVariant {
+                        id: p.id.0,
+                        kind: EntityKind::Horse,
+                        variant: *packed as u32,
                     });
                 }
                 // Index 20 on cats = CatVariant Holder; on wolves = interested

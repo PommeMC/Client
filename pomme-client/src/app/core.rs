@@ -1145,6 +1145,18 @@ impl AppCore {
                 NetworkEvent::EntitySprinting { id, sprinting } => {
                     game.entity_store.set_sprinting(id, sprinting);
                 }
+                NetworkEvent::EquineFlags {
+                    id,
+                    eating,
+                    standing,
+                    open_mouth,
+                } => {
+                    game.entity_store
+                        .set_equine_flags(id, eating, standing, open_mouth);
+                }
+                NetworkEvent::ChestedHorse { id, chest } => {
+                    game.entity_store.set_chested(id, chest);
+                }
                 NetworkEvent::VillagerData {
                     id,
                     kind,

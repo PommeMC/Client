@@ -84,6 +84,12 @@ pub struct EntityRenderInfo {
     pub relax_state_one_amount: f32,
     /// Rabbit hop keyframe clock, seconds since the hop started.
     pub hop_elapsed_secs: Option<f32>,
+    /// Equine grass-eat / rear-up / feeding springs, interpolated.
+    pub eat_anim: f32,
+    pub stand_anim: f32,
+    pub feeding_anim: f32,
+    /// Equine tail swish (client-local RNG counter).
+    pub animate_tail: bool,
     /// Base-model tint (wolf wet-shade grayscale); white for everyone else.
     pub base_tint: [f32; 4],
     /// Extra scale applied after the entity rotation (slime size + squish),
@@ -96,6 +102,58 @@ pub struct EntityRenderInfo {
     /// Skip frustum/distance culling (the 3rd-person self entity, which sits at
     /// the camera and must never blink out).
     pub skip_cull: bool,
+}
+
+/// Everything inert: mob-family animation inputs zeroed, no overlays, white
+/// tint. Construction sites spell out only the fields that apply to them.
+impl Default for EntityRenderInfo {
+    fn default() -> Self {
+        Self {
+            position: Position::new(0.0, 0.0, 0.0),
+            head_x_rot_deg: 0.0,
+            head_y_rot_deg: 0.0,
+            body_y_rot_deg: 0.0,
+            is_baby: false,
+            is_crouching: false,
+            walk_anim_pos: 0.0,
+            walk_anim_speed: 0.0,
+            entity_kind: EntityKind::Player,
+            player_uuid: None,
+            variant_index: 0,
+            overlay_tints: [None; MAX_OVERLAYS],
+            overlay_variants: [0; MAX_OVERLAYS],
+            is_unhappy: false,
+            head_y_offset: 0.0,
+            head_x_rot_deg_override: None,
+            has_red_overlay: false,
+            aggressive: false,
+            flap: 0.0,
+            flap_speed: 0.0,
+            is_creepy: false,
+            is_converting: false,
+            is_holding_item: false,
+            nose_wobble_speed: 0.0,
+            is_sitting: false,
+            is_sprinting: false,
+            is_angry: false,
+            tail_angle: 0.0,
+            head_roll_angle: 0.0,
+            shake_anim: 0.0,
+            lie_down_amount: 0.0,
+            lie_down_amount_tail: 0.0,
+            relax_state_one_amount: 0.0,
+            hop_elapsed_secs: None,
+            eat_anim: 0.0,
+            stand_anim: 0.0,
+            feeding_anim: 0.0,
+            animate_tail: false,
+            base_tint: WHITE_TINT,
+            body_transform: None,
+            age_in_ticks: 0.0,
+            attack_time: 0.0,
+            skip_cull: false,
+        }
+    }
 }
 
 /// How an overlay layer is blended. Base/baby variants are always `Opaque`.
@@ -332,6 +390,8 @@ enum AnimationType {
     /// Cat and ocelot (ocelots never set the pose inputs).
     Feline,
     Rabbit,
+    /// Horse family; the hook set is derived from (entity kind, is_baby).
+    Equine,
     /// No part animation (slime — size/squish live in the body transform).
     Static,
 }
@@ -474,6 +534,27 @@ fn mob_definitions() -> Vec<MobDef> {
         "rabbit_brown_baby", "rabbit_white_baby", "rabbit_black_baby",
         "rabbit_white_splotched_baby", "rabbit_gold_baby", "rabbit_salt_baby",
         "rabbit_caerbannog_baby", "rabbit_toast_baby");
+    // Horse variant_index = color id 0-6; markings overlay variant = id - 1.
+    const HORSE_TEX: &[&[&str]] = tex_table!("horse":
+        "horse_white", "horse_creamy", "horse_chestnut", "horse_brown", "horse_black",
+        "horse_gray", "horse_darkbrown");
+    const HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse":
+        "horse_white_baby", "horse_creamy_baby", "horse_chestnut_baby", "horse_brown_baby",
+        "horse_black_baby", "horse_gray_baby", "horse_darkbrown_baby");
+    const HORSE_MARKINGS_TEX: &[&[&str]] = tex_table!("horse":
+        "horse_markings_white", "horse_markings_whitefield", "horse_markings_whitedots",
+        "horse_markings_blackdots");
+    const HORSE_MARKINGS_BABY_TEX: &[&[&str]] = tex_table!("horse":
+        "horse_markings_white_baby", "horse_markings_whitefield_baby",
+        "horse_markings_whitedots_baby", "horse_markings_blackdots_baby");
+    const DONKEY_TEX: &[&[&str]] = tex_table!("horse": "donkey");
+    const DONKEY_BABY_TEX: &[&[&str]] = tex_table!("horse": "donkey_baby");
+    const MULE_TEX: &[&[&str]] = tex_table!("horse": "mule");
+    const MULE_BABY_TEX: &[&[&str]] = tex_table!("horse": "mule_baby");
+    const SKELETON_HORSE_TEX: &[&[&str]] = tex_table!("horse": "horse_skeleton");
+    const SKELETON_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse": "horse_skeleton_baby");
+    const ZOMBIE_HORSE_TEX: &[&[&str]] = tex_table!("horse": "horse_zombie");
+    const ZOMBIE_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse": "horse_zombie_baby");
     const SKELETON_TEX: &[&[&str]] = &[&["minecraft/textures/entity/skeleton/skeleton.png"]];
     const STRAY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/skeleton/stray.png"]];
     const STRAY_OVERLAY_TEX: &[&[&str]] =
@@ -916,6 +997,94 @@ fn mob_definitions() -> Vec<MobDef> {
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
+        // TODO: saddle and horse-armor equipment layers.
+        MobDef {
+            kind: EntityKind::Horse,
+            anim: AnimationType::Equine,
+            adult: vec![opaque(entity_model::bake_horse_model(), HORSE_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_horse_model(),
+                HORSE_BABY_TEX,
+                64,
+            )),
+            // Slot 0: markings (vanilla `entityTranslucent`), gated on
+            // markings != NONE.
+            adult_overlays: vec![VariantDef {
+                model: entity_model::bake_horse_model(),
+                tex_variants: HORSE_MARKINGS_TEX,
+                tex_size: 64,
+                overlay_kind: OverlayKind::BodyTranslucent,
+            }],
+            baby_overlays: vec![VariantDef {
+                model: entity_model::bake_baby_horse_model(),
+                tex_variants: HORSE_MARKINGS_BABY_TEX,
+                tex_size: 64,
+                overlay_kind: OverlayKind::BodyTranslucent,
+            }],
+        },
+        MobDef {
+            kind: EntityKind::Donkey,
+            anim: AnimationType::Equine,
+            // Variant 0 = no chest, 1 = chest.
+            adult: vec![
+                opaque(entity_model::bake_donkey_model(0.87, false), DONKEY_TEX, 64),
+                opaque(entity_model::bake_donkey_model(0.87, true), DONKEY_TEX, 64),
+            ],
+            baby: Some(opaque(
+                entity_model::bake_baby_donkey_model(),
+                DONKEY_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Mule,
+            anim: AnimationType::Equine,
+            adult: vec![
+                opaque(entity_model::bake_donkey_model(0.92, false), MULE_TEX, 64),
+                opaque(entity_model::bake_donkey_model(0.92, true), MULE_TEX, 64),
+            ],
+            baby: Some(opaque(
+                entity_model::bake_baby_donkey_model(),
+                MULE_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::SkeletonHorse,
+            anim: AnimationType::Equine,
+            adult: vec![opaque(
+                entity_model::bake_undead_horse_model(),
+                SKELETON_HORSE_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_horse_model(),
+                SKELETON_HORSE_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::ZombieHorse,
+            anim: AnimationType::Equine,
+            adult: vec![opaque(
+                entity_model::bake_undead_horse_model(),
+                ZOMBIE_HORSE_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_horse_model(),
+                ZOMBIE_HORSE_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
     ]
 }
 
@@ -1343,6 +1512,27 @@ impl EntityRenderer {
                 local_head_y,
                 info.hop_elapsed_secs,
                 info.is_baby,
+            ),
+            AnimationType::Equine => entity_model::compute_equine_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.age_in_ticks,
+                &entity_model::EquineAnimInputs {
+                    kind: if !info.is_baby {
+                        entity_model::EquineKind::Adult
+                    } else if matches!(info.entity_kind, EntityKind::Donkey | EntityKind::Mule) {
+                        entity_model::EquineKind::BabyDonkey
+                    } else {
+                        entity_model::EquineKind::BabyHorse
+                    },
+                    eat_anim: info.eat_anim,
+                    stand_anim: info.stand_anim,
+                    feeding_anim: info.feeding_anim,
+                    animate_tail: info.animate_tail,
+                },
             ),
             AnimationType::Static => entity_model::PartAnim::default(),
         }
@@ -1827,6 +2017,16 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         // Vanilla Rabbit.BABY_DIMENSIONS: explicit 0.24x0.4, not half scale.
         EntityKind::Rabbit if is_baby => return (0.24, 0.4),
         EntityKind::Rabbit => (0.49, 0.6),
+        // Vanilla horse babies scale 0.7 (Horse.BABY_DIMENSIONS), not 0.5;
+        // donkey/mule babies are the generic half scale.
+        EntityKind::Horse | EntityKind::SkeletonHorse | EntityKind::ZombieHorse if is_baby => {
+            return (1.3964844 * 0.7, 1.6 * 0.7);
+        }
+        EntityKind::Horse
+        | EntityKind::Mule
+        | EntityKind::SkeletonHorse
+        | EntityKind::ZombieHorse => (1.3964844, 1.6),
+        EntityKind::Donkey => (1.3964844, 1.5),
         EntityKind::Player => (0.6, 1.8),
         _ => (1.0, 1.0),
     };

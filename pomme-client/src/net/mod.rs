@@ -361,6 +361,16 @@ pub enum NetworkEvent {
         id: i32,
         sprinting: bool,
     },
+    EquineFlags {
+        id: i32,
+        eating: bool,
+        standing: bool,
+        open_mouth: bool,
+    },
+    ChestedHorse {
+        id: i32,
+        chest: bool,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,

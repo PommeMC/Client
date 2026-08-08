@@ -2285,6 +2285,10 @@ pub fn update_game(
                     relax_state_one_amount: extras.relax_state_one_amount,
                     hop_elapsed_secs: extras.hop_elapsed_secs,
                     base_tint: extras.base_tint,
+                    eat_anim: extras.eat_anim,
+                    stand_anim: extras.stand_anim,
+                    feeding_anim: extras.feeding_anim,
+                    animate_tail: extras.animate_tail,
                     body_transform: extras.body_transform,
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
@@ -2311,7 +2315,6 @@ pub fn update_game(
             head_y_rot_deg: interp_y_rot_deg,
             head_x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
             body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
-            is_baby: false,
             is_crouching: game.player.crouching,
             walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
@@ -2319,35 +2322,8 @@ pub fn update_game(
                 .min(1.0),
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
-            variant_index: 0,
-            overlay_tints: [None; MAX_OVERLAYS],
-            overlay_variants: [0; MAX_OVERLAYS],
-            is_unhappy: false,
-            head_y_offset: 0.0,
-            head_x_rot_deg_override: None,
-            has_red_overlay: false,
-            aggressive: false,
-            flap: 0.0,
-            flap_speed: 0.0,
-            is_creepy: false,
-            is_converting: false,
-            is_holding_item: false,
-            nose_wobble_speed: 0.0,
-            is_sitting: false,
-            is_sprinting: false,
-            is_angry: false,
-            tail_angle: 0.0,
-            head_roll_angle: 0.0,
-            shake_anim: 0.0,
-            lie_down_amount: 0.0,
-            lie_down_amount_tail: 0.0,
-            relax_state_one_amount: 0.0,
-            hop_elapsed_secs: None,
-            base_tint: WHITE_TINT,
-            body_transform: None,
-            age_in_ticks: 0.0,
-            attack_time: 0.0,
             skip_cull: true,
+            ..Default::default()
         });
     }
 
@@ -2830,6 +2806,10 @@ struct EntityExtras {
     relax_state_one_amount: f32,
     hop_elapsed_secs: Option<f32>,
     base_tint: [f32; 4],
+    eat_anim: f32,
+    stand_anim: f32,
+    feeding_anim: f32,
+    animate_tail: bool,
 }
 
 /// Manual impl because `base_tint` defaults to white, not zero.
@@ -2855,6 +2835,10 @@ impl Default for EntityExtras {
             relax_state_one_amount: 0.0,
             hop_elapsed_secs: None,
             base_tint: WHITE_TINT,
+            eat_anim: 0.0,
+            stand_anim: 0.0,
+            feeding_anim: 0.0,
+            animate_tail: false,
         }
     }
 }
@@ -2922,6 +2906,25 @@ fn entity_extras(
         },
         EntityKind::Wolf => wolf_extras(e, alpha, game_time),
         EntityKind::Cat => cat_extras(e, alpha),
+        EntityKind::Horse => {
+            let markings = (e.variant >> 8) & 0xFF;
+            EntityExtras {
+                variant_index: e.variant & 0xFF,
+                // Markings slot; id 0 = NONE draws nothing.
+                overlay_tints: if markings != 0 {
+                    SLOT0_TINTS
+                } else {
+                    [None; MAX_OVERLAYS]
+                },
+                overlay_variants: [markings.saturating_sub(1), 0, 0, 0],
+                ..equine_extras(e, alpha)
+            }
+        }
+        EntityKind::Donkey | EntityKind::Mule => EntityExtras {
+            variant_index: e.has_chest as u32,
+            ..equine_extras(e, alpha)
+        },
+        EntityKind::SkeletonHorse | EntityKind::ZombieHorse => equine_extras(e, alpha),
         EntityKind::Rabbit => EntityExtras {
             // "Toast" overrides the variant texture (slot 7).
             variant_index: if e.custom_name.as_deref() == Some("Toast") {
@@ -2954,6 +2957,16 @@ fn slime_body_transform(e: &crate::entity::LivingEntity, alpha: f32) -> glam::Ma
     glam::Mat4::from_scale(glam::Vec3::splat(0.999))
         * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.001, 0.0))
         * glam::Mat4::from_scale(glam::Vec3::new(w * size, size / w, w * size))
+}
+
+fn equine_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    EntityExtras {
+        eat_anim: e.prev_eat_anim + (e.eat_anim - e.prev_eat_anim) * alpha,
+        stand_anim: e.prev_stand_anim + (e.stand_anim - e.prev_stand_anim) * alpha,
+        feeding_anim: e.prev_mouth_anim + (e.mouth_anim - e.prev_mouth_anim) * alpha,
+        animate_tail: e.tail_swishing(),
+        ..Default::default()
+    }
 }
 
 /// Wolf texture state (`variant_index = variant * 3 + state`, tame > angry >
