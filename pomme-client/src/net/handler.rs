@@ -934,26 +934,24 @@ fn chicken_variant_index(registry_holder: &RegistryHolder, protocol_id: u32) -> 
             .position(|p| *p == name)
             .map(|i| i as u32)
     };
+    let nbt_string = |name: &str| nbt.string(name).map(|s| s.to_str().into_owned());
     if let Some(i) = order_pos(ident.path()) {
         return i;
     }
-    if let Some(asset) = nbt.string("asset_id").map(|s| s.to_str().into_owned())
-        && let Some(i) = CHICKEN_VARIANT_ORDER
-            .iter()
-            .position(|p| {
-                asset.strip_prefix("minecraft:").unwrap_or(asset.as_str())
-                    == format!("entity/chicken/chicken_{p}")
-            })
-            .map(|i| i as u32)
+    if let Some(i) = nbt_string("asset_id")
+        .and_then(|asset| {
+            asset
+                .strip_prefix("minecraft:")
+                .unwrap_or(&asset)
+                .strip_prefix("entity/chicken/chicken_")
+                .map(str::to_owned)
+        })
+        .and_then(|suffix| order_pos(&suffix))
     {
         return i;
     }
     // "normal" is the codec default when the model field is absent.
-    match nbt
-        .string("model")
-        .map(|s| s.to_str().into_owned())
-        .as_deref()
-    {
+    match nbt_string("model").as_deref() {
         Some("cold") => order_pos("cold").unwrap_or(0),
         _ => 0,
     }

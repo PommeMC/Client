@@ -234,6 +234,13 @@ impl LivingEntity {
         self.interp_steps = INTERPOLATION_STEPS;
     }
 
+    /// Extends any in-flight position lerp instead of re-targeting it
+    /// (vanilla `moveOrInterpolateTo` rotation overloads).
+    fn interpolate_to_rotation(&mut self, y_rot_deg: f32, x_rot_deg: f32) {
+        self.interp_look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
+        self.interp_steps = self.interp_steps.max(INTERPOLATION_STEPS);
+    }
+
     pub fn tick_interpolation(&mut self) {
         self.prev_position = self.position;
         self.prev_look_dir = self.look_dir;
@@ -1049,19 +1056,15 @@ impl EntityStore {
 
     pub fn update_living_rotation(&mut self, id: i32, y_rot_deg: f32, x_rot_deg: f32) {
         if let Some(entity) = self.living.get_mut(&id) {
-            entity.interp_look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
-            entity.interp_steps = entity.interp_steps.max(INTERPOLATION_STEPS);
+            entity.interpolate_to_rotation(y_rot_deg, x_rot_deg);
         }
     }
 
-    /// Rotation-only movement (`MoveEntityRot`): vanilla applies the new
-    /// rotation via `moveOrInterpolateTo` and sets onGround; position
-    /// interpolation is untouched (extending an in-flight lerp matches the
-    /// `EntityMovedRotated` convention rather than vanilla's fixed re-target).
+    /// Rotation-only movement (`MoveEntityRot`): rotation plus onGround,
+    /// position interpolation untouched.
     pub fn rotate_living(&mut self, id: i32, y_rot_deg: f32, x_rot_deg: f32, on_ground: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
-            entity.interp_look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
-            entity.interp_steps = entity.interp_steps.max(INTERPOLATION_STEPS);
+            entity.interpolate_to_rotation(y_rot_deg, x_rot_deg);
             entity.on_ground = on_ground;
         }
     }
