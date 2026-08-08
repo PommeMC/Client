@@ -495,24 +495,22 @@ pub fn handle_game_packet(
                 if item.index == 18
                     && let azalea_entity::EntityDataValue::CowVariant(variant) = &item.value
                 {
-                    use azalea_registry::DataRegistry;
                     let _ = event_tx.try_send(variant_event(
                         registry_holder,
                         p.id.0,
                         EntityKind::Cow,
-                        variant.protocol_id(),
+                        variant,
                     ));
                 }
                 // Index 18 on chickens = ChickenVariant Holder.
                 if item.index == 18
                     && let azalea_entity::EntityDataValue::ChickenVariant(variant) = &item.value
                 {
-                    use azalea_registry::DataRegistry;
                     let _ = event_tx.try_send(variant_event(
                         registry_holder,
                         p.id.0,
                         EntityKind::Chicken,
-                        variant.protocol_id(),
+                        variant,
                     ));
                 }
                 // Index 19 on villagers / 20 on zombie villagers = VillagerData
@@ -725,12 +723,12 @@ fn variant_event(
     registry_holder: &RegistryHolder,
     id: i32,
     kind: EntityKind,
-    protocol_id: u32,
+    holder: &impl azalea_registry::DataRegistry,
 ) -> NetworkEvent {
     NetworkEvent::EntityVariant {
         id,
         kind,
-        variant: variant_index(registry_holder, kind, protocol_id),
+        variant: variant_index(registry_holder, kind, holder.protocol_id()),
     }
 }
 
