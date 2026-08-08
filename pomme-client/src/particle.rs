@@ -567,7 +567,7 @@ impl ParticleStore {
 
 /// `java.util.Random.nextGaussian` (Marsaglia polar method), minus the
 /// second-sample cache.
-fn next_gaussian() -> f64 {
+pub(crate) fn next_gaussian() -> f64 {
     loop {
         let v1 = 2.0 * fastrand::f64() - 1.0;
         let v2 = 2.0 * fastrand::f64() - 1.0;

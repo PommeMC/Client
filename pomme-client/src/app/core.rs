@@ -1115,6 +1115,12 @@ impl AppCore {
                 NetworkEvent::EntityVariant { id, kind, variant } => {
                     game.entity_store.set_variant(id, kind, variant);
                 }
+                NetworkEvent::MobFlag { id, flag, value } => {
+                    game.entity_store.set_mob_flag(id, flag, value);
+                }
+                NetworkEvent::SlimeSize { id, size } => {
+                    game.entity_store.set_slime_size(id, size);
+                }
                 NetworkEvent::VillagerData {
                     id,
                     kind,
@@ -1135,9 +1141,6 @@ impl AppCore {
                 }
                 NetworkEvent::EntitySwing { id } => {
                     game.entity_store.start_swing(id);
-                }
-                NetworkEvent::CreeperPowered { id, powered } => {
-                    game.entity_store.set_powered(id, powered);
                 }
                 NetworkEvent::EntityDamaged { id } => {
                     game.entity_store.mark_hurt(id);
