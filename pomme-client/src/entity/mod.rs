@@ -40,7 +40,15 @@ pub struct LivingEntity {
     pub on_ground: bool,
     pub wool_color: Option<u8>,
     pub is_sheared: bool,
-    pub cow_variant: u8,
+    /// Registry/wire variant slot; meaning is per-kind (pool index for
+    /// cow/chicken). Normalized in `EntityStore::set_variant`.
+    pub variant: u32,
+    /// Chicken wing-flap state (vanilla `Chicken.aiStep`): `flap` is the
+    /// unbounded wing-cycle phase, `flap_speed` the 0..1 amplitude.
+    pub flap: f32,
+    pub prev_flap: f32,
+    pub flap_speed: f32,
+    pub prev_flap_speed: f32,
     pub villager_kind: VillagerKind,
     pub villager_profession: VillagerProfession,
     pub villager_level: u32,
@@ -61,6 +69,8 @@ pub struct LivingEntity {
     /// (driven by the server `Animate` packet). Drives the zombie attack
     /// swing.
     pub swing_time: u8,
+    /// Chicken `flapping` decay factor.
+    flapping: f32,
     interp_target: Position,
     interp_look_dir: LookDirection,
     interp_steps: i32,
@@ -93,10 +103,16 @@ impl LivingEntity {
             prev_walk_anim_speed: 0.0,
             is_baby: false,
             is_crouching: false,
-            on_ground: false,
+            // Spawn grounded: on_ground is packet-driven and a stationary
+            // entity gets no movement packet for up to 60 ticks.
+            on_ground: true,
             wool_color: None,
             is_sheared: false,
-            cow_variant: 0,
+            variant: 0,
+            flap: 0.0,
+            prev_flap: 0.0,
+            flap_speed: 0.0,
+            prev_flap_speed: 0.0,
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
             villager_level: 0,
@@ -109,6 +125,7 @@ impl LivingEntity {
             aggressive: false,
             powered: false,
             swing_time: 0,
+            flapping: 1.0,
             interp_target: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
@@ -161,6 +178,29 @@ impl LivingEntity {
     pub fn swing_progress(&self, partial: f32) -> f32 {
         ((SWING_DURATION as f32 - self.swing_time as f32 + partial) / SWING_DURATION as f32)
             .clamp(0.0, 1.0)
+    }
+
+    /// Vanilla `Chicken.aiStep` wing flap; the update order matters.
+    fn tick_flap(&mut self) {
+        self.prev_flap = self.flap;
+        self.prev_flap_speed = self.flap_speed;
+        let delta = if self.on_ground { -0.3 } else { 1.2 };
+        self.flap_speed = (self.flap_speed + delta).clamp(0.0, 1.0);
+        if !self.on_ground && self.flapping < 1.0 {
+            self.flapping = 1.0;
+        }
+        self.flapping *= 0.9;
+        self.flap += self.flapping * 2.0;
+    }
+
+    /// Per-kind per-tick animation state (the kind-specific tail of vanilla
+    /// `aiStep`); arms accrue as mobs land.
+    fn tick_kind_anims(&mut self) {
+        #[allow(clippy::single_match)]
+        match self.entity_type {
+            EntityKind::Chicken => self.tick_flap(),
+            _ => {}
+        }
     }
 
     pub fn tick_body_rotation(&mut self) {
@@ -520,16 +560,18 @@ impl EntityStore {
         );
     }
 
-    pub fn move_living_delta(&mut self, id: i32, dx: f64, dy: f64, dz: f64) {
+    pub fn move_living_delta(&mut self, id: i32, dx: f64, dy: f64, dz: f64, on_ground: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             let target = entity.interp_target + DVec3::new(dx, dy, dz);
             entity.interpolate_to_pos(target);
+            entity.on_ground = on_ground;
         }
     }
 
-    pub fn teleport_living(&mut self, id: i32, position: Position) {
+    pub fn teleport_living(&mut self, id: i32, position: Position, on_ground: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.interpolate_to_pos(position);
+            entity.on_ground = on_ground;
         }
     }
 
@@ -554,11 +596,14 @@ impl EntityStore {
         }
     }
 
-    pub fn set_cow_variant(&mut self, id: i32, variant: u8) {
+    /// `kind` is the mob the emitting handler arm resolved the value for;
+    /// metadata indices are overloaded across kinds, so a mismatched entity
+    /// ignores the write.
+    pub fn set_variant(&mut self, id: i32, kind: EntityKind, raw: u32) {
         if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Cow
+            && entity.entity_type == kind
         {
-            entity.cow_variant = variant;
+            entity.variant = raw;
         }
     }
 
@@ -633,10 +678,14 @@ impl EntityStore {
         }
     }
 
-    pub fn update_living_rotation(&mut self, id: i32, y_rot_deg: f32, x_rot_deg: f32) {
+    /// Rotation half of any movement packet: rotation plus onGround. Extends
+    /// any in-flight position lerp instead of re-targeting it (vanilla
+    /// `moveOrInterpolateTo` rotation overloads).
+    pub fn rotate_living(&mut self, id: i32, y_rot_deg: f32, x_rot_deg: f32, on_ground: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.interp_look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
             entity.interp_steps = entity.interp_steps.max(INTERPOLATION_STEPS);
+            entity.on_ground = on_ground;
         }
     }
 
@@ -674,6 +723,7 @@ impl EntityStore {
                 &mut entity.walk_anim_speed,
                 &mut entity.prev_walk_anim_speed,
             );
+            entity.tick_kind_anims();
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
             if entity.eat_anim_tick > 0 {
                 entity.eat_anim_tick -= 1;

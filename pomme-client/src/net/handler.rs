@@ -2,12 +2,14 @@ use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::position::ChunkPos;
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
+use azalea_registry::builtin::EntityKind;
 use crossbeam_channel::Sender;
 
 use super::NetworkEvent;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::components::Position;
+use crate::renderer::pipelines::entity_renderer::{CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER};
 use crate::ui::text::format_text_spans;
 
 /// Dimension info from a login/respawn registry entry. `has_skylight` lives
@@ -379,6 +381,15 @@ pub fn handle_game_packet(
                 on_ground: p.on_ground,
             });
         }
+        ClientboundGamePacket::MoveEntityRot(p) => {
+            let look: azalea_entity::LookDirection = p.look_direction.into();
+            let _ = event_tx.try_send(NetworkEvent::EntityRotated {
+                id: p.entity_id.0,
+                y_rot_deg: look.y_rot(),
+                x_rot_deg: look.x_rot(),
+                on_ground: p.on_ground,
+            });
+        }
         ClientboundGamePacket::TeleportEntity(p) => {
             let delta = p.change.delta;
             let _ = event_tx.try_send(NetworkEvent::EntityTeleported {
@@ -502,22 +513,24 @@ pub fn handle_game_packet(
                     && let azalea_entity::EntityDataValue::CowVariant(variant) = &item.value
                 {
                     use azalea_registry::DataRegistry;
-                    let resolved = registry_holder
-                        .protocol_id_to_identifier(
-                            azalea_registry::identifier::Identifier::new("minecraft:cow_variant"),
-                            variant.protocol_id(),
-                        )
-                        .map(|id| match id.path() {
-                            "temperate" => 0u8,
-                            "cold" => 1,
-                            "warm" => 2,
-                            _ => 0,
-                        })
-                        .unwrap_or(0);
-                    let _ = event_tx.try_send(NetworkEvent::CowVariant {
-                        id: p.id.0,
-                        variant: resolved,
-                    });
+                    let _ = event_tx.try_send(variant_event(
+                        registry_holder,
+                        p.id.0,
+                        EntityKind::Cow,
+                        variant.protocol_id(),
+                    ));
+                }
+                // Index 18 on chickens = ChickenVariant Holder.
+                if item.index == 18
+                    && let azalea_entity::EntityDataValue::ChickenVariant(variant) = &item.value
+                {
+                    use azalea_registry::DataRegistry;
+                    let _ = event_tx.try_send(variant_event(
+                        registry_holder,
+                        p.id.0,
+                        EntityKind::Chicken,
+                        variant.protocol_id(),
+                    ));
                 }
                 // Index 18 on villagers = unhappy counter (head-shake while > 0).
                 // Emit unconditionally; consumer filters by entity type.
@@ -684,6 +697,67 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedTe
     let text: String = spans.iter().map(|s| s.text.as_str()).collect();
     tracing::info!("Chat: {text}");
     let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
+}
+
+/// Resolves a variant registry holder id to the mob's renderer pool slot.
+/// Matches vanilla, which reads the entry's synced NBT and never the registry
+/// id: a known `asset_id` picks the exact slot, else the `model` field picks
+/// the mesh (its values name slots; absent means "normal" = slot 0), else the
+/// registry path as a last resort for entries synced without NBT.
+fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id: u32) -> u32 {
+    let (registry, order, asset_prefix) = match kind {
+        EntityKind::Cow => (
+            "minecraft:cow_variant",
+            COW_VARIANT_ORDER,
+            "entity/cow/cow_",
+        ),
+        EntityKind::Chicken => (
+            "minecraft:chicken_variant",
+            CHICKEN_VARIANT_ORDER,
+            "entity/chicken/chicken_",
+        ),
+        _ => return 0,
+    };
+    // Position == protocol id only holds because pomme answers
+    // SelectKnownPacks with an empty list (connection.rs), forcing the server
+    // to send NBT for every entry (azalea shift_removes NBT-less ones).
+    let Some((ident, nbt)) = registry_holder
+        .extra
+        .get(&azalea_registry::identifier::Identifier::new(registry))
+        .and_then(|r| r.map.get_index(protocol_id as usize))
+    else {
+        return 0;
+    };
+    let order_pos = |name: &str| order.iter().position(|p| *p == name).map(|i| i as u32);
+    if let Some(asset) = nbt.string("asset_id").map(|s| s.to_str())
+        && let Some(suffix) = asset
+            .strip_prefix("minecraft:")
+            .unwrap_or(&asset)
+            .strip_prefix(asset_prefix)
+        && let Some(i) = order_pos(suffix)
+    {
+        return i;
+    }
+    if let Some(model) = nbt.string("model").map(|s| s.to_str())
+        && let Some(i) = order_pos(&model)
+    {
+        return i;
+    }
+    order_pos(ident.path()).unwrap_or(0)
+}
+
+/// The kind-tagged variant event for a synced-registry holder value.
+fn variant_event(
+    registry_holder: &RegistryHolder,
+    id: i32,
+    kind: EntityKind,
+    protocol_id: u32,
+) -> NetworkEvent {
+    NetworkEvent::EntityVariant {
+        id,
+        kind,
+        variant: variant_index(registry_holder, kind, protocol_id),
+    }
 }
 
 fn lp_to_dvec3(v: &azalea_core::delta::LpVec3) -> glam::DVec3 {

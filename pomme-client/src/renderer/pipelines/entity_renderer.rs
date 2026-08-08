@@ -54,6 +54,9 @@ pub struct EntityRenderInfo {
     pub has_red_overlay: bool,
     /// Mob is targeting/attacking — raises zombie/skeleton arms.
     pub aggressive: bool,
+    /// Chicken wing-flap phase and 0..1 amplitude, interpolated.
+    pub flap: f32,
+    pub flap_speed: f32,
     /// Interpolated entity age in ticks; drives the undead idle arm bob.
     pub age_in_ticks: f32,
     /// Arm-swing progress 0..1; drives the zombie attack swing.
@@ -131,6 +134,22 @@ impl MobEntry {
 }
 
 pub const WHITE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// Registry-path order of each mob's flattened variant pool; the net handler
+/// resolves synced registry ids against these same slices, and the renderer
+/// constructor asserts the pools line up.
+pub const CHICKEN_VARIANT_ORDER: &[&str] = &["temperate", "warm", "cold"];
+pub const COW_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
+
+/// Pool length the `*_VARIANT_ORDER` slice implies for mobs whose variant
+/// index comes from a synced registry.
+fn expected_variant_count(kind: EntityKind) -> Option<usize> {
+    match kind {
+        EntityKind::Chicken => Some(CHICKEN_VARIANT_ORDER.len()),
+        EntityKind::Cow => Some(COW_VARIANT_ORDER.len()),
+        _ => None,
+    }
+}
 
 /// Vanilla `OverlayTexture` hurt pixel (ARGB 0xB2FF0000): rgb is the overlay
 /// color, `a` is how much of the base color survives the mix.
@@ -216,6 +235,7 @@ pub(super) enum BlendMode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AnimationType {
     Quadruped,
+    Chicken,
     Humanoid,
     Zombie,
     Skeleton,
@@ -259,6 +279,21 @@ fn mob_definitions() -> Vec<MobDef> {
         &["minecraft/textures/entity/cow/cow_temperate_baby.png"],
         &["minecraft/textures/entity/cow/cow_cold_baby.png"],
         &["minecraft/textures/entity/cow/cow_warm_baby.png"],
+    ];
+    // The two normal-mesh variants share one VariantDef, the cold mesh gets
+    // its own; the flattened pool follows CHICKEN_VARIANT_ORDER.
+    const CHICKEN_NORMAL_TEX: &[&[&str]] = &[
+        &[
+            "minecraft/textures/entity/chicken/chicken_temperate.png",
+            "minecraft/textures/entity/chicken.png",
+        ],
+        &["minecraft/textures/entity/chicken/chicken_warm.png"],
+    ];
+    const CHICKEN_COLD_TEX: &[&[&str]] = &[&["minecraft/textures/entity/chicken/chicken_cold.png"]];
+    const CHICKEN_BABY_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/chicken/chicken_temperate_baby.png"],
+        &["minecraft/textures/entity/chicken/chicken_warm_baby.png"],
+        &["minecraft/textures/entity/chicken/chicken_cold_baby.png"],
     ];
     const SHEEP_ADULT_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep.png"]];
     const SHEEP_BABY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep_baby.png"]];
@@ -359,6 +394,25 @@ fn mob_definitions() -> Vec<MobDef> {
                 entity_model::bake_baby_cow_model(),
                 COW_BABY_TEX,
                 64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Chicken,
+            anim: AnimationType::Chicken,
+            adult: vec![
+                opaque(entity_model::bake_chicken_model(), CHICKEN_NORMAL_TEX, 64),
+                opaque(
+                    entity_model::bake_cold_chicken_model(),
+                    CHICKEN_COLD_TEX,
+                    64,
+                ),
+            ],
+            baby: Some(opaque(
+                entity_model::bake_baby_chicken_model(),
+                CHICKEN_BABY_TEX,
+                16,
             )),
             adult_overlays: vec![],
             baby_overlays: vec![],
@@ -637,6 +691,23 @@ impl EntityRenderer {
                 assert_part_order_matches(baby, &baby_overlays);
             }
 
+            if let Some(n) = expected_variant_count(def.kind) {
+                assert_eq!(
+                    adult_variants.len(),
+                    n,
+                    "{:?} adult variant pool != variant order length",
+                    def.kind
+                );
+                if let Some(baby) = &baby_variants {
+                    assert_eq!(
+                        baby.len(),
+                        n,
+                        "{:?} baby variant pool != variant order length",
+                        def.kind
+                    );
+                }
+            }
+
             mobs.insert(
                 def.kind,
                 MobEntry {
@@ -807,6 +878,15 @@ impl EntityRenderer {
                 info.walk_anim_speed,
                 info.head_y_offset,
                 info.head_x_rot_deg_override,
+            ),
+            AnimationType::Chicken => entity_model::compute_chicken_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.flap,
+                info.flap_speed,
             ),
             AnimationType::Humanoid => entity_model::compute_humanoid_anim(
                 model,
@@ -1274,6 +1354,9 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
     let (w, h) = match kind {
         EntityKind::Pig => (0.9, 0.9),
         EntityKind::Cow => (0.9, 1.4),
+        // Vanilla Chicken.BABY_DIMENSIONS is an explicit 0.3x0.4, not half scale.
+        EntityKind::Chicken if is_baby => return (0.3, 0.4),
+        EntityKind::Chicken => (0.4, 0.7),
         EntityKind::Sheep => (0.9, 1.3),
         EntityKind::Zombie => (0.6, 1.95),
         EntityKind::Skeleton => (0.6, 1.99),

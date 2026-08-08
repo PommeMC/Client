@@ -2,6 +2,11 @@ use glam::{Mat4, Quat, Vec3};
 
 use super::chunk::mesher::ChunkVertex;
 
+/// Vanilla `EntityModel.MODEL_Y_OFFSET` (-1.501) in model pixels: re-bases the
+/// y-down ground plane (y=24) onto the y-up origin, with a 0.001-block lift so
+/// feet don't z-fight the block top.
+const MODEL_REBASE_Y: f32 = 24.016;
+
 #[derive(Clone, Copy)]
 pub struct ModelCube {
     pub origin: Vec3,
@@ -32,6 +37,16 @@ fn quadruped_legs(
         leg("right_front_leg", -leg_x, front_z, right_cube),
         leg("left_front_leg", leg_x, front_z, left_cube),
     ]
+}
+
+/// Mirror a cube's geometry across x=0 WITHOUT flipping UVs (e.g. chicken
+/// wings and legs share one un-mirrored texture — vanilla quirk). Pair with
+/// `mirror: true` where vanilla's `.mirror()` UV flip is also wanted.
+fn mirror_x_geom(c: ModelCube) -> ModelCube {
+    ModelCube {
+        origin: Vec3::new(-(c.origin.x + c.size.x), c.origin.y, c.origin.z),
+        ..c
+    }
 }
 
 #[derive(Clone)]
@@ -131,10 +146,13 @@ impl BakedEntityModel {
             let pivot = part.offset + extra_translation;
             let offset = match self.convention {
                 ModelConvention::EntityYDown => {
-                    // The +24 re-bases vanilla's y-down ground plane onto the
-                    // engine's y-up origin; child pivots are relative to their
-                    // parent (already re-based), so they only mirror.
-                    let rebase = if part.parent.is_some() { 0.0 } else { 24.0 };
+                    // Child pivots are relative to their parent (already
+                    // re-based), so they only mirror.
+                    let rebase = if part.parent.is_some() {
+                        0.0
+                    } else {
+                        MODEL_REBASE_Y
+                    };
                     Vec3::new(pivot.x, rebase - pivot.y, pivot.z)
                 }
                 ModelConvention::BlockYUp => pivot,
@@ -448,9 +466,8 @@ fn humanoid_parts(
     // Pomme's `mirror` flag only flips UVs, so mirror the geometry origin across
     // x=0 too (vanilla `.mirror()` does both, e.g. arm origin -3 -> -1).
     let mirror_x = |c: ModelCube| ModelCube {
-        origin: Vec3::new(-(c.origin.x + c.size.x), c.origin.y, c.origin.z),
         mirror: true,
-        ..c
+        ..mirror_x_geom(c)
     };
     let arm_cube_left = mirror_x(arm_cube_right);
     let leg_cube_left = mirror_x(leg_cube_right);
@@ -945,6 +962,117 @@ pub fn bake_baby_cow_model() -> BakedEntityModel {
     bake_model(parts, 64, 64)
 }
 
+/// Vanilla `AdultChickenModel.createBaseChickenModel()`. The beak and wattle
+/// are children with a zero pose in vanilla, so they fold into the head part.
+/// Legs share identical UVs and are not mirrored (vanilla quirk).
+fn chicken_parts() -> Vec<EntityPart> {
+    let leg = |name: &str, x: f32| {
+        vpart(
+            name,
+            None,
+            Vec3::new(x, 19.0, 1.0),
+            vec![vbox((26, 0), (-1.0, 0.0, -3.0), (3.0, 5.0, 3.0))],
+        )
+    };
+    let wing_cube = vbox((24, 13), (0.0, 0.0, -3.0), (1.0, 4.0, 6.0));
+    let wing = |name: &str, x: f32, cube: ModelCube| {
+        vpart(name, None, Vec3::new(x, 13.0, 0.0), vec![cube])
+    };
+    vec![
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, 15.0, -4.0),
+            vec![
+                vbox((0, 0), (-2.0, -6.0, -2.0), (4.0, 6.0, 3.0)),
+                // Beak.
+                vbox((14, 0), (-2.0, -4.0, -4.0), (4.0, 2.0, 2.0)),
+                // Wattle ("red_thing").
+                vbox((14, 4), (-1.0, -2.0, -3.0), (2.0, 2.0, 2.0)),
+            ],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+            ..vpart(
+                "body",
+                None,
+                Vec3::new(0.0, 16.0, 0.0),
+                vec![vbox((0, 9), (-3.0, -4.0, -3.0), (6.0, 8.0, 6.0))],
+            )
+        },
+        leg("right_leg", -2.0),
+        leg("left_leg", 1.0),
+        wing("right_wing", -4.0, wing_cube),
+        wing("left_wing", 4.0, mirror_x_geom(wing_cube)),
+    ]
+}
+
+pub fn bake_chicken_model() -> BakedEntityModel {
+    bake_model(chicken_parts(), 64, 32)
+}
+
+/// Vanilla `ColdChickenModel`: the base chicken plus a head crest and a
+/// zero-width tail-feather plane.
+pub fn bake_cold_chicken_model() -> BakedEntityModel {
+    let mut parts = chicken_parts();
+    // Head crest (its -2.015 z avoids z-fighting), then body tail feathers.
+    parts
+        .iter_mut()
+        .find(|p| p.name == "head")
+        .expect("chicken mesh has a head")
+        .cubes
+        .push(vbox((44, 0), (-3.0, -7.0, -2.015), (6.0, 3.0, 4.0)));
+    parts
+        .iter_mut()
+        .find(|p| p.name == "body")
+        .expect("chicken mesh has a body")
+        .cubes
+        .push(vbox((38, 9), (0.0, 3.0, -1.0), (0.0, 3.0, 5.0)));
+    bake_model(parts, 64, 32)
+}
+
+/// Vanilla `BabyChickenModel`: a wholly separate 16x16 mesh with the head
+/// fused into the body (so no head look). The wing pivots are X-flipped
+/// relative to the adult (vanilla quirk; the legs are not).
+pub fn bake_baby_chicken_model() -> BakedEntityModel {
+    let leg = |name: &str, x: f32, shin_uv: (u32, u32), foot_uv: (u32, u32)| {
+        vpart(
+            name,
+            None,
+            Vec3::new(x, 22.0, 0.5),
+            vec![
+                vbox(shin_uv, (-0.5, 0.0, 0.0), (1.0, 2.0, 0.0)),
+                vbox(foot_uv, (-0.5, 2.0, -1.0), (1.0, 0.0, 1.0)),
+            ],
+        )
+    };
+    let wing = |name: &str, x: f32, origin_x: f32, uv: (u32, u32)| {
+        vpart(
+            name,
+            None,
+            Vec3::new(x, 20.0, 0.0),
+            vec![vbox(uv, (origin_x, 0.0, -1.0), (1.0, 0.0, 2.0))],
+        )
+    };
+    let parts = vec![
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 20.25, -1.25),
+            vec![
+                vbox((0, 0), (-2.0, -2.25, -0.75), (4.0, 4.0, 4.0)),
+                // Beak.
+                vbox((10, 8), (-1.0, -0.25, -1.75), (2.0, 1.0, 1.0)),
+            ],
+        ),
+        leg("left_leg", 1.0, (2, 2), (0, 1)),
+        leg("right_leg", -1.0, (0, 2), (0, 0)),
+        wing("right_wing", 2.0, 0.0, (6, 8)),
+        wing("left_wing", -2.0, -1.0, (4, 8)),
+    ];
+    bake_model(parts, 16, 16)
+}
+
 pub fn bake_sheep_model() -> BakedEntityModel {
     let mut parts = vec![
         EntityPart {
@@ -1356,8 +1484,8 @@ pub fn bake_villager_model(no_hat: bool) -> BakedEntityModel {
     for part in &mut parts {
         let is_root = part.parent.is_none();
         if is_root {
-            part.offset =
-                part.offset * VILLAGER_SCALE + Vec3::new(0.0, 24.016 * (1.0 - VILLAGER_SCALE), 0.0);
+            part.offset = part.offset * VILLAGER_SCALE
+                + Vec3::new(0.0, MODEL_REBASE_Y * (1.0 - VILLAGER_SCALE), 0.0);
         }
         scales.push(if is_root { VILLAGER_SCALE } else { 1.0 });
     }
@@ -1471,6 +1599,38 @@ pub fn compute_quadruped_anim(
             anim.translation
                 .push((i, Vec3::new(0.0, head_y_offset, 0.0)));
         }
+        anim.rotation.push((i, rot));
+    }
+
+    anim
+}
+
+/// Chicken (`ChickenModel.setupAnim` + `AdultChickenModel.setupAnim`). The
+/// baby model has no head part, so its match arm never fires there (vanilla
+/// babies don't turn their heads either).
+pub fn compute_chicken_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    flap: f32,
+    flap_speed: f32,
+) -> PartAnim {
+    let mut anim = PartAnim::default();
+    let flap_angle = (flap.sin() + 1.0) * flap_speed;
+    // The negation is vanilla's `+ PI` leg phase: cos(x + PI) = -cos(x).
+    let leg_swing = (walk_pos * 0.6662).cos() * 1.4 * walk_speed;
+
+    for (i, part) in model.parts.iter().enumerate() {
+        let rot = match part.name.as_str() {
+            "head" => head_rotation(head_x_rot_deg, local_head_y_rot_deg),
+            "right_leg" => Vec3::new(leg_swing, 0.0, 0.0),
+            "left_leg" => Vec3::new(-leg_swing, 0.0, 0.0),
+            "right_wing" => Vec3::new(0.0, 0.0, flap_angle),
+            "left_wing" => Vec3::new(0.0, 0.0, -flap_angle),
+            _ => continue,
+        };
         anim.rotation.push((i, rot));
     }
 
