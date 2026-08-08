@@ -220,9 +220,10 @@ pub struct GameState {
     pub vis_mask: HashMap<ChunkPos, u32>,
     /// Per-section generation for edits only (bulk uses the column
     /// `content_gen` above). Bumped per edited section so a result is
-    /// dropped only when *that* section was edited again — editing one
-    /// section never invalidates a sibling section's in-flight result.
-    /// Sections meshed together as one edit span share one gen value.
+    /// dropped only when *that* section was edited again ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â
+    /// editing one section never invalidates a sibling section's in-flight
+    /// result. Sections meshed together as one edit span share one gen
+    /// value.
     pub section_gen: HashMap<(ChunkPos, i32), u64>,
     pub next_section_gen: u64,
     /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
@@ -237,8 +238,9 @@ pub struct GameState {
     /// overlay reads it now.
     pub vis_tiers: HashMap<ChunkPos, u8>,
     pub vis_valid: bool,
-    /// Camera 8-block bucket that last triggered an occlusion walk — movement,
-    /// not rotation, drives recomputes (vanilla's cadence).
+    /// Camera 8-block bucket that last triggered an occlusion walk
+    /// ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â movement, not rotation, drives recomputes
+    /// (vanilla's cadence).
     pub last_vis_cam: (i32, i32, i32),
     /// In-flight async occlusion walk; its result is applied a few frames
     /// later.
@@ -848,9 +850,10 @@ impl GameState {
 
     /// Drive the cave-cull occlusion walk: apply a finished async walk to the
     /// per-column draw masks, then schedule the next one on 8-block camera
-    /// movement or chunk loads (one at a time, off the main thread — vanilla's
-    /// async, movement-gated cadence). The walk is rotation-independent;
-    /// frustum culling runs per-frame on the GPU.
+    /// movement or chunk loads (one at a time, off the main thread
+    /// ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â vanilla's async, movement-gated cadence). The
+    /// walk is rotation-independent; frustum culling runs per-frame on the
+    /// GPU.
     pub fn update_visibility(
         &mut self,
         renderer: &mut Renderer,
@@ -967,9 +970,9 @@ impl GameState {
 
     /// Enqueue every loaded column's not-yet-meshed sections (re-meshing the
     /// whole column on a lod/content change). Like vanilla, every section in
-    /// render distance meshes regardless of visibility — occlusion gates only
-    /// drawing — and the queue orders the backlog nearest-first. Runs every
-    /// frame to drain it.
+    /// render distance meshes regardless of visibility ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â
+    /// occlusion gates only drawing ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â and the queue orders
+    /// the backlog nearest-first. Runs every frame to drain it.
     pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos, chunk_detail: u32) {
         let n = self.chunk_store.section_count();
         let full = section_mask(n);
@@ -1044,7 +1047,8 @@ fn section_mask(n: i32) -> u32 {
 }
 
 /// Contiguous `(start, end)` index runs of set bits in `mask`, so a (usually
-/// contiguous) visible set enqueues as a few range jobs — one gather per run.
+/// contiguous) visible set enqueues as a few range jobs ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â one
+/// gather per run.
 fn contiguous_runs(mask: u32) -> Vec<(i32, i32)> {
     let mut runs = Vec::new();
     let mut i = 0i32;
@@ -1130,8 +1134,8 @@ fn apply_result_action(
 }
 
 /// Set the active render distance (the persisted menu value) and push it to the
-/// server — used by the chunk-load benchmark as it ramps the distance up and
-/// down.
+/// server ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â used by the chunk-load benchmark as it ramps the
+/// distance up and down.
 fn apply_render_distance(
     core: &mut AppCore,
     game: &mut GameState,
@@ -1563,8 +1567,8 @@ pub fn update_game(
         None
     };
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
-    // entities/player, held item, clouds, or weather — and skipping them also keeps
-    // the measured frame times honest.
+    // entities/player, held item, clouds, or weather ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â and
+    // skipping them also keeps the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
     if !benchmark_running && game.hide_gui {
         // F1: vanilla still renders the debug overlay with the GUI hidden.
@@ -2812,31 +2816,36 @@ struct EntityExtras {
     animate_tail: bool,
 }
 
-const EMPTY_EXTRAS: EntityExtras = EntityExtras {
-    variant_index: 0,
-    overlay_tints: [None; MAX_OVERLAYS],
-    overlay_variants: [0; MAX_OVERLAYS],
-    head_y_offset: 0.0,
-    head_x_rot_deg_override: None,
-    flap: 0.0,
-    flap_speed: 0.0,
-    body_transform: None,
-    render_offset: glam::DVec3::ZERO,
-    nose_wobble_speed: 0.0,
-    is_angry: false,
-    tail_angle: 0.0,
-    head_roll_angle: 0.0,
-    shake_anim: 0.0,
-    lie_down_amount: 0.0,
-    lie_down_amount_tail: 0.0,
-    relax_state_one_amount: 0.0,
-    hop_elapsed_secs: None,
-    base_tint: WHITE_TINT,
-    eat_anim: 0.0,
-    stand_anim: 0.0,
-    feeding_anim: 0.0,
-    animate_tail: false,
-};
+/// Manual impl because `base_tint` defaults to white, not zero.
+impl Default for EntityExtras {
+    fn default() -> Self {
+        Self {
+            variant_index: 0,
+            overlay_tints: [None; MAX_OVERLAYS],
+            overlay_variants: [0; MAX_OVERLAYS],
+            head_y_offset: 0.0,
+            head_x_rot_deg_override: None,
+            flap: 0.0,
+            flap_speed: 0.0,
+            body_transform: None,
+            render_offset: glam::DVec3::ZERO,
+            nose_wobble_speed: 0.0,
+            is_angry: false,
+            tail_angle: 0.0,
+            head_roll_angle: 0.0,
+            shake_anim: 0.0,
+            lie_down_amount: 0.0,
+            lie_down_amount_tail: 0.0,
+            relax_state_one_amount: 0.0,
+            hop_elapsed_secs: None,
+            base_tint: WHITE_TINT,
+            eat_anim: 0.0,
+            stand_anim: 0.0,
+            feeding_anim: 0.0,
+            animate_tail: false,
+        }
+    }
+}
 
 /// Only the first overlay slot visible, untinted.
 const SLOT0_TINTS: [Option<[f32; 4]>; MAX_OVERLAYS] = {
@@ -2853,14 +2862,14 @@ fn entity_extras(
 ) -> EntityExtras {
     match e.entity_type {
         EntityKind::Cow => EntityExtras {
-            variant_index: e.cow_variant as u32,
-            ..EMPTY_EXTRAS
+            variant_index: e.variant,
+            ..Default::default()
         },
         EntityKind::Chicken => EntityExtras {
-            variant_index: e.chicken_variant as u32,
-            flap: e.prev_flap + (e.flap - e.prev_flap) * alpha,
-            flap_speed: e.prev_flap_speed + (e.flap_speed - e.prev_flap_speed) * alpha,
-            ..EMPTY_EXTRAS
+            variant_index: e.variant,
+            flap: e.prev_flap.lerp(e.flap, alpha),
+            flap_speed: e.prev_flap_speed.lerp(e.flap_speed, alpha),
+            ..Default::default()
         },
         EntityKind::Sheep => sheep_extras(entity_id, e, alpha),
         EntityKind::Villager => villager_like_extras(e, &VILLAGER_TYPE_HAT),
@@ -2868,12 +2877,12 @@ fn entity_extras(
         EntityKind::Bogged => EntityExtras {
             overlay_tints: SLOT0_TINTS,
             variant_index: e.is_sheared as u32,
-            ..EMPTY_EXTRAS
+            ..Default::default()
         },
         // Always-visible slot-0 overlay (spider eyes, drowned/stray clothing).
         EntityKind::Spider | EntityKind::Drowned | EntityKind::Stray => EntityExtras {
             overlay_tints: SLOT0_TINTS,
-            ..EMPTY_EXTRAS
+            ..Default::default()
         },
         EntityKind::Enderman => EntityExtras {
             overlay_tints: SLOT0_TINTS,
@@ -2888,30 +2897,33 @@ fn entity_extras(
             } else {
                 glam::DVec3::ZERO
             },
-            ..EMPTY_EXTRAS
+            ..Default::default()
         },
         EntityKind::Slime => EntityExtras {
             overlay_tints: SLOT0_TINTS,
             body_transform: Some(slime_body_transform(e, alpha)),
-            ..EMPTY_EXTRAS
+            ..Default::default()
         },
         EntityKind::Witch => EntityExtras {
             nose_wobble_speed: 0.01 * (entity_id % 10) as f32,
-            ..EMPTY_EXTRAS
+            ..Default::default()
         },
         EntityKind::Wolf => wolf_extras(e, alpha, game_time),
         EntityKind::Cat => cat_extras(e, alpha),
-        EntityKind::Horse => EntityExtras {
-            variant_index: e.horse_color as u32,
-            // Markings slot; id 0 = NONE draws nothing.
-            overlay_tints: if e.horse_markings != 0 {
-                SLOT0_TINTS
-            } else {
-                [None; MAX_OVERLAYS]
-            },
-            overlay_variants: [e.horse_markings.saturating_sub(1) as u32, 0, 0, 0],
-            ..equine_extras(e, alpha)
-        },
+        EntityKind::Horse => {
+            let markings = (e.variant >> 8) & 0xFF;
+            EntityExtras {
+                variant_index: e.variant & 0xFF,
+                // Markings slot; id 0 = NONE draws nothing.
+                overlay_tints: if markings != 0 {
+                    SLOT0_TINTS
+                } else {
+                    [None; MAX_OVERLAYS]
+                },
+                overlay_variants: [markings.saturating_sub(1), 0, 0, 0],
+                ..equine_extras(e, alpha)
+            }
+        }
         EntityKind::Donkey | EntityKind::Mule => EntityExtras {
             variant_index: e.has_chest as u32,
             ..equine_extras(e, alpha)
@@ -2922,19 +2934,19 @@ fn entity_extras(
             variant_index: if e.custom_name.as_deref() == Some("Toast") {
                 7
             } else {
-                e.rabbit_variant as u32
+                e.variant
             },
             hop_elapsed_secs: e
                 .hop_anim_start
                 .map(|start| (e.age_in_ticks.wrapping_sub(start) as f32 + alpha) * 0.05),
-            ..EMPTY_EXTRAS
+            ..Default::default()
         },
         // Charged-creeper aura overlay (slot 0) only when powered.
         EntityKind::Creeper if e.powered => EntityExtras {
             overlay_tints: SLOT0_TINTS,
-            ..EMPTY_EXTRAS
+            ..Default::default()
         },
-        _ => EMPTY_EXTRAS,
+        _ => EntityExtras::default(),
     }
 }
 
@@ -2956,7 +2968,7 @@ fn equine_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
         stand_anim: e.prev_stand_anim + (e.stand_anim - e.prev_stand_anim) * alpha,
         feeding_anim: e.prev_mouth_anim + (e.mouth_anim - e.prev_mouth_anim) * alpha,
         animate_tail: e.tail_swishing(),
-        ..EMPTY_EXTRAS
+        ..Default::default()
     }
 }
 
@@ -2988,7 +3000,7 @@ fn wolf_extras(e: &crate::entity::LivingEntity, alpha: f32, game_time: i64) -> E
     }
     let wet = e.wet_shade(alpha);
     EntityExtras {
-        variant_index: e.wolf_variant as u32 * 3 + state,
+        variant_index: e.variant * 3 + state,
         overlay_tints,
         is_angry,
         tail_angle,
@@ -2998,7 +3010,7 @@ fn wolf_extras(e: &crate::entity::LivingEntity, alpha: f32, game_time: i64) -> E
             * PI,
         shake_anim: e.prev_shake_anim + (e.shake_anim - e.prev_shake_anim) * alpha,
         base_tint: [wet, wet, wet, 1.0],
-        ..EMPTY_EXTRAS
+        ..Default::default()
     }
 }
 
@@ -3016,7 +3028,7 @@ fn cat_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
             * glam::Mat4::from_rotation_z((90.0 * lie).to_radians())
     });
     EntityExtras {
-        variant_index: e.cat_variant as u32,
+        variant_index: e.variant,
         overlay_tints,
         lie_down_amount: lie,
         lie_down_amount_tail: e.prev_lie_down_amount_tail
@@ -3024,7 +3036,7 @@ fn cat_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
         relax_state_one_amount: e.prev_relax_state_one_amount
             + (e.relax_state_one_amount - e.prev_relax_state_one_amount) * alpha,
         body_transform,
-        ..EMPTY_EXTRAS
+        ..Default::default()
     }
 }
 
@@ -3062,14 +3074,15 @@ fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> 
         overlay_tints,
         head_y_offset,
         head_x_rot_deg_override,
-        ..EMPTY_EXTRAS
+        ..Default::default()
     }
 }
 
 /// Whether the type texture's built-in hat is fully or partially covered by
 /// the profession texture's own hat, per the `villager` sections of the
-/// `.png.mcmeta` files under `textures/entity/villager/` (hardcoded — no
-/// resource-pack support). 0 = none, 1 = partial, 2 = full.
+/// `.png.mcmeta` files under `textures/entity/villager/` (hardcoded
+/// ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no resource-pack support). 0 = none, 1 = partial, 2 =
+/// full.
 const VILLAGER_TYPE_HAT: [u8; 7] = [2, 0, 0, 0, 2, 0, 0]; // desert, snow = full
 // `zombie_villager/type/` ships no `.mcmeta` files at all.
 const ZOMBIE_VILLAGER_TYPE_HAT: [u8; 7] = [0; 7];
@@ -3123,7 +3136,7 @@ fn villager_like_extras(e: &crate::entity::LivingEntity, type_hat_table: &[u8; 7
             (profession as u32).saturating_sub(1),
             e.villager_level.clamp(1, 5) - 1,
         ],
-        ..EMPTY_EXTRAS
+        ..Default::default()
     }
 }
 
