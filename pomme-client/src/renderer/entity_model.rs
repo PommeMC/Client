@@ -159,15 +159,16 @@ impl BakedEntityModel {
             } / 16.0;
 
             // A quaternion override expresses the exact render-space orientation
-            // directly; otherwise use the per-axis euler product: the y-down
-            // convention needs the engine's mixed signs (-x, -y, +z), y-up
-            // matches vanilla's `translateAndRotate` ZYX order verbatim.
+            // directly; otherwise use vanilla's `translateAndRotate` ZYX euler
+            // product. The y-down convention conjugates it by the render-space
+            // flip (bake y-negate x matrix x-flip = vanilla `scale(-1,-1,1)`):
+            // x and y angles negate, z keeps its sign, order stays ZYX.
             let rot_mat = match (quat_rot, self.convention) {
                 (Some(q), _) => Mat4::from_quat(q),
                 (None, ModelConvention::EntityYDown) => {
-                    Mat4::from_rotation_x(-rot.x)
+                    Mat4::from_rotation_z(rot.z)
                         * Mat4::from_rotation_y(-rot.y)
-                        * Mat4::from_rotation_z(rot.z)
+                        * Mat4::from_rotation_x(-rot.x)
                 }
                 (None, ModelConvention::BlockYUp) => {
                     Mat4::from_rotation_z(rot.z)
@@ -254,7 +255,12 @@ pub fn bake_pig_model() -> BakedEntityModel {
         deformation: 0.0,
         mirror: false,
     };
-    parts.extend(quadruped_legs(3.0, 18.0, -5.0, 7.0, pig_leg, pig_leg));
+    // Vanilla `createBodyMesh(6, /*mirrorLeftLeg*/ true, false, g)`.
+    let pig_leg_left = ModelCube {
+        mirror: true,
+        ..pig_leg
+    };
+    parts.extend(quadruped_legs(3.0, 18.0, -5.0, 7.0, pig_leg, pig_leg_left));
     bake_model(parts, 64, 64)
 }
 
@@ -2238,16 +2244,18 @@ pub fn bake_sheep_model() -> BakedEntityModel {
             parent: None,
         },
     ];
-    let sheep_leg_right = ModelCube {
+    // Vanilla `createBodyMesh(12, false, /*mirrorRightLeg*/ true, ...)` —
+    // sheep mirror the RIGHT legs, not the left.
+    let sheep_leg_left = ModelCube {
         origin: Vec3::new(-2.0, 0.0, -2.0),
         size: Vec3::new(4.0, 12.0, 4.0),
         tex_offset: (0, 16),
         deformation: 0.0,
         mirror: false,
     };
-    let sheep_leg_left = ModelCube {
+    let sheep_leg_right = ModelCube {
         mirror: true,
-        ..sheep_leg_right
+        ..sheep_leg_left
     };
     parts.extend(quadruped_legs(
         3.0,
@@ -2374,25 +2382,15 @@ pub fn bake_sheep_wool_model() -> BakedEntityModel {
             parent: None,
         },
     ];
-    let wool_leg_right = ModelCube {
+    // Vanilla `SheepFurModel` shares one unmirrored cube across all four legs.
+    let wool_leg = ModelCube {
         origin: Vec3::new(-2.0, 0.0, -2.0),
         size: Vec3::new(4.0, 6.0, 4.0),
         tex_offset: (0, 16),
         deformation: 0.5,
         mirror: false,
     };
-    let wool_leg_left = ModelCube {
-        mirror: true,
-        ..wool_leg_right
-    };
-    parts.extend(quadruped_legs(
-        3.0,
-        12.0,
-        -5.0,
-        7.0,
-        wool_leg_right,
-        wool_leg_left,
-    ));
+    parts.extend(quadruped_legs(3.0, 12.0, -5.0, 7.0, wool_leg, wool_leg));
     bake_model(parts, 64, 32)
 }
 
@@ -2751,19 +2749,32 @@ pub fn bake_slime_outer_model() -> BakedEntityModel {
 /// its witch.png region is fully transparent, so its cubes are dropped.
 fn witch_parts() -> Vec<EntityPart> {
     let mut parts = villager_parts();
-    parts[1] = vpart(
+    let index_of = |parts: &[EntityPart], name: &str| {
+        parts
+            .iter()
+            .position(|p| p.name == name)
+            .unwrap_or_else(|| panic!("villager mesh has a {name}"))
+    };
+    let head = index_of(&parts, "head");
+    let hat = index_of(&parts, "hat");
+    let nose = index_of(&parts, "nose");
+    parts[hat] = vpart(
         "hat",
-        Some(0),
+        Some(head),
         Vec3::new(-5.0, -10.03125, -5.0),
         vec![vbox((0, 64), (0.0, 0.0, 0.0), (10.0, 2.0, 10.0))],
     );
-    parts[2].cubes.clear(); // hat_rim
+    let hat_rim = index_of(&parts, "hat_rim");
+    parts[hat_rim].cubes.clear();
+    // The cone stacks parent hat -> hat2 -> hat3 -> hat4; the appended parts
+    // land at indices n, n+1, n+2.
+    let n = parts.len();
     parts.extend([
         EntityPart {
             default_rotation: Vec3::new(-0.05235988, 0.0, 0.02617994),
             ..vpart(
                 "hat2",
-                Some(1),
+                Some(hat),
                 Vec3::new(1.75, -4.0, 2.0),
                 vec![vbox((0, 76), (0.0, 0.0, 0.0), (7.0, 4.0, 7.0))],
             )
@@ -2772,7 +2783,7 @@ fn witch_parts() -> Vec<EntityPart> {
             default_rotation: Vec3::new(-0.10471976, 0.0, 0.05235988),
             ..vpart(
                 "hat3",
-                Some(9),
+                Some(n),
                 Vec3::new(1.75, -4.0, 2.0),
                 vec![vbox((0, 87), (0.0, 0.0, 0.0), (4.0, 4.0, 4.0))],
             )
@@ -2781,7 +2792,7 @@ fn witch_parts() -> Vec<EntityPart> {
             default_rotation: Vec3::new(-0.20943952, 0.0, 0.10471976),
             ..vpart(
                 "hat4",
-                Some(10),
+                Some(n + 1),
                 Vec3::new(1.75, -2.0, 2.0),
                 vec![ModelCube {
                     deformation: 0.25,
@@ -2792,7 +2803,7 @@ fn witch_parts() -> Vec<EntityPart> {
         // The mole samples the unused top-left corner of the head texture.
         vpart(
             "mole",
-            Some(3),
+            Some(nose),
             Vec3::new(0.0, -2.0, 0.0),
             vec![ModelCube {
                 deformation: -0.25,
@@ -4266,54 +4277,72 @@ pub fn compute_equine_anim(
     anim
 }
 
-/// The four corner positions of each cube face, in render space (Y already
-/// flipped). Face order: 0 -Z, 1 +Z, 2 +Y, 3 -Y, 4 -X, 5 +X.
+/// The four corner positions of each cube face, ported from vanilla
+/// `ModelPart.Cube`: eight shared corners (`t*` on minZ, `l*` on maxZ) with
+/// model Y negated for the engine's y-up render space (the entity matrix
+/// supplies the X half of vanilla's `scale(-1,-1,1)`). Face order: 0 -Z,
+/// 1 +Z, 2 minY (rendered top), 3 maxY (rendered bottom), 4 -X, 5 +X —
+/// vanilla NORTH, SOUTH, DOWN, UP, WEST, EAST. `mirror` swaps the minX/maxX
+/// corner labels (vanilla's UV-only mirror; `push_face` also reverses the
+/// quad).
 fn cube_face_positions(cube: &ModelCube) -> [[[f32; 3]; 4]; 6] {
-    let w = cube.size.x;
-    let h = cube.size.y;
-    let d = cube.size.z;
-
     let inf = cube.deformation;
-    let x0 = (cube.origin.x - inf) / 16.0;
-    let y0 = (cube.origin.y - inf) / 16.0;
+    let mut x0 = (cube.origin.x - inf) / 16.0;
+    let mut x1 = (cube.origin.x + cube.size.x + inf) / 16.0;
+    let y0 = -((cube.origin.y - inf) / 16.0);
+    let y1 = -((cube.origin.y + cube.size.y + inf) / 16.0);
     let z0 = (cube.origin.z - inf) / 16.0;
-    let x1 = (cube.origin.x + w + inf) / 16.0;
-    let y1 = (cube.origin.y + h + inf) / 16.0;
-    let z1 = (cube.origin.z + d + inf) / 16.0;
-
-    let yb = -y1;
-    let yt = -y0;
-
+    let z1 = (cube.origin.z + cube.size.z + inf) / 16.0;
+    if cube.mirror {
+        std::mem::swap(&mut x0, &mut x1);
+    }
+    let t0 = [x0, y0, z0];
+    let t1 = [x1, y0, z0];
+    let t2 = [x1, y1, z0];
+    let t3 = [x0, y1, z0];
+    let l0 = [x0, y0, z1];
+    let l1 = [x1, y0, z1];
+    let l2 = [x1, y1, z1];
+    let l3 = [x0, y1, z1];
     [
-        [[x1, yb, z0], [x0, yb, z0], [x0, yt, z0], [x1, yt, z0]],
-        [[x0, yb, z1], [x1, yb, z1], [x1, yt, z1], [x0, yt, z1]],
-        [[x0, yt, z0], [x0, yt, z1], [x1, yt, z1], [x1, yt, z0]],
-        [[x0, yb, z1], [x0, yb, z0], [x1, yb, z0], [x1, yb, z1]],
-        [[x0, yb, z1], [x0, yb, z0], [x0, yt, z0], [x0, yt, z1]],
-        [[x1, yb, z0], [x1, yb, z1], [x1, yt, z1], [x1, yt, z0]],
+        [t1, t0, t3, t2],
+        [l0, l1, l2, l3],
+        [l1, l0, t0, t1],
+        [t2, t3, l3, l2],
+        [t0, l0, l3, t3],
+        [l1, t1, t2, l2],
     ]
 }
 
-/// Emit two triangles for one quad face, mapping the normalized UV rect onto
-/// its corners (`u_min`/`v_min` is the texture's top-left).
+/// Emit one quad as two triangles with vanilla `ModelPart.Polygon` UV
+/// corners: vertex 0 gets `(u1, v0)`, then `(u0, v0)`, `(u0, v1)`,
+/// `(u1, v1)` — the rect params are used as passed (the box unwrap hands the
+/// maxY face a V-reversed rect on purpose). `mirror` reverses the quad,
+/// completing vanilla's mirror alongside the corner swap in
+/// `cube_face_positions`.
 fn push_face(
     positions: &[[f32; 3]; 4],
-    u_min: f32,
-    u_max: f32,
-    v_min: f32,
-    v_max: f32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    mirror: bool,
     vertices: &mut Vec<ChunkVertex>,
 ) {
-    let uvs = [
-        [u_min, v_max],
-        [u_max, v_max],
-        [u_max, v_min],
-        [u_min, v_min],
+    let mut corners = [
+        (positions[0], [u1, v0]),
+        (positions[1], [u0, v0]),
+        (positions[2], [u0, v1]),
+        (positions[3], [u1, v1]),
     ];
+    if mirror {
+        corners.reverse();
+    }
     for &i in &[0usize, 1, 2, 0, 2, 3] {
+        let (position, uv) = corners[i];
         vertices.push(ChunkVertex {
-            position: positions[i],
-            tex_coords: crate::renderer::chunk::mesher::pack_uv(uvs[i][0], uvs[i][1]),
+            position,
+            tex_coords: crate::renderer::chunk::mesher::pack_uv(uv[0], uv[1]),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
                 1.0,
                 crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
@@ -4330,47 +4359,42 @@ fn generate_cube_vertices(
 ) {
     let tw = tex_w as f32;
     let th = tex_h as f32;
-    let u0 = cube.tex_offset.0 as f32;
-    let v0 = cube.tex_offset.1 as f32;
+    let u = cube.tex_offset.0 as f32;
+    let v = cube.tex_offset.1 as f32;
     let w = cube.size.x;
     let h = cube.size.y;
     let d = cube.size.z;
 
-    // Entity box-unwrap UV rects, face order matching `cube_face_positions`.
+    // Vanilla box-unwrap rects (`ModelPart.Cube`), face order matching
+    // `cube_face_positions`, as `(u0, v0, u1, v1)` polygon params: the maxY
+    // face's V runs reversed, and its right edge is `u+d+2w`, not `u+2d+w`
+    // (they differ whenever w != d).
     let face_uv = [
-        [u0 + d, v0 + d, u0 + d + w, v0 + d + h],
-        [u0 + d + w + d, v0 + d, u0 + d + w + d + w, v0 + d + h],
-        [u0 + d, v0, u0 + d + w, v0 + d],
-        [u0 + d + w, v0, u0 + d + w + w, v0 + d],
-        [u0, v0 + d, u0 + d, v0 + d + h],
-        [u0 + d + w, v0 + d, u0 + d + w + d, v0 + d + h],
+        [u + d, v + d, u + d + w, v + d + h],
+        [u + 2.0 * d + w, v + d, u + 2.0 * d + 2.0 * w, v + d + h],
+        [u + d, v, u + d + w, v + d],
+        [u + d + w, v + d, u + d + 2.0 * w, v],
+        [u, v + d, u + d, v + d + h],
+        [u + d + w, v + d, u + 2.0 * d + w, v + d + h],
     ];
 
     let positions = cube_face_positions(cube);
-
-    // Indices 4 (-X) and 5 (+X) are the side faces. When mirror is set, vanilla's
-    // minX/maxX swap effectively exchanges their UV regions; every face also has
-    // its U flipped.
-    for (idx, pos) in positions.iter().enumerate() {
-        let src = match (cube.mirror, idx) {
-            (true, 4) => &face_uv[5],
-            (true, 5) => &face_uv[4],
-            _ => &face_uv[idx],
-        };
-        let v_min = src[1] / th;
-        let v_max = src[3] / th;
-        let (u_min, u_max) = if cube.mirror {
-            (src[2] / tw, src[0] / tw)
-        } else {
-            (src[0] / tw, src[2] / tw)
-        };
-        push_face(pos, u_min, u_max, v_min, v_max, vertices);
+    for (pos, uv) in positions.iter().zip(&face_uv) {
+        push_face(
+            pos,
+            uv[0] / tw,
+            uv[1] / th,
+            uv[2] / tw,
+            uv[3] / th,
+            cube.mirror,
+            vertices,
+        );
     }
 }
 
 /// Like [`generate_cube_vertices`] but with explicit per-face UV rects (face
-/// order -Z, +Z, +Y, -Y, -X, +X) instead of the entity box-unwrap, for block
-/// models whose texture layout isn't a box-unwrap (e.g. signs).
+/// order -Z, +Z, minY, maxY, -X, +X) instead of the entity box-unwrap, for
+/// block models whose texture layout isn't a box-unwrap (e.g. signs).
 pub(crate) fn generate_cube_vertices_faces(
     cube: &ModelCube,
     face_uvs: &[[f32; 4]; 6],
@@ -4385,9 +4409,10 @@ pub(crate) fn generate_cube_vertices_faces(
         push_face(
             pos,
             uv[0] / tw,
-            uv[2] / tw,
             uv[1] / th,
+            uv[2] / tw,
             uv[3] / th,
+            cube.mirror,
             vertices,
         );
     }
