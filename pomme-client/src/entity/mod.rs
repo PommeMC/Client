@@ -77,10 +77,9 @@ pub struct LivingEntity {
     pub wool_color: Option<u8>,
     /// Sheep wool shorn / bogged mushrooms shorn.
     pub is_sheared: bool,
-    /// Registry/wire variant slot; meaning is per-kind (pool index for
-    /// cow/chicken/wolf/cat, packed `color | markings << 8` for horse, raw
-    /// vanilla int for rabbit/salmon/tropical fish). Normalized in
-    /// `EntityStore::set_variant`.
+    /// Registry/wire variant slot; meaning is per-kind. Holder-backed values
+    /// are pre-resolved to pool indices by the net handler; raw-int kinds are
+    /// normalized in `EntityStore::apply_entity_data`.
     pub variant: u32,
     /// Chicken wing-flap state (vanilla `Chicken.aiStep`): `flap` is the
     /// unbounded wing-cycle phase, `flap_speed` the 0..1 amplitude.
@@ -1017,10 +1016,8 @@ impl EntityStore {
             (EntityKind::Enderman, 17, Bool(b)) => entity.is_creepy = b,
             (EntityKind::Witch, 17, Bool(b)) => entity.witch_drinking = b,
             // Zombie-family underwater conversion / zombie villager curing.
-            (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b)) => {
-                entity.is_converting = b
-            }
-            (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
+            (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b))
+            | (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
             (EntityKind::Villager, 18, Int(c)) => entity.unhappy_counter = c,
             // Vanilla sparse rabbit id map: 99 = evil, unknown ids fall back
             // to brown.
@@ -1051,12 +1048,13 @@ impl EntityStore {
                 entity.is_tame = f & 0x04 != 0;
             }
             (EntityKind::Wolf, 20, Bool(b)) => entity.is_interested = b,
-            (EntityKind::Wolf, 21, Int(c)) => entity.collar_color = c as u8 & 0x0F,
+            (EntityKind::Wolf, 21, Int(c)) | (EntityKind::Cat, 23, Int(c)) => {
+                entity.collar_color = c as u8 & 0x0F
+            }
             (EntityKind::Cat, 21, Bool(b)) => entity.is_lying = b,
             // Vanilla persistent-anger end time (game-time tick).
             (EntityKind::Wolf, 22, Long(t)) => entity.anger_end_time = t,
             (EntityKind::Cat, 22, Bool(b)) => entity.relax_state_one = b,
-            (EntityKind::Cat, 23, Int(c)) => entity.collar_color = c as u8 & 0x0F,
             // Bat flags byte: bit 0x01 = resting (hanging); a flip restarts
             // the fly/rest animation clock.
             (EntityKind::Bat, 16, Byte(f)) => {
@@ -1088,9 +1086,6 @@ impl EntityStore {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == kind
         {
-            // Holder-backed indices (cow/chicken/wolf/cat) are pre-resolved
-            // by the net handler; raw-int maps (rabbit/horse/fish) live in
-            // `apply_entity_data`.
             entity.variant = raw;
         }
     }
