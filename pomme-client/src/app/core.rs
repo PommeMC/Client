@@ -991,6 +991,7 @@ impl AppCore {
                 }
                 NetworkEvent::EntityMotion { id, velocity } => {
                     game.item_entity_store.set_motion(id, velocity);
+                    game.entity_store.set_living_motion(id, velocity);
                 }
                 NetworkEvent::EntityTeleported {
                     id,
@@ -1003,6 +1004,9 @@ impl AppCore {
                     game.entity_store.teleport_living(id, position, on_ground);
                     game.entity_store
                         .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                    if let Some(velocity) = velocity {
+                        game.entity_store.set_living_motion(id, velocity);
+                    }
                     game.item_entity_store
                         .teleport(id, position, velocity, on_ground);
                 }
@@ -1156,6 +1160,15 @@ impl AppCore {
                 }
                 NetworkEvent::ChestedHorse { id, chest } => {
                     game.entity_store.set_chested(id, chest);
+                }
+                NetworkEvent::PufferfishPuffState { id, state } => {
+                    game.entity_store.set_puff_state(id, state);
+                }
+                NetworkEvent::GlowSquidDarkTicks { id, ticks } => {
+                    game.entity_store.set_glow_squid_dark_ticks(id, ticks);
+                }
+                NetworkEvent::SquidTentacleReset { id } => {
+                    game.entity_store.squid_tentacle_reset(id);
                 }
                 NetworkEvent::VillagerData {
                     id,
@@ -1427,7 +1440,7 @@ impl AppCore {
             game.interaction.use_speed_multiplier(),
             game.interaction.slow_due_to_using_item(),
         );
-        game.entity_store.tick_living();
+        game.entity_store.tick_living(&game.chunk_store);
 
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
