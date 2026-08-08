@@ -181,7 +181,10 @@ impl LivingEntity {
             prev_walk_anim_speed: 0.0,
             is_baby: false,
             is_crouching: false,
-            on_ground: false,
+            // on_ground is packet-driven and a stationary entity gets no
+            // movement packet for up to 60 ticks, so spawn grounded (vanilla
+            // grounds remotes via local physics pomme doesn't run).
+            on_ground: true,
             wool_color: None,
             is_sheared: false,
             // Vanilla salmon default is MEDIUM (id 1); non-default-only
@@ -257,7 +260,7 @@ impl LivingEntity {
             swing_time: 0,
             flapping: 1.0,
             target_squish: 0.0,
-            prev_on_ground: false,
+            prev_on_ground: true,
             is_shaking: false,
             jump_ticks: 0,
             jump_duration: 0,
@@ -276,13 +279,6 @@ impl LivingEntity {
     fn interpolate_to_pos(&mut self, pos: Position) {
         self.interp_target = pos;
         self.interp_steps = INTERPOLATION_STEPS;
-    }
-
-    /// Extends any in-flight position lerp instead of re-targeting it
-    /// (vanilla `moveOrInterpolateTo` rotation overloads).
-    fn interpolate_to_rotation(&mut self, y_rot_deg: f32, x_rot_deg: f32) {
-        self.interp_look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
-        self.interp_steps = self.interp_steps.max(INTERPOLATION_STEPS);
     }
 
     pub fn tick_interpolation(&mut self) {
@@ -551,6 +547,27 @@ impl LivingEntity {
         }
         self.prev_on_ground = self.on_ground;
         self.target_squish *= 0.6;
+    }
+
+    /// Per-kind per-tick animation state (the kind-specific tail of vanilla
+    /// `aiStep`); arms accrue as mobs land.
+    fn tick_kind_anims(&mut self) {
+        match self.entity_type {
+            EntityKind::Chicken => self.tick_flap(),
+            EntityKind::Squid | EntityKind::GlowSquid => {
+                self.tick_squid();
+                if self.dark_ticks > 0 {
+                    self.dark_ticks -= 1;
+                }
+            }
+            // One animation clock, restarted whenever the resting flag
+            // flips (the setter clears it).
+            EntityKind::Bat if self.bat_anim_start.is_none() => {
+                self.bat_anim_start = Some(self.age_in_ticks);
+            }
+            k if is_equine(&k) => self.tick_equine_anims(),
+            _ => {}
+        }
     }
 
     pub fn tick_body_rotation(&mut self) {
@@ -986,8 +1003,13 @@ impl EntityStore {
         }
     }
 
-    pub fn set_variant(&mut self, id: i32, raw: u32) {
-        if let Some(entity) = self.living.get_mut(&id) {
+    /// `kind` is the mob the emitting handler arm resolved the value for;
+    /// metadata indices are overloaded across kinds, so a mismatched entity
+    /// ignores the write.
+    pub fn set_variant(&mut self, id: i32, kind: EntityKind, raw: u32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == kind
+        {
             entity.variant = match entity.entity_type {
                 // Vanilla sparse rabbit id map: 99 = evil, unknown ids fall
                 // back to brown.
@@ -1250,17 +1272,14 @@ impl EntityStore {
         }
     }
 
-    pub fn update_living_rotation(&mut self, id: i32, y_rot_deg: f32, x_rot_deg: f32) {
-        if let Some(entity) = self.living.get_mut(&id) {
-            entity.interpolate_to_rotation(y_rot_deg, x_rot_deg);
-        }
-    }
-
-    /// Rotation-only movement (`MoveEntityRot`): rotation plus onGround,
-    /// position interpolation untouched.
+    /// Rotation half of any movement packet: rotation plus onGround,
+    /// position interpolation untouched. Extends any in-flight position lerp
+    /// instead of re-targeting it (vanilla `moveOrInterpolateTo` rotation
+    /// overloads).
     pub fn rotate_living(&mut self, id: i32, y_rot_deg: f32, x_rot_deg: f32, on_ground: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
-            entity.interpolate_to_rotation(y_rot_deg, x_rot_deg);
+            entity.interp_look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
+            entity.interp_steps = entity.interp_steps.max(INTERPOLATION_STEPS);
             entity.on_ground = on_ground;
         }
     }
@@ -1299,30 +1318,11 @@ impl EntityStore {
                 &mut entity.walk_anim_speed,
                 &mut entity.prev_walk_anim_speed,
             );
-            if entity.entity_type == EntityKind::Chicken {
-                entity.tick_flap();
-            }
+            entity.tick_kind_anims();
             entity.tick_squish();
             entity.tick_tamable_anims();
-            if is_equine(&entity.entity_type) {
-                entity.tick_equine_anims();
-            }
             if probes_water(&entity.entity_type) {
                 entity.is_in_water = entity.probe_water(chunks);
-            }
-            match entity.entity_type {
-                EntityKind::Squid | EntityKind::GlowSquid => {
-                    entity.tick_squid();
-                    if entity.dark_ticks > 0 {
-                        entity.dark_ticks -= 1;
-                    }
-                }
-                // One animation clock, restarted whenever the resting flag
-                // flips (the setter clears it).
-                EntityKind::Bat if entity.bat_anim_start.is_none() => {
-                    entity.bat_anim_start = Some(entity.age_in_ticks);
-                }
-                _ => {}
             }
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
             if entity.eat_anim_tick > 0 {
