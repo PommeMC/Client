@@ -351,6 +351,9 @@ async fn config_sequence(
                 tracing::debug!("Received tags");
             }
             ClientboundConfigPacket::SelectKnownPacks(_) => {
+                // Claiming no known packs forces the server to send NBT for
+                // every registry entry; `variant_index` (handler.rs) relies on
+                // that to equate registry-map position with protocol id.
                 conn.write(ServerboundConfigPacket::SelectKnownPacks(
                     s_select_known_packs::ServerboundSelectKnownPacks {
                         known_packs: vec![],
