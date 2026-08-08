@@ -1033,16 +1033,13 @@ impl EntityRenderer {
     }
 
     /// The translation is anchor-relative, subtracted in f64 (see
-    /// `Camera::anchor`). The trailing X flip is the other half of vanilla's
-    /// `scale(-1,-1,1)` (the bake negates Y); without it every model renders
-    /// left-right mirrored.
+    /// `Camera::anchor`).
     fn entity_matrix(info: &EntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
         let base = glam::Mat4::from_translation((*info.position - anchor).as_vec3())
             * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians());
         // The flip composes innermost: vanilla applies its setupRotations
         // (body_transform's rotations) before `scale(-1,-1,1)`.
-        info.body_transform.map_or(base, |m| base * m)
-            * glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0))
+        info.body_transform.map_or(base, |m| base * m) * entity_model::render_x_flip()
     }
 
     #[allow(clippy::too_many_arguments)]
