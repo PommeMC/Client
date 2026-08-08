@@ -76,8 +76,9 @@ pub struct LivingEntity {
     pub wool_color: Option<u8>,
     /// Sheep wool shorn / bogged mushrooms shorn.
     pub is_sheared: bool,
-    /// Registry/wire variant slot; meaning is per-kind (pool index for
-    /// cow/chicken). Normalized in `EntityStore::set_variant`.
+    /// Registry/wire variant slot; meaning is per-kind. Holder-backed values
+    /// are pre-resolved to pool indices by the net handler; raw-int kinds are
+    /// normalized in `EntityStore::apply_entity_data`.
     pub variant: u32,
     /// Chicken wing-flap state (vanilla `Chicken.aiStep`): `flap` is the
     /// unbounded wing-cycle phase, `flap_speed` the 0..1 amplitude.
@@ -796,10 +797,8 @@ impl EntityStore {
             (EntityKind::Enderman, 17, Bool(b)) => entity.is_creepy = b,
             (EntityKind::Witch, 17, Bool(b)) => entity.witch_drinking = b,
             // Zombie-family underwater conversion / zombie villager curing.
-            (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b)) => {
-                entity.is_converting = b
-            }
-            (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
+            (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b))
+            | (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
             (EntityKind::Villager, 18, Int(c)) => entity.unhappy_counter = c,
             // Vanilla sparse rabbit id map: 99 = evil, unknown ids fall back
             // to brown.

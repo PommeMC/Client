@@ -307,10 +307,8 @@ pub enum NetworkEvent {
     FinishUseItem {
         id: i32,
     },
-    /// Registry/wire variant slot; meaning is per-kind (pool index for
-    /// cow/chicken). Per-kind normalization lives in
-    /// `EntityStore::set_variant`; `kind` is the mob the emitting arm
-    /// resolved for, guarding overloaded metadata indices.
+    /// Registry/wire variant slot; meaning is per-kind. `kind` is the mob
+    /// the emitting arm resolved for, guarding overloaded metadata indices.
     EntityVariant {
         id: i32,
         kind: EntityKind,
