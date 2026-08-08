@@ -3492,6 +3492,9 @@ pub fn compute_chicken_anim(
     anim
 }
 
+/// Vanilla head look, `Ry(yaw)·Rx(pitch)`: `compute_part_transforms` composes
+/// vanilla's ZYX order with the render-space sign conjugation itself, so the
+/// angles pass through unchanged.
 fn head_rotation(head_x_rot_deg: f32, local_head_y_rot_deg: f32) -> Vec3 {
     vanilla_rot(
         head_x_rot_deg.to_radians(),
