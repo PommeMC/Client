@@ -168,6 +168,42 @@ impl MobEntry {
 
 pub const WHITE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
+/// Registry-path order of each mob's flattened variant pool; the net handler
+/// resolves synced registry ids against these same slices, and the renderer
+/// constructor asserts the pools line up.
+pub const CHICKEN_VARIANT_ORDER: &[&str] = &["temperate", "warm", "cold"];
+pub const COW_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
+/// Wolf pool interleaves 3 state textures (wild/tame/angry) per variant.
+pub const WOLF_VARIANT_ORDER: &[&str] = &[
+    "pale", "spotted", "snowy", "black", "ashen", "rusty", "woods", "chestnut", "striped",
+];
+/// Registry-path-alphabetical, matching the cat pool.
+pub const CAT_VARIANT_ORDER: &[&str] = &[
+    "all_black",
+    "black",
+    "british_shorthair",
+    "calico",
+    "jellie",
+    "persian",
+    "ragdoll",
+    "red",
+    "siamese",
+    "tabby",
+    "white",
+];
+
+/// Pool length the `*_VARIANT_ORDER` slice implies for mobs whose variant
+/// index comes from a synced registry.
+fn expected_variant_count(kind: EntityKind) -> Option<usize> {
+    match kind {
+        EntityKind::Chicken => Some(CHICKEN_VARIANT_ORDER.len()),
+        EntityKind::Cow => Some(COW_VARIANT_ORDER.len()),
+        EntityKind::Wolf => Some(WOLF_VARIANT_ORDER.len() * 3),
+        EntityKind::Cat => Some(CAT_VARIANT_ORDER.len()),
+        _ => None,
+    }
+}
+
 /// Vanilla `OverlayTexture` hurt pixel (ARGB 0xB2FF0000): rgb is the overlay
 /// color, `a` is how much of the base color survives the mix.
 const HURT_OVERLAY: [f32; 4] = [1.0, 0.0, 0.0, 178.0 / 255.0];
@@ -335,9 +371,8 @@ fn mob_definitions() -> Vec<MobDef> {
         &["minecraft/textures/entity/cow/cow_cold_baby.png"],
         &["minecraft/textures/entity/cow/cow_warm_baby.png"],
     ];
-    // Variant order is temperate/warm/cold: the two normal-mesh variants share
-    // one VariantDef, the cold mesh gets its own. The handler's index mapping
-    // must match.
+    // The two normal-mesh variants share one VariantDef, the cold mesh gets
+    // its own; the flattened pool follows CHICKEN_VARIANT_ORDER.
     const CHICKEN_NORMAL_TEX: &[&[&str]] = &[
         &[
             "minecraft/textures/entity/chicken/chicken_temperate.png",
@@ -392,8 +427,8 @@ fn mob_definitions() -> Vec<MobDef> {
     // Indexed by profession level 1-5 minus one.
     const ZOMBIE_VILLAGER_LEVEL_TEX: &[&[&str]] = tex_table!("zombie_villager/profession_level":
         "stone", "iron", "gold", "emerald", "diamond");
-    // Wolf pool: variant_index = wolf_variant * 3 + state (0 wild, 1 tame,
-    // 2 angry); variant order must match the handler's resolve slice.
+    // Wolf pool: variant_index = variant * 3 + state (0 wild, 1 tame,
+    // 2 angry); variants follow WOLF_VARIANT_ORDER.
     const WOLF_TEX: &[&[&str]] = tex_table!("wolf":
         "wolf", "wolf_tame", "wolf_angry",
         "wolf_spotted", "wolf_spotted_tame", "wolf_spotted_angry",
@@ -416,9 +451,7 @@ fn mob_definitions() -> Vec<MobDef> {
         "wolf_striped_baby", "wolf_striped_tame_baby", "wolf_striped_angry_baby");
     const WOLF_COLLAR_TEX: &[&[&str]] = tex_table!("wolf": "wolf_collar");
     const WOLF_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("wolf": "wolf_collar_baby");
-    // Cat variants in registry-path-alphabetical order (the handler resolves
-    // ids through the synced registry, whose data-driven order is
-    // alphabetical).
+    // Cat pool follows CAT_VARIANT_ORDER (registry-path-alphabetical).
     const CAT_TEX: &[&[&str]] = tex_table!("cat":
         "cat_all_black", "cat_black", "cat_british_shorthair", "cat_calico", "cat_jellie",
         "cat_persian", "cat_ragdoll", "cat_red", "cat_siamese", "cat_tabby", "cat_white");
@@ -1006,6 +1039,25 @@ impl EntityRenderer {
             assert_part_order_matches(&adult_variants, &adult_overlays);
             if let Some(baby) = &baby_variants {
                 assert_part_order_matches(baby, &baby_overlays);
+            }
+
+            // The net handler resolves variant ids against the
+            // *_VARIANT_ORDER slices; the flattened pools must line up.
+            if let Some(n) = expected_variant_count(def.kind) {
+                assert_eq!(
+                    adult_variants.len(),
+                    n,
+                    "{:?} adult variant pool != variant order length",
+                    def.kind
+                );
+                if let Some(baby) = &baby_variants {
+                    assert_eq!(
+                        baby.len(),
+                        n,
+                        "{:?} baby variant pool != variant order length",
+                        def.kind
+                    );
+                }
             }
 
             mobs.insert(
@@ -1740,8 +1792,21 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
     let (w, h) = match kind {
         EntityKind::Pig => (0.9, 0.9),
         EntityKind::Cow => (0.9, 1.4),
+        // Vanilla Chicken.BABY_DIMENSIONS is an explicit 0.3x0.4, not half scale.
+        EntityKind::Chicken if is_baby => return (0.3, 0.4),
         EntityKind::Chicken => (0.4, 0.7),
         EntityKind::Sheep => (0.9, 1.3),
+        // Vanilla Zombie.BABY_DIMENSIONS / Villager baby: explicit 0.49x0.98,
+        // not half scale.
+        EntityKind::Zombie
+        | EntityKind::Husk
+        | EntityKind::Drowned
+        | EntityKind::ZombieVillager
+        | EntityKind::Villager
+            if is_baby =>
+        {
+            return (0.49, 0.98);
+        }
         EntityKind::Zombie
         | EntityKind::Husk
         | EntityKind::Drowned
@@ -1755,6 +1820,8 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::Witch => (0.6, 1.95),
         EntityKind::Wolf => (0.6, 0.85),
         EntityKind::Cat | EntityKind::Ocelot => (0.6, 0.7),
+        // Vanilla Rabbit.BABY_DIMENSIONS: explicit 0.24x0.4, not half scale.
+        EntityKind::Rabbit if is_baby => return (0.24, 0.4),
         EntityKind::Rabbit => (0.49, 0.6),
         EntityKind::Player => (0.6, 1.8),
         _ => (1.0, 1.0),

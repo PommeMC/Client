@@ -980,6 +980,15 @@ impl AppCore {
                         .update_living_rotation(id, y_rot_deg, x_rot_deg);
                     game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
                 }
+                NetworkEvent::EntityRotated {
+                    id,
+                    y_rot_deg,
+                    x_rot_deg,
+                    on_ground,
+                } => {
+                    game.entity_store
+                        .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                }
                 NetworkEvent::EntityMotion { id, velocity } => {
                     game.item_entity_store.set_motion(id, velocity);
                 }
@@ -1103,11 +1112,8 @@ impl AppCore {
                         );
                     }
                 }
-                NetworkEvent::CowVariant { id, variant } => {
-                    game.entity_store.set_cow_variant(id, variant);
-                }
-                NetworkEvent::ChickenVariant { id, variant } => {
-                    game.entity_store.set_chicken_variant(id, variant);
+                NetworkEvent::EntityVariant { id, variant } => {
+                    game.entity_store.set_variant(id, variant);
                 }
                 NetworkEvent::EndermanCreepy { id, creepy } => {
                     game.entity_store.set_enderman_creepy(id, creepy);
@@ -1134,9 +1140,6 @@ impl AppCore {
                 NetworkEvent::CollarColor { id, color } => {
                     game.entity_store.set_collar_color(id, color);
                 }
-                NetworkEvent::WolfVariant { id, variant } => {
-                    game.entity_store.set_wolf_variant(id, variant);
-                }
                 NetworkEvent::WolfInterested { id, interested } => {
                     game.entity_store.set_wolf_interested(id, interested);
                 }
@@ -1146,17 +1149,11 @@ impl AppCore {
                 NetworkEvent::WolfShaking { id, shaking } => {
                     game.entity_store.set_wolf_shaking(id, shaking);
                 }
-                NetworkEvent::CatVariant { id, variant } => {
-                    game.entity_store.set_cat_variant(id, variant);
-                }
                 NetworkEvent::CatLying { id, lying } => {
                     game.entity_store.set_cat_lying(id, lying);
                 }
                 NetworkEvent::CatRelaxed { id, relaxed } => {
                     game.entity_store.set_cat_relaxed(id, relaxed);
-                }
-                NetworkEvent::RabbitVariant { id, variant } => {
-                    game.entity_store.set_rabbit_variant(id, variant);
                 }
                 NetworkEvent::RabbitJump { id } => {
                     game.entity_store.start_rabbit_jump(id);

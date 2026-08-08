@@ -34,6 +34,16 @@ fn quadruped_legs(
     ]
 }
 
+/// Mirror a cube's geometry across x=0 WITHOUT flipping UVs (e.g. chicken
+/// wings and legs share one un-mirrored texture — vanilla quirk). Pair with
+/// `mirror: true` where vanilla's `.mirror()` UV flip is also wanted.
+fn mirror_x_geom(c: ModelCube) -> ModelCube {
+    ModelCube {
+        origin: Vec3::new(-(c.origin.x + c.size.x), c.origin.y, c.origin.z),
+        ..c
+    }
+}
+
 #[derive(Clone)]
 pub struct EntityPart {
     pub name: String,
@@ -448,9 +458,8 @@ fn humanoid_parts(
     // Pomme's `mirror` flag only flips UVs, so mirror the geometry origin across
     // x=0 too (vanilla `.mirror()` does both, e.g. arm origin -3 -> -1).
     let mirror_x = |c: ModelCube| ModelCube {
-        origin: Vec3::new(-(c.origin.x + c.size.x), c.origin.y, c.origin.z),
         mirror: true,
-        ..c
+        ..mirror_x_geom(c)
     };
     let arm_cube_left = mirror_x(arm_cube_right);
     let leg_cube_left = mirror_x(leg_cube_right);
@@ -1774,13 +1783,9 @@ fn chicken_parts() -> Vec<EntityPart> {
             vec![vbox((26, 0), (-1.0, 0.0, -3.0), (3.0, 5.0, 3.0))],
         )
     };
-    let wing = |name: &str, x: f32, origin_x: f32| {
-        vpart(
-            name,
-            None,
-            Vec3::new(x, 13.0, 0.0),
-            vec![vbox((24, 13), (origin_x, 0.0, -3.0), (1.0, 4.0, 6.0))],
-        )
+    let wing_cube = vbox((24, 13), (0.0, 0.0, -3.0), (1.0, 4.0, 6.0));
+    let wing = |name: &str, x: f32, cube: ModelCube| {
+        vpart(name, None, Vec3::new(x, 13.0, 0.0), vec![cube])
     };
     vec![
         vpart(
@@ -1806,8 +1811,8 @@ fn chicken_parts() -> Vec<EntityPart> {
         },
         leg("right_leg", -2.0),
         leg("left_leg", 1.0),
-        wing("right_wing", -4.0, 0.0),
-        wing("left_wing", 4.0, -1.0),
+        wing("right_wing", -4.0, wing_cube),
+        wing("left_wing", 4.0, mirror_x_geom(wing_cube)),
     ]
 }
 
@@ -1820,10 +1825,16 @@ pub fn bake_chicken_model() -> BakedEntityModel {
 pub fn bake_cold_chicken_model() -> BakedEntityModel {
     let mut parts = chicken_parts();
     // Head crest (its -2.015 z avoids z-fighting), then body tail feathers.
-    parts[0]
+    parts
+        .iter_mut()
+        .find(|p| p.name == "head")
+        .expect("chicken mesh has a head")
         .cubes
         .push(vbox((44, 0), (-3.0, -7.0, -2.015), (6.0, 3.0, 4.0)));
-    parts[1]
+    parts
+        .iter_mut()
+        .find(|p| p.name == "body")
+        .expect("chicken mesh has a body")
         .cubes
         .push(vbox((38, 9), (0.0, 3.0, -1.0), (0.0, 3.0, 5.0)));
     bake_model(parts, 64, 32)
