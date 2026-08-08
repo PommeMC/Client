@@ -415,6 +415,35 @@ struct MobDef {
 }
 
 fn mob_definitions() -> Vec<MobDef> {
+    // One single-fallback texture entry per name under an entity texture dir.
+    macro_rules! tex_table {
+        ($dir:expr => $($name:literal),+ $(,)?) => {
+            &[$(&[concat!("minecraft/textures/entity/", $dir, "/", $name, ".png")]),+]
+        };
+    }
+    // The villager and zombie-villager overlay dirs ship identical
+    // registry-ordered file names; each list is written once here and both
+    // mobs' tables expand from it. Types index by the builtin VillagerKind
+    // registry order, professions by VillagerProfession order minus "none"
+    // (which has no texture), levels by profession level 1-5 minus one.
+    macro_rules! villager_type_table {
+        ($dir:expr) => {
+            tex_table!($dir => "desert", "jungle", "plains", "savanna", "snow", "swamp", "taiga")
+        };
+    }
+    macro_rules! villager_profession_table {
+        ($dir:expr) => {
+            tex_table!($dir => "armorer", "butcher", "cartographer", "cleric", "farmer",
+                "fisherman", "fletcher", "leatherworker", "librarian", "mason", "nitwit",
+                "shepherd", "toolsmith", "weaponsmith")
+        };
+    }
+    macro_rules! villager_level_table {
+        ($dir:expr) => {
+            tex_table!($dir => "stone", "iron", "gold", "emerald", "diamond")
+        };
+    }
+
     const PIG_ADULT_TEX: &[&[&str]] = &[&[
         "minecraft/textures/entity/pig/pig_temperate.png",
         "minecraft/textures/entity/pig/temperate_pig.png",
@@ -448,50 +477,32 @@ fn mob_definitions() -> Vec<MobDef> {
         &["minecraft/textures/entity/chicken/chicken_warm_baby.png"],
         &["minecraft/textures/entity/chicken/chicken_cold_baby.png"],
     ];
-    const SHEEP_ADULT_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep.png"]];
-    const SHEEP_BABY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep_baby.png"]];
-    const SHEEP_WOOL_UNDERCOAT_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/sheep/sheep_wool_undercoat.png"]];
-    const SHEEP_WOOL_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep_wool.png"]];
-    const SHEEP_BABY_WOOL_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/sheep/sheep_wool_baby.png"]];
-    const PLAYER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/player/wide/steve.png"]];
-    const ZOMBIE_TEX: &[&[&str]] = &[&["minecraft/textures/entity/zombie/zombie.png"]];
-    const ZOMBIE_BABY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/zombie/zombie_baby.png"]];
-    const HUSK_TEX: &[&[&str]] = &[&["minecraft/textures/entity/zombie/husk.png"]];
-    const HUSK_BABY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/zombie/husk_baby.png"]];
-    const DROWNED_TEX: &[&[&str]] = &[&["minecraft/textures/entity/zombie/drowned.png"]];
-    const DROWNED_BABY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/zombie/drowned_baby.png"]];
-    const DROWNED_OUTER_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/zombie/drowned_outer_layer.png"]];
-    const DROWNED_OUTER_BABY_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/zombie/drowned_outer_layer_baby.png"]];
-    // One single-fallback texture entry per name under an entity texture dir.
-    macro_rules! tex_table {
-        ($dir:literal: $($name:literal),+ $(,)?) => {
-            &[$(&[concat!("minecraft/textures/entity/", $dir, "/", $name, ".png")]),+]
-        };
-    }
-    const ZOMBIE_VILLAGER_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/zombie_villager/zombie_villager.png"]];
+    const SHEEP_ADULT_TEX: &[&[&str]] = tex_table!("sheep" => "sheep");
+    const SHEEP_BABY_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_baby");
+    const SHEEP_WOOL_UNDERCOAT_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool_undercoat");
+    const SHEEP_WOOL_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool");
+    const SHEEP_BABY_WOOL_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool_baby");
+    const PLAYER_TEX: &[&[&str]] = tex_table!("player/wide" => "steve");
+    const ZOMBIE_TEX: &[&[&str]] = tex_table!("zombie" => "zombie");
+    const ZOMBIE_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "zombie_baby");
+    const HUSK_TEX: &[&[&str]] = tex_table!("zombie" => "husk");
+    const HUSK_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "husk_baby");
+    const DROWNED_TEX: &[&[&str]] = tex_table!("zombie" => "drowned");
+    const DROWNED_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_baby");
+    const DROWNED_OUTER_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_outer_layer");
+    const DROWNED_OUTER_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_outer_layer_baby");
+    const ZOMBIE_VILLAGER_TEX: &[&[&str]] = tex_table!("zombie_villager" => "zombie_villager");
     const ZOMBIE_VILLAGER_BABY_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/zombie_villager/zombie_villager_baby.png"]];
-    // Indexed by the builtin VillagerKind registry order.
-    const ZOMBIE_VILLAGER_TYPE_TEX: &[&[&str]] = tex_table!("zombie_villager/type":
-        "desert", "jungle", "plains", "savanna", "snow", "swamp", "taiga");
-    const ZOMBIE_VILLAGER_BABY_TYPE_TEX: &[&[&str]] = tex_table!("zombie_villager/baby":
-        "desert", "jungle", "plains", "savanna", "snow", "swamp", "taiga");
-    // Indexed by VillagerProfession registry order minus one ("none" has no
-    // texture).
-    const ZOMBIE_VILLAGER_PROFESSION_TEX: &[&[&str]] = tex_table!("zombie_villager/profession":
-        "armorer", "butcher", "cartographer", "cleric", "farmer", "fisherman", "fletcher",
-        "leatherworker", "librarian", "mason", "nitwit", "shepherd", "toolsmith", "weaponsmith");
-    // Indexed by profession level 1-5 minus one.
-    const ZOMBIE_VILLAGER_LEVEL_TEX: &[&[&str]] = tex_table!("zombie_villager/profession_level":
-        "stone", "iron", "gold", "emerald", "diamond");
+        tex_table!("zombie_villager" => "zombie_villager_baby");
+    const ZOMBIE_VILLAGER_TYPE_TEX: &[&[&str]] = villager_type_table!("zombie_villager/type");
+    const ZOMBIE_VILLAGER_BABY_TYPE_TEX: &[&[&str]] = villager_type_table!("zombie_villager/baby");
+    const ZOMBIE_VILLAGER_PROFESSION_TEX: &[&[&str]] =
+        villager_profession_table!("zombie_villager/profession");
+    const ZOMBIE_VILLAGER_LEVEL_TEX: &[&[&str]] =
+        villager_level_table!("zombie_villager/profession_level");
     // Wolf pool: variant_index = variant * 3 + state (0 wild, 1 tame,
     // 2 angry); variants follow WOLF_VARIANT_ORDER.
-    const WOLF_TEX: &[&[&str]] = tex_table!("wolf":
+    const WOLF_TEX: &[&[&str]] = tex_table!("wolf" =>
         "wolf", "wolf_tame", "wolf_angry",
         "wolf_spotted", "wolf_spotted_tame", "wolf_spotted_angry",
         "wolf_snowy", "wolf_snowy_tame", "wolf_snowy_angry",
@@ -501,7 +512,7 @@ fn mob_definitions() -> Vec<MobDef> {
         "wolf_woods", "wolf_woods_tame", "wolf_woods_angry",
         "wolf_chestnut", "wolf_chestnut_tame", "wolf_chestnut_angry",
         "wolf_striped", "wolf_striped_tame", "wolf_striped_angry");
-    const WOLF_BABY_TEX: &[&[&str]] = tex_table!("wolf":
+    const WOLF_BABY_TEX: &[&[&str]] = tex_table!("wolf" =>
         "wolf_baby", "wolf_tame_baby", "wolf_angry_baby",
         "wolf_spotted_baby", "wolf_spotted_tame_baby", "wolf_spotted_angry_baby",
         "wolf_snowy_baby", "wolf_snowy_tame_baby", "wolf_snowy_angry_baby",
@@ -511,86 +522,72 @@ fn mob_definitions() -> Vec<MobDef> {
         "wolf_woods_baby", "wolf_woods_tame_baby", "wolf_woods_angry_baby",
         "wolf_chestnut_baby", "wolf_chestnut_tame_baby", "wolf_chestnut_angry_baby",
         "wolf_striped_baby", "wolf_striped_tame_baby", "wolf_striped_angry_baby");
-    const WOLF_COLLAR_TEX: &[&[&str]] = tex_table!("wolf": "wolf_collar");
-    const WOLF_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("wolf": "wolf_collar_baby");
+    const WOLF_COLLAR_TEX: &[&[&str]] = tex_table!("wolf" => "wolf_collar");
+    const WOLF_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("wolf" => "wolf_collar_baby");
     // Cat pool follows CAT_VARIANT_ORDER (registry-path-alphabetical).
-    const CAT_TEX: &[&[&str]] = tex_table!("cat":
+    const CAT_TEX: &[&[&str]] = tex_table!("cat" =>
         "cat_all_black", "cat_black", "cat_british_shorthair", "cat_calico", "cat_jellie",
         "cat_persian", "cat_ragdoll", "cat_red", "cat_siamese", "cat_tabby", "cat_white");
-    const CAT_BABY_TEX: &[&[&str]] = tex_table!("cat":
+    const CAT_BABY_TEX: &[&[&str]] = tex_table!("cat" =>
         "cat_all_black_baby", "cat_black_baby", "cat_british_shorthair_baby", "cat_calico_baby",
         "cat_jellie_baby", "cat_persian_baby", "cat_ragdoll_baby", "cat_red_baby",
         "cat_siamese_baby", "cat_tabby_baby", "cat_white_baby");
-    const CAT_COLLAR_TEX: &[&[&str]] = tex_table!("cat": "cat_collar");
-    const CAT_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("cat": "cat_collar_baby");
-    const OCELOT_TEX: &[&[&str]] = tex_table!("cat": "ocelot");
-    const OCELOT_BABY_TEX: &[&[&str]] = tex_table!("cat": "ocelot_baby");
+    const CAT_COLLAR_TEX: &[&[&str]] = tex_table!("cat" => "cat_collar");
+    const CAT_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("cat" => "cat_collar_baby");
+    const OCELOT_TEX: &[&[&str]] = tex_table!("cat" => "ocelot");
+    const OCELOT_BABY_TEX: &[&[&str]] = tex_table!("cat" => "ocelot_baby");
     // Rabbit: variant ids 0-6 in vanilla id order, slot 7 = the "Toast"
     // custom-name override.
-    const RABBIT_TEX: &[&[&str]] = tex_table!("rabbit":
+    const RABBIT_TEX: &[&[&str]] = tex_table!("rabbit" =>
         "rabbit_brown", "rabbit_white", "rabbit_black", "rabbit_white_splotched",
         "rabbit_gold", "rabbit_salt", "rabbit_caerbannog", "rabbit_toast");
-    const RABBIT_BABY_TEX: &[&[&str]] = tex_table!("rabbit":
+    const RABBIT_BABY_TEX: &[&[&str]] = tex_table!("rabbit" =>
         "rabbit_brown_baby", "rabbit_white_baby", "rabbit_black_baby",
         "rabbit_white_splotched_baby", "rabbit_gold_baby", "rabbit_salt_baby",
         "rabbit_caerbannog_baby", "rabbit_toast_baby");
     // Horse variant_index = color id 0-6; markings overlay variant = id - 1.
-    const HORSE_TEX: &[&[&str]] = tex_table!("horse":
+    const HORSE_TEX: &[&[&str]] = tex_table!("horse" =>
         "horse_white", "horse_creamy", "horse_chestnut", "horse_brown", "horse_black",
         "horse_gray", "horse_darkbrown");
-    const HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse":
+    const HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" =>
         "horse_white_baby", "horse_creamy_baby", "horse_chestnut_baby", "horse_brown_baby",
         "horse_black_baby", "horse_gray_baby", "horse_darkbrown_baby");
-    const HORSE_MARKINGS_TEX: &[&[&str]] = tex_table!("horse":
+    const HORSE_MARKINGS_TEX: &[&[&str]] = tex_table!("horse" =>
         "horse_markings_white", "horse_markings_whitefield", "horse_markings_whitedots",
         "horse_markings_blackdots");
-    const HORSE_MARKINGS_BABY_TEX: &[&[&str]] = tex_table!("horse":
+    const HORSE_MARKINGS_BABY_TEX: &[&[&str]] = tex_table!("horse" =>
         "horse_markings_white_baby", "horse_markings_whitefield_baby",
         "horse_markings_whitedots_baby", "horse_markings_blackdots_baby");
-    const DONKEY_TEX: &[&[&str]] = tex_table!("horse": "donkey");
-    const DONKEY_BABY_TEX: &[&[&str]] = tex_table!("horse": "donkey_baby");
-    const MULE_TEX: &[&[&str]] = tex_table!("horse": "mule");
-    const MULE_BABY_TEX: &[&[&str]] = tex_table!("horse": "mule_baby");
-    const SKELETON_HORSE_TEX: &[&[&str]] = tex_table!("horse": "horse_skeleton");
-    const SKELETON_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse": "horse_skeleton_baby");
-    const ZOMBIE_HORSE_TEX: &[&[&str]] = tex_table!("horse": "horse_zombie");
-    const ZOMBIE_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse": "horse_zombie_baby");
-    const SKELETON_TEX: &[&[&str]] = &[&["minecraft/textures/entity/skeleton/skeleton.png"]];
-    const STRAY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/skeleton/stray.png"]];
-    const STRAY_OVERLAY_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/skeleton/stray_overlay.png"]];
-    const BOGGED_TEX: &[&[&str]] = &[&["minecraft/textures/entity/skeleton/bogged.png"]];
-    const BOGGED_OVERLAY_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/skeleton/bogged_overlay.png"]];
-    const CREEPER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/creeper/creeper.png"]];
-    const CREEPER_ARMOR_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/creeper/creeper_armor.png"]];
-    const SPIDER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/spider/spider.png"]];
-    const SPIDER_EYES_TEX: &[&[&str]] = &[&["minecraft/textures/entity/spider/spider_eyes.png"]];
-    const ENDERMAN_TEX: &[&[&str]] = &[&["minecraft/textures/entity/enderman/enderman.png"]];
-    const ENDERMAN_EYES_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/enderman/enderman_eyes.png"]];
-    const SLIME_TEX: &[&[&str]] = &[&["minecraft/textures/entity/slime/slime.png"]];
+    const DONKEY_TEX: &[&[&str]] = tex_table!("horse" => "donkey");
+    const DONKEY_BABY_TEX: &[&[&str]] = tex_table!("horse" => "donkey_baby");
+    const MULE_TEX: &[&[&str]] = tex_table!("horse" => "mule");
+    const MULE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "mule_baby");
+    const SKELETON_HORSE_TEX: &[&[&str]] = tex_table!("horse" => "horse_skeleton");
+    const SKELETON_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "horse_skeleton_baby");
+    const ZOMBIE_HORSE_TEX: &[&[&str]] = tex_table!("horse" => "horse_zombie");
+    const ZOMBIE_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "horse_zombie_baby");
+    const SKELETON_TEX: &[&[&str]] = tex_table!("skeleton" => "skeleton");
+    const STRAY_TEX: &[&[&str]] = tex_table!("skeleton" => "stray");
+    const STRAY_OVERLAY_TEX: &[&[&str]] = tex_table!("skeleton" => "stray_overlay");
+    const BOGGED_TEX: &[&[&str]] = tex_table!("skeleton" => "bogged");
+    const BOGGED_OVERLAY_TEX: &[&[&str]] = tex_table!("skeleton" => "bogged_overlay");
+    const CREEPER_TEX: &[&[&str]] = tex_table!("creeper" => "creeper");
+    const CREEPER_ARMOR_TEX: &[&[&str]] = tex_table!("creeper" => "creeper_armor");
+    const SPIDER_TEX: &[&[&str]] = tex_table!("spider" => "spider");
+    const SPIDER_EYES_TEX: &[&[&str]] = tex_table!("spider" => "spider_eyes");
+    const ENDERMAN_TEX: &[&[&str]] = tex_table!("enderman" => "enderman");
+    const ENDERMAN_EYES_TEX: &[&[&str]] = tex_table!("enderman" => "enderman_eyes");
+    const SLIME_TEX: &[&[&str]] = tex_table!("slime" => "slime");
     const WITCH_TEX: &[&[&str]] = &[&[
         "minecraft/textures/entity/witch/witch.png",
         "minecraft/textures/entity/witch.png",
     ]];
-    const VILLAGER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/villager/villager.png"]];
-    const VILLAGER_BABY_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/villager/villager_baby.png"]];
-    // Indexed by the builtin VillagerKind registry order.
-    const VILLAGER_TYPE_TEX: &[&[&str]] = tex_table!("villager/type":
-        "desert", "jungle", "plains", "savanna", "snow", "swamp", "taiga");
-    const VILLAGER_BABY_TYPE_TEX: &[&[&str]] = tex_table!("villager/baby":
-        "desert", "jungle", "plains", "savanna", "snow", "swamp", "taiga");
-    // Indexed by VillagerProfession registry order minus one ("none" has no
-    // texture).
-    const VILLAGER_PROFESSION_TEX: &[&[&str]] = tex_table!("villager/profession":
-        "armorer", "butcher", "cartographer", "cleric", "farmer", "fisherman", "fletcher",
-        "leatherworker", "librarian", "mason", "nitwit", "shepherd", "toolsmith", "weaponsmith");
-    // Indexed by profession level 1-5 minus one.
-    const VILLAGER_LEVEL_TEX: &[&[&str]] = tex_table!("villager/profession_level":
-        "stone", "iron", "gold", "emerald", "diamond");
+    const VILLAGER_TEX: &[&[&str]] = tex_table!("villager" => "villager");
+    const VILLAGER_BABY_TEX: &[&[&str]] = tex_table!("villager" => "villager_baby");
+    const VILLAGER_TYPE_TEX: &[&[&str]] = villager_type_table!("villager/type");
+    const VILLAGER_BABY_TYPE_TEX: &[&[&str]] = villager_type_table!("villager/baby");
+    const VILLAGER_PROFESSION_TEX: &[&[&str]] = villager_profession_table!("villager/profession");
+    const VILLAGER_LEVEL_TEX: &[&[&str]] = villager_level_table!("villager/profession_level");
 
     // Base and baby models, plus opaque overlays (sheep wool), are all Opaque.
     fn opaque(
@@ -618,11 +615,13 @@ fn mob_definitions() -> Vec<MobDef> {
         profession_tex: &'static [&'static [&'static str]],
         level_tex: &'static [&'static [&'static str]],
     ) -> Vec<VariantDef> {
+        // Slots 0/2/3 share one bake of the hatted model.
+        let hatted = bake(false);
         vec![
-            opaque(bake(false), type_tex, 64),
+            opaque(hatted.clone(), type_tex, 64),
             opaque(bake(true), type_tex, 64),
-            opaque(bake(false), profession_tex, 64),
-            opaque(bake(false), level_tex, 64),
+            opaque(hatted.clone(), profession_tex, 64),
+            opaque(hatted, level_tex, 64),
         ]
     }
 
@@ -820,6 +819,9 @@ fn mob_definitions() -> Vec<MobDef> {
             kind: EntityKind::Bogged,
             anim: AnimationType::Skeleton,
             // Variant 0 = mushrooms, 1 = sheared (empty mushroom parts).
+            // TODO: replace with a per-part visibility mask (vanilla
+            // `mushrooms.visible = !isSheared`) instead of a second baked
+            // model; would also drop the cubeless overlay padding.
             adult: vec![
                 opaque(entity_model::bake_bogged_model(false), BOGGED_TEX, 64),
                 opaque(entity_model::bake_bogged_model(true), BOGGED_TEX, 64),
@@ -1589,11 +1591,16 @@ impl EntityRenderer {
                 let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
                 let entity_mat = Self::entity_matrix(info, anchor);
                 let anim = self.compute_anim(entry.anim, &variant.model, info);
+                // Computed once per entity and shared with the overlay draws:
+                // overlays match the base's part order AND pivots (only cube
+                // geometry differs), and cubeless padding parts are never
+                // drawn, so their transforms are unused.
+                let part_transforms = variant.model.compute_part_transforms(&anim);
                 vis.push(VisEntity {
                     info,
                     entry,
                     entity_mat,
-                    anim,
+                    part_transforms,
                 });
             }
             if vis.is_empty() {
@@ -1855,13 +1862,13 @@ fn create_camera_sets(
     (sets, buffers, allocations)
 }
 
-/// A culled, drawable entity with its world transform and animation
-/// precomputed.
+/// A culled, drawable entity with its world transform and per-part
+/// animation matrices precomputed (shared by the base and overlay draws).
 struct VisEntity<'a> {
     info: &'a EntityRenderInfo,
     entry: &'a MobEntry,
     entity_mat: glam::Mat4,
-    anim: entity_model::PartAnim,
+    part_transforms: Vec<glam::Mat4>,
 }
 
 /// One instanced (variant, part) draw: a run of `instance_count` instances from
@@ -1904,18 +1911,13 @@ impl<'a> VariantGroups<'a> {
     fn emit(&self, vis: &[VisEntity], instances: &mut Vec<EntityInstance>) -> Vec<DrawRecord> {
         let mut records = Vec::new();
         for (variant, texture_set, members) in &self.groups {
-            // Part transforms differ per entity (animation), so compute per member.
-            let pts: Vec<Vec<glam::Mat4>> = members
-                .iter()
-                .map(|(vi, ..)| variant.model.compute_part_transforms(&vis[*vi].anim))
-                .collect();
             for (p, (start, part_count)) in variant.model.part_ranges.iter().enumerate() {
                 if *part_count == 0 {
                     continue;
                 }
                 let first_instance = instances.len() as u32;
-                for (k, (vi, tint, overlay, uv)) in members.iter().enumerate() {
-                    let model = vis[*vi].entity_mat * pts[k][p];
+                for (vi, tint, overlay, uv) in members.iter() {
+                    let model = vis[*vi].entity_mat * vis[*vi].part_transforms[p];
                     instances.push(EntityInstance {
                         model: model.to_cols_array_2d(),
                         tint: *tint,
@@ -1983,39 +1985,39 @@ const ANIM_MARGIN: f32 = 0.5;
 /// Vanilla (width, height) hitbox per supported mob, scaled for babies; used to
 /// build the cull bounding sphere.
 fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
+    // Vanilla babies declare explicit BABY_DIMENSIONS rather than a scale;
+    // list kinds whose constant isn't the half-scale the fallback below
+    // assumes. Every new baby mob must be checked against its class.
+    if is_baby {
+        match kind {
+            EntityKind::Chicken => return (0.3, 0.4),
+            EntityKind::Rabbit => return (0.24, 0.4),
+            EntityKind::Zombie
+            | EntityKind::Husk
+            | EntityKind::Drowned
+            | EntityKind::ZombieVillager
+            | EntityKind::Villager => return (0.49, 0.98),
+            _ => {}
+        }
+    }
     let (w, h) = match kind {
         EntityKind::Pig => (0.9, 0.9),
         EntityKind::Cow => (0.9, 1.4),
-        // Vanilla Chicken.BABY_DIMENSIONS is an explicit 0.3x0.4, not half scale.
-        EntityKind::Chicken if is_baby => return (0.3, 0.4),
         EntityKind::Chicken => (0.4, 0.7),
         EntityKind::Sheep => (0.9, 1.3),
-        // Vanilla Zombie.BABY_DIMENSIONS / Villager baby: explicit 0.49x0.98,
-        // not half scale.
         EntityKind::Zombie
         | EntityKind::Husk
         | EntityKind::Drowned
         | EntityKind::ZombieVillager
         | EntityKind::Villager
-            if is_baby =>
-        {
-            return (0.49, 0.98);
-        }
-        EntityKind::Zombie
-        | EntityKind::Husk
-        | EntityKind::Drowned
-        | EntityKind::ZombieVillager => (0.6, 1.95),
+        | EntityKind::Witch => (0.6, 1.95),
         EntityKind::Skeleton | EntityKind::Stray | EntityKind::Bogged => (0.6, 1.99),
         EntityKind::Creeper => (0.6, 1.7),
         EntityKind::Spider => (1.4, 0.9),
-        EntityKind::Villager => (0.6, 1.95),
         EntityKind::Enderman => (0.6, 2.9),
         EntityKind::Slime => (0.52, 0.52),
-        EntityKind::Witch => (0.6, 1.95),
         EntityKind::Wolf => (0.6, 0.85),
         EntityKind::Cat | EntityKind::Ocelot => (0.6, 0.7),
-        // Vanilla Rabbit.BABY_DIMENSIONS: explicit 0.24x0.4, not half scale.
-        EntityKind::Rabbit if is_baby => return (0.24, 0.4),
         EntityKind::Rabbit => (0.49, 0.6),
         // Vanilla horse babies scale 0.7 (Horse.BABY_DIMENSIONS), not 0.5;
         // donkey/mule babies are the generic half scale.
@@ -2095,6 +2097,9 @@ fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) 
     }
 }
 
+// TODO: share one vertex buffer + model per distinct mesh across texture
+// variants (a zombie villager's 33 texture variants clone 2 meshes), and
+// batch the per-texture one-time upload submits into one fence wait.
 #[allow(clippy::too_many_arguments)]
 fn build_variants(
     device: &vk::Device,
