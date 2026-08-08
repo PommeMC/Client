@@ -1143,9 +1143,9 @@ impl EntityRenderer {
         }
         let base = glam::Mat4::from_translation((*info.position - anchor).as_vec3())
             * glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
-        // The flip composes innermost: vanilla applies its setupRotations
-        // (body_transform's rotations) before `scale(-1,-1,1)`.
-        info.body_transform.map_or(base, |m| base * m) * entity_model::render_x_flip()
+        // body_transform sits before the parts (whose root transforms carry
+        // the convention's X flip), matching vanilla's setupRotations order.
+        info.body_transform.map_or(base, |m| base * m)
     }
 
     #[allow(clippy::too_many_arguments)]
