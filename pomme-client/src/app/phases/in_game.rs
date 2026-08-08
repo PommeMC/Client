@@ -2777,6 +2777,7 @@ fn build_item_render_infos(
     infos
 }
 
+#[derive(Default)]
 struct EntityExtras {
     variant_index: u32,
     overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
@@ -2786,16 +2787,6 @@ struct EntityExtras {
     flap: f32,
     flap_speed: f32,
 }
-
-const EMPTY_EXTRAS: EntityExtras = EntityExtras {
-    variant_index: 0,
-    overlay_tints: [None; MAX_OVERLAYS],
-    overlay_variants: [0; MAX_OVERLAYS],
-    head_y_offset: 0.0,
-    head_x_rot_deg_override: None,
-    flap: 0.0,
-    flap_speed: 0.0,
-};
 
 /// Only the first overlay slot visible, untinted.
 const SLOT0_TINTS: [Option<[f32; 4]>; MAX_OVERLAYS] = {
@@ -2807,28 +2798,28 @@ const SLOT0_TINTS: [Option<[f32; 4]>; MAX_OVERLAYS] = {
 fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
     match e.entity_type {
         EntityKind::Cow => EntityExtras {
-            variant_index: e.cow_variant as u32,
-            ..EMPTY_EXTRAS
+            variant_index: e.variant,
+            ..Default::default()
         },
         EntityKind::Chicken => EntityExtras {
-            variant_index: e.chicken_variant as u32,
-            flap: e.prev_flap + (e.flap - e.prev_flap) * alpha,
-            flap_speed: e.prev_flap_speed + (e.flap_speed - e.prev_flap_speed) * alpha,
-            ..EMPTY_EXTRAS
+            variant_index: e.variant,
+            flap: e.prev_flap.lerp(e.flap, alpha),
+            flap_speed: e.prev_flap_speed.lerp(e.flap_speed, alpha),
+            ..Default::default()
         },
         EntityKind::Sheep => sheep_extras(entity_id, e, alpha),
         EntityKind::Villager => villager_extras(e),
         // Spider eyes overlay is always visible (slot 0).
         EntityKind::Spider => EntityExtras {
             overlay_tints: SLOT0_TINTS,
-            ..EMPTY_EXTRAS
+            ..Default::default()
         },
         // Charged-creeper aura overlay (slot 0) only when powered.
         EntityKind::Creeper if e.powered => EntityExtras {
             overlay_tints: SLOT0_TINTS,
-            ..EMPTY_EXTRAS
+            ..Default::default()
         },
-        _ => EMPTY_EXTRAS,
+        _ => EntityExtras::default(),
     }
 }
 
@@ -2866,7 +2857,7 @@ fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> 
         overlay_tints,
         head_y_offset,
         head_x_rot_deg_override,
-        ..EMPTY_EXTRAS
+        ..Default::default()
     }
 }
 
@@ -2924,7 +2915,7 @@ fn villager_extras(e: &crate::entity::LivingEntity) -> EntityExtras {
             (profession as u32).saturating_sub(1),
             e.villager_level.clamp(1, 5) - 1,
         ],
-        ..EMPTY_EXTRAS
+        ..Default::default()
     }
 }
 

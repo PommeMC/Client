@@ -135,6 +135,22 @@ impl MobEntry {
 
 pub const WHITE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
+/// Registry-path order of each mob's flattened variant pool; the net handler
+/// resolves synced registry ids against these same slices, and the renderer
+/// constructor asserts the pools line up.
+pub const CHICKEN_VARIANT_ORDER: &[&str] = &["temperate", "warm", "cold"];
+pub const COW_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
+
+/// Pool length the `*_VARIANT_ORDER` slice implies for mobs whose variant
+/// index comes from a synced registry.
+fn expected_variant_count(kind: EntityKind) -> Option<usize> {
+    match kind {
+        EntityKind::Chicken => Some(CHICKEN_VARIANT_ORDER.len()),
+        EntityKind::Cow => Some(COW_VARIANT_ORDER.len()),
+        _ => None,
+    }
+}
+
 /// Vanilla `OverlayTexture` hurt pixel (ARGB 0xB2FF0000): rgb is the overlay
 /// color, `a` is how much of the base color survives the mix.
 const HURT_OVERLAY: [f32; 4] = [1.0, 0.0, 0.0, 178.0 / 255.0];
@@ -264,9 +280,8 @@ fn mob_definitions() -> Vec<MobDef> {
         &["minecraft/textures/entity/cow/cow_cold_baby.png"],
         &["minecraft/textures/entity/cow/cow_warm_baby.png"],
     ];
-    // Variant order is temperate/warm/cold: the two normal-mesh variants share
-    // one VariantDef, the cold mesh gets its own. The handler's index mapping
-    // must match.
+    // The two normal-mesh variants share one VariantDef, the cold mesh gets
+    // its own; the flattened pool follows CHICKEN_VARIANT_ORDER.
     const CHICKEN_NORMAL_TEX: &[&[&str]] = &[
         &[
             "minecraft/textures/entity/chicken/chicken_temperate.png",
@@ -674,6 +689,25 @@ impl EntityRenderer {
             assert_part_order_matches(&adult_variants, &adult_overlays);
             if let Some(baby) = &baby_variants {
                 assert_part_order_matches(baby, &baby_overlays);
+            }
+
+            // The net handler resolves variant ids against the
+            // *_VARIANT_ORDER slices; the flattened pools must line up.
+            if let Some(n) = expected_variant_count(def.kind) {
+                assert_eq!(
+                    adult_variants.len(),
+                    n,
+                    "{:?} adult variant pool != variant order length",
+                    def.kind
+                );
+                if let Some(baby) = &baby_variants {
+                    assert_eq!(
+                        baby.len(),
+                        n,
+                        "{:?} baby variant pool != variant order length",
+                        def.kind
+                    );
+                }
             }
 
             mobs.insert(
@@ -1322,6 +1356,8 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
     let (w, h) = match kind {
         EntityKind::Pig => (0.9, 0.9),
         EntityKind::Cow => (0.9, 1.4),
+        // Vanilla Chicken.BABY_DIMENSIONS is an explicit 0.3x0.4, not half scale.
+        EntityKind::Chicken if is_baby => return (0.3, 0.4),
         EntityKind::Chicken => (0.4, 0.7),
         EntityKind::Sheep => (0.9, 1.3),
         EntityKind::Zombie => (0.6, 1.95),

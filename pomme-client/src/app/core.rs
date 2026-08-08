@@ -980,6 +980,15 @@ impl AppCore {
                         .update_living_rotation(id, y_rot_deg, x_rot_deg);
                     game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
                 }
+                NetworkEvent::EntityRotated {
+                    id,
+                    y_rot_deg,
+                    x_rot_deg,
+                    on_ground,
+                } => {
+                    game.entity_store
+                        .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                }
                 NetworkEvent::EntityMotion { id, velocity } => {
                     game.item_entity_store.set_motion(id, velocity);
                 }
@@ -1103,11 +1112,8 @@ impl AppCore {
                         );
                     }
                 }
-                NetworkEvent::CowVariant { id, variant } => {
-                    game.entity_store.set_cow_variant(id, variant);
-                }
-                NetworkEvent::ChickenVariant { id, variant } => {
-                    game.entity_store.set_chicken_variant(id, variant);
+                NetworkEvent::EntityVariant { id, variant } => {
+                    game.entity_store.set_variant(id, variant);
                 }
                 NetworkEvent::VillagerData {
                     id,
