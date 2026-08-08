@@ -1052,11 +1052,9 @@ impl EntityStore {
             (MobFlag::WolfInterested, EntityKind::Wolf) => entity.is_interested = value,
             (MobFlag::CatLying, EntityKind::Cat) => entity.is_lying = value,
             (MobFlag::CatRelaxed, EntityKind::Cat) => entity.relax_state_one = value,
-            (MobFlag::BatResting, EntityKind::Bat) => {
-                if entity.bat_resting != value {
-                    entity.bat_resting = value;
-                    entity.bat_anim_start = None;
-                }
+            (MobFlag::BatResting, EntityKind::Bat) if entity.bat_resting != value => {
+                entity.bat_resting = value;
+                entity.bat_anim_start = None;
             }
             _ => {}
         }
