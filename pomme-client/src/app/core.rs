@@ -977,7 +977,7 @@ impl AppCore {
                     game.entity_store
                         .move_living_delta(id, dx, dy, dz, on_ground);
                     game.entity_store
-                        .update_living_rotation(id, y_rot_deg, x_rot_deg);
+                        .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                     game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
                 }
                 NetworkEvent::EntityRotated {
@@ -1002,7 +1002,7 @@ impl AppCore {
                 } => {
                     game.entity_store.teleport_living(id, position, on_ground);
                     game.entity_store
-                        .update_living_rotation(id, y_rot_deg, x_rot_deg);
+                        .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                     game.item_entity_store
                         .teleport(id, position, velocity, on_ground);
                 }
@@ -1112,8 +1112,8 @@ impl AppCore {
                         );
                     }
                 }
-                NetworkEvent::EntityVariant { id, variant } => {
-                    game.entity_store.set_variant(id, variant);
+                NetworkEvent::EntityVariant { id, kind, variant } => {
+                    game.entity_store.set_variant(id, kind, variant);
                 }
                 NetworkEvent::VillagerData {
                     id,
