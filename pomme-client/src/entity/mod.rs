@@ -181,9 +181,8 @@ impl LivingEntity {
             prev_walk_anim_speed: 0.0,
             is_baby: false,
             is_crouching: false,
-            // on_ground is packet-driven and a stationary entity gets no
-            // movement packet for up to 60 ticks, so spawn grounded (vanilla
-            // grounds remotes via local physics pomme doesn't run).
+            // Spawn grounded: on_ground is packet-driven and a stationary
+            // entity gets no movement packet for up to 60 ticks.
             on_ground: true,
             wool_color: None,
             is_sheared: false,
@@ -1272,10 +1271,9 @@ impl EntityStore {
         }
     }
 
-    /// Rotation half of any movement packet: rotation plus onGround,
-    /// position interpolation untouched. Extends any in-flight position lerp
-    /// instead of re-targeting it (vanilla `moveOrInterpolateTo` rotation
-    /// overloads).
+    /// Rotation half of any movement packet: rotation plus onGround. Extends
+    /// any in-flight position lerp instead of re-targeting it (vanilla
+    /// `moveOrInterpolateTo` rotation overloads).
     pub fn rotate_living(&mut self, id: i32, y_rot_deg: f32, x_rot_deg: f32, on_ground: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.interp_look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
