@@ -2957,14 +2957,6 @@ fn head_rotation(head_x_rot_deg: f32, local_head_y_rot_deg: f32) -> Vec3 {
     )
 }
 
-/// A vanilla `(xRot, yRot, zRot)` triple, passed through unchanged:
-/// `compute_part_transforms` composes vanilla's ZYX order with the
-/// render-space sign conjugation itself. Kept as a marker for
-/// vanilla-sourced multi-axis rotations.
-fn vanilla_rot(x: f32, y: f32, z: f32) -> Vec3 {
-    Vec3::new(x, y, z)
-}
-
 /// Vanilla `Mth.lerp(delta, from, to)`.
 fn lerp(delta: f32, from: f32, to: f32) -> f32 {
     from + delta * (to - from)
