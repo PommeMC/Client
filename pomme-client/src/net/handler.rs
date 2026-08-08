@@ -455,12 +455,18 @@ pub fn handle_game_packet(
                         is_crouching: matches!(pose, azalea_entity::Pose::Crouching),
                     });
                 }
+                // Index 16 (Boolean) = baby flag / bogged sheared. Emit both;
+                // consumers filter by entity type.
                 if item.index == 16
-                    && let azalea_entity::EntityDataValue::Boolean(is_baby) = &item.value
+                    && let azalea_entity::EntityDataValue::Boolean(flag) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::EntityBabyFlag {
                         id: p.id.0,
-                        is_baby: *is_baby,
+                        is_baby: *flag,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::BoggedSheared {
+                        id: p.id.0,
+                        sheared: *flag,
                     });
                 }
                 // Index 16 (Int) = player score / slime size (Slime's
@@ -548,6 +554,26 @@ pub fn handle_game_packet(
                         variant.protocol_id(),
                     ));
                 }
+                // Index 18 (Boolean) = zombie-family underwater conversion.
+                if item.index == 18
+                    && let azalea_entity::EntityDataValue::Boolean(converting) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::MobFlag {
+                        id: p.id.0,
+                        flag: MobFlag::ZombieConverting,
+                        value: *converting,
+                    });
+                }
+                // Index 19 (Boolean) = zombie villager curing.
+                if item.index == 19
+                    && let azalea_entity::EntityDataValue::Boolean(converting) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::MobFlag {
+                        id: p.id.0,
+                        flag: MobFlag::ZombieVillagerConverting,
+                        value: *converting,
+                    });
+                }
                 // Index 18 (Int) = villager unhappy counter / slime size. Emit
                 // both; consumers filter by entity type.
                 if item.index == 18
@@ -562,8 +588,9 @@ pub fn handle_game_packet(
                         size: *value,
                     });
                 }
-                // Index 19 on villagers = VillagerData (type/profession/level).
-                if item.index == 19
+                // Index 19 on villagers / 20 on zombie villagers = VillagerData
+                // (type/profession/level).
+                if (item.index == 19 || item.index == 20)
                     && let azalea_entity::EntityDataValue::VillagerData(data) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::VillagerData {

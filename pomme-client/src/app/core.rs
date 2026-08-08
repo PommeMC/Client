@@ -1121,6 +1121,9 @@ impl AppCore {
                 NetworkEvent::SlimeSize { id, size } => {
                     game.entity_store.set_slime_size(id, size);
                 }
+                NetworkEvent::BoggedSheared { id, sheared } => {
+                    game.entity_store.set_bogged_sheared(id, sheared);
+                }
                 NetworkEvent::VillagerData {
                     id,
                     kind,

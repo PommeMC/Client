@@ -329,6 +329,10 @@ pub enum NetworkEvent {
         id: i32,
         size: i32,
     },
+    BoggedSheared {
+        id: i32,
+        sheared: bool,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,

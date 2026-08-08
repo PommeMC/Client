@@ -21,6 +21,10 @@ pub enum MobFlag {
     CreeperPowered,
     EndermanCreepy,
     WitchDrinking,
+    /// Zombie-family underwater conversion.
+    ZombieConverting,
+    /// Zombie villager curing.
+    ZombieVillagerConverting,
 }
 
 const INTERPOLATION_STEPS: i32 = 3;
@@ -48,6 +52,7 @@ pub struct LivingEntity {
     pub is_crouching: bool,
     pub on_ground: bool,
     pub wool_color: Option<u8>,
+    /// Sheep wool shorn / bogged mushrooms shorn.
     pub is_sheared: bool,
     /// Registry/wire variant slot; meaning is per-kind (pool index for
     /// cow/chicken). Normalized in `EntityStore::set_variant`.
@@ -66,6 +71,8 @@ pub struct LivingEntity {
     /// Enderman screaming flag — raises the head and jitters the render
     /// position.
     pub is_creepy: bool,
+    /// Zombie-family conversion (drowning / villager cure) — body-yaw shake.
+    pub is_converting: bool,
     /// Witch drinking flag — swings the nose down toward the potion.
     pub witch_drinking: bool,
     pub villager_kind: VillagerKind,
@@ -138,6 +145,7 @@ impl LivingEntity {
             prev_squish: 0.0,
             slime_size: 1,
             is_creepy: false,
+            is_converting: false,
             witch_drinking: false,
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
@@ -620,8 +628,19 @@ impl EntityStore {
     }
 
     pub fn set_baby(&mut self, id: i32, is_baby: bool) {
-        if let Some(entity) = self.living.get_mut(&id) {
+        if let Some(entity) = self.living.get_mut(&id)
+            // On bogged, entity-data index 16 is the sheared flag, not baby.
+            && entity.entity_type != EntityKind::Bogged
+        {
             entity.is_baby = is_baby;
+        }
+    }
+
+    pub fn set_bogged_sheared(&mut self, id: i32, sheared: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Bogged
+        {
+            entity.is_sheared = sheared;
         }
     }
 
@@ -662,6 +681,13 @@ impl EntityStore {
             (MobFlag::CreeperPowered, EntityKind::Creeper) => entity.powered = value,
             (MobFlag::EndermanCreepy, EntityKind::Enderman) => entity.is_creepy = value,
             (MobFlag::WitchDrinking, EntityKind::Witch) => entity.witch_drinking = value,
+            (
+                MobFlag::ZombieConverting,
+                EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned,
+            ) => entity.is_converting = value,
+            (MobFlag::ZombieVillagerConverting, EntityKind::ZombieVillager) => {
+                entity.is_converting = value
+            }
             _ => {}
         }
     }
@@ -682,7 +708,10 @@ impl EntityStore {
         level: u32,
     ) {
         if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Villager
+            && matches!(
+                entity.entity_type,
+                EntityKind::Villager | EntityKind::ZombieVillager
+            )
         {
             entity.villager_kind = kind;
             entity.villager_profession = profession;
@@ -846,5 +875,10 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
             | EntityKind::Enderman
             | EntityKind::Slime
             | EntityKind::Witch
+            | EntityKind::Husk
+            | EntityKind::Drowned
+            | EntityKind::ZombieVillager
+            | EntityKind::Stray
+            | EntityKind::Bogged
     )
 }
