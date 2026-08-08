@@ -1115,24 +1115,14 @@ impl AppCore {
                 NetworkEvent::EntityVariant { id, kind, variant } => {
                     game.entity_store.set_variant(id, kind, variant);
                 }
-                NetworkEvent::EndermanCreepy { id, creepy } => {
-                    game.entity_store.set_enderman_creepy(id, creepy);
-                }
-                NetworkEvent::WitchDrinking { id, drinking } => {
-                    game.entity_store.set_witch_drinking(id, drinking);
+                NetworkEvent::MobFlag { id, flag, value } => {
+                    game.entity_store.set_mob_flag(id, flag, value);
                 }
                 NetworkEvent::SlimeSize { id, size } => {
                     game.entity_store.set_slime_size(id, size);
                 }
                 NetworkEvent::BoggedSheared { id, sheared } => {
                     game.entity_store.set_bogged_sheared(id, sheared);
-                }
-                NetworkEvent::ZombieConverting { id, converting } => {
-                    game.entity_store.set_zombie_converting(id, converting);
-                }
-                NetworkEvent::ZombieVillagerConverting { id, converting } => {
-                    game.entity_store
-                        .set_zombie_villager_converting(id, converting);
                 }
                 NetworkEvent::VillagerData {
                     id,
@@ -1154,9 +1144,6 @@ impl AppCore {
                 }
                 NetworkEvent::EntitySwing { id } => {
                     game.entity_store.start_swing(id);
-                }
-                NetworkEvent::CreeperPowered { id, powered } => {
-                    game.entity_store.set_powered(id, powered);
                 }
                 NetworkEvent::EntityDamaged { id } => {
                     game.entity_store.mark_hurt(id);

@@ -45,23 +45,26 @@ pub fn bake_shulker_box_model() -> BakedEntityModel {
 /// the model bakes against a 16x16 reference even though the texture
 /// (`block/<wood>_sign.png`) is 32x32. Face order: -Z, +Z, +Y, -Y, -X, +X.
 pub fn bake_sign_model() -> BakedEntityModel {
+    // Face order -Z, +Z, top, bottom, -X, +X; the render-space X flip puts
+    // the model's -X face on the world's +X side, so the side rects are
+    // assigned crosswise.
     const BOARD_UVS: [[f32; 4]; 6] = [
         [0.0, 8.0, 12.0, 14.0],  // -Z (back)
         [0.0, 1.0, 12.0, 7.0],   // +Z (front)
-        [0.0, 0.0, 12.0, 1.0],   // +Y (top)
-        [0.0, 14.0, 12.0, 15.0], // -Y (bottom)
-        [12.0, 8.0, 13.0, 14.0], // -X
-        [12.0, 1.0, 13.0, 7.0],  // +X
+        [0.0, 0.0, 12.0, 1.0],   // top
+        [0.0, 14.0, 12.0, 15.0], // bottom
+        [12.0, 1.0, 13.0, 7.0],  // -X
+        [12.0, 8.0, 13.0, 14.0], // +X
     ];
-    // The post's top is hidden under the board, so its +Y face reuses the
+    // The post's top is hidden under the board, so its top face reuses the
     // bottom rect rather than claiming texture vanilla never assigns it.
     const POST_UVS: [[f32; 4]; 6] = [
         [14.0, 8.0, 15.0, 15.0],  // -Z
         [14.0, 0.0, 15.0, 7.0],   // +Z
-        [14.0, 15.0, 15.0, 16.0], // +Y (hidden)
-        [14.0, 15.0, 15.0, 16.0], // -Y
-        [15.0, 8.0, 16.0, 15.0],  // -X
-        [15.0, 0.0, 16.0, 7.0],   // +X
+        [14.0, 15.0, 15.0, 16.0], // top (hidden)
+        [14.0, 15.0, 15.0, 16.0], // bottom
+        [15.0, 0.0, 16.0, 7.0],   // -X
+        [15.0, 8.0, 16.0, 15.0],  // +X
     ];
 
     let board = ModelCube {
