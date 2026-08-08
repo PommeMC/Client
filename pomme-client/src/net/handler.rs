@@ -8,6 +8,7 @@ use super::NetworkEvent;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::components::Position;
+use crate::renderer::pipelines::entity_renderer::{CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER};
 use crate::ui::text::format_text_spans;
 
 /// Dimension info from a login/respawn registry entry. `has_skylight` lives
@@ -379,6 +380,15 @@ pub fn handle_game_packet(
                 on_ground: p.on_ground,
             });
         }
+        ClientboundGamePacket::MoveEntityRot(p) => {
+            let look: azalea_entity::LookDirection = p.look_direction.into();
+            let _ = event_tx.try_send(NetworkEvent::EntityRotated {
+                id: p.entity_id.0,
+                y_rot_deg: look.y_rot(),
+                x_rot_deg: look.x_rot(),
+                on_ground: p.on_ground,
+            });
+        }
         ClientboundGamePacket::TeleportEntity(p) => {
             let delta = p.change.delta;
             let _ = event_tx.try_send(NetworkEvent::EntityTeleported {
@@ -512,17 +522,19 @@ pub fn handle_game_packet(
                     let _ = event_tx.try_send(NetworkEvent::EntityCustomName { id: p.id.0, name });
                 }
                 // Index 18 on cows = CowVariant Holder.
+                // TODO: resolve datapack entries via the synced registry NBT
+                // like chicken_variant_index does.
                 if item.index == 18
                     && let azalea_entity::EntityDataValue::CowVariant(variant) = &item.value
                 {
                     use azalea_registry::DataRegistry;
-                    let _ = event_tx.try_send(NetworkEvent::CowVariant {
+                    let _ = event_tx.try_send(NetworkEvent::EntityVariant {
                         id: p.id.0,
                         variant: variant_index(
                             registry_holder,
                             "minecraft:cow_variant",
                             variant.protocol_id(),
-                            &["temperate", "cold", "warm"],
+                            COW_VARIANT_ORDER,
                         ),
                     });
                 }
@@ -531,14 +543,9 @@ pub fn handle_game_packet(
                     && let azalea_entity::EntityDataValue::ChickenVariant(variant) = &item.value
                 {
                     use azalea_registry::DataRegistry;
-                    let _ = event_tx.try_send(NetworkEvent::ChickenVariant {
+                    let _ = event_tx.try_send(NetworkEvent::EntityVariant {
                         id: p.id.0,
-                        variant: variant_index(
-                            registry_holder,
-                            "minecraft:chicken_variant",
-                            variant.protocol_id(),
-                            &["temperate", "warm", "cold"],
-                        ),
+                        variant: chicken_variant_index(registry_holder, variant.protocol_id()),
                     });
                 }
                 // Index 18 (Boolean) = zombie-family underwater conversion.
@@ -732,20 +739,65 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedTe
 }
 
 /// Resolves a variant registry holder id to its index in `order` — the
-/// renderer's texture-variant order for that mob. Unknown ids fall back to 0.
+/// renderer's variant-pool order for that mob. Unknown ids fall back to 0.
 fn variant_index(
     registry_holder: &RegistryHolder,
     registry: &str,
     protocol_id: u32,
     order: &[&str],
-) -> u8 {
+) -> u32 {
     registry_holder
         .protocol_id_to_identifier(
             azalea_registry::identifier::Identifier::new(registry),
             protocol_id,
         )
         .and_then(|id| order.iter().position(|p| *p == id.path()))
-        .unwrap_or(0) as u8
+        .unwrap_or(0) as u32
+}
+
+/// Chicken ids resolve by path against CHICKEN_VARIANT_ORDER; datapack
+/// entries fall back to their synced ModelAndTexture NBT — a known asset_id
+/// picks the exact pool slot, otherwise the model field picks the mesh
+/// (normal -> temperate slot, cold -> cold slot).
+fn chicken_variant_index(registry_holder: &RegistryHolder, protocol_id: u32) -> u32 {
+    let Some((ident, nbt)) = registry_holder
+        .extra
+        .get(&azalea_registry::identifier::Identifier::new(
+            "minecraft:chicken_variant",
+        ))
+        .and_then(|r| r.map.get_index(protocol_id as usize))
+    else {
+        return 0;
+    };
+    let order_pos = |name: &str| {
+        CHICKEN_VARIANT_ORDER
+            .iter()
+            .position(|p| *p == name)
+            .map(|i| i as u32)
+    };
+    if let Some(i) = order_pos(ident.path()) {
+        return i;
+    }
+    if let Some(asset) = nbt.string("asset_id").map(|s| s.to_str().into_owned())
+        && let Some(i) = CHICKEN_VARIANT_ORDER
+            .iter()
+            .position(|p| {
+                asset.strip_prefix("minecraft:").unwrap_or(asset.as_str())
+                    == format!("entity/chicken/chicken_{p}")
+            })
+            .map(|i| i as u32)
+    {
+        return i;
+    }
+    // "normal" is the codec default when the model field is absent.
+    match nbt
+        .string("model")
+        .map(|s| s.to_str().into_owned())
+        .as_deref()
+    {
+        Some("cold") => order_pos("cold").unwrap_or(0),
+        _ => 0,
+    }
 }
 
 fn lp_to_dvec3(v: &azalea_core::delta::LpVec3) -> glam::DVec3 {
