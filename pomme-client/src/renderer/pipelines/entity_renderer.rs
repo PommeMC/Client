@@ -1041,8 +1041,6 @@ impl EntityRenderer {
                 assert_part_order_matches(baby, &baby_overlays);
             }
 
-            // The net handler resolves variant ids against the
-            // *_VARIANT_ORDER slices; the flattened pools must line up.
             if let Some(n) = expected_variant_count(def.kind) {
                 assert_eq!(
                     adult_variants.len(),
