@@ -7,13 +7,6 @@ use super::chunk::mesher::ChunkVertex;
 /// feet don't z-fight the block top.
 const MODEL_REBASE_Y: f32 = 24.016;
 
-/// The X half of vanilla's `scale(-1,-1,1)` (the bake negates Y); prepended
-/// to every root part transform of an `EntityYDown` model. Without it every
-/// model renders left-right mirrored.
-fn render_x_flip() -> Mat4 {
-    Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0))
-}
-
 #[derive(Clone, Copy)]
 pub struct ModelCube {
     pub origin: Vec3,
@@ -180,7 +173,9 @@ impl BakedEntityModel {
             let transform = if let Some(parent_idx) = part.parent {
                 transforms[parent_idx] * local
             } else if self.convention == ModelConvention::EntityYDown {
-                render_x_flip() * local
+                // The X half of vanilla's `scale(-1,-1,1)` (the bake negates
+                // Y); without it every model renders left-right mirrored.
+                Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)) * local
             } else {
                 local
             };
