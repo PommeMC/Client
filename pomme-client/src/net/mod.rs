@@ -399,6 +399,29 @@ pub enum NetworkEvent {
         id: i32,
         chest: bool,
     },
+    BatResting {
+        id: i32,
+        resting: bool,
+    },
+    SalmonVariant {
+        id: i32,
+        variant: i32,
+    },
+    TropicalFishVariant {
+        id: i32,
+        variant: i32,
+    },
+    PufferfishPuffState {
+        id: i32,
+        state: i32,
+    },
+    GlowSquidDarkTicks {
+        id: i32,
+        ticks: i32,
+    },
+    SquidTentacleReset {
+        id: i32,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,

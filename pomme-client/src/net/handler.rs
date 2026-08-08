@@ -443,6 +443,33 @@ pub fn handle_game_packet(
                         is_crouching: matches!(pose, azalea_entity::Pose::Crouching),
                     });
                 }
+                // Index 16 (Byte) = bat flags: bit 0x01 resting.
+                if item.index == 16
+                    && let azalea_entity::EntityDataValue::Byte(flags) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::BatResting {
+                        id: p.id.0,
+                        resting: (*flags & 0x01) != 0,
+                    });
+                }
+                // Index 17 (Int) = salmon size / tropical fish packed variant /
+                // pufferfish puff state. Emit all; consumers filter by kind.
+                if item.index == 17
+                    && let azalea_entity::EntityDataValue::Int(value) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::SalmonVariant {
+                        id: p.id.0,
+                        variant: *value,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::TropicalFishVariant {
+                        id: p.id.0,
+                        variant: *value,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::PufferfishPuffState {
+                        id: p.id.0,
+                        state: *value,
+                    });
+                }
                 // Index 16 (Boolean) = baby flag / bogged sheared. Emit both;
                 // consumers filter by entity type.
                 if item.index == 16
@@ -600,6 +627,10 @@ pub fn handle_game_packet(
                         id: p.id.0,
                         variant: *value,
                     });
+                    let _ = event_tx.try_send(NetworkEvent::GlowSquidDarkTicks {
+                        id: p.id.0,
+                        ticks: *value,
+                    });
                 }
                 // Index 18 (Byte): tamable flags (0x01 sitting, 0x04 tame) or
                 // equine flags (0x10 eating, 0x20 standing, 0x40 open mouth).
@@ -750,6 +781,10 @@ pub fn handle_game_packet(
         // Event id 1 = rabbit jump start (15-tick hop).
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 1 => {
             let _ = event_tx.try_send(NetworkEvent::RabbitJump { id: p.entity_id.0 });
+        }
+        // Event id 19 = squid tentacle-clock rollover.
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 19 => {
+            let _ = event_tx.try_send(NetworkEvent::SquidTentacleReset { id: p.entity_id.0 });
         }
         // Events 8 / 56 = wolf wet-shake start / cancel.
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 8 => {
