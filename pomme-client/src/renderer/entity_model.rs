@@ -7,6 +7,13 @@ use super::chunk::mesher::ChunkVertex;
 /// feet don't z-fight the block top.
 const MODEL_REBASE_Y: f32 = 24.016;
 
+/// The X half of vanilla's `scale(-1,-1,1)` (the bake negates Y); composed
+/// innermost into the entity and block-entity model matrices. Without it
+/// every model renders left-right mirrored.
+pub(crate) fn render_x_flip() -> Mat4 {
+    Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0))
+}
+
 #[derive(Clone, Copy)]
 pub struct ModelCube {
     pub origin: Vec3,
