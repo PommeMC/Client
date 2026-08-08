@@ -29,7 +29,7 @@ use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
-    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, jeb_sheep_tint, wool_color_tint,
+    EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint, wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
@@ -2230,7 +2230,8 @@ pub fn update_game(
             .iter()
             .map(|(&entity_id, e)| {
                 let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
-                let extras = entity_extras(entity_id, e, partial_tick);
+                let extras =
+                    entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
 
                 EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
@@ -2273,6 +2274,17 @@ pub fn update_game(
                     is_converting: e.is_converting,
                     is_holding_item: e.witch_drinking,
                     nose_wobble_speed: extras.nose_wobble_speed,
+                    is_sitting: e.is_sitting,
+                    is_sprinting: e.is_sprinting,
+                    is_angry: extras.is_angry,
+                    tail_angle: extras.tail_angle,
+                    head_roll_angle: extras.head_roll_angle,
+                    shake_anim: extras.shake_anim,
+                    lie_down_amount: extras.lie_down_amount,
+                    lie_down_amount_tail: extras.lie_down_amount_tail,
+                    relax_state_one_amount: extras.relax_state_one_amount,
+                    hop_elapsed_secs: extras.hop_elapsed_secs,
+                    base_tint: extras.base_tint,
                     body_transform: extras.body_transform,
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
@@ -2321,6 +2333,17 @@ pub fn update_game(
             is_converting: false,
             is_holding_item: false,
             nose_wobble_speed: 0.0,
+            is_sitting: false,
+            is_sprinting: false,
+            is_angry: false,
+            tail_angle: 0.0,
+            head_roll_angle: 0.0,
+            shake_anim: 0.0,
+            lie_down_amount: 0.0,
+            lie_down_amount_tail: 0.0,
+            relax_state_one_amount: 0.0,
+            hop_elapsed_secs: None,
+            base_tint: WHITE_TINT,
             body_transform: None,
             age_in_ticks: 0.0,
             attack_time: 0.0,
@@ -2787,7 +2810,6 @@ fn build_item_render_infos(
     infos
 }
 
-#[derive(Default)]
 struct EntityExtras {
     variant_index: u32,
     overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
@@ -2799,6 +2821,42 @@ struct EntityExtras {
     body_transform: Option<glam::Mat4>,
     render_offset: glam::DVec3,
     nose_wobble_speed: f32,
+    is_angry: bool,
+    tail_angle: f32,
+    head_roll_angle: f32,
+    shake_anim: f32,
+    lie_down_amount: f32,
+    lie_down_amount_tail: f32,
+    relax_state_one_amount: f32,
+    hop_elapsed_secs: Option<f32>,
+    base_tint: [f32; 4],
+}
+
+/// Manual impl because `base_tint` defaults to white, not zero.
+impl Default for EntityExtras {
+    fn default() -> Self {
+        Self {
+            variant_index: 0,
+            overlay_tints: [None; MAX_OVERLAYS],
+            overlay_variants: [0; MAX_OVERLAYS],
+            head_y_offset: 0.0,
+            head_x_rot_deg_override: None,
+            flap: 0.0,
+            flap_speed: 0.0,
+            body_transform: None,
+            render_offset: glam::DVec3::ZERO,
+            nose_wobble_speed: 0.0,
+            is_angry: false,
+            tail_angle: 0.0,
+            head_roll_angle: 0.0,
+            shake_anim: 0.0,
+            lie_down_amount: 0.0,
+            lie_down_amount_tail: 0.0,
+            relax_state_one_amount: 0.0,
+            hop_elapsed_secs: None,
+            base_tint: WHITE_TINT,
+        }
+    }
 }
 
 /// Only the first overlay slot visible, untinted.
@@ -2808,7 +2866,12 @@ const SLOT0_TINTS: [Option<[f32; 4]>; MAX_OVERLAYS] = {
     tints
 };
 
-fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+fn entity_extras(
+    entity_id: i32,
+    e: &crate::entity::LivingEntity,
+    alpha: f32,
+    game_time: i64,
+) -> EntityExtras {
     match e.entity_type {
         EntityKind::Cow => EntityExtras {
             variant_index: e.variant,
@@ -2857,6 +2920,20 @@ fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) ->
             nose_wobble_speed: 0.01 * (entity_id % 10) as f32,
             ..Default::default()
         },
+        EntityKind::Wolf => wolf_extras(e, alpha, game_time),
+        EntityKind::Cat => cat_extras(e, alpha),
+        EntityKind::Rabbit => EntityExtras {
+            // "Toast" overrides the variant texture (slot 7).
+            variant_index: if e.custom_name.as_deref() == Some("Toast") {
+                7
+            } else {
+                e.variant
+            },
+            hop_elapsed_secs: e
+                .hop_anim_start
+                .map(|start| (e.age_in_ticks.wrapping_sub(start) as f32 + alpha) * 0.05),
+            ..Default::default()
+        },
         // Charged-creeper aura overlay (slot 0) only when powered.
         EntityKind::Creeper if e.powered => EntityExtras {
             overlay_tints: SLOT0_TINTS,
@@ -2877,6 +2954,74 @@ fn slime_body_transform(e: &crate::entity::LivingEntity, alpha: f32) -> glam::Ma
     glam::Mat4::from_scale(glam::Vec3::splat(0.999))
         * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.001, 0.0))
         * glam::Mat4::from_scale(glam::Vec3::new(w * size, size / w, w * size))
+}
+
+/// Wolf texture state (`variant_index = variant * 3 + state`, tame > angry >
+/// wild priority), collar tint, tail angle, and the beg/shake/wet values.
+fn wolf_extras(e: &crate::entity::LivingEntity, alpha: f32, game_time: i64) -> EntityExtras {
+    use std::f32::consts::PI;
+    let is_angry = e.anger_end_time > 0 && e.anger_end_time > game_time;
+    let state = if e.is_tame {
+        1
+    } else if is_angry {
+        2
+    } else {
+        0
+    };
+    let tail_angle = if is_angry {
+        1.5393804
+    } else if e.is_tame {
+        // Tame wolves carry their health in the tail; tame max health is a
+        // fixed 40 (`applyTamingSideEffects`), attributes aren't parsed.
+        let max_health = 40.0;
+        (0.55 - (max_health - e.health) / max_health * 0.4) * PI
+    } else {
+        0.62831855
+    };
+    let mut overlay_tints = [None; MAX_OVERLAYS];
+    if e.is_tame {
+        overlay_tints[0] = Some(dye_color_tint(e.collar_color));
+    }
+    let wet = e.wet_shade(alpha);
+    EntityExtras {
+        variant_index: e.variant * 3 + state,
+        overlay_tints,
+        is_angry,
+        tail_angle,
+        head_roll_angle: (e.prev_interested_angle
+            + (e.interested_angle - e.prev_interested_angle) * alpha)
+            * 0.15
+            * PI,
+        shake_anim: e.prev_shake_anim + (e.shake_anim - e.prev_shake_anim) * alpha,
+        base_tint: [wet, wet, wet, 1.0],
+        ..Default::default()
+    }
+}
+
+/// Cat collar, pose springs, and the lie-down whole-body roll (vanilla
+/// `CatRenderer.setupRotations`).
+// TODO: the extra 0.15 offset while lying on a sleeping player.
+fn cat_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    let mut overlay_tints = [None; MAX_OVERLAYS];
+    if e.is_tame {
+        overlay_tints[0] = Some(dye_color_tint(e.collar_color));
+    }
+    let lie = e.prev_lie_down_amount + (e.lie_down_amount - e.prev_lie_down_amount) * alpha;
+    let body_transform = (lie > 0.0).then(|| {
+        glam::Mat4::from_translation(glam::Vec3::new(0.4 * lie, 0.15 * lie, 0.1 * lie))
+            * glam::Mat4::from_rotation_z((90.0 * lie).to_radians())
+    });
+    EntityExtras {
+        variant_index: e.variant,
+        overlay_tints,
+        lie_down_amount: lie,
+        lie_down_amount_tail: e.prev_lie_down_amount_tail
+            + (e.lie_down_amount_tail - e.prev_lie_down_amount_tail) * alpha,
+        relax_state_one_amount: e.prev_relax_state_one_amount
+            + (e.relax_state_one_amount - e.prev_relax_state_one_amount) * alpha,
+        body_transform,
+        ..Default::default()
+    }
 }
 
 fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {

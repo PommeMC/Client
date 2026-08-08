@@ -67,6 +67,25 @@ pub struct EntityRenderInfo {
     pub is_holding_item: bool,
     /// Witch per-entity nose-wobble rate, resolved from the entity id.
     pub nose_wobble_speed: f32,
+    /// Tamable sitting pose (wolf/cat).
+    pub is_sitting: bool,
+    pub is_sprinting: bool,
+    /// Wolf anger — angry face texture is picked upstream; this pins the tail.
+    pub is_angry: bool,
+    /// Wolf tail pitch (vanilla `getTailAngle`), radians.
+    pub tail_angle: f32,
+    /// Wolf beg head tilt, radians, interpolated.
+    pub head_roll_angle: f32,
+    /// Wolf wet-shake progress 0..2, interpolated.
+    pub shake_anim: f32,
+    /// Cat lie-down / relax springs, interpolated.
+    pub lie_down_amount: f32,
+    pub lie_down_amount_tail: f32,
+    pub relax_state_one_amount: f32,
+    /// Rabbit hop keyframe clock, seconds since the hop started.
+    pub hop_elapsed_secs: Option<f32>,
+    /// Base-model tint (wolf wet-shade grayscale); white for everyone else.
+    pub base_tint: [f32; 4],
     /// Extra scale applied after the entity rotation (slime size + squish),
     /// shared by base and overlay draws.
     pub body_transform: Option<glam::Mat4>,
@@ -156,6 +175,24 @@ pub const WHITE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// constructor asserts the pools line up.
 pub const CHICKEN_VARIANT_ORDER: &[&str] = &["temperate", "warm", "cold"];
 pub const COW_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
+/// Wolf pool interleaves 3 state textures (wild/tame/angry) per variant.
+pub const WOLF_VARIANT_ORDER: &[&str] = &[
+    "pale", "spotted", "snowy", "black", "ashen", "rusty", "woods", "chestnut", "striped",
+];
+/// Registry-path-alphabetical, matching the cat pool.
+pub const CAT_VARIANT_ORDER: &[&str] = &[
+    "all_black",
+    "black",
+    "british_shorthair",
+    "calico",
+    "jellie",
+    "persian",
+    "ragdoll",
+    "red",
+    "siamese",
+    "tabby",
+    "white",
+];
 
 /// Pool length the `*_VARIANT_ORDER` slice implies for mobs whose variant
 /// index comes from a synced registry.
@@ -163,6 +200,8 @@ fn expected_variant_count(kind: EntityKind) -> Option<usize> {
     match kind {
         EntityKind::Chicken => Some(CHICKEN_VARIANT_ORDER.len()),
         EntityKind::Cow => Some(COW_VARIANT_ORDER.len()),
+        EntityKind::Wolf => Some(WOLF_VARIANT_ORDER.len() * 3),
+        EntityKind::Cat => Some(CAT_VARIANT_ORDER.len()),
         _ => None,
     }
 }
@@ -200,6 +239,31 @@ const fn rgb(hex: u32) -> [f32; 4] {
 
 pub fn wool_color_tint(color: u8) -> [f32; 4] {
     WOOL_COLOR_RGBA[(color & 0x0F) as usize]
+}
+
+/// Vanilla `DyeColor.getTextureDiffuseColor` — the modern dye table used by
+/// collar layers (`WOOL_COLOR_RGBA` above is the legacy wool table).
+pub const DYE_COLOR_RGBA: [[f32; 4]; 16] = [
+    rgb(0xF9FFFE), // 0 white
+    rgb(0xF9801D), // 1 orange
+    rgb(0xC74EBD), // 2 magenta
+    rgb(0x3AB3DA), // 3 light_blue
+    rgb(0xFED83D), // 4 yellow
+    rgb(0x80C71F), // 5 lime
+    rgb(0xF38BAA), // 6 pink
+    rgb(0x474F52), // 7 gray
+    rgb(0x9D9D97), // 8 light_gray
+    rgb(0x169C9C), // 9 cyan
+    rgb(0x8932B8), // 10 purple
+    rgb(0x3C44AA), // 11 blue
+    rgb(0x835432), // 12 brown
+    rgb(0x5E7C16), // 13 green
+    rgb(0xB02E26), // 14 red
+    rgb(0x1D1D21), // 15 black
+];
+
+pub fn dye_color_tint(color: u8) -> [f32; 4] {
+    DYE_COLOR_RGBA[(color & 0x0F) as usize]
 }
 
 pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
@@ -264,6 +328,10 @@ enum AnimationType {
     Spider,
     Villager,
     Witch,
+    Wolf,
+    /// Cat and ocelot (ocelots never set the pose inputs).
+    Feline,
+    Rabbit,
     /// No part animation (slime — size/squish live in the body transform).
     Static,
 }
@@ -361,6 +429,51 @@ fn mob_definitions() -> Vec<MobDef> {
     // Indexed by profession level 1-5 minus one.
     const ZOMBIE_VILLAGER_LEVEL_TEX: &[&[&str]] = tex_table!("zombie_villager/profession_level":
         "stone", "iron", "gold", "emerald", "diamond");
+    // Wolf pool: variant_index = variant * 3 + state (0 wild, 1 tame,
+    // 2 angry); variants follow WOLF_VARIANT_ORDER.
+    const WOLF_TEX: &[&[&str]] = tex_table!("wolf":
+        "wolf", "wolf_tame", "wolf_angry",
+        "wolf_spotted", "wolf_spotted_tame", "wolf_spotted_angry",
+        "wolf_snowy", "wolf_snowy_tame", "wolf_snowy_angry",
+        "wolf_black", "wolf_black_tame", "wolf_black_angry",
+        "wolf_ashen", "wolf_ashen_tame", "wolf_ashen_angry",
+        "wolf_rusty", "wolf_rusty_tame", "wolf_rusty_angry",
+        "wolf_woods", "wolf_woods_tame", "wolf_woods_angry",
+        "wolf_chestnut", "wolf_chestnut_tame", "wolf_chestnut_angry",
+        "wolf_striped", "wolf_striped_tame", "wolf_striped_angry");
+    const WOLF_BABY_TEX: &[&[&str]] = tex_table!("wolf":
+        "wolf_baby", "wolf_tame_baby", "wolf_angry_baby",
+        "wolf_spotted_baby", "wolf_spotted_tame_baby", "wolf_spotted_angry_baby",
+        "wolf_snowy_baby", "wolf_snowy_tame_baby", "wolf_snowy_angry_baby",
+        "wolf_black_baby", "wolf_black_tame_baby", "wolf_black_angry_baby",
+        "wolf_ashen_baby", "wolf_ashen_tame_baby", "wolf_ashen_angry_baby",
+        "wolf_rusty_baby", "wolf_rusty_tame_baby", "wolf_rusty_angry_baby",
+        "wolf_woods_baby", "wolf_woods_tame_baby", "wolf_woods_angry_baby",
+        "wolf_chestnut_baby", "wolf_chestnut_tame_baby", "wolf_chestnut_angry_baby",
+        "wolf_striped_baby", "wolf_striped_tame_baby", "wolf_striped_angry_baby");
+    const WOLF_COLLAR_TEX: &[&[&str]] = tex_table!("wolf": "wolf_collar");
+    const WOLF_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("wolf": "wolf_collar_baby");
+    // Cat pool follows CAT_VARIANT_ORDER (registry-path-alphabetical).
+    const CAT_TEX: &[&[&str]] = tex_table!("cat":
+        "cat_all_black", "cat_black", "cat_british_shorthair", "cat_calico", "cat_jellie",
+        "cat_persian", "cat_ragdoll", "cat_red", "cat_siamese", "cat_tabby", "cat_white");
+    const CAT_BABY_TEX: &[&[&str]] = tex_table!("cat":
+        "cat_all_black_baby", "cat_black_baby", "cat_british_shorthair_baby", "cat_calico_baby",
+        "cat_jellie_baby", "cat_persian_baby", "cat_ragdoll_baby", "cat_red_baby",
+        "cat_siamese_baby", "cat_tabby_baby", "cat_white_baby");
+    const CAT_COLLAR_TEX: &[&[&str]] = tex_table!("cat": "cat_collar");
+    const CAT_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("cat": "cat_collar_baby");
+    const OCELOT_TEX: &[&[&str]] = tex_table!("cat": "ocelot");
+    const OCELOT_BABY_TEX: &[&[&str]] = tex_table!("cat": "ocelot_baby");
+    // Rabbit: variant ids 0-6 in vanilla id order, slot 7 = the "Toast"
+    // custom-name override.
+    const RABBIT_TEX: &[&[&str]] = tex_table!("rabbit":
+        "rabbit_brown", "rabbit_white", "rabbit_black", "rabbit_white_splotched",
+        "rabbit_gold", "rabbit_salt", "rabbit_caerbannog", "rabbit_toast");
+    const RABBIT_BABY_TEX: &[&[&str]] = tex_table!("rabbit":
+        "rabbit_brown_baby", "rabbit_white_baby", "rabbit_black_baby",
+        "rabbit_white_splotched_baby", "rabbit_gold_baby", "rabbit_salt_baby",
+        "rabbit_caerbannog_baby", "rabbit_toast_baby");
     const SKELETON_TEX: &[&[&str]] = &[&["minecraft/textures/entity/skeleton/skeleton.png"]];
     const STRAY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/skeleton/stray.png"]];
     const STRAY_OVERLAY_TEX: &[&[&str]] =
@@ -732,6 +845,74 @@ fn mob_definitions() -> Vec<MobDef> {
             anim: AnimationType::Witch,
             adult: vec![opaque(entity_model::bake_witch_model(), WITCH_TEX, 64)],
             baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // TODO: wolf armor layer (needs the equipment-asset pipeline).
+        MobDef {
+            kind: EntityKind::Wolf,
+            anim: AnimationType::Wolf,
+            adult: vec![opaque(entity_model::bake_wolf_model(), WOLF_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_wolf_model(),
+                WOLF_BABY_TEX,
+                32,
+            )),
+            // Slot 0: dye-tinted collar, tame only.
+            adult_overlays: vec![opaque(
+                entity_model::bake_wolf_collar_model(),
+                WOLF_COLLAR_TEX,
+                64,
+            )],
+            baby_overlays: vec![opaque(
+                entity_model::bake_baby_wolf_model(),
+                WOLF_COLLAR_BABY_TEX,
+                32,
+            )],
+        },
+        MobDef {
+            kind: EntityKind::Cat,
+            anim: AnimationType::Feline,
+            adult: vec![opaque(entity_model::bake_cat_model(), CAT_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_cat_model(),
+                CAT_BABY_TEX,
+                32,
+            )),
+            // Slot 0: dye-tinted collar, tame only (its bake is inflated /
+            // rescaled per vanilla's collar layers).
+            adult_overlays: vec![opaque(
+                entity_model::bake_cat_collar_model(),
+                CAT_COLLAR_TEX,
+                64,
+            )],
+            baby_overlays: vec![opaque(
+                entity_model::bake_baby_cat_collar_model(),
+                CAT_COLLAR_BABY_TEX,
+                32,
+            )],
+        },
+        MobDef {
+            kind: EntityKind::Ocelot,
+            anim: AnimationType::Feline,
+            adult: vec![opaque(entity_model::bake_ocelot_model(), OCELOT_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_ocelot_model(),
+                OCELOT_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Rabbit,
+            anim: AnimationType::Rabbit,
+            adult: vec![opaque(entity_model::bake_rabbit_model(), RABBIT_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_rabbit_model(),
+                RABBIT_BABY_TEX,
+                32,
+            )),
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
@@ -1125,6 +1306,44 @@ impl EntityRenderer {
                 info.nose_wobble_speed,
                 info.is_holding_item,
             ),
+            AnimationType::Wolf => entity_model::compute_wolf_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                &entity_model::WolfAnimInputs {
+                    is_sitting: info.is_sitting,
+                    is_angry: info.is_angry,
+                    is_baby: info.is_baby,
+                    tail_angle: info.tail_angle,
+                    head_roll_angle: info.head_roll_angle,
+                    shake_anim: info.shake_anim,
+                },
+            ),
+            AnimationType::Feline => entity_model::compute_feline_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                &entity_model::FelineAnimInputs {
+                    is_crouching: info.is_crouching,
+                    is_sprinting: info.is_sprinting,
+                    is_sitting: info.is_sitting,
+                    lie_down_amount: info.lie_down_amount,
+                    lie_down_amount_tail: info.lie_down_amount_tail,
+                    relax_state_one_amount: info.relax_state_one_amount,
+                    is_baby: info.is_baby,
+                },
+            ),
+            AnimationType::Rabbit => entity_model::compute_rabbit_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.hop_elapsed_secs,
+                info.is_baby,
+            ),
             AnimationType::Static => entity_model::PartAnim::default(),
         }
     }
@@ -1207,7 +1426,7 @@ impl EntityRenderer {
                 opaque.add(
                     base,
                     texture_set,
-                    (vi, WHITE_TINT, hurt_color(v.info), [0.0, 0.0]),
+                    (vi, v.info.base_tint, hurt_color(v.info), [0.0, 0.0]),
                 );
             }
             for slot in 0..MAX_OVERLAYS {
@@ -1603,6 +1822,11 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::Enderman => (0.6, 2.9),
         EntityKind::Slime => (0.52, 0.52),
         EntityKind::Witch => (0.6, 1.95),
+        EntityKind::Wolf => (0.6, 0.85),
+        EntityKind::Cat | EntityKind::Ocelot => (0.6, 0.7),
+        // Vanilla Rabbit.BABY_DIMENSIONS: explicit 0.24x0.4, not half scale.
+        EntityKind::Rabbit if is_baby => return (0.24, 0.4),
+        EntityKind::Rabbit => (0.49, 0.6),
         EntityKind::Player => (0.6, 1.8),
         _ => (1.0, 1.0),
     };

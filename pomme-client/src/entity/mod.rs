@@ -25,6 +25,10 @@ pub enum MobFlag {
     ZombieConverting,
     /// Zombie villager curing.
     ZombieVillagerConverting,
+    /// Wolf head-tilt beg state.
+    WolfInterested,
+    CatLying,
+    CatRelaxed,
 }
 
 const INTERPOLATION_STEPS: i32 = 3;
@@ -75,6 +79,31 @@ pub struct LivingEntity {
     pub is_converting: bool,
     /// Witch drinking flag — swings the nose down toward the potion.
     pub witch_drinking: bool,
+    /// Tamable (wolf/cat) state from the flags byte.
+    pub is_sitting: bool,
+    pub is_tame: bool,
+    pub is_sprinting: bool,
+    /// Dye id, wolf/cat collars (vanilla default red).
+    pub collar_color: u8,
+    pub is_interested: bool,
+    /// Vanilla persistent-anger end time; angry while > current game time.
+    pub anger_end_time: i64,
+    /// Metadata health; drives the tame wolf's tail angle.
+    pub health: f32,
+    pub interested_angle: f32,
+    pub prev_interested_angle: f32,
+    pub shake_anim: f32,
+    pub prev_shake_anim: f32,
+    pub is_lying: bool,
+    pub relax_state_one: bool,
+    pub lie_down_amount: f32,
+    pub prev_lie_down_amount: f32,
+    pub lie_down_amount_tail: f32,
+    pub prev_lie_down_amount_tail: f32,
+    pub relax_state_one_amount: f32,
+    pub prev_relax_state_one_amount: f32,
+    /// Tick the rabbit hop keyframe clock started at, while hopping.
+    pub hop_anim_start: Option<u32>,
     pub villager_kind: VillagerKind,
     pub villager_profession: VillagerProfession,
     pub villager_level: u32,
@@ -99,6 +128,9 @@ pub struct LivingEntity {
     flapping: f32,
     target_squish: f32,
     prev_on_ground: bool,
+    is_shaking: bool,
+    jump_ticks: i32,
+    jump_duration: i32,
     interp_target: Position,
     interp_look_dir: LookDirection,
     interp_steps: i32,
@@ -147,6 +179,26 @@ impl LivingEntity {
             is_creepy: false,
             is_converting: false,
             witch_drinking: false,
+            is_sitting: false,
+            is_tame: false,
+            is_sprinting: false,
+            collar_color: 14,
+            is_interested: false,
+            anger_end_time: -1,
+            health: 20.0,
+            interested_angle: 0.0,
+            prev_interested_angle: 0.0,
+            shake_anim: 0.0,
+            prev_shake_anim: 0.0,
+            is_lying: false,
+            relax_state_one: false,
+            lie_down_amount: 0.0,
+            prev_lie_down_amount: 0.0,
+            lie_down_amount_tail: 0.0,
+            prev_lie_down_amount_tail: 0.0,
+            relax_state_one_amount: 0.0,
+            prev_relax_state_one_amount: 0.0,
+            hop_anim_start: None,
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
             villager_level: 0,
@@ -165,6 +217,9 @@ impl LivingEntity {
             // grounded spawn above this reproduces vanilla's first-track
             // landing squash and skips the airborne-spawn stretch.
             prev_on_ground: false,
+            is_shaking: false,
+            jump_ticks: 0,
+            jump_duration: 0,
             interp_target: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
@@ -230,6 +285,66 @@ impl LivingEntity {
         }
         self.flapping *= 0.9;
         self.flap += self.flapping * 2.0;
+    }
+
+    /// Client-side springs for the wolf beg tilt / shake ramp, cat lie-down
+    /// and relax, and the rabbit hop clock (vanilla ticks these on both
+    /// sides; only the driving flags are synced). Inert for other mobs.
+    fn tick_tamable_anims(&mut self) {
+        let spring = |cur: f32, on: bool, up: f32, down: f32| {
+            if on {
+                (cur + up).min(1.0)
+            } else {
+                (cur - down).max(0.0)
+            }
+        };
+        self.prev_interested_angle = self.interested_angle;
+        self.interested_angle +=
+            (if self.is_interested { 1.0 } else { 0.0 } - self.interested_angle) * 0.4;
+
+        if self.is_shaking {
+            self.prev_shake_anim = self.shake_anim;
+            self.shake_anim += 0.05;
+            if self.prev_shake_anim >= 2.0 {
+                self.is_shaking = false;
+                self.shake_anim = 0.0;
+                self.prev_shake_anim = 0.0;
+            }
+        }
+
+        self.prev_lie_down_amount = self.lie_down_amount;
+        self.lie_down_amount = spring(self.lie_down_amount, self.is_lying, 0.15, 0.22);
+        self.prev_lie_down_amount_tail = self.lie_down_amount_tail;
+        self.lie_down_amount_tail = spring(self.lie_down_amount_tail, self.is_lying, 0.08, 0.13);
+        self.prev_relax_state_one_amount = self.relax_state_one_amount;
+        self.relax_state_one_amount =
+            spring(self.relax_state_one_amount, self.relax_state_one, 0.1, 0.13);
+
+        // Vanilla `Rabbit.aiStep` jump counter + `setupAnimationStates`.
+        if self.jump_ticks != self.jump_duration {
+            self.jump_ticks += 1;
+        } else if self.jump_duration != 0 {
+            self.jump_ticks = 0;
+            self.jump_duration = 0;
+        }
+        if self.jump_ticks > 0 {
+            if self.hop_anim_start.is_none() {
+                self.hop_anim_start = Some(self.age_in_ticks);
+            }
+        } else {
+            self.hop_anim_start = None;
+        }
+    }
+
+    /// Vanilla `Wolf.getWetShade` grayscale, with wetness approximated by the
+    /// shake run (rain wetness isn't sampled).
+    // TODO: true isInWaterOrRain wetness for the pre-shake 0.75 darkening.
+    pub fn wet_shade(&self, alpha: f32) -> f32 {
+        if !self.is_shaking {
+            return 1.0;
+        }
+        let shake = self.prev_shake_anim + (self.shake_anim - self.prev_shake_anim) * alpha;
+        (0.75 + shake / 2.0 * 0.25).min(1.0)
     }
 
     /// Vanilla `AbstractCubeMob.tick` squish spring; the update order matters.
@@ -666,7 +781,18 @@ impl EntityStore {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == kind
         {
-            entity.variant = raw;
+            entity.variant = match entity.entity_type {
+                // Vanilla sparse rabbit id map: 99 = evil, unknown ids fall
+                // back to brown.
+                EntityKind::Rabbit => match raw {
+                    0..=5 => raw,
+                    99 => 6,
+                    _ => 0,
+                },
+                // Holder-backed indices (cow/chicken/wolf/cat) are
+                // pre-resolved by the net handler.
+                _ => raw,
+            };
         }
     }
 
@@ -688,6 +814,9 @@ impl EntityStore {
             (MobFlag::ZombieVillagerConverting, EntityKind::ZombieVillager) => {
                 entity.is_converting = value
             }
+            (MobFlag::WolfInterested, EntityKind::Wolf) => entity.is_interested = value,
+            (MobFlag::CatLying, EntityKind::Cat) => entity.is_lying = value,
+            (MobFlag::CatRelaxed, EntityKind::Cat) => entity.relax_state_one = value,
             _ => {}
         }
     }
@@ -755,6 +884,64 @@ impl EntityStore {
         }
     }
 
+    pub fn set_tamable_flags(&mut self, id: i32, sitting: bool, tame: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && matches!(entity.entity_type, EntityKind::Wolf | EntityKind::Cat)
+        {
+            entity.is_sitting = sitting;
+            entity.is_tame = tame;
+        }
+    }
+
+    pub fn set_collar_color(&mut self, id: i32, color: u8) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && matches!(entity.entity_type, EntityKind::Wolf | EntityKind::Cat)
+        {
+            entity.collar_color = color & 0x0F;
+        }
+    }
+
+    pub fn set_wolf_anger(&mut self, id: i32, end_time: i64) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Wolf
+        {
+            entity.anger_end_time = end_time;
+        }
+    }
+
+    /// Wolf wet-shake start / cancel (entity events 8 / 56).
+    pub fn set_wolf_shaking(&mut self, id: i32, shaking: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Wolf
+        {
+            entity.is_shaking = shaking;
+            entity.shake_anim = 0.0;
+            entity.prev_shake_anim = 0.0;
+        }
+    }
+
+    /// Rabbit hop (entity event 1): vanilla sets a 15-tick jump run.
+    pub fn start_rabbit_jump(&mut self, id: i32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Rabbit
+        {
+            entity.jump_duration = 15;
+            entity.jump_ticks = 0;
+        }
+    }
+
+    pub fn set_health(&mut self, id: i32, health: f32) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.health = health;
+        }
+    }
+
+    pub fn set_sprinting(&mut self, id: i32, sprinting: bool) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.is_sprinting = sprinting;
+        }
+    }
+
     /// Begins an arm swing (server `Animate` packet). Restarts when idle or
     /// past the halfway point (vanilla `LivingEntity.swing`); `swing_time`
     /// counts down, so that is `swing_time <= SWING_DURATION / 2`.
@@ -812,6 +999,7 @@ impl EntityStore {
                 &mut entity.prev_walk_anim_speed,
             );
             entity.tick_kind_anims();
+            entity.tick_tamable_anims();
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
             if entity.eat_anim_tick > 0 {
                 entity.eat_anim_tick -= 1;
@@ -880,5 +1068,9 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
             | EntityKind::ZombieVillager
             | EntityKind::Stray
             | EntityKind::Bogged
+            | EntityKind::Wolf
+            | EntityKind::Cat
+            | EntityKind::Ocelot
+            | EntityKind::Rabbit
     )
 }

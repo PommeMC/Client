@@ -333,6 +333,34 @@ pub enum NetworkEvent {
         id: i32,
         sheared: bool,
     },
+    TamableFlags {
+        id: i32,
+        sitting: bool,
+        tame: bool,
+    },
+    CollarColor {
+        id: i32,
+        color: u8,
+    },
+    WolfAnger {
+        id: i32,
+        end_time: i64,
+    },
+    WolfShaking {
+        id: i32,
+        shaking: bool,
+    },
+    RabbitJump {
+        id: i32,
+    },
+    EntityHealth {
+        id: i32,
+        health: f32,
+    },
+    EntitySprinting {
+        id: i32,
+        sprinting: bool,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,

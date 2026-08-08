@@ -10,7 +10,9 @@ use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::MobFlag;
 use crate::entity::components::Position;
-use crate::renderer::pipelines::entity_renderer::{CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER};
+use crate::renderer::pipelines::entity_renderer::{
+    CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
+};
 use crate::ui::text::format_text_spans;
 
 /// Dimension info from a login/respawn registry entry. `has_skylight` lives
@@ -485,6 +487,25 @@ pub fn handle_game_packet(
                         size: *score,
                     });
                 }
+                // Index 0 = shared entity flags byte: bit 0x08 = sprinting
+                // (drives the cat's stalking pose).
+                if item.index == 0
+                    && let azalea_entity::EntityDataValue::Byte(flags) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::EntitySprinting {
+                        id: p.id.0,
+                        sprinting: (*flags & 0x08) != 0,
+                    });
+                }
+                // Index 9 = health; drives the tame wolf's tail angle.
+                if item.index == 9
+                    && let azalea_entity::EntityDataValue::Float(health) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::EntityHealth {
+                        id: p.id.0,
+                        health: *health,
+                    });
+                }
                 // Index 15 = mob flags byte (AbstractInsentient): bit 0x04 = aggressive.
                 if item.index == 15
                     && let azalea_entity::EntityDataValue::Byte(flags) = &item.value
@@ -574,8 +595,8 @@ pub fn handle_game_packet(
                         value: *converting,
                     });
                 }
-                // Index 18 (Int) = villager unhappy counter / slime size. Emit
-                // both; consumers filter by entity type.
+                // Index 18 (Int) = villager unhappy counter / slime size /
+                // rabbit variant. Emit all; consumers filter by entity type.
                 if item.index == 18
                     && let azalea_entity::EntityDataValue::Int(value) = &item.value
                 {
@@ -586,6 +607,101 @@ pub fn handle_game_packet(
                     let _ = event_tx.try_send(NetworkEvent::SlimeSize {
                         id: p.id.0,
                         size: *value,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::EntityVariant {
+                        id: p.id.0,
+                        kind: EntityKind::Rabbit,
+                        variant: *value as u32,
+                    });
+                }
+                // Index 18 (Byte) on tamables = flags: bit 0x01 sitting, bit
+                // 0x04 tame.
+                if item.index == 18
+                    && let azalea_entity::EntityDataValue::Byte(flags) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::TamableFlags {
+                        id: p.id.0,
+                        sitting: (*flags & 0x01) != 0,
+                        tame: (*flags & 0x04) != 0,
+                    });
+                }
+                // Index 20 on cats = CatVariant Holder; on wolves = interested
+                // Boolean.
+                if item.index == 20
+                    && let azalea_entity::EntityDataValue::CatVariant(variant) = &item.value
+                {
+                    use azalea_registry::DataRegistry;
+                    let _ = event_tx.try_send(variant_event(
+                        registry_holder,
+                        p.id.0,
+                        EntityKind::Cat,
+                        variant.protocol_id(),
+                    ));
+                }
+                if item.index == 20
+                    && let azalea_entity::EntityDataValue::Boolean(interested) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::MobFlag {
+                        id: p.id.0,
+                        flag: MobFlag::WolfInterested,
+                        value: *interested,
+                    });
+                }
+                // Index 21: wolf collar color Int / cat lying Boolean; index
+                // 23 carries the cat's collar Int. Consumers filter by kind.
+                if item.index == 21
+                    && let azalea_entity::EntityDataValue::Int(color) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::CollarColor {
+                        id: p.id.0,
+                        color: *color as u8,
+                    });
+                }
+                if item.index == 21
+                    && let azalea_entity::EntityDataValue::Boolean(lying) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::MobFlag {
+                        id: p.id.0,
+                        flag: MobFlag::CatLying,
+                        value: *lying,
+                    });
+                }
+                // Index 22: wolf anger end time Long / cat relax Boolean.
+                if item.index == 22
+                    && let azalea_entity::EntityDataValue::Long(end_time) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::WolfAnger {
+                        id: p.id.0,
+                        end_time: *end_time,
+                    });
+                }
+                if item.index == 22
+                    && let azalea_entity::EntityDataValue::Boolean(relaxed) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::MobFlag {
+                        id: p.id.0,
+                        flag: MobFlag::CatRelaxed,
+                        value: *relaxed,
+                    });
+                }
+                // Index 23: wolf variant Holder / cat collar color Int.
+                if item.index == 23
+                    && let azalea_entity::EntityDataValue::WolfVariant(variant) = &item.value
+                {
+                    use azalea_registry::DataRegistry;
+                    let _ = event_tx.try_send(variant_event(
+                        registry_holder,
+                        p.id.0,
+                        EntityKind::Wolf,
+                        variant.protocol_id(),
+                    ));
+                }
+                if item.index == 23
+                    && let azalea_entity::EntityDataValue::Int(color) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::CollarColor {
+                        id: p.id.0,
+                        color: *color as u8,
                     });
                 }
                 // Index 19 on villagers / 20 on zombie villagers = VillagerData
@@ -609,6 +725,23 @@ pub fn handle_game_packet(
         // Event id 10 = sheep eat-grass animation start (40-tick head-dip).
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 10 => {
             let _ = event_tx.try_send(NetworkEvent::SheepEatStart { id: p.entity_id.0 });
+        }
+        // Event id 1 = rabbit jump start (15-tick hop).
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 1 => {
+            let _ = event_tx.try_send(NetworkEvent::RabbitJump { id: p.entity_id.0 });
+        }
+        // Events 8 / 56 = wolf wet-shake start / cancel.
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 8 => {
+            let _ = event_tx.try_send(NetworkEvent::WolfShaking {
+                id: p.entity_id.0,
+                shaking: true,
+            });
+        }
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 56 => {
+            let _ = event_tx.try_send(NetworkEvent::WolfShaking {
+                id: p.entity_id.0,
+                shaking: false,
+            });
         }
         // Arm-swing animation drives the zombie attack swing (skeleton aim uses the
         // aggressive flag instead). Both hands trigger the same swing timer.
@@ -762,6 +895,18 @@ fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id
             "minecraft:chicken_variant",
             CHICKEN_VARIANT_ORDER,
             "entity/chicken/chicken_",
+        ),
+        EntityKind::Cat => (
+            "minecraft:cat_variant",
+            CAT_VARIANT_ORDER,
+            "entity/cat/cat_",
+        ),
+        // TODO: wolf NBT nests its textures (assets.wild, no flat
+        // asset_id/model), so datapack wolves only resolve by registry path.
+        EntityKind::Wolf => (
+            "minecraft:wolf_variant",
+            WOLF_VARIANT_ORDER,
+            "entity/wolf/wolf_",
         ),
         _ => return 0,
     };
