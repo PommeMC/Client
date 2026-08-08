@@ -39,6 +39,16 @@ fn quadruped_legs(
     ]
 }
 
+/// Index of the named part, panicking at bake time if the mesh changed
+/// shape — positional indexing into a shared parts builder goes stale
+/// silently.
+fn part_index(parts: &[EntityPart], name: &str) -> usize {
+    parts
+        .iter()
+        .position(|p| p.name == name)
+        .unwrap_or_else(|| panic!("mesh has a {name} part"))
+}
+
 /// Mirror a cube's geometry across x=0 WITHOUT flipping UVs (e.g. chicken
 /// wings and legs share one un-mirrored texture — vanilla quirk). Pair with
 /// `mirror: true` where vanilla's `.mirror()` UV flip is also wanted.
@@ -131,6 +141,12 @@ impl BakedEntityModel {
                     extra_translation = t;
                     break;
                 }
+            }
+            // Scaled roots (`bake_scaled`) pre-bake `offset * factor`, so an
+            // anim translation must scale too; children inherit the scale
+            // through the parent matrix instead. No-op at the default 1.0.
+            if part.parent.is_none() {
+                extra_translation *= self.part_scales.get(i).copied().unwrap_or(1.0);
             }
 
             let pivot = part.offset + extra_translation;
@@ -633,9 +649,11 @@ pub fn bake_husk_model() -> BakedEntityModel {
 // once a swim_amount ramp from the pose metadata exists.
 pub fn bake_drowned_model(g: f32) -> BakedEntityModel {
     let mut parts = zombie_parts();
-    // humanoid_parts order: 3 = left_arm, 5 = left_leg.
-    parts[3].cubes = vec![vbox((32, 48), (-1.0, -2.0, -2.0), (4.0, 12.0, 4.0))];
-    parts[5].cubes = vec![vbox((16, 48), (-2.0, 0.0, -2.0), (4.0, 12.0, 4.0))];
+    // Vanilla gives the drowned's left limbs their own UV regions.
+    let left_arm = part_index(&parts, "left_arm");
+    parts[left_arm].cubes = vec![vbox((32, 48), (-1.0, -2.0, -2.0), (4.0, 12.0, 4.0))];
+    let left_leg = part_index(&parts, "left_leg");
+    parts[left_leg].cubes = vec![vbox((16, 48), (-2.0, 0.0, -2.0), (4.0, 12.0, 4.0))];
     inflate(&mut parts, g);
     bake_model(parts, 64, 64)
 }
@@ -2420,22 +2438,16 @@ pub fn bake_slime_outer_model() -> BakedEntityModel {
 /// its witch.png region is fully transparent, so its cubes are dropped.
 fn witch_parts() -> Vec<EntityPart> {
     let mut parts = villager_parts();
-    let index_of = |parts: &[EntityPart], name: &str| {
-        parts
-            .iter()
-            .position(|p| p.name == name)
-            .unwrap_or_else(|| panic!("villager mesh has a {name}"))
-    };
-    let head = index_of(&parts, "head");
-    let hat = index_of(&parts, "hat");
-    let nose = index_of(&parts, "nose");
+    let head = part_index(&parts, "head");
+    let hat = part_index(&parts, "hat");
+    let nose = part_index(&parts, "nose");
     parts[hat] = vpart(
         "hat",
         Some(head),
         Vec3::new(-5.0, -10.03125, -5.0),
         vec![vbox((0, 64), (0.0, 0.0, 0.0), (10.0, 2.0, 10.0))],
     );
-    let hat_rim = index_of(&parts, "hat_rim");
+    let hat_rim = part_index(&parts, "hat_rim");
     parts[hat_rim].cubes.clear();
     // The cone stacks parent hat -> hat2 -> hat3 -> hat4; the appended parts
     // land at indices n, n+1, n+2.

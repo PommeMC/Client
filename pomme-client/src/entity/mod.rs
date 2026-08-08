@@ -14,21 +14,39 @@ use crate::physics::collision::resolve_collision;
 use crate::world::block::{FluidKind, fluid};
 use crate::world::chunk::ChunkStore;
 
-/// Kind-gated boolean mob states; each flag belongs to one mob kind and
-/// [`EntityStore::set_mob_flag`] drops writes for a mismatched entity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MobFlag {
-    CreeperPowered,
-    EndermanCreepy,
-    WitchDrinking,
-    /// Zombie-family underwater conversion.
-    ZombieConverting,
-    /// Zombie villager curing.
-    ZombieVillagerConverting,
-    /// Wolf head-tilt beg state.
-    WolfInterested,
-    CatLying,
-    CatRelaxed,
+/// A scalar synched-entity-data value, forwarded raw from the wire;
+/// [`EntityStore::apply_entity_data`] gives it meaning per (kind, index).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MetaValue {
+    Bool(bool),
+    Int(i32),
+    Byte(u8),
+    Float(f32),
+    Long(i64),
+}
+
+/// Kinds whose entity-data index 16 is the baby flag: `AgeableMob`
+/// descendants plus the zombie family (which defines its own baby flag at
+/// the same index). NOT baby at 16: Bogged (sheared), Skeleton (stray
+/// conversion), Witch (Raider celebrating), fish (from-bucket).
+fn is_baby_kind(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Pig
+            | EntityKind::Cow
+            | EntityKind::Sheep
+            | EntityKind::Chicken
+            | EntityKind::Villager
+            | EntityKind::Slime
+            | EntityKind::Zombie
+            | EntityKind::Husk
+            | EntityKind::Drowned
+            | EntityKind::ZombieVillager
+            | EntityKind::Wolf
+            | EntityKind::Cat
+            | EntityKind::Ocelot
+            | EntityKind::Rabbit
+    )
 }
 
 const INTERPOLATION_STEPS: i32 = 3;
@@ -742,35 +760,75 @@ impl EntityStore {
         }
     }
 
-    pub fn set_baby(&mut self, id: i32, is_baby: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            // On bogged, entity-data index 16 is the sheared flag, not baby.
-            && entity.entity_type != EntityKind::Bogged
-        {
-            entity.is_baby = is_baby;
-        }
-    }
-
-    pub fn set_bogged_sheared(&mut self, id: i32, sheared: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Bogged
-        {
-            entity.is_sheared = sheared;
+    /// Resolves a raw synched-entity-data scalar per (kind, index), the
+    /// direct analogue of vanilla's per-class `onSyncedDataUpdated`. Index
+    /// arithmetic follows the registration chain: `Entity` 0-7,
+    /// `LivingEntity` 8-14, `Mob` 15, `AgeableMob` 16 baby + 17 age-locked,
+    /// first subclass field 18. Where an index moved between supported
+    /// versions both spots are accepted (the other index carries an
+    /// incompatible type or kind on each version).
+    pub fn apply_entity_data(&mut self, id: i32, index: u8, value: MetaValue) {
+        use MetaValue::{Bool, Byte, Float, Int, Long};
+        let Some(entity) = self.living.get_mut(&id) else {
+            return;
+        };
+        match (entity.entity_type, index, value) {
+            // Shared entity flags byte: bit 0x08 = sprinting.
+            (_, 0, Byte(f)) => entity.is_sprinting = f & 0x08 != 0,
+            (_, 9, Float(h)) => entity.health = h,
+            // Mob flags byte: bit 0x04 = aggressive.
+            (_, 15, Byte(f)) => entity.aggressive = f & 0x04 != 0,
+            (k, 16, Bool(b)) if is_baby_kind(k) => entity.is_baby = b,
+            // Skeleton: powder-snow stray conversion; drives the vanilla
+            // `isShaking` body jitter.
+            (EntityKind::Skeleton, 16, Bool(b)) => entity.is_converting = b,
+            (EntityKind::Bogged, 16, Bool(b)) => entity.is_sheared = b,
+            // Slime size: 16 on 1.21.9-26.1.x, 18 since Slime joined
+            // AgeableMob in 26.2.
+            (EntityKind::Slime, 16 | 18, Int(s)) => entity.slime_size = s.clamp(1, 127) as u8,
+            // Sheep wool byte (low nibble = DyeColor, bit 0x10 = sheared):
+            // 17 on 1.21.9-26.1.x, 18 on 26.2.
+            (EntityKind::Sheep, 17 | 18, Byte(w)) => {
+                entity.wool_color = Some(w & 0x0F);
+                entity.is_sheared = w & 0x10 != 0;
+            }
+            (EntityKind::Creeper, 17, Bool(b)) => entity.powered = b,
+            (EntityKind::Enderman, 17, Bool(b)) => entity.is_creepy = b,
+            (EntityKind::Witch, 17, Bool(b)) => entity.witch_drinking = b,
+            // Zombie-family underwater conversion / zombie villager curing.
+            (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b)) => {
+                entity.is_converting = b
+            }
+            (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
+            (EntityKind::Villager, 18, Int(c)) => entity.unhappy_counter = c,
+            // Vanilla sparse rabbit id map: 99 = evil, unknown ids fall back
+            // to brown.
+            (EntityKind::Rabbit, 18, Int(v)) => {
+                entity.variant = match v {
+                    0..=5 => v as u32,
+                    99 => 6,
+                    _ => 0,
+                }
+            }
+            // Tamable flags byte: bit 0x01 = sitting, 0x04 = tame.
+            (EntityKind::Wolf | EntityKind::Cat, 18, Byte(f)) => {
+                entity.is_sitting = f & 0x01 != 0;
+                entity.is_tame = f & 0x04 != 0;
+            }
+            (EntityKind::Wolf, 20, Bool(b)) => entity.is_interested = b,
+            (EntityKind::Wolf, 21, Int(c)) => entity.collar_color = c as u8 & 0x0F,
+            (EntityKind::Cat, 21, Bool(b)) => entity.is_lying = b,
+            // Vanilla persistent-anger end time (game-time tick).
+            (EntityKind::Wolf, 22, Long(t)) => entity.anger_end_time = t,
+            (EntityKind::Cat, 22, Bool(b)) => entity.relax_state_one = b,
+            (EntityKind::Cat, 23, Int(c)) => entity.collar_color = c as u8 & 0x0F,
+            _ => {}
         }
     }
 
     pub fn set_crouching(&mut self, id: i32, is_crouching: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.is_crouching = is_crouching;
-        }
-    }
-
-    pub fn set_sheep_wool(&mut self, id: i32, color: u8, sheared: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Sheep
-        {
-            entity.wool_color = Some(color);
-            entity.is_sheared = sheared;
         }
     }
 
@@ -781,51 +839,10 @@ impl EntityStore {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == kind
         {
-            entity.variant = match entity.entity_type {
-                // Vanilla sparse rabbit id map: 99 = evil, unknown ids fall
-                // back to brown.
-                EntityKind::Rabbit => match raw {
-                    0..=5 => raw,
-                    99 => 6,
-                    _ => 0,
-                },
-                // Holder-backed indices (cow/chicken/wolf/cat) are
-                // pre-resolved by the net handler.
-                _ => raw,
-            };
-        }
-    }
-
-    /// Applies a [`MobFlag`] write, dropping it when the entity isn't the
-    /// flag's mob (metadata indices are overloaded across kinds, so the net
-    /// handler emits every candidate flag for an ambiguous boolean).
-    pub fn set_mob_flag(&mut self, id: i32, flag: MobFlag, value: bool) {
-        let Some(entity) = self.living.get_mut(&id) else {
-            return;
-        };
-        match (flag, entity.entity_type) {
-            (MobFlag::CreeperPowered, EntityKind::Creeper) => entity.powered = value,
-            (MobFlag::EndermanCreepy, EntityKind::Enderman) => entity.is_creepy = value,
-            (MobFlag::WitchDrinking, EntityKind::Witch) => entity.witch_drinking = value,
-            (
-                MobFlag::ZombieConverting,
-                EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned,
-            ) => entity.is_converting = value,
-            (MobFlag::ZombieVillagerConverting, EntityKind::ZombieVillager) => {
-                entity.is_converting = value
-            }
-            (MobFlag::WolfInterested, EntityKind::Wolf) => entity.is_interested = value,
-            (MobFlag::CatLying, EntityKind::Cat) => entity.is_lying = value,
-            (MobFlag::CatRelaxed, EntityKind::Cat) => entity.relax_state_one = value,
-            _ => {}
-        }
-    }
-
-    pub fn set_slime_size(&mut self, id: i32, size: i32) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Slime
-        {
-            entity.slime_size = size.clamp(1, 127) as u8;
+            // Holder-backed indices (cow/chicken/wolf/cat) are pre-resolved
+            // by the net handler; the rabbit's raw-int map lives in
+            // `apply_entity_data`.
+            entity.variant = raw;
         }
     }
 
@@ -845,14 +862,6 @@ impl EntityStore {
             entity.villager_kind = kind;
             entity.villager_profession = profession;
             entity.villager_level = level;
-        }
-    }
-
-    pub fn set_villager_unhappy(&mut self, id: i32, counter: i32) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Villager
-        {
-            entity.unhappy_counter = counter;
         }
     }
 
@@ -878,37 +887,6 @@ impl EntityStore {
         }
     }
 
-    pub fn set_aggressive(&mut self, id: i32, aggressive: bool) {
-        if let Some(entity) = self.living.get_mut(&id) {
-            entity.aggressive = aggressive;
-        }
-    }
-
-    pub fn set_tamable_flags(&mut self, id: i32, sitting: bool, tame: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && matches!(entity.entity_type, EntityKind::Wolf | EntityKind::Cat)
-        {
-            entity.is_sitting = sitting;
-            entity.is_tame = tame;
-        }
-    }
-
-    pub fn set_collar_color(&mut self, id: i32, color: u8) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && matches!(entity.entity_type, EntityKind::Wolf | EntityKind::Cat)
-        {
-            entity.collar_color = color & 0x0F;
-        }
-    }
-
-    pub fn set_wolf_anger(&mut self, id: i32, end_time: i64) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Wolf
-        {
-            entity.anger_end_time = end_time;
-        }
-    }
-
     /// Wolf wet-shake start / cancel (entity events 8 / 56).
     pub fn set_wolf_shaking(&mut self, id: i32, shaking: bool) {
         if let Some(entity) = self.living.get_mut(&id)
@@ -927,18 +905,6 @@ impl EntityStore {
         {
             entity.jump_duration = 15;
             entity.jump_ticks = 0;
-        }
-    }
-
-    pub fn set_health(&mut self, id: i32, health: f32) {
-        if let Some(entity) = self.living.get_mut(&id) {
-            entity.health = health;
-        }
-    }
-
-    pub fn set_sprinting(&mut self, id: i32, sprinting: bool) {
-        if let Some(entity) = self.living.get_mut(&id) {
-            entity.is_sprinting = sprinting;
         }
     }
 
