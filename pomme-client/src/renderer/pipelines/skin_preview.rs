@@ -669,8 +669,11 @@ pub(crate) fn create_pipeline(
     pipeline
 }
 
-// Vanilla model coordinates: Y-down, 1 unit = 1 pixel
-// We convert to Y-up by negating Y, then scale by PX
+// Vanilla model coordinates: Y-down, 1 unit = 1 pixel; converted to Y-up by
+// negating Y, then scaled by PX. Unlike the entity renderer (X flip + face
+// rect on -Z), this mesh is built Z-reflected — face rect on +Z, viewed from
+// -Z — which yields the identical image; don't "fix" one convention without
+// the other.
 const PX: f32 = 1.0 / 16.0;
 
 fn uv(x: u32, y: u32, w: u32, h: u32) -> [[f32; 2]; 4] {
@@ -750,11 +753,14 @@ fn add_box(
         [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
         uv(tx + td, ty, tw, td),
     );
-    // Bottom (-Y in our space = +Y in vanilla = bottom)
+    // Bottom (-Y in our space = +Y in vanilla = bottom). Vanilla reads the
+    // maxY face's rect with V reversed (`ModelPart.Cube`'s UP polygon).
+    let mut bottom_uv = uv(tx + td + tw, ty, tw, td);
+    bottom_uv.reverse();
     quad(
         verts,
         [[x0, y0, z1], [x1, y0, z1], [x1, y0, z0], [x0, y0, z0]],
-        uv(tx + td + tw, ty, tw, td),
+        bottom_uv,
     );
 }
 
