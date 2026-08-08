@@ -816,7 +816,7 @@ fn bake_root_scaled(
     let mut all = vec![vpart(
         "root",
         None,
-        Vec3::new(0.0, 24.016 * (1.0 - factor), 0.0),
+        Vec3::new(0.0, MODEL_REBASE_Y * (1.0 - factor), 0.0),
         vec![],
     )];
     all.extend(parts.into_iter().map(|mut part| {
