@@ -17,7 +17,7 @@ use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::DVec3;
 use simdnbt::owned::NbtCompound;
 
-use crate::entity::MobFlag;
+use crate::entity::MetaValue;
 use crate::entity::components::Position;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
 
@@ -288,18 +288,17 @@ pub enum NetworkEvent {
         id: i32,
         head_y_rot_deg: f32,
     },
-    EntityBabyFlag {
+    /// A raw scalar entity-data value; `EntityStore::apply_entity_data`
+    /// resolves its meaning per (kind, index) like vanilla's
+    /// `onSyncedDataUpdated`.
+    EntityData {
         id: i32,
-        is_baby: bool,
+        index: u8,
+        value: MetaValue,
     },
     EntityPose {
         id: i32,
         is_crouching: bool,
-    },
-    SheepWoolData {
-        id: i32,
-        color: u8,
-        sheared: bool,
     },
     SheepEatStart {
         id: i32,
@@ -317,39 +316,15 @@ pub enum NetworkEvent {
         kind: EntityKind,
         variant: u32,
     },
-    /// Kind-gated boolean mob state; the store drops writes whose entity
-    /// kind doesn't match the flag's mob (metadata indices are overloaded
-    /// across kinds).
-    MobFlag {
-        id: i32,
-        flag: MobFlag,
-        value: bool,
-    },
-    SlimeSize {
-        id: i32,
-        size: i32,
-    },
-    BoggedSheared {
-        id: i32,
-        sheared: bool,
-    },
     VillagerData {
         id: i32,
         kind: VillagerKind,
         profession: VillagerProfession,
         level: u32,
     },
-    VillagerUnhappy {
-        id: i32,
-        counter: i32,
-    },
     EntityCustomName {
         id: i32,
         name: Option<String>,
-    },
-    EntityAggressive {
-        id: i32,
-        aggressive: bool,
     },
     EntitySwing {
         id: i32,
