@@ -1089,14 +1089,11 @@ impl AppCore {
                         mesh.z_size,
                     );
                 }
-                NetworkEvent::EntityBabyFlag { id, is_baby } => {
-                    game.entity_store.set_baby(id, is_baby);
+                NetworkEvent::EntityData { id, index, value } => {
+                    game.entity_store.apply_entity_data(id, index, value);
                 }
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
-                }
-                NetworkEvent::SheepWoolData { id, color, sheared } => {
-                    game.entity_store.set_sheep_wool(id, color, sheared);
                 }
                 NetworkEvent::SheepEatStart { id } => {
                     game.entity_store.start_sheep_eat(id);
@@ -1119,53 +1116,11 @@ impl AppCore {
                 NetworkEvent::EntityVariant { id, kind, variant } => {
                     game.entity_store.set_variant(id, kind, variant);
                 }
-                NetworkEvent::MobFlag { id, flag, value } => {
-                    game.entity_store.set_mob_flag(id, flag, value);
-                }
-                NetworkEvent::SlimeSize { id, size } => {
-                    game.entity_store.set_slime_size(id, size);
-                }
-                NetworkEvent::BoggedSheared { id, sheared } => {
-                    game.entity_store.set_bogged_sheared(id, sheared);
-                }
-                NetworkEvent::TamableFlags { id, sitting, tame } => {
-                    game.entity_store.set_tamable_flags(id, sitting, tame);
-                }
-                NetworkEvent::CollarColor { id, color } => {
-                    game.entity_store.set_collar_color(id, color);
-                }
-                NetworkEvent::WolfAnger { id, end_time } => {
-                    game.entity_store.set_wolf_anger(id, end_time);
-                }
                 NetworkEvent::WolfShaking { id, shaking } => {
                     game.entity_store.set_wolf_shaking(id, shaking);
                 }
                 NetworkEvent::RabbitJump { id } => {
                     game.entity_store.start_rabbit_jump(id);
-                }
-                NetworkEvent::EntityHealth { id, health } => {
-                    game.entity_store.set_health(id, health);
-                }
-                NetworkEvent::EntitySprinting { id, sprinting } => {
-                    game.entity_store.set_sprinting(id, sprinting);
-                }
-                NetworkEvent::EquineFlags {
-                    id,
-                    eating,
-                    standing,
-                    open_mouth,
-                } => {
-                    game.entity_store
-                        .set_equine_flags(id, eating, standing, open_mouth);
-                }
-                NetworkEvent::ChestedHorse { id, chest } => {
-                    game.entity_store.set_chested(id, chest);
-                }
-                NetworkEvent::PufferfishPuffState { id, state } => {
-                    game.entity_store.set_puff_state(id, state);
-                }
-                NetworkEvent::GlowSquidDarkTicks { id, ticks } => {
-                    game.entity_store.set_glow_squid_dark_ticks(id, ticks);
                 }
                 NetworkEvent::SquidTentacleReset { id } => {
                     game.entity_store.squid_tentacle_reset(id);
@@ -1179,14 +1134,8 @@ impl AppCore {
                     game.entity_store
                         .set_villager_data(id, kind, profession, level);
                 }
-                NetworkEvent::VillagerUnhappy { id, counter } => {
-                    game.entity_store.set_villager_unhappy(id, counter);
-                }
                 NetworkEvent::EntityCustomName { id, name } => {
                     game.entity_store.set_custom_name(id, name);
-                }
-                NetworkEvent::EntityAggressive { id, aggressive } => {
-                    game.entity_store.set_aggressive(id, aggressive);
                 }
                 NetworkEvent::EntitySwing { id } => {
                     game.entity_store.start_swing(id);
