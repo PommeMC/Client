@@ -841,7 +841,7 @@ impl EntityStore {
                 },
                 // Horse packed variant: `color | markings << 8`, both wrapping
                 // their id ranges (vanilla `ByIdMap` WRAP).
-                EntityKind::Horse => (raw & 0xFF) % 7 | (((raw >> 8) & 0xFF) % 5) << 8,
+                EntityKind::Horse => ((raw & 0xFF) % 7) | ((((raw >> 8) & 0xFF) % 5) << 8),
                 // Holder-backed indices (cow/chicken/wolf/cat) are
                 // pre-resolved by the net handler.
                 _ => raw,
