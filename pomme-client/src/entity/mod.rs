@@ -14,6 +14,15 @@ use crate::physics::collision::resolve_collision;
 use crate::world::block::{FluidKind, fluid};
 use crate::world::chunk::ChunkStore;
 
+/// Kind-gated boolean mob states; each flag belongs to one mob kind and
+/// [`EntityStore::set_mob_flag`] drops writes for a mismatched entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MobFlag {
+    CreeperPowered,
+    EndermanCreepy,
+    WitchDrinking,
+}
+
 const INTERPOLATION_STEPS: i32 = 3;
 const HURT_DURATION: u8 = 10;
 /// Vanilla default arm-swing duration in ticks
@@ -49,6 +58,16 @@ pub struct LivingEntity {
     pub prev_flap: f32,
     pub flap_speed: f32,
     pub prev_flap_speed: f32,
+    /// Slime squish spring (vanilla `AbstractCubeMob`): negative = squashed
+    /// on landing, positive = stretched in the air.
+    pub squish: f32,
+    pub prev_squish: f32,
+    pub slime_size: u8,
+    /// Enderman screaming flag — raises the head and jitters the render
+    /// position.
+    pub is_creepy: bool,
+    /// Witch drinking flag — swings the nose down toward the potion.
+    pub witch_drinking: bool,
     pub villager_kind: VillagerKind,
     pub villager_profession: VillagerProfession,
     pub villager_level: u32,
@@ -71,6 +90,8 @@ pub struct LivingEntity {
     pub swing_time: u8,
     /// Chicken `flapping` decay factor.
     flapping: f32,
+    target_squish: f32,
+    prev_on_ground: bool,
     interp_target: Position,
     interp_look_dir: LookDirection,
     interp_steps: i32,
@@ -113,6 +134,11 @@ impl LivingEntity {
             prev_flap: 0.0,
             flap_speed: 0.0,
             prev_flap_speed: 0.0,
+            squish: 0.0,
+            prev_squish: 0.0,
+            slime_size: 1,
+            is_creepy: false,
+            witch_drinking: false,
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
             villager_level: 0,
@@ -126,6 +152,11 @@ impl LivingEntity {
             powered: false,
             swing_time: 0,
             flapping: 1.0,
+            target_squish: 0.0,
+            // Vanilla `AbstractCubeMob.wasOnGround` starts false; with the
+            // grounded spawn above this reproduces vanilla's first-track
+            // landing squash and skips the airborne-spawn stretch.
+            prev_on_ground: false,
             interp_target: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
@@ -193,12 +224,25 @@ impl LivingEntity {
         self.flap += self.flapping * 2.0;
     }
 
+    /// Vanilla `AbstractCubeMob.tick` squish spring; the update order matters.
+    fn tick_squish(&mut self) {
+        self.prev_squish = self.squish;
+        self.squish += (self.target_squish - self.squish) * 0.5;
+        if self.on_ground && !self.prev_on_ground {
+            self.target_squish = -0.5;
+        } else if !self.on_ground && self.prev_on_ground {
+            self.target_squish = 1.0;
+        }
+        self.prev_on_ground = self.on_ground;
+        self.target_squish *= 0.6;
+    }
+
     /// Per-kind per-tick animation state (the kind-specific tail of vanilla
     /// `aiStep`); arms accrue as mobs land.
     fn tick_kind_anims(&mut self) {
-        #[allow(clippy::single_match)]
         match self.entity_type {
             EntityKind::Chicken => self.tick_flap(),
+            EntityKind::Slime => self.tick_squish(),
             _ => {}
         }
     }
@@ -607,6 +651,29 @@ impl EntityStore {
         }
     }
 
+    /// Applies a [`MobFlag`] write, dropping it when the entity isn't the
+    /// flag's mob (metadata indices are overloaded across kinds, so the net
+    /// handler emits every candidate flag for an ambiguous boolean).
+    pub fn set_mob_flag(&mut self, id: i32, flag: MobFlag, value: bool) {
+        let Some(entity) = self.living.get_mut(&id) else {
+            return;
+        };
+        match (flag, entity.entity_type) {
+            (MobFlag::CreeperPowered, EntityKind::Creeper) => entity.powered = value,
+            (MobFlag::EndermanCreepy, EntityKind::Enderman) => entity.is_creepy = value,
+            (MobFlag::WitchDrinking, EntityKind::Witch) => entity.witch_drinking = value,
+            _ => {}
+        }
+    }
+
+    pub fn set_slime_size(&mut self, id: i32, size: i32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Slime
+        {
+            entity.slime_size = size.clamp(1, 127) as u8;
+        }
+    }
+
     pub fn set_villager_data(
         &mut self,
         id: i32,
@@ -656,14 +723,6 @@ impl EntityStore {
     pub fn set_aggressive(&mut self, id: i32, aggressive: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.aggressive = aggressive;
-        }
-    }
-
-    pub fn set_powered(&mut self, id: i32, powered: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Creeper
-        {
-            entity.powered = powered;
         }
     }
 
@@ -784,5 +843,8 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
             | EntityKind::Creeper
             | EntityKind::Spider
             | EntityKind::Villager
+            | EntityKind::Enderman
+            | EntityKind::Slime
+            | EntityKind::Witch
     )
 }

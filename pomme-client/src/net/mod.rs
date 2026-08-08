@@ -17,6 +17,7 @@ use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::DVec3;
 use simdnbt::owned::NbtCompound;
 
+use crate::entity::MobFlag;
 use crate::entity::components::Position;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
 
@@ -316,6 +317,18 @@ pub enum NetworkEvent {
         kind: EntityKind,
         variant: u32,
     },
+    /// Kind-gated boolean mob state; the store drops writes whose entity
+    /// kind doesn't match the flag's mob (metadata indices are overloaded
+    /// across kinds).
+    MobFlag {
+        id: i32,
+        flag: MobFlag,
+        value: bool,
+    },
+    SlimeSize {
+        id: i32,
+        size: i32,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,
@@ -336,10 +349,6 @@ pub enum NetworkEvent {
     },
     EntitySwing {
         id: i32,
-    },
-    CreeperPowered {
-        id: i32,
-        powered: bool,
     },
     EntityDamaged {
         id: i32,
