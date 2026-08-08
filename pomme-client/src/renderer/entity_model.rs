@@ -142,10 +142,13 @@ impl BakedEntityModel {
             let pivot = part.offset + extra_translation;
             let offset = match self.convention {
                 ModelConvention::EntityYDown => {
-                    // The +24 re-bases vanilla's y-down ground plane onto the
-                    // engine's y-up origin; child pivots are relative to their
-                    // parent (already re-based), so they only mirror.
-                    let rebase = if part.parent.is_some() { 0.0 } else { 24.0 };
+                    // 24.016 re-bases vanilla's y-down ground plane onto the
+                    // engine's y-up origin: vanilla `EntityModel.MODEL_Y_OFFSET`
+                    // (-1.501, i.e. 24.016/16) lifts models 0.001 above the
+                    // ground so feet don't z-fight the block top. Child pivots
+                    // are relative to their parent (already re-based), so they
+                    // only mirror.
+                    let rebase = if part.parent.is_some() { 0.0 } else { 24.016 };
                     Vec3::new(pivot.x, rebase - pivot.y, pivot.z)
                 }
                 ModelConvention::BlockYUp => pivot,
