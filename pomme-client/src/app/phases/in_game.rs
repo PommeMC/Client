@@ -220,10 +220,9 @@ pub struct GameState {
     pub vis_mask: HashMap<ChunkPos, u32>,
     /// Per-section generation for edits only (bulk uses the column
     /// `content_gen` above). Bumped per edited section so a result is
-    /// dropped only when *that* section was edited again
-    /// ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â editing one section never
-    /// invalidates a sibling section's in-flight result. Sections meshed
-    /// together as one edit span share one gen value.
+    /// dropped only when *that* section was edited again — editing one
+    /// section never invalidates a sibling section's in-flight result.
+    /// Sections meshed together as one edit span share one gen value.
     pub section_gen: HashMap<(ChunkPos, i32), u64>,
     pub next_section_gen: u64,
     /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
@@ -238,9 +237,8 @@ pub struct GameState {
     /// overlay reads it now.
     pub vis_tiers: HashMap<ChunkPos, u8>,
     pub vis_valid: bool,
-    /// Camera 8-block bucket that last triggered an occlusion walk
-    /// ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â movement, not rotation, drives
-    /// recomputes (vanilla's cadence).
+    /// Camera 8-block bucket that last triggered an occlusion walk — movement,
+    /// not rotation, drives recomputes (vanilla's cadence).
     pub last_vis_cam: (i32, i32, i32),
     /// In-flight async occlusion walk; its result is applied a few frames
     /// later.
@@ -850,10 +848,9 @@ impl GameState {
 
     /// Drive the cave-cull occlusion walk: apply a finished async walk to the
     /// per-column draw masks, then schedule the next one on 8-block camera
-    /// movement or chunk loads (one at a time, off the main thread
-    /// ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â vanilla's async, movement-gated
-    /// cadence). The walk is rotation-independent; frustum culling runs
-    /// per-frame on the GPU.
+    /// movement or chunk loads (one at a time, off the main thread — vanilla's
+    /// async, movement-gated cadence). The walk is rotation-independent;
+    /// frustum culling runs per-frame on the GPU.
     pub fn update_visibility(
         &mut self,
         renderer: &mut Renderer,
@@ -970,10 +967,9 @@ impl GameState {
 
     /// Enqueue every loaded column's not-yet-meshed sections (re-meshing the
     /// whole column on a lod/content change). Like vanilla, every section in
-    /// render distance meshes regardless of visibility
-    /// ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â occlusion gates only drawing
-    /// ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â and the queue orders
-    /// the backlog nearest-first. Runs every frame to drain it.
+    /// render distance meshes regardless of visibility — occlusion gates only
+    /// drawing — and the queue orders the backlog nearest-first. Runs every
+    /// frame to drain it.
     pub fn rescan_mesh_jobs(&mut self, player_chunk: ChunkPos, chunk_detail: u32) {
         let n = self.chunk_store.section_count();
         let full = section_mask(n);
@@ -1048,8 +1044,7 @@ fn section_mask(n: i32) -> u32 {
 }
 
 /// Contiguous `(start, end)` index runs of set bits in `mask`, so a (usually
-/// contiguous) visible set enqueues as a few range jobs
-/// ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â one gather per run.
+/// contiguous) visible set enqueues as a few range jobs — one gather per run.
 fn contiguous_runs(mask: u32) -> Vec<(i32, i32)> {
     let mut runs = Vec::new();
     let mut i = 0i32;
@@ -1135,8 +1130,8 @@ fn apply_result_action(
 }
 
 /// Set the active render distance (the persisted menu value) and push it to the
-/// server ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â used by the chunk-load
-/// benchmark as it ramps the distance up and down.
+/// server — used by the chunk-load benchmark as it ramps the distance up and
+/// down.
 fn apply_render_distance(
     core: &mut AppCore,
     game: &mut GameState,
@@ -1568,9 +1563,8 @@ pub fn update_game(
         None
     };
     // The chunk-load benchmark renders a clean top-down view: only terrain, no HUD,
-    // entities/player, held item, clouds, or weather
-    // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â and skipping them also keeps the
-    // measured frame times honest.
+    // entities/player, held item, clouds, or weather — and skipping them also keeps
+    // the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
     if !benchmark_running && game.hide_gui {
         // F1: vanilla still renders the debug overlay with the GUI hidden.
@@ -2972,14 +2966,15 @@ fn entity_extras(
 }
 
 /// Vanilla `AbstractCubeMobRenderer.applySizeAndSquish` plus the slime-only
-/// `downscaleSlightly` (0.999 shrink + 0.001 lift against shell z-fighting).
+/// `downscaleSlightly` (0.999 shrink + a 0.001 drop that tucks the inner body
+/// under the shell surface; vanilla's +0.001 is in flipped space = down).
 fn slime_body_transform(e: &crate::entity::LivingEntity, alpha: f32) -> glam::Mat4 {
     let squish = e.prev_squish + (e.squish - e.prev_squish) * alpha;
     let size = e.slime_size as f32;
     let ss = squish / (size * 0.5 + 1.0);
     let w = 1.0 / (ss + 1.0);
     glam::Mat4::from_scale(glam::Vec3::splat(0.999))
-        * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.001, 0.0))
+        * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.001, 0.0))
         * glam::Mat4::from_scale(glam::Vec3::new(w * size, size / w, w * size))
 }
 
@@ -3182,9 +3177,8 @@ fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> 
 
 /// Whether the type texture's built-in hat is fully or partially covered by
 /// the profession texture's own hat, per the `villager` sections of the
-/// `.png.mcmeta` files under `textures/entity/villager/` (hardcoded
-/// ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â no resource-pack support). 0 = none,
-/// 1 = partial, 2 = full.
+/// `.png.mcmeta` files under `textures/entity/villager/` (hardcoded — no
+/// resource-pack support). 0 = none, 1 = partial, 2 = full.
 const VILLAGER_TYPE_HAT: [u8; 7] = [2, 0, 0, 0, 2, 0, 0]; // desert, snow = full
 // `zombie_villager/type/` ships no `.mcmeta` files at all.
 const ZOMBIE_VILLAGER_TYPE_HAT: [u8; 7] = [0; 7];

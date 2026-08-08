@@ -1119,11 +1119,8 @@ impl AppCore {
                 NetworkEvent::EntityVariant { id, kind, variant } => {
                     game.entity_store.set_variant(id, kind, variant);
                 }
-                NetworkEvent::EndermanCreepy { id, creepy } => {
-                    game.entity_store.set_enderman_creepy(id, creepy);
-                }
-                NetworkEvent::WitchDrinking { id, drinking } => {
-                    game.entity_store.set_witch_drinking(id, drinking);
+                NetworkEvent::MobFlag { id, flag, value } => {
+                    game.entity_store.set_mob_flag(id, flag, value);
                 }
                 NetworkEvent::SlimeSize { id, size } => {
                     game.entity_store.set_slime_size(id, size);
@@ -1131,33 +1128,17 @@ impl AppCore {
                 NetworkEvent::BoggedSheared { id, sheared } => {
                     game.entity_store.set_bogged_sheared(id, sheared);
                 }
-                NetworkEvent::ZombieConverting { id, converting } => {
-                    game.entity_store.set_zombie_converting(id, converting);
-                }
-                NetworkEvent::ZombieVillagerConverting { id, converting } => {
-                    game.entity_store
-                        .set_zombie_villager_converting(id, converting);
-                }
                 NetworkEvent::TamableFlags { id, sitting, tame } => {
                     game.entity_store.set_tamable_flags(id, sitting, tame);
                 }
                 NetworkEvent::CollarColor { id, color } => {
                     game.entity_store.set_collar_color(id, color);
                 }
-                NetworkEvent::WolfInterested { id, interested } => {
-                    game.entity_store.set_wolf_interested(id, interested);
-                }
                 NetworkEvent::WolfAnger { id, end_time } => {
                     game.entity_store.set_wolf_anger(id, end_time);
                 }
                 NetworkEvent::WolfShaking { id, shaking } => {
                     game.entity_store.set_wolf_shaking(id, shaking);
-                }
-                NetworkEvent::CatLying { id, lying } => {
-                    game.entity_store.set_cat_lying(id, lying);
-                }
-                NetworkEvent::CatRelaxed { id, relaxed } => {
-                    game.entity_store.set_cat_relaxed(id, relaxed);
                 }
                 NetworkEvent::RabbitJump { id } => {
                     game.entity_store.start_rabbit_jump(id);
@@ -1179,9 +1160,6 @@ impl AppCore {
                 }
                 NetworkEvent::ChestedHorse { id, chest } => {
                     game.entity_store.set_chested(id, chest);
-                }
-                NetworkEvent::BatResting { id, resting } => {
-                    game.entity_store.set_bat_resting(id, resting);
                 }
                 NetworkEvent::PufferfishPuffState { id, state } => {
                     game.entity_store.set_puff_state(id, state);
@@ -1212,9 +1190,6 @@ impl AppCore {
                 }
                 NetworkEvent::EntitySwing { id } => {
                     game.entity_store.start_swing(id);
-                }
-                NetworkEvent::CreeperPowered { id, powered } => {
-                    game.entity_store.set_powered(id, powered);
                 }
                 NetworkEvent::EntityDamaged { id } => {
                     game.entity_store.mark_hurt(id);

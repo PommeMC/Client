@@ -14,6 +14,25 @@ use crate::physics::collision::resolve_collision;
 use crate::world::block::{FluidKind, fluid};
 use crate::world::chunk::ChunkStore;
 
+/// Kind-gated boolean mob states; each flag belongs to one mob kind and
+/// [`EntityStore::set_mob_flag`] drops writes for a mismatched entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MobFlag {
+    CreeperPowered,
+    EndermanCreepy,
+    WitchDrinking,
+    /// Zombie-family underwater conversion.
+    ZombieConverting,
+    /// Zombie villager curing.
+    ZombieVillagerConverting,
+    /// Wolf head-tilt beg state.
+    WolfInterested,
+    CatLying,
+    CatRelaxed,
+    /// Bat hanging state; a flip restarts the fly/rest animation clock.
+    BatResting,
+}
+
 const INTERPOLATION_STEPS: i32 = 3;
 const HURT_DURATION: u8 = 10;
 /// Vanilla default arm-swing duration in ticks
@@ -259,7 +278,10 @@ impl LivingEntity {
             swing_time: 0,
             flapping: 1.0,
             target_squish: 0.0,
-            prev_on_ground: true,
+            // Vanilla `AbstractCubeMob.wasOnGround` starts false; with the
+            // grounded spawn above this reproduces vanilla's first-track
+            // landing squash and skips the airborne-spawn stretch.
+            prev_on_ground: false,
             is_shaking: false,
             jump_ticks: 0,
             jump_duration: 0,
@@ -553,6 +575,7 @@ impl LivingEntity {
     fn tick_kind_anims(&mut self) {
         match self.entity_type {
             EntityKind::Chicken => self.tick_flap(),
+            EntityKind::Slime => self.tick_squish(),
             EntityKind::Squid | EntityKind::GlowSquid => {
                 self.tick_squid();
                 if self.dark_ticks > 0 {
@@ -966,27 +989,6 @@ impl EntityStore {
         }
     }
 
-    /// Zombie-family underwater conversion.
-    pub fn set_zombie_converting(&mut self, id: i32, converting: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && matches!(
-                entity.entity_type,
-                EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned
-            )
-        {
-            entity.is_converting = converting;
-        }
-    }
-
-    /// Zombie villager curing.
-    pub fn set_zombie_villager_converting(&mut self, id: i32, converting: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::ZombieVillager
-        {
-            entity.is_converting = converting;
-        }
-    }
-
     pub fn set_crouching(&mut self, id: i32, is_crouching: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.is_crouching = is_crouching;
@@ -1029,19 +1031,34 @@ impl EntityStore {
         }
     }
 
-    pub fn set_enderman_creepy(&mut self, id: i32, creepy: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Enderman
-        {
-            entity.is_creepy = creepy;
-        }
-    }
-
-    pub fn set_witch_drinking(&mut self, id: i32, drinking: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Witch
-        {
-            entity.witch_drinking = drinking;
+    /// Applies a [`MobFlag`] write, dropping it when the entity isn't the
+    /// flag's mob (metadata indices are overloaded across kinds, so the net
+    /// handler emits every candidate flag for an ambiguous boolean).
+    pub fn set_mob_flag(&mut self, id: i32, flag: MobFlag, value: bool) {
+        let Some(entity) = self.living.get_mut(&id) else {
+            return;
+        };
+        match (flag, entity.entity_type) {
+            (MobFlag::CreeperPowered, EntityKind::Creeper) => entity.powered = value,
+            (MobFlag::EndermanCreepy, EntityKind::Enderman) => entity.is_creepy = value,
+            (MobFlag::WitchDrinking, EntityKind::Witch) => entity.witch_drinking = value,
+            (
+                MobFlag::ZombieConverting,
+                EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned,
+            ) => entity.is_converting = value,
+            (MobFlag::ZombieVillagerConverting, EntityKind::ZombieVillager) => {
+                entity.is_converting = value
+            }
+            (MobFlag::WolfInterested, EntityKind::Wolf) => entity.is_interested = value,
+            (MobFlag::CatLying, EntityKind::Cat) => entity.is_lying = value,
+            (MobFlag::CatRelaxed, EntityKind::Cat) => entity.relax_state_one = value,
+            (MobFlag::BatResting, EntityKind::Bat) => {
+                if entity.bat_resting != value {
+                    entity.bat_resting = value;
+                    entity.bat_anim_start = None;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1108,14 +1125,6 @@ impl EntityStore {
         }
     }
 
-    pub fn set_powered(&mut self, id: i32, powered: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Creeper
-        {
-            entity.powered = powered;
-        }
-    }
-
     pub fn set_tamable_flags(&mut self, id: i32, sitting: bool, tame: bool) {
         if let Some(entity) = self.living.get_mut(&id)
             && matches!(entity.entity_type, EntityKind::Wolf | EntityKind::Cat)
@@ -1130,14 +1139,6 @@ impl EntityStore {
             && matches!(entity.entity_type, EntityKind::Wolf | EntityKind::Cat)
         {
             entity.collar_color = color & 0x0F;
-        }
-    }
-
-    pub fn set_wolf_interested(&mut self, id: i32, interested: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Wolf
-        {
-            entity.is_interested = interested;
         }
     }
 
@@ -1157,22 +1158,6 @@ impl EntityStore {
             entity.is_shaking = shaking;
             entity.shake_anim = 0.0;
             entity.prev_shake_anim = 0.0;
-        }
-    }
-
-    pub fn set_cat_lying(&mut self, id: i32, lying: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Cat
-        {
-            entity.is_lying = lying;
-        }
-    }
-
-    pub fn set_cat_relaxed(&mut self, id: i32, relaxed: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Cat
-        {
-            entity.relax_state_one = relaxed;
         }
     }
 
@@ -1207,16 +1192,6 @@ impl EntityStore {
     pub fn set_living_motion(&mut self, id: i32, velocity: DVec3) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.velocity = velocity;
-        }
-    }
-
-    pub fn set_bat_resting(&mut self, id: i32, resting: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Bat
-            && entity.bat_resting != resting
-        {
-            entity.bat_resting = resting;
-            entity.bat_anim_start = None;
         }
     }
 
@@ -1317,7 +1292,6 @@ impl EntityStore {
                 &mut entity.prev_walk_anim_speed,
             );
             entity.tick_kind_anims();
-            entity.tick_squish();
             entity.tick_tamable_anims();
             if probes_water(&entity.entity_type) {
                 entity.is_in_water = entity.probe_water(chunks);

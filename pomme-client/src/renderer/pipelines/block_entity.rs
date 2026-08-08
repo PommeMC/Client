@@ -538,9 +538,13 @@ impl BlockEntityPipeline {
             ) - anchor)
                 .as_vec3();
             let model_mat = match model.convention {
+                // The X flip pairs with the bake's Y negation to reproduce
+                // vanilla's `scale(1,-1,-1)` (= the 180 yaw offset times
+                // `scale(-1,-1,1)`), same as the entity renderer.
                 ModelConvention::EntityYDown => {
                     glam::Mat4::from_translation(block_center)
                         * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians())
+                        * glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0))
                 }
                 // Vanilla `ChestRenderer`: rotate by -facing.toYRot() about the
                 // block center; coords are relative to the block's min corner.
