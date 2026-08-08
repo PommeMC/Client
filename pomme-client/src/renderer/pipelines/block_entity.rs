@@ -168,7 +168,6 @@ fn lid_anim(kind: BlockEntityKind, openness: f32) -> PartAnim {
         BlockEntityKind::ShulkerBox => PartAnim {
             rotation: vec![(0, glam::Vec3::new(0.0, eased * 270.0f32.to_radians(), 0.0))],
             translation: vec![(0, glam::Vec3::new(0.0, -eased * 8.0, 0.0))],
-            ..Default::default()
         },
         _ => PartAnim::default(),
     }
