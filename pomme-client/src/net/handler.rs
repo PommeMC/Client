@@ -519,24 +519,22 @@ pub fn handle_game_packet(
                 if item.index == 20
                     && let azalea_entity::EntityDataValue::CatVariant(variant) = &item.value
                 {
-                    use azalea_registry::DataRegistry;
                     let _ = event_tx.try_send(variant_event(
                         registry_holder,
                         p.id.0,
                         EntityKind::Cat,
-                        variant.protocol_id(),
+                        variant,
                     ));
                 }
                 // Index 23 on wolves = WolfVariant Holder.
                 if item.index == 23
                     && let azalea_entity::EntityDataValue::WolfVariant(variant) = &item.value
                 {
-                    use azalea_registry::DataRegistry;
                     let _ = event_tx.try_send(variant_event(
                         registry_holder,
                         p.id.0,
                         EntityKind::Wolf,
-                        variant.protocol_id(),
+                        variant,
                     ));
                 }
                 // Index 19 on villagers / 20 on zombie villagers = VillagerData

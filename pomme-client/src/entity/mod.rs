@@ -815,12 +815,13 @@ impl EntityStore {
                 entity.is_tame = f & 0x04 != 0;
             }
             (EntityKind::Wolf, 20, Bool(b)) => entity.is_interested = b,
-            (EntityKind::Wolf, 21, Int(c)) => entity.collar_color = c as u8 & 0x0F,
+            (EntityKind::Wolf, 21, Int(c)) | (EntityKind::Cat, 23, Int(c)) => {
+                entity.collar_color = c as u8 & 0x0F
+            }
             (EntityKind::Cat, 21, Bool(b)) => entity.is_lying = b,
             // Vanilla persistent-anger end time (game-time tick).
             (EntityKind::Wolf, 22, Long(t)) => entity.anger_end_time = t,
             (EntityKind::Cat, 22, Bool(b)) => entity.relax_state_one = b,
-            (EntityKind::Cat, 23, Int(c)) => entity.collar_color = c as u8 & 0x0F,
             _ => {}
         }
     }
@@ -838,9 +839,6 @@ impl EntityStore {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == kind
         {
-            // Holder-backed indices (cow/chicken/wolf/cat) are pre-resolved
-            // by the net handler; the rabbit's raw-int map lives in
-            // `apply_entity_data`.
             entity.variant = raw;
         }
     }
