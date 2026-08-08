@@ -527,34 +527,24 @@ pub fn handle_game_packet(
                     && let azalea_entity::EntityDataValue::CowVariant(variant) = &item.value
                 {
                     use azalea_registry::DataRegistry;
-                    let _ = event_tx.try_send(NetworkEvent::EntityVariant {
-                        id: p.id.0,
-                        kind: EntityKind::Cow,
-                        variant: variant_index(
-                            registry_holder,
-                            "minecraft:cow_variant",
-                            variant.protocol_id(),
-                            COW_VARIANT_ORDER,
-                            "entity/cow/cow_",
-                        ),
-                    });
+                    let _ = event_tx.try_send(variant_event(
+                        registry_holder,
+                        p.id.0,
+                        EntityKind::Cow,
+                        variant.protocol_id(),
+                    ));
                 }
                 // Index 18 on chickens = ChickenVariant Holder.
                 if item.index == 18
                     && let azalea_entity::EntityDataValue::ChickenVariant(variant) = &item.value
                 {
                     use azalea_registry::DataRegistry;
-                    let _ = event_tx.try_send(NetworkEvent::EntityVariant {
-                        id: p.id.0,
-                        kind: EntityKind::Chicken,
-                        variant: variant_index(
-                            registry_holder,
-                            "minecraft:chicken_variant",
-                            variant.protocol_id(),
-                            CHICKEN_VARIANT_ORDER,
-                            "entity/chicken/chicken_",
-                        ),
-                    });
+                    let _ = event_tx.try_send(variant_event(
+                        registry_holder,
+                        p.id.0,
+                        EntityKind::Chicken,
+                        variant.protocol_id(),
+                    ));
                 }
                 // Index 18 (Boolean) = zombie-family underwater conversion.
                 if item.index == 18
@@ -746,24 +736,28 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedTe
     let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
 }
 
-/// Resolves a variant registry holder id to its index in `order` — the
-/// renderer's variant-pool order for that mob. Matches vanilla's renderer,
-/// which reads the entry's synced ModelAndTexture NBT and never the registry
-/// id: a known `asset_id` (prefix-stripped, e.g. `entity/chicken/chicken_`)
-/// picks the exact pool slot, otherwise the `model` field picks the mesh
-/// (its values name pool slots; absent means "normal" = slot 0). The registry
-/// path is only a last resort for entries synced without NBT.
-fn variant_index(
-    registry_holder: &RegistryHolder,
-    registry: &str,
-    protocol_id: u32,
-    order: &[&str],
-    asset_prefix: &str,
-) -> u32 {
+/// Resolves a variant registry holder id to the mob's renderer pool slot.
+/// Matches vanilla, which reads the entry's synced NBT and never the registry
+/// id: a known `asset_id` picks the exact slot, else the `model` field picks
+/// the mesh (its values name slots; absent means "normal" = slot 0), else the
+/// registry path as a last resort for entries synced without NBT.
+fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id: u32) -> u32 {
+    let (registry, order, asset_prefix) = match kind {
+        EntityKind::Cow => (
+            "minecraft:cow_variant",
+            COW_VARIANT_ORDER,
+            "entity/cow/cow_",
+        ),
+        EntityKind::Chicken => (
+            "minecraft:chicken_variant",
+            CHICKEN_VARIANT_ORDER,
+            "entity/chicken/chicken_",
+        ),
+        _ => return 0,
+    };
     // Position == protocol id only holds because pomme answers
     // SelectKnownPacks with an empty list (connection.rs), forcing the server
-    // to send NBT for every entry; azalea shift_removes NBT-less entries,
-    // which would shift the indices here.
+    // to send NBT for every entry (azalea shift_removes NBT-less ones).
     let Some((ident, nbt)) = registry_holder
         .extra
         .get(&azalea_registry::identifier::Identifier::new(registry))
@@ -787,6 +781,20 @@ fn variant_index(
         return i;
     }
     order_pos(ident.path()).unwrap_or(0)
+}
+
+/// The kind-tagged variant event for a synced-registry holder value.
+fn variant_event(
+    registry_holder: &RegistryHolder,
+    id: i32,
+    kind: EntityKind,
+    protocol_id: u32,
+) -> NetworkEvent {
+    NetworkEvent::EntityVariant {
+        id,
+        kind,
+        variant: variant_index(registry_holder, kind, protocol_id),
+    }
 }
 
 fn lp_to_dvec3(v: &azalea_core::delta::LpVec3) -> glam::DVec3 {
