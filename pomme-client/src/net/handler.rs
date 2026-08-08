@@ -8,6 +8,7 @@ use crossbeam_channel::Sender;
 use super::NetworkEvent;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
+use crate::entity::MobFlag;
 use crate::entity::components::Position;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
@@ -470,13 +471,20 @@ pub fn handle_game_packet(
                         sheared: *flag,
                     });
                 }
-                // Entity data index 16 = player score (1.21.4 protocol)
+                // Index 16 (Int) = player score / slime size (Slime's
+                // DATA_ID_SIZE sits at 16 on 1.21.9-26.1.x; 26.2 moved it to
+                // 18 when Slime gained AgeableMob's fields). Emit both;
+                // consumers filter by entity type.
                 if item.index == 16
                     && let azalea_entity::EntityDataValue::Int(score) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::PlayerScore {
                         entity_id: p.id.0,
                         score: *score,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::SlimeSize {
+                        id: p.id.0,
+                        size: *score,
                     });
                 }
                 // Index 0 = shared entity flags byte: bit 0x08 = sprinting
@@ -519,22 +527,22 @@ pub fn handle_game_packet(
                     });
                 }
                 // Index 17 (Boolean) = creeper powered / enderman creepy / witch
-                // drinking. Emit all three; consumers filter by entity type.
+                // drinking. Emit every candidate; the store applies only the
+                // flag matching the entity's kind.
                 if item.index == 17
                     && let azalea_entity::EntityDataValue::Boolean(flag) = &item.value
                 {
-                    let _ = event_tx.try_send(NetworkEvent::CreeperPowered {
-                        id: p.id.0,
-                        powered: *flag,
-                    });
-                    let _ = event_tx.try_send(NetworkEvent::EndermanCreepy {
-                        id: p.id.0,
-                        creepy: *flag,
-                    });
-                    let _ = event_tx.try_send(NetworkEvent::WitchDrinking {
-                        id: p.id.0,
-                        drinking: *flag,
-                    });
+                    for f in [
+                        MobFlag::CreeperPowered,
+                        MobFlag::EndermanCreepy,
+                        MobFlag::WitchDrinking,
+                    ] {
+                        let _ = event_tx.try_send(NetworkEvent::MobFlag {
+                            id: p.id.0,
+                            flag: f,
+                            value: *flag,
+                        });
+                    }
                 }
                 // Index 2 = custom name (Optional<Component>); needed for jeb_ sheep detection.
                 if item.index == 2
@@ -571,18 +579,20 @@ pub fn handle_game_packet(
                 if item.index == 18
                     && let azalea_entity::EntityDataValue::Boolean(converting) = &item.value
                 {
-                    let _ = event_tx.try_send(NetworkEvent::ZombieConverting {
+                    let _ = event_tx.try_send(NetworkEvent::MobFlag {
                         id: p.id.0,
-                        converting: *converting,
+                        flag: MobFlag::ZombieConverting,
+                        value: *converting,
                     });
                 }
                 // Index 19 (Boolean) = zombie villager curing.
                 if item.index == 19
                     && let azalea_entity::EntityDataValue::Boolean(converting) = &item.value
                 {
-                    let _ = event_tx.try_send(NetworkEvent::ZombieVillagerConverting {
+                    let _ = event_tx.try_send(NetworkEvent::MobFlag {
                         id: p.id.0,
-                        converting: *converting,
+                        flag: MobFlag::ZombieVillagerConverting,
+                        value: *converting,
                     });
                 }
                 // Index 18 (Int) = villager unhappy counter / slime size /
@@ -631,9 +641,10 @@ pub fn handle_game_packet(
                 if item.index == 20
                     && let azalea_entity::EntityDataValue::Boolean(interested) = &item.value
                 {
-                    let _ = event_tx.try_send(NetworkEvent::WolfInterested {
+                    let _ = event_tx.try_send(NetworkEvent::MobFlag {
                         id: p.id.0,
-                        interested: *interested,
+                        flag: MobFlag::WolfInterested,
+                        value: *interested,
                     });
                 }
                 // Index 21: wolf collar color Int / cat lying Boolean; index
@@ -649,9 +660,10 @@ pub fn handle_game_packet(
                 if item.index == 21
                     && let azalea_entity::EntityDataValue::Boolean(lying) = &item.value
                 {
-                    let _ = event_tx.try_send(NetworkEvent::CatLying {
+                    let _ = event_tx.try_send(NetworkEvent::MobFlag {
                         id: p.id.0,
-                        lying: *lying,
+                        flag: MobFlag::CatLying,
+                        value: *lying,
                     });
                 }
                 // Index 22: wolf anger end time Long / cat relax Boolean.
@@ -666,9 +678,10 @@ pub fn handle_game_packet(
                 if item.index == 22
                     && let azalea_entity::EntityDataValue::Boolean(relaxed) = &item.value
                 {
-                    let _ = event_tx.try_send(NetworkEvent::CatRelaxed {
+                    let _ = event_tx.try_send(NetworkEvent::MobFlag {
                         id: p.id.0,
-                        relaxed: *relaxed,
+                        flag: MobFlag::CatRelaxed,
+                        value: *relaxed,
                     });
                 }
                 // Index 23: wolf variant Holder / cat collar color Int.

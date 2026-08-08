@@ -61,7 +61,9 @@ pub struct EntityRenderInfo {
     pub is_creepy: bool,
     /// Zombie-family conversion — shakes the whole body.
     pub is_converting: bool,
-    /// Witch drinking (vanilla `isHoldingItem`).
+    /// Witch drinking. Driven by the using-item metadata flag rather than
+    /// vanilla's `isHoldingItem` (main-hand item check) — pomme tracks no
+    /// mob equipment; the two only diverge for command-equipped witches.
     pub is_holding_item: bool,
     /// Witch per-entity nose-wobble rate, resolved from the entity id.
     pub nose_wobble_speed: f32,
@@ -285,7 +287,7 @@ pub struct EntityRenderer {
     body_translucent_pipeline: vk::Pipeline,
     /// Translucent, depth-write off — spider eyes.
     eyes_pipeline: vk::Pipeline,
-    /// Additive, depth-write off — charged-creeper energy swirl.
+    /// Additive, depth-writing — charged-creeper energy swirl.
     swirl_pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
@@ -488,7 +490,10 @@ fn mob_definitions() -> Vec<MobDef> {
     const ENDERMAN_EYES_TEX: &[&[&str]] =
         &[&["minecraft/textures/entity/enderman/enderman_eyes.png"]];
     const SLIME_TEX: &[&[&str]] = &[&["minecraft/textures/entity/slime/slime.png"]];
-    const WITCH_TEX: &[&[&str]] = &[&["minecraft/textures/entity/witch/witch.png"]];
+    const WITCH_TEX: &[&[&str]] = &[&[
+        "minecraft/textures/entity/witch/witch.png",
+        "minecraft/textures/entity/witch.png",
+    ]];
     const VILLAGER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/villager/villager.png"]];
     const VILLAGER_BABY_TEX: &[&[&str]] =
         &[&["minecraft/textures/entity/villager/villager_baby.png"]];
@@ -1344,7 +1349,9 @@ impl EntityRenderer {
     }
 
     /// The translation is anchor-relative, subtracted in f64 (see
-    /// `Camera::anchor`).
+    /// `Camera::anchor`). The trailing X flip is the other half of vanilla's
+    /// `scale(-1,-1,1)` (the bake negates Y); without it every model renders
+    /// left-right mirrored.
     fn entity_matrix(info: &EntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
         let mut body_y_rot_deg = info.body_y_rot_deg;
         if info.is_converting {
@@ -1357,7 +1364,10 @@ impl EntityRenderer {
         }
         let base = glam::Mat4::from_translation((*info.position - anchor).as_vec3())
             * glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
+        // The flip composes innermost: vanilla applies its setupRotations
+        // (body_transform's rotations) before `scale(-1,-1,1)`.
         info.body_transform.map_or(base, |m| base * m)
+            * glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1379,7 +1389,6 @@ impl EntityRenderer {
         // (immutable reads of self.mobs), grouped by variant so each (variant,
         // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
         // and are dropped at the end of this block, before the buffer write below.
-        let cull_dist_sq = cull_dist * cull_dist;
         let mut instances: Vec<EntityInstance> = Vec::new();
         let (opaque, body, eyes, swirl) = {
             let mut vis: Vec<VisEntity> = Vec::new();
@@ -1387,7 +1396,7 @@ impl EntityRenderer {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
                     continue;
                 };
-                if !info.skip_cull && !entity_visible(info, frustum, eye, cull_dist_sq) {
+                if !info.skip_cull && !entity_visible(info, frustum, eye, cull_dist) {
                     continue;
                 }
                 let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
@@ -1835,24 +1844,26 @@ fn entity_visible(
     info: &EntityRenderInfo,
     frustum: &[[f32; 4]; 6],
     eye: glam::DVec3,
-    cull_dist_sq: f32,
+    cull_dist: f32,
 ) -> bool {
     let (w, h) = entity_bounds(info.entity_kind, info.is_baby);
-    let mut radius = 0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN;
     // A body transform (slime size/squish) can grow the entity well past its
-    // base bounds; inflate the sphere by its largest axis scale.
-    if let Some(m) = &info.body_transform {
-        let s = m
-            .x_axis
+    // base bounds; scale the sphere and its center by the largest axis scale.
+    let scale = info.body_transform.map_or(1.0, |m| {
+        m.x_axis
             .length_squared()
             .max(m.y_axis.length_squared())
             .max(m.z_axis.length_squared())
-            .sqrt();
-        radius *= s.max(1.0);
-    }
+            .sqrt()
+            .max(1.0)
+    });
+    let radius = (0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN) * scale;
     let mut q = (*info.position - eye).as_vec3();
-    q.y += h * 0.5;
-    if q.length_squared() > cull_dist_sq {
+    q.y += h * 0.5 * scale;
+    // Distance-cull with the radius as margin so an oversized entity stays
+    // visible while any of its body is in range.
+    let max_dist = cull_dist + radius;
+    if q.length_squared() > max_dist * max_dist {
         return false;
     }
     for pl in frustum {

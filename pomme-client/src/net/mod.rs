@@ -17,6 +17,7 @@ use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::DVec3;
 use simdnbt::owned::NbtCompound;
 
+use crate::entity::MobFlag;
 use crate::entity::components::Position;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
 
@@ -316,13 +317,13 @@ pub enum NetworkEvent {
         kind: EntityKind,
         variant: u32,
     },
-    EndermanCreepy {
+    /// Kind-gated boolean mob state; the store drops writes whose entity
+    /// kind doesn't match the flag's mob (metadata indices are overloaded
+    /// across kinds).
+    MobFlag {
         id: i32,
-        creepy: bool,
-    },
-    WitchDrinking {
-        id: i32,
-        drinking: bool,
+        flag: MobFlag,
+        value: bool,
     },
     SlimeSize {
         id: i32,
@@ -331,14 +332,6 @@ pub enum NetworkEvent {
     BoggedSheared {
         id: i32,
         sheared: bool,
-    },
-    ZombieConverting {
-        id: i32,
-        converting: bool,
-    },
-    ZombieVillagerConverting {
-        id: i32,
-        converting: bool,
     },
     TamableFlags {
         id: i32,
@@ -349,10 +342,6 @@ pub enum NetworkEvent {
         id: i32,
         color: u8,
     },
-    WolfInterested {
-        id: i32,
-        interested: bool,
-    },
     WolfAnger {
         id: i32,
         end_time: i64,
@@ -360,14 +349,6 @@ pub enum NetworkEvent {
     WolfShaking {
         id: i32,
         shaking: bool,
-    },
-    CatLying {
-        id: i32,
-        lying: bool,
-    },
-    CatRelaxed {
-        id: i32,
-        relaxed: bool,
     },
     RabbitJump {
         id: i32,
@@ -400,10 +381,6 @@ pub enum NetworkEvent {
     },
     EntitySwing {
         id: i32,
-    },
-    CreeperPowered {
-        id: i32,
-        powered: bool,
     },
     EntityDamaged {
         id: i32,
