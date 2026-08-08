@@ -41,8 +41,11 @@ pub struct LivingEntity {
     pub wool_color: Option<u8>,
     /// Sheep wool shorn / bogged mushrooms shorn.
     pub is_sheared: bool,
-    pub cow_variant: u8,
-    pub chicken_variant: u8,
+    /// Registry/wire variant slot; meaning is per-kind (pool index for
+    /// cow/chicken/wolf/cat, packed `color | markings << 8` for horse, raw
+    /// vanilla int for rabbit/salmon/tropical fish). Normalized in
+    /// `EntityStore::set_variant`.
+    pub variant: u32,
     /// Chicken wing-flap state (vanilla `Chicken.aiStep`): `flap` is the
     /// unbounded wing-cycle phase, `flap_speed` the 0..1 amplitude.
     pub flap: f32,
@@ -67,7 +70,6 @@ pub struct LivingEntity {
     pub is_sprinting: bool,
     /// Dye id, wolf/cat collars (vanilla default red).
     pub collar_color: u8,
-    pub wolf_variant: u8,
     pub is_interested: bool,
     /// Vanilla persistent-anger end time; angry while > current game time.
     pub anger_end_time: i64,
@@ -77,7 +79,6 @@ pub struct LivingEntity {
     pub prev_interested_angle: f32,
     pub shake_anim: f32,
     pub prev_shake_anim: f32,
-    pub cat_variant: u8,
     pub is_lying: bool,
     pub relax_state_one: bool,
     pub lie_down_amount: f32,
@@ -86,7 +87,6 @@ pub struct LivingEntity {
     pub prev_lie_down_amount_tail: f32,
     pub relax_state_one_amount: f32,
     pub prev_relax_state_one_amount: f32,
-    pub rabbit_variant: u8,
     /// Tick the rabbit hop keyframe clock started at, while hopping.
     pub hop_anim_start: Option<u32>,
     /// Equine flag-byte state (grass eating, rearing, open mouth).
@@ -99,8 +99,6 @@ pub struct LivingEntity {
     pub prev_stand_anim: f32,
     pub mouth_anim: f32,
     pub prev_mouth_anim: f32,
-    pub horse_color: u8,
-    pub horse_markings: u8,
     pub has_chest: bool,
     /// Packet-driven velocity (vanilla remote entities never integrate their
     /// own); feeds the squid body-rotation sim.
@@ -117,10 +115,6 @@ pub struct LivingEntity {
     pub bat_resting: bool,
     /// Tick the bat's current fly/rest animation started at.
     pub bat_anim_start: Option<u32>,
-    pub salmon_variant: u8,
-    /// Tropical fish packed variant: b0 shape, b1 pattern, b2 base dye, b3
-    /// pattern dye.
-    pub tropical_variant: i32,
     pub puff_state: u8,
     /// Glow squid post-hurt dim timer, synced then decremented client-side.
     pub dark_ticks: i32,
@@ -190,8 +184,13 @@ impl LivingEntity {
             on_ground: false,
             wool_color: None,
             is_sheared: false,
-            cow_variant: 0,
-            chicken_variant: 0,
+            // Vanilla salmon default is MEDIUM (id 1); non-default-only
+            // metadata means the size may never be synced.
+            variant: if entity_type == EntityKind::Salmon {
+                1
+            } else {
+                0
+            },
             flap: 0.0,
             prev_flap: 0.0,
             flap_speed: 0.0,
@@ -206,7 +205,6 @@ impl LivingEntity {
             is_tame: false,
             is_sprinting: false,
             collar_color: 14,
-            wolf_variant: 0,
             is_interested: false,
             anger_end_time: -1,
             health: 20.0,
@@ -214,7 +212,6 @@ impl LivingEntity {
             prev_interested_angle: 0.0,
             shake_anim: 0.0,
             prev_shake_anim: 0.0,
-            cat_variant: 0,
             is_lying: false,
             relax_state_one: false,
             lie_down_amount: 0.0,
@@ -223,7 +220,6 @@ impl LivingEntity {
             prev_lie_down_amount_tail: 0.0,
             relax_state_one_amount: 0.0,
             prev_relax_state_one_amount: 0.0,
-            rabbit_variant: 0,
             hop_anim_start: None,
             is_eating: false,
             is_standing: false,
@@ -234,8 +230,6 @@ impl LivingEntity {
             prev_stand_anim: 0.0,
             mouth_anim: 0.0,
             prev_mouth_anim: 0.0,
-            horse_color: 0,
-            horse_markings: 0,
             has_chest: false,
             velocity: DVec3::ZERO,
             is_in_water: false,
@@ -247,8 +241,6 @@ impl LivingEntity {
             prev_tentacle_angle: 0.0,
             bat_resting: false,
             bat_anim_start: None,
-            salmon_variant: 1,
-            tropical_variant: 0,
             puff_state: 0,
             dark_ticks: 0,
             villager_kind: VillagerKind::default(),
@@ -455,7 +447,7 @@ impl LivingEntity {
             EntityKind::Cod => (0.5, 0.3),
             // `Salmon.getSalmonScale`: small 0.5, medium 1.0, large 1.5.
             EntityKind::Salmon => {
-                let scale = match self.salmon_variant {
+                let scale = match self.variant {
                     0 => 0.5,
                     2 => 1.5,
                     _ => 1.0,
@@ -987,19 +979,25 @@ impl EntityStore {
         }
     }
 
-    pub fn set_cow_variant(&mut self, id: i32, variant: u8) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Cow
-        {
-            entity.cow_variant = variant;
-        }
-    }
-
-    pub fn set_chicken_variant(&mut self, id: i32, variant: u8) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Chicken
-        {
-            entity.chicken_variant = variant;
+    pub fn set_variant(&mut self, id: i32, raw: u32) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.variant = match entity.entity_type {
+                // Vanilla sparse rabbit id map: 99 = evil, unknown ids fall
+                // back to brown.
+                EntityKind::Rabbit => match raw {
+                    0..=5 => raw,
+                    99 => 6,
+                    _ => 0,
+                },
+                // Horse packed variant: `color | markings << 8`, both wrapping
+                // their id ranges (vanilla `ByIdMap` WRAP).
+                EntityKind::Horse => ((raw & 0xFF) % 7) | ((((raw >> 8) & 0xFF) % 5) << 8),
+                // Salmon size ids stop at LARGE (2).
+                EntityKind::Salmon => raw.min(2),
+                // Holder-backed indices (cow/chicken/wolf/cat) are
+                // pre-resolved by the net handler.
+                _ => raw,
+            };
         }
     }
 
@@ -1107,14 +1105,6 @@ impl EntityStore {
         }
     }
 
-    pub fn set_wolf_variant(&mut self, id: i32, variant: u8) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Wolf
-        {
-            entity.wolf_variant = variant;
-        }
-    }
-
     pub fn set_wolf_interested(&mut self, id: i32, interested: bool) {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == EntityKind::Wolf
@@ -1142,14 +1132,6 @@ impl EntityStore {
         }
     }
 
-    pub fn set_cat_variant(&mut self, id: i32, variant: u8) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Cat
-        {
-            entity.cat_variant = variant;
-        }
-    }
-
     pub fn set_cat_lying(&mut self, id: i32, lying: bool) {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == EntityKind::Cat
@@ -1163,19 +1145,6 @@ impl EntityStore {
             && entity.entity_type == EntityKind::Cat
         {
             entity.relax_state_one = relaxed;
-        }
-    }
-
-    pub fn set_rabbit_variant(&mut self, id: i32, variant: i32) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Rabbit
-        {
-            // Vanilla sparse id map: 99 = evil, unknown ids fall back to brown.
-            entity.rabbit_variant = match variant {
-                0..=5 => variant as u8,
-                99 => 6,
-                _ => 0,
-            };
         }
     }
 
@@ -1196,17 +1165,6 @@ impl EntityStore {
             entity.is_eating = eating;
             entity.is_standing = standing;
             entity.is_open_mouth = open_mouth;
-        }
-    }
-
-    /// Horse packed variant: `color | markings << 8`, both wrapping their id
-    /// ranges (vanilla `ByIdMap` WRAP).
-    pub fn set_horse_variant(&mut self, id: i32, packed: i32) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Horse
-        {
-            entity.horse_color = (packed & 0xFF).rem_euclid(7) as u8;
-            entity.horse_markings = ((packed >> 8) & 0xFF).rem_euclid(5) as u8;
         }
     }
 
@@ -1231,22 +1189,6 @@ impl EntityStore {
         {
             entity.bat_resting = resting;
             entity.bat_anim_start = None;
-        }
-    }
-
-    pub fn set_salmon_variant(&mut self, id: i32, variant: i32) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Salmon
-        {
-            entity.salmon_variant = variant.clamp(0, 2) as u8;
-        }
-    }
-
-    pub fn set_tropical_variant(&mut self, id: i32, variant: i32) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::TropicalFish
-        {
-            entity.tropical_variant = variant;
         }
     }
 
@@ -1308,6 +1250,18 @@ impl EntityStore {
         }
     }
 
+    /// Rotation-only movement (`MoveEntityRot`): vanilla applies the new
+    /// rotation via `moveOrInterpolateTo` and sets onGround; position
+    /// interpolation is untouched (extending an in-flight lerp matches the
+    /// `EntityMovedRotated` convention rather than vanilla's fixed re-target).
+    pub fn rotate_living(&mut self, id: i32, y_rot_deg: f32, x_rot_deg: f32, on_ground: bool) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.interp_look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
+            entity.interp_steps = entity.interp_steps.max(INTERPOLATION_STEPS);
+            entity.on_ground = on_ground;
+        }
+    }
+
     pub fn update_head_rotation(&mut self, id: i32, head_y_rot_deg: f32) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.interp_head_y_rot_deg = head_y_rot_deg;
@@ -1342,7 +1296,9 @@ impl EntityStore {
                 &mut entity.walk_anim_speed,
                 &mut entity.prev_walk_anim_speed,
             );
-            entity.tick_flap();
+            if entity.entity_type == EntityKind::Chicken {
+                entity.tick_flap();
+            }
             entity.tick_squish();
             entity.tick_tamable_anims();
             if is_equine(&entity.entity_type) {
