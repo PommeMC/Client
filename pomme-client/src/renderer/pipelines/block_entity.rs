@@ -168,7 +168,6 @@ fn lid_anim(kind: BlockEntityKind, openness: f32) -> PartAnim {
         BlockEntityKind::ShulkerBox => PartAnim {
             rotation: vec![(0, glam::Vec3::new(0.0, eased * 270.0f32.to_radians(), 0.0))],
             translation: vec![(0, glam::Vec3::new(0.0, -eased * 8.0, 0.0))],
-            ..Default::default()
         },
         _ => PartAnim::default(),
     }
@@ -538,6 +537,8 @@ impl BlockEntityPipeline {
             ) - anchor)
                 .as_vec3();
             let model_mat = match model.convention {
+                // With the 180 yaw offset and the convention's baked-in flip
+                // this reproduces vanilla's block-entity `scale(1,-1,-1)`.
                 ModelConvention::EntityYDown => {
                     glam::Mat4::from_translation(block_center)
                         * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians())
