@@ -235,6 +235,12 @@ pub enum NetworkEvent {
         x_rot_deg: f32,
         on_ground: bool,
     },
+    EntityRotated {
+        id: i32,
+        y_rot_deg: f32,
+        x_rot_deg: f32,
+        on_ground: bool,
+    },
     EntityMotion {
         id: i32,
         velocity: DVec3,
@@ -301,13 +307,12 @@ pub enum NetworkEvent {
     FinishUseItem {
         id: i32,
     },
-    CowVariant {
+    /// Registry/wire variant slot; meaning is per-kind (pool index for
+    /// cow/chicken). Per-kind normalization lives in
+    /// `EntityStore::set_variant`.
+    EntityVariant {
         id: i32,
-        variant: u8,
-    },
-    ChickenVariant {
-        id: i32,
-        variant: u8,
+        variant: u32,
     },
     EndermanCreepy {
         id: i32,
