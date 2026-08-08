@@ -2272,6 +2272,8 @@ pub fn update_game(
                     flap_speed: extras.flap_speed,
                     is_creepy: e.is_creepy,
                     is_converting: e.is_converting,
+                    // TODO: derive from the main-hand item (vanilla
+                    // `isHoldingItem`) once mob equipment tracking lands.
                     is_holding_item: e.witch_drinking,
                     nose_wobble_speed: extras.nose_wobble_speed,
                     is_sitting: e.is_sitting,
