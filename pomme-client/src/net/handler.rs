@@ -8,6 +8,7 @@ use crossbeam_channel::Sender;
 use super::NetworkEvent;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
+use crate::entity::MobFlag;
 use crate::entity::components::Position;
 use crate::renderer::pipelines::entity_renderer::{CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER};
 use crate::ui::text::format_text_spans;
@@ -462,13 +463,20 @@ pub fn handle_game_packet(
                         is_baby: *is_baby,
                     });
                 }
-                // Entity data index 16 = player score (1.21.4 protocol)
+                // Index 16 (Int) = player score / slime size (Slime's
+                // DATA_ID_SIZE sits at 16 on 1.21.9-26.1.x; 26.2 moved it to
+                // 18 when Slime gained AgeableMob's fields). Emit both;
+                // consumers filter by entity type.
                 if item.index == 16
                     && let azalea_entity::EntityDataValue::Int(score) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::PlayerScore {
                         entity_id: p.id.0,
                         score: *score,
+                    });
+                    let _ = event_tx.try_send(NetworkEvent::SlimeSize {
+                        id: p.id.0,
+                        size: *score,
                     });
                 }
                 // Index 15 = mob flags byte (AbstractInsentient): bit 0x04 = aggressive.
@@ -492,22 +500,22 @@ pub fn handle_game_packet(
                     });
                 }
                 // Index 17 (Boolean) = creeper powered / enderman creepy / witch
-                // drinking. Emit all three; consumers filter by entity type.
+                // drinking. Emit every candidate; the store applies only the
+                // flag matching the entity's kind.
                 if item.index == 17
                     && let azalea_entity::EntityDataValue::Boolean(flag) = &item.value
                 {
-                    let _ = event_tx.try_send(NetworkEvent::CreeperPowered {
-                        id: p.id.0,
-                        powered: *flag,
-                    });
-                    let _ = event_tx.try_send(NetworkEvent::EndermanCreepy {
-                        id: p.id.0,
-                        creepy: *flag,
-                    });
-                    let _ = event_tx.try_send(NetworkEvent::WitchDrinking {
-                        id: p.id.0,
-                        drinking: *flag,
-                    });
+                    for f in [
+                        MobFlag::CreeperPowered,
+                        MobFlag::EndermanCreepy,
+                        MobFlag::WitchDrinking,
+                    ] {
+                        let _ = event_tx.try_send(NetworkEvent::MobFlag {
+                            id: p.id.0,
+                            flag: f,
+                            value: *flag,
+                        });
+                    }
                 }
                 // Index 2 = custom name (Optional<Component>); needed for jeb_ sheep detection.
                 if item.index == 2

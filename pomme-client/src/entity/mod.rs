@@ -14,6 +14,15 @@ use crate::physics::collision::resolve_collision;
 use crate::world::block::{FluidKind, fluid};
 use crate::world::chunk::ChunkStore;
 
+/// Kind-gated boolean mob states; each flag belongs to one mob kind and
+/// [`EntityStore::set_mob_flag`] drops writes for a mismatched entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MobFlag {
+    CreeperPowered,
+    EndermanCreepy,
+    WitchDrinking,
+}
+
 const INTERPOLATION_STEPS: i32 = 3;
 const HURT_DURATION: u8 = 10;
 /// Vanilla default arm-swing duration in ticks
@@ -144,7 +153,10 @@ impl LivingEntity {
             swing_time: 0,
             flapping: 1.0,
             target_squish: 0.0,
-            prev_on_ground: true,
+            // Vanilla `AbstractCubeMob.wasOnGround` starts false; with the
+            // grounded spawn above this reproduces vanilla's first-track
+            // landing squash and skips the airborne-spawn stretch.
+            prev_on_ground: false,
             interp_target: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
@@ -228,9 +240,9 @@ impl LivingEntity {
     /// Per-kind per-tick animation state (the kind-specific tail of vanilla
     /// `aiStep`); arms accrue as mobs land.
     fn tick_kind_anims(&mut self) {
-        #[allow(clippy::single_match)]
         match self.entity_type {
             EntityKind::Chicken => self.tick_flap(),
+            EntityKind::Slime => self.tick_squish(),
             _ => {}
         }
     }
@@ -639,19 +651,18 @@ impl EntityStore {
         }
     }
 
-    pub fn set_enderman_creepy(&mut self, id: i32, creepy: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Enderman
-        {
-            entity.is_creepy = creepy;
-        }
-    }
-
-    pub fn set_witch_drinking(&mut self, id: i32, drinking: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Witch
-        {
-            entity.witch_drinking = drinking;
+    /// Applies a [`MobFlag`] write, dropping it when the entity isn't the
+    /// flag's mob (metadata indices are overloaded across kinds, so the net
+    /// handler emits every candidate flag for an ambiguous boolean).
+    pub fn set_mob_flag(&mut self, id: i32, flag: MobFlag, value: bool) {
+        let Some(entity) = self.living.get_mut(&id) else {
+            return;
+        };
+        match (flag, entity.entity_type) {
+            (MobFlag::CreeperPowered, EntityKind::Creeper) => entity.powered = value,
+            (MobFlag::EndermanCreepy, EntityKind::Enderman) => entity.is_creepy = value,
+            (MobFlag::WitchDrinking, EntityKind::Witch) => entity.witch_drinking = value,
+            _ => {}
         }
     }
 
@@ -715,14 +726,6 @@ impl EntityStore {
         }
     }
 
-    pub fn set_powered(&mut self, id: i32, powered: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Creeper
-        {
-            entity.powered = powered;
-        }
-    }
-
     /// Begins an arm swing (server `Animate` packet). Restarts when idle or
     /// past the halfway point (vanilla `LivingEntity.swing`); `swing_time`
     /// counts down, so that is `swing_time <= SWING_DURATION / 2`.
@@ -780,7 +783,6 @@ impl EntityStore {
                 &mut entity.prev_walk_anim_speed,
             );
             entity.tick_kind_anims();
-            entity.tick_squish();
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
             if entity.eat_anim_tick > 0 {
                 entity.eat_anim_tick -= 1;

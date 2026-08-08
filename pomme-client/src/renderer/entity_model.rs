@@ -1610,19 +1610,32 @@ pub fn bake_slime_outer_model() -> BakedEntityModel {
 /// its witch.png region is fully transparent, so its cubes are dropped.
 fn witch_parts() -> Vec<EntityPart> {
     let mut parts = villager_parts();
-    parts[1] = vpart(
+    let index_of = |parts: &[EntityPart], name: &str| {
+        parts
+            .iter()
+            .position(|p| p.name == name)
+            .unwrap_or_else(|| panic!("villager mesh has a {name}"))
+    };
+    let head = index_of(&parts, "head");
+    let hat = index_of(&parts, "hat");
+    let nose = index_of(&parts, "nose");
+    parts[hat] = vpart(
         "hat",
-        Some(0),
+        Some(head),
         Vec3::new(-5.0, -10.03125, -5.0),
         vec![vbox((0, 64), (0.0, 0.0, 0.0), (10.0, 2.0, 10.0))],
     );
-    parts[2].cubes.clear(); // hat_rim
+    let hat_rim = index_of(&parts, "hat_rim");
+    parts[hat_rim].cubes.clear();
+    // The cone stacks parent hat -> hat2 -> hat3 -> hat4; the appended parts
+    // land at indices n, n+1, n+2.
+    let n = parts.len();
     parts.extend([
         EntityPart {
             default_rotation: Vec3::new(-0.05235988, 0.0, 0.02617994),
             ..vpart(
                 "hat2",
-                Some(1),
+                Some(hat),
                 Vec3::new(1.75, -4.0, 2.0),
                 vec![vbox((0, 76), (0.0, 0.0, 0.0), (7.0, 4.0, 7.0))],
             )
@@ -1631,7 +1644,7 @@ fn witch_parts() -> Vec<EntityPart> {
             default_rotation: Vec3::new(-0.10471976, 0.0, 0.05235988),
             ..vpart(
                 "hat3",
-                Some(9),
+                Some(n),
                 Vec3::new(1.75, -4.0, 2.0),
                 vec![vbox((0, 87), (0.0, 0.0, 0.0), (4.0, 4.0, 4.0))],
             )
@@ -1640,7 +1653,7 @@ fn witch_parts() -> Vec<EntityPart> {
             default_rotation: Vec3::new(-0.20943952, 0.0, 0.10471976),
             ..vpart(
                 "hat4",
-                Some(10),
+                Some(n + 1),
                 Vec3::new(1.75, -2.0, 2.0),
                 vec![ModelCube {
                     deformation: 0.25,
@@ -1651,7 +1664,7 @@ fn witch_parts() -> Vec<EntityPart> {
         // The mole samples the unused top-left corner of the head texture.
         vpart(
             "mole",
-            Some(3),
+            Some(nose),
             Vec3::new(0.0, -2.0, 0.0),
             vec![ModelCube {
                 deformation: -0.25,
