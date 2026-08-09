@@ -46,6 +46,14 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[
     khr::portability_subset::NAME,
 ];
 
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceFeatures {
+    pub timestamp_queries: bool,
+    /// Valid low bits of the graphics queue's timestamps; deltas must be
+    /// masked to this width or they read garbage at counter wrap.
+    pub timestamp_valid_bits: u32,
+}
+
 pub struct VulkanContext {
     pub instance: vk::Instance,
     pub surface: vk::SurfaceKHR,
@@ -71,6 +79,7 @@ pub struct VulkanContext {
 
     pub gpu_name: String,
     pub vulkan_version: String,
+    pub features: DeviceFeatures,
 }
 
 impl VulkanContext {
@@ -167,6 +176,79 @@ impl VulkanContext {
         };
         tracing::info!("GPU: {gpu_name} ({vulkan_version})");
 
+        let properties = physical_device.get_properties();
+        let family_props = physical_device.get_queue_family_properties();
+        let graphics_family_props = family_props[graphics_family as usize];
+
+        let base_features = physical_device.get_features();
+        let fill_mode_non_solid = base_features.fill_mode_non_solid == vk::TRUE;
+        let draw_indirect_first_instance = base_features.draw_indirect_first_instance == vk::TRUE;
+        let multi_draw_indirect = base_features.multi_draw_indirect == vk::TRUE;
+
+        let queue_supports_timestamps = graphics_family_props.timestamp_valid_bits > 0;
+        let timestamp_queries = properties.limits.timestamp_compute_and_graphics == vk::TRUE
+            && properties.limits.timestamp_period > 0.0
+            && queue_supports_timestamps;
+
+        if fill_mode_non_solid {
+            tracing::info!("fillModeNonSolid supported, wireframe mode available");
+        } else {
+            tracing::warn!("fillModeNonSolid not supported, wireframe mode disabled");
+        }
+
+        if timestamp_queries {
+            tracing::info!(
+                "Timestamp queries supported (period: {} ns, queue timestampValidBits: {})",
+                properties.limits.timestamp_period,
+                graphics_family_props.timestamp_valid_bits
+            );
+        } else {
+            tracing::warn!(
+                "Timestamp queries not supported (period: {} ns, queue timestampValidBits: {})",
+                properties.limits.timestamp_period,
+                graphics_family_props.timestamp_valid_bits
+            );
+        }
+
+        // The cull shader routes each section's origin through firstInstance;
+        // without the feature every indirect chunk draw is invalid usage
+        // (geometry at wrong positions), so it is a hard requirement.
+        if !draw_indirect_first_instance {
+            tracing::error!(
+                "drawIndirectFirstInstance not supported; GPU-driven chunk drawing requires it"
+            );
+            return Err(ContextError::NoSuitableGpu);
+        }
+        // Every chunk draw list is a multi-draw (`vkCmdDrawIndexedIndirect*`
+        // with drawCount / maxDrawCount in the thousands), invalid without
+        // the feature.
+        if !multi_draw_indirect {
+            tracing::error!(
+                "multiDrawIndirect not supported; GPU-driven chunk drawing requires it"
+            );
+            return Err(ContextError::NoSuitableGpu);
+        }
+        // water_scan.comp is a single 512-invocation workgroup (one thread
+        // per distance bucket); the spec floor is 128, so gate explicitly
+        // rather than panicking at pipeline creation.
+        let limits = &properties.limits;
+        if limits.max_compute_work_group_invocations < 512
+            || limits.max_compute_work_group_size[0] < 512
+        {
+            tracing::error!(
+                "compute workgroup limits too small (invocations {}, size_x {}); \
+                 the water ordering scan needs 512",
+                limits.max_compute_work_group_invocations,
+                limits.max_compute_work_group_size[0]
+            );
+            return Err(ContextError::NoSuitableGpu);
+        }
+
+        let features = DeviceFeatures {
+            timestamp_queries,
+            timestamp_valid_bits: graphics_family_props.timestamp_valid_bits,
+        };
+
         let queue_priority = 1.0f32;
 
         let queue_create_infos: &[_] = if graphics_family == present_family {
@@ -206,11 +288,19 @@ impl VulkanContext {
         let device_extension_names: Vec<*const c_char> =
             DEVICE_EXTENSIONS.iter().map(|ext| ext.as_ptr()).collect();
 
+        let mut enabled_features = vk::PhysicalDeviceFeatures::default();
+        if fill_mode_non_solid {
+            enabled_features.fill_mode_non_solid = vk::TRUE;
+        }
+        enabled_features.draw_indirect_first_instance = vk::TRUE;
+        enabled_features.multi_draw_indirect = vk::TRUE;
+
         let device_info = vk::DeviceCreateInfo {
             queue_create_info_count: queue_create_infos.len() as u32,
             queue_create_infos: queue_create_infos.as_ptr(),
             enabled_extension_count: device_extension_names.len() as u32,
             enabled_extension_names: device_extension_names.as_ptr(),
+            enabled_features: &enabled_features,
             ..Default::default()
         }
         .next(&mut vk12_features);
@@ -279,6 +369,7 @@ impl VulkanContext {
             debug_messenger,
             gpu_name,
             vulkan_version,
+            features,
         })
     }
 

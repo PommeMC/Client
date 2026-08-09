@@ -108,7 +108,9 @@ fn default_true() -> bool {
 }
 
 fn default_chunk_detail() -> u32 {
-    8
+    // 0 = Auto: full detail out to the render distance, LOD only when the
+    // user lowers the slider below it (stock settings stay vanilla-looking).
+    0
 }
 
 fn default_volume() -> f32 {
@@ -120,7 +122,7 @@ impl Default for Settings {
         Self {
             gui_scale: 0,
             render_distance: 12,
-            chunk_detail: 8,
+            chunk_detail: 0,
             simulation_distance: 12,
             fov: 70,
             fov_effect_scale: 1.0,
@@ -398,7 +400,9 @@ pub struct MainMenu {
     pub render_distance: u32,
     /// Radius of full-detail meshing (LOD 0), in chunks; coarser LODs start
     /// beyond it. Pomme-custom: vanilla has no LOD, this buys its look back
-    /// within a VRAM budget.
+    /// within a VRAM budget. 0 = Auto (follows the render distance, so no
+    /// LOD ever sits inside it); resolve through
+    /// [`Self::effective_chunk_detail`], never read raw.
     pub chunk_detail: u32,
     pub simulation_distance: u32,
     /// Server-announced view distance cap; 0 when unknown (slider runs 2..32).
@@ -456,6 +460,17 @@ const MAX_FRIEND: usize = 16;
 const MAX_SEARCH: usize = 128;
 
 impl MainMenu {
+    /// The chunk-detail radius the LOD ladder actually uses: the slider value,
+    /// or the render distance when set to Auto (0) — full detail everywhere
+    /// in range by default.
+    pub fn effective_chunk_detail(&self) -> u32 {
+        if self.chunk_detail == 0 {
+            self.render_distance
+        } else {
+            self.chunk_detail
+        }
+    }
+
     pub fn new(
         game_dir: &Path,
         rt: Arc<tokio::runtime::Runtime>,

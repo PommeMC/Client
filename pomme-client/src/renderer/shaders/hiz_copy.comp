@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0) uniform sampler2D depth_buffer;
+layout(binding = 1, r32f) writeonly uniform image2D hiz_mip0;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(hiz_mip0);
+    if (pos.x >= size.x || pos.y >= size.y) {
+        return;
+    }
+    vec2 uv = (vec2(pos) + 0.5) / vec2(size);
+    float d = texture(depth_buffer, uv).r;
+    imageStore(hiz_mip0, pos, vec4(d, 0.0, 0.0, 0.0));
+}

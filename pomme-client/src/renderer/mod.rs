@@ -3,15 +3,17 @@ pub mod camera;
 pub mod chunk;
 mod context;
 pub mod entity_model;
+pub mod hiz;
 pub mod pipelines;
 mod screenshot;
 pub(crate) mod shader;
 mod swapchain;
+pub(crate) mod timings;
 pub(crate) mod util;
 
 pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,9 +23,11 @@ pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
 use chunk::atlas::TextureAtlas;
 use chunk::buffer::ChunkBufferStore;
-use chunk::mesher::{ChunkMeshData, MeshDispatcher};
+use chunk::dispatcher::ChunkMeshing;
+use chunk::mesher::SectionMeshData;
 use context::VulkanContext;
 use glam::dvec3;
+use hiz::{HizPipeline, OcclusionCamera};
 use pipelines::block_entity::BlockEntityPipeline;
 pub use pipelines::block_entity::BlockEntityRenderInfo;
 use pipelines::block_overlay::BlockOverlayPipeline;
@@ -51,6 +55,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
+use crate::renderer::timings::{RenderTimings, Timer, Timestamp};
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
@@ -95,6 +100,22 @@ fn preview_box_rect(rect: [f32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> 
     })
 }
 
+/// Clears the box's depth and scissors into it; the caller draws its content
+/// and then restores the full-frame scissor.
+fn begin_preview_box(
+    cmd: vk::CommandBuffer,
+    clear_attachment: vk::ClearAttachment,
+    rect: vk::Rect2D,
+) {
+    let clear_rect = vk::ClearRect {
+        rect,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
+    cmd.set_scissor(0, &[rect]);
+}
+
 // Constructed once per frame and consumed immediately, never stored.
 #[allow(clippy::large_enum_variant)]
 enum RenderMode<'a> {
@@ -126,20 +147,12 @@ enum RenderMode<'a> {
     },
 }
 
-#[derive(Default, Clone)]
-pub struct RenderTimings {
-    pub frame_ms: f32,
-    pub fence_ms: f32,
-    pub acquire_ms: f32,
-    pub cull_ms: f32,
-    pub draw_ms: f32,
-    pub present_ms: f32,
-}
-
 pub struct Renderer {
     ctx: VulkanContext,
     swapchain: Swapchain,
-    camera: Camera,
+    pub camera: Camera,
+
+    pub mesh_queue: VecDeque<SectionMeshData>,
 
     registry: BlockRegistry,
     jar_assets_dir: PathBuf,
@@ -173,7 +186,13 @@ pub struct Renderer {
     vsync: bool,
     width: u32,
     height: u32,
+    query_pools: Option<[vk::QueryPool; MAX_FRAMES_IN_FLIGHT]>,
+    query_reset: [bool; MAX_FRAMES_IN_FLIGHT],
     last_timings: RenderTimings,
+    hiz_pipeline: HizPipeline,
+    /// CPU wait in the last frame's `acquire_next_image`: where FIFO vblank
+    /// backpressure lands, consumed by the vsync frame pacer.
+    last_acquire_ms: f32,
 }
 
 impl Renderer {
@@ -396,12 +415,8 @@ impl Renderer {
             &ctx.allocator,
         );
 
-        let chunk_buffers = ChunkBufferStore::new(
-            &ctx.device,
-            ctx.physical_device,
-            ctx.graphics_family,
-            &ctx.allocator,
-        );
+        let mut chunk_buffers =
+            ChunkBufferStore::new(&ctx.device, ctx.physical_device, &ctx.allocator);
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
@@ -450,9 +465,45 @@ impl Renderer {
             asset_index,
         );
 
+        let query_pools = if ctx.features.timestamp_queries {
+            Some(std::array::from_fn(|_| {
+                let count = Timestamp::Count as u32;
+                let info = vk::QueryPoolCreateInfo {
+                    query_type: vk::QueryType::Timestamp,
+                    query_count: count,
+                    ..Default::default()
+                };
+
+                ctx.device.create_query_pool(&info, None).unwrap()
+            }))
+        } else {
+            None
+        };
+
+        let properties = ctx.physical_device.get_properties();
+        let timestamp_period = properties.limits.timestamp_period;
+        let timestamp_mask = match ctx.features.timestamp_valid_bits {
+            0 | 64 => u64::MAX,
+            bits => (1u64 << bits) - 1,
+        };
+        let hiz_pipeline = HizPipeline::new(
+            &ctx.device,
+            &ctx.allocator,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            swapchain_extent.width,
+            swapchain_extent.height,
+            swapchain_state.depth_view,
+        );
+        chunk_buffers.set_hiz_descriptors(
+            &ctx.device,
+            hiz_pipeline.full_view(),
+            hiz_pipeline.sampler(),
+        );
         Ok(Self {
             ctx,
             swapchain: swapchain_state,
+            mesh_queue: VecDeque::new(),
             camera,
             registry,
             jar_assets_dir: jar_assets_dir.to_path_buf(),
@@ -484,7 +535,16 @@ impl Renderer {
             vsync,
             width: swapchain_extent.width,
             height: swapchain_extent.height,
-            last_timings: RenderTimings::default(),
+
+            query_pools,
+            query_reset: Default::default(),
+            last_timings: RenderTimings {
+                ticks: [0; _],
+                timestamp_period,
+                timestamp_mask,
+            },
+            hiz_pipeline,
+            last_acquire_ms: 0.0,
         })
     }
 
@@ -738,6 +798,20 @@ impl Renderer {
             self.blur_pipeline.blurred_view(),
             self.blur_pipeline.blurred_sampler(),
         );
+        self.hiz_pipeline.resize(
+            &self.ctx.device,
+            &self.ctx.allocator,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            self.width,
+            self.height,
+            self.swapchain.depth_view,
+        );
+        self.chunk_buffers.set_hiz_descriptors(
+            &self.ctx.device,
+            self.hiz_pipeline.full_view(),
+            self.hiz_pipeline.sampler(),
+        );
 
         let sem_info = vk::SemaphoreCreateInfo::default();
         self.render_finished_per_image = Vec::with_capacity(self.swapchain.images.len());
@@ -878,6 +952,20 @@ impl Renderer {
         self.camera.position
     }
 
+    pub fn camera_frustum_planes(&self) -> [[f32; 4]; 6] {
+        self.camera.frustum_planes()
+    }
+
+    pub fn last_acquire_ms(&self) -> f32 {
+        self.last_acquire_ms
+    }
+
+    /// Re-syncs the block registry's dense state tables with the active block
+    /// table; the id space changes with the server's protocol.
+    pub fn rebuild_block_state_tables(&mut self) {
+        self.registry.build_state_tables();
+    }
+
     /// Camera position used for rendering (eye plus any third-person offset).
     pub fn camera_render_position(&self) -> glam::DVec3 {
         *self.camera.position + self.camera.third_person_offset().as_dvec3()
@@ -887,18 +975,6 @@ impl Renderer {
     /// to the GPU is rebased against this in f64 first (see `Camera::anchor`).
     pub fn camera_anchor(&self) -> glam::DVec3 {
         self.camera.anchor()
-    }
-
-    /// Six normalized frustum planes (camera-relative, same convention as the
-    /// GPU cull), for CPU-side visibility classification of
-    /// mesh-scheduling.
-    pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
-        self.camera.frustum_planes()
-    }
-
-    /// Frustum planes widened by `extra_radians` of FOV, for the tier-1 margin.
-    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
-        self.camera.frustum_planes_dilated(extra_radians)
     }
 
     pub fn cycle_camera_mode(&mut self) {
@@ -928,10 +1004,8 @@ impl Renderer {
         self.chunk_buffers.sections_drawn()
     }
 
-    /// Push the CPU visibility graph's per-column visible-section masks to the
-    /// chunk buffer store, which omits occluded sections from the GPU cull.
-    pub fn set_chunk_visibility(&mut self, vis: HashMap<ChunkPos, u32>) {
-        self.chunk_buffers.set_chunk_visibility(vis);
+    pub fn meta_rebuild_ms(&self) -> f32 {
+        self.chunk_buffers.meta_rebuild_ms()
     }
 
     /// Arm a vanilla F2 screenshot; captured on the next presented frame.
@@ -952,25 +1026,40 @@ impl Renderer {
             .wait_for_fences(&self.ctx.in_flight_fences, true, u64::MAX);
     }
 
-    /// Upload a batch of chunk meshes in a single coalesced transfer. Returns,
-    /// per mesh that hit pool exhaustion, the section indices dropped (need
-    /// re-mesh); empty on success.
-    pub fn upload_chunk_meshes(&mut self, meshes: &[ChunkMeshData]) -> Vec<(ChunkPos, Vec<i32>)> {
-        self.chunk_buffers.upload_batch(
+    pub fn stage_mesh_batch(&mut self) {
+        let eye = self.camera_render_position();
+        self.chunk_buffers.stage_mesh_batch(
             &self.ctx.device,
             &self.ctx.allocator,
-            self.ctx.graphics_queue,
-            meshes,
-        )
+            &mut self.mesh_queue,
+            eye,
+        );
+    }
+
+    /// GPU-wait time inside the last `stage_mesh_batch` (emergency slice
+    /// reclaim), for the benchmark's upload breakdown.
+    pub fn last_upload_reclaim_ms(&self) -> f32 {
+        self.chunk_buffers.last_reclaim_ms
     }
 
     pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {
         self.chunk_buffers.remove(pos);
+        // Queued-but-unstaged meshes for the column would pass the stage
+        // epoch gate (an unloaded column reads as epoch 0) and re-insert a
+        // ChunkAlloc nothing cleans up.
+        self.mesh_queue
+            .retain(|m| m.spos.x != pos.x || m.spos.z != pos.z);
     }
 
     pub fn clear_chunk_meshes(&mut self) {
         self.wait_for_all_frames();
         self.chunk_buffers.clear();
+        // Queued-but-unstaged meshes belong to the cleared world; staged into
+        // the fresh buffers they would draw as ghosts, and their pre-reset
+        // epochs would out-rank every legitimate upload for those sections.
+        self.mesh_queue.clear();
+        // The old world's depth pyramid must not cull the new one.
+        self.hiz_pipeline.invalidate_snapshot();
     }
 
     pub fn registry(&self) -> &BlockRegistry {
@@ -981,13 +1070,14 @@ impl Renderer {
         &self.atlas.uv_map
     }
 
-    pub fn create_mesh_dispatcher(
+    pub fn create_chunk_meshing(
         &self,
+        shared_chunk_store: std::sync::Arc<crate::world::chunk::SharedChunkStore>,
         biome_climate: std::sync::Arc<
             std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
         >,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
-    ) -> MeshDispatcher {
+    ) -> ChunkMeshing {
         let grass_colormap = crate::renderer::chunk::mesher::Colormap::load(
             &self.jar_assets_dir,
             &self.asset_index,
@@ -1006,7 +1096,8 @@ impl Renderer {
             "minecraft/textures/colormap/dry_foliage.png",
             packs,
         );
-        MeshDispatcher::new(
+        ChunkMeshing::create(
+            shared_chunk_store,
             self.registry.clone(),
             self.atlas.uv_map.clone(),
             grass_colormap,
@@ -1047,6 +1138,7 @@ impl Renderer {
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
+        occlusion_enabled: bool,
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
@@ -1090,6 +1182,7 @@ impl Renderer {
                 book_preview,
                 eyes_in_water,
             },
+            occlusion_enabled,
         )
     }
 
@@ -1113,6 +1206,7 @@ impl Renderer {
                 cursor,
                 show_skin,
             },
+            true,
         )
     }
 
@@ -1303,26 +1397,73 @@ impl Renderer {
             })
     }
 
+    /// Begin a load-variant render pass (color preserved from the ended
+    /// pass) and restore the frame's viewport/scissor, resuming drawing
+    /// mid-frame. `clear_values` may be empty when the pass clears nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn resume_pass(
+        &self,
+        cmd: vk::CommandBuffer,
+        render_pass: vk::RenderPass,
+        framebuffer: vk::Framebuffer,
+        clear_values: &[vk::ClearValue],
+        viewport: vk::Viewport,
+        scissor: vk::Rect2D,
+    ) {
+        let info = vk::RenderPassBeginInfo {
+            render_pass,
+            framebuffer,
+            render_area: vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: self.swapchain.extent,
+            },
+            clear_value_count: clear_values.len() as u32,
+            clear_values: if clear_values.is_empty() {
+                std::ptr::null()
+            } else {
+                clear_values.as_ptr()
+            },
+            ..Default::default()
+        };
+        cmd.begin_render_pass(&info, vk::SubpassContents::Inline);
+        cmd.set_viewport(0, &[viewport]);
+        cmd.set_scissor(0, &[scissor]);
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn render_frame(
         &mut self,
         window: &Window,
         hide_cursor: bool,
         clear_color: [f32; 4],
         mode: RenderMode<'_>,
+        occlusion_enabled: bool,
     ) -> Result<(), RendererError> {
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
         }
-
         let frame = self.ctx.frame_index;
         let fence = self.ctx.in_flight_fences[frame];
         let image_available = self.ctx.image_available_semaphores[frame];
         let cmd = self.ctx.command_buffers[frame];
 
-        let t_fence = std::time::Instant::now();
         self.ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
-        let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
-
+        if let Some(query_pools) = self.query_pools
+            && self.query_reset[frame]
+        {
+            self.query_reset[frame] = false;
+            self.ctx
+                .device
+                .get_query_pool_results(
+                    query_pools[frame],
+                    0,
+                    Timestamp::Count as u32,
+                    bytemuck::cast_slice_mut(&mut self.last_timings.ticks),
+                    size_of::<u64>() as u64,
+                    vk::QueryResultFlags::Type64 | vk::QueryResultFlags::Wait,
+                )
+                .unwrap();
+        }
         // Fence signalled: reclaim chunk slices the GPU is now provably done with,
         // and read back any screenshot copy recorded for this frame index.
         self.chunk_buffers.begin_frame();
@@ -1338,6 +1479,8 @@ impl Renderer {
         ) {
             Ok(image) => image,
             Err(vk::Error::OutOfDateKHR) => {
+                // Routine on resize/minimize; recreate next frame and skip
+                // this one quietly instead of surfacing an error to log.
                 self.swapchain_dirty = true;
                 return Ok(());
             }
@@ -1346,7 +1489,7 @@ impl Renderer {
 
         self.swapchain_dirty |= image.suboptimal;
         let image_index = image.value;
-        let acquire_ms = t_acquire.elapsed().as_secs_f32() * 1000.0;
+        self.last_acquire_ms = t_acquire.elapsed().as_secs_f32() * 1000.0;
 
         let render_finished = self.render_finished_per_image[image_index as usize];
 
@@ -1378,7 +1521,6 @@ impl Renderer {
             window.set_cursor_visible(false);
         }
 
-        self.ctx.device.reset_fences(&[fence])?;
         cmd.reset(vk::CommandBufferResetFlags::empty())?;
 
         let begin_info = vk::CommandBufferBeginInfo {
@@ -1386,7 +1528,6 @@ impl Renderer {
             ..Default::default()
         };
         cmd.begin(&begin_info)?;
-
         let extent = self.swapchain.extent;
         let viewport = vk::Viewport {
             x: 0.0,
@@ -1401,8 +1542,46 @@ impl Renderer {
             extent,
         };
 
-        if matches!(&mode, RenderMode::World { .. }) {
+        // Meshes staged this frame (or on the loading screen) copy into the
+        // pools through this frame's command buffer; must precede the draws.
+        self.chunk_buffers.record_copies(cmd, frame);
+
+        // World frames only: the menu path records just a couple of the
+        // Timestamp scopes, and the readback WAITs on all of them, so arming
+        // the pool there would block the next frame's result read forever.
+        let timer_pool = match (&mode, self.query_pools) {
+            (RenderMode::World { .. }, Some(query_pools)) => {
+                cmd.reset_query_pool(query_pools[frame], 0, Timestamp::Count as u32);
+                self.query_reset[frame] = true;
+                Some(query_pools[frame])
+            }
+            _ => None,
+        };
+        let timer = Timer::new(cmd, timer_pool);
+        let frame_start_timer = timer.scope(Timestamp::FrameStart, Timestamp::FrameEnd);
+
+        // The pyramid at this point still holds the previous frame's depth;
+        // the snapshot is the camera that drew it. F3+O gates only the
+        // consumption (None = fail open): the pyramid keeps rebuilding, so
+        // re-enabling is instant.
+        let occlusion = if occlusion_enabled {
+            self.hiz_pipeline.snapshot()
+        } else {
+            None
+        };
+
+        if let RenderMode::World {
+            render_distance, ..
+        } = &mode
+        {
+            let render_distance = *render_distance;
             let frustum = self.camera.frustum_planes();
+            let player_pos = *self.camera.position;
+            let player_chunk = ChunkPos::new(
+                player_pos.x.div_euclid(16.0) as i32,
+                player_pos.z.div_euclid(16.0) as i32,
+            );
+            let cull_timer = timer.scope(Timestamp::CullStart, Timestamp::CullEnd);
             // The eye (including the third-person offset) is the origin the chunk
             // vertex shader renders relative to, so the cull must use it too.
             self.chunk_buffers.dispatch_cull(
@@ -1411,9 +1590,20 @@ impl Renderer {
                 &frustum,
                 self.camera.anchor(),
                 self.camera_render_position(),
+                player_chunk,
+                Some(render_distance),
+                occlusion,
             );
+            cull_timer.end();
         }
-
+        // Reversed-Z world: far is 0, so the world pass clears depth to 0;
+        // the hand/HUD segment resumes in the load pass with a standard 1.0
+        // clear. Menu frames are standard-depth throughout (skin/book
+        // previews test Less).
+        let depth_clear = match &mode {
+            RenderMode::World { .. } => 0.0,
+            RenderMode::MainMenu { .. } => 1.0,
+        };
         let clear_values = [
             vk::ClearValue {
                 color: vk::ClearColorValue {
@@ -1422,7 +1612,7 @@ impl Renderer {
             },
             vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
+                    depth: depth_clear,
                     stencil: 0,
                 },
             },
@@ -1433,6 +1623,447 @@ impl Renderer {
             RenderMode::MainMenu { elements, .. } => elements.as_slice(),
         };
 
+        // The depth image is shared by every frame in flight, and the previous
+        // frame's Hi-Z pass reads it on the compute stage after that frame's
+        // render pass ended; nothing else orders that read against this
+        // frame's depth writes (the render pass's external dependency only
+        // covers fragment stages, and the fence is several frames behind).
+        // Barriers are queue-scoped, so this execution dependency makes this
+        // frame's depth-writing stages wait out any in-flight Hi-Z read
+        // (write-after-read: no access masks needed).
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::ComputeShader,
+            vk::PipelineStageFlags::EarlyFragmentTests | vk::PipelineStageFlags::LateFragmentTests,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[],
+        );
+
+        let gui_bake_timer = timer.scope(Timestamp::GuiBakeStart, Timestamp::GuiBakeEnd);
+        let item_atlas_uvs = self.run_gui_bake(cmd, menu_elements);
+        gui_bake_timer.end();
+
+        let use_scene_pass = matches!(&mode, RenderMode::MainMenu { blur, .. } if *blur > 0.01);
+        let (render_pass, framebuffer) = if use_scene_pass {
+            (
+                self.swapchain.render_pass_scene,
+                self.swapchain.framebuffers_scene[image_index as usize],
+            )
+        } else {
+            (
+                self.swapchain.render_pass,
+                self.swapchain.framebuffers[image_index as usize],
+            )
+        };
+        let render_pass_info = vk::RenderPassBeginInfo {
+            render_pass,
+            framebuffer,
+            render_area: vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: self.swapchain.extent,
+            },
+            clear_value_count: clear_values.len() as u32,
+            clear_values: clear_values.as_ptr(),
+            ..Default::default()
+        };
+        cmd.begin_render_pass(&render_pass_info, vk::SubpassContents::Inline);
+        cmd.set_viewport(0, &[viewport]);
+        cmd.set_scissor(0, &[scissor]);
+        let sw = self.swapchain.extent.width as f32;
+        let sh = self.swapchain.extent.height as f32;
+
+        match &mode {
+            RenderMode::World {
+                overlay,
+                swing_progress,
+                use_anim,
+                held_item,
+                destroy_info,
+                show_chunk_borders,
+                sky,
+                entities,
+                item_entities,
+                block_entities,
+                particles,
+                weather,
+                cloud_mode,
+                render_distance,
+                player_preview,
+                book_preview,
+                eyes_in_water,
+            } => {
+                // Vanilla water fog hides the sky dome and clouds; the framebuffer
+                // is cleared to the water fog color, so skipping them tints the view
+                // when looking up out of geometry.
+                if !*eyes_in_water {
+                    self.sky_pipeline.update_and_draw(
+                        &self.ctx.device,
+                        cmd,
+                        frame,
+                        &self.camera,
+                        sky,
+                    );
+                }
+
+                let terrain_timer = timer.scope(Timestamp::TerrainStart, Timestamp::TerrainEnd);
+                // Solid (no discard) first so it lays down depth and early-Z lets
+                // the front-to-back order reject occluded fragments; cutout after.
+                self.chunk_pipeline.bind(cmd, frame, false);
+                self.chunk_buffers.draw_indirect(cmd, frame, false);
+                self.chunk_pipeline.bind(cmd, frame, true);
+                self.chunk_buffers.draw_indirect(cmd, frame, true);
+                terrain_timer.end();
+
+                let anchor = self.camera.anchor();
+                let eye = self.camera_render_position();
+
+                if let Some((block_pos, stage, state)) = destroy_info {
+                    self.block_overlay_pipeline.draw(
+                        cmd,
+                        frame,
+                        &self.registry,
+                        *state,
+                        block_pos,
+                        anchor,
+                        *stage,
+                    );
+                }
+
+                let entity_timer = timer.scope(Timestamp::EntitiesStart, Timestamp::EntitiesEnd);
+                let ent_frustum = self.camera.frustum_planes();
+                // Entities aren't sent beyond the server's tracking range; a
+                // generous render-distance cap just trims anything stray.
+                let ent_cull_dist = (*render_distance * 16) as f32 + 16.0;
+                self.entity_renderer.draw(
+                    cmd,
+                    frame,
+                    entities,
+                    &ent_frustum,
+                    anchor,
+                    eye,
+                    ent_cull_dist,
+                );
+
+                self.block_entity_pipeline
+                    .draw(cmd, frame, anchor, block_entities);
+
+                self.item_entity_pipeline.draw(cmd, frame, item_entities);
+                entity_timer.end();
+                let translucent_timer =
+                    timer.scope(Timestamp::TranslucentStart, Timestamp::TranslucentEnd);
+
+                // Break particles draw after entities but before translucent
+                // water: they write depth, and pomme's water doesn't, so this
+                // lets water blend over particles behind it (vanilla draws
+                // particles after all translucents into a depth-sharing
+                // target).
+                self.particle_pipeline
+                    .update_and_draw(cmd, frame, &self.camera, particles);
+
+                // Translucent water draws after opaque terrain and entities so it
+                // blends over them; depth-tested (occluded by geometry in front)
+                // but doesn't write depth. GPU-culled and bucket-ordered
+                // back-to-front by the cull/scan/emit chain.
+                self.chunk_pipeline.bind_water(cmd, frame);
+                self.chunk_buffers.draw_water(cmd, frame);
+                translucent_timer.end();
+
+                // Occluder geometry is complete: end the pass so the Hi-Z
+                // copy samples the stored depth now — before clouds and
+                // weather, whose depth writes must never occlusion-cull the
+                // terrain behind them (clouds are 80% alpha), and before the
+                // hand/HUD segment's depth clear wipes the buffer.
+                cmd.end_render_pass();
+
+                let hiz_timer = timer.scope(Timestamp::HizStart, Timestamp::HizEnd);
+                self.hiz_pipeline
+                    .execute(cmd, self.swapchain.depth_image, self.swapchain.extent);
+                hiz_timer.end();
+                // Next frame's occlusion test projects with the camera that
+                // drew this depth; same anchor/eye split as the cull,
+                // third-person offset included.
+                let anchor = self.camera.anchor();
+                let eye = self.camera_render_position();
+                self.hiz_pipeline.set_snapshot(OcclusionCamera {
+                    view_proj: self.camera.view_projection().to_cols_array_2d(),
+                    cam_block: anchor.as_ivec3(),
+                    frac: (eye - anchor).as_vec3(),
+                });
+
+                // Two hazards before resuming: the resumed pass writes the
+                // depth the Hi-Z copy samples (WAR, execution-only via the
+                // ComputeShader source stage), and the world pass left the
+                // color image in PresentSrcKHR while the load pass expects
+                // ColorAttachmentOptimal.
+                let color_barrier = vk::ImageMemoryBarrier {
+                    src_access_mask: vk::AccessFlags::ColorAttachmentWrite,
+                    dst_access_mask: vk::AccessFlags::ColorAttachmentRead
+                        | vk::AccessFlags::ColorAttachmentWrite,
+                    old_layout: vk::ImageLayout::PresentSrcKHR,
+                    new_layout: vk::ImageLayout::ColorAttachmentOptimal,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    image: self.swapchain.images[image_index as usize],
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::Color,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    ..Default::default()
+                };
+                cmd.pipeline_barrier(
+                    vk::PipelineStageFlags::ColorAttachmentOutput
+                        | vk::PipelineStageFlags::ComputeShader,
+                    vk::PipelineStageFlags::ColorAttachmentOutput
+                        | vk::PipelineStageFlags::EarlyFragmentTests
+                        | vk::PipelineStageFlags::LateFragmentTests,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[color_barrier],
+                );
+
+                // Resume with the world depth preserved (load_depth variant)
+                // for the passes that depth-test against terrain but must not
+                // feed the occlusion pyramid.
+                self.resume_pass(
+                    cmd,
+                    self.swapchain.render_pass_load_depth,
+                    self.swapchain.framebuffers_load[image_index as usize],
+                    &[],
+                    viewport,
+                    scissor,
+                );
+
+                let ui_timer = timer.scope(Timestamp::UiStart, Timestamp::UiEnd);
+
+                // Clouds draw after opaque world geometry (so terrain occludes
+                // them) and before weather, depth-tested against the scene.
+                if !*eyes_in_water {
+                    self.cloud_pipeline
+                        .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
+                }
+
+                // Weather draws after opaque world geometry (depth-tested against
+                // terrain) but before the depth clear for the hand pass.
+                self.weather_pipeline
+                    .update_and_draw(cmd, frame, &self.camera, sky, weather);
+
+                if *show_chunk_borders {
+                    self.chunk_border_pipeline.draw(cmd, frame);
+                }
+
+                let clear_attachment = vk::ClearAttachment {
+                    aspect_mask: vk::ImageAspectFlags::Depth,
+                    color_attachment: 0,
+                    clear_value: vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue {
+                            depth: 1.0,
+                            stencil: 0,
+                        },
+                    },
+                };
+                // In-pass depth clear to standard 1.0 for the hand/HUD
+                // segment (the begin_preview_box pattern, full-frame).
+                let clear_rect = vk::ClearRect {
+                    rect: scissor,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                };
+                cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
+                if self.camera.mode == camera::CameraMode::FirstPerson
+                    && self.camera.top_down().is_none()
+                {
+                    let aspect = sw / sh.max(1.0);
+                    // Same view-bob the world uses, so the arm/item bob in lockstep
+                    // (vanilla applies bobView to the hand pose stack too).
+                    let bob = self.camera.view_bob_matrix();
+                    // Vanilla renderArmWithItem draws the arm only for an empty
+                    // hand; a held item renders alone.
+                    match held_item {
+                        Some(item) => self.held_item_pipeline.update_and_draw(
+                            cmd,
+                            frame,
+                            aspect,
+                            *swing_progress,
+                            *use_anim,
+                            item,
+                            &self.item_entity_pipeline,
+                            bob,
+                        ),
+                        None => self.hand_pipeline.update_and_draw(
+                            cmd,
+                            frame,
+                            aspect,
+                            *swing_progress,
+                            bob,
+                        ),
+                    }
+                }
+
+                self.menu_pipeline
+                    .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+
+                if let Some(p) = player_preview
+                    && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
+                {
+                    begin_preview_box(cmd, clear_attachment, rect);
+                    self.skin_preview.draw_in_box(cmd, frame, *p, sw, sh);
+                    cmd.set_scissor(0, &[scissor]);
+                }
+
+                if let Some(p) = book_preview
+                    && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
+                {
+                    begin_preview_box(cmd, clear_attachment, rect);
+                    self.book_preview.draw_in_box(cmd, frame, *p, sw, sh);
+                    cmd.set_scissor(0, &[scissor]);
+                }
+
+                ui_timer.end();
+            }
+            RenderMode::MainMenu {
+                scroll,
+                blur,
+                elements,
+                cursor,
+                show_skin,
+            } => {
+                let aspect = sw / sh.max(1.0);
+                self.panorama_pipeline
+                    .draw(&self.ctx.device, cmd, *scroll, aspect, 0.0);
+
+                // A BlurBackdrop marker splits the elements: those before it are
+                // drawn into the scene so the blur pass captures them (the title
+                // screen behind the Friends dialog); the rest are drawn sharp.
+                let split = elements
+                    .iter()
+                    .position(|e| matches!(e, MenuElement::BlurBackdrop));
+                let mut vbase = 0u32;
+                if let Some(i) = split {
+                    vbase = self.menu_pipeline.draw_from(
+                        cmd,
+                        sw,
+                        sh,
+                        &elements[..i],
+                        &item_atlas_uvs,
+                        0,
+                    );
+                }
+
+                if *blur > 0.01 {
+                    cmd.end_render_pass();
+
+                    let swapchain_image = self.swapchain.images[image_index as usize];
+                    let iterations = ((*blur * 3.0).ceil() as u32).clamp(1, 4);
+                    self.blur_pipeline.execute(
+                        cmd,
+                        swapchain_image,
+                        self.swapchain.extent.width,
+                        self.swapchain.extent.height,
+                        iterations,
+                    );
+
+                    self.resume_pass(
+                        cmd,
+                        self.swapchain.render_pass_load,
+                        self.swapchain.framebuffers_load[image_index as usize],
+                        &clear_values,
+                        viewport,
+                        scissor,
+                    );
+                }
+
+                if *show_skin {
+                    self.skin_preview.draw(
+                        &self.ctx.device,
+                        cmd,
+                        frame,
+                        aspect,
+                        0.7,
+                        0.5,
+                        cursor.0,
+                        cursor.1,
+                        sw,
+                        sh,
+                    );
+                }
+
+                let fg = match split {
+                    Some(i) => &elements[i + 1..],
+                    None => &elements[..],
+                };
+                self.menu_pipeline
+                    .draw_from(cmd, sw, sh, fg, &item_atlas_uvs, vbase);
+            }
+        }
+
+        cmd.end_render_pass();
+        frame_start_timer.end();
+
+        // Image is now in PresentSrcKHR; grab it before present if F2 was pressed.
+        self.screenshot.record_if_armed(
+            &self.ctx.device,
+            &self.ctx.allocator,
+            cmd,
+            frame,
+            self.swapchain.images[image_index as usize],
+            self.swapchain.extent,
+            self.swapchain.format.format,
+        );
+
+        self.gui_item_atlas.end_frame();
+        cmd.end()?;
+        let submit_info = vk::SubmitInfo {
+            wait_semaphore_count: 1,
+            wait_semaphores: &image_available,
+            wait_dst_stage_mask: &vk::PipelineStageFlags::ColorAttachmentOutput,
+            command_buffer_count: 1,
+            command_buffers: &cmd.handle(),
+            signal_semaphore_count: 1,
+            signal_semaphores: &render_finished,
+            ..Default::default()
+        };
+        // The fence resets only here, right before the submit that re-signals
+        // it: an error on any earlier path leaves it signaled, so the next
+        // frame's wait returns instead of hanging forever. A failed submit
+        // after the reset is unrecoverable (device lost) — abort with the
+        // error rather than stranding every later `wait_for_fences`.
+        self.ctx.device.reset_fences(&[fence])?;
+        self.ctx
+            .graphics_queue
+            .submit(&[submit_info], fence)
+            .expect("queue submit failed (device lost?)");
+        self.chunk_buffers.frame_submitted();
+
+        let present_info = vk::PresentInfoKHR {
+            wait_semaphore_count: 1,
+            wait_semaphores: &render_finished,
+            swapchain_count: 1,
+            swapchains: &self.swapchain.handle,
+            image_indices: &image_index,
+            ..Default::default()
+        };
+        match self.ctx.present_queue.present(&present_info) {
+            Ok(()) => {}
+            Err(vk::Error::OutOfDateKHR | vk::Error::SuboptimalKHR) => {
+                self.swapchain_dirty = true;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        self.ctx.advance_frame();
+
+        Ok(())
+    }
+
+    fn run_gui_bake(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        menu_elements: &[MenuElement],
+    ) -> HashMap<String, [f32; 4]> {
         let target_slot_px =
             pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(
                 self.swapchain.extent.width as f32,
@@ -1518,374 +2149,7 @@ impl Renderer {
             self.gui_item_atlas.end_bake_pass(cmd);
         }
 
-        let use_blur = matches!(&mode, RenderMode::MainMenu { blur, .. } if *blur > 0.01);
-
-        let (rp, fb) = if use_blur {
-            (
-                self.swapchain.render_pass_scene,
-                self.swapchain.framebuffers_scene[image_index as usize],
-            )
-        } else {
-            (
-                self.swapchain.render_pass,
-                self.swapchain.framebuffers[image_index as usize],
-            )
-        };
-
-        let render_pass_info = vk::RenderPassBeginInfo {
-            render_pass: rp,
-            framebuffer: fb,
-            render_area: vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: self.swapchain.extent,
-            },
-            clear_value_count: clear_values.len() as u32,
-            clear_values: clear_values.as_ptr(),
-            ..Default::default()
-        };
-
-        cmd.begin_render_pass(&render_pass_info, vk::SubpassContents::Inline);
-
-        cmd.set_viewport(0, &[viewport]);
-        cmd.set_scissor(0, &[scissor]);
-
-        let sw = self.swapchain.extent.width as f32;
-        let sh = self.swapchain.extent.height as f32;
-
-        let frame_start = std::time::Instant::now();
-
-        match &mode {
-            RenderMode::World {
-                overlay,
-                swing_progress,
-                use_anim,
-                held_item,
-                destroy_info,
-                show_chunk_borders,
-                sky,
-                entities,
-                item_entities,
-                block_entities,
-                particles,
-                weather,
-                cloud_mode,
-                render_distance,
-                player_preview,
-                book_preview,
-                eyes_in_water,
-            } => {
-                // Vanilla water fog hides the sky dome and clouds; the framebuffer
-                // is cleared to the water fog color, so skipping them tints the view
-                // when looking up out of geometry.
-                if !*eyes_in_water {
-                    self.sky_pipeline.update_and_draw(
-                        &self.ctx.device,
-                        cmd,
-                        frame,
-                        &self.camera,
-                        sky,
-                    );
-                }
-
-                let t_cull = std::time::Instant::now();
-                // Solid (no discard) first so it lays down depth and early-Z lets
-                // the front-to-back order reject occluded fragments; cutout after.
-                self.chunk_pipeline.bind(cmd, frame, false);
-                self.chunk_buffers.draw_indirect(cmd, frame, false);
-                self.chunk_pipeline.bind(cmd, frame, true);
-                self.chunk_buffers.draw_indirect(cmd, frame, true);
-                let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
-
-                let anchor = self.camera.anchor();
-                let eye = self.camera_render_position();
-
-                if let Some((block_pos, stage, state)) = destroy_info {
-                    self.block_overlay_pipeline.draw(
-                        cmd,
-                        frame,
-                        &self.registry,
-                        *state,
-                        block_pos,
-                        anchor,
-                        *stage,
-                    );
-                }
-
-                let ent_frustum = self.camera.frustum_planes();
-                // Entities aren't sent beyond the server's tracking range; a
-                // generous render-distance cap just trims anything stray.
-                let ent_cull_dist = (*render_distance * 16) as f32 + 16.0;
-                self.entity_renderer.draw(
-                    cmd,
-                    frame,
-                    entities,
-                    &ent_frustum,
-                    anchor,
-                    eye,
-                    ent_cull_dist,
-                );
-
-                self.block_entity_pipeline
-                    .draw(cmd, frame, anchor, block_entities);
-
-                self.item_entity_pipeline.draw(cmd, frame, item_entities);
-
-                // Break particles draw after entities but before translucent
-                // water: they write depth, and pomme's water doesn't, so this
-                // lets water blend over particles behind it (vanilla draws
-                // particles after all translucents into a depth-sharing
-                // target).
-                self.particle_pipeline
-                    .update_and_draw(cmd, frame, &self.camera, particles);
-
-                // Translucent water draws after opaque terrain and entities so it
-                // blends over them; depth-tested (occluded by geometry in front)
-                // but doesn't write depth. CPU frustum-culled, reusing the entity
-                // frustum/eye.
-                self.chunk_pipeline.bind_water(cmd, frame);
-                self.chunk_buffers.draw_water(
-                    cmd,
-                    self.chunk_pipeline.pipeline_layout,
-                    &ent_frustum,
-                    anchor,
-                    eye,
-                );
-
-                // Clouds draw after opaque world geometry (so terrain occludes
-                // them) and before weather, depth-tested against the scene.
-                if !*eyes_in_water {
-                    self.cloud_pipeline
-                        .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
-                }
-
-                // Weather draws after opaque world geometry (depth-tested against
-                // terrain) but before the depth clear for the hand pass.
-                self.weather_pipeline
-                    .update_and_draw(cmd, frame, &self.camera, sky, weather);
-
-                if *show_chunk_borders {
-                    self.chunk_border_pipeline.draw(cmd, frame);
-                }
-
-                let clear_attachment = vk::ClearAttachment {
-                    aspect_mask: vk::ImageAspectFlags::Depth,
-                    color_attachment: 0,
-                    clear_value: vk::ClearValue {
-                        depth_stencil: vk::ClearDepthStencilValue {
-                            depth: 1.0,
-                            stencil: 0,
-                        },
-                    },
-                };
-                let clear_rect = vk::ClearRect {
-                    rect: scissor,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                };
-                cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
-
-                if self.camera.mode == camera::CameraMode::FirstPerson
-                    && self.camera.top_down().is_none()
-                {
-                    let aspect = sw / sh.max(1.0);
-                    // Same view-bob the world uses, so the arm/item bob in lockstep
-                    // (vanilla applies bobView to the hand pose stack too).
-                    let bob = self.camera.view_bob_matrix();
-                    // Vanilla renderArmWithItem draws the arm only for an empty
-                    // hand; a held item renders alone.
-                    match held_item {
-                        Some(item) => self.held_item_pipeline.update_and_draw(
-                            cmd,
-                            frame,
-                            aspect,
-                            *swing_progress,
-                            *use_anim,
-                            item,
-                            &self.item_entity_pipeline,
-                            bob,
-                        ),
-                        None => self.hand_pipeline.update_and_draw(
-                            cmd,
-                            frame,
-                            aspect,
-                            *swing_progress,
-                            bob,
-                        ),
-                    }
-                }
-
-                self.menu_pipeline
-                    .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
-
-                // Each preview box gets its depth cleared and its own scissor
-                // while the 3D content draws.
-                if let Some(p) = player_preview
-                    && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
-                {
-                    let clear_rect = vk::ClearRect {
-                        rect,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    };
-                    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
-                    cmd.set_scissor(0, &[rect]);
-                    self.skin_preview.draw_in_box(cmd, frame, *p, sw, sh);
-                    cmd.set_scissor(0, &[scissor]);
-                }
-
-                if let Some(p) = book_preview
-                    && let Some(rect) = preview_box_rect(p.rect, self.swapchain.extent)
-                {
-                    let clear_rect = vk::ClearRect {
-                        rect,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    };
-                    cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
-                    cmd.set_scissor(0, &[rect]);
-                    self.book_preview.draw_in_box(cmd, frame, *p, sw, sh);
-                    cmd.set_scissor(0, &[scissor]);
-                }
-
-                self.last_timings.cull_ms = cull_ms;
-                self.last_timings.frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-            }
-            RenderMode::MainMenu {
-                scroll,
-                blur,
-                elements,
-                cursor,
-                show_skin,
-            } => {
-                let aspect = sw / sh.max(1.0);
-                self.panorama_pipeline
-                    .draw(&self.ctx.device, cmd, *scroll, aspect, 0.0);
-
-                // A BlurBackdrop marker splits the elements: those before it are
-                // drawn into the scene so the blur pass captures them (the title
-                // screen behind the Friends dialog); the rest are drawn sharp.
-                let split = elements
-                    .iter()
-                    .position(|e| matches!(e, MenuElement::BlurBackdrop));
-                let mut vbase = 0u32;
-                if let Some(i) = split {
-                    vbase = self.menu_pipeline.draw_from(
-                        cmd,
-                        sw,
-                        sh,
-                        &elements[..i],
-                        &item_atlas_uvs,
-                        0,
-                    );
-                }
-
-                if *blur > 0.01 {
-                    cmd.end_render_pass();
-
-                    let swapchain_image = self.swapchain.images[image_index as usize];
-                    let iterations = ((*blur * 3.0).ceil() as u32).clamp(1, 4);
-                    self.blur_pipeline.execute(
-                        cmd,
-                        swapchain_image,
-                        self.swapchain.extent.width,
-                        self.swapchain.extent.height,
-                        iterations,
-                    );
-
-                    let load_rp_info = vk::RenderPassBeginInfo {
-                        render_pass: self.swapchain.render_pass_load,
-                        framebuffer: self.swapchain.framebuffers_load[image_index as usize],
-                        render_area: vk::Rect2D {
-                            offset: vk::Offset2D { x: 0, y: 0 },
-                            extent: self.swapchain.extent,
-                        },
-                        clear_value_count: clear_values.len() as u32,
-                        clear_values: clear_values.as_ptr(),
-                        ..Default::default()
-                    };
-                    cmd.begin_render_pass(&load_rp_info, vk::SubpassContents::Inline);
-                    cmd.set_viewport(0, &[viewport]);
-                    cmd.set_scissor(0, &[scissor]);
-                }
-
-                if *show_skin {
-                    self.skin_preview.draw(
-                        &self.ctx.device,
-                        cmd,
-                        frame,
-                        aspect,
-                        0.7,
-                        0.5,
-                        cursor.0,
-                        cursor.1,
-                        sw,
-                        sh,
-                    );
-                }
-
-                let fg = match split {
-                    Some(i) => &elements[i + 1..],
-                    None => &elements[..],
-                };
-                self.menu_pipeline
-                    .draw_from(cmd, sw, sh, fg, &item_atlas_uvs, vbase);
-            }
-        }
-
-        cmd.end_render_pass();
-
-        // Image is now in PresentSrcKHR; grab it before present if F2 was pressed.
-        self.screenshot.record_if_armed(
-            &self.ctx.device,
-            &self.ctx.allocator,
-            cmd,
-            frame,
-            self.swapchain.images[image_index as usize],
-            self.swapchain.extent,
-            self.swapchain.format.format,
-        );
-
-        self.gui_item_atlas.end_frame();
-
-        cmd.end()?;
-
-        let submit_info = vk::SubmitInfo {
-            wait_semaphore_count: 1,
-            wait_semaphores: &image_available,
-            wait_dst_stage_mask: &vk::PipelineStageFlags::ColorAttachmentOutput,
-            command_buffer_count: 1,
-            command_buffers: &cmd.handle(),
-            signal_semaphore_count: 1,
-            signal_semaphores: &render_finished,
-            ..Default::default()
-        };
-
-        self.ctx.graphics_queue.submit(&[submit_info], fence)?;
-
-        let present_info = vk::PresentInfoKHR {
-            wait_semaphore_count: 1,
-            wait_semaphores: &render_finished,
-            swapchain_count: 1,
-            swapchains: &self.swapchain.handle,
-            image_indices: &image_index,
-            ..Default::default()
-        };
-
-        let t_present = std::time::Instant::now();
-        match self.ctx.present_queue.present(&present_info) {
-            Ok(()) => {}
-            Err(vk::Error::OutOfDateKHR | vk::Error::SuboptimalKHR) => {
-                self.swapchain_dirty = true;
-            }
-            Err(e) => return Err(e.into()),
-        }
-        let present_ms = t_present.elapsed().as_secs_f32() * 1000.0;
-        self.last_timings.fence_ms = fence_ms;
-        self.last_timings.acquire_ms = acquire_ms;
-        self.last_timings.present_ms = present_ms;
-
-        self.ctx.advance_frame();
-        Ok(())
+        item_atlas_uvs
     }
 }
 
@@ -2190,6 +2454,8 @@ impl Drop for Renderer {
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.blur_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.hiz_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
         self.skin_preview
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.book_preview
@@ -2215,6 +2481,12 @@ impl Drop for Renderer {
         self.gui_item_atlas
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
+
+        if let Some(query_pools) = self.query_pools {
+            for pool in query_pools {
+                self.ctx.device.destroy_query_pool(pool, None);
+            }
+        }
 
         for sem in self.render_finished_per_image.drain(..) {
             self.ctx.device.destroy_semaphore(sem, None);

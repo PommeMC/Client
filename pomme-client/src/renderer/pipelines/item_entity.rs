@@ -259,7 +259,12 @@ impl ItemEntityPipeline {
         atlas: &TextureAtlas,
     ) -> Self {
         let shared = ItemPipelineShared::new(device, allocator, atlas, "item_entity");
-        let pipeline = create_pipeline(device, render_pass, shared.pipeline_layout);
+        let pipeline = create_pipeline(
+            device,
+            render_pass,
+            shared.pipeline_layout,
+            vk::CompareOp::Greater,
+        );
 
         Self {
             pipeline,
@@ -390,7 +395,12 @@ impl ItemEntityPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.shared.pipeline_layout);
+        self.pipeline = create_pipeline(
+            device,
+            render_pass,
+            self.shared.pipeline_layout,
+            vk::CompareOp::Greater,
+        );
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -616,12 +626,22 @@ fn build_flat_quad(region: AtlasRegion) -> Vec<ChunkVertex> {
         .collect()
 }
 
+/// `depth_compare` picks the convention of the segment the pipeline draws in:
+/// the world segment uses reversed-Z (`Greater`), while the hand/HUD segment
+/// after the mid-frame depth clear keeps standard depth (`Less`).
 pub(super) fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
+    depth_compare: vk::CompareOp,
 ) -> vk::Pipeline {
-    create_pipeline_with_front_face(device, render_pass, layout, vk::FrontFace::CounterClockwise)
+    create_pipeline_with_front_face(
+        device,
+        render_pass,
+        layout,
+        vk::FrontFace::CounterClockwise,
+        depth_compare,
+    )
 }
 
 pub(super) fn create_pipeline_with_front_face(
@@ -629,6 +649,7 @@ pub(super) fn create_pipeline_with_front_face(
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
     front_face: vk::FrontFace,
+    depth_compare: vk::CompareOp,
 ) -> vk::Pipeline {
     let vert_spv = shader::include_spirv!("item_entity.vert.spv");
     let frag_spv = shader::include_spirv!("item_entity.frag.spv");
@@ -683,7 +704,7 @@ pub(super) fn create_pipeline_with_front_face(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: vk::TRUE,
-        depth_compare_op: vk::CompareOp::Less,
+        depth_compare_op: depth_compare,
         ..Default::default()
     };
     let blend_attachment = vk::PipelineColorBlendAttachmentState {

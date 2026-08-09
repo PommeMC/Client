@@ -1,0 +1,41 @@
+#version 450
+
+// Exclusive prefix sum over the water distance buckets cull.comp counted,
+// turning counts into write offsets for water_emit.comp, plus the total draw
+// count for the indirect-count draw. One workgroup covering every bucket.
+
+#include "chunk_meta.glsl"
+
+// Must equal WATER_BUCKETS (layout constants can't reference it).
+layout(local_size_x = 512) in;
+
+layout(set = 0, binding = 7) buffer WaterBuckets {
+    uint water_buckets[];
+};
+
+layout(set = 0, binding = 10) writeonly buffer WaterCount {
+    uint water_draw_count;
+};
+
+shared uint scan[WATER_BUCKETS];
+
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    uint count = water_buckets[i];
+    scan[i] = count;
+    barrier();
+
+    // Hillis-Steele inclusive scan.
+    for (uint off = 1u; off < WATER_BUCKETS; off <<= 1u) {
+        uint add = (i >= off) ? scan[i - off] : 0u;
+        barrier();
+        scan[i] += add;
+        barrier();
+    }
+
+    // Exclusive offset for the emit pass's per-bucket cursors.
+    water_buckets[i] = scan[i] - count;
+    if (i == WATER_BUCKETS - 1u) {
+        water_draw_count = scan[i];
+    }
+}

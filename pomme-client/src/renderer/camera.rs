@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use glam::camera::rh::{proj, view};
 use glam::{DVec3, FloatExt, Mat4, Vec3};
 
@@ -230,19 +232,9 @@ impl Camera {
         Self::planes_from_view_projection(self.view_projection())
     }
 
-    /// Frustum planes for a FOV widened by `extra_radians` (clamped below
-    /// 180°), giving an "about to be seen" margin for occlusion-gated mesh
-    /// scheduling.
-    pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
-        // Vanilla createProjectionMatrixForCulling never culls narrower than the
-        // base FOV, so a narrowing modifier (underwater) can't clip visible edges.
-        let cull_fov = self
-            .fov_radians(self.render_partial_tick)
-            .max(self.base_fov_degrees.to_radians());
-        let fov = (cull_fov + extra_radians).min(2.96);
-        Self::planes_from_view_projection(self.view_projection_with_fov(fov))
-    }
-
+    // With the infinite-reverse projection the r3±r2 rows both yield near-side
+    // planes and no far plane exists — sections are bounded by load distance
+    // instead. The zero-length guard below keeps any degenerate row inert.
     fn planes_from_view_projection(m: Mat4) -> [[f32; 4]; 6] {
         let mt = m.transpose();
         let r0 = mt.x_axis;
@@ -336,11 +328,10 @@ impl Camera {
     pub fn sky_view_projection(&self) -> Mat4 {
         let (forward, up) = self.view_basis();
         let view = view::look_to_mat4(Vec3::ZERO, forward, up);
-        let mut proj = proj::directx::perspective(
+        let mut proj = proj::directx::perspective_infinite_reverse(
             self.fov_radians(self.render_partial_tick),
             self.aspect_ratio,
             NEAR,
-            self.depth_far,
         );
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
@@ -378,11 +369,18 @@ impl Camera {
         self.fov_radians(self.render_partial_tick).to_degrees()
     }
 
+    /// Reversed-Z with an infinite far plane (near maps to depth 1, infinity
+    /// to 0): floating-point depth keeps its precision spread over the whole
+    /// range, so distant terrain never z-fights. World-pass pipelines test
+    /// `Greater*` and the depth attachment clears to 0.0 to match;
+    /// `depth_far` remains the fog/culling horizon only.
     pub fn view_projection_with_fov(&self, fov: f32) -> Mat4 {
-        let offset = self.third_person_offset();
         let (forward, up) = self.view_basis();
-        let view = self.bob_matrix() * view::look_to_mat4(offset, forward, up);
-        let mut proj = proj::directx::perspective(fov, self.aspect_ratio, NEAR, self.depth_far);
+        // Zero-eye view: every consumer feeds coordinates relative to the
+        // full render eye (`position + third_person_offset`), so the view
+        // must not subtract the offset again.
+        let view = self.bob_matrix() * view::look_to_mat4(Vec3::ZERO, forward, up);
+        let mut proj = proj::directx::perspective_infinite_reverse(fov, self.aspect_ratio, NEAR);
         proj.y_axis.y *= -1.0; // Vulkan NDC has +Y down
         proj * view
     }
@@ -422,6 +420,27 @@ const WATER_FOG_END: f32 = 96.0;
 const ENV_FOG_START: f32 = 0.0;
 const ENV_FOG_END: f32 = 1024.0;
 
+/// Session-only fog kill switch, vanilla's `FogRenderer.toggleFog` (the F3+F
+/// debug chord; not a saved setting, and a static exactly like vanilla's).
+static FOG_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Flip the fog toggle, returning the new state.
+pub fn toggle_fog() -> bool {
+    !FOG_ENABLED.fetch_xor(true, Ordering::Relaxed)
+}
+
+/// Milliseconds since the first call this session, as u32 (wraps after ~49
+/// days). The chunk shaders compute section fade-in from per-section upload
+/// stamps against this clock (`camera_block.w`), so both sides must use this
+/// same epoch.
+pub fn session_millis() -> u32 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u32
+}
+
 impl CameraUniform {
     pub fn new(
         camera: &Camera,
@@ -439,7 +458,15 @@ impl CameraUniform {
         // keep the whole loaded area visible.
         let blocks = (render_distance_chunks * 16) as f32;
         let span = (blocks / 10.0).clamp(4.0, 64.0);
-        let (fog_start, fog_end, env_start, env_end, fog_rgb) = if camera.top_down().is_some() {
+        let fog_off = !FOG_ENABLED.load(Ordering::Relaxed);
+        let (fog_start, fog_end, env_start, env_end, fog_rgb) = if fog_off {
+            // F3+F: bands that never start kill every fog (water included),
+            // matching vanilla's toggleFog early-out. `linear_fog_value`
+            // returns 0 before its division for dist <= start, so MAX is
+            // safe. Vanilla's disabled-fog UBO carries color (0,0,0,0), so
+            // section fade-ins mix from black rather than sky.
+            (f32::MAX, f32::MAX, f32::MAX, f32::MAX, [0.0, 0.0, 0.0])
+        } else if camera.top_down().is_some() {
             let far = camera.depth_far;
             (far, far, far, far, sky_color)
         } else if eyes_in_water {
@@ -462,7 +489,8 @@ impl CameraUniform {
             view_proj: camera.view_projection().to_cols_array_2d(),
             camera_pos: [pos.x, pos.y, pos.z, fog_start],
             fog_color: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_end],
-            camera_block: anchor.as_ivec3().extend(0).to_array(),
+            // The w lane carries the session clock for shader-side fades.
+            camera_block: anchor.as_ivec3().extend(session_millis() as i32).to_array(),
             fog_env: [env_start, env_end, 0.0, 0.0],
         }
     }

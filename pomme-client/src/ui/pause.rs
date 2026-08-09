@@ -69,6 +69,28 @@ pub fn build_pause_menu(
             } else {
                 "Server render distance: unknown".to_string()
             };
+            // Same cap rule as the render-distance slider
+            // (`render_distance_max`): the server's announcement when known,
+            // a conservative 32 otherwise.
+            let cap = if server_rd > 0 { server_rd } else { 32 };
+            let mut rungs: Vec<u32> = [8u32, 16, 24, 32, 48, 64, 96, 128]
+                .into_iter()
+                .filter(|&rd| rd <= cap)
+                .collect();
+            let mut labels: Vec<String> = rungs
+                .iter()
+                .map(|&rd| format!("Render Distance {rd}"))
+                .collect();
+            if !rungs.contains(&cap) {
+                rungs.push(cap);
+                labels.push(format!("Render Distance {cap} (server max)"));
+            }
+            let mut items: Vec<(&str, PauseAction)> = labels
+                .iter()
+                .map(String::as_str)
+                .zip(rungs.iter().map(|&rd| PauseAction::StartChunkLoad(rd)))
+                .collect();
+            items.push(("Back", PauseAction::Back));
             build_submenu(
                 elements,
                 screen_w,
@@ -78,13 +100,7 @@ pub fn build_pause_menu(
                 gs,
                 "Chunk Loader",
                 Some(&subtitle),
-                &[
-                    ("Render Distance 8", PauseAction::StartChunkLoad(8)),
-                    ("Render Distance 16", PauseAction::StartChunkLoad(16)),
-                    ("Render Distance 24", PauseAction::StartChunkLoad(24)),
-                    ("Render Distance 32", PauseAction::StartChunkLoad(32)),
-                    ("Back", PauseAction::Back),
-                ],
+                &items,
             )
         }
     }

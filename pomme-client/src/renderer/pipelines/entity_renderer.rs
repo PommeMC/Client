@@ -1881,7 +1881,7 @@ pub(super) fn create_pipeline(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: depth_write,
-        depth_compare_op: vk::CompareOp::LessOrEqual,
+        depth_compare_op: vk::CompareOp::GreaterOrEqual,
         ..Default::default()
     };
 

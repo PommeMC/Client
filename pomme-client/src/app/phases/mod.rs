@@ -109,13 +109,16 @@ pub enum AppPhase {
         gfx: Gfx,
         panorama: Panorama,
         connect_phase: ConnectionPhase,
-        connection: ConnectionHandle,
+        // `game` before `connection`: dropping GameState joins the mesh
+        // workers, and ConnectionHandle's drop resets the global block table
+        // the workers may still be reading (fields drop in declaration order).
         game: GameState,
+        connection: ConnectionHandle,
     },
     InGame {
         gfx: Gfx,
-        connection: ConnectionHandle,
         game: GameState,
+        connection: ConnectionHandle,
     },
 }
 

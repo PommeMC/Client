@@ -403,7 +403,7 @@ fn create_pipeline(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: vk::TRUE,
-        depth_compare_op: vk::CompareOp::Less,
+        depth_compare_op: vk::CompareOp::Greater,
         ..Default::default()
     };
     let blend_attachment = if translucent {

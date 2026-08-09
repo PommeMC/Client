@@ -13,7 +13,8 @@ layout(location = 2) in vec2 tex_coords;
 layout(location = 3) in vec4 light_tint;
 // Per-instance (from the meta buffer):
 layout(location = 4) in ivec3 in_origin;
-layout(location = 5) in float in_fade;
+layout(location = 5) in uint in_uploaded_ms;
+
 
 layout(location = 0) out vec2 v_tex_coords;
 layout(location = 1) out float v_light;
@@ -32,7 +33,9 @@ void main() {
     v_tex_coords = tex_coords;
     v_light = light_tint.r;
     v_tint = light_tint.gba;
-    v_visibility = in_fade;
+    // Fade-in from the section's upload stamp against the session clock in
+    // camera_block.w; uint subtraction is wrap-safe.
+    v_visibility = clamp(float(uint(camera_block.w) - in_uploaded_ms) / FADE_MS, 0.0, 1.0);
     v_fog_color = fog_color.rgb;
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
 }

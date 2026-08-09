@@ -18,7 +18,9 @@ fn main() {
     println!("cargo:rerun-if-changed=src/renderer/chunk/packing_consts.rs");
     fs::write(
         Path::new(&out_dir).join("packing.glsl"),
-        format!("const float POS_RANGE = {POS_RANGE:?};\nconst float POS_BIAS = {POS_BIAS:?};\n"),
+        format!(
+            "const float POS_RANGE = {POS_RANGE:?};\nconst float POS_BIAS = {POS_BIAS:?};\nconst float FADE_MS = {FADE_DURATION_MS:?};\n"
+        ),
     )
     .expect("failed to write packing.glsl");
 
@@ -57,8 +59,9 @@ fn main() {
         ("chunk.vert", shaderc::ShaderKind::Vertex),
         ("chunk.frag", shaderc::ShaderKind::Fragment),
         ("chunk_solid.frag", shaderc::ShaderKind::Fragment),
-        ("water.vert", shaderc::ShaderKind::Vertex),
         ("water.frag", shaderc::ShaderKind::Fragment),
+        ("water_scan.comp", shaderc::ShaderKind::Compute),
+        ("water_emit.comp", shaderc::ShaderKind::Compute),
         ("cube.vert", shaderc::ShaderKind::Vertex),
         ("cube.frag", shaderc::ShaderKind::Fragment),
         ("panorama.vert", shaderc::ShaderKind::Vertex),
@@ -87,6 +90,8 @@ fn main() {
         ("particle.frag", shaderc::ShaderKind::Fragment),
         ("clouds.vert", shaderc::ShaderKind::Vertex),
         ("clouds.frag", shaderc::ShaderKind::Fragment),
+        ("hiz_copy.comp", shaderc::ShaderKind::Compute),
+        ("hiz_reduce.comp", shaderc::ShaderKind::Compute),
     ];
 
     for (file, kind) in &shaders {

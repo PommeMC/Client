@@ -20,6 +20,10 @@ client-release *args:
     #!/usr/bin/env bash
     cargo run --release -p pomme-client -- --launch-token "$(mktemp)" {{ args }}
 
+client-flamegraph *args:
+    #!/usr/bin/env bash
+    cargo flamegraph -p pomme-client -- --launch-token "$(mktemp)" {{ args }}
+
 client-build *args:
     @cargo build -p pomme-client {{ args }}
 
