@@ -24,14 +24,10 @@ impl ChunkRendererCore {
         {
             for i in 0..MAX_FRAMES_IN_FLIGHT {
                 std::mem::take(&mut self.culling.meta_buffers[i]).destroy(device, allocator);
-                std::mem::take(&mut self.culling.indirect_buffers[i]).destroy(device, allocator);
-                std::mem::take(&mut self.culling.indirect_cutout_buffers[i])
-                    .destroy(device, allocator);
             }
         }
 
         let meta_size = (new_max * size_of::<ChunkMeta>()) as u64;
-        let indirect_size = (new_max * size_of::<DrawCommand>()) as u64;
         for i in 0..MAX_FRAMES_IN_FLIGHT {
             let buffer = Buffer::host(
                 device,
@@ -42,24 +38,6 @@ impl ChunkRendererCore {
             );
             self.culling.meta_buffers[i] = buffer;
 
-            let buffer = Buffer::host(
-                device,
-                allocator,
-                indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
-                "indirect_cmds",
-            );
-            self.culling.indirect_buffers[i] = buffer;
-
-            let buffer = Buffer::host(
-                device,
-                allocator,
-                indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
-                "indirect_cmds_cutout",
-            );
-            self.culling.indirect_cutout_buffers[i] = buffer;
-
             let (meta_info, mut meta_write) = desc_write(
                 self.culling.compute_sets[i],
                 0,
@@ -67,47 +45,27 @@ impl ChunkRendererCore {
                 self.culling.meta_buffers[i].buffer,
                 meta_size,
             );
-            let (indirect_info, mut indirect_write) = desc_write(
-                self.culling.compute_sets[i],
-                2,
-                vk::DescriptorType::StorageBuffer,
-                self.culling.indirect_buffers[i].buffer,
-                indirect_size,
-            );
-            let (indirect_c_info, mut indirect_c_write) = desc_write(
-                self.culling.compute_sets[i],
-                4,
-                vk::DescriptorType::StorageBuffer,
-                self.culling.indirect_cutout_buffers[i].buffer,
-                indirect_size,
-            );
             meta_write.buffer_info = meta_info.as_ptr();
-            indirect_write.buffer_info = indirect_info.as_ptr();
-            indirect_c_write.buffer_info = indirect_c_info.as_ptr();
-            device.update_descriptor_sets(&[meta_write, indirect_write, indirect_c_write], &[]);
+            device.update_descriptor_sets(&[meta_write], &[]);
         }
 
-        // The water command/candidate buffers scale with max_meta too.
-        {
-            for i in 0..MAX_FRAMES_IN_FLIGHT {
-                std::mem::take(&mut self.culling.water_indirect_buffers[i])
-                    .destroy(device, allocator);
-                std::mem::take(&mut self.culling.water_candidate_buffers[i])
-                    .destroy(device, allocator);
-            }
-        }
-        (
-            self.culling.water_indirect_buffers,
-            self.culling.water_candidate_buffers,
-        ) = create_water_scaled_buffers(device, allocator, new_max, indirect_size);
+        // Candidate storage is one entry per metadata slot. Indirect command
+        // buffers have their own independently growing draw capacity.
         for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let (water_ind_info, mut water_ind_write) = desc_write(
-                self.culling.compute_sets[i],
-                9,
-                vk::DescriptorType::StorageBuffer,
-                self.culling.water_indirect_buffers[i].buffer,
-                indirect_size,
-            );
+            std::mem::take(&mut self.culling.water_candidate_buffers[i]).destroy(device, allocator);
+        }
+        self.culling.water_candidate_buffers = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| {
+                Buffer::device(
+                    device,
+                    allocator,
+                    new_max as u64 * 4,
+                    vk::BufferUsageFlags::StorageBuffer,
+                    "water_candidates",
+                )
+            })
+            .collect();
+        for i in 0..MAX_FRAMES_IN_FLIGHT {
             let (candidates_info, mut candidates_write) = desc_write(
                 self.culling.compute_sets[i],
                 8,
@@ -115,9 +73,8 @@ impl ChunkRendererCore {
                 self.culling.water_candidate_buffers[i].buffer,
                 new_max as u64 * 4,
             );
-            water_ind_write.buffer_info = water_ind_info.as_ptr();
             candidates_write.buffer_info = candidates_info.as_ptr();
-            device.update_descriptor_sets(&[water_ind_write, candidates_write], &[]);
+            device.update_descriptor_sets(&[candidates_write], &[]);
         }
 
         self.metadata.slots.grow(new_max as u32);
@@ -134,6 +91,101 @@ impl ChunkRendererCore {
         self.metadata.applied = [0; MAX_FRAMES_IN_FLIGHT];
 
         self.culling.max_meta = new_max;
+    }
+
+    /// Grow all indirect command buffers together after the previous frame's
+    /// counters reported overflow. Capacity only grows, and always by powers
+    /// of two relative to its current size.
+    pub(super) fn ensure_draw_capacity(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+    ) {
+        let required = std::mem::take(&mut self.culling.requested_draw_capacity);
+        if required <= self.culling.draw_capacity {
+            return;
+        }
+
+        let device_limit = self.culling.max_draw_indirect_count as usize;
+        let mut new_capacity = self.culling.draw_capacity.max(1);
+        while new_capacity < required && new_capacity < device_limit {
+            new_capacity = new_capacity.saturating_mul(2).min(device_limit);
+        }
+        if new_capacity <= self.culling.draw_capacity {
+            if !self.culling.warned_draw_cap {
+                self.culling.warned_draw_cap = true;
+                tracing::warn!(
+                    "chunk draws require {required} commands, but the device limit is {device_limit}; excess draws are dropped"
+                );
+            }
+            return;
+        }
+
+        device.wait_idle().ok();
+        let indirect_size = (new_capacity * size_of::<DrawCommand>()) as u64;
+        for frame in 0..MAX_FRAMES_IN_FLIGHT {
+            std::mem::take(&mut self.culling.indirect_buffers[frame]).destroy(device, allocator);
+            std::mem::take(&mut self.culling.indirect_cutout_buffers[frame])
+                .destroy(device, allocator);
+            std::mem::take(&mut self.culling.water_indirect_buffers[frame])
+                .destroy(device, allocator);
+
+            self.culling.indirect_buffers[frame] = Buffer::host(
+                device,
+                allocator,
+                indirect_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "indirect_cmds",
+            );
+            self.culling.indirect_cutout_buffers[frame] = Buffer::host(
+                device,
+                allocator,
+                indirect_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "indirect_cmds_cutout",
+            );
+            self.culling.water_indirect_buffers[frame] = Buffer::host(
+                device,
+                allocator,
+                indirect_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "water_indirect",
+            );
+
+            let (solid_info, mut solid_write) = desc_write(
+                self.culling.compute_sets[frame],
+                2,
+                vk::DescriptorType::StorageBuffer,
+                self.culling.indirect_buffers[frame].buffer,
+                indirect_size,
+            );
+            let (cutout_info, mut cutout_write) = desc_write(
+                self.culling.compute_sets[frame],
+                4,
+                vk::DescriptorType::StorageBuffer,
+                self.culling.indirect_cutout_buffers[frame].buffer,
+                indirect_size,
+            );
+            let (water_info, mut water_write) = desc_write(
+                self.culling.compute_sets[frame],
+                9,
+                vk::DescriptorType::StorageBuffer,
+                self.culling.water_indirect_buffers[frame].buffer,
+                indirect_size,
+            );
+            solid_write.buffer_info = solid_info.as_ptr();
+            cutout_write.buffer_info = cutout_info.as_ptr();
+            water_write.buffer_info = water_info.as_ptr();
+            device.update_descriptor_sets(&[solid_write, cutout_write, water_write], &[]);
+        }
+
+        tracing::info!(
+            "Chunk indirect capacity grew from {} to {} commands",
+            self.culling.draw_capacity,
+            new_capacity,
+        );
+        self.culling.draw_capacity = new_capacity;
+        self.culling.warned_draw_cap = false;
     }
 
     pub(super) fn alloc_meta_slot(
@@ -197,6 +249,7 @@ impl ChunkRendererCore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn dispatch_cull(
         &mut self,
         cmd: vk::CommandBuffer,
@@ -230,7 +283,7 @@ impl ChunkRendererCore {
             occlusion_valid: occlusion.is_some() as u32,
             player_chunk: [player_chunk.x, player_chunk.z],
             limit_rd: limit_rd.unwrap_or(0),
-            _pad: [0; 3],
+            _pad: [self.culling.clamped_draw_count(), 0, 0],
         };
         let frustum_bytes = bytemuck::bytes_of(&frustum_data);
         self.culling.frustum_buffers[frame]
@@ -249,17 +302,35 @@ impl ChunkRendererCore {
                 s[..4].copy_from_slice(&0u32.to_ne_bytes());
                 n
             };
-            self.culling.last_draw_count = read_and_clear(&mut self.culling.count_buffers[frame])
-                + read_and_clear(&mut self.culling.count_cutout_buffers[frame]);
+            let solid = read_and_clear(&mut self.culling.count_buffers[frame]);
+            let cutout = read_and_clear(&mut self.culling.count_cutout_buffers[frame]);
+            let water_bytes = self.culling.water_count_buffers[frame]
+                .allocation
+                .mapped_slice()
+                .unwrap();
+            let water = u32::from_ne_bytes([
+                water_bytes[0],
+                water_bytes[1],
+                water_bytes[2],
+                water_bytes[3],
+            ]);
+            self.culling.last_draw_count = solid + cutout;
+            let capacity = self.culling.clamped_draw_count();
+            let observed = solid.max(cutout).max(water);
+            if observed > capacity {
+                self.culling.requested_draw_capacity =
+                    self.culling.requested_draw_capacity.max(observed as usize);
+            }
         }
 
         // macOS draws the whole indirect buffer (no drawIndirectCount), so slots
         // the cull shader leaves unfilled must read as no-op draws, not stale data.
         #[cfg(target_os = "macos")]
         {
-            // Only slots below the high water are ever drawn (max_draws
-            // bounds the zero-fill).
-            let live = self.metadata.high_water as usize * size_of::<DrawCommand>();
+            // Without drawIndirectCount the driver executes the complete
+            // command capacity, so every command the cull does not overwrite
+            // this frame must be a zeroed no-op.
+            let live = self.culling.clamped_draw_count() as usize * size_of::<DrawCommand>();
             for a in [
                 &mut self.culling.indirect_buffers[frame].allocation,
                 &mut self.culling.indirect_cutout_buffers[frame].allocation,
@@ -353,7 +424,7 @@ impl ChunkRendererCore {
     }
 
     pub(super) fn clamped_draw_count(&mut self) -> u32 {
-        self.culling.clamped_draw_count(self.metadata.high_water)
+        self.culling.clamped_draw_count()
     }
 
     pub fn draw_indirect(&mut self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
@@ -374,25 +445,13 @@ impl ChunkRendererCore {
             )
         };
 
-        // Binding 0: packed vertex pool. Binding 1: the meta buffer, read per
-        // instance for the section origin + fade (indexed by `first_instance`).
-        cmd.bind_vertex_buffers(
-            0,
-            &[
-                self.vertex_buffer.buffer,
-                self.culling.meta_buffers[frame].buffer,
-            ],
-            &[0, 0],
-        );
-        cmd.bind_index_buffer(
-            self.uploads.quad_index_buffer.buffer,
-            0,
-            vk::IndexType::Uint32,
-        );
+        // Binding 0: the per-instance meta buffer, read for section origin and
+        // fade (indexed by `first_instance`). Face and cuboid data are pulled
+        // from graphics storage descriptors by the vertex shader.
         if cfg!(target_os = "macos") {
-            cmd.draw_indexed_indirect(indirect, 0, max_draws, size_of::<DrawCommand>() as u32);
+            cmd.draw_indirect(indirect, 0, max_draws, size_of::<DrawCommand>() as u32);
         } else {
-            cmd.draw_indexed_indirect_count(
+            cmd.draw_indirect_count(
                 indirect,
                 0,
                 count,
@@ -409,28 +468,15 @@ impl ChunkRendererCore {
         }
 
         let max_draws = self.clamped_draw_count();
-        cmd.bind_vertex_buffers(
-            0,
-            &[
-                self.vertex_buffer.buffer,
-                self.culling.meta_buffers[frame].buffer,
-            ],
-            &[0, 0],
-        );
-        cmd.bind_index_buffer(
-            self.uploads.quad_index_buffer.buffer,
-            0,
-            vk::IndexType::Uint32,
-        );
         if cfg!(target_os = "macos") {
-            cmd.draw_indexed_indirect(
+            cmd.draw_indirect(
                 self.culling.water_indirect_buffers[frame].buffer,
                 0,
                 max_draws,
                 size_of::<DrawCommand>() as u32,
             );
         } else {
-            cmd.draw_indexed_indirect_count(
+            cmd.draw_indirect_count(
                 self.culling.water_indirect_buffers[frame].buffer,
                 0,
                 self.culling.water_count_buffers[frame].buffer,
@@ -442,11 +488,8 @@ impl ChunkRendererCore {
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
-        std::mem::take(&mut self.vertex_buffer).destroy(device, allocator);
-        std::mem::take(&mut self.uploads.quad_index_buffer).destroy(device, allocator);
-        if let Some(buffer) = self.uploads.quad_index_src.take() {
-            buffer.destroy(device, allocator);
-        }
+        std::mem::take(&mut self.mesh_buffer).destroy(device, allocator);
+        std::mem::take(&mut self.global_cuboid_buffer).destroy(device, allocator);
         for buffer in self
             .culling
             .meta_buffers

@@ -5,14 +5,14 @@
 // distance, so ascending command index draws back-to-front.
 
 #include "chunk_meta.glsl"
+#include "frustum.glsl"
 
 layout(local_size_x = 64) in;
 
 struct DrawCmd {
-    uint index_count;
+    uint vertex_count;
     uint instance_count;
-    uint first_index;
-    int vertex_offset;
+    uint first_vertex;
     uint first_instance;
 };
 
@@ -33,6 +33,7 @@ layout(set = 0, binding = 8) readonly buffer WaterCandidates {
 layout(set = 0, binding = 9) writeonly buffer WaterIndirect {
     DrawCmd water_draws[];
 };
+layout(set = 0, binding = 11, std430) readonly buffer MeshBuf { uint mesh_data[]; };
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
@@ -43,12 +44,19 @@ void main() {
     uint bucket = packed & 0x1FFu;
     ChunkMeta m = chunks[slot];
 
-    DrawCmd d;
-    d.index_count = m.water_quads * 6u;
-    d.instance_count = 1u;
-    d.first_index = 0u;
-    // Water quads trail the solid and cutout groups in the vertex slice.
-    d.vertex_offset = m.vertex_offset + int((m.solid_quads + m.cutout_quads) * 4u);
-    d.first_instance = slot;
-    water_draws[atomicAdd(water_buckets[bucket], 1u)] = d;
+    const uint BATCH_WORDS = 8u;
+    uint fluid_start = m.solid_batch_count + m.cutout_batch_count;
+    for (uint j = 0u; j < m.fluid_batch_count; ++j) {
+        uint batch_word = m.batch_word_offset + (fluid_start + j) * BATCH_WORDS;
+        DrawCmd d;
+        d.vertex_count = mesh_data[batch_word + 1u] * 6u;
+        d.instance_count = 1u;
+        // The vertex shader rebases this draw-local index with the batch's
+        // absolute face-word offset. This avoids overflowing that offset when
+        // converting it into a global six-vertices-per-face index.
+        d.first_vertex = 0u;
+        d.first_instance = batch_word;
+        uint out_index = atomicAdd(water_buckets[bucket], 1u);
+        if (out_index < draw_capacity) water_draws[out_index] = d;
+    }
 }

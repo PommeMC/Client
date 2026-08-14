@@ -25,7 +25,7 @@ use camera::{Camera, CameraUniform};
 use chunk::ChunkRenderer;
 use chunk::atlas::TextureAtlas;
 use chunk::dispatcher::ChunkMeshing;
-use chunk::mesher::SectionMeshData;
+use chunk::mesher::{SectionMeshData, build_global_cuboid_table};
 use context::VulkanContext;
 use glam::dvec3;
 use hiz::{HizPipeline, OcclusionCamera};
@@ -156,6 +156,7 @@ pub struct Renderer {
     pub mesh_queue: VecDeque<SectionMeshData>,
 
     registry: BlockRegistry,
+    global_cuboids: std::sync::Arc<chunk::mesher::GlobalCuboidTable>,
     jar_assets_dir: PathBuf,
     asset_index: Option<AssetIndex>,
 
@@ -203,6 +204,7 @@ impl Renderer {
         asset_index: &Option<AssetIndex>,
         game_dir: &Path,
         vsync: bool,
+        render_distance: u32,
     ) -> Result<Self, RendererError> {
         let size = window.inner_size();
 
@@ -416,8 +418,17 @@ impl Renderer {
             &ctx.allocator,
         );
 
-        let mut chunk_buffers =
-            ChunkRenderer::new(&ctx.device, ctx.physical_device, &ctx.allocator);
+        let global_cuboid_table =
+            std::sync::Arc::new(build_global_cuboid_table(&registry, &atlas.uv_map));
+        let mut chunk_buffers = ChunkRenderer::new(
+            &ctx.device,
+            ctx.physical_device,
+            &ctx.allocator,
+            &global_cuboid_table.data,
+            render_distance,
+        );
+        let (mesh_buffer, global_cuboid_buffer) = chunk_buffers.geometry_buffers();
+        chunk_pipeline.set_geometry_buffers(&ctx.device, mesh_buffer, global_cuboid_buffer);
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
@@ -507,6 +518,7 @@ impl Renderer {
             mesh_queue: VecDeque::new(),
             camera,
             registry,
+            global_cuboids: global_cuboid_table,
             jar_assets_dir: jar_assets_dir.to_path_buf(),
             asset_index: asset_index.clone(),
             atlas,
@@ -756,6 +768,12 @@ impl Renderer {
             self.swapchain.render_pass,
             &self.ctx.allocator,
             &self.atlas,
+        );
+        let (mesh_buffer, global_cuboid_buffer) = self.chunk_buffers.geometry_buffers();
+        self.chunk_pipeline.set_geometry_buffers(
+            &self.ctx.device,
+            mesh_buffer,
+            global_cuboid_buffer,
         );
 
         self.hand_pipeline
@@ -1105,6 +1123,7 @@ impl Renderer {
             foliage_colormap,
             dry_foliage_colormap,
             biome_climate,
+            std::sync::Arc::clone(&self.global_cuboids),
         )
     }
 
@@ -1246,6 +1265,25 @@ impl Renderer {
             Some(packs),
         )
         .expect("failed to rebuild atlas");
+
+        // The global cuboid table is immutable for one loaded content set.
+        // Asset reload creates its single replacement and updates the one GPU
+        // constant buffer before any new section meshing starts.
+        self.global_cuboids = std::sync::Arc::new(build_global_cuboid_table(
+            &self.registry,
+            &self.atlas.uv_map,
+        ));
+        self.chunk_buffers.replace_global_cuboids(
+            &self.ctx.device,
+            &self.ctx.allocator,
+            &self.global_cuboids.data,
+        );
+        let (mesh_buffer, global_cuboid_buffer) = self.chunk_buffers.geometry_buffers();
+        self.chunk_pipeline.set_geometry_buffers(
+            &self.ctx.device,
+            mesh_buffer,
+            global_cuboid_buffer,
+        );
 
         self.chunk_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);

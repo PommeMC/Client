@@ -695,7 +695,7 @@ impl GameState {
     /// work: columns whose chunk-load light applied go through the
     /// content-gen path like chunk loads (the rescan enqueues them
     /// nearest-first), individual lit sections remesh on the priority lane.
-    pub fn update_light(&mut self, chunk_detail: u32) {
+    pub fn update_light(&mut self) {
         let mut dirty = crate::world::light::LightDirty::default();
         self.light_engine
             .poll_and_run(&mut self.chunk_store, &mut dirty);
@@ -717,7 +717,6 @@ impl GameState {
                 self.bump_content_gen(ChunkSectionPos::new(pos.x, min_section_y + si, pos.z));
             }
         }
-        let player_chunk = self.player_chunk();
         for key in &dirty.sections {
             let si = key.y - min_section_y;
             let col = ChunkPos::new(key.x, key.z);
@@ -729,43 +728,34 @@ impl GameState {
             if !self.chunk_store.shared.has_chunk(col) {
                 continue;
             }
-            self.enqueue_section_edit(
-                ChunkSectionPos::new(key.x, key.y, key.z),
-                crate::app::core::chunk_lod(col, player_chunk, chunk_detail),
-            );
+            self.enqueue_section_edit(ChunkSectionPos::new(key.x, key.y, key.z));
         }
     }
 
     /// Mesh a single edited section now on the priority lane, ungated by
     /// visibility. Bumps that section's generation so the result is dropped
     /// only if the same section is edited again before it lands.
-    pub fn enqueue_section_edit(&mut self, pos: ChunkSectionPos, lod: u32) {
-        self.meshing.enqueue_section_edit(pos, lod);
+    pub fn enqueue_section_edit(&mut self, pos: ChunkSectionPos) {
+        self.meshing.enqueue_section_edit(pos);
     }
 
-    pub fn mesh_edit_now(&mut self, pos: ChunkSectionPos, lod: u32) {
-        self.meshing.mesh_edit_now(pos, lod);
+    pub fn mesh_edit_now(&mut self, pos: ChunkSectionPos) {
+        self.meshing.mesh_edit_now(pos);
     }
 
     /// Enqueue every loaded column's not-yet-meshed sections (re-meshing the
-    /// whole column on a lod/content change). Like vanilla, every section in
+    /// whole column on a content change). Like vanilla, every section in
     /// render distance meshes regardless of visibility — occlusion gates only
     /// drawing — and the queue orders the backlog nearest-first. Runs every
     /// frame to drain it.
     pub fn rescan_mesh_jobs(
         &mut self,
         player_chunk: ChunkPos,
-        chunk_detail: u32,
         frustum: &[[f32; 4]; 6],
         eye: glam::DVec3,
     ) {
-        self.meshing.rescan_mesh_jobs(
-            self.chunk_store.loaded_set(),
-            player_chunk,
-            chunk_detail,
-            frustum,
-            eye,
-        );
+        self.meshing
+            .rescan_mesh_jobs(self.chunk_store.loaded_set(), player_chunk, frustum, eye);
     }
 }
 
@@ -987,7 +977,7 @@ pub fn update_game(
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
     let t_light = std::time::Instant::now();
-    game.update_light(core.menu.effective_chunk_detail());
+    game.update_light();
     game.last_update_phases.light_ms = t_light.elapsed().as_secs_f32() * 1000.0;
 
     // F1 (vanilla keyToggleGui); only while no screen or chat is open.
@@ -1562,7 +1552,6 @@ pub fn update_game(
         };
         let mut lines = vec![
             rd_line,
-            format!("Chunk Detail: {}", result.chunk_detail),
             format!(
                 "Loaded {} chunks in {:.2}s (avg of {} runs)",
                 result.chunk_count, result.load_secs, result.runs
@@ -2243,7 +2232,6 @@ pub fn update_game(
         PauseAction::StartChunkLoad(rd) => {
             game.chunk_load_bench = Some(ChunkLoadBench::new(
                 rd,
-                core.menu.effective_chunk_detail(),
                 core.menu.render_distance,
                 game.server_render_distance,
                 gfx.renderer.gpu_name(),

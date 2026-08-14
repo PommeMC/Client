@@ -2,126 +2,106 @@
 
 use super::*;
 
+fn build_mesh_payload(mesh: &SectionMeshData, pool_off: u32, uploaded_ms: u32) -> Vec<u8> {
+    let counts = mesh.batch_counts;
+    debug_assert_eq!(
+        counts.regular_solid + counts.opaque_fluid + counts.cutout + counts.translucent_fluid,
+        mesh.batches.len() as u32,
+    );
+    let layout = mesh.layout();
+    let base = pool_off as usize * POOL_UNIT as usize;
+    let mut bytes = vec![0u8; layout.size];
+    let mut write = |offset: usize, src: &[u8]| {
+        bytes[offset..offset + src.len()].copy_from_slice(src);
+    };
+    write(layout.regular_faces, bytemuck::cast_slice(&mesh.faces));
+    write(
+        layout.regular_cuboids,
+        bytemuck::cast_slice(&mesh.section_cuboids),
+    );
+    write(layout.fluid_faces, bytemuck::cast_slice(&mesh.fluid_faces));
+    write(
+        layout.fluid_cuboids,
+        bytemuck::cast_slice(&mesh.fluid_cuboids),
+    );
+    write(
+        layout.fluid_heights,
+        bytemuck::cast_slice(&mesh.fluid_heights),
+    );
+
+    let origin = [mesh.spos.x * 16, mesh.spos.y * 16, mesh.spos.z * 16];
+    let gpu_batches: Vec<GpuFaceBatch> = mesh
+        .batches
+        .iter()
+        .enumerate()
+        .map(|(index, batch)| {
+            let index = index as u32;
+            let opaque_fluid_start = counts.regular_solid;
+            let cutout_start = opaque_fluid_start + counts.opaque_fluid;
+            let translucent_fluid_start = cutout_start + counts.cutout;
+            let fluid = (opaque_fluid_start..cutout_start).contains(&index)
+                || index >= translucent_fluid_start;
+            let face_base = if fluid {
+                layout.fluid_faces
+            } else {
+                layout.regular_faces
+            };
+            let cuboid_base = if fluid {
+                layout.fluid_cuboids
+            } else {
+                layout.regular_cuboids
+            };
+            GpuFaceBatch {
+                face_word_offset: ((base + face_base) / 4) as u32 + batch.face_offset,
+                face_count: batch.face_count,
+                cuboid_word_offset: ((base + cuboid_base) / 4) as u32 + batch.cuboid_base * 2,
+                fluid_height_word_offset: if fluid {
+                    ((base + layout.fluid_heights) / 4) as u32 + batch.cuboid_base
+                } else {
+                    u32::MAX
+                },
+                origin,
+                uploaded_ms,
+            }
+        })
+        .collect();
+    write(layout.batches, bytemuck::cast_slice(&gpu_batches));
+    bytes
+}
+
 impl ChunkRendererCore {
-    pub(super) fn ensure_quad_index_capacity(
-        &mut self,
-        device: &vk::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        quads: u32,
-    ) {
-        if quads <= self.uploads.quad_index_quads {
-            return;
-        }
-        let new_quads = quads.next_power_of_two().max(INITIAL_QUAD_INDEX_QUADS);
-        let size = new_quads as u64 * 6 * size_of::<u32>() as u64;
-
-        if self.uploads.quad_index_quads > 0 {
-            // In-flight frames may still reference the old buffer (and the
-            // staged path's copy source).
-            device.wait_idle().ok();
-            let old = std::mem::take(&mut self.uploads.quad_index_buffer);
-            old.destroy(device, allocator);
-            if let Some(src) = self.uploads.quad_index_src.take() {
-                src.destroy(device, allocator);
-            }
-        }
-
-        let mut pattern: Vec<u32> = Vec::with_capacity(new_quads as usize * 6);
-        for q in 0..new_quads {
-            let base = q * 4;
-            pattern.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
-        }
-        let bytes: &[u8] = bytemuck::cast_slice(&pattern);
-
-        let mut buffer = if self.uploads.use_staging {
-            Buffer::device(
-                device,
-                allocator,
-                size,
-                vk::BufferUsageFlags::IndexBuffer,
-                "quad_index",
-            )
-        } else {
-            Buffer::host(
-                device,
-                allocator,
-                size,
-                vk::BufferUsageFlags::IndexBuffer,
-                "quad_index",
-            )
-        };
-        if self.uploads.use_staging {
-            let mut src = Buffer::host(
-                device,
-                allocator,
-                size,
-                vk::BufferUsageFlags::TransferSrc,
-                "quad_index_src",
-            );
-            src.mapped_slice_mut()[..bytes.len()].copy_from_slice(bytes);
-            self.uploads.quad_index_src = Some(src);
-            self.uploads.quad_index_copy_pending = true;
-        } else {
-            buffer.mapped_slice_mut()[..bytes.len()].copy_from_slice(bytes);
-        }
-        self.uploads.quad_index_buffer = buffer;
-        self.uploads.quad_index_quads = new_quads;
-        tracing::info!(
-            "Quad index buffer: {} quads ({} KB)",
-            new_quads,
-            size / 1024
-        );
-    }
-
     pub fn record_copies(&mut self, cmd: vk::CommandBuffer, frame: usize) {
-        // One-shot pattern upload for a (re)created quad index buffer; it
-        // precedes the frame's draws in the same command buffer, so the
-        // barrier below covers it.
-        let quad_copy = self.uploads.quad_index_copy_pending;
-        if quad_copy {
-            self.uploads.quad_index_copy_pending = false;
-            let src = self.uploads.quad_index_src.as_ref().unwrap();
-            let copy = [vk::BufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size: self.uploads.quad_index_quads as u64 * 6 * size_of::<u32>() as u64,
-            }];
-            cmd.copy_buffer(src.buffer, self.uploads.quad_index_buffer.buffer, &copy);
-        }
-        if self.uploads.pending_copies.is_empty() && !quad_copy {
+        if self.uploads.pending_copies.is_empty() {
             return;
         }
-        if !self.uploads.pending_copies.is_empty() {
-            let mut copy_v: Vec<vk::BufferCopy> =
-                Vec::with_capacity(self.uploads.pending_copies.len());
-            let mut stg_v = 0usize;
-            {
-                let buf = self.uploads.staging_buffers[frame].mapped_slice_mut();
-                for pending in &self.uploads.pending_copies {
-                    write_verts(buf, stg_v, &pending.vertices);
-                    let vbytes = pending.vertices.len() * VERTEX_SIZE as usize;
-                    copy_v.push(vk::BufferCopy {
-                        src_offset: stg_v as u64,
-                        dst_offset: pending.vtx_off as u64 * VERTEX_SIZE,
-                        size: vbytes as u64,
-                    });
-                    stg_v += vbytes;
-                }
+        let mut copies: Vec<vk::BufferCopy> = Vec::with_capacity(self.uploads.pending_copies.len());
+        let mut staging_offset = 0usize;
+        {
+            let buf = self.uploads.staging_buffers[frame].mapped_slice_mut();
+            for pending in &self.uploads.pending_copies {
+                let end = staging_offset + pending.bytes.len();
+                buf[staging_offset..end].copy_from_slice(&pending.bytes);
+                copies.push(vk::BufferCopy {
+                    src_offset: staging_offset as u64,
+                    dst_offset: pending.pool_off as u64 * POOL_UNIT,
+                    size: pending.bytes.len() as u64,
+                });
+                staging_offset = end;
             }
-            cmd.copy_buffer(
-                self.uploads.staging_buffers[frame].buffer,
-                self.vertex_buffer.buffer,
-                &copy_v,
-            );
         }
+        cmd.copy_buffer(
+            self.uploads.staging_buffers[frame].buffer,
+            self.mesh_buffer.buffer,
+            &copies,
+        );
         let barrier = vk::MemoryBarrier {
             src_access_mask: vk::AccessFlags::TransferWrite,
-            dst_access_mask: vk::AccessFlags::VertexAttributeRead | vk::AccessFlags::IndexRead,
+            dst_access_mask: vk::AccessFlags::ShaderRead,
             ..Default::default()
         };
         cmd.pipeline_barrier(
             vk::PipelineStageFlags::Transfer,
-            vk::PipelineStageFlags::VertexInput,
+            vk::PipelineStageFlags::ComputeShader | vk::PipelineStageFlags::VertexShader,
             vk::DependencyFlags::empty(),
             &[barrier],
             &[],
@@ -145,6 +125,7 @@ impl ChunkRendererCore {
         mesh_queue: &mut VecDeque<SectionMeshData>,
         eye: DVec3,
     ) {
+        self.ensure_draw_capacity(device, allocator);
         self.geometry.last_reclaim_ms = 0.0;
         // Keep only the newest result per section before draining: the stale
         // check below reads `self.geometry.chunks`, which only reflects this batch's
@@ -179,14 +160,15 @@ impl ChunkRendererCore {
             col_pos: ChunkPos,
             si: i32,
             was_present: bool,
-            vtx_off: u32,
-            vcount: u32,
+            pool_off: u32,
+            pool_len: u32,
             meta_slot: u32,
+            uploaded_ms: u32,
         }
         let mut entries: Vec<BatchEntry> = Vec::new();
 
         // Include copies carried over from a skipped frame in the budget.
-        let mut current_v_bytes = self.uploads.pending_v_bytes;
+        let mut current_mesh_bytes = self.uploads.pending_mesh_bytes;
         while let Some(mesh) = mesh_queue.front() {
             let col_pos = ChunkPos::new(mesh.spos.x, mesh.spos.z);
             let si = mesh.relative_si;
@@ -219,41 +201,35 @@ impl ChunkRendererCore {
                     .push(SectionAlloc {
                         section_index: si,
                         meta_slot: TOMBSTONE_SLOT,
-                        vertex_offset: 0,
-                        vtx_len: 0,
+                        pool_offset: 0,
+                        pool_len: 0,
                         content_gen,
                         epoch,
                     });
                 mesh_queue.pop_front();
                 continue;
             }
-            let vcount = mesh.vertices.len() as u32;
+            let layout = mesh.layout();
+            let mesh_bytes = layout.size;
+            let pool_len = mesh_bytes.div_ceil(POOL_UNIT as usize) as u32;
             if self.uploads.use_staging {
-                let v_bytes = vcount as usize * VERTEX_SIZE as usize;
                 // A section too large for the staging slab is skipped, not overflowed.
-                if v_bytes > staging_budget {
+                if mesh_bytes > staging_budget {
                     tracing::warn!(
                         "Section {:?} too large for staging ({} bytes), skipping",
                         mesh.spos,
-                        v_bytes,
+                        mesh_bytes,
                     );
                     mesh_queue.pop_front();
                     continue;
                 }
                 // This transfer's staging budget is full; leave the rest queued.
-                if current_v_bytes + v_bytes > staging_budget {
+                if current_mesh_bytes + mesh_bytes > staging_budget {
                     break;
                 }
-                current_v_bytes += v_bytes;
+                current_mesh_bytes += mesh_bytes;
             }
-            // The shared quad index buffer must cover the section's largest
-            // single-pass draw.
-            let max_quads = mesh
-                .solid_quads
-                .max(mesh.cutout_quads)
-                .max(mesh.water_quads);
-            self.ensure_quad_index_capacity(device, allocator, max_quads);
-            let Some(vtx_off) = self.alloc_vertices(device, vcount) else {
+            let Some(pool_off) = self.alloc_mesh(device, pool_len) else {
                 // Rate-limited: exhaustion persists across frames.
                 let now = std::time::Instant::now();
                 if self
@@ -263,8 +239,8 @@ impl ChunkRendererCore {
                     self.last_pool_warn = Some(now);
                     tracing::warn!(
                         "vertex pool exhausted (largest free run {} verts, wanted {});                          uploads stalled for {:?}",
-                        self.geometry.vertex_free.largest_free(),
-                        vcount,
+                        self.geometry.mesh_free.largest_free(),
+                        pool_len,
                         mesh.spos,
                     );
                 }
@@ -278,9 +254,10 @@ impl ChunkRendererCore {
                 col_pos,
                 si,
                 was_present,
-                vtx_off,
-                vcount,
+                pool_off,
+                pool_len,
                 meta_slot,
+                uploaded_ms: 0,
             });
         }
 
@@ -289,7 +266,7 @@ impl ChunkRendererCore {
         }
 
         let now_ms = crate::renderer::camera::session_millis();
-        for entry in &entries {
+        for entry in &mut entries {
             let spos = entry.mesh.spos;
             // A re-meshed section swaps instantly and near columns never fade
             // (vanilla `isNearby`); everything else fades in from its upload
@@ -302,17 +279,20 @@ impl ChunkRendererCore {
             } else {
                 now_ms
             };
+            entry.uploaded_ms = uploaded_ms;
+            let layout = entry.mesh.layout();
+            let base_bytes = entry.pool_off as usize * POOL_UNIT as usize;
             self.queue_meta_write(
                 entry.meta_slot,
                 ChunkMeta {
                     aabb_min: entry.mesh.aabb.min,
                     aabb_max: entry.mesh.aabb.max,
-                    solid_quads: entry.mesh.solid_quads,
-                    cutout_quads: entry.mesh.cutout_quads,
-                    vertex_offset: entry.vtx_off as i32,
-                    uploaded_ms,
+                    batch_word_offset: ((base_bytes + layout.batches) / 4) as u32,
+                    solid_batch_count: entry.mesh.batch_counts.solid_draws(),
+                    cutout_batch_count: entry.mesh.batch_counts.cutout,
+                    fluid_batch_count: entry.mesh.batch_counts.translucent_fluid,
                     origin: [spos.x * 16, spos.y * 16, spos.z * 16],
-                    water_quads: entry.mesh.water_quads,
+                    _pad: 0,
                 },
             );
             self.geometry
@@ -325,27 +305,112 @@ impl ChunkRendererCore {
                 .push(SectionAlloc {
                     section_index: entry.si,
                     meta_slot: entry.meta_slot,
-                    vertex_offset: entry.vtx_off as i32,
-                    vtx_len: entry.vcount,
+                    pool_offset: entry.pool_off,
+                    pool_len: entry.pool_len,
                     content_gen: entry.mesh.content_gen,
                     epoch: entry.mesh.upload_epoch,
                 });
         }
 
         if self.uploads.use_staging {
-            for entry in &mut entries {
-                self.uploads.pending_v_bytes += entry.mesh.vertices.len() * VERTEX_SIZE as usize;
+            for entry in &entries {
+                let bytes = build_mesh_payload(&entry.mesh, entry.pool_off, entry.uploaded_ms);
+                self.uploads.pending_mesh_bytes += bytes.len();
                 self.uploads.pending_copies.push(PendingCopy {
-                    vertices: std::mem::take(&mut entry.mesh.vertices),
-                    vtx_off: entry.vtx_off,
+                    bytes,
+                    pool_off: entry.pool_off,
                 });
             }
         } else {
-            let vbuf = self.vertex_buffer.allocation.mapped_slice_mut().unwrap();
+            let vbuf = self.mesh_buffer.allocation.mapped_slice_mut().unwrap();
             for entry in &entries {
-                let base = entry.vtx_off as usize * VERTEX_SIZE as usize;
-                write_verts(vbuf, base, &entry.mesh.vertices);
+                let bytes = build_mesh_payload(&entry.mesh, entry.pool_off, entry.uploaded_ms);
+                let base = entry.pool_off as usize * POOL_UNIT as usize;
+                vbuf[base..base + bytes.len()].copy_from_slice(&bytes);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::chunk::mesher::{ChunkAABB, FaceBatch, FaceBatchCounts, FaceRecord};
+
+    #[test]
+    fn payload_rebases_regular_and_fluid_batches_into_one_allocation() {
+        let mesh = SectionMeshData {
+            spos: ChunkSectionPos::new(2, 3, 4),
+            relative_si: 3,
+            faces: vec![FaceRecord::new(0, [1; 4]); 2],
+            section_cuboids: vec![SectionCuboid { packed: 0 }; 3],
+            fluid_faces: vec![FaceRecord::new(6, [2; 4]); 2],
+            fluid_cuboids: vec![SectionCuboid { packed: 0 }; 3],
+            fluid_heights: vec![0x4321; 3],
+            batches: vec![
+                FaceBatch {
+                    face_offset: 1,
+                    face_count: 1,
+                    cuboid_base: 0,
+                },
+                FaceBatch {
+                    face_offset: 0,
+                    face_count: 2,
+                    cuboid_base: 1,
+                },
+            ],
+            batch_counts: FaceBatchCounts {
+                regular_solid: 1,
+                opaque_fluid: 0,
+                cutout: 0,
+                translucent_fluid: 1,
+            },
+            aabb: ChunkAABB {
+                min: [0.0; 4],
+                max: [1.0; 4],
+            },
+            content_gen: 0,
+            upload_epoch: 0,
+            queue_ms: 0.0,
+            mesh_ms: 0.0,
+        };
+        let pool_off = 2;
+        let uploaded_ms = 77;
+        let layout = mesh.layout();
+        let payload = build_mesh_payload(&mesh, pool_off, uploaded_ms);
+        assert_eq!(payload.len(), layout.size);
+        let read_batch = |index: usize| {
+            let start = layout.batches + index * size_of::<GpuFaceBatch>();
+            bytemuck::pod_read_unaligned::<GpuFaceBatch>(
+                &payload[start..start + size_of::<GpuFaceBatch>()],
+            )
+        };
+        let base = pool_off as usize * POOL_UNIT as usize;
+        let regular = read_batch(0);
+        assert_eq!(
+            regular.face_word_offset,
+            ((base + layout.regular_faces) / 4) as u32 + 1
+        );
+        assert_eq!(
+            regular.cuboid_word_offset,
+            ((base + layout.regular_cuboids) / 4) as u32
+        );
+        assert_eq!(regular.fluid_height_word_offset, u32::MAX);
+        assert_eq!(regular.origin, [32, 48, 64]);
+        assert_eq!(regular.uploaded_ms, uploaded_ms);
+
+        let fluid = read_batch(1);
+        assert_eq!(
+            fluid.face_word_offset,
+            ((base + layout.fluid_faces) / 4) as u32
+        );
+        assert_eq!(
+            fluid.cuboid_word_offset,
+            ((base + layout.fluid_cuboids) / 4) as u32 + 2
+        );
+        assert_eq!(
+            fluid.fluid_height_word_offset,
+            ((base + layout.fluid_heights) / 4) as u32 + 1
+        );
     }
 }

@@ -198,6 +198,7 @@ impl ApplicationHandler for App {
                     &self.core.asset_index,
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
+                    self.core.menu.render_distance,
                 ) {
                     Ok(r) => r,
                     Err(e) => {

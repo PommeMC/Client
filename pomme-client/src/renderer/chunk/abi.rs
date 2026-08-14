@@ -1,28 +1,27 @@
 use glam::DVec3;
 use pyronyx::vk;
 
-use super::mesher::{ChunkAABB, PackedVertex};
+use super::mesher::ChunkAABB;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct ChunkMeta {
     pub(crate) aabb_min: [f32; 4],
     pub(crate) aabb_max: [f32; 4],
-    pub(crate) solid_quads: u32,
-    pub(crate) cutout_quads: u32,
-    pub(crate) vertex_offset: i32,
-    pub(crate) uploaded_ms: u32,
+    pub(crate) batch_word_offset: u32,
+    pub(crate) solid_batch_count: u32,
+    pub(crate) cutout_batch_count: u32,
+    pub(crate) fluid_batch_count: u32,
     pub(crate) origin: [i32; 3],
-    pub(crate) water_quads: u32,
+    pub(crate) _pad: u32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct DrawCommand {
-    pub(crate) index_count: u32,
+    pub(crate) vertex_count: u32,
     pub(crate) instance_count: u32,
-    pub(crate) first_index: u32,
-    pub(crate) vertex_offset: i32,
+    pub(crate) first_vertex: u32,
     pub(crate) first_instance: u32,
 }
 
@@ -42,65 +41,12 @@ pub(crate) struct FrustumData {
     pub(crate) _pad: [u32; 3],
 }
 
-pub(crate) fn vertex_bindings() -> [vk::VertexInputBindingDescription; 2] {
-    [
-        vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: size_of::<PackedVertex>() as u32,
-            input_rate: vk::VertexInputRate::Vertex,
-        },
-        vk::VertexInputBindingDescription {
-            binding: 1,
-            stride: size_of::<ChunkMeta>() as u32,
-            input_rate: vk::VertexInputRate::Instance,
-        },
-    ]
+pub(crate) fn vertex_bindings() -> [vk::VertexInputBindingDescription; 0] {
+    []
 }
 
-pub(crate) fn vertex_attributes() -> [vk::VertexInputAttributeDescription; 6] {
-    let pos_off = std::mem::offset_of!(PackedVertex, pos) as u32;
-    let uv_off = std::mem::offset_of!(PackedVertex, uv) as u32;
-    let light_tint_off = std::mem::offset_of!(PackedVertex, light_tint) as u32;
-    let origin_off = std::mem::offset_of!(ChunkMeta, origin) as u32;
-    let uploaded_off = std::mem::offset_of!(ChunkMeta, uploaded_ms) as u32;
-    [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R16G16Unorm,
-            offset: pos_off,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R16Unorm,
-            offset: pos_off + 4,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 2,
-            binding: 0,
-            format: vk::Format::R16G16Unorm,
-            offset: uv_off,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 3,
-            binding: 0,
-            format: vk::Format::R8G8B8A8Unorm,
-            offset: light_tint_off,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 4,
-            binding: 1,
-            format: vk::Format::R32G32B32Sint,
-            offset: origin_off,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 5,
-            binding: 1,
-            format: vk::Format::R32Uint,
-            offset: uploaded_off,
-        },
-    ]
+pub(crate) fn vertex_attributes() -> [vk::VertexInputAttributeDescription; 0] {
+    []
 }
 
 pub(crate) fn aabb_in_frustum(

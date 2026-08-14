@@ -20,9 +20,11 @@ pub struct ChunkPipeline {
     pub pipeline_layout: vk::PipelineLayout,
     pub descriptor_set_layout_camera: vk::DescriptorSetLayout,
     pub descriptor_set_layout_atlas: vk::DescriptorSetLayout,
+    pub descriptor_set_layout_geometry: vk::DescriptorSetLayout,
     pub descriptor_pool: vk::DescriptorPool,
     pub camera_sets: Vec<vk::DescriptorSet>,
     pub atlas_set: vk::DescriptorSet,
+    pub geometry_set: vk::DescriptorSet,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Allocation>,
 }
@@ -45,7 +47,32 @@ impl ChunkPipeline {
             vk::ShaderStageFlags::Fragment,
         );
 
-        let layouts = [camera_layout, atlas_layout];
+        let geometry_bindings = [
+            vk::DescriptorSetLayoutBinding {
+                binding: 0,
+                descriptor_type: vk::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::Vertex,
+                ..Default::default()
+            },
+            vk::DescriptorSetLayoutBinding {
+                binding: 1,
+                descriptor_type: vk::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::Vertex,
+                ..Default::default()
+            },
+        ];
+        let geometry_layout_info = vk::DescriptorSetLayoutCreateInfo {
+            binding_count: 2,
+            bindings: geometry_bindings.as_ptr(),
+            ..Default::default()
+        };
+        let geometry_layout = device
+            .create_descriptor_set_layout(&geometry_layout_info, None)
+            .expect("failed to create chunk geometry descriptor layout");
+
+        let layouts = [camera_layout, atlas_layout, geometry_layout];
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
@@ -68,9 +95,13 @@ impl ChunkPipeline {
                 ty: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
             },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::StorageBuffer,
+                descriptor_count: 2,
+            },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: (MAX_FRAMES_IN_FLIGHT + 1) as u32,
+            max_sets: (MAX_FRAMES_IN_FLIGHT + 2) as u32,
             pool_size_count: pool_sizes.len() as u32,
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
@@ -101,6 +132,17 @@ impl ChunkPipeline {
         device
             .allocate_descriptor_sets(&atlas_alloc_info, slice::from_mut(&mut atlas_set))
             .expect("failed to allocate atlas descriptor set");
+
+        let geometry_alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: 1,
+            set_layouts: &geometry_layout,
+            ..Default::default()
+        };
+        let mut geometry_set = vk::DescriptorSet::null();
+        device
+            .allocate_descriptor_sets(&geometry_alloc_info, slice::from_mut(&mut geometry_set))
+            .expect("failed to allocate geometry descriptor set");
 
         let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -155,9 +197,11 @@ impl ChunkPipeline {
             pipeline_layout,
             descriptor_set_layout_camera: camera_layout,
             descriptor_set_layout_atlas: atlas_layout,
+            descriptor_set_layout_geometry: geometry_layout,
             descriptor_pool,
             camera_sets,
             atlas_set,
+            geometry_set,
             camera_buffers,
             camera_allocations,
         }
@@ -167,6 +211,45 @@ impl ChunkPipeline {
         let bytes = bytemuck::bytes_of(uniform);
         self.camera_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
             .copy_from_slice(bytes);
+    }
+
+    pub fn set_geometry_buffers(
+        &self,
+        device: &vk::Device,
+        mesh: vk::Buffer,
+        global_cuboid: vk::Buffer,
+    ) {
+        let infos = [
+            vk::DescriptorBufferInfo {
+                buffer: mesh,
+                offset: 0,
+                range: vk::WHOLE_SIZE,
+            },
+            vk::DescriptorBufferInfo {
+                buffer: global_cuboid,
+                offset: 0,
+                range: vk::WHOLE_SIZE,
+            },
+        ];
+        let writes = [
+            vk::WriteDescriptorSet {
+                dst_set: self.geometry_set,
+                dst_binding: 0,
+                descriptor_type: vk::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                buffer_info: &infos[0],
+                ..Default::default()
+            },
+            vk::WriteDescriptorSet {
+                dst_set: self.geometry_set,
+                dst_binding: 1,
+                descriptor_type: vk::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                buffer_info: &infos[1],
+                ..Default::default()
+            },
+        ];
+        device.update_descriptor_sets(&writes, &[]);
     }
 
     pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
@@ -197,7 +280,7 @@ impl ChunkPipeline {
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
             0,
-            &[self.camera_sets[frame], self.atlas_set],
+            &[self.camera_sets[frame], self.atlas_set, self.geometry_set],
             &[],
         );
     }
@@ -209,7 +292,7 @@ impl ChunkPipeline {
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
             0,
-            &[self.camera_sets[frame], self.atlas_set],
+            &[self.camera_sets[frame], self.atlas_set, self.geometry_set],
             &[],
         );
     }
@@ -233,6 +316,7 @@ impl ChunkPipeline {
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.descriptor_set_layout_camera, None);
         device.destroy_descriptor_set_layout(self.descriptor_set_layout_atlas, None);
+        device.destroy_descriptor_set_layout(self.descriptor_set_layout_geometry, None);
     }
 }
 
@@ -275,7 +359,7 @@ fn create_pipelines(
         shader::include_spirv!("chunk_solid.frag.spv"),
         &color_blend,
         true,
-        true,
+        false,
     );
     let cutout = create_chunk_variant(
         device,
@@ -285,7 +369,7 @@ fn create_pipelines(
         shader::include_spirv!("chunk.frag.spv"),
         &color_blend,
         true,
-        true,
+        false,
     );
     (solid, cutout)
 }
@@ -325,8 +409,8 @@ fn create_water_pipeline(
     )
 }
 
-/// Build a chunk pipeline given the shader SPIR-V, color-blend, whether it
-/// writes depth, and whether it reads the per-instance meta binding.
+/// Build a chunk pipeline given the shader SPIR-V, blend/depth state, and
+/// whether both sides of fluid surfaces must remain visible.
 #[allow(clippy::too_many_arguments)]
 fn create_chunk_variant(
     device: &vk::Device,
@@ -336,7 +420,7 @@ fn create_chunk_variant(
     frag_spirv: &[u8],
     color_blend: &vk::PipelineColorBlendStateCreateInfo,
     depth_write: bool,
-    instanced: bool,
+    two_sided: bool,
 ) -> vk::Pipeline {
     let vert_module = shader::create_shader_module(device, vert_spirv);
     let frag_module = shader::create_shader_module(device, frag_spirv);
@@ -353,7 +437,7 @@ fn create_chunk_variant(
         &stages,
         color_blend,
         depth_write,
-        instanced,
+        two_sided,
     );
     device.destroy_shader_module(vert_module, None);
     device.destroy_shader_module(frag_module, None);
@@ -370,18 +454,15 @@ fn build_pipeline(
     stages: &[vk::PipelineShaderStageCreateInfo],
     color_blend: &vk::PipelineColorBlendStateCreateInfo,
     depth_write: bool,
-    instanced: bool,
+    two_sided: bool,
 ) -> vk::Pipeline {
     use crate::renderer::chunk::{chunk_vertex_attributes, chunk_vertex_bindings};
     let binding_descs = chunk_vertex_bindings();
     let attr_descs = chunk_vertex_attributes();
-    // Binding 0 / attributes 0-3 are the packed vertices; binding 1 /
-    // attributes 4-5 the per-instance meta only the indirect passes use.
-    let (binding_descs, attr_descs): (&[_], &[_]) = if instanced {
-        (&binding_descs, &attr_descs)
-    } else {
-        (&binding_descs[..1], &attr_descs[..4])
-    };
+    // Face records and cuboid geometry are storage-buffer inputs. The only
+    // vertex attribute is the per-instance section metadata used to locate
+    // the face range and rebase the section.
+    let (binding_descs, attr_descs): (&[_], &[_]) = (&binding_descs, &attr_descs);
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
         vertex_binding_description_count: binding_descs.len() as u32,
         vertex_binding_descriptions: binding_descs.as_ptr(),
@@ -404,7 +485,11 @@ fn build_pipeline(
 
     let rasterizer = vk::PipelineRasterizationStateCreateInfo {
         polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::Back,
+        cull_mode: if two_sided {
+            vk::CullModeFlags::None
+        } else {
+            vk::CullModeFlags::Back
+        },
         front_face: vk::FrontFace::CounterClockwise,
         line_width: 1.0,
         ..Default::default()

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 
 use azalea_core::position::{ChunkPos, ChunkSectionPos};
@@ -10,7 +10,8 @@ use glam::DVec3;
 
 use super::abi::aabb_in_frustum;
 use super::mesher::{
-    BiomeClimate, ChunkAABB, Colormap, SectionMeshData, SectionStoreSnapshot, mesh_section,
+    BiomeClimate, ChunkAABB, Colormap, GlobalCuboidTable, SectionMeshData, SectionStoreSnapshot,
+    mesh_section,
 };
 use super::section::LocalSection;
 use crate::renderer::Renderer;
@@ -24,16 +25,14 @@ use crate::world::chunk::SharedChunkStore;
 /// atomics that are touched a handful of times per slot per frame, so the
 /// possible false sharing between adjacent slots is the cheaper trade.
 pub struct SectionMeta {
-    pub ver: AtomicU64,       // Monotonic, bumped on any mutation to this slot
-    pub pos: AtomicU64,       // Packed ChunkSectionPos identity of current slot occupant
-    pub target_lod: AtomicU8, // Target LOD level assigned to this section slot
+    pub ver: AtomicU64, // Monotonic, bumped on any mutation to this slot
+    pub pos: AtomicU64, // Packed ChunkSectionPos identity of current slot occupant
 }
 impl Default for SectionMeta {
     fn default() -> Self {
         Self {
             ver: AtomicU64::new(0),
             pos: AtomicU64::new(u64::MAX),
-            target_lod: AtomicU8::new(0),
         }
     }
 }
@@ -89,8 +88,6 @@ pub struct ChunkMeshing {
     /// Shared: workers clear/re-set bits, edits set bits
     pub update_set: Arc<ChunkRing<AtomicU32>>,
     store: Arc<SharedChunkStore>,
-    /// Per-column rescan cache: the lod last stamped by a full section visit.
-    col_lod: HashMap<ChunkPos, u32>,
     result_rx: crossbeam_channel::Receiver<SectionMeshData>,
     /// These three are kept alongside the workers' clones so `mesh_edit_now`
     /// can run a job on the calling thread.
@@ -107,6 +104,7 @@ pub struct ChunkMeshing {
     /// mid-session `BiomeColors` update reaches meshing without recreating
     /// the dispatcher.
     biome_climate: Arc<std::sync::RwLock<Arc<HashMap<u32, BiomeClimate>>>>,
+    global_cuboids: Arc<GlobalCuboidTable>,
 }
 impl ChunkMeshing {
     pub fn new(
@@ -122,6 +120,7 @@ impl ChunkMeshing {
             worker.thread().unpark();
         }
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         shared_chunk_store: Arc<SharedChunkStore>,
         registry: BlockRegistry,
@@ -130,6 +129,7 @@ impl ChunkMeshing {
         foliage_colormap: Colormap,
         dry_foliage_colormap: Colormap,
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+        global_cuboids: Arc<GlobalCuboidTable>,
     ) -> Self {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         let biome_climate = Arc::new(std::sync::RwLock::new(biome_climate));
@@ -158,6 +158,7 @@ impl ChunkMeshing {
             let foliage_colormap = Arc::clone(&foliage_colormap);
             let dry_foliage_colormap = Arc::clone(&dry_foliage_colormap);
             let biome_climate = Arc::clone(&biome_climate);
+            let global_cuboids = Arc::clone(&global_cuboids);
             let tx = result_tx.clone();
             workers.push(
                 std::thread::Builder::new()
@@ -173,6 +174,7 @@ impl ChunkMeshing {
                             foliage_colormap,
                             dry_foliage_colormap,
                             biome_climate,
+                            global_cuboids,
                             tx,
                         )
                     })
@@ -183,7 +185,6 @@ impl ChunkMeshing {
             section_meta,
             update_set,
             store: shared_chunk_store,
-            col_lod: HashMap::new(),
             result_rx,
             result_tx,
             registry,
@@ -195,6 +196,7 @@ impl ChunkMeshing {
             foliage_colormap,
             dry_foliage_colormap,
             biome_climate,
+            global_cuboids,
         }
     }
 
@@ -219,10 +221,8 @@ impl ChunkMeshing {
     }
     pub fn clear(&mut self) {
         self.mark_all_dirty();
-        self.col_lod.clear();
     }
     pub fn on_chunk_unload(&mut self, pos: ChunkPos) {
-        self.col_lod.remove(&pos);
         let min_y_sec = self.store.min_section_y();
         for si in 0..crate::util::meshable_section_count(self.store.section_count()) {
             let spos = ChunkSectionPos::new(pos.x, min_y_sec + si, pos.z);
@@ -257,12 +257,11 @@ impl ChunkMeshing {
             .fetch_or(section_bit(rel_y), Ordering::Release);
         new_ver
     }
-    pub fn enqueue_section_edit(&mut self, pos: ChunkSectionPos, lod: u32) {
+    pub fn enqueue_section_edit(&mut self, pos: ChunkSectionPos) {
         let meta = self.section_meta.get(pos);
         let chunk_pos = ChunkPos::new(pos.x, pos.z);
         let rel_y = self.store.section_y_index(pos.y);
         meta.pos.store(pack_section_pos(pos), Ordering::Release);
-        meta.target_lod.store(lod as u8, Ordering::Release);
         meta.ver.fetch_add(1, Ordering::Release);
         self.update_set
             .get(chunk_pos)
@@ -272,8 +271,8 @@ impl ChunkMeshing {
     /// under `PrioritizeChunkUpdates.PLAYER_AFFECTED`): the result reaches the
     /// normal drain and uploads later this same frame, so a player's own
     /// break/place never shows the async round-trip's lag.
-    pub fn mesh_edit_now(&mut self, pos: ChunkSectionPos, lod: u32) {
-        self.enqueue_section_edit(pos, lod);
+    pub fn mesh_edit_now(&mut self, pos: ChunkSectionPos) {
+        self.enqueue_section_edit(pos);
         let job = PendingJob {
             pos,
             upload_epoch: self.next_epoch.fetch_add(1, Ordering::Relaxed),
@@ -292,6 +291,7 @@ impl ChunkMeshing {
                 &self.foliage_colormap,
                 &self.dry_foliage_colormap,
                 &self.biome_climate,
+                &self.global_cuboids,
                 &self.result_tx,
                 0.0,
             )
@@ -309,7 +309,6 @@ impl ChunkMeshing {
         &mut self,
         loaded: &std::collections::HashSet<ChunkPos>,
         player_chunk: ChunkPos,
-        chunk_detail: u32,
         frustum: &[[f32; 4]; 6],
         eye: DVec3,
     ) {
@@ -322,21 +321,17 @@ impl ChunkMeshing {
         // Pass 1: cheap per-column screen for work, so an all-dirty burst
         // (dimension change, benchmark reset) pays the per-section walk only
         // for columns it will actually visit.
-        let mut active_cols: Vec<(ChunkPos, u32, u32)> = Vec::new();
+        let mut active_cols: Vec<(ChunkPos, u32)> = Vec::new();
         for &pos in loaded {
             let active_mask = self.update_set.get(pos).load(Ordering::Acquire);
-            let lod = crate::app::core::chunk_lod(pos, player_chunk, chunk_detail);
-            // Fast path: a present cache entry means a previous full visit
-            // stamped every section's identity, so with nothing dirty and the
-            // lod unchanged the section loop has no work.
-            if active_mask == 0 && self.col_lod.get(&pos) == Some(&lod) {
+            if active_mask == 0 {
                 continue;
             }
-            active_cols.push((pos, active_mask, lod));
+            active_cols.push((pos, active_mask));
         }
         // In-frustum columns first, nearest-first within each half, so
         // stopping at the job cap fills the view before the surroundings and
-        // leaves the rest completely untouched (bits, lod and identity stamps
+        // leaves the rest completely untouched (bits and identity stamps
         // included) for later rescans.
         let min_y = self.store.min_y();
         let column_aabb = ChunkAABB {
@@ -352,19 +347,17 @@ impl ChunkMeshing {
 
         const MAX_RESCAN_JOBS: usize = 8192;
         let mut candidate_jobs = Vec::new();
-        for (pos, active_mask, lod) in active_cols {
+        for (pos, active_mask) in active_cols {
             if candidate_jobs.len() >= MAX_RESCAN_JOBS {
                 break;
             }
             for si in 0..section_count {
                 let spos = ChunkSectionPos::new(pos.x, min_y_section + si, pos.z);
                 let meta = self.section_meta.get(spos);
-                let current_lod = meta.target_lod.load(Ordering::Acquire) as u32;
-                let lod_changed = current_lod != lod;
                 let is_dirty = (active_mask & section_bit(si as u32)) != 0;
                 let packed_pos = meta.pos.load(Ordering::Acquire);
                 let identity_changed = packed_pos != pack_section_pos(spos);
-                if is_dirty || lod_changed || identity_changed {
+                if is_dirty || identity_changed {
                     // Back the job with a dirty bit like edits: `send`
                     // replaces the batch each frame, so a job must stay
                     // re-derivable until a worker claims it (claiming clears
@@ -374,10 +367,6 @@ impl ChunkMeshing {
                             .get(pos)
                             .fetch_or(section_bit(si as u32), Ordering::Release);
                     }
-                    if lod_changed {
-                        meta.target_lod.store(lod as u8, Ordering::Release);
-                        meta.ver.fetch_add(1, Ordering::Release);
-                    }
                     meta.pos.store(pack_section_pos(spos), Ordering::Release);
                     let upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
                     candidate_jobs.push(PendingJob {
@@ -386,7 +375,6 @@ impl ChunkMeshing {
                     });
                 }
             }
-            self.col_lod.insert(pos, lod);
         }
         let section_aabb = ChunkAABB {
             min: [0.0; 4],
@@ -466,6 +454,7 @@ impl PendingJob {
         foliage_colormap: &Arc<Colormap>,
         dry_foliage_colormap: &Arc<Colormap>,
         biome_climate: &Arc<std::sync::RwLock<Arc<HashMap<u32, BiomeClimate>>>>,
+        global_cuboids: &Arc<GlobalCuboidTable>,
         tx: &crossbeam_channel::Sender<SectionMeshData>,
         queue_ms: f32,
     ) {
@@ -479,7 +468,6 @@ impl PendingJob {
             .fetch_and(!section_bit(rel_y), Ordering::Acquire);
         let meta = section_meta.get(self.pos);
         let claim_ver = meta.ver.load(Ordering::Acquire);
-        let claim_lod = meta.target_lod.load(Ordering::Acquire) as u32;
         let mut guard = ReMarkGuard {
             update_set,
             pos: chunk_pos,
@@ -494,6 +482,7 @@ impl PendingJob {
             biome_climate: biome_climate.read().unwrap().clone(),
             min_y: shared_chunk_store.min_y(),
             spos: self.pos,
+            global_cuboids: Arc::clone(global_cuboids),
         };
         let meshed_at = std::time::Instant::now();
         let mut mesh = mesh_section(
@@ -501,7 +490,6 @@ impl PendingJob {
             self.pos,
             registry,
             uv_map,
-            claim_lod,
             claim_ver,
             self.upload_epoch,
         );
@@ -582,6 +570,7 @@ impl MeshQueue {
         foliage_colormap: Arc<Colormap>,
         dry_foliage_colormap: Arc<Colormap>,
         biome_climate: Arc<std::sync::RwLock<Arc<HashMap<u32, BiomeClimate>>>>,
+        global_cuboids: Arc<GlobalCuboidTable>,
         tx: crossbeam_channel::Sender<SectionMeshData>,
     ) {
         loop {
@@ -612,6 +601,7 @@ impl MeshQueue {
                     &foliage_colormap,
                     &dry_foliage_colormap,
                     &biome_climate,
+                    &global_cuboids,
                     &tx,
                     queue_ms,
                 )

@@ -88,6 +88,7 @@ pub struct BlockRegistry {
     /// otherwise pay on every lookup, many times per block face.
     state_models: Vec<Option<Arc<BakedModel>>>,
     state_multipart: Vec<Option<Arc<[model::BakedQuad]>>>,
+    state_multipart_cuboids: Vec<Option<Arc<[model::BakedCuboid]>>>,
     state_textures: Vec<Option<Arc<FaceTextures>>>,
     state_flags: Vec<u8>,
     built_table: usize,
@@ -159,6 +160,7 @@ impl BlockRegistry {
             placeable_blocks: build_placeable_blocks(),
             state_models: Vec::new(),
             state_multipart: Vec::new(),
+            state_multipart_cuboids: Vec::new(),
             state_textures: Vec::new(),
             state_flags: Vec::new(),
             built_table: 0,
@@ -185,6 +187,12 @@ impl BlockRegistry {
         self.state_multipart = states
             .clone()
             .map(|s| self.lookup_multipart(s, &mut multipart_memo))
+            .collect();
+        let mut cuboid_memo: HashMap<(&'static str, Vec<u16>), Arc<[model::BakedCuboid]>> =
+            HashMap::new();
+        self.state_multipart_cuboids = states
+            .clone()
+            .map(|s| self.lookup_multipart_cuboids(s, &mut cuboid_memo))
             .collect();
         self.state_textures = states
             .clone()
@@ -248,6 +256,28 @@ impl BlockRegistry {
         self.state_multipart
             .get(self.state_index(state))?
             .as_deref()
+    }
+
+    #[inline]
+    pub fn get_multipart_cuboids(&self, state: BlockState) -> Option<&[model::BakedCuboid]> {
+        self.state_multipart_cuboids
+            .get(self.state_index(state))?
+            .as_deref()
+    }
+
+    /// All baked face geometry used to build the renderer's immutable cuboid
+    /// table. This is intentionally exposed as a read-only iterator; the
+    /// registry remains the owner of the model data.
+    pub fn all_baked_cuboids(&self) -> impl Iterator<Item = &model::BakedCuboid> + '_ {
+        self.baked
+            .values()
+            .flat_map(|variants| variants.values())
+            .flat_map(|model| model.cuboids.iter())
+            .chain(
+                self.multipart
+                    .values()
+                    .flat_map(|entries| entries.iter().flat_map(|entry| entry.cuboids.iter())),
+            )
     }
 
     #[inline]
@@ -324,6 +354,38 @@ impl BlockRegistry {
         // Matched-but-quadless keeps the old None (state falls through to the
         // plain cube path).
         (!quads.is_empty()).then_some(quads)
+    }
+
+    fn lookup_multipart_cuboids(
+        &self,
+        state: BlockState,
+        memo: &mut HashMap<(&'static str, Vec<u16>), Arc<[model::BakedCuboid]>>,
+    ) -> Option<Arc<[model::BakedCuboid]>> {
+        let name = super::block_id(state);
+        let entries = self.multipart.get(name)?;
+        let props = super::block_properties(state);
+        let matched: Vec<u16> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                let when = entry.when.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+                constraints_match(props, when)
+            })
+            .map(|(i, _)| i as u16)
+            .collect();
+        if matched.is_empty() {
+            return None;
+        }
+        let cuboids = Arc::clone(
+            memo.entry((name, matched))
+                .or_insert_with_key(|(_, matched)| {
+                    matched
+                        .iter()
+                        .flat_map(|&i| entries[i as usize].cuboids.iter().cloned())
+                        .collect()
+                }),
+        );
+        (!cuboids.is_empty()).then_some(cuboids)
     }
 
     pub fn texture_names(&self) -> impl Iterator<Item = &str> + '_ {

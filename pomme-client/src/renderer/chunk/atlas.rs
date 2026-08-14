@@ -9,10 +9,6 @@ use crate::assets::{AssetIndex, resolve_asset_path_with_packs};
 use crate::renderer::buffer::Buffer;
 use crate::renderer::util;
 
-/// Name of the synthetic all-white sprite: flat-color LOD faces sample it and
-/// carry their color in the tint lanes, riding the textured pipeline.
-pub const WHITE_TEXTURE: &str = "__white";
-
 #[derive(Debug, Clone, Copy)]
 pub struct AtlasRegion {
     pub u_min: f32,
@@ -23,10 +19,6 @@ pub struct AtlasRegion {
     /// sprite can render in the no-discard solid pass (early-Z). Sprites with
     /// any transparent texel are cutout and stay in the discard pass.
     pub opaque: bool,
-    /// Alpha-weighted mean of the sprite's level-0 texels (sRGB), the flat
-    /// color distant LOD faces render as (DH-style: averaged color instead of
-    /// a magnified texture).
-    pub avg: [f32; 3],
 }
 
 #[derive(Clone)]
@@ -125,14 +117,6 @@ impl TextureAtlas {
             }
         }
 
-        sources.push(Source {
-            name: WHITE_TEXTURE.to_string(),
-            data: vec![255u8; (MISSING_TILE * MISSING_TILE * 4) as usize],
-            w: MISSING_TILE,
-            h: MISSING_TILE,
-        });
-        total_area += u64::from(MISSING_TILE * MISSING_TILE);
-
         sources.sort_by_key(|s| std::cmp::Reverse(s.h.max(MISSING_TILE)));
 
         const MAX_ATLAS_SIZE: u32 = 8192;
@@ -172,7 +156,6 @@ impl TextureAtlas {
                 Some(Some((cx, cy))) => {
                     let mut region = pixel_region(*cx, *cy, src.w, src.h, atlas_size);
                     region.opaque = sprite_is_opaque(&src.data);
-                    region.avg = sprite_average(&src.data);
                     for py in 0..src.h {
                         for px in 0..src.w {
                             let s = ((py * src.w + px) * 4) as usize;
@@ -348,7 +331,6 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion 
         // solid checker, so the geometric defaults are opaque and its
         // magenta/black average.
         opaque: true,
-        avg: [0.5, 0.0, 0.5],
     }
 }
 
@@ -357,24 +339,6 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion 
 /// pass, so a hole never renders solid.
 fn sprite_is_opaque(data: &[u8]) -> bool {
     data.chunks_exact(4).all(|px| px[3] == 255)
-}
-
-/// Alpha-weighted mean color of an RGBA sprite's texels (sRGB); white when
-/// fully transparent or empty so the tint multiply stays inert.
-fn sprite_average(data: &[u8]) -> [f32; 3] {
-    let mut rgb = [0u64; 3];
-    let mut alpha = 0u64;
-    for px in data.chunks_exact(4) {
-        let a = u64::from(px[3]);
-        alpha += a;
-        for (c, v) in rgb.iter_mut().enumerate() {
-            *v += u64::from(px[c]) * a;
-        }
-    }
-    if alpha == 0 {
-        return [1.0; 3];
-    }
-    rgb.map(|v| (v / alpha) as f32 / 255.0)
 }
 
 type PackResult = (HashMap<String, Option<(u32, u32)>>, AtlasRegion);

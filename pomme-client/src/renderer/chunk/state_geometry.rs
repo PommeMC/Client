@@ -7,12 +7,12 @@ impl ChunkRendererCore {
         self.geometry.last_reclaim_ms
     }
 
-    pub(super) fn alloc_vertices(&mut self, device: &vk::Device, count: u32) -> Option<u32> {
-        if let Some(off) = self.geometry.vertex_free.alloc(count) {
+    pub(super) fn alloc_mesh(&mut self, device: &vk::Device, count: u32) -> Option<u32> {
+        if let Some(off) = self.geometry.mesh_free.alloc(count) {
             return Some(off);
         }
         self.reclaim_retired(device)
-            .then(|| self.geometry.vertex_free.alloc(count))
+            .then(|| self.geometry.mesh_free.alloc(count))
             .flatten()
     }
 
@@ -31,7 +31,7 @@ impl ChunkRendererCore {
     }
 
     pub(super) fn free_slice(&mut self, (vo, vl, slot): (u32, u32, u32)) {
-        self.geometry.vertex_free.free_region(vo, vl);
+        self.geometry.mesh_free.free_region(vo, vl);
         self.metadata.slots.free_region(slot, 1);
     }
 
@@ -56,7 +56,7 @@ impl ChunkRendererCore {
     }
 
     pub(super) fn retire_freed(&mut self, freed: Vec<(u32, u32, u32)>) {
-        for &(.., slot) in &freed {
+        for &(_, _, slot) in &freed {
             self.queue_meta_write(slot, bytemuck::Zeroable::zeroed());
         }
         self.drop_pending_copies_for(&freed);
@@ -100,7 +100,7 @@ impl ChunkRendererCore {
 
     pub fn clear(&mut self) {
         self.geometry.chunks.clear();
-        self.geometry.vertex_free.reset();
+        self.geometry.mesh_free.reset();
         self.geometry.pending_free.clear();
         // Staged copies target pool offsets that just died with the pools.
         self.drop_pending_copies();

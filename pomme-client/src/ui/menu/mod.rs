@@ -24,8 +24,6 @@ use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 struct Settings {
     gui_scale: u32,
     render_distance: u32,
-    #[serde(default = "default_chunk_detail")]
-    chunk_detail: u32,
     simulation_distance: u32,
     #[serde(default = "default_fov")]
     fov: u32,
@@ -107,12 +105,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_chunk_detail() -> u32 {
-    // 0 = Auto: full detail out to the render distance, LOD only when the
-    // user lowers the slider below it (stock settings stay vanilla-looking).
-    0
-}
-
 fn default_volume() -> f32 {
     1.0
 }
@@ -122,7 +114,6 @@ impl Default for Settings {
         Self {
             gui_scale: 0,
             render_distance: 12,
-            chunk_detail: 0,
             simulation_distance: 12,
             fov: 70,
             fov_effect_scale: 1.0,
@@ -398,12 +389,6 @@ pub struct MainMenu {
     last_click_index: Option<usize>,
     pub gui_scale_setting: u32,
     pub render_distance: u32,
-    /// Radius of full-detail meshing (LOD 0), in chunks; coarser LODs start
-    /// beyond it. Pomme-custom: vanilla has no LOD, this buys its look back
-    /// within a VRAM budget. 0 = Auto (follows the render distance, so no
-    /// LOD ever sits inside it); resolve through
-    /// [`Self::effective_chunk_detail`], never read raw.
-    pub chunk_detail: u32,
     pub simulation_distance: u32,
     /// Server-announced view distance cap; 0 when unknown (slider runs 2..32).
     pub server_render_distance: u32,
@@ -460,17 +445,6 @@ const MAX_FRIEND: usize = 16;
 const MAX_SEARCH: usize = 128;
 
 impl MainMenu {
-    /// The chunk-detail radius the LOD ladder actually uses: the slider value,
-    /// or the render distance when set to Auto (0) — full detail everywhere
-    /// in range by default.
-    pub fn effective_chunk_detail(&self) -> u32 {
-        if self.chunk_detail == 0 {
-            self.render_distance
-        } else {
-            self.chunk_detail
-        }
-    }
-
     pub fn new(
         game_dir: &Path,
         rt: Arc<tokio::runtime::Runtime>,
@@ -520,7 +494,6 @@ impl MainMenu {
             last_click_index: None,
             gui_scale_setting: settings.gui_scale,
             render_distance: settings.render_distance,
-            chunk_detail: settings.chunk_detail,
             simulation_distance: settings.simulation_distance,
             server_render_distance: 0,
             fov: settings.fov,
@@ -612,7 +585,6 @@ impl MainMenu {
             &Settings {
                 gui_scale: self.gui_scale_setting,
                 render_distance: self.render_distance,
-                chunk_detail: self.chunk_detail,
                 simulation_distance: self.simulation_distance,
                 fov: self.fov,
                 fov_effect_scale: self.fov_effect_scale,

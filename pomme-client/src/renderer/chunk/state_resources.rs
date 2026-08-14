@@ -3,37 +3,74 @@
 use super::*;
 
 impl ChunkRendererCore {
+    fn create_global_cuboid_buffer(
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        global_cuboids: &[CuboidData],
+    ) -> Buffer {
+        let global_bytes = (global_cuboids.len().max(1) as u64 * GLOBAL_CUBOID_SIZE).max(8);
+        let mut buffer = Buffer::host(
+            device,
+            allocator,
+            global_bytes,
+            vk::BufferUsageFlags::StorageBuffer,
+            "global_cuboids_constant",
+        );
+        if !global_cuboids.is_empty() {
+            let bytes: &[u8] = bytemuck::cast_slice(global_cuboids);
+            buffer.mapped_slice_mut()[..bytes.len()].copy_from_slice(bytes);
+        }
+        buffer
+    }
+
+    pub(in crate::renderer::chunk) fn replace_global_cuboids(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        global_cuboids: &[CuboidData],
+    ) {
+        let replacement = Self::create_global_cuboid_buffer(device, allocator, global_cuboids);
+        std::mem::replace(&mut self.global_cuboid_buffer, replacement).destroy(device, allocator);
+    }
+
     pub fn new(
         device: &vk::Device,
         physical_device: vk::PhysicalDevice,
         allocator: &Arc<Mutex<Allocator>>,
+        global_cuboids: &[CuboidData],
+        render_distance: u32,
     ) -> Self {
-        let total_buckets = compute_bucket_count(physical_device);
-        let vertex_size = total_buckets as u64 * BUCKET_VERTICES as u64 * VERTEX_SIZE;
-
         let dev_props = physical_device.get_properties();
+        let descriptor_buckets =
+            u64::from(dev_props.limits.max_storage_buffer_range) / MESH_POOL_BYTES_PER_BUCKET;
+        let total_buckets = compute_bucket_count(physical_device)
+            .min(u32::try_from(descriptor_buckets).unwrap_or(u32::MAX).max(1));
+        let mesh_size = total_buckets as u64 * MESH_POOL_BYTES_PER_BUCKET;
+
         let use_staging = dev_props.device_type == vk::PhysicalDeviceType::DiscreteGpu;
         // Spec floor is 65535 even with multiDrawIndirect; meta_high_water
         // passes it from ~RD 32, so every draw clamps to the device cap.
         let max_draw_indirect_count = dev_props.limits.max_draw_indirect_count;
 
-        let vertex_buffer = if use_staging {
+        let mesh_buffer = if use_staging {
             Buffer::device(
                 device,
                 allocator,
-                vertex_size,
-                vk::BufferUsageFlags::VertexBuffer,
-                "vertex_pool",
+                mesh_size,
+                vk::BufferUsageFlags::StorageBuffer,
+                "mesh_pool",
             )
         } else {
             Buffer::host(
                 device,
                 allocator,
-                vertex_size,
-                vk::BufferUsageFlags::VertexBuffer,
-                "vertex_pool",
+                mesh_size,
+                vk::BufferUsageFlags::StorageBuffer,
+                "mesh_pool",
             )
         };
+        let global_cuboid_buffer =
+            Self::create_global_cuboid_buffer(device, allocator, global_cuboids);
 
         // Discrete GPUs batch a frame's uploads through this buffer in one
         // transfer, so size it to hold several columns and keep sub-flushes rare.
@@ -64,7 +101,7 @@ impl ChunkRendererCore {
             } else {
                 "HOST_VISIBLE"
             },
-            vertex_size / (1024 * 1024),
+            mesh_size / (1024 * 1024),
             staging_size / 1024,
         );
 
@@ -74,8 +111,20 @@ impl ChunkRendererCore {
         // 27ms frame when an RD-32 world (~45k section draws) crossed 16x. The
         // grow path stays as a rare safety net.
         let max_meta = (total_buckets * 32).max(8192) as usize;
+        // Size draws from the requested startup view: two opaque batches plus
+        // one cutout and one translucent batch for each of the default
+        // overworld's 24 sections per column. Runtime overflow readback grows
+        // this independently from metadata by doubling.
+        let draw_capacity = initial_draw_capacity(render_distance)
+            .min(max_draw_indirect_count as usize)
+            .max(1);
         let meta_size = (max_meta * size_of::<ChunkMeta>()) as u64;
-        let indirect_size = (max_meta * size_of::<DrawCommand>()) as u64;
+        let indirect_size = (draw_capacity * size_of::<DrawCommand>()) as u64;
+        tracing::info!(
+            "Chunk indirect capacity: {} commands (render distance {})",
+            draw_capacity,
+            render_distance,
+        );
         let count_size = 4u64;
         let frustum_size = size_of::<FrustumData>() as u64;
 
@@ -200,7 +249,7 @@ impl ChunkRendererCore {
                 ty: vk::DescriptorType::StorageBuffer,
                 // meta + solid indirect/count + cutout indirect/count +
                 // water indirect/count/buckets/candidates = 9 per frame.
-                descriptor_count: 9 * MAX_FRAMES_IN_FLIGHT as u32,
+                descriptor_count: 10 * MAX_FRAMES_IN_FLIGHT as u32,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UniformBuffer,
@@ -316,6 +365,13 @@ impl ChunkRendererCore {
                 water_count_buffers[i].buffer,
                 count_size,
             );
+            let (mesh_info, mut mesh_write) = desc_write(
+                compute_sets[i],
+                11,
+                vk::DescriptorType::StorageBuffer,
+                mesh_buffer.buffer,
+                mesh_size,
+            );
 
             meta_write.buffer_info = meta_info.as_ptr();
             frustum_write.buffer_info = frustum_info.as_ptr();
@@ -327,6 +383,7 @@ impl ChunkRendererCore {
             candidates_write.buffer_info = candidates_info.as_ptr();
             water_ind_write.buffer_info = water_ind_info.as_ptr();
             water_count_write.buffer_info = water_count_info.as_ptr();
+            mesh_write.buffer_info = mesh_info.as_ptr();
 
             let writes = [
                 meta_write,
@@ -339,19 +396,23 @@ impl ChunkRendererCore {
                 candidates_write,
                 water_ind_write,
                 water_count_write,
+                mesh_write,
             ];
 
             device.update_descriptor_sets(&writes, &[]);
         }
 
-        let mut this = Self {
+        Self {
             last_pool_warn: None,
-            vertex_buffer,
+            mesh_buffer,
+            global_cuboid_buffer,
             uploads: ChunkUploads::new(staging_buffers, staging_size, use_staging),
-            geometry: ChunkGeometry::new(total_buckets * BUCKET_VERTICES),
+            geometry: ChunkGeometry::new((mesh_size / POOL_UNIT) as u32),
             metadata: ChunkMetadata::new(max_meta),
             culling: ChunkCulling {
                 max_meta,
+                draw_capacity,
+                requested_draw_capacity: 0,
                 max_draw_indirect_count,
                 warned_draw_cap: false,
                 compute_pipeline,
@@ -374,8 +435,6 @@ impl ChunkRendererCore {
                 fade_enabled: false,
                 last_draw_count: 0,
             },
-        };
-        this.ensure_quad_index_capacity(device, allocator, INITIAL_QUAD_INDEX_QUADS);
-        this
+        }
     }
 }

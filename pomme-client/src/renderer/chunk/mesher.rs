@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use azalea_block::BlockState;
 use azalea_core::position::ChunkSectionPos;
+use bytemuck::Zeroable;
 use pyronyx::vk;
 
-use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, WHITE_TEXTURE};
+use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::section::LocalSection;
-use crate::world::block::model::{BakedModel, Direction, face_positions, face_uvs};
+use crate::world::block::model::{BakedCuboid, BakedModel, Direction, face_positions, face_uvs};
 use crate::world::block::registry::{BlockRegistry, Tint};
 use crate::world::block::{block_id, is_air};
 use crate::world::chunk::ChunkStore;
+
+/// CPU-only expanded vertex used while calculating chunk bounds and by
+/// non-chunk renderers. Chunk mesh uploads contain [`FaceRecord`] values.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ChunkVertex {
@@ -52,17 +55,315 @@ impl ChunkVertex {
 }
 include!("packing_consts.rs");
 
-/// Compact GPU vertex (14 bytes): section-local position quantized to u16 (see
-/// `POS_RANGE`), rebased in the vertex shader via the integer section origin.
-/// `light_tint` is `[u8; 4]` (not `u32`) so the struct packs to 14 bytes with
-/// no alignment padding; byte order matches the old `R8G8B8A8_UNORM` (light,
-/// r,g,b).
+/// One packed u32 face: low 12 bits are the window-local quad ID and the upper
+/// 20 bits are four u5 combined-shade values.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct PackedVertex {
-    pub pos: [u16; 3],
-    pub uv: [u16; 2],
-    pub light_tint: [u8; 4],
+pub struct FaceRecord {
+    pub packed: u32,
+}
+
+impl FaceRecord {
+    pub fn new(quad_id: u16, shades: [u8; 4]) -> Self {
+        assert!(u32::from(quad_id) <= MAX_QUAD_ID);
+        let mut packed = u32::from(quad_id);
+        for (i, shade) in shades.into_iter().enumerate() {
+            packed |= u32::from(shade.min(31)) << (12 + i * 5);
+        }
+        Self { packed }
+    }
+
+    #[cfg(test)]
+    pub fn fields(self) -> (u16, [u8; 4]) {
+        (
+            (self.packed & 0xfff) as u16,
+            std::array::from_fn(|i| ((self.packed >> (12 + i * 5)) & 31) as u8),
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CuboidFaceData {
+    pub positions: [[f32; 4]; 4],
+    pub uvs: [[f32; 4]; 4],
+    /// x=face present, y=apply section tint. Remaining lanes are reserved.
+    pub material: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CuboidData {
+    pub faces: [CuboidFaceData; 6],
+}
+
+#[derive(Clone)]
+pub struct GlobalCuboidTable {
+    pub data: Vec<CuboidData>,
+    ids: HashMap<u32, u16>,
+    missing_id: u16,
+    water_id: u16,
+    lava_id: u16,
+}
+
+impl GlobalCuboidTable {
+    fn id(&self, uid: u32) -> u16 {
+        *self
+            .ids
+            .get(&uid)
+            .expect("baked cuboid missing from global table")
+    }
+}
+
+pub fn build_global_cuboid_table(
+    registry: &crate::world::block::registry::BlockRegistry,
+    uv_map: &AtlasUVMap,
+) -> GlobalCuboidTable {
+    fn intern(
+        data: &mut Vec<CuboidData>,
+        dedup: &mut HashMap<Vec<u8>, u16>,
+        cuboid: CuboidData,
+    ) -> u16 {
+        let key = bytemuck::bytes_of(&cuboid).to_vec();
+        if let Some(&id) = dedup.get(&key) {
+            return id;
+        }
+        let id = u16::try_from(data.len()).expect("global cuboid table exceeds u16 ID space");
+        data.push(cuboid);
+        dedup.insert(key, id);
+        id
+    }
+
+    let mut data = Vec::new();
+    let mut dedup = HashMap::new();
+    let mut ids = HashMap::new();
+    for baked in registry.all_baked_cuboids() {
+        let mut cuboid = CuboidData::zeroed();
+        for face in &baked.faces {
+            let region = uv_map.get_region(&face.texture);
+            let u_span = region.u_max - region.u_min;
+            let v_span = region.v_max - region.v_min;
+            cuboid.faces[face.direction.index()] = CuboidFaceData {
+                positions: std::array::from_fn(|i| {
+                    [
+                        face.positions[i][0],
+                        face.positions[i][1],
+                        face.positions[i][2],
+                        1.0,
+                    ]
+                }),
+                uvs: std::array::from_fn(|i| {
+                    [
+                        region.u_min + face.uvs[i][0] * u_span,
+                        region.v_min + face.uvs[i][1] * v_span,
+                        0.0,
+                        0.0,
+                    ]
+                }),
+                material: [1, u32::from(!matches!(face.tint, Tint::None)), 0, 0],
+            };
+        }
+        let id = intern(&mut data, &mut dedup, cuboid);
+        ids.insert(baked.uid, id);
+    }
+    let mut append_cube = |texture: &str, tinted: bool| {
+        let region = uv_map.get_region(texture);
+        let mut cuboid = CuboidData::zeroed();
+        for direction in CUBE_FACE_DIRS {
+            let (positions, uvs, _) = cube_face_geometry(direction);
+            let u_span = region.u_max - region.u_min;
+            let v_span = region.v_max - region.v_min;
+            cuboid.faces[direction.index()] = CuboidFaceData {
+                positions: positions.map(|p| [p[0], p[1], p[2], 1.0]),
+                uvs: std::array::from_fn(|i| {
+                    [
+                        region.u_min + uvs[i][0] * u_span,
+                        region.v_min + uvs[i][1] * v_span,
+                        0.0,
+                        0.0,
+                    ]
+                }),
+                material: [1, u32::from(tinted), 0, 0],
+            };
+        }
+        intern(&mut data, &mut dedup, cuboid)
+    };
+    let missing_id = append_cube("", false);
+    let water_id = append_cube("water_still", true);
+    let lava_id = append_cube("lava_still", false);
+    GlobalCuboidTable {
+        data,
+        ids,
+        missing_id,
+        water_id,
+        lava_id,
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SectionCuboid {
+    pub packed: u64,
+}
+
+impl SectionCuboid {
+    pub fn new(pos: [u8; 3], global_id: u16, tint: [f32; 3]) -> Self {
+        let r = (tint[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u64;
+        let g = (tint[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u64;
+        let b = (tint[2].clamp(0.0, 1.0) * 127.0 + 0.5) as u64;
+        Self {
+            packed: u64::from(pos[0])
+                | (u64::from(pos[1]) << 4)
+                | (u64::from(pos[2]) << 8)
+                | (u64::from(global_id) << 12)
+                | (r << 28)
+                | (g << 36)
+                | (b << 44),
+        }
+    }
+}
+
+pub type PackedFace = FaceRecord;
+/// Number of cuboids addressable by one face-record window. Integer division
+/// intentionally leaves quad IDs 4092..4095 unused.
+pub const MAX_CUBOIDS_PER_WINDOW: u32 = (1 << 12) / 6;
+pub const MAX_QUAD_ID: u32 = (MAX_CUBOIDS_PER_WINDOW - 1) * 6 + 5;
+
+/// Window formula shared by batching and tests:
+/// `window = cuboid / 682`, `base = window * 682`, `local = cuboid - base`.
+pub const fn cuboid_window(cuboid: u32) -> (u32, u32, u32) {
+    let window = cuboid / MAX_CUBOIDS_PER_WINDOW;
+    let base = window * MAX_CUBOIDS_PER_WINDOW;
+    (window, base, cuboid - base)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FaceBatch {
+    pub face_offset: u32,
+    pub face_count: u32,
+    pub cuboid_base: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FaceBatchCounts {
+    pub regular_solid: u32,
+    pub opaque_fluid: u32,
+    pub cutout: u32,
+    pub translucent_fluid: u32,
+}
+
+impl FaceBatchCounts {
+    pub const fn solid_draws(self) -> u32 {
+        self.regular_solid + self.opaque_fluid
+    }
+}
+
+/// Eight u32 words embedded in the section allocation. `firstInstance` is the
+/// absolute word offset of this record in the mesh buffer.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuFaceBatch {
+    pub face_word_offset: u32,
+    pub face_count: u32,
+    pub cuboid_word_offset: u32,
+    pub fluid_height_word_offset: u32,
+    pub origin: [i32; 3],
+    pub uploaded_ms: u32,
+}
+
+#[derive(Clone, Copy)]
+pub struct SectionMeshLayout {
+    pub regular_faces: usize,
+    pub regular_cuboids: usize,
+    pub fluid_faces: usize,
+    pub fluid_cuboids: usize,
+    pub fluid_heights: usize,
+    pub batches: usize,
+    pub size: usize,
+}
+
+#[cfg(test)]
+mod face_record_tests {
+    use super::*;
+
+    #[test]
+    fn roundtrips_fields() {
+        let f = FaceRecord::new(0xab, [0, 1, 30, 31]);
+        assert_eq!(f.fields(), (0xab, [0, 1, 30, 31]));
+        assert_eq!(size_of::<FaceRecord>(), 4);
+    }
+
+    #[test]
+    fn cuboid_windows_keep_quad_ids_in_twelve_bits() {
+        assert_eq!(MAX_CUBOIDS_PER_WINDOW, 682);
+        assert_eq!(MAX_QUAD_ID, 4091);
+        assert_eq!(cuboid_window(681), (0, 0, 681));
+        assert_eq!(cuboid_window(682), (1, 682, 0));
+        assert_eq!(cuboid_window(683), (1, 682, 1));
+        assert_eq!(cuboid_window(681).2 * 6 + 5, MAX_QUAD_ID);
+    }
+
+    #[test]
+    fn section_cuboid_roundtrips_rgb887() {
+        let c = SectionCuboid::new([15, 7, 3], 0xabcd, [1.0, 128.0 / 255.0, 64.0 / 127.0]);
+        assert_eq!(c.packed & 0xfff, 0x37f);
+        assert_eq!((c.packed >> 12) & 0xffff, 0xabcd);
+        assert_eq!((c.packed >> 28) & 0xff, 255);
+        assert_eq!((c.packed >> 36) & 0xff, 128);
+        assert_eq!((c.packed >> 44) & 0x7f, 64);
+        assert_eq!(c.packed >> 51, 0);
+        assert_eq!(size_of::<SectionCuboid>(), 8);
+        assert_eq!(size_of::<GpuFaceBatch>(), 32);
+    }
+
+    #[test]
+    fn fluid_heights_use_four_nibbles() {
+        assert_eq!(
+            pack_fluid_corner_heights([0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]),
+            0xfa50
+        );
+        assert_eq!(fluid_corner_height([1.0, 0.0, 0.0, 0.0]), 1.0);
+        assert_eq!(fluid_corner_height([-1.0, -1.0, 0.5, -1.0]), 0.5);
+    }
+
+    #[test]
+    fn section_layout_is_one_aligned_non_overlapping_allocation() {
+        let mesh = SectionMeshData {
+            spos: ChunkSectionPos::new(0, 0, 0),
+            relative_si: 0,
+            faces: vec![FaceRecord::new(0, [0; 4]); 3],
+            section_cuboids: vec![SectionCuboid { packed: 0 }; 2],
+            fluid_faces: vec![FaceRecord::new(0, [0; 4]); 5],
+            fluid_cuboids: vec![SectionCuboid { packed: 0 }; 4],
+            fluid_heights: vec![0; 4],
+            batches: vec![FaceBatch {
+                face_offset: 0,
+                face_count: 3,
+                cuboid_base: 0,
+            }],
+            batch_counts: FaceBatchCounts {
+                regular_solid: 1,
+                ..Default::default()
+            },
+            aabb: ChunkAABB::zeroed(),
+            content_gen: 0,
+            upload_epoch: 0,
+            queue_ms: 0.0,
+            mesh_ms: 0.0,
+        };
+        let layout = mesh.layout();
+        assert_eq!(layout.regular_faces, 0);
+        assert_eq!(layout.regular_cuboids % 8, 0);
+        assert_eq!(layout.fluid_cuboids % 8, 0);
+        assert_eq!(layout.batches % 8, 0);
+        assert_eq!(layout.size % 8, 0);
+        assert!(layout.regular_cuboids >= mesh.faces.len() * 4);
+        assert!(layout.fluid_faces >= layout.regular_cuboids + mesh.section_cuboids.len() * 8);
+        assert!(layout.fluid_cuboids >= layout.fluid_faces + mesh.fluid_faces.len() * 4);
+        assert!(layout.fluid_heights >= layout.fluid_cuboids + mesh.fluid_cuboids.len() * 8);
+        assert!(layout.batches >= layout.fluid_heights + mesh.fluid_heights.len() * 4);
+        assert!(layout.size >= layout.batches + size_of::<GpuFaceBatch>());
+    }
 }
 
 #[repr(C)]
@@ -74,37 +375,6 @@ pub struct ChunkAABB {
 
 fn unorm_to_u16(x: f32) -> u16 {
     (x.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
-}
-
-fn quantize_coord(local: f32) -> u16 {
-    unorm_to_u16((local + POS_BIAS) / POS_RANGE)
-}
-
-fn pack_vertex(v: &ChunkVertex) -> PackedVertex {
-    PackedVertex {
-        pos: [
-            quantize_coord(v.position[0]),
-            quantize_coord(v.position[1]),
-            quantize_coord(v.position[2]),
-        ],
-        uv: v.tex_coords,
-        light_tint: v.light_tint.to_le_bytes(),
-    }
-}
-
-fn section_aabb<'a>(verts: impl Iterator<Item = &'a ChunkVertex>) -> ChunkAABB {
-    let mut mn = [f32::MAX; 3];
-    let mut mx = [f32::MIN; 3];
-    for v in verts {
-        for k in 0..3 {
-            mn[k] = mn[k].min(v.position[k]);
-            mx[k] = mx[k].max(v.position[k]);
-        }
-    }
-    ChunkAABB {
-        min: [mn[0], mn[1], mn[2], 0.0],
-        max: [mx[0], mx[1], mx[2], 0.0],
-    }
 }
 
 pub fn pack_uv(u: f32, v: f32) -> [u16; 2] {
@@ -129,36 +399,23 @@ pub const fn pack_tint_shifted(rgb: [f32; 3]) -> u32 {
 }
 pub const PACKED_WHITE_SHIFTED: u32 = pack_tint_shifted([1.0, 1.0, 1.0]);
 
-/// Fold a sprite's average color into a packed tint's lanes for flat-color
-/// LOD faces. The shader raises tint to the 2.2 power while sampled texels
-/// pass through linearly, so the average is inverse-gamma-encoded here to
-/// land back on its true value — otherwise flat faces render ~half as bright
-/// as their textured neighbors.
-fn mul_tint(packed: u32, rgb: [f32; 3]) -> u32 {
-    let ch = |shift: u32| ((packed >> shift) & 0xFF) as f32 / 255.0;
-    let enc = |c: f32| c.powf(1.0 / 2.2);
-    pack_tint_shifted([
-        ch(8) * enc(rgb[0]),
-        ch(16) * enc(rgb[1]),
-        ch(24) * enc(rgb[2]),
-    ])
-}
-/// One 16³ section's geometry as a pure quad list (4 vertices per quad, no
-/// indices): vertices are grouped `[solid quads][cutout quads][water quads]`
-/// so each pass draws a contiguous vertex range against the shared static
-/// quad index buffer (`0,1,2,2,3,0` per quad, `vertex_offset` rebases).
+/// One 16³ section's packed faces, section cuboids, fluid heights, and batch
+/// descriptors. All subranges are uploaded through one 8-byte-aligned pool
+/// allocation and rendered as non-indexed six-vertex faces.
 pub struct SectionMeshData {
     pub spos: ChunkSectionPos,
     pub relative_si: i32,
-    /// Length is `4 * (solid + cutout + water)` quads.
-    pub vertices: Vec<PackedVertex>,
+    pub faces: Vec<PackedFace>,
+    pub section_cuboids: Vec<SectionCuboid>,
+    pub fluid_faces: Vec<PackedFace>,
+    pub fluid_cuboids: Vec<SectionCuboid>,
+    /// Fluid-only parallel array. Each u32 stores four u4 corner heights in
+    /// bits 0..15; the upper half is reserved.
+    pub fluid_heights: Vec<u32>,
+    pub batches: Vec<FaceBatch>,
+    pub batch_counts: FaceBatchCounts,
     /// Section-local bounds of the un-quantized vertices, for culling.
     pub aabb: ChunkAABB,
-    /// Quads per pass, in slice order: solid (no-discard), cutout (discard),
-    /// then translucent water (separate blended pass).
-    pub solid_quads: u32,
-    pub cutout_quads: u32,
-    pub water_quads: u32,
     /// Content generation this mesh was built from (see
     /// `GameState::content_gen`). Lets the drain drop a stale result whose
     /// column has since been edited.
@@ -175,41 +432,103 @@ pub struct SectionMeshData {
 }
 impl SectionMeshData {
     pub fn is_empty(&self) -> bool {
-        self.vertices.is_empty()
+        self.faces.is_empty() && self.fluid_faces.is_empty()
     }
-}
 
-/// Per-section meshing accumulator: one vertex list per pass, each holding
-/// whole quads (4 vertices). Finalized into a [`SectionMeshData`] by packing
-/// the three lists back to back.
-#[derive(Default)]
-struct MeshSink {
-    solid: Vec<ChunkVertex>,
-    cutout: Vec<ChunkVertex>,
-    water: Vec<ChunkVertex>,
-}
-
-impl MeshSink {
-    /// Vertex list a quad goes in: solid sprites render in the no-discard
-    /// pass, everything else in the discard (cutout) pass.
-    fn pass_for(&mut self, opaque: bool) -> &mut Vec<ChunkVertex> {
-        if opaque {
-            &mut self.solid
-        } else {
-            &mut self.cutout
+    pub fn layout(&self) -> SectionMeshLayout {
+        const fn align(value: usize, alignment: usize) -> usize {
+            (value + alignment - 1) & !(alignment - 1)
+        }
+        let regular_faces = 0;
+        let regular_cuboids = align(self.faces.len() * 4, 8);
+        let fluid_faces = regular_cuboids + self.section_cuboids.len() * 8;
+        let fluid_cuboids = align(fluid_faces + self.fluid_faces.len() * 4, 8);
+        let fluid_heights = fluid_cuboids + self.fluid_cuboids.len() * 8;
+        let batches = align(fluid_heights + self.fluid_heights.len() * 4, 8);
+        let size = align(batches + self.batches.len() * size_of::<GpuFaceBatch>(), 8);
+        SectionMeshLayout {
+            regular_faces,
+            regular_cuboids,
+            fluid_faces,
+            fluid_cuboids,
+            fluid_heights,
+            batches,
+            size,
         }
     }
 }
 
-/// Append one quad's vertices. When the smooth-lighting diagonal flip fires
-/// (vanilla's anisotropy fix), the quad is rotated by one vertex instead of
-/// re-indexed, so the shared `0,1,2,2,3,0` index pattern triangulates on the
-/// other diagonal; rotation preserves winding.
-fn push_quad(dst: &mut Vec<ChunkVertex>, quad: [ChunkVertex; 4], lights: [f32; 4]) {
-    if lights[0] + lights[2] > lights[1] + lights[3] {
-        dst.extend_from_slice(&[quad[1], quad[2], quad[3], quad[0]]);
-    } else {
-        dst.extend_from_slice(&quad);
+/// Per-section meshing accumulator. Expanded four-corner quads exist only long
+/// enough to calculate bounds; final GPU data stores one u32 per face.
+struct MeshSink {
+    solid_faces: Vec<PendingFace>,
+    cutout_faces: Vec<PendingFace>,
+    opaque_fluid_faces: Vec<PendingFace>,
+    translucent_fluid_faces: Vec<PendingFace>,
+    cuboids: Vec<SectionCuboid>,
+    fluid_cuboids: Vec<SectionCuboid>,
+    fluid_heights: Vec<u32>,
+    aabb_min: [f32; 3],
+    aabb_max: [f32; 3],
+}
+
+impl Default for MeshSink {
+    fn default() -> Self {
+        Self {
+            solid_faces: Vec::new(),
+            cutout_faces: Vec::new(),
+            opaque_fluid_faces: Vec::new(),
+            translucent_fluid_faces: Vec::new(),
+            cuboids: Vec::new(),
+            fluid_cuboids: Vec::new(),
+            fluid_heights: Vec::new(),
+            aabb_min: [f32::MAX; 3],
+            aabb_max: [f32::MIN; 3],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PendingFace {
+    cuboid: u32,
+    direction: Direction,
+    shades: [u8; 4],
+}
+
+#[derive(Clone, Copy)]
+enum MeshClass {
+    Solid,
+    OpaqueFluid,
+    Cutout,
+    TranslucentFluid,
+}
+
+impl MeshSink {
+    fn add_regular_cuboid(&mut self, cuboid: SectionCuboid) -> u32 {
+        let index = self.cuboids.len() as u32;
+        self.cuboids.push(cuboid);
+        index
+    }
+    fn add_fluid_cuboid(&mut self, cuboid: SectionCuboid, heights: u32) -> u32 {
+        let index = self.fluid_cuboids.len() as u32;
+        self.fluid_cuboids.push(cuboid);
+        self.fluid_heights.push(heights);
+        index
+    }
+    fn push(&mut self, class: MeshClass, quad: [ChunkVertex; 4], face: PendingFace) {
+        for vertex in quad {
+            for axis in 0..3 {
+                self.aabb_min[axis] = self.aabb_min[axis].min(vertex.position[axis]);
+                self.aabb_max[axis] = self.aabb_max[axis].max(vertex.position[axis]);
+            }
+        }
+        let faces = match class {
+            MeshClass::Solid => &mut self.solid_faces,
+            MeshClass::OpaqueFluid => &mut self.opaque_fluid_faces,
+            MeshClass::Cutout => &mut self.cutout_faces,
+            MeshClass::TranslucentFluid => &mut self.translucent_fluid_faces,
+        };
+        faces.push(face);
     }
 }
 #[derive(Clone, Copy, Debug, Default)]
@@ -227,6 +546,7 @@ pub struct BiomeClimate {
     pub grass_color_modifier: GrassColorModifier,
     pub foliage_color_override: Option<[f32; 3]>,
     pub dry_foliage_color_override: Option<[f32; 3]>,
+    pub water_color: [f32; 3],
 }
 impl Default for BiomeClimate {
     fn default() -> Self {
@@ -237,6 +557,7 @@ impl Default for BiomeClimate {
             grass_color_modifier: GrassColorModifier::None,
             foliage_color_override: None,
             dry_foliage_color_override: None,
+            water_color: [0.247, 0.463, 0.894],
         }
     }
 }
@@ -493,6 +814,7 @@ pub(crate) struct SectionStoreSnapshot {
     /// Section position, so section-local sample coords convert to world for
     /// spatial lookups (the swamp grass noise).
     pub(crate) spos: ChunkSectionPos,
+    pub(crate) global_cuboids: Arc<GlobalCuboidTable>,
 }
 impl SectionStoreSnapshot {
     fn climate_at(&self, x: i32, y: i32, z: i32) -> BiomeClimate {
@@ -527,6 +849,9 @@ impl SectionStoreSnapshot {
                 .lookup(climate.temperature, climate.downfall)
         })
     }
+    fn water_color_at(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        self.climate_at(x, y, z).water_color
+    }
     fn grass_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
         self.blend_color(x, y, z, Self::grass_color_at)
     }
@@ -535,6 +860,9 @@ impl SectionStoreSnapshot {
     }
     fn dry_foliage_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
         self.blend_color(x, y, z, Self::dry_foliage_color_at)
+    }
+    fn water_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        self.blend_color(x, y, z, Self::water_color_at)
     }
     fn blend_color(
         &self,
@@ -559,7 +887,6 @@ pub(crate) fn mesh_section(
     spos: ChunkSectionPos,
     registry: &BlockRegistry,
     uv_map: &AtlasUVMap,
-    lod: u32,
     content_gen: u64,
     upload_epoch: u64,
 ) -> SectionMeshData {
@@ -567,11 +894,6 @@ pub(crate) fn mesh_section(
     let mut sink = MeshSink::default();
     let mut logged_missing: std::collections::HashSet<&'static str> =
         std::collections::HashSet::new();
-    let step = 1i32 << lod;
-    if lod > 0 {
-        mesh_lod_cells(&mut sink, snapshot, registry, uv_map, step);
-        return finalize_section(sink, spos, relative_si, content_gen, upload_epoch);
-    }
     for local_z in 0..16 {
         for local_x in 0..16 {
             for local_y in 0..16 {
@@ -593,14 +915,9 @@ pub(crate) fn mesh_section(
                         &mut sink, block_pos, baked, snapshot, registry, uv_map, local_x, local_y,
                         local_z,
                     );
-                } else if let Some(quads) = registry.get_multipart_quads(state) {
-                    emit_multipart(
-                        &mut sink, block_pos, quads, snapshot, registry, uv_map, local_x, local_y,
-                        local_z,
-                    );
-                } else if let Some(textures) = registry.get_textures(state) {
-                    emit_cube_faces(
-                        &mut sink, block_pos, textures, snapshot, registry, uv_map, local_x,
+                } else if let Some(cuboids) = registry.get_multipart_cuboids(state) {
+                    emit_baked_cuboids(
+                        &mut sink, block_pos, cuboids, snapshot, registry, uv_map, local_x,
                         local_y, local_z,
                     );
                 } else {
@@ -619,9 +936,8 @@ pub(crate) fn mesh_section(
     finalize_section(sink, spos, relative_si, content_gen, upload_epoch)
 }
 
-/// Pack the pass groups back to back (solid, cutout, water — recording the
-/// quad counts), take the section-local AABB from the float positions, then
-/// quantize.
+/// Pack descriptors in the fixed ABI order: regular solid, opaque fluid,
+/// cutout, translucent fluid. The ordering replaces a stored per-batch tag.
 fn finalize_section(
     sink: MeshSink,
     spos: ChunkSectionPos,
@@ -629,22 +945,95 @@ fn finalize_section(
     content_gen: u64,
     upload_epoch: u64,
 ) -> SectionMeshData {
-    let all_verts = || {
-        sink.solid
-            .iter()
-            .chain(sink.cutout.iter())
-            .chain(sink.water.iter())
+    let face_count = sink.solid_faces.len()
+        + sink.opaque_fluid_faces.len()
+        + sink.cutout_faces.len()
+        + sink.translucent_fluid_faces.len();
+    let aabb = if face_count == 0 {
+        ChunkAABB::zeroed()
+    } else {
+        ChunkAABB {
+            min: [sink.aabb_min[0], sink.aabb_min[1], sink.aabb_min[2], 0.0],
+            max: [sink.aabb_max[0], sink.aabb_max[1], sink.aabb_max[2], 0.0],
+        }
     };
-    let aabb = section_aabb(all_verts());
-    let vertices: Vec<PackedVertex> = all_verts().map(pack_vertex).collect();
+    fn append_windows(
+        out: &mut Vec<FaceRecord>,
+        batches: &mut Vec<FaceBatch>,
+        faces: &[PendingFace],
+        cuboid_count: usize,
+    ) {
+        for base in (0..cuboid_count as u32).step_by(MAX_CUBOIDS_PER_WINDOW as usize) {
+            let end = (base + MAX_CUBOIDS_PER_WINDOW).min(cuboid_count as u32);
+            let face_offset = out.len() as u32;
+            for face in faces.iter().filter(|f| (base..end).contains(&f.cuboid)) {
+                let (_, face_base, local) = cuboid_window(face.cuboid);
+                debug_assert_eq!(face_base, base);
+                let quad_id = local * 6 + face.direction.index() as u32;
+                out.push(FaceRecord::new(quad_id as u16, face.shades));
+            }
+            let face_count = out.len() as u32 - face_offset;
+            if face_count != 0 {
+                batches.push(FaceBatch {
+                    face_offset,
+                    face_count,
+                    cuboid_base: base,
+                });
+            }
+        }
+    }
+    let mut faces = Vec::with_capacity(sink.solid_faces.len() + sink.cutout_faces.len());
+    let mut fluid_faces =
+        Vec::with_capacity(sink.opaque_fluid_faces.len() + sink.translucent_fluid_faces.len());
+    let mut batches = Vec::new();
+    let batch_start = batches.len();
+    append_windows(
+        &mut faces,
+        &mut batches,
+        &sink.solid_faces,
+        sink.cuboids.len(),
+    );
+    let regular_solid = (batches.len() - batch_start) as u32;
+    let batch_start = batches.len();
+    append_windows(
+        &mut fluid_faces,
+        &mut batches,
+        &sink.opaque_fluid_faces,
+        sink.fluid_cuboids.len(),
+    );
+    let opaque_fluid = (batches.len() - batch_start) as u32;
+    let batch_start = batches.len();
+    append_windows(
+        &mut faces,
+        &mut batches,
+        &sink.cutout_faces,
+        sink.cuboids.len(),
+    );
+    let cutout = (batches.len() - batch_start) as u32;
+    let batch_start = batches.len();
+    append_windows(
+        &mut fluid_faces,
+        &mut batches,
+        &sink.translucent_fluid_faces,
+        sink.fluid_cuboids.len(),
+    );
+    let translucent_fluid = (batches.len() - batch_start) as u32;
     SectionMeshData {
         spos,
         relative_si,
-        vertices,
+        faces,
+        section_cuboids: sink.cuboids,
+        fluid_faces,
+        fluid_cuboids: sink.fluid_cuboids,
+        fluid_heights: sink.fluid_heights,
+        batches,
+        batch_counts: FaceBatchCounts {
+            regular_solid,
+            opaque_fluid,
+            cutout,
+            translucent_fluid,
+        },
         aabb,
-        solid_quads: (sink.solid.len() / 4) as u32,
-        cutout_quads: (sink.cutout.len() / 4) as u32,
-        water_quads: (sink.water.len() / 4) as u32,
         content_gen,
         upload_epoch,
         queue_ms: 0.0,
@@ -663,45 +1052,24 @@ fn emit_baked_model(
     ly: i32,
     lz: i32,
 ) {
-    for quad in &model.quads {
-        if let Some(cullface) = quad.cullface {
-            let offset = cullface.offset();
-            let neighbor =
-                snapshot
-                    .section
-                    .get_block_state(lx + offset[0], ly + offset[1], lz + offset[2]);
-            if registry.occludes_neighbor(neighbor) {
-                continue;
-            }
-        }
-        let region = uv_map.get_region(&quad.texture);
-        let tint = tint_color(
-            quad.tint,
-            snapshot.grass_tint(lx, ly, lz),
-            snapshot.foliage_tint(lx, ly, lz),
-            snapshot.dry_foliage_tint(lx, ly, lz),
-        );
-        let lights = if let Some(dir) = quad.cullface {
-            compute_face_ao(snapshot, registry, lx, ly, lz, dir)
-        } else {
-            [quad.shade_light; 4]
-        };
-        emit_face(
-            sink,
-            block_pos,
-            &quad.positions,
-            &quad.uvs,
-            lights,
-            region,
-            tint,
-        );
-    }
+    emit_baked_cuboids(
+        sink,
+        block_pos,
+        &model.cuboids,
+        snapshot,
+        registry,
+        uv_map,
+        lx,
+        ly,
+        lz,
+    );
 }
+
 #[allow(clippy::too_many_arguments)]
-fn emit_cube_faces(
+fn emit_baked_cuboids(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
-    textures: &crate::world::block::registry::FaceTextures,
+    cuboids: &[BakedCuboid],
     snapshot: &SectionStoreSnapshot,
     registry: &BlockRegistry,
     uv_map: &AtlasUVMap,
@@ -709,62 +1077,65 @@ fn emit_cube_faces(
     ly: i32,
     lz: i32,
 ) {
-    let tint = tint_color(
-        textures.tint,
-        snapshot.grass_tint(lx, ly, lz),
-        snapshot.foliage_tint(lx, ly, lz),
-        snapshot.dry_foliage_tint(lx, ly, lz),
-    );
-    for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
-        let offset = dir.offset();
-        let neighbor =
-            snapshot
-                .section
-                .get_block_state(lx + offset[0], ly + offset[1], lz + offset[2]);
-        if registry.occludes_neighbor(neighbor) {
+    for baked in cuboids {
+        let visible: Vec<_> = baked
+            .faces
+            .iter()
+            .filter(|quad| {
+                if let Some(cullface) = quad.cullface {
+                    let offset = cullface.offset();
+                    let neighbor = snapshot.section.get_block_state(
+                        lx + offset[0],
+                        ly + offset[1],
+                        lz + offset[2],
+                    );
+                    !registry.occludes_neighbor(neighbor)
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if visible.is_empty() {
             continue;
         }
-        let face_tex = match i {
-            0 => &textures.top,
-            1 => &textures.bottom,
-            2 => &textures.north,
-            3 => &textures.south,
-            4 => &textures.east,
-            _ => &textures.west,
-        };
-        let region = uv_map.get_region(face_tex);
-        let (positions, uvs, _) = cube_face_geometry(*dir);
-        let lights = compute_face_ao(snapshot, registry, lx, ly, lz, *dir);
-        let is_side = i >= 2;
-        if let Some(overlay) = textures.side_overlay.as_deref().filter(|_| is_side) {
+        let tint_kind = visible
+            .iter()
+            .find_map(|q| (!matches!(q.tint, Tint::None)).then_some(q.tint))
+            .unwrap_or(Tint::None);
+        let packed_tint = tint_color(
+            tint_kind,
+            snapshot.grass_tint(lx, ly, lz),
+            snapshot.foliage_tint(lx, ly, lz),
+            snapshot.dry_foliage_tint(lx, ly, lz),
+        );
+        let lanes = packed_tint.to_le_bytes();
+        let cuboid = sink.add_regular_cuboid(SectionCuboid::new(
+            [lx as u8, ly as u8, lz as u8],
+            snapshot.global_cuboids.id(baked.uid),
+            [
+                lanes[1] as f32 / 255.0,
+                lanes[2] as f32 / 255.0,
+                lanes[3] as f32 / 255.0,
+            ],
+        ));
+        for quad in visible {
+            let region = uv_map.get_region(&quad.texture);
+            let lights = if let Some(dir) = quad.cullface {
+                compute_face_ao(snapshot, registry, lx, ly, lz, dir)
+            } else {
+                [quad.shade_light; 4]
+            };
             emit_face(
                 sink,
+                cuboid,
+                quad.direction,
                 block_pos,
-                &positions,
-                &uvs,
+                &quad.positions,
+                &quad.uvs,
                 lights,
                 region,
                 PACKED_WHITE_SHIFTED,
             );
-            let overlay_region = uv_map.get_region(overlay);
-            emit_face(
-                sink,
-                block_pos,
-                &positions,
-                &uvs,
-                lights,
-                overlay_region,
-                tint,
-            );
-        } else {
-            let is_tinted =
-                !matches!(textures.tint, Tint::None) && (textures.side_overlay.is_none() || i == 0);
-            let face_tint = if is_tinted {
-                tint
-            } else {
-                PACKED_WHITE_SHIFTED
-            };
-            emit_face(sink, block_pos, &positions, &uvs, lights, region, face_tint);
         }
     }
 }
@@ -789,50 +1160,77 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
         _ => BlockKind::Solid,
     }
 }
-// TODO: biome-based water color
-// TODO: per-corner height averaging for smooth water surfaces
 // TODO: flowing water texture (water_flow) with direction-based rotation
-// TODO: per-level height for flowing water (level / 9.0 per corner)
-const FLUID_MAX_HEIGHT: f32 = 8.0 / 9.0;
-#[allow(clippy::too_many_arguments)]
-fn block_face_tex_tint(
-    state: azalea_block::BlockState,
-    dir: Direction,
-    uv_map: &AtlasUVMap,
+
+fn fluid_sample_height(
     snapshot: &SectionStoreSnapshot,
     registry: &BlockRegistry,
-    lx: i32,
-    ly: i32,
-    lz: i32,
-) -> (AtlasRegion, u32) {
-    match classify_block(state) {
-        BlockKind::Water => (
-            uv_map.get_region("water_still"),
-            pack_tint_shifted([0.247, 0.463, 0.894]),
-        ),
-        BlockKind::Lava => (uv_map.get_region("lava_still"), PACKED_WHITE_SHIFTED),
-        _ => {
-            if let Some(textures) = registry.get_textures(state) {
-                let tint = tint_color(
-                    textures.tint,
-                    snapshot.grass_tint(lx, ly, lz),
-                    snapshot.foliage_tint(lx, ly, lz),
-                    snapshot.dry_foliage_tint(lx, ly, lz),
-                );
-                let tex_name = match dir {
-                    Direction::Up => &textures.top,
-                    Direction::Down => &textures.bottom,
-                    Direction::North => &textures.north,
-                    Direction::South => &textures.south,
-                    Direction::East => &textures.east,
-                    Direction::West => &textures.west,
-                };
-                (uv_map.get_region(tex_name), tint)
-            } else {
-                (uv_map.get_region(""), MISSING_TINT)
-            }
+    kind: crate::world::block::FluidKind,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> f32 {
+    let state = snapshot.section.get_block_state(x, y, z);
+    let fluid = crate::world::block::fluid(state);
+    if fluid.kind == kind {
+        let above = crate::world::block::fluid(snapshot.section.get_block_state(x, y + 1, z));
+        if above.kind == kind || fluid.falling {
+            1.0
+        } else {
+            f32::from(fluid.amount) / 9.0
         }
+    } else if registry.is_opaque_full_cube(state) {
+        -1.0
+    } else {
+        0.0
     }
+}
+
+/// Vanilla-style weighted corner height. Nearly-full samples receive ten
+/// votes so a source surface stays flat next to a shallow flowing sample;
+/// solid samples (-1) do not participate.
+fn fluid_corner_height(samples: [f32; 4]) -> f32 {
+    if samples.iter().any(|&height| height >= 1.0) {
+        return 1.0;
+    }
+    let mut total = 0.0;
+    let mut weight = 0.0;
+    for height in samples {
+        if height < 0.0 {
+            continue;
+        }
+        let sample_weight = if height >= 0.8 { 10.0 } else { 1.0 };
+        total += height * sample_weight;
+        weight += sample_weight;
+    }
+    if weight == 0.0 { 0.0 } else { total / weight }
+}
+
+fn fluid_corner_heights(
+    snapshot: &SectionStoreSnapshot,
+    registry: &BlockRegistry,
+    kind: crate::world::block::FluidKind,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> [f32; 4] {
+    let height = |dx, dz| fluid_sample_height(snapshot, registry, kind, x + dx, y, z + dz);
+    let center = height(0, 0);
+    [
+        fluid_corner_height([center, height(-1, 0), height(0, -1), height(-1, -1)]),
+        fluid_corner_height([center, height(-1, 0), height(0, 1), height(-1, 1)]),
+        fluid_corner_height([center, height(1, 0), height(0, 1), height(1, 1)]),
+        fluid_corner_height([center, height(1, 0), height(0, -1), height(1, -1)]),
+    ]
+}
+
+fn pack_fluid_corner_heights(heights: [f32; 4]) -> u32 {
+    heights
+        .into_iter()
+        .enumerate()
+        .fold(0u32, |packed, (i, height)| {
+            packed | (((height.clamp(0.0, 1.0) * 15.0 + 0.5) as u32) << (i * 4))
+        })
 }
 #[allow(clippy::too_many_arguments)]
 fn emit_fluid(
@@ -847,14 +1245,43 @@ fn emit_fluid(
     ly: i32,
     lz: i32,
 ) {
-    let (region, tint) =
-        block_face_tex_tint(state, Direction::Up, uv_map, snapshot, registry, lx, ly, lz);
-
-    // Water is translucent (separate blended pass); lava is opaque.
-    let dst = if matches!(kind, BlockKind::Water) {
-        &mut sink.water
+    let (region, tint) = if matches!(kind, BlockKind::Water) {
+        (
+            uv_map.get_region("water_still"),
+            pack_tint_shifted(snapshot.water_tint(lx, ly, lz)),
+        )
     } else {
-        &mut sink.solid
+        (uv_map.get_region("lava_still"), PACKED_WHITE_SHIFTED)
+    };
+
+    let global_id = if matches!(kind, BlockKind::Water) {
+        snapshot.global_cuboids.water_id
+    } else {
+        snapshot.global_cuboids.lava_id
+    };
+    let fluid_kind = crate::world::block::fluid(state).kind;
+    let heights = fluid_corner_heights(snapshot, registry, fluid_kind, lx, ly, lz);
+    let lanes = tint.to_le_bytes();
+    let packed_heights = pack_fluid_corner_heights(heights);
+    let render_heights: [f32; 4] =
+        std::array::from_fn(|i| ((packed_heights >> (i * 4)) & 0xf) as f32 / 15.0);
+    let cuboid = sink.add_fluid_cuboid(
+        SectionCuboid::new(
+            [lx as u8, ly as u8, lz as u8],
+            global_id,
+            [
+                lanes[1] as f32 / 255.0,
+                lanes[2] as f32 / 255.0,
+                lanes[3] as f32 / 255.0,
+            ],
+        ),
+        packed_heights,
+    );
+
+    let class = if matches!(kind, BlockKind::Water) {
+        MeshClass::TranslucentFluid
+    } else {
+        MeshClass::OpaqueFluid
     };
 
     for dir in &CUBE_FACE_DIRS {
@@ -863,284 +1290,28 @@ fn emit_fluid(
             snapshot
                 .section
                 .get_block_state(lx + offset[0], ly + offset[1], lz + offset[2]);
-        if matches!(classify_block(neighbor), BlockKind::Water | BlockKind::Lava)
+        if crate::world::block::fluid(neighbor).kind == fluid_kind
             || registry.occludes_neighbor(neighbor)
         {
             continue;
         }
         let (mut positions, uvs, light) = cube_face_geometry(*dir);
-        if matches!(dir, Direction::Up) {
-            // A water/lava block above would have culled this face already, so
-            // the surface always sits at the lowered fluid height.
-            for p in &mut positions {
-                p[1] = FLUID_MAX_HEIGHT;
-            }
-            emit_quad_into(dst, block_pos, &positions, &uvs, [light; 4], region, tint);
-            // Vanilla's backward up-face: the surface seen from below (underwater
-            // looking up). Reversed winding so it survives back-face culling.
-            let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
-            let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
-            emit_quad_into(
-                dst,
-                block_pos,
-                &rev_positions,
-                &rev_uvs,
-                [light; 4],
-                region,
-                tint,
-            );
-            continue;
-        }
-        emit_quad_into(dst, block_pos, &positions, &uvs, [light; 4], region, tint);
-    }
-}
-#[allow(clippy::too_many_arguments)]
-fn emit_multipart(
-    sink: &mut MeshSink,
-    block_pos: [f32; 3],
-    quads: &[crate::world::block::model::BakedQuad],
-    snapshot: &SectionStoreSnapshot,
-    registry: &BlockRegistry,
-    uv_map: &AtlasUVMap,
-    lx: i32,
-    ly: i32,
-    lz: i32,
-) {
-    for quad in quads {
-        if let Some(cullface) = quad.cullface {
-            let offset = cullface.offset();
-            let neighbor =
-                snapshot
-                    .section
-                    .get_block_state(lx + offset[0], ly + offset[1], lz + offset[2]);
-            if registry.occludes_neighbor(neighbor) {
-                continue;
-            }
-        }
-        let region = uv_map.get_region(&quad.texture);
-        let tint = tint_color(
-            quad.tint,
-            snapshot.grass_tint(lx, ly, lz),
-            snapshot.foliage_tint(lx, ly, lz),
-            snapshot.dry_foliage_tint(lx, ly, lz),
-        );
-        emit_face(
-            sink,
-            block_pos,
-            &quad.positions,
-            &quad.uvs,
-            [quad.shade_light; 4],
-            region,
-            tint,
-        );
-    }
-}
-/// What occupies a LOD cell's neighbor, deciding face culling: drawn LOD
-/// cubes are full-size and opaque, so a `Solid` neighbor fully covers the
-/// shared face. Vertical neighbors past the section resolve through the
-/// padding (same column, same LOD, so a covered face really is covered);
-/// horizontal ones stay `Outside` and keep the face — the adjacent column may
-/// render at a different LOD (or full detail), where a single-block sample
-/// can't prove coverage and overdraw beats holes.
-#[derive(Clone, Copy, PartialEq)]
-enum LodNeighbor {
-    Empty,
-    Solid,
-    Fluid,
-    Outside,
-}
-
-/// LOD sections render one cube per step³ cell, colored by the cell's
-/// *dominant* block: aggregate sampling (any non-air occupies, most frequent
-/// state wins), so thin features neither vanish nor shimmer — the DH/Voxy
-/// downsampling model.
-fn mesh_lod_cells(
-    sink: &mut MeshSink,
-    snapshot: &SectionStoreSnapshot,
-    registry: &BlockRegistry,
-    uv_map: &AtlasUVMap,
-    step: i32,
-) {
-    let cells = (16 / step) as usize;
-    let cell_at = |cx: usize, cy: usize, cz: usize| (cy * cells + cz) * cells + cx;
-    let mut grid: Vec<Option<BlockState>> = vec![None; cells * cells * cells];
-    let mut surface: Vec<(BlockState, u8)> = Vec::new();
-    let mut all: Vec<(BlockState, u8)> = Vec::new();
-    fn vote(counts: &mut Vec<(BlockState, u8)>, state: BlockState) {
-        match counts.iter_mut().find(|(s, _)| *s == state) {
-            Some((_, n)) => *n += 1,
-            None => counts.push((state, 1)),
-        }
-    }
-    fn dominant(counts: &[(BlockState, u8)]) -> Option<BlockState> {
-        counts.iter().max_by_key(|&&(_, n)| n).map(|&(s, _)| s)
-    }
-    for cy in 0..cells {
-        for cz in 0..cells {
-            for cx in 0..cells {
-                surface.clear();
-                all.clear();
-                // The surface vote counts each XZ column's topmost block when
-                // air sits directly above it — the block actually seen from
-                // above — so a one-block grass skin over dirt reads as grass,
-                // not the dirt that outnumbers it. Fully buried cells (side or
-                // underside exposure only) fall back to the all-blocks vote.
-                let ly_base = cy as i32 * step;
-                for oz in 0..step {
-                    for ox in 0..step {
-                        let lx = cx as i32 * step + ox;
-                        let lz = cz as i32 * step + oz;
-                        let mut top: Option<(BlockState, i32)> = None;
-                        for oy in 0..step {
-                            let state = snapshot.section.get_block_state(lx, ly_base + oy, lz);
-                            if matches!(classify_block(state), BlockKind::Air) {
-                                continue;
-                            }
-                            vote(&mut all, state);
-                            top = Some((state, oy));
-                        }
-                        if let Some((state, top_oy)) = top {
-                            // The topmost block has air above it by
-                            // construction unless it sits at the cell
-                            // ceiling, where the row above (section padding
-                            // at worst) decides.
-                            let exposed = top_oy < step - 1
-                                || matches!(
-                                    classify_block(snapshot.section.get_block_state(
-                                        lx,
-                                        ly_base + step,
-                                        lz
-                                    )),
-                                    BlockKind::Air
-                                );
-                            if exposed {
-                                vote(&mut surface, state);
-                            }
-                        }
-                    }
-                }
-                grid[cell_at(cx, cy, cz)] = dominant(&surface).or_else(|| dominant(&all));
-            }
-        }
-    }
-
-    let classify_neighbor = |state: BlockState, full_cover: bool| -> LodNeighbor {
-        match classify_block(state) {
-            BlockKind::Air => LodNeighbor::Empty,
-            BlockKind::Water | BlockKind::Lava => LodNeighbor::Fluid,
-            BlockKind::Solid if full_cover => LodNeighbor::Solid,
-            BlockKind::Solid => LodNeighbor::Empty,
-        }
-    };
-    let neighbor_of = |cx: i32, cy: i32, cz: i32| -> LodNeighbor {
-        let range = 0..cells as i32;
-        if !range.contains(&cy) {
-            // Vertical crossings resolve through the section padding: sample
-            // the block just past the shared face at the cell's base corner.
-            // The section above/below is the same column, so it meshes at the
-            // same LOD and any occupied cell there draws a full cube.
-            let py = if cy < 0 { -1 } else { 16 };
-            let state = snapshot.section.get_block_state(cx * step, py, cz * step);
-            return classify_neighbor(state, registry.is_opaque_full_cube(state));
-        }
-        if !range.contains(&cx) || !range.contains(&cz) {
-            return LodNeighbor::Outside;
-        }
-        match grid[cell_at(cx as usize, cy as usize, cz as usize)] {
-            None => LodNeighbor::Empty,
-            Some(s) if matches!(classify_block(s), BlockKind::Water | BlockKind::Lava) => {
-                LodNeighbor::Fluid
-            }
-            Some(_) => LodNeighbor::Solid,
-        }
-    };
-
-    for cy in 0..cells {
-        for cz in 0..cells {
-            for cx in 0..cells {
-                let Some(state) = grid[cell_at(cx, cy, cz)] else {
-                    continue;
+        for p in &mut positions {
+            if p[1] > 0.5 {
+                let high_x = p[0] >= 0.5;
+                let high_z = p[2] >= 0.5;
+                let corner = if high_x {
+                    if high_z { 2 } else { 3 }
+                } else if high_z {
+                    1
+                } else {
+                    0
                 };
-                let neighbor = |dir: Direction| {
-                    let o = dir.offset();
-                    neighbor_of(cx as i32 + o[0], cy as i32 + o[1], cz as i32 + o[2])
-                };
-                emit_lod_cube(
-                    sink,
-                    state,
-                    snapshot,
-                    registry,
-                    uv_map,
-                    [cx as i32 * step, cy as i32 * step, cz as i32 * step],
-                    step,
-                    neighbor,
-                );
+                p[1] = render_heights[corner];
             }
         }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_lod_cube(
-    sink: &mut MeshSink,
-    state: azalea_block::BlockState,
-    snapshot: &SectionStoreSnapshot,
-    registry: &BlockRegistry,
-    uv_map: &AtlasUVMap,
-    cell_base: [i32; 3],
-    step: i32,
-    neighbor: impl Fn(Direction) -> LodNeighbor,
-) {
-    let [lx, ly, lz] = cell_base;
-    let is_fluid = matches!(classify_block(state), BlockKind::Water | BlockKind::Lava);
-    // A lowered fluid surface only where nothing fluid sits above, or a seam
-    // shows at the LOD border.
-    let fluid_top = if is_fluid && neighbor(Direction::Up) != LodNeighbor::Fluid {
-        FLUID_MAX_HEIGHT
-    } else {
-        1.0
-    };
-    for dir in &CUBE_FACE_DIRS {
-        // A solid neighbor cube fully covers the shared face; fluids also cull
-        // against each other (no internal water faces).
-        let covered = match neighbor(*dir) {
-            LodNeighbor::Solid => true,
-            LodNeighbor::Fluid => is_fluid,
-            LodNeighbor::Empty | LodNeighbor::Outside => false,
-        };
-        if covered {
-            continue;
-        }
-        let (region, tint) =
-            block_face_tex_tint(state, *dir, uv_map, snapshot, registry, lx, ly, lz);
-        // Past 2x, magnified sprites read as pixel mush: distant cubes render
-        // as the sprite's average color instead (a white texel carries the
-        // color through the tint lanes), the DH flat-color model.
-        let (region, tint) = if step >= 4 {
-            (uv_map.get_region(WHITE_TEXTURE), mul_tint(tint, region.avg))
-        } else {
-            (region, tint)
-        };
-        let (positions, uvs, light) = cube_face_geometry(*dir);
-        let s = step as f32;
-        let sy = if is_fluid { fluid_top } else { s };
-        let scaled = positions.map(|p| [p[0] * s, p[1] * sy, p[2] * s]);
-        // Route like the full-detail paths: water into the blended pass (it
-        // joins the GPU distance ordering), everything else by the sprite's
-        // opacity so cutout textures keep their discard pass.
-        let dst = if matches!(classify_block(state), BlockKind::Water) {
-            &mut sink.water
-        } else {
-            sink.pass_for(region.opaque)
-        };
         emit_quad_into(
-            dst,
-            [lx as f32, ly as f32, lz as f32],
-            &scaled,
-            &uvs,
-            [light; 4],
-            region,
-            tint,
+            sink, class, cuboid, *dir, block_pos, &positions, &uvs, [light; 4], region, tint,
         );
     }
 }
@@ -1155,6 +1326,11 @@ fn emit_missing_cube(
     ly: i32,
     lz: i32,
 ) {
+    let cuboid = sink.add_regular_cuboid(SectionCuboid::new(
+        [lx as u8, ly as u8, lz as u8],
+        snapshot.global_cuboids.missing_id,
+        [1.0, 0.0, 1.0],
+    ));
     for dir in &CUBE_FACE_DIRS {
         let offset = dir.offset();
         let neighbor =
@@ -1175,7 +1351,15 @@ fn emit_missing_cube(
             light_tint: pack_light_tint(light, MISSING_TINT),
         });
         // The missing tile is a solid checker, so the cube goes in the solid pass.
-        sink.solid.extend_from_slice(&quad);
+        sink.push(
+            MeshClass::Solid,
+            quad,
+            PendingFace {
+                cuboid,
+                direction: *dir,
+                shades: [((light * 31.0) + 0.5) as u8; 4],
+            },
+        );
     }
 }
 pub(crate) const CUBE_FACE_DIRS: [Direction; 6] = [
@@ -1191,6 +1375,8 @@ pub(crate) const CUBE_FACE_DIRS: [Direction; 6] = [
 #[allow(clippy::too_many_arguments)]
 fn emit_face(
     sink: &mut MeshSink,
+    cuboid: u32,
+    direction: Direction,
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
     uvs: &[[f32; 2]; 4],
@@ -1199,7 +1385,14 @@ fn emit_face(
     tint: u32,
 ) {
     emit_quad_into(
-        sink.pass_for(region.opaque),
+        sink,
+        if region.opaque {
+            MeshClass::Solid
+        } else {
+            MeshClass::Cutout
+        },
+        cuboid,
+        direction,
         block_pos,
         positions,
         uvs,
@@ -1211,7 +1404,10 @@ fn emit_face(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_quad_into(
-    dst: &mut Vec<ChunkVertex>,
+    sink: &mut MeshSink,
+    class: MeshClass,
+    cuboid: u32,
+    direction: Direction,
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
     uvs: &[[f32; 2]; 4],
@@ -1233,7 +1429,16 @@ fn emit_quad_into(
         ),
         light_tint: pack_light_tint(lights[i], tint),
     });
-    push_quad(dst, quad, lights);
+    let shades = lights.map(|light| (light.clamp(0.0, 1.0) * 31.0 + 0.5) as u8);
+    sink.push(
+        class,
+        quad,
+        PendingFace {
+            cuboid,
+            direction,
+            shades,
+        },
+    );
 }
 fn shade_brightness(state: azalea_block::BlockState, registry: &BlockRegistry) -> f32 {
     // TODO: non-occluding full cubes (leaves, glass, ice) still darken adjacent

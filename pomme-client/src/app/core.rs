@@ -1315,10 +1315,7 @@ impl AppCore {
         // ungated by visibility.
         for &(col, si) in &priority_remesh {
             let spos = ChunkSectionPos::new(col.x, min_y_section + si, col.z);
-            game.enqueue_section_edit(
-                spos,
-                chunk_lod(col, player_chunk, self.menu.effective_chunk_detail()),
-            );
+            game.enqueue_section_edit(spos);
         }
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1000.0;
         game.last_update_phases.net_decode_ms = ms(t_net);
@@ -1331,7 +1328,6 @@ impl AppCore {
         let t_rescan = std::time::Instant::now();
         game.rescan_mesh_jobs(
             player_chunk,
-            self.menu.effective_chunk_detail(),
             &renderer.camera_frustum_planes(),
             renderer.camera_render_position(),
         );
@@ -1478,12 +1474,12 @@ impl AppCore {
                     .on_block_dirty(&game.chunk_store, b.x, b.y, b.z);
                 dirty_sections_for_block(&mut sections, b.x, b.y, b.z, min_y, n);
             }
-            // Player edits are always adjacent (lod 0) and mesh on this
+            // Player edits mesh immediately on this
             // thread so they show this frame, like vanilla's compileSync.
             let min_y_section = min_y.div_euclid(16);
             for (col, si) in sections {
                 let spos = ChunkSectionPos::new(col.x, min_y_section + si, col.z);
-                game.mesh_edit_now(spos, 0);
+                game.mesh_edit_now(spos);
             }
         }
         // Menus consume their own clicks later in the frame, so only clear
@@ -1631,24 +1627,6 @@ pub(crate) fn server_view_distance_update(announced: u32, last_request: u32) -> 
     (announced != last_request).then_some(announced)
 }
 
-/// LOD level for a column: full detail within `detail` chunks (the Chunk
-/// Detail setting), half resolution to twice that, quarter beyond.
-pub(crate) fn chunk_lod(
-    pos: azalea_core::position::ChunkPos,
-    player: azalea_core::position::ChunkPos,
-    detail: u32,
-) -> u32 {
-    let dx = (pos.x - player.x).unsigned_abs();
-    let dz = (pos.z - player.z).unsigned_abs();
-    let dist = dx.max(dz);
-    if dist <= detail {
-        0
-    } else if dist <= detail * 2 {
-        1
-    } else {
-        2
-    }
-}
 /// Vanilla `AbstractClientPlayer.getFieldOfViewModifier`. `effect_scale` is the
 /// `fovEffectScale` accessibility value (1.0 = full effect).
 fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {

@@ -136,6 +136,17 @@ pub enum Direction {
 }
 
 impl Direction {
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Down => 0,
+            Self::Up => 1,
+            Self::North => 2,
+            Self::South => 3,
+            Self::West => 4,
+            Self::East => 5,
+        }
+    }
+
     pub fn offset(&self) -> [i32; 3] {
         match self {
             Direction::Down => [0, -1, 0],
@@ -207,11 +218,25 @@ pub struct BakedQuad {
     pub cullface: Option<Direction>,
     pub tint: super::registry::Tint,
     pub shade_light: f32,
+    /// Direction within the owning model element. Unlike `cullface`, this is
+    /// always present and is used to address the six faces of a global cuboid.
+    pub direction: Direction,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BakedCuboid {
+    /// Unique identity of this baked element. Global-table construction maps
+    /// it to a deduplicated GPU cuboid ID; chunk meshing never infers identity
+    /// from flattened vertex data.
+    pub uid: u32,
+    pub faces: Vec<BakedQuad>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BakedModel {
     pub quads: Vec<BakedQuad>,
+    #[serde(default)]
+    pub cuboids: Vec<BakedCuboid>,
     pub is_full_cube: bool,
     /// Vanilla `canOcclude`: full cubes occlude, but cutout blocks like leaves
     /// don't, so neighbor faces against them still render.
@@ -222,6 +247,7 @@ pub struct BakedModel {
 pub struct MultipartEntry {
     pub when: HashMap<String, String>,
     pub quads: Vec<BakedQuad>,
+    pub cuboids: Vec<BakedCuboid>,
 }
 
 const FOLIAGE_TINTED: &[&str] = &[
@@ -336,6 +362,7 @@ pub fn bake_all_models(
                         entries.push(MultipartEntry {
                             when,
                             quads: baked.quads,
+                            cuboids: baked.cuboids,
                         });
                     }
                 }
@@ -531,6 +558,7 @@ pub fn bake_chest_item_model() -> BakedModel {
     );
     BakedModel {
         quads,
+        cuboids: Vec::new(),
         is_full_cube: false,
         occludes: false,
     }
@@ -670,7 +698,7 @@ fn add_chest_cube(
             shade: shades[5],
         },
     ];
-    for spec in face_specs {
+    for (face_index, spec) in face_specs.into_iter().enumerate() {
         let (u_min_px, v_min_px, u_max_px, v_max_px) = spec.uv_pixels;
         let u1 = (u_min_px + 0.5) / TEX_SIZE;
         let v1 = (v_min_px + 0.5) / TEX_SIZE;
@@ -689,6 +717,14 @@ fn add_chest_cube(
             cullface: None,
             tint: super::registry::Tint::None,
             shade_light: spec.shade,
+            direction: [
+                Direction::Up,
+                Direction::Down,
+                Direction::North,
+                Direction::South,
+                Direction::West,
+                Direction::East,
+            ][face_index],
         });
     }
 }
@@ -1077,8 +1113,10 @@ fn bake_resolved_model(
     }
 
     let mut quads = Vec::new();
+    let mut cuboids = Vec::new();
 
     for element in &resolved.elements {
+        let mut faces = Vec::with_capacity(element.faces.len());
         let from = [
             element.from[0] / 16.0,
             element.from[1] / 16.0,
@@ -1091,7 +1129,7 @@ fn bake_resolved_model(
         ];
 
         for (face_name, face_def) in &element.faces {
-            let Some(dir) = Direction::from_str(face_name) else {
+            let Some(mut dir) = Direction::from_str(face_name) else {
                 continue;
             };
 
@@ -1121,15 +1159,27 @@ fn bake_resolved_model(
             if rot_x != 0 || rot_y != 0 {
                 positions = rotate_positions(positions, rot_x, rot_y);
                 cullface = cullface.map(|d| d.rotate_x(rot_x).rotate_y(rot_y));
+                dir = dir.rotate_x(rot_x).rotate_y(rot_y);
             }
 
-            quads.push(BakedQuad {
+            let quad = BakedQuad {
                 positions,
                 uvs,
                 texture: texture_name.to_string(),
                 cullface,
                 tint: quad_tint,
                 shade_light,
+                direction: dir,
+            };
+            faces.push(quad.clone());
+            quads.push(quad);
+        }
+        if !faces.is_empty() {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static NEXT_CUBOID_UID: AtomicU32 = AtomicU32::new(1);
+            cuboids.push(BakedCuboid {
+                uid: NEXT_CUBOID_UID.fetch_add(1, Ordering::Relaxed),
+                faces,
             });
         }
     }
@@ -1141,6 +1191,7 @@ fn bake_resolved_model(
     let is_full_cube = check_full_cube(&quads);
     Some(BakedModel {
         quads,
+        cuboids,
         is_full_cube,
         occludes: is_full_cube,
     })

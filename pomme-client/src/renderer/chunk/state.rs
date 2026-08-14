@@ -10,20 +10,24 @@ use super::abi::{ChunkMeta, DrawCommand, FrustumData};
 use super::cull::{ChunkCulling, create_compute_pipeline, create_cull_desc_layout, desc_write};
 use super::dispatcher::pack_section_pos;
 use super::geometry::{ChunkAlloc, ChunkGeometry, SectionAlloc, TOMBSTONE_SLOT, slice_of};
-use super::mesher::{FADE_DURATION_MS, PackedVertex, SectionMeshData};
+use super::mesher::{
+    CuboidData, FADE_DURATION_MS, GpuFaceBatch, PackedFace, SectionCuboid, SectionMeshData,
+};
 use super::metadata::ChunkMetadata;
 use super::resources::create_water_scaled_buffers;
-use super::upload::{ChunkUploads, PendingCopy, write_verts};
+use super::upload::{ChunkUploads, PendingCopy};
 use crate::renderer::buffer::Buffer;
 use crate::renderer::hiz::OcclusionCamera;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader};
 
-const BUCKET_VERTICES: u32 = 32768;
-const VERTEX_SIZE: u64 = size_of::<PackedVertex>() as u64;
-const BYTES_PER_BUCKET: u64 = BUCKET_VERTICES as u64 * VERTEX_SIZE;
-/// Initial capacity (in quads) of the shared static quad index buffer; grown
-/// by doubling if a single section's pass ever exceeds it.
-const INITIAL_QUAD_INDEX_QUADS: u32 = 16384;
+const BUCKET_FACES: u32 = 32768;
+const FACE_RECORD_SIZE: u64 = size_of::<PackedFace>() as u64;
+const SECTION_CUBOID_SIZE: u64 = size_of::<SectionCuboid>() as u64;
+const GLOBAL_CUBOID_SIZE: u64 = size_of::<CuboidData>() as u64;
+const POOL_UNIT: u64 = 8;
+const MESH_POOL_BYTES_PER_BUCKET: u64 =
+    BUCKET_FACES as u64 * (FACE_RECORD_SIZE + SECTION_CUBOID_SIZE + 4);
+const BYTES_PER_BUCKET: u64 = MESH_POOL_BYTES_PER_BUCKET;
 /// Manhattan-distance buckets (in sections) ordering the translucent water
 /// draw list back-to-front on the GPU; sections farther than the last bucket
 /// clamp into it.
@@ -38,6 +42,8 @@ const MAX_BUCKETS: u32 = 4096;
 /// Integrated GPUs share system RAM (reported as device-local), so their pool
 /// caps at ~512 MB instead of the discrete cards' ~1.75 GB.
 const MAX_BUCKETS_INTEGRATED: u32 = 1024;
+const STARTUP_SECTIONS_PER_COLUMN: u64 = 24;
+const STARTUP_DRAWS_PER_SECTION: u64 = 4;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
 /// Sections whose center sits within this squared distance of the camera
 /// render opaque immediately and never fade in.
@@ -87,6 +93,30 @@ fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
         count
     );
     count
+}
+
+/// Initial indirect capacity for the default 384-block-tall world: two
+/// opaque batches plus one cutout and one translucent batch per section.
+fn initial_draw_capacity(render_distance: u32) -> usize {
+    let diameter = u64::from(render_distance)
+        .saturating_mul(2)
+        .saturating_add(1);
+    let draws = diameter
+        .saturating_mul(diameter)
+        .saturating_mul(STARTUP_SECTIONS_PER_COLUMN)
+        .saturating_mul(STARTUP_DRAWS_PER_SECTION);
+    usize::try_from(draws.max(1)).unwrap_or(usize::MAX)
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::initial_draw_capacity;
+
+    #[test]
+    fn startup_draw_capacity_uses_square_view_and_four_batches_per_section() {
+        assert_eq!(initial_draw_capacity(2), 5 * 5 * 24 * 4);
+        assert_eq!(initial_draw_capacity(12), 25 * 25 * 24 * 4);
+    }
 }
 
 pub(super) type ChunkRendererCore = super::ChunkRendererState;

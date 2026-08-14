@@ -31,7 +31,8 @@ use crate::renderer::hiz::OcclusionCamera;
 
 pub(super) struct ChunkRendererState {
     last_pool_warn: Option<std::time::Instant>,
-    vertex_buffer: Buffer,
+    mesh_buffer: Buffer,
+    global_cuboid_buffer: Buffer,
     uploads: ChunkUploads,
     geometry: ChunkGeometry,
     metadata: ChunkMetadata,
@@ -49,9 +50,17 @@ impl ChunkRenderer {
         device: &vk::Device,
         physical_device: vk::PhysicalDevice,
         allocator: &Arc<Mutex<Allocator>>,
+        global_cuboids: &[mesher::CuboidData],
+        render_distance: u32,
     ) -> Self {
         Self {
-            core: ChunkRendererCore::new(device, physical_device, allocator),
+            core: ChunkRendererCore::new(
+                device,
+                physical_device,
+                allocator,
+                global_cuboids,
+                render_distance,
+            ),
         }
     }
 
@@ -137,6 +146,22 @@ impl ChunkRenderer {
     }
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         self.core.destroy(device, allocator);
+    }
+
+    pub fn geometry_buffers(&self) -> (vk::Buffer, vk::Buffer) {
+        (
+            self.core.mesh_buffer.buffer,
+            self.core.global_cuboid_buffer.buffer,
+        )
+    }
+
+    pub fn replace_global_cuboids(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        cuboids: &[mesher::CuboidData],
+    ) {
+        self.core.replace_global_cuboids(device, allocator, cuboids);
     }
 }
 

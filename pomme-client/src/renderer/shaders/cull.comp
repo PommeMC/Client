@@ -3,51 +3,17 @@
 layout(local_size_x = 64) in;
 
 #include "chunk_meta.glsl"
+#include "frustum.glsl"
 
 struct DrawCmd {
-    uint index_count;
+    uint vertex_count;
     uint instance_count;
-    uint first_index;
-    int vertex_offset;
+    uint first_vertex;
     uint first_instance;
 };
 
 layout(set = 0, binding = 0) readonly buffer MetaBuf {
     ChunkMeta chunks[];
-};
-
-layout(set = 0, binding = 1) uniform FrustumBuf {
-    vec4 planes[6];
-    // Camera that drew the Hi-Z pyramid this dispatch samples (last frame's);
-    // occlusion tests must project with it, not the live camera.
-    mat4 prev_view_proj;
-    uint chunk_count;
-    // Camera block position plus the eye's small offset from it; the
-    // origins are rebased in integer math so nothing here forms a large
-    // float.
-    int cam_x;
-    int cam_y;
-    int cam_z;
-    float frac_x;
-    float frac_y;
-    float frac_z;
-    // The pyramid camera's anchor split, same convention as cam_*/frac_*.
-    int prev_cam_x;
-    int prev_cam_y;
-    int prev_cam_z;
-    float prev_frac_x;
-    float prev_frac_y;
-    float prev_frac_z;
-    // 0 = fail open, skip the occlusion test (no pyramid yet, world change,
-    // or F3+O off).
-    uint occlusion_valid;
-    // Player column + render distance for the column cull (0 = off).
-    int player_cx;
-    int player_cz;
-    uint limit_rd;
-    uint _pad0;
-    uint _pad1;
-    uint _pad2;
 };
 
 layout(set = 0, binding = 2) writeonly buffer IndirectBuf {
@@ -80,6 +46,7 @@ layout(set = 0, binding = 8) writeonly buffer WaterCandidates {
     // Packed (meta slot << 9) | bucket.
     uint water_candidates[];
 };
+layout(set = 0, binding = 11, std430) readonly buffer MeshBuf { uint mesh_data[]; };
 
 // Texel span of the screen rect at `mip`, clamped to the mip's edge.
 ivec2 texel_span(vec2 min_xy, vec2 max_xy, int mip) {
@@ -157,21 +124,22 @@ bool hiz_occluded(vec3 bmin, vec3 bmax) {
     return near_depth < far_z;
 }
 
-// Emit one indexed draw of `quads` quads starting at `vertex_offset` against
-// the shared quad index buffer. The per-instance attributes (origin + fade)
-// come from meta entry `idx`, routed via first_instance.
-void emit(uint quads, int vertex_offset, uint idx, bool cutout) {
-    if (quads == 0u) return;
+// Emit one non-indexed draw of six vertices per face. Keep first_vertex at
+// zero: multiplying an absolute mesh word offset by six can overflow u32 for
+// large mesh pools. first_instance points at the batch descriptor, whose
+// face-word offset the vertex shader adds to its draw-local face index.
+void emit_batch(uint batch_word, bool cutout) {
     DrawCmd d;
-    d.index_count = quads * 6u;
+    d.vertex_count = mesh_data[batch_word + 1u] * 6u;
     d.instance_count = 1u;
-    d.first_index = 0u;
-    d.vertex_offset = vertex_offset;
-    d.first_instance = idx;
+    d.first_vertex = 0u;
+    d.first_instance = batch_word;
     if (cutout) {
-        cutout_draws[atomicAdd(cutout_draw_count, 1u)] = d;
+        uint out_index = atomicAdd(cutout_draw_count, 1u);
+        if (out_index < draw_capacity) cutout_draws[out_index] = d;
     } else {
-        draws[atomicAdd(draw_count, 1u)] = d;
+        uint out_index = atomicAdd(draw_count, 1u);
+        if (out_index < draw_capacity) draws[out_index] = d;
     }
 }
 
@@ -180,7 +148,8 @@ void main() {
     if (idx >= chunk_count) return;
 
     ChunkMeta m = chunks[idx];
-    if (m.solid_quads == 0u && m.cutout_quads == 0u && m.water_quads == 0u) return;
+    uint batch_count = m.solid_batch_count + m.cutout_batch_count + m.fluid_batch_count;
+    if (batch_count == 0u) return;
 
     // Columns beyond the render distance never draw.
     if (limit_rd > 0u) {
@@ -211,21 +180,26 @@ void main() {
         if (hiz_occluded(pbase + m.aabb_min.xyz, pbase + m.aabb_max.xyz)) return;
     }
 
-    // The vertex slice is grouped solid-first; the cutout draw rebases its
-    // vertex_offset past the solid quads.
-    emit(m.solid_quads, m.vertex_offset, idx, false);
-    emit(m.cutout_quads, m.vertex_offset + int(m.solid_quads * 4u), idx, true);
+    const uint BATCH_WORDS = 8u;
+    for (uint i = 0u; i < m.solid_batch_count; ++i) {
+        emit_batch(m.batch_word_offset + i * BATCH_WORDS, false);
+    }
+    for (uint i = 0u; i < m.cutout_batch_count; ++i) {
+        emit_batch(m.batch_word_offset + (m.solid_batch_count + i) * BATCH_WORDS, true);
+    }
 
     // Water joins the bucketed translucent list: reverse Manhattan distance
     // (in sections) as the sort key, so far buckets land first in the emit
     // pass's output and blending runs back-to-front.
-    if (m.water_quads != 0u) {
+    if (m.fluid_batch_count != 0u) {
         ivec3 sec = m.origin >> 4;
         ivec3 cam_sec = ivec3(cam_x, cam_y, cam_z) >> 4;
         int dist = abs(sec.x - cam_sec.x) + abs(sec.y - cam_sec.y) + abs(sec.z - cam_sec.z);
         int last = int(WATER_BUCKETS) - 1;
         uint bucket = uint(last - min(dist, last));
-        atomicAdd(water_buckets[bucket], 1u);
+        // The scan totals draw commands, while the candidate list remains one
+        // entry per section for water_emit.comp to expand.
+        atomicAdd(water_buckets[bucket], m.fluid_batch_count);
         uint ci = atomicAdd(water_buckets[WATER_BUCKETS], 1u);
         water_candidates[ci] = (idx << 9) | bucket;
     }

@@ -10,6 +10,11 @@ use crate::renderer::shader;
 
 pub(crate) struct ChunkCulling {
     pub(crate) max_meta: usize,
+    /// Allocated commands in each solid, cutout, and water indirect buffer.
+    pub(crate) draw_capacity: usize,
+    /// Largest count observed beyond the current capacity. The upload phase
+    /// consumes this request and doubles the buffers before the next cull.
+    pub(crate) requested_draw_capacity: usize,
     pub(crate) max_draw_indirect_count: u32,
     pub(crate) warned_draw_cap: bool,
     pub(crate) compute_pipeline: vk::Pipeline,
@@ -34,16 +39,10 @@ pub(crate) struct ChunkCulling {
 }
 
 impl ChunkCulling {
-    pub(crate) fn clamped_draw_count(&mut self, high_water: u32) -> u32 {
-        if high_water > self.max_draw_indirect_count && !self.warned_draw_cap {
-            self.warned_draw_cap = true;
-            tracing::warn!(
-                "live section draws ({}) exceed maxDrawIndirectCount ({}); excess draws are dropped",
-                high_water,
-                self.max_draw_indirect_count
-            );
-        }
-        high_water.min(self.max_draw_indirect_count)
+    pub(crate) fn clamped_draw_count(&self) -> u32 {
+        u32::try_from(self.draw_capacity)
+            .unwrap_or(u32::MAX)
+            .min(self.max_draw_indirect_count)
     }
 }
 
@@ -80,7 +79,7 @@ pub(crate) fn create_compute_pipeline(
 }
 
 pub(crate) fn create_cull_desc_layout(device: &vk::Device) -> vk::DescriptorSetLayout {
-    let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..=10)
+    let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..=11)
         .map(|binding| vk::DescriptorSetLayoutBinding {
             binding,
             descriptor_type: match binding {

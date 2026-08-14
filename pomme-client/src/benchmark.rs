@@ -330,9 +330,6 @@ pub struct ChunkLoadResult {
     /// is the context that makes two pastes comparable (or not).
     pub player_pos: [f64; 3],
     pub target_rd: u32,
-    /// Effective chunk-detail radius the run meshed with (Auto resolves to
-    /// the render distance); full detail out to this, LOD beyond.
-    pub chunk_detail: u32,
     /// Server-advertised cap, if it sent one (else equals `target_rd`).
     pub effective_rd: u32,
     /// Radius actually loaded, inferred from `chunk_count` — the real distance
@@ -413,7 +410,6 @@ pub enum ChunkLoadStep {
 pub struct ChunkLoadBench {
     phase: ChunkPhase,
     target_rd: u32,
-    chunk_detail: u32,
     effective_rd: u32,
     original_rd: u32,
     gpu_name: String,
@@ -447,7 +443,6 @@ impl ChunkLoadBench {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         target_rd: u32,
-        chunk_detail: u32,
         original_rd: u32,
         server_rd: u32,
         gpu_name: &str,
@@ -465,7 +460,6 @@ impl ChunkLoadBench {
         Self {
             phase: ChunkPhase::ServerWait,
             target_rd,
-            chunk_detail,
             effective_rd,
             original_rd,
             gpu_name: gpu_name.to_owned(),
@@ -648,7 +642,6 @@ impl ChunkLoadBench {
             timestamp: iso8601_utc_now(),
             player_pos: self.player_pos,
             target_rd: self.target_rd,
-            chunk_detail: self.chunk_detail,
             effective_rd: self.effective_rd,
             achieved_rd: radius_from_chunk_count(chunk_count),
             runs: measured.len() as u32,
