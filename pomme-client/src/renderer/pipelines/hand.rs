@@ -8,6 +8,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, SkinData, shader, util};
 const NEAR: f32 = 0.05;
 const FAR: f32 = 10.0;
@@ -124,12 +125,13 @@ impl HandPipeline {
         let mut mvp_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for &set in &mvp_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 size_of::<HandUniform>() as u64,
                 "hand_uniform",
-            );
+            )
+            .into_parts();
 
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
@@ -373,13 +375,14 @@ fn create_arm_vertex_buffer(
 ) -> (vk::Buffer, Allocation, u32) {
     let vertices = build_arm_vertices(skin_w, skin_h, slim);
     let vertex_bytes = bytemuck::cast_slice::<HandVertex, u8>(&vertices);
-    let (buffer, allocation) = util::create_mapped_buffer(
+    let (buffer, allocation) = Buffer::mapped(
         device,
         allocator,
         vertex_bytes,
         vk::BufferUsageFlags::VertexBuffer,
         "hand_vertices",
-    );
+    )
+    .into_parts();
     (buffer, allocation, vertices.len() as u32)
 }
 
@@ -491,7 +494,7 @@ fn upload_skin_to_gpu(
     let (image, view, allocation) =
         util::create_gpu_image(device, allocator, width, height, "skin");
     let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, pixels, "skin_staging");
+        Buffer::staging(device, allocator, pixels, "skin_staging").into_parts();
     util::upload_image(
         device,
         queue,

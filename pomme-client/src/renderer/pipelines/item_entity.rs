@@ -8,6 +8,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, TextureAtlas, atlas_asset_path};
 use crate::renderer::chunk::mesher::ChunkVertex;
@@ -136,12 +137,13 @@ impl ItemPipelineShared {
             Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 size_of::<CameraUniform>() as u64,
                 &format!("{label}_camera"),
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -286,13 +288,14 @@ impl ItemEntityPipeline {
         is_3d_model: bool,
     ) {
         let bytes = bytemuck::cast_slice(vertices);
-        let (buffer, allocation) = util::create_mapped_buffer(
+        let (buffer, allocation) = Buffer::mapped(
             device,
             allocator,
             bytes,
             vk::BufferUsageFlags::VertexBuffer,
             &format!("item_{name}"),
-        );
+        )
+        .into_parts();
         let (min_y, z_size) = mesh_bounds(vertices);
         self.meshes.insert(
             name.to_string(),

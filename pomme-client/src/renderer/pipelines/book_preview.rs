@@ -14,6 +14,7 @@ use pyronyx::vk;
 
 use super::skin_preview::{Uniform, Vertex, create_pipeline, write_uniform};
 use crate::assets::{AssetIndex, load_image, resolve_asset_path};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::{BookPreview, MAX_FRAMES_IN_FLIGHT, util};
 
 /// Base mesh of one book part, posed per frame.
@@ -122,12 +123,13 @@ impl BookPreviewPipeline {
         let mut mvp_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut mvp_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for set in &mvp_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 std::mem::size_of::<Uniform>() as u64,
                 "book_mvp",
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -165,7 +167,7 @@ impl BookPreviewPipeline {
         let (texture, texture_view, texture_allocation) =
             util::create_gpu_image(device, allocator, tex_w, tex_h, "book_texture");
         let (staging, staging_alloc) =
-            util::create_staging_buffer(device, allocator, &pixels, "book_texture_staging");
+            Buffer::staging(device, allocator, &pixels, "book_texture_staging").into_parts();
         util::upload_image(device, queue, command_pool, staging, texture, tex_w, tex_h);
         device.destroy_buffer(staging, None);
         allocator.lock().unwrap().free(staging_alloc).ok();
@@ -192,13 +194,14 @@ impl BookPreviewPipeline {
         let mut vertex_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut vertex_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_mapped_buffer(
+            let (buf, alloc) = Buffer::mapped(
                 device,
                 allocator,
                 &zeroed,
                 vk::BufferUsageFlags::VertexBuffer,
                 "book_vertices",
-            );
+            )
+            .into_parts();
             vertex_buffers.push(buf);
             vertex_allocations.push(alloc);
         }

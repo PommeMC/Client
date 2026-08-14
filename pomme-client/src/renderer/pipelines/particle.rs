@@ -5,6 +5,7 @@ use glam::Vec3;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::{Camera, CameraUniform};
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
@@ -133,12 +134,13 @@ impl ParticlePipeline {
         let mut camera_allocations: Vec<Option<Allocation>> =
             Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 std::mem::size_of::<CameraUniform>() as u64,
                 "particle_camera",
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -162,13 +164,14 @@ impl ParticlePipeline {
             Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let vertex_bytes = (MAX_VERTS * std::mem::size_of::<ParticleVertex>()) as u64;
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_host_buffer(
+            let (buf, alloc) = Buffer::host(
                 device,
                 allocator,
                 vertex_bytes,
                 vk::BufferUsageFlags::VertexBuffer,
                 "particle_vertices",
-            );
+            )
+            .into_parts();
             vertex_buffers.push(buf);
             vertex_allocations.push(Some(alloc));
         }

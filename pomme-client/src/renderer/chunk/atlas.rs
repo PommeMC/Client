@@ -6,6 +6,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path_with_packs};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::util;
 
 /// Name of the synthetic all-white sprite: flat-color LOD faces sample it and
@@ -204,7 +205,7 @@ impl TextureAtlas {
             "atlas_image",
         );
         let (staging_buffer, staging_allocation) =
-            util::create_staging_buffer(device, allocator, &staging_pixels, "atlas_staging");
+            Buffer::staging(device, allocator, &staging_pixels, "atlas_staging").into_parts();
 
         util::upload_image_mipmapped(
             device,

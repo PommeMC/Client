@@ -7,6 +7,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::Camera;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
@@ -320,12 +321,13 @@ impl SkyPipeline {
         let mut ubo_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for &set in &ubo_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 std::mem::size_of::<SkyUniform>() as u64,
                 "sky_uniform",
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -388,13 +390,14 @@ impl SkyPipeline {
 
         let geom = build_all_geometry();
         let vertex_bytes = bytemuck::cast_slice::<SkyVertex, u8>(&geom.vertices);
-        let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
+        let (vertex_buffer, vertex_allocation) = Buffer::mapped(
             device,
             allocator,
             vertex_bytes,
             vk::BufferUsageFlags::VertexBuffer,
             "sky_vertices",
-        );
+        )
+        .into_parts();
 
         tracing::info!(
             "Sky pipeline initialized ({} top_disc, {} star, 6 sun, 6 moon, {} sunrise, {} dark_disc vertices)",
@@ -953,7 +956,7 @@ fn load_celestial_texture(
 
     let (image, view, allocation) = util::create_gpu_image(device, allocator, w, h, key);
     let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, &format!("{key}_staging"));
+        Buffer::staging(device, allocator, &pixels, &format!("{key}_staging")).into_parts();
 
     util::upload_image(device, queue, command_pool, staging_buf, image, w, h);
 

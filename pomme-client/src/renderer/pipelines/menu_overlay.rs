@@ -7,6 +7,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::{shader, util};
 use crate::ui::font::GlyphMap;
 use crate::ui::text::TextSpan;
@@ -338,7 +339,7 @@ impl MenuOverlayPipeline {
             .expect("failed to allocate texture descriptor set");
 
         let (globals_buffer, globals_allocation) =
-            util::create_uniform_buffer(device, allocator, 8, "menu_globals");
+            Buffer::uniform(device, allocator, 8, "menu_globals").into_parts();
 
         let buf_info = vk::DescriptorBufferInfo {
             buffer: globals_buffer,
@@ -365,7 +366,7 @@ impl MenuOverlayPipeline {
         );
 
         let (font_staging_buffer, font_staging_alloc) =
-            util::create_staging_buffer(device, allocator, &atlas.pixels, "menu_font_staging");
+            Buffer::staging(device, allocator, &atlas.pixels, "menu_font_staging").into_parts();
 
         util::upload_image(
             device,
@@ -399,12 +400,13 @@ impl MenuOverlayPipeline {
 
         let (item_image, item_view, item_alloc) =
             util::create_gpu_image(device, allocator, 1, 1, "item_atlas_placeholder");
-        let (item_staging_buffer, item_staging_alloc) = util::create_staging_buffer(
+        let (item_staging_buffer, item_staging_alloc) = Buffer::staging(
             device,
             allocator,
             &[0u8, 0, 0, 0],
             "item_atlas_placeholder_staging",
-        );
+        )
+        .into_parts();
         util::upload_image(
             device,
             queue,
@@ -437,7 +439,7 @@ impl MenuOverlayPipeline {
             let (img, view, alloc) =
                 util::create_gpu_image(device, allocator, w, h, "mc_font_atlas");
             let (stg_buf, stg_alloc) =
-                util::create_staging_buffer(device, allocator, gm.raw_pixels(), "mc_font_staging");
+                Buffer::staging(device, allocator, gm.raw_pixels(), "mc_font_staging").into_parts();
             util::upload_image(device, queue, command_pool, stg_buf, img, w, h);
             (img, view, Some(alloc), stg_buf, Some(stg_alloc))
         } else {
@@ -445,7 +447,7 @@ impl MenuOverlayPipeline {
                 util::create_gpu_image(device, allocator, 1, 1, "mc_font_dummy");
             let dummy = [0u8; 4];
             let (stg_buf, stg_alloc) =
-                util::create_staging_buffer(device, allocator, &dummy, "mc_font_dummy_stg");
+                Buffer::staging(device, allocator, &dummy, "mc_font_dummy_stg").into_parts();
             util::upload_image(device, queue, command_pool, stg_buf, img, 1, 1);
             (img, view, Some(alloc), stg_buf, Some(stg_alloc))
         };
@@ -480,12 +482,13 @@ impl MenuOverlayPipeline {
             vk::Format::R8G8B8A8Srgb,
             "favicon_placeholder",
         );
-        let (fav_staging, fav_staging_alloc) = util::create_staging_buffer(
+        let (fav_staging, fav_staging_alloc) = Buffer::staging(
             device,
             allocator,
             &[255u8, 255, 255, 255],
             "favicon_staging",
-        );
+        )
+        .into_parts();
         util::upload_image(
             device,
             queue,
@@ -557,13 +560,14 @@ impl MenuOverlayPipeline {
         ];
         device.update_descriptor_sets(&writes, &[]);
 
-        let (vertex_buffer, vertex_allocation) = util::create_host_buffer(
+        let (vertex_buffer, vertex_allocation) = Buffer::host(
             device,
             allocator,
             (MAX_VERTICES * VERTEX_SIZE) as u64,
             vk::BufferUsageFlags::VertexBuffer,
             "menu_vertices",
-        );
+        )
+        .into_parts();
 
         Self {
             pipeline,
@@ -1261,7 +1265,7 @@ impl MenuOverlayPipeline {
             "favicon_atlas",
         );
         let (staging, staging_alloc) =
-            util::create_staging_buffer(device, allocator, &pixels, "favicon_atlas_staging");
+            Buffer::staging(device, allocator, &pixels, "favicon_atlas_staging").into_parts();
         util::upload_image(
             device,
             queue,
@@ -2624,7 +2628,7 @@ fn build_sprite_atlas(
     let (image, view, allocation) =
         util::create_gpu_image(device, allocator, atlas_size, atlas_size, "sprite_atlas");
     let (staging_buffer, staging_allocation) =
-        util::create_staging_buffer(device, allocator, &pixels, "sprite_staging");
+        Buffer::staging(device, allocator, &pixels, "sprite_staging").into_parts();
     util::upload_image(
         device,
         queue,

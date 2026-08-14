@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
@@ -105,12 +106,13 @@ impl ChunkPipeline {
         let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 size_of::<CameraUniform>() as u64,
                 "camera_uniform",
-            );
+            )
+            .into_parts();
 
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
@@ -370,7 +372,7 @@ fn build_pipeline(
     depth_write: bool,
     instanced: bool,
 ) -> vk::Pipeline {
-    use crate::renderer::chunk::buffer::{chunk_vertex_attributes, chunk_vertex_bindings};
+    use crate::renderer::chunk::{chunk_vertex_attributes, chunk_vertex_bindings};
     let binding_descs = chunk_vertex_bindings();
     let attr_descs = chunk_vertex_attributes();
     // Binding 0 / attributes 0-3 are the packed vertices; binding 1 /

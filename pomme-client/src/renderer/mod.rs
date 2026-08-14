@@ -1,4 +1,5 @@
 pub mod block_entity_model;
+pub mod buffer;
 pub mod camera;
 pub mod chunk;
 mod context;
@@ -21,8 +22,8 @@ use azalea_block::BlockState;
 use azalea_core::position::{BlockPos, ChunkPos};
 pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
+use chunk::ChunkRenderer;
 use chunk::atlas::TextureAtlas;
-use chunk::buffer::ChunkBufferStore;
 use chunk::dispatcher::ChunkMeshing;
 use chunk::mesher::SectionMeshData;
 use context::VulkanContext;
@@ -179,7 +180,7 @@ pub struct Renderer {
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
     block_entity_pipeline: BlockEntityPipeline,
-    chunk_buffers: ChunkBufferStore,
+    chunk_buffers: ChunkRenderer,
     render_finished_per_image: Vec<vk::Semaphore>,
     screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
@@ -416,7 +417,7 @@ impl Renderer {
         );
 
         let mut chunk_buffers =
-            ChunkBufferStore::new(&ctx.device, ctx.physical_device, &ctx.allocator);
+            ChunkRenderer::new(&ctx.device, ctx.physical_device, &ctx.allocator);
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
@@ -1039,7 +1040,7 @@ impl Renderer {
     /// GPU-wait time inside the last `stage_mesh_batch` (emergency slice
     /// reclaim), for the benchmark's upload breakdown.
     pub fn last_upload_reclaim_ms(&self) -> f32 {
-        self.chunk_buffers.last_reclaim_ms
+        self.chunk_buffers.last_reclaim_ms()
     }
 
     pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {

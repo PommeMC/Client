@@ -1,6 +1,145 @@
+pub(crate) mod abi;
 pub mod atlas;
 pub mod block_ao;
-pub mod buffer;
+pub(crate) mod cull;
 pub mod dispatcher;
+pub(crate) mod geometry;
 pub mod mesher;
+pub(crate) mod metadata;
+pub(crate) mod pool;
+pub(crate) mod resources;
 pub mod section;
+mod state;
+pub(crate) mod upload;
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+use azalea_core::position::ChunkPos;
+use glam::DVec3;
+use pomme_gpu_allocator::vulkan::Allocator;
+use pyronyx::vk;
+
+use self::cull::ChunkCulling;
+use self::geometry::ChunkGeometry;
+use self::mesher::SectionMeshData;
+use self::metadata::ChunkMetadata;
+use self::state::ChunkRendererCore;
+use self::upload::ChunkUploads;
+use crate::renderer::buffer::Buffer;
+use crate::renderer::hiz::OcclusionCamera;
+
+pub(super) struct ChunkRendererState {
+    last_pool_warn: Option<std::time::Instant>,
+    vertex_buffer: Buffer,
+    uploads: ChunkUploads,
+    geometry: ChunkGeometry,
+    metadata: ChunkMetadata,
+    culling: ChunkCulling,
+}
+
+/// Public chunk-rendering façade. Resource lifetime and rendering phases are
+/// implemented by private components; callers do not depend on their layout.
+pub struct ChunkRenderer {
+    core: ChunkRendererCore,
+}
+
+impl ChunkRenderer {
+    pub fn new(
+        device: &vk::Device,
+        physical_device: vk::PhysicalDevice,
+        allocator: &Arc<Mutex<Allocator>>,
+    ) -> Self {
+        Self {
+            core: ChunkRendererCore::new(device, physical_device, allocator),
+        }
+    }
+
+    pub fn sections_drawn(&self) -> u32 {
+        self.core.sections_drawn()
+    }
+    pub fn meta_rebuild_ms(&self) -> f32 {
+        self.core.meta_rebuild_ms()
+    }
+    pub fn last_reclaim_ms(&self) -> f32 {
+        self.core.last_reclaim_ms()
+    }
+    pub fn chunk_count(&self) -> u32 {
+        self.core.chunk_count()
+    }
+
+    pub fn record_copies(&mut self, cmd: vk::CommandBuffer, frame: usize) {
+        self.core.record_copies(cmd, frame);
+    }
+
+    pub fn stage_mesh_batch(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        mesh_queue: &mut VecDeque<SectionMeshData>,
+        eye: DVec3,
+    ) {
+        self.core
+            .stage_mesh_batch(device, allocator, mesh_queue, eye);
+    }
+
+    pub fn begin_frame(&mut self) {
+        self.core.begin_frame();
+    }
+    pub fn frame_submitted(&mut self) {
+        self.core.frame_submitted();
+    }
+    pub fn remove(&mut self, pos: &ChunkPos) {
+        self.core.remove(pos);
+    }
+    pub fn clear(&mut self) {
+        self.core.clear();
+    }
+
+    pub fn set_hiz_descriptors(
+        &mut self,
+        device: &vk::Device,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+    ) {
+        self.core.set_hiz_descriptors(device, view, sampler);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_cull(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        frustum: &[[f32; 4]; 6],
+        anchor: DVec3,
+        eye: DVec3,
+        player_chunk: ChunkPos,
+        limit_rd: Option<u32>,
+        occlusion: Option<OcclusionCamera>,
+    ) {
+        self.core.dispatch_cull(
+            cmd,
+            frame,
+            frustum,
+            anchor,
+            eye,
+            player_chunk,
+            limit_rd,
+            occlusion,
+        );
+    }
+
+    pub fn draw_indirect(&mut self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
+        self.core.draw_indirect(cmd, frame, cutout);
+    }
+    pub fn draw_water(&mut self, cmd: vk::CommandBuffer, frame: usize) {
+        self.core.draw_water(cmd, frame);
+    }
+    pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        self.core.destroy(device, allocator);
+    }
+}
+
+pub(crate) use abi::{
+    vertex_attributes as chunk_vertex_attributes, vertex_bindings as chunk_vertex_bindings,
+};

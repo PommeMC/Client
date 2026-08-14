@@ -7,6 +7,7 @@ use glam::{Mat4, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::pipelines::item_display::{DisplayResolver, DisplayTransform};
@@ -115,12 +116,13 @@ impl GuiItemPipeline {
             .allocate_descriptor_sets(&atlas_alloc_info, slice::from_mut(&mut atlas_set))
             .expect("failed to allocate gui_item atlas set");
 
-        let (camera_buffer, camera_alloc) = util::create_uniform_buffer(
+        let (camera_buffer, camera_alloc) = Buffer::uniform(
             device,
             allocator,
             size_of::<CameraUniform>() as u64,
             "gui_item_camera",
-        );
+        )
+        .into_parts();
         let cam_buf_info = vk::DescriptorBufferInfo {
             buffer: camera_buffer,
             offset: 0,

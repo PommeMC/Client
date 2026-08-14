@@ -10,6 +10,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::{CUBE_FACE_DIRS, cube_face_geometry};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
@@ -141,12 +142,13 @@ impl BlockOverlayPipeline {
         let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 size_of::<CameraUniform>() as u64,
                 "block_overlay_camera",
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -204,13 +206,14 @@ impl BlockOverlayPipeline {
         let mut vertex_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut vertex_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_mapped_buffer(
+            let (buf, alloc) = Buffer::mapped(
                 device,
                 allocator,
                 bytes,
                 vk::BufferUsageFlags::VertexBuffer,
                 "block_overlay_vertices",
-            );
+            )
+            .into_parts();
             vertex_buffers.push(buf);
             vertex_allocations.push(alloc);
         }
@@ -476,7 +479,7 @@ fn load_destroy_atlas(
     let (image, view, allocation) =
         util::create_gpu_image(device, allocator, atlas_w, atlas_h, "destroy_atlas");
     let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &atlas_pixels, "destroy_atlas_staging");
+        Buffer::staging(device, allocator, &atlas_pixels, "destroy_atlas_staging").into_parts();
 
     util::upload_image(
         device,

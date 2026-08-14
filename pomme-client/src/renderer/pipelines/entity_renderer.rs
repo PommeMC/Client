@@ -9,6 +9,7 @@ use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::entity::components::Position;
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
@@ -1105,7 +1106,7 @@ fn create_per_frame_host_buffers(
     let mut buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
     let mut allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
     for _ in 0..MAX_FRAMES_IN_FLIGHT {
-        let (buf, alloc) = util::create_host_buffer(device, allocator, size, usage, name);
+        let (buf, alloc) = Buffer::host(device, allocator, size, usage, name).into_parts();
         buffers.push(buf);
         allocations.push(alloc);
     }
@@ -1365,13 +1366,14 @@ fn build_variants(
     tex_variants
         .iter()
         .map(|tex_keys| {
-            let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
+            let (vertex_buffer, vertex_allocation) = Buffer::mapped(
                 device,
                 allocator,
                 vert_bytes,
                 vk::BufferUsageFlags::VertexBuffer,
                 "entity_vertices",
-            );
+            )
+            .into_parts();
 
             let (texture_image, texture_view, texture_allocation) = load_entity_texture(
                 device,
@@ -1452,7 +1454,7 @@ fn load_entity_texture(
     let (image, view, allocation) =
         util::create_gpu_image(device, allocator, width, height, "entity_texture");
     let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, "entity_texture_staging");
+        Buffer::staging(device, allocator, &pixels, "entity_texture_staging").into_parts();
     util::upload_image(
         device,
         queue,
@@ -1479,7 +1481,7 @@ fn upload_texture_pixels(
     let (image, view, allocation) =
         util::create_gpu_image(device, allocator, width, height, "player_skin_texture");
     let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, pixels, "player_skin_texture_staging");
+        Buffer::staging(device, allocator, pixels, "player_skin_texture_staging").into_parts();
     util::upload_image(
         device,
         queue,

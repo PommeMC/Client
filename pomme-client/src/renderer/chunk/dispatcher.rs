@@ -8,7 +8,7 @@ use crossbeam_epoch as epoch;
 use crossbeam_epoch::Atomic;
 use glam::DVec3;
 
-use super::buffer::aabb_in_frustum;
+use super::abi::aabb_in_frustum;
 use super::mesher::{
     BiomeClimate, ChunkAABB, Colormap, SectionMeshData, SectionStoreSnapshot, mesh_section,
 };

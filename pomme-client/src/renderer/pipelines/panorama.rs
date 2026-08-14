@@ -6,6 +6,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationSc
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::{shader, util};
 
 // Minecraft panorama face order differs from Vulkan cubemap layer order
@@ -106,7 +107,7 @@ impl PanoramaPipeline {
             .expect("failed to allocate cube descriptor set");
 
         let (params_buffer, params_allocation) =
-            util::create_uniform_buffer(device, allocator, 16, "panorama_params");
+            Buffer::uniform(device, allocator, 16, "panorama_params").into_parts();
 
         let buffer_info = vk::DescriptorBufferInfo {
             buffer: params_buffer,
@@ -387,7 +388,7 @@ fn load_cubemap(
 
     let (image, allocation) = create_cubemap_image(device, allocator, face_w, face_h);
     let (staging_buffer, staging_allocation) =
-        util::create_staging_buffer(device, allocator, &staging_data, "panorama_cubemap_staging");
+        Buffer::staging(device, allocator, &staging_data, "panorama_cubemap_staging").into_parts();
 
     upload_cubemap(
         device,
@@ -744,7 +745,7 @@ fn create_fallback_cubemap(
     let (image, allocation) = create_cubemap_image(device, allocator, 1, 1);
     let view = create_cubemap_view(device, image, 1);
     let (staging_buffer, staging_allocation) =
-        util::create_staging_buffer(device, allocator, &pixels, "panorama_fallback_staging");
+        Buffer::staging(device, allocator, &pixels, "panorama_fallback_staging").into_parts();
 
     let sampler_info = vk::SamplerCreateInfo {
         mag_filter: vk::Filter::Linear,

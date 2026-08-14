@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -218,12 +219,13 @@ impl ChunkBorderPipeline {
         let mut camera_buffers = Vec::new();
         let mut camera_allocs = Vec::new();
         for desc_set in &desc_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 size_of::<CameraUniform>() as u64,
                 "chunk_border_cam",
-            );
+            )
+            .into_parts();
             let buf_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -243,13 +245,14 @@ impl ChunkBorderPipeline {
         }
 
         let max_verts = 4096;
-        let (vertex_buffer, vertex_alloc) = util::create_host_buffer(
+        let (vertex_buffer, vertex_alloc) = Buffer::host(
             device,
             allocator,
             (max_verts * size_of::<LineVertex>()) as u64,
             vk::BufferUsageFlags::VertexBuffer,
             "chunk_border_verts",
-        );
+        )
+        .into_parts();
 
         Self {
             pipeline,

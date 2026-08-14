@@ -5,6 +5,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::{Camera, CameraUniform};
 use crate::renderer::chunk::mesher::BiomeClimate;
 use crate::renderer::pipelines::sky::SkyState;
@@ -172,12 +173,13 @@ impl WeatherPipeline {
         let mut camera_allocations: Vec<Option<Allocation>> =
             Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 std::mem::size_of::<CameraUniform>() as u64,
                 "weather_camera",
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -201,13 +203,14 @@ impl WeatherPipeline {
             Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let vertex_bytes = (MAX_WEATHER_VERTS * std::mem::size_of::<WeatherVertex>()) as u64;
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_host_buffer(
+            let (buf, alloc) = Buffer::host(
                 device,
                 allocator,
                 vertex_bytes,
                 vk::BufferUsageFlags::VertexBuffer,
                 "weather_vertices",
-            );
+            )
+            .into_parts();
             vertex_buffers.push(buf);
             vertex_allocations.push(Some(alloc));
         }
@@ -556,7 +559,7 @@ fn load_weather_texture(
 
     let (image, view, allocation) = util::create_gpu_image(device, allocator, w, h, key);
     let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, &format!("{key}_staging"));
+        Buffer::staging(device, allocator, &pixels, &format!("{key}_staging")).into_parts();
     util::upload_image(device, queue, command_pool, staging_buf, image, w, h);
     device.destroy_buffer(staging_buf, None);
     allocator.lock().unwrap().free(staging_alloc).ok();

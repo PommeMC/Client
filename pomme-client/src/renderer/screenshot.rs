@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
-use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
+use pomme_gpu_allocator::vulkan::Allocator;
 use pyronyx::vk;
 
+use super::buffer::Buffer;
 use super::util;
 
 /// A capture whose GPU copy was recorded during a given frame; its host
@@ -14,8 +15,7 @@ use super::util;
 /// written by then.
 struct PendingCapture {
     frame: usize,
-    buffer: vk::Buffer,
-    allocation: Allocation,
+    buffer: Buffer,
     width: u32,
     height: u32,
     bgra: bool,
@@ -73,7 +73,7 @@ impl ScreenshotCapture {
         self.armed = false;
 
         let size = u64::from(extent.width) * u64::from(extent.height) * 4;
-        let (buffer, allocation) = util::create_host_buffer(
+        let buffer = Buffer::host(
             device,
             allocator,
             size,
@@ -119,7 +119,7 @@ impl ScreenshotCapture {
         cmd.copy_image_to_buffer(
             image,
             vk::ImageLayout::TransferSrcOptimal,
-            buffer,
+            buffer.buffer,
             &[region],
         );
 
@@ -135,7 +135,7 @@ impl ScreenshotCapture {
         // The buffer barrier makes the copy visible to the mapped host read that
         // follows the frame fence; without the HOST stage that read races the copy.
         let host_read = vk::BufferMemoryBarrier {
-            buffer,
+            buffer: buffer.buffer,
             offset: 0,
             size: vk::WHOLE_SIZE,
             src_access_mask: vk::AccessFlags::TransferWrite,
@@ -154,7 +154,6 @@ impl ScreenshotCapture {
         self.pending.push(PendingCapture {
             frame,
             buffer,
-            allocation,
             width: extent.width,
             height: extent.height,
             bgra: is_bgra(format),
@@ -189,12 +188,12 @@ impl ScreenshotCapture {
     ) {
         let px_bytes = cap.width as usize * cap.height as usize * 4;
         let pixels = cap
+            .buffer
             .allocation
             .mapped_slice()
             .map(|s| s[..px_bytes].to_vec());
 
-        device.destroy_buffer(cap.buffer, None);
-        allocator.lock().unwrap().free(cap.allocation).ok();
+        cap.buffer.destroy(device, allocator);
 
         let Some(pixels) = pixels else {
             let _ = self
@@ -215,8 +214,7 @@ impl ScreenshotCapture {
     /// idle).
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         for cap in self.pending.drain(..) {
-            device.destroy_buffer(cap.buffer, None);
-            allocator.lock().unwrap().free(cap.allocation).ok();
+            cap.buffer.destroy(device, allocator);
         }
     }
 }

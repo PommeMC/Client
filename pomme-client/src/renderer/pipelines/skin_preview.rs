@@ -6,6 +6,7 @@ use glam::{Mat4, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
+use crate::renderer::buffer::Buffer;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 #[repr(C)]
@@ -155,12 +156,13 @@ impl SkinPreviewPipeline {
         let mut arm_mvp_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 std::mem::size_of::<Uniform>() as u64,
                 "skin_body_mvp",
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -178,12 +180,13 @@ impl SkinPreviewPipeline {
             mvp_buffers.push(buf);
             mvp_allocations.push(alloc);
 
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 std::mem::size_of::<Uniform>() as u64,
                 "skin_head_mvp",
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -201,12 +204,13 @@ impl SkinPreviewPipeline {
             head_mvp_buffers.push(buf);
             head_mvp_allocations.push(alloc);
 
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 std::mem::size_of::<Uniform>() as u64,
                 "skin_arm_mvp",
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -242,33 +246,36 @@ impl SkinPreviewPipeline {
 
         let body_verts = build_body_mesh(slim);
         let body_bytes = bytemuck::cast_slice(&body_verts);
-        let (body_buffer, body_allocation) = util::create_mapped_buffer(
+        let (body_buffer, body_allocation) = Buffer::mapped(
             device,
             allocator,
             body_bytes,
             vk::BufferUsageFlags::VertexBuffer,
             "skin_body",
-        );
+        )
+        .into_parts();
 
         let arm_verts = build_right_arm_mesh(slim);
         let arm_bytes = bytemuck::cast_slice(&arm_verts);
-        let (arm_buffer, arm_allocation) = util::create_mapped_buffer(
+        let (arm_buffer, arm_allocation) = Buffer::mapped(
             device,
             allocator,
             arm_bytes,
             vk::BufferUsageFlags::VertexBuffer,
             "skin_arm",
-        );
+        )
+        .into_parts();
 
         let head_verts = build_head_mesh();
         let head_bytes = bytemuck::cast_slice(&head_verts);
-        let (head_buffer, head_allocation) = util::create_mapped_buffer(
+        let (head_buffer, head_allocation) = Buffer::mapped(
             device,
             allocator,
             head_bytes,
             vk::BufferUsageFlags::VertexBuffer,
             "skin_head",
-        );
+        )
+        .into_parts();
 
         Self {
             pipeline,

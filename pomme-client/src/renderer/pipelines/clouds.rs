@@ -5,6 +5,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::{Camera, CameraUniform, CloudMode, MIN_FAR};
 use crate::renderer::pipelines::sky::SkyState;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
@@ -191,12 +192,13 @@ impl CloudPipeline {
         let mut camera_allocations: Vec<Option<Allocation>> =
             Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 std::mem::size_of::<CameraUniform>() as u64,
                 "cloud_camera",
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -220,13 +222,14 @@ impl CloudPipeline {
             Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let instance_bytes = (MAX_FACES * std::mem::size_of::<CloudFace>()) as u64;
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let (buf, alloc) = util::create_host_buffer(
+            let (buf, alloc) = Buffer::host(
                 device,
                 allocator,
                 instance_bytes,
                 vk::BufferUsageFlags::VertexBuffer,
                 "cloud_faces",
-            );
+            )
+            .into_parts();
             instance_buffers.push(buf);
             instance_allocations.push(Some(alloc));
         }

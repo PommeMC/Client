@@ -9,6 +9,7 @@ use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim};
@@ -412,12 +413,13 @@ impl BlockEntityPipeline {
         let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut camera_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for &set in &camera_sets {
-            let (buf, alloc) = util::create_uniform_buffer(
+            let (buf, alloc) = Buffer::uniform(
                 device,
                 allocator,
                 size_of::<CameraUniform>() as u64,
                 "block_entity_camera_uniform",
-            );
+            )
+            .into_parts();
             let buffer_info = vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: 0,
@@ -652,13 +654,14 @@ fn build_entry(
         }
     }
     let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&all_vertices);
-    let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
+    let (vertex_buffer, vertex_allocation) = Buffer::mapped(
         device,
         allocator,
         vert_bytes,
         vk::BufferUsageFlags::VertexBuffer,
         "block_entity_vertices",
-    );
+    )
+    .into_parts();
 
     let textures = tex_variants
         .iter()
@@ -715,7 +718,7 @@ fn build_texture_slot(
     let (image, view, allocation) =
         util::create_gpu_image(device, allocator, width, height, "block_entity_texture");
     let (staging_buf, staging_alloc) =
-        util::create_staging_buffer(device, allocator, &pixels, "block_entity_texture_staging");
+        Buffer::staging(device, allocator, &pixels, "block_entity_texture_staging").into_parts();
     pending_uploads.push(util::PendingImageUpload {
         staging_buffer: staging_buf,
         staging_size: pixels.len() as u64,

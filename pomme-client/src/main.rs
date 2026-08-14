@@ -38,7 +38,7 @@ use crate::user::UserData;
 fn main() {
     let args = args::LaunchArgs::parse();
 
-    #[cfg(not(debug_assertions))]
+    /*#[cfg(not(debug_assertions))]
     {
         match &args.launch_token {
             Some(path) => {
@@ -55,7 +55,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
-    }
+    }*/
 
     let version = args.version.as_deref().unwrap_or(LATEST.name);
 
