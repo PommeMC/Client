@@ -1,6 +1,5 @@
 #version 460
 #extension GL_EXT_mesh_shader : require
-#extension GL_ARB_shader_draw_parameters : require
 
 #include "fog.glsl"
 #include "camera_ubo.glsl"
@@ -8,36 +7,16 @@
 
 layout(local_size_x = 32) in;
 layout(triangles, max_vertices = 128, max_primitives = 64) out;
-layout(constant_id = 0) const uint DRAW_STREAM = 0u;
 
-struct GlobalFace {
-    vec4 positions[4];
-    vec4 uvs[4];
-    uvec4 material;
+struct TaskPayload {
+    uint batch_word;
 };
-struct GlobalCuboid {
-    GlobalFace faces[6];
-};
+taskPayloadSharedEXT TaskPayload payload;
 
-layout(set = 2, binding = 0, std430) readonly buffer MeshData {
-    uint meshData[];
-};
-layout(set = 2, binding = 1, std430) readonly buffer CuboidBuffer {
-    GlobalCuboid globalCuboids[];
-};
-
-// Each entry is a 12-byte VkDrawMeshTasksIndirectCommandEXT followed by the
-// batch word used by the mesh shader. The 16-byte stride is valid for both the
-// indirect reader and this std430 storage-buffer view.
-layout(set = 3, binding = 2, std430) readonly buffer SolidDraws {
-    uvec4 solidDraws[];
-};
-layout(set = 3, binding = 4, std430) readonly buffer CutoutDraws {
-    uvec4 cutoutDraws[];
-};
-layout(set = 3, binding = 20, std430) readonly buffer WaterDraws {
-    uvec4 waterDraws[];
-};
+struct GlobalFace { vec4 positions[4]; vec4 uvs[4]; uvec4 material; };
+struct GlobalCuboid { GlobalFace faces[6]; };
+layout(set = 2, binding = 0, std430) readonly buffer MeshData { uint meshData[]; };
+layout(set = 2, binding = 1, std430) readonly buffer CuboidBuffer { GlobalCuboid globalCuboids[]; };
 
 layout(location = 0) out vec2 v_tex_coords[];
 layout(location = 1) out float v_light[];
@@ -46,35 +25,20 @@ layout(location = 3) flat out float v_visibility[];
 layout(location = 4) out vec3 v_fog_color[];
 layout(location = 5) out float v_fog[];
 
-uint faceBits(uint f, uint shift, uint mask) {
-    return (f >> shift) & mask;
-}
-
-uint shadeCorner(uint f, uint corner) {
-    return faceBits(f, 12u + corner * 5u, 0x1fu);
-}
-
+uint faceBits(uint f, uint shift, uint mask) { return (f >> shift) & mask; }
+uint shadeCorner(uint f, uint corner) { return faceBits(f, 12u + corner * 5u, 0x1fu); }
 vec3 sectionTint(uvec2 c) {
-    return vec3(
-        float((c.x >> 28u) | ((c.y & 0xfu) << 4u)) / 255.0,
-        float((c.y >> 4u) & 0xffu) / 255.0,
-        float((c.y >> 12u) & 0x7fu) / 127.0
-    );
-}
-
-uint drawBatchWord() {
-    uint draw = uint(gl_DrawIDARB);
-    if (DRAW_STREAM == 1u) return cutoutDraws[draw].w;
-    if (DRAW_STREAM == 2u) return waterDraws[draw].w;
-    return solidDraws[draw].w;
+    return vec3(float((c.x >> 28u) | ((c.y & 0xfu) << 4u)) / 255.0,
+        float((c.y >> 4u) & 0xffu) / 255.0, float((c.y >> 12u) & 0x7fu) / 127.0);
 }
 
 void main() {
-    uint batch_word = drawBatchWord();
-    uint face_in_batch = gl_WorkGroupID.x * 32u + gl_LocalInvocationIndex;
-    uint face_count = meshData[batch_word + 1u];
-    uint live_faces = min(32u, face_count - gl_WorkGroupID.x * 32u);
+    uint batch_word = payload.batch_word;
+    uint group_face = gl_WorkGroupID.x * 32u;
+    uint face_count = meshData[batch_word + 1u] & 0x1fffffffu;
+    uint live_faces = min(32u, face_count - group_face);
     SetMeshOutputsEXT(live_faces * 4u, live_faces * 2u);
+    uint face_in_batch = group_face + gl_LocalInvocationIndex;
     if (face_in_batch >= face_count) return;
 
     uint face_id = meshData[batch_word] + face_in_batch;
@@ -82,45 +46,28 @@ void main() {
     uint s0 = shadeCorner(f, 0u), s1 = shadeCorner(f, 1u);
     uint s2 = shadeCorner(f, 2u), s3 = shadeCorner(f, 3u);
     bool diagonal_a = abs(int(s0) - int(s2)) <= abs(int(s1) - int(s3));
-
     uint quad_id = faceBits(f, 0u, 0xfffu);
     uint direction = quad_id % 6u;
     uint section_word = meshData[batch_word + 2u];
-    uvec2 section_cuboid = uvec2(
-        meshData[section_word + (quad_id / 6u) * 2u],
-        meshData[section_word + (quad_id / 6u) * 2u + 1u]
-    );
-    uint global_id = (section_cuboid.x >> 12u) & 0xffffu;
-    GlobalFace face = globalCuboids[global_id].faces[direction];
-    ivec3 origin = ivec3(
-        int(meshData[batch_word + 4u]),
-        int(meshData[batch_word + 5u]),
-        int(meshData[batch_word + 6u])
-    );
-    vec3 cuboid_offset = vec3(
-        section_cuboid.x & 0xfu,
-        (section_cuboid.x >> 4u) & 0xfu,
-        (section_cuboid.x >> 8u) & 0xfu
-    );
+    uvec2 section_cuboid = uvec2(meshData[section_word + (quad_id / 6u) * 2u],
+        meshData[section_word + (quad_id / 6u) * 2u + 1u]);
+    GlobalFace face = globalCuboids[(section_cuboid.x >> 12u) & 0xffffu].faces[direction];
+    ivec3 origin = ivec3(int(meshData[batch_word + 4u]), int(meshData[batch_word + 5u]),
+        int(meshData[batch_word + 6u]));
+    vec3 cuboid_offset = vec3(section_cuboid.x & 0xfu, (section_cuboid.x >> 4u) & 0xfu,
+        (section_cuboid.x >> 8u) & 0xfu);
     vec3 tint = face.material.y != 0u ? sectionTint(section_cuboid) : vec3(1.0);
-    float visibility = clamp(
-        float(uint(camera_block.w) - meshData[batch_word + 7u]) / FADE_MS,
-        0.0,
-        1.0
-    );
+    float visibility = clamp(float(uint(camera_block.w) - meshData[batch_word + 7u]) / FADE_MS, 0.0, 1.0);
 
     uint vertex_base = gl_LocalInvocationIndex * 4u;
     for (uint corner = 0u; corner < 4u; ++corner) {
         vec4 local = face.positions[corner];
         if (meshData[batch_word + 3u] != 0xffffffffu) {
-            uint packed_heights = meshData[meshData[batch_word + 3u] + quad_id / 6u];
-            bool high_x = local.x >= 0.5;
-            bool high_z = local.z >= 0.5;
+            uint heights = meshData[meshData[batch_word + 3u] + quad_id / 6u];
+            bool high_x = local.x >= 0.5, high_z = local.z >= 0.5;
             uint height_corner = high_x ? (high_z ? 2u : 3u) : (high_z ? 1u : 0u);
-            float height = float((packed_heights >> (height_corner * 4u)) & 0x0fu) / 15.0;
-            local.y *= height;
+            local.y *= float((heights >> (height_corner * 4u)) & 0x0fu) / 15.0;
         }
-
         vec3 rel = vec3(origin - camera_block.xyz) + local.xyz + cuboid_offset - camera_pos.xyz;
         uint vertex = vertex_base + corner;
         gl_MeshVerticesEXT[vertex].gl_Position = view_proj * vec4(rel, 1.0);
@@ -131,17 +78,12 @@ void main() {
         v_fog_color[vertex] = fog_color.rgb;
         v_fog[vertex] = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     }
-
     uint primitive_base = gl_LocalInvocationIndex * 2u;
     if (diagonal_a) {
-        gl_PrimitiveTriangleIndicesEXT[primitive_base] =
-            uvec3(vertex_base, vertex_base + 1u, vertex_base + 2u);
-        gl_PrimitiveTriangleIndicesEXT[primitive_base + 1u] =
-            uvec3(vertex_base, vertex_base + 2u, vertex_base + 3u);
+        gl_PrimitiveTriangleIndicesEXT[primitive_base] = uvec3(vertex_base, vertex_base + 1u, vertex_base + 2u);
+        gl_PrimitiveTriangleIndicesEXT[primitive_base + 1u] = uvec3(vertex_base, vertex_base + 2u, vertex_base + 3u);
     } else {
-        gl_PrimitiveTriangleIndicesEXT[primitive_base] =
-            uvec3(vertex_base, vertex_base + 1u, vertex_base + 3u);
-        gl_PrimitiveTriangleIndicesEXT[primitive_base + 1u] =
-            uvec3(vertex_base + 1u, vertex_base + 2u, vertex_base + 3u);
+        gl_PrimitiveTriangleIndicesEXT[primitive_base] = uvec3(vertex_base, vertex_base + 1u, vertex_base + 3u);
+        gl_PrimitiveTriangleIndicesEXT[primitive_base + 1u] = uvec3(vertex_base + 1u, vertex_base + 2u, vertex_base + 3u);
     }
 }

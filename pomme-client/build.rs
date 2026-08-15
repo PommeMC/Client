@@ -46,7 +46,7 @@ fn main() {
             content,
         })
     });
-    for include in ["fog.glsl", "camera_ubo.glsl"] {
+    for include in ["fog.glsl", "camera_ubo.glsl", "batch_cull.glsl"] {
         println!(
             "cargo:rerun-if-changed={}",
             shader_dir.join(include).display()
@@ -55,6 +55,7 @@ fn main() {
 
     let shaders = [
         ("chunk.vert", shaderc::ShaderKind::Vertex),
+        ("chunk.task", shaderc::ShaderKind::Task),
         ("chunk.mesh", shaderc::ShaderKind::Mesh),
         ("chunk.frag", shaderc::ShaderKind::Fragment),
         ("chunk_solid.frag", shaderc::ShaderKind::Fragment),
@@ -77,6 +78,7 @@ fn main() {
         ("region_prepare.comp", shaderc::ShaderKind::Compute),
         ("section_expand.comp", shaderc::ShaderKind::Compute),
         ("cull_finalize.comp", shaderc::ShaderKind::Compute),
+        ("task_dispatch.comp", shaderc::ShaderKind::Compute),
         ("aabb.vert", shaderc::ShaderKind::Vertex),
         ("aabb.frag", shaderc::ShaderKind::Fragment),
         ("blur.vert", shaderc::ShaderKind::Vertex),

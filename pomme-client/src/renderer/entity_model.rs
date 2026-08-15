@@ -1,6 +1,6 @@
 use glam::{Mat4, Quat, Vec3};
 
-use super::chunk::mesher::ChunkVertex;
+use super::model_vertex::ModelVertex;
 
 #[derive(Clone, Copy)]
 pub struct ModelCube {
@@ -60,7 +60,7 @@ pub enum ModelConvention {
 #[derive(Clone)]
 pub struct BakedEntityModel {
     pub parts: Vec<EntityPart>,
-    pub vertices: Vec<ChunkVertex>,
+    pub vertices: Vec<ModelVertex>,
     pub part_ranges: Vec<(u32, u32)>,
     pub convention: ModelConvention,
     /// Per-part scale (parallel to `parts`), applied about each part's pivot at
@@ -84,7 +84,7 @@ impl BakedEntityModel {
     /// Assemble baked parts, defaulting every part's scale to 1.0.
     pub(crate) fn new(
         parts: Vec<EntityPart>,
-        vertices: Vec<ChunkVertex>,
+        vertices: Vec<ModelVertex>,
         part_ranges: Vec<(u32, u32)>,
     ) -> Self {
         let part_scales = vec![1.0; parts.len()];
@@ -1720,7 +1720,7 @@ fn push_face(
     u_max: f32,
     v_min: f32,
     v_max: f32,
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<ModelVertex>,
 ) {
     let uvs = [
         [u_min, v_max],
@@ -1729,7 +1729,7 @@ fn push_face(
         [u_min, v_min],
     ];
     for &i in &[0usize, 1, 2, 0, 2, 3] {
-        vertices.push(ChunkVertex {
+        vertices.push(ModelVertex {
             position: positions[i],
             tex_coords: crate::renderer::chunk::mesher::pack_uv(uvs[i][0], uvs[i][1]),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
@@ -1744,7 +1744,7 @@ fn generate_cube_vertices(
     cube: &ModelCube,
     tex_w: u32,
     tex_h: u32,
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<ModelVertex>,
 ) {
     let tw = tex_w as f32;
     let th = tex_h as f32;
@@ -1794,7 +1794,7 @@ pub(crate) fn generate_cube_vertices_faces(
     face_uvs: &[[f32; 4]; 6],
     tex_w: u32,
     tex_h: u32,
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<ModelVertex>,
 ) {
     let tw = tex_w as f32;
     let th = tex_h as f32;

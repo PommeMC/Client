@@ -3,7 +3,9 @@ pub mod buffer;
 pub mod camera;
 pub mod chunk;
 mod context;
+mod debug_labels;
 pub mod entity_model;
+pub mod model_vertex;
 pub mod pipelines;
 mod screenshot;
 pub(crate) mod shader;
@@ -26,6 +28,7 @@ use chunk::atlas::TextureAtlas;
 use chunk::dispatcher::ChunkMeshing;
 use chunk::mesher::{SectionMeshData, build_global_cuboid_table};
 use context::VulkanContext;
+use debug_labels::DebugLabels;
 use glam::dvec3;
 use pipelines::block_entity::BlockEntityPipeline;
 pub use pipelines::block_entity::BlockEntityRenderInfo;
@@ -66,15 +69,12 @@ pub enum RendererError {
 
     #[error("vulkan error: {0}")]
     Vulkan(#[from] vk::Error),
-
-    #[error("mesh chunk renderer pipeline creation failed: {0}")]
-    MeshRendererUnavailable(vk::Error),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChunkDrawBackend {
-    Legacy,
-    Mesh,
+    Indirect,
+    Task,
 }
 
 #[derive(Clone, Copy)]
@@ -205,6 +205,7 @@ pub struct Renderer {
     /// CPU wait in the last frame's `acquire_next_image`: where FIFO vblank
     /// backpressure lands, consumed by the vsync frame pacer.
     last_acquire_ms: f32,
+    debug_labels: DebugLabels,
 }
 
 impl Renderer {
@@ -216,6 +217,7 @@ impl Renderer {
         vsync: bool,
         render_distance: u32,
         chunk_renderer: ChunkRendererMode,
+        debug_labels: bool,
     ) -> Result<Self, RendererError> {
         let size = window.inner_size();
 
@@ -228,11 +230,11 @@ impl Renderer {
             })
         };
 
-        let ctx = VulkanContext::new(&window, chunk_renderer)?;
-        let mut chunk_backend = if ctx.features.mesh_shader {
-            ChunkDrawBackend::Mesh
+        let ctx = VulkanContext::new(&window, chunk_renderer, debug_labels)?;
+        let mut chunk_backend = if ctx.features.task_shader {
+            ChunkDrawBackend::Task
         } else {
-            ChunkDrawBackend::Legacy
+            ChunkDrawBackend::Indirect
         };
         let swapchain_state = Swapchain::new(
             &ctx,
@@ -300,10 +302,10 @@ impl Renderer {
             Ok(pipeline) => pipeline,
             Err(error)
                 if chunk_renderer == ChunkRendererMode::Auto
-                    && chunk_backend == ChunkDrawBackend::Mesh =>
+                    && chunk_backend == ChunkDrawBackend::Task =>
             {
-                tracing::warn!("Mesh chunk pipeline creation failed ({error}); using legacy");
-                chunk_backend = ChunkDrawBackend::Legacy;
+                tracing::warn!("task terrain pipeline creation failed ({error}); using indirect");
+                chunk_backend = ChunkDrawBackend::Indirect;
                 ChunkPipeline::new(
                     &ctx.device,
                     swapchain_state.render_pass,
@@ -312,16 +314,8 @@ impl Renderer {
                     chunk_backend,
                 )?
             }
-            Err(error) if chunk_renderer == ChunkRendererMode::Mesh => {
-                return Err(RendererError::MeshRendererUnavailable(error));
-            }
             Err(error) => return Err(error.into()),
         };
-        tracing::info!(
-            "Chunk renderer: {:?} (mesh limits: {:?})",
-            chunk_backend,
-            ctx.features.mesh_limits,
-        );
 
         let hand_pipeline = HandPipeline::new(
             &ctx.device,
@@ -468,6 +462,7 @@ impl Renderer {
             &global_cuboid_table.data,
             render_distance,
             chunk_backend,
+            ctx.features.task_limits,
         );
         let (mesh_buffer, global_cuboid_buffer) = chunk_buffers.geometry_buffers();
         chunk_pipeline.set_geometry_buffers(&ctx.device, mesh_buffer, global_cuboid_buffer);
@@ -547,6 +542,7 @@ impl Renderer {
             0 | 64 => u64::MAX,
             bits => (1u64 << bits) - 1,
         };
+        let debug_labels = DebugLabels::new(ctx.features.debug_labels, &ctx.instance, &ctx.device);
         Ok(Self {
             ctx,
             swapchain: swapchain_state,
@@ -594,6 +590,7 @@ impl Renderer {
                 timestamp_mask,
             },
             last_acquire_ms: 0.0,
+            debug_labels,
         })
     }
 
@@ -1154,6 +1151,11 @@ impl Renderer {
             dry_foliage_colormap,
             biome_climate,
             std::sync::Arc::clone(&self.global_cuboids),
+            if self.chunk_backend == ChunkDrawBackend::Task {
+                chunk::mesher::BatchGranularity::Directional
+            } else {
+                chunk::mesher::BatchGranularity::Coarse
+            },
         )
     }
 
@@ -1598,6 +1600,9 @@ impl Renderer {
             ..Default::default()
         };
         cmd.begin(&begin_info)?;
+        let frame_label = self
+            .debug_labels
+            .colored_scope(cmd, c"Frame", [0.15, 0.45, 0.85, 1.0]);
         let extent = self.swapchain.extent;
         let viewport = vk::Viewport {
             x: 0.0,
@@ -1614,7 +1619,9 @@ impl Renderer {
 
         // Meshes staged this frame (or on the loading screen) copy into the
         // pools through this frame's command buffer; must precede the draws.
+        let upload_label = self.debug_labels.scope(cmd, c"Chunk uploads");
         self.chunk_buffers.record_copies(cmd, frame);
+        upload_label.end();
 
         // World frames only: the menu path records just a couple of the
         // Timestamp scopes, and the readback WAITs on all of them, so arming
@@ -1642,6 +1649,9 @@ impl Renderer {
                 player_pos.z.div_euclid(16.0) as i32,
             );
             let cull_timer = timer.scope(Timestamp::CullStart, Timestamp::CullEnd);
+            let cull_label =
+                self.debug_labels
+                    .colored_scope(cmd, c"Chunk culling", [0.9, 0.55, 0.12, 1.0]);
             // The eye (including the third-person offset) is the origin the chunk
             // vertex shader renders relative to, so the cull must use it too.
             self.chunk_buffers.dispatch_cull(
@@ -1654,6 +1664,7 @@ impl Renderer {
                 Some(render_distance),
                 raster_occlusion,
             );
+            cull_label.end();
             cull_timer.end();
         }
         // Reversed-Z world: far is 0, so the world pass clears depth to 0;
@@ -1684,7 +1695,9 @@ impl Renderer {
         };
 
         let gui_bake_timer = timer.scope(Timestamp::GuiBakeStart, Timestamp::GuiBakeEnd);
+        let gui_bake_label = self.debug_labels.scope(cmd, c"GUI item bake");
         let item_atlas_uvs = self.run_gui_bake(cmd, menu_elements);
+        gui_bake_label.end();
         gui_bake_timer.end();
 
         let use_scene_pass = matches!(&mode, RenderMode::MainMenu { blur, .. } if *blur > 0.01);
@@ -1746,6 +1759,7 @@ impl Renderer {
                 // is cleared to the water fog color, so skipping them tints the view
                 // when looking up out of geometry.
                 if !*eyes_in_water {
+                    let sky_label = self.debug_labels.scope(cmd, c"Sky");
                     self.sky_pipeline.update_and_draw(
                         &self.ctx.device,
                         cmd,
@@ -1753,22 +1767,39 @@ impl Renderer {
                         &self.camera,
                         sky,
                     );
+                    sky_label.end();
                 }
 
                 let terrain_timer = timer.scope(Timestamp::TerrainStart, Timestamp::TerrainEnd);
+                let terrain_label = self.debug_labels.colored_scope(
+                    cmd,
+                    c"Terrain initial",
+                    [0.25, 0.75, 0.3, 1.0],
+                );
                 // Solid (no discard) first so it lays down depth and early-Z lets
                 // the front-to-back order reject occluded fragments; cutout after.
-                let chunk_draw_set = self.chunk_buffers.draw_set(frame);
-                self.chunk_pipeline.bind(cmd, frame, false, chunk_draw_set);
+                let opaque_label = self.debug_labels.scope(cmd, c"Opaque terrain");
+                self.chunk_pipeline
+                    .bind(cmd, frame, false, self.chunk_buffers.draw_set(frame));
                 self.chunk_buffers.draw_indirect(cmd, frame, false);
-                self.chunk_pipeline.bind(cmd, frame, true, chunk_draw_set);
+                opaque_label.end();
+                let cutout_label = self.debug_labels.scope(cmd, c"Cutout terrain");
+                self.chunk_pipeline
+                    .bind(cmd, frame, true, self.chunk_buffers.draw_set(frame));
                 self.chunk_buffers.draw_indirect(cmd, frame, true);
+                cutout_label.end();
+                terrain_label.end();
                 terrain_timer.end();
 
                 if raster_occlusion {
                     let region_timer = timer.scope(
                         Timestamp::OcclusionRegionStart,
                         Timestamp::OcclusionRegionEnd,
+                    );
+                    let region_label = self.debug_labels.colored_scope(
+                        cmd,
+                        c"Occlusion regions",
+                        [0.75, 0.25, 0.75, 1.0],
                     );
                     self.occlusion_pipeline.draw(
                         &self.ctx.device,
@@ -1780,10 +1811,16 @@ impl Renderer {
                     );
                     cmd.end_render_pass();
                     self.chunk_buffers.expand_sections(cmd, frame);
+                    region_label.end();
                     region_timer.end();
                     let section_timer = timer.scope(
                         Timestamp::OcclusionSectionStart,
                         Timestamp::OcclusionSectionEnd,
+                    );
+                    let section_label = self.debug_labels.colored_scope(
+                        cmd,
+                        c"Occlusion sections",
+                        [0.7, 0.2, 0.65, 1.0],
                     );
                     self.resume_pass(
                         cmd,
@@ -1802,10 +1839,17 @@ impl Renderer {
                         self.chunk_buffers.aabb_resources(frame, true),
                     );
                     cmd.end_render_pass();
+                    section_label.end();
                     section_timer.end();
                     let finalize_timer =
                         timer.scope(Timestamp::CullFinalizeStart, Timestamp::CullFinalizeEnd);
+                    let finalize_label = self.debug_labels.colored_scope(
+                        cmd,
+                        c"Occlusion finalize",
+                        [0.85, 0.35, 0.65, 1.0],
+                    );
                     self.chunk_buffers.finalize_occlusion(cmd, frame);
+                    finalize_label.end();
                     finalize_timer.end();
                     self.resume_pass(
                         cmd,
@@ -1818,11 +1862,22 @@ impl Renderer {
 
                     let new_terrain_timer =
                         timer.scope(Timestamp::TerrainNewStart, Timestamp::TerrainNewEnd);
-                    let chunk_draw_set = self.chunk_buffers.draw_set(frame);
-                    self.chunk_pipeline.bind(cmd, frame, false, chunk_draw_set);
+                    let new_terrain_label = self.debug_labels.colored_scope(
+                        cmd,
+                        c"Terrain newly visible",
+                        [0.35, 0.85, 0.4, 1.0],
+                    );
+                    let opaque_label = self.debug_labels.scope(cmd, c"Opaque terrain");
+                    self.chunk_pipeline
+                        .bind(cmd, frame, false, self.chunk_buffers.draw_set(frame));
                     self.chunk_buffers.draw_indirect(cmd, frame, false);
-                    self.chunk_pipeline.bind(cmd, frame, true, chunk_draw_set);
+                    opaque_label.end();
+                    let cutout_label = self.debug_labels.scope(cmd, c"Cutout terrain");
+                    self.chunk_pipeline
+                        .bind(cmd, frame, true, self.chunk_buffers.draw_set(frame));
                     self.chunk_buffers.draw_indirect(cmd, frame, true);
+                    cutout_label.end();
+                    new_terrain_label.end();
                     new_terrain_timer.end();
                 } else {
                     // Every reset query must be written before the next use of
@@ -1856,6 +1911,7 @@ impl Renderer {
                 }
 
                 let entity_timer = timer.scope(Timestamp::EntitiesStart, Timestamp::EntitiesEnd);
+                let entity_label = self.debug_labels.scope(cmd, c"Entities");
                 let ent_frustum = self.camera.frustum_planes();
                 // Entities aren't sent beyond the server's tracking range; a
                 // generous render-distance cap just trims anything stray.
@@ -1874,39 +1930,55 @@ impl Renderer {
                     .draw(cmd, frame, anchor, block_entities);
 
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
+                entity_label.end();
                 entity_timer.end();
                 let translucent_timer =
                     timer.scope(Timestamp::TranslucentStart, Timestamp::TranslucentEnd);
+                let translucent_label = self.debug_labels.colored_scope(
+                    cmd,
+                    c"Particles and water",
+                    [0.1, 0.65, 0.85, 1.0],
+                );
 
                 // Break particles draw after entities but before translucent
                 // water: they write depth, and pomme's water doesn't, so this
                 // lets water blend over particles behind it (vanilla draws
                 // particles after all translucents into a depth-sharing
                 // target).
+                let particle_label = self.debug_labels.scope(cmd, c"Particles");
                 self.particle_pipeline
                     .update_and_draw(cmd, frame, &self.camera, particles);
+                particle_label.end();
 
                 // Translucent water draws after opaque terrain and entities so it
                 // blends over them; depth-tested (occluded by geometry in front)
                 // but doesn't write depth. GPU-culled and bucket-ordered
                 // back-to-front by the cull/scan/emit chain.
-                self.chunk_pipeline.bind_water(cmd, frame, chunk_draw_set);
+                let water_label = self.debug_labels.scope(cmd, c"Water");
+                self.chunk_pipeline.bind_water(cmd, frame);
                 self.chunk_buffers.draw_water(cmd, frame);
+                water_label.end();
+                translucent_label.end();
                 translucent_timer.end();
 
                 let ui_timer = timer.scope(Timestamp::UiStart, Timestamp::UiEnd);
+                let ui_label = self.debug_labels.scope(cmd, c"World overlays and UI");
 
                 // Clouds draw after opaque world geometry (so terrain occludes
                 // them) and before weather, depth-tested against the scene.
                 if !*eyes_in_water {
+                    let cloud_label = self.debug_labels.scope(cmd, c"Clouds");
                     self.cloud_pipeline
                         .update_and_draw(cmd, frame, &self.camera, sky, *cloud_mode);
+                    cloud_label.end();
                 }
 
                 // Weather draws after opaque world geometry (depth-tested against
                 // terrain) but before the depth clear for the hand pass.
+                let weather_label = self.debug_labels.scope(cmd, c"Weather");
                 self.weather_pipeline
                     .update_and_draw(cmd, frame, &self.camera, sky, weather);
+                weather_label.end();
 
                 if *show_chunk_borders {
                     self.chunk_border_pipeline.draw(cmd, frame);
@@ -1930,6 +2002,7 @@ impl Renderer {
                     layer_count: 1,
                 };
                 cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
+                let hud_label = self.debug_labels.scope(cmd, c"Hand and HUD");
                 if self.camera.mode == camera::CameraMode::FirstPerson
                     && self.camera.top_down().is_none()
                 {
@@ -1979,6 +2052,8 @@ impl Renderer {
                     cmd.set_scissor(0, &[scissor]);
                 }
 
+                hud_label.end();
+                ui_label.end();
                 ui_timer.end();
             }
             RenderMode::MainMenu {
@@ -1988,9 +2063,14 @@ impl Renderer {
                 cursor,
                 show_skin,
             } => {
+                let menu_label =
+                    self.debug_labels
+                        .colored_scope(cmd, c"Main menu", [0.3, 0.55, 0.95, 1.0]);
                 let aspect = sw / sh.max(1.0);
+                let panorama_label = self.debug_labels.scope(cmd, c"Panorama");
                 self.panorama_pipeline
                     .draw(&self.ctx.device, cmd, *scroll, aspect, 0.0);
+                panorama_label.end();
 
                 // A BlurBackdrop marker splits the elements: those before it are
                 // drawn into the scene so the blur pass captures them (the title
@@ -2013,6 +2093,7 @@ impl Renderer {
                 if *blur > 0.01 {
                     cmd.end_render_pass();
 
+                    let blur_label = self.debug_labels.scope(cmd, c"Menu blur");
                     let swapchain_image = self.swapchain.images[image_index as usize];
                     let iterations = ((*blur * 3.0).ceil() as u32).clamp(1, 4);
                     self.blur_pipeline.execute(
@@ -2022,6 +2103,7 @@ impl Renderer {
                         self.swapchain.extent.height,
                         iterations,
                     );
+                    blur_label.end();
 
                     self.resume_pass(
                         cmd,
@@ -2054,6 +2136,7 @@ impl Renderer {
                 };
                 self.menu_pipeline
                     .draw_from(cmd, sw, sh, fg, &item_atlas_uvs, vbase);
+                menu_label.end();
             }
         }
 
@@ -2072,6 +2155,7 @@ impl Renderer {
         );
 
         self.gui_item_atlas.end_frame();
+        frame_label.end();
         cmd.end()?;
         let submit_info = vk::SubmitInfo {
             wait_semaphore_count: 1,

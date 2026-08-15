@@ -4,7 +4,38 @@ use pyronyx::ext::mesh_shader::MeshShaderCommandBuffer;
 
 use super::*;
 
+fn terrain_shader_stages(backend: ChunkDrawBackend) -> vk::PipelineStageFlags {
+    if backend == ChunkDrawBackend::Task {
+        vk::PipelineStageFlags::TaskShaderEXT | vk::PipelineStageFlags::MeshShaderEXT
+    } else {
+        vk::PipelineStageFlags::VertexShader
+    }
+}
+
 impl ChunkRendererCore {
+    fn prepare_task_dispatch(&self, cmd: vk::CommandBuffer) {
+        if self.culling.backend != ChunkDrawBackend::Task {
+            return;
+        }
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::ComputeShader,
+            vk::PipelineStageFlags::ComputeShader,
+            vk::DependencyFlags::empty(),
+            &[vk::MemoryBarrier {
+                src_access_mask: vk::AccessFlags::ShaderWrite,
+                dst_access_mask: vk::AccessFlags::ShaderRead,
+                ..Default::default()
+            }],
+            &[],
+            &[],
+        );
+        cmd.bind_pipeline(
+            vk::PipelineBindPoint::Compute,
+            self.culling.task_dispatch_pipeline,
+        );
+        cmd.dispatch(1, 1, 1);
+    }
+
     pub(super) fn grow_regions(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let old = self.regions.metadata.mirror.len();
         let new_capacity = old.max(1) * 2;
@@ -431,10 +462,12 @@ impl ChunkRendererCore {
         // so the count buffers still hold their previous cull result; capture the
         // total (solid + cutout draws) for the debug overlay before clearing them.
         {
+            let capacity = self.culling.clamped_draw_count();
             let read_and_clear = |buffer: &mut Buffer| {
                 let s = buffer.mapped_slice_mut();
                 let n = u32::from_ne_bytes([s[0], s[1], s[2], s[3]]);
                 s[..4].copy_from_slice(&0u32.to_ne_bytes());
+                s[4..8].copy_from_slice(&capacity.to_ne_bytes());
                 n
             };
             let solid = read_and_clear(&mut self.culling.count_buffers[frame]);
@@ -451,8 +484,20 @@ impl ChunkRendererCore {
             ]);
             let stats = self.culling.stats_buffers[frame].mapped_slice_mut();
             self.culling.last_draw_count = u32::from_ne_bytes(stats[0..4].try_into().unwrap());
-            stats[..16].fill(0);
-            let capacity = self.culling.clamped_draw_count();
+            let task_stats: [u32; 4] = std::array::from_fn(|i| {
+                let start = 16 + i * 4;
+                u32::from_ne_bytes(stats[start..start + 4].try_into().unwrap())
+            });
+            if self.culling.backend == ChunkDrawBackend::Task {
+                tracing::trace!(
+                    candidates = task_stats[0],
+                    rejected = task_stats[1],
+                    mesh_groups = task_stats[2],
+                    faces = task_stats[3],
+                    "task terrain stats"
+                );
+            }
+            stats.fill(0);
             let observed = solid.max(cutout).max(water);
             if observed > capacity {
                 self.culling.requested_draw_capacity =
@@ -549,19 +594,17 @@ impl ChunkRendererCore {
         } else {
             self.dispatch_water_ordering(cmd, count);
         }
+        self.prepare_task_dispatch(cmd);
 
         let barrier = vk::MemoryBarrier {
             src_access_mask: vk::AccessFlags::ShaderWrite,
-            dst_access_mask: vk::AccessFlags::IndirectCommandRead | vk::AccessFlags::ShaderRead,
+            dst_access_mask: vk::AccessFlags::IndirectCommandRead
+                | vk::AccessFlags::ShaderRead
+                | vk::AccessFlags::ShaderWrite,
             ..Default::default()
         };
-        let dst_stages = vk::PipelineStageFlags::DrawIndirect
-            | vk::PipelineStageFlags::VertexShader
-            | if self.culling.backend == ChunkDrawBackend::Mesh {
-                vk::PipelineStageFlags::MeshShaderEXT
-            } else {
-                vk::PipelineStageFlags::empty()
-            };
+        let dst_stages =
+            vk::PipelineStageFlags::DrawIndirect | terrain_shader_stages(self.culling.backend);
         cmd.pipeline_barrier(
             vk::PipelineStageFlags::ComputeShader,
             dst_stages,
@@ -633,11 +676,13 @@ impl ChunkRendererCore {
         cmd.dispatch(self.metadata.high_water.div_ceil(64), 1, 1);
         cmd.pipeline_barrier(
             vk::PipelineStageFlags::ComputeShader,
-            vk::PipelineStageFlags::DrawIndirect | vk::PipelineStageFlags::VertexShader,
+            vk::PipelineStageFlags::DrawIndirect | terrain_shader_stages(self.culling.backend),
             vk::DependencyFlags::empty(),
             &[vk::MemoryBarrier {
                 src_access_mask: vk::AccessFlags::ShaderWrite,
-                dst_access_mask: vk::AccessFlags::IndirectCommandRead | vk::AccessFlags::ShaderRead,
+                dst_access_mask: vk::AccessFlags::IndirectCommandRead
+                    | vk::AccessFlags::ShaderRead
+                    | vk::AccessFlags::ShaderWrite,
                 ..Default::default()
             }],
             &[],
@@ -646,14 +691,8 @@ impl ChunkRendererCore {
     }
 
     pub fn finalize_occlusion(&self, cmd: vk::CommandBuffer, frame: usize) {
-        let mesh_stage = if self.culling.backend == ChunkDrawBackend::Mesh {
-            vk::PipelineStageFlags::MeshShaderEXT
-        } else {
-            vk::PipelineStageFlags::empty()
-        };
-        let draw_stages = vk::PipelineStageFlags::DrawIndirect
-            | vk::PipelineStageFlags::VertexShader
-            | mesh_stage;
+        let draw_stages =
+            vk::PipelineStageFlags::DrawIndirect | terrain_shader_stages(self.culling.backend);
         cmd.pipeline_barrier(
             draw_stages | vk::PipelineStageFlags::ComputeShader,
             vk::PipelineStageFlags::Transfer,
@@ -712,15 +751,16 @@ impl ChunkRendererCore {
         );
         cmd.dispatch(self.metadata.high_water.div_ceil(64), 1, 1);
         self.dispatch_water_ordering(cmd, self.metadata.high_water);
+        self.prepare_task_dispatch(cmd);
         cmd.pipeline_barrier(
             vk::PipelineStageFlags::ComputeShader,
-            vk::PipelineStageFlags::DrawIndirect
-                | vk::PipelineStageFlags::VertexShader
-                | mesh_stage,
+            vk::PipelineStageFlags::DrawIndirect | terrain_shader_stages(self.culling.backend),
             vk::DependencyFlags::empty(),
             &[vk::MemoryBarrier {
                 src_access_mask: vk::AccessFlags::ShaderWrite,
-                dst_access_mask: vk::AccessFlags::IndirectCommandRead | vk::AccessFlags::ShaderRead,
+                dst_access_mask: vk::AccessFlags::IndirectCommandRead
+                    | vk::AccessFlags::ShaderRead
+                    | vk::AccessFlags::ShaderWrite,
                 ..Default::default()
             }],
             &[],
@@ -772,17 +812,17 @@ impl ChunkRendererCore {
             )
         };
 
-        // Legacy routes the batch word through firstInstance. Mesh commands
-        // store it after their 12-byte dispatch prefix and read it through the
-        // same buffer's storage descriptor using DrawIndex.
-        if self.culling.backend == ChunkDrawBackend::Mesh {
-            cmd.draw_mesh_tasks_indirect_count(
-                indirect,
+        if self.culling.backend == ChunkDrawBackend::Task {
+            let command = if cutout {
+                self.culling.task_command_cutout_buffers[frame].buffer
+            } else {
+                self.culling.task_command_buffers[frame].buffer
+            };
+            cmd.draw_mesh_tasks_indirect(
+                command,
                 0,
-                count,
-                0,
-                max_draws,
-                size_of::<DrawCommand>() as u32,
+                1,
+                size_of::<vk::DrawMeshTasksIndirectCommandEXT>() as u32,
             );
         } else if cfg!(target_os = "macos") {
             cmd.draw_indirect(indirect, 0, max_draws, size_of::<DrawCommand>() as u32);
@@ -804,16 +844,7 @@ impl ChunkRendererCore {
         }
 
         let max_draws = self.clamped_draw_count();
-        if self.culling.backend == ChunkDrawBackend::Mesh {
-            cmd.draw_mesh_tasks_indirect_count(
-                self.culling.water_indirect_buffers[frame].buffer,
-                0,
-                self.culling.water_count_buffers[frame].buffer,
-                0,
-                max_draws,
-                size_of::<DrawCommand>() as u32,
-            );
-        } else if cfg!(target_os = "macos") {
+        if cfg!(target_os = "macos") {
             cmd.draw_indirect(
                 self.culling.water_indirect_buffers[frame].buffer,
                 0,
@@ -843,6 +874,8 @@ impl ChunkRendererCore {
             .chain(self.culling.count_buffers.drain(..))
             .chain(self.culling.indirect_cutout_buffers.drain(..))
             .chain(self.culling.count_cutout_buffers.drain(..))
+            .chain(self.culling.task_command_buffers.drain(..))
+            .chain(self.culling.task_command_cutout_buffers.drain(..))
             .chain(self.culling.water_indirect_buffers.drain(..))
             .chain(self.culling.water_count_buffers.drain(..))
             .chain(self.culling.water_bucket_buffers.drain(..))
@@ -866,6 +899,7 @@ impl ChunkRendererCore {
         device.destroy_pipeline(self.culling.region_prepare_pipeline, None);
         device.destroy_pipeline(self.culling.section_expand_pipeline, None);
         device.destroy_pipeline(self.culling.finalize_pipeline, None);
+        device.destroy_pipeline(self.culling.task_dispatch_pipeline, None);
         device.destroy_pipeline(self.culling.water_scan_pipeline, None);
         device.destroy_pipeline(self.culling.water_emit_pipeline, None);
         device.destroy_pipeline_layout(self.culling.compute_layout, None);

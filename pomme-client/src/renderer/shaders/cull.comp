@@ -1,11 +1,10 @@
 #version 450
 layout(local_size_x = 64) in;
-layout(constant_id = 0) const uint USE_MESH_SHADERS = 0u;
+layout(constant_id = 0) const bool TASK_BACKEND = false;
 #include "chunk_meta.glsl"
 #include "frustum.glsl"
 
-const uint FACES_PER_MESH_WORKGROUP = 32u;
-const uint BATCH_WORDS = 8u;
+const uint BATCH_WORDS = 16u;
 struct DrawCmd { uint x; uint y; uint z_or_first; uint batch; };
 layout(set=0,binding=0) readonly buffer Meta { ChunkMeta chunks[]; };
 layout(set=0,binding=2) writeonly buffer SeedSolid { DrawCmd seed_solid[]; };
@@ -17,12 +16,20 @@ layout(set=0,binding=18) buffer WaterBuckets { uint water_buckets[]; };
 layout(set=0,binding=19) writeonly buffer WaterCandidates { uint water_candidates[]; };
 layout(set=0,binding=22) readonly buffer MeshBuf { uint mesh_data[]; };
 layout(set=0,binding=23) buffer Stats { uint visible_sections; uint seed_sections; uint new_sections; uint _s; };
+#include "batch_cull.glsl"
 
 void emit(uint word, bool cutout) {
-    uint faces = mesh_data[word + 1u];
-    DrawCmd d = DrawCmd(USE_MESH_SHADERS != 0u ? (faces + 31u) / 32u : faces * 6u,
-                        1u, USE_MESH_SHADERS != 0u ? 1u : 0u, word);
-    uint out_index = cutout ? atomicAdd(seed_cutout_count, 1u) : atomicAdd(seed_solid_count, 1u);
+    if (!TASK_BACKEND && batch_backfacing(word)) return;
+    uint faces = batch_face_count(word);
+    DrawCmd d = TASK_BACKEND
+        ? DrawCmd(0u, 0u, 0u, word)
+        : DrawCmd(faces * 6u, 1u, 0u, word);
+    // Let the count overflow the output allocation. Indirect draws clamp it
+    // through maxDrawCount; task dispatch clamps it in task_dispatch.comp.
+    // A global CAS loop here serializes every visible batch.
+    uint out_index = cutout
+        ? atomicAdd(seed_cutout_count, 1u)
+        : atomicAdd(seed_solid_count, 1u);
     if (out_index < draw_capacity) {
         if (cutout) seed_cutout[out_index] = d; else seed_solid[out_index] = d;
     }

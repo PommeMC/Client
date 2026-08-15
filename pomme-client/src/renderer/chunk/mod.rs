@@ -29,6 +29,7 @@ use self::state::ChunkRendererCore;
 use self::upload::ChunkUploads;
 use crate::renderer::ChunkDrawBackend;
 use crate::renderer::buffer::Buffer;
+use crate::renderer::context::TaskShaderLimits;
 
 pub(super) struct ChunkRendererState {
     last_pool_warn: Option<std::time::Instant>,
@@ -56,6 +57,7 @@ impl ChunkRenderer {
         global_cuboids: &[mesher::CuboidData],
         render_distance: u32,
         backend: ChunkDrawBackend,
+        task_limits: TaskShaderLimits,
     ) -> Self {
         Self {
             core: ChunkRendererCore::new(
@@ -65,6 +67,7 @@ impl ChunkRenderer {
                 global_cuboids,
                 render_distance,
                 backend,
+                task_limits,
             ),
         }
     }
@@ -141,6 +144,9 @@ impl ChunkRenderer {
     pub fn draw_indirect(&mut self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
         self.core.draw_indirect(cmd, frame, cutout);
     }
+    pub fn draw_set(&self, frame: usize) -> vk::DescriptorSet {
+        self.core.culling.compute_sets[frame]
+    }
     pub fn expand_sections(&self, cmd: vk::CommandBuffer, frame: usize) {
         self.core.expand_sections(cmd, frame);
     }
@@ -153,9 +159,6 @@ impl ChunkRenderer {
         sections: bool,
     ) -> (vk::Buffer, vk::Buffer, vk::Buffer, vk::Buffer) {
         self.core.aabb_resources(frame, sections)
-    }
-    pub(crate) fn draw_set(&self, frame: usize) -> vk::DescriptorSet {
-        self.core.culling.compute_sets[frame]
     }
     pub fn draw_water(&mut self, cmd: vk::CommandBuffer, frame: usize) {
         self.core.draw_water(cmd, frame);

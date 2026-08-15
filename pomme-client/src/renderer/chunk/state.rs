@@ -17,6 +17,7 @@ use super::metadata::ChunkMetadata;
 use super::resources::create_water_scaled_buffers;
 use super::upload::{ChunkUploads, PendingCopy};
 use crate::renderer::buffer::Buffer;
+use crate::renderer::context::TaskShaderLimits;
 use crate::renderer::{ChunkDrawBackend, MAX_FRAMES_IN_FLIGHT, shader};
 
 const BUCKET_FACES: u32 = 32768;

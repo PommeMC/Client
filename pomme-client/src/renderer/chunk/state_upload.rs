@@ -53,7 +53,7 @@ fn build_mesh_payload(mesh: &SectionMeshData, pool_off: u32, uploaded_ms: u32) -
             };
             GpuFaceBatch {
                 face_word_offset: ((base + face_base) / 4) as u32 + batch.face_offset,
-                face_count: batch.face_count,
+                face_count_and_cull: batch.packed_face_count(),
                 cuboid_word_offset: ((base + cuboid_base) / 4) as u32 + batch.cuboid_base * 2,
                 fluid_height_word_offset: if fluid {
                     ((base + layout.fluid_heights) / 4) as u32 + batch.cuboid_base
@@ -62,6 +62,8 @@ fn build_mesh_payload(mesh: &SectionMeshData, pool_off: u32, uploaded_ms: u32) -
                 },
                 origin,
                 uploaded_ms,
+                aabb_min: [batch.aabb_min[0], batch.aabb_min[1], batch.aabb_min[2], 0.0],
+                aabb_max: [batch.aabb_max[0], batch.aabb_max[1], batch.aabb_max[2], 0.0],
             }
         })
         .collect();
@@ -101,7 +103,12 @@ impl ChunkRendererCore {
         };
         cmd.pipeline_barrier(
             vk::PipelineStageFlags::Transfer,
-            vk::PipelineStageFlags::ComputeShader | vk::PipelineStageFlags::VertexShader,
+            vk::PipelineStageFlags::ComputeShader
+                | if self.culling.backend == ChunkDrawBackend::Task {
+                    vk::PipelineStageFlags::TaskShaderEXT | vk::PipelineStageFlags::MeshShaderEXT
+                } else {
+                    vk::PipelineStageFlags::VertexShader
+                },
             vk::DependencyFlags::empty(),
             &[barrier],
             &[],
@@ -348,7 +355,10 @@ impl ChunkRendererCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::renderer::chunk::mesher::{ChunkAABB, FaceBatch, FaceBatchCounts, FaceRecord};
+    use crate::renderer::chunk::mesher::{
+        BATCH_CULL_SHIFT, BATCH_FACE_COUNT_MASK, BatchCull, ChunkAABB, FaceBatch, FaceBatchCounts,
+        FaceRecord,
+    };
 
     #[test]
     fn payload_rebases_regular_and_fluid_batches_into_one_allocation() {
@@ -365,11 +375,17 @@ mod tests {
                     face_offset: 1,
                     face_count: 1,
                     cuboid_base: 0,
+                    cull: BatchCull::East,
+                    aabb_min: [1.0, 2.0, 3.0],
+                    aabb_max: [4.0, 5.0, 6.0],
                 },
                 FaceBatch {
                     face_offset: 0,
                     face_count: 2,
                     cuboid_base: 1,
+                    cull: BatchCull::Uncullable,
+                    aabb_min: [7.0, 8.0, 9.0],
+                    aabb_max: [10.0, 11.0, 12.0],
                 },
             ],
             batch_counts: FaceBatchCounts {
@@ -409,8 +425,11 @@ mod tests {
             ((base + layout.regular_cuboids) / 4) as u32
         );
         assert_eq!(regular.fluid_height_word_offset, u32::MAX);
+        assert_eq!(regular.face_count_and_cull, 1 | (5 << BATCH_CULL_SHIFT));
         assert_eq!(regular.origin, [32, 48, 64]);
         assert_eq!(regular.uploaded_ms, uploaded_ms);
+        assert_eq!(regular.aabb_min, [1.0, 2.0, 3.0, 0.0]);
+        assert_eq!(regular.aabb_max, [4.0, 5.0, 6.0, 0.0]);
 
         let fluid = read_batch(1);
         assert_eq!(
@@ -425,5 +444,7 @@ mod tests {
             fluid.fluid_height_word_offset,
             ((base + layout.fluid_heights) / 4) as u32 + 1
         );
+        assert_eq!(fluid.face_count_and_cull & BATCH_FACE_COUNT_MASK, 2);
+        assert_eq!(fluid.face_count_and_cull >> BATCH_CULL_SHIFT, 6);
     }
 }

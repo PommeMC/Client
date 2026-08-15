@@ -54,6 +54,7 @@ pub struct App {
     /// Frame counter gating the refresh re-query (queries when it wraps to 0).
     refresh_poll: u32,
     chunk_renderer: ChunkRendererMode,
+    debug_labels: bool,
 }
 
 /// Port of vanilla `FramerateLimiter`: paces to a target period by sleeping
@@ -126,6 +127,7 @@ impl App {
         user: UserData,
         quick_access_multiplayer: Option<String>,
         chunk_renderer: ChunkRendererMode,
+        debug_labels: bool,
     ) -> Self {
         Self {
             phase: StateSlot::new(AppPhase::Setup {
@@ -138,6 +140,7 @@ impl App {
             refresh_period_ns: None,
             refresh_poll: 0,
             chunk_renderer,
+            debug_labels,
         }
     }
 
@@ -204,6 +207,7 @@ impl ApplicationHandler for App {
                     self.core.menu.vsync,
                     self.core.menu.render_distance,
                     self.chunk_renderer,
+                    self.debug_labels,
                 ) {
                     Ok(r) => r,
                     Err(e) => {

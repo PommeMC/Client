@@ -11,7 +11,7 @@ use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, TextureAtlas, atlas_asset_path};
-use crate::renderer::chunk::mesher::ChunkVertex;
+use crate::renderer::model_vertex::ModelVertex;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 use crate::world::block::model::BakedModel;
 
@@ -284,7 +284,7 @@ impl ItemEntityPipeline {
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
         name: &str,
-        vertices: &[ChunkVertex],
+        vertices: &[ModelVertex],
         is_3d_model: bool,
     ) {
         let bytes = bytemuck::cast_slice(vertices);
@@ -418,7 +418,7 @@ impl ItemEntityPipeline {
 
 /// Local-space `(min_y, z_size)` of a baked mesh, before the per-entity model
 /// scale. Empty meshes report a degenerate box at the origin.
-fn mesh_bounds(vertices: &[ChunkVertex]) -> (f32, f32) {
+fn mesh_bounds(vertices: &[ModelVertex]) -> (f32, f32) {
     let mut min_y = f32::INFINITY;
     let mut min_z = f32::INFINITY;
     let mut max_z = f32::NEG_INFINITY;
@@ -433,7 +433,7 @@ fn mesh_bounds(vertices: &[ChunkVertex]) -> (f32, f32) {
     (min_y, max_z - min_z)
 }
 
-fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ChunkVertex> {
+fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ModelVertex> {
     let mut vertices = Vec::new();
     for quad in &model.quads {
         let region = uv_map.get_region(&quad.texture);
@@ -447,7 +447,7 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ChunkVertex> 
 
         for i in [0, 1, 2, 2, 3, 0] {
             let p = quad.positions[i];
-            vertices.push(ChunkVertex {
+            vertices.push(ModelVertex {
                 position: [p[0] - 0.5, p[1] - 0.5, p[2] - 0.5],
                 tex_coords: crate::renderer::chunk::mesher::pack_uv(
                     region.u_min + quad.uvs[i][0] * u_span,
@@ -460,7 +460,7 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ChunkVertex> 
     vertices
 }
 
-fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<ChunkVertex> {
+fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<ModelVertex> {
     let w = img.width() as i32;
     let h = img.height() as i32;
     let mut vertices = Vec::new();
@@ -493,7 +493,7 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Chunk
         [region.u_min, region.v_min],
     ];
     for i in 0..6 {
-        vertices.push(ChunkVertex {
+        vertices.push(ModelVertex {
             position: front[i],
             tex_coords: crate::renderer::chunk::mesher::pack_uv(front_uvs[i][0], front_uvs[i][1]),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
@@ -520,7 +520,7 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Chunk
         [region.u_min, region.v_min],
     ];
     for i in 0..6 {
-        vertices.push(ChunkVertex {
+        vertices.push(ModelVertex {
             position: back[i],
             tex_coords: crate::renderer::chunk::mesher::pack_uv(back_uvs[i][0], back_uvs[i][1]),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
@@ -566,7 +566,7 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Chunk
 
 #[allow(clippy::too_many_arguments)]
 fn push_side_quad(
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<ModelVertex>,
     x0: f32,
     y0: f32,
     x1: f32,
@@ -586,7 +586,7 @@ fn push_side_quad(
         [x0, y0, z1],
     ];
     for p in &positions {
-        vertices.push(ChunkVertex {
+        vertices.push(ModelVertex {
             position: *p,
             tex_coords: crate::renderer::chunk::mesher::pack_uv(u, v),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
@@ -597,7 +597,7 @@ fn push_side_quad(
     }
 }
 
-fn build_flat_quad(region: AtlasRegion) -> Vec<ChunkVertex> {
+fn build_flat_quad(region: AtlasRegion) -> Vec<ModelVertex> {
     let h = 0.5;
     let positions = [
         [-h, -h, 0.0],
@@ -618,7 +618,7 @@ fn build_flat_quad(region: AtlasRegion) -> Vec<ChunkVertex> {
     positions
         .iter()
         .zip(uvs.iter())
-        .map(|(p, uv)| ChunkVertex {
+        .map(|(p, uv)| ModelVertex {
             position: *p,
             tex_coords: crate::renderer::chunk::mesher::pack_uv(uv[0], uv[1]),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
@@ -674,8 +674,8 @@ pub(super) fn create_pipeline_with_front_face(
         },
     ];
 
-    let binding = ChunkVertex::binding_description();
-    let attrs = ChunkVertex::attribute_descriptions();
+    let binding = ModelVertex::binding_description();
+    let attrs = ModelVertex::attribute_descriptions();
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
         vertex_binding_description_count: 1,

@@ -210,6 +210,21 @@ impl Direction {
     }
 }
 
+fn element_keeps_axis_direction(rotation: &Option<ElementRotation>, direction: Direction) -> bool {
+    let Some(rotation) = rotation else {
+        return true;
+    };
+    if rotation.angle.abs() <= f32::EPSILON {
+        return true;
+    }
+    matches!(
+        (rotation.axis.as_str(), direction),
+        ("x", Direction::West | Direction::East)
+            | ("y", Direction::Down | Direction::Up)
+            | ("z", Direction::North | Direction::South)
+    )
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BakedQuad {
     pub positions: [[f32; 3]; 4],
@@ -218,6 +233,10 @@ pub struct BakedQuad {
     pub cullface: Option<Direction>,
     pub tint: super::registry::Tint,
     pub shade_light: f32,
+    /// Coarse backface direction derived from the face and rotation metadata.
+    /// Element rotations that tilt this face set it to `None`.
+    #[serde(default)]
+    pub batch_direction: Option<Direction>,
     /// Direction within the owning model element. Unlike `cullface`, this is
     /// always present and is used to address the six faces of a global cuboid.
     pub direction: Direction,
@@ -710,6 +729,14 @@ fn add_chest_cube(
             UvPattern::North => [[u1, v2], [u1, v1], [u2, v1], [u2, v2]],
             UvPattern::SouthWestEast => [[u2, v2], [u2, v1], [u1, v1], [u1, v2]],
         };
+        let direction = [
+            Direction::Up,
+            Direction::Down,
+            Direction::North,
+            Direction::South,
+            Direction::West,
+            Direction::East,
+        ][face_index];
         quads.push(BakedQuad {
             positions: spec.positions,
             uvs,
@@ -717,14 +744,8 @@ fn add_chest_cube(
             cullface: None,
             tint: super::registry::Tint::None,
             shade_light: spec.shade,
-            direction: [
-                Direction::Up,
-                Direction::Down,
-                Direction::North,
-                Direction::South,
-                Direction::West,
-                Direction::East,
-            ][face_index],
+            batch_direction: Some(direction),
+            direction,
         });
     }
 }
@@ -1155,10 +1176,13 @@ fn bake_resolved_model(
             } else {
                 super::registry::Tint::None
             };
+            let mut batch_direction =
+                element_keeps_axis_direction(&element.rotation, dir).then_some(dir);
 
             if rot_x != 0 || rot_y != 0 {
                 positions = rotate_positions(positions, rot_x, rot_y);
                 cullface = cullface.map(|d| d.rotate_x(rot_x).rotate_y(rot_y));
+                batch_direction = batch_direction.map(|d| d.rotate_x(rot_x).rotate_y(rot_y));
                 dir = dir.rotate_x(rot_x).rotate_y(rot_y);
             }
 
@@ -1169,6 +1193,7 @@ fn bake_resolved_model(
                 cullface,
                 tint: quad_tint,
                 shade_light,
+                batch_direction,
                 direction: dir,
             };
             faces.push(quad.clone());
@@ -1478,6 +1503,30 @@ mod tests {
         Direction::West,
         Direction::East,
     ];
+
+    #[test]
+    fn element_rotation_only_keeps_parallel_face_directions() {
+        let y_45 = Some(ElementRotation {
+            origin: [8.0; 3],
+            axis: "y".into(),
+            angle: 45.0,
+            rescale: false,
+        });
+        assert!(element_keeps_axis_direction(&y_45, Direction::Up));
+        assert!(element_keeps_axis_direction(&y_45, Direction::Down));
+        assert!(!element_keeps_axis_direction(&y_45, Direction::North));
+        assert!(!element_keeps_axis_direction(&y_45, Direction::East));
+
+        let x_22 = Some(ElementRotation {
+            origin: [8.0; 3],
+            axis: "x".into(),
+            angle: 22.5,
+            rescale: true,
+        });
+        assert!(element_keeps_axis_direction(&x_22, Direction::West));
+        assert!(!element_keeps_axis_direction(&x_22, Direction::Up));
+        assert!(element_keeps_axis_direction(&None, Direction::South));
+    }
 
     /// The (right, up) axes of each face viewed from outside the block:
     /// sky-up for the sides, and vanilla's map orientation for up/down.

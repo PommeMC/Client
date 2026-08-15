@@ -22,6 +22,7 @@ pub(crate) struct ChunkCulling {
     pub(crate) region_prepare_pipeline: vk::Pipeline,
     pub(crate) section_expand_pipeline: vk::Pipeline,
     pub(crate) finalize_pipeline: vk::Pipeline,
+    pub(crate) task_dispatch_pipeline: vk::Pipeline,
     pub(crate) water_scan_pipeline: vk::Pipeline,
     pub(crate) water_emit_pipeline: vk::Pipeline,
     pub(crate) compute_layout: vk::PipelineLayout,
@@ -33,6 +34,8 @@ pub(crate) struct ChunkCulling {
     pub(crate) count_buffers: Vec<Buffer>,
     pub(crate) indirect_cutout_buffers: Vec<Buffer>,
     pub(crate) count_cutout_buffers: Vec<Buffer>,
+    pub(crate) task_command_buffers: Vec<Buffer>,
+    pub(crate) task_command_cutout_buffers: Vec<Buffer>,
     pub(crate) water_indirect_buffers: Vec<Buffer>,
     pub(crate) water_count_buffers: Vec<Buffer>,
     pub(crate) water_bucket_buffers: Vec<Buffer>,
@@ -96,7 +99,7 @@ pub(crate) fn create_cull_desc_layout(
     device: &vk::Device,
     backend: ChunkDrawBackend,
 ) -> vk::DescriptorSetLayout {
-    let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..=23)
+    let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..=25)
         .map(|binding| vk::DescriptorSetLayoutBinding {
             binding,
             descriptor_type: match binding {
@@ -104,11 +107,12 @@ pub(crate) fn create_cull_desc_layout(
                 _ => vk::DescriptorType::StorageBuffer,
             },
             descriptor_count: 1,
-            stage_flags: if backend == ChunkDrawBackend::Mesh && matches!(binding, 2 | 4 | 20) {
-                vk::ShaderStageFlags::Compute | vk::ShaderStageFlags::MeshEXT
-            } else {
-                vk::ShaderStageFlags::Compute
-            },
+            stage_flags: vk::ShaderStageFlags::Compute
+                | if backend == ChunkDrawBackend::Task && matches!(binding, 2 | 3 | 4 | 5 | 23) {
+                    vk::ShaderStageFlags::TaskEXT
+                } else {
+                    vk::ShaderStageFlags::empty()
+                },
             ..Default::default()
         })
         .collect();

@@ -11,8 +11,8 @@ use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::entity::components::Position;
 use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
+use crate::renderer::model_vertex::ModelVertex;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
 
 pub const MAX_OVERLAYS: usize = 4;
@@ -1361,7 +1361,7 @@ fn build_variants(
         OverlayKind::SwirlAdditive => texture_sampler_repeat,
         _ => texture_sampler,
     };
-    let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
+    let vert_bytes = bytemuck::cast_slice::<ModelVertex, u8>(&model.vertices);
 
     tex_variants
         .iter()
@@ -1601,8 +1601,8 @@ pub(super) fn create_pipeline(
     // Binding 0: per-vertex mesh data. Instanced pipelines add binding 1 with
     // per-instance data (model columns + tint + overlay + uv), one EntityInstance
     // per (entity, part); push-constant ones bind only the mesh.
-    let mut bindings = vec![ChunkVertex::binding_description()];
-    let mut attrs = ChunkVertex::attribute_descriptions().to_vec();
+    let mut bindings = vec![ModelVertex::binding_description()];
+    let mut attrs = ModelVertex::attribute_descriptions().to_vec();
     if let ModelInput::Instanced = model_input {
         bindings.push(vk::VertexInputBindingDescription {
             binding: 1,

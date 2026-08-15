@@ -11,8 +11,8 @@ use pyronyx::vk;
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
-use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim};
+use crate::renderer::model_vertex::ModelVertex;
 use crate::renderer::pipelines::entity_renderer::{
     BlendMode, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
@@ -645,7 +645,7 @@ fn build_entry(
     pending_uploads: &mut Vec<util::PendingImageUpload>,
     staging_to_free: &mut Vec<(vk::Buffer, Allocation)>,
 ) -> KindEntry {
-    let mut all_vertices: Vec<ChunkVertex> = Vec::new();
+    let mut all_vertices: Vec<ModelVertex> = Vec::new();
     for model in &mut models {
         let base = all_vertices.len() as u32;
         all_vertices.append(&mut model.vertices);
@@ -653,7 +653,7 @@ fn build_entry(
             range.0 += base;
         }
     }
-    let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&all_vertices);
+    let vert_bytes = bytemuck::cast_slice::<ModelVertex, u8>(&all_vertices);
     let (vertex_buffer, vertex_allocation) = Buffer::mapped(
         device,
         allocator,

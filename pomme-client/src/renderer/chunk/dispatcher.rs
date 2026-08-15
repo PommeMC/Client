@@ -10,8 +10,8 @@ use glam::DVec3;
 
 use super::abi::aabb_in_frustum;
 use super::mesher::{
-    BiomeClimate, ChunkAABB, Colormap, GlobalCuboidTable, SectionMeshData, SectionStoreSnapshot,
-    mesh_section,
+    BatchGranularity, BiomeClimate, ChunkAABB, Colormap, GlobalCuboidTable, SectionMeshData,
+    SectionStoreSnapshot, mesh_section,
 };
 use super::section::LocalSection;
 use crate::renderer::Renderer;
@@ -105,6 +105,7 @@ pub struct ChunkMeshing {
     /// the dispatcher.
     biome_climate: Arc<std::sync::RwLock<Arc<HashMap<u32, BiomeClimate>>>>,
     global_cuboids: Arc<GlobalCuboidTable>,
+    batch_granularity: BatchGranularity,
 }
 impl ChunkMeshing {
     pub fn new(
@@ -130,6 +131,7 @@ impl ChunkMeshing {
         dry_foliage_colormap: Colormap,
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
         global_cuboids: Arc<GlobalCuboidTable>,
+        batch_granularity: BatchGranularity,
     ) -> Self {
         let (result_tx, result_rx) = crossbeam_channel::unbounded();
         let biome_climate = Arc::new(std::sync::RwLock::new(biome_climate));
@@ -159,6 +161,7 @@ impl ChunkMeshing {
             let dry_foliage_colormap = Arc::clone(&dry_foliage_colormap);
             let biome_climate = Arc::clone(&biome_climate);
             let global_cuboids = Arc::clone(&global_cuboids);
+            let worker_granularity = batch_granularity;
             let tx = result_tx.clone();
             workers.push(
                 std::thread::Builder::new()
@@ -175,6 +178,7 @@ impl ChunkMeshing {
                             dry_foliage_colormap,
                             biome_climate,
                             global_cuboids,
+                            worker_granularity,
                             tx,
                         )
                     })
@@ -197,6 +201,7 @@ impl ChunkMeshing {
             dry_foliage_colormap,
             biome_climate,
             global_cuboids,
+            batch_granularity,
         }
     }
 
@@ -292,6 +297,7 @@ impl ChunkMeshing {
                 &self.dry_foliage_colormap,
                 &self.biome_climate,
                 &self.global_cuboids,
+                self.batch_granularity,
                 &self.result_tx,
                 0.0,
             )
@@ -455,6 +461,7 @@ impl PendingJob {
         dry_foliage_colormap: &Arc<Colormap>,
         biome_climate: &Arc<std::sync::RwLock<Arc<HashMap<u32, BiomeClimate>>>>,
         global_cuboids: &Arc<GlobalCuboidTable>,
+        batch_granularity: BatchGranularity,
         tx: &crossbeam_channel::Sender<SectionMeshData>,
         queue_ms: f32,
     ) {
@@ -492,6 +499,7 @@ impl PendingJob {
             uv_map,
             claim_ver,
             self.upload_epoch,
+            batch_granularity,
         );
         mesh.queue_ms = queue_ms;
         mesh.mesh_ms = meshed_at.elapsed().as_secs_f32() * 1000.0;
@@ -571,6 +579,7 @@ impl MeshQueue {
         dry_foliage_colormap: Arc<Colormap>,
         biome_climate: Arc<std::sync::RwLock<Arc<HashMap<u32, BiomeClimate>>>>,
         global_cuboids: Arc<GlobalCuboidTable>,
+        batch_granularity: BatchGranularity,
         tx: crossbeam_channel::Sender<SectionMeshData>,
     ) {
         loop {
@@ -602,6 +611,7 @@ impl MeshQueue {
                     &dry_foliage_colormap,
                     &biome_climate,
                     &global_cuboids,
+                    batch_granularity,
                     &tx,
                     queue_ms,
                 )

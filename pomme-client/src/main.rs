@@ -124,6 +124,7 @@ fn main() {
         user,
         args.quick_access_multiplayer,
         args.chunk_renderer,
+        args.debug_labels,
     )
     .run()
     {

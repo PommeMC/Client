@@ -1,10 +1,11 @@
 use glam::Vec3;
 
-use super::chunk::mesher::{ChunkVertex, PACKED_WHITE_SHIFTED, pack_light_tint, pack_uv};
+use super::chunk::mesher::{PACKED_WHITE_SHIFTED, pack_light_tint, pack_uv};
 use super::entity_model::{
     BakedEntityModel, EntityPart, ModelConvention, ModelCube, bake_model,
     generate_cube_vertices_faces,
 };
+use super::model_vertex::ModelVertex;
 
 /// Shulker box, closed state. Matches vanilla `ShulkerModel`: a 16x12x16 lid
 /// stacked on a 16x8x16 base, with the lid's bottom flush against the base's
@@ -118,7 +119,7 @@ fn emit_vanilla_cube(
     tex_w: u32,
     tex_h: u32,
     faces: u8,
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<ModelVertex>,
 ) {
     let (w, h, d) = (size.x, size.y, size.z);
     let (x0, y0, z0) = (origin.x, origin.y, origin.z);
@@ -178,7 +179,7 @@ fn emit_vanilla_cube(
         }
         for &i in &[0usize, 1, 2, 0, 2, 3] {
             let (pos, u, v) = corners[i];
-            vertices.push(ChunkVertex {
+            vertices.push(ModelVertex {
                 position: [pos[0] / 16.0, pos[1] / 16.0, pos[2] / 16.0],
                 tex_coords: pack_uv(u / tex_w as f32, v / tex_h as f32),
                 // TODO: full-bright; vanilla samples the lightmap at the block

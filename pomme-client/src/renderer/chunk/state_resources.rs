@@ -40,6 +40,7 @@ impl ChunkRendererCore {
         global_cuboids: &[CuboidData],
         render_distance: u32,
         backend: ChunkDrawBackend,
+        task_limits: TaskShaderLimits,
     ) -> Self {
         let dev_props = physical_device.get_properties();
         let descriptor_buckets =
@@ -51,7 +52,22 @@ impl ChunkRendererCore {
         let use_staging = dev_props.device_type == vk::PhysicalDeviceType::DiscreteGpu;
         // Spec floor is 65535 even with multiDrawIndirect; meta_high_water
         // passes it from ~RD 32, so every draw clamps to the device cap.
-        let max_draw_indirect_count = dev_props.limits.max_draw_indirect_count;
+        let task_dispatch_width = task_limits.max_task_work_group_count[0]
+            .min(task_limits.max_task_work_group_total_count)
+            .max(1);
+        let max_draw_indirect_count = if backend == ChunkDrawBackend::Task {
+            let total = task_limits.max_task_work_group_total_count;
+            let rectangular_safe = if total <= task_dispatch_width {
+                total
+            } else {
+                total.saturating_sub(task_dispatch_width - 1)
+            };
+            rectangular_safe
+                .min(task_dispatch_width.saturating_mul(task_limits.max_task_work_group_count[1]))
+                .min(dev_props.limits.max_draw_indirect_count)
+        } else {
+            dev_props.limits.max_draw_indirect_count
+        };
 
         let mesh_buffer = if use_staging {
             Buffer::device(
@@ -128,7 +144,11 @@ impl ChunkRendererCore {
             draw_capacity,
             render_distance,
         );
-        let count_size = 4u64;
+        // The first word is the indirect/task candidate count. The second is
+        // its allocation capacity, used by task_dispatch.comp to clamp an
+        // intentionally overflowing atomic count before dispatching tasks.
+        let count_size = 8u64;
+        let task_command_size = size_of::<vk::DrawMeshTasksIndirectCommandEXT>() as u64;
         let aabb_command_size = 20u64;
         let frustum_size = size_of::<FrustumData>() as u64;
 
@@ -137,6 +157,8 @@ impl ChunkRendererCore {
         let mut count_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut indirect_cutout_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut count_cutout_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut task_command_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut task_command_cutout_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut frustum_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut water_count_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut water_bucket_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -170,7 +192,7 @@ impl ChunkRendererCore {
             );
             indirect_buffers.push(buffer);
 
-            let buffer = Buffer::host(
+            let mut buffer = Buffer::host(
                 device,
                 allocator,
                 count_size,
@@ -179,6 +201,8 @@ impl ChunkRendererCore {
                     | vk::BufferUsageFlags::TransferDst,
                 "draw_count",
             );
+            buffer.mapped_slice_mut()[..8]
+                .copy_from_slice(bytemuck::bytes_of(&[0u32, draw_capacity as u32]));
             count_buffers.push(buffer);
 
             let buffer = Buffer::host(
@@ -192,7 +216,7 @@ impl ChunkRendererCore {
             );
             indirect_cutout_buffers.push(buffer);
 
-            let buffer = Buffer::host(
+            let mut buffer = Buffer::host(
                 device,
                 allocator,
                 count_size,
@@ -201,7 +225,24 @@ impl ChunkRendererCore {
                     | vk::BufferUsageFlags::TransferDst,
                 "draw_count_cutout",
             );
+            buffer.mapped_slice_mut()[..8]
+                .copy_from_slice(bytemuck::bytes_of(&[0u32, draw_capacity as u32]));
             count_cutout_buffers.push(buffer);
+
+            task_command_buffers.push(Buffer::device(
+                device,
+                allocator,
+                task_command_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "task_command",
+            ));
+            task_command_cutout_buffers.push(Buffer::device(
+                device,
+                allocator,
+                task_command_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "task_command_cutout",
+            ));
 
             let buffer = Buffer::host(
                 device,
@@ -280,13 +321,15 @@ impl ChunkRendererCore {
                 vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::TransferDst,
                 "section_visibility",
             ));
-            stats_buffers.push(Buffer::host(
+            let mut stats = Buffer::host(
                 device,
                 allocator,
-                16,
+                32,
                 vk::BufferUsageFlags::StorageBuffer,
                 "occlusion_stats",
-            ));
+            );
+            stats.mapped_slice_mut().fill(0);
+            stats_buffers.push(stats);
         }
 
         let history_buffer = Buffer::device(
@@ -310,7 +353,7 @@ impl ChunkRendererCore {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create compute pipeline layout");
 
-        let backend_value = u32::from(backend == ChunkDrawBackend::Mesh);
+        let backend_value = u32::from(backend == ChunkDrawBackend::Task);
         let map_entry = [vk::SpecializationMapEntry {
             constant_id: 0,
             offset: 0,
@@ -347,6 +390,24 @@ impl ChunkRendererCore {
             shader::include_spirv!("cull_finalize.comp.spv"),
             Some(&specialization),
         );
+        let task_width_entry = [vk::SpecializationMapEntry {
+            constant_id: 0,
+            offset: 0,
+            size: size_of::<u32>(),
+        }];
+        let task_width_specialization = vk::SpecializationInfo {
+            map_entry_count: 1,
+            map_entries: task_width_entry.as_ptr(),
+            data_size: size_of::<u32>(),
+            data: (&task_dispatch_width as *const u32).cast(),
+            ..Default::default()
+        };
+        let task_dispatch_pipeline = create_compute_pipeline(
+            device,
+            compute_layout,
+            shader::include_spirv!("task_dispatch.comp.spv"),
+            Some(&task_width_specialization),
+        );
         let water_scan_pipeline = create_compute_pipeline(
             device,
             compute_layout,
@@ -357,13 +418,13 @@ impl ChunkRendererCore {
             device,
             compute_layout,
             shader::include_spirv!("water_emit.comp.spv"),
-            Some(&specialization),
+            None,
         );
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::StorageBuffer,
-                descriptor_count: 23 * MAX_FRAMES_IN_FLIGHT as u32,
+                descriptor_count: 25 * MAX_FRAMES_IN_FLIGHT as u32,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UniformBuffer,
@@ -418,7 +479,7 @@ impl ChunkRendererCore {
                     3,
                     vk::DescriptorType::StorageBuffer,
                     count_buffers[i].buffer,
-                    4,
+                    count_size,
                 ),
                 (
                     4,
@@ -430,7 +491,7 @@ impl ChunkRendererCore {
                     5,
                     vk::DescriptorType::StorageBuffer,
                     count_cutout_buffers[i].buffer,
-                    4,
+                    count_size,
                 ),
                 (
                     6,
@@ -514,7 +575,19 @@ impl ChunkRendererCore {
                     23,
                     vk::DescriptorType::StorageBuffer,
                     stats_buffers[i].buffer,
-                    16,
+                    32,
+                ),
+                (
+                    24,
+                    vk::DescriptorType::StorageBuffer,
+                    task_command_buffers[i].buffer,
+                    task_command_size,
+                ),
+                (
+                    25,
+                    vk::DescriptorType::StorageBuffer,
+                    task_command_cutout_buffers[i].buffer,
+                    task_command_size,
                 ),
             ];
             let infos: Vec<_> = bindings
@@ -560,6 +633,7 @@ impl ChunkRendererCore {
                 region_prepare_pipeline,
                 section_expand_pipeline,
                 finalize_pipeline,
+                task_dispatch_pipeline,
                 water_scan_pipeline,
                 water_emit_pipeline,
                 compute_layout,
@@ -571,6 +645,8 @@ impl ChunkRendererCore {
                 count_buffers,
                 indirect_cutout_buffers,
                 count_cutout_buffers,
+                task_command_buffers,
+                task_command_cutout_buffers,
                 water_indirect_buffers,
                 water_count_buffers,
                 water_bucket_buffers,

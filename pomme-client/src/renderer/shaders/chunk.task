@@ -1,0 +1,84 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+#include "camera_ubo.glsl"
+
+layout(local_size_x = 32) in;
+
+layout(set = 2, binding = 0, std430) readonly buffer MeshData {
+    uint meshData[];
+};
+layout(constant_id = 0) const uint DRAW_STREAM = 0u;
+layout(set = 3, binding = 2, std430) readonly buffer SolidCandidates { uvec4 solidCandidates[]; };
+layout(set = 3, binding = 4, std430) readonly buffer CutoutCandidates { uvec4 cutoutCandidates[]; };
+struct CandidateCount { uint count; uint capacity; };
+layout(set = 3, binding = 3, std430) readonly buffer SolidCount { CandidateCount solid; };
+layout(set = 3, binding = 5, std430) readonly buffer CutoutCount { CandidateCount cutout; };
+layout(set = 3, binding = 23, std430) buffer Stats {
+    uint visible_sections;
+    uint seed_sections;
+    uint new_sections;
+    uint overflows;
+    uint task_candidates;
+    uint task_rejected;
+    uint mesh_groups;
+    uint task_faces;
+};
+
+struct TaskPayload {
+    uint batch_word;
+};
+taskPayloadSharedEXT TaskPayload payload;
+
+const uint BATCH_CULL_SHIFT = 29u;
+const uint BATCH_FACE_COUNT_MASK = 0x1fffffffu;
+const uint BATCH_CULL_UNCULLABLE = 6u;
+const float BATCH_CULL_EPSILON = 0.001;
+
+bool batchBackfacing(uint word) {
+    uint direction = meshData[word + 1u] >> BATCH_CULL_SHIFT;
+    if (direction >= BATCH_CULL_UNCULLABLE) return false;
+
+    vec3 eye = vec3(camera_block.xyz) + camera_pos.xyz;
+    vec3 origin = vec3(
+        int(meshData[word + 4u]),
+        int(meshData[word + 5u]),
+        int(meshData[word + 6u])
+    );
+    vec3 mn = origin + uintBitsToFloat(uvec3(
+        meshData[word + 8u], meshData[word + 9u], meshData[word + 10u]
+    ));
+    vec3 mx = origin + uintBitsToFloat(uvec3(
+        meshData[word + 12u], meshData[word + 13u], meshData[word + 14u]
+    ));
+
+    if (direction == 0u) return eye.y > mx.y + BATCH_CULL_EPSILON;
+    if (direction == 1u) return eye.y < mn.y - BATCH_CULL_EPSILON;
+    if (direction == 2u) return eye.z > mx.z + BATCH_CULL_EPSILON;
+    if (direction == 3u) return eye.z < mn.z - BATCH_CULL_EPSILON;
+    if (direction == 4u) return eye.x > mx.x + BATCH_CULL_EPSILON;
+    return eye.x < mn.x - BATCH_CULL_EPSILON;
+}
+
+void main() {
+    uint candidate = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    CandidateCount candidates = DRAW_STREAM == 0u ? solid : cutout;
+    uint candidate_count = min(candidates.count, candidates.capacity);
+    if (candidate >= candidate_count) {
+        EmitMeshTasksEXT(0u, 1u, 1u);
+        return;
+    }
+    uint batch_word = DRAW_STREAM == 0u
+        ? solidCandidates[candidate].w
+        : cutoutCandidates[candidate].w;
+    if (gl_LocalInvocationIndex == 0u) payload.batch_word = batch_word;
+    uint face_count = meshData[batch_word + 1u] & BATCH_FACE_COUNT_MASK;
+    uint groups = batchBackfacing(batch_word) ? 0u : (face_count + 31u) / 32u;
+    if (gl_LocalInvocationIndex == 0u) {
+        atomicAdd(task_candidates, 1u);
+        atomicAdd(task_rejected, uint(groups == 0u));
+        atomicAdd(mesh_groups, groups);
+        if (groups != 0u) atomicAdd(task_faces, face_count);
+    }
+    EmitMeshTasksEXT(groups, 1u, 1u);
+}

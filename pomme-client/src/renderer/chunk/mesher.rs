@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use azalea_core::position::ChunkSectionPos;
 use bytemuck::Zeroable;
-use pyronyx::vk;
 
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::section::LocalSection;
@@ -12,47 +11,6 @@ use crate::world::block::registry::{BlockRegistry, Tint};
 use crate::world::block::{block_id, is_air};
 use crate::world::chunk::ChunkStore;
 
-/// CPU-only expanded vertex used while calculating chunk bounds and by
-/// non-chunk renderers. Chunk mesh uploads contain [`FaceRecord`] values.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ChunkVertex {
-    pub position: [f32; 3],
-    pub tex_coords: [u16; 2],
-    pub light_tint: u32,
-}
-impl ChunkVertex {
-    pub const STRIDE: u32 = size_of::<Self>() as u32;
-    pub fn binding_description() -> vk::VertexInputBindingDescription {
-        vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: Self::STRIDE,
-            input_rate: vk::VertexInputRate::Vertex,
-        }
-    }
-    pub fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 3] {
-        [
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32Sfloat,
-                offset: 0,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R16G16Unorm,
-                offset: 12,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 2,
-                binding: 0,
-                format: vk::Format::R8G8B8A8Unorm,
-                offset: 16,
-            },
-        ]
-    }
-}
 include!("packing_consts.rs");
 
 /// One packed u32 face: low 12 bits are the window-local quad ID and the upper
@@ -242,6 +200,52 @@ pub struct FaceBatch {
     pub face_offset: u32,
     pub face_count: u32,
     pub cuboid_base: u32,
+    pub cull: BatchCull,
+    pub aabb_min: [f32; 3],
+    pub aabb_max: [f32; 3],
+}
+
+/// Conservative whole-batch backface classification. The numeric values are
+/// shared with `batch_cull.glsl`; the six axis values match `Direction::index`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchCull {
+    Down = 0,
+    Up = 1,
+    North = 2,
+    South = 3,
+    West = 4,
+    East = 5,
+    Uncullable = 6,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchGranularity {
+    Coarse,
+    Directional,
+}
+
+impl BatchCull {
+    const fn from_direction(direction: Direction) -> Self {
+        match direction {
+            Direction::Down => Self::Down,
+            Direction::Up => Self::Up,
+            Direction::North => Self::North,
+            Direction::South => Self::South,
+            Direction::West => Self::West,
+            Direction::East => Self::East,
+        }
+    }
+}
+
+pub const BATCH_CULL_SHIFT: u32 = 29;
+pub const BATCH_FACE_COUNT_MASK: u32 = (1 << BATCH_CULL_SHIFT) - 1;
+
+impl FaceBatch {
+    pub const fn packed_face_count(self) -> u32 {
+        assert!(self.face_count <= BATCH_FACE_COUNT_MASK);
+        self.face_count | ((self.cull as u32) << BATCH_CULL_SHIFT)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -258,17 +262,19 @@ impl FaceBatchCounts {
     }
 }
 
-/// Eight u32 words embedded in the section allocation. `firstInstance` is the
+/// Sixteen u32 words embedded in the section allocation. `firstInstance` is the
 /// absolute word offset of this record in the mesh buffer.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuFaceBatch {
     pub face_word_offset: u32,
-    pub face_count: u32,
+    pub face_count_and_cull: u32,
     pub cuboid_word_offset: u32,
     pub fluid_height_word_offset: u32,
     pub origin: [i32; 3],
     pub uploaded_ms: u32,
+    pub aabb_min: [f32; 4],
+    pub aabb_max: [f32; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -304,6 +310,128 @@ mod face_record_tests {
     }
 
     #[test]
+    fn mesh_sink_separates_batches_and_tracks_their_bounds() {
+        let mut sink = MeshSink::default();
+        let face = |cuboid, direction| PendingFace {
+            cuboid,
+            direction,
+            shades: [31; 4],
+        };
+        let east_a = [
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
+        ];
+        let east_b = east_a.map(|p| [p[0] + 2.0, p[1] + 3.0, p[2] + 4.0]);
+        sink.push(
+            MeshClass::Solid,
+            BatchCull::East,
+            east_a,
+            face(0, Direction::East),
+        );
+        sink.push(
+            MeshClass::Solid,
+            BatchCull::East,
+            east_b,
+            face(1, Direction::East),
+        );
+        sink.push(
+            MeshClass::Solid,
+            BatchCull::West,
+            east_a,
+            face(0, Direction::West),
+        );
+        sink.push(
+            MeshClass::Solid,
+            BatchCull::East,
+            east_a,
+            face(MAX_CUBOIDS_PER_WINDOW, Direction::East),
+        );
+        sink.push(
+            MeshClass::TranslucentFluid,
+            BatchCull::Up,
+            east_a,
+            face(0, Direction::Up),
+        );
+
+        assert_eq!(sink.solid_batches.len(), 3);
+        let first = sink
+            .solid_batches
+            .iter()
+            .find(|batch| batch.cuboid_base == 0 && batch.cull == BatchCull::East)
+            .unwrap();
+        assert_eq!(first.faces.len(), 2);
+        assert_eq!(first.aabb_min, [1.0, 0.0, 0.0]);
+        assert_eq!(first.aabb_max, [3.0, 4.0, 5.0]);
+        assert_eq!(sink.translucent_fluid_batches.len(), 1);
+        assert_eq!(
+            sink.translucent_fluid_batches[0].cull,
+            BatchCull::Uncullable
+        );
+    }
+
+    #[test]
+    fn startup_granularity_selects_coarse_or_directional_batches() {
+        fn make_sink() -> MeshSink {
+            let mut sink = MeshSink::default();
+            let positions = [[0.0, 0.0, 0.0]; 4];
+            for (cuboid, direction) in [
+                (0, Direction::East),
+                (1, Direction::West),
+                (MAX_CUBOIDS_PER_WINDOW, Direction::East),
+            ] {
+                sink.push(
+                    MeshClass::Solid,
+                    BatchCull::from_direction(direction),
+                    positions,
+                    PendingFace {
+                        cuboid,
+                        direction,
+                        shades: [31; 4],
+                    },
+                );
+            }
+            sink
+        }
+
+        let finish = |granularity| {
+            finalize_section(
+                make_sink(),
+                ChunkSectionPos::new(0, 0, 0),
+                0,
+                0,
+                0,
+                granularity,
+            )
+        };
+        let coarse = finish(BatchGranularity::Coarse);
+        let directional = finish(BatchGranularity::Directional);
+        assert_eq!(coarse.batch_counts.regular_solid, 2);
+        assert_eq!(directional.batch_counts.regular_solid, 3);
+        assert!(
+            coarse
+                .batches
+                .iter()
+                .all(|batch| batch.cull == BatchCull::Uncullable)
+        );
+    }
+
+    #[test]
+    fn gpu_batch_packs_count_and_cull_tag() {
+        let batch = FaceBatch {
+            face_offset: 0,
+            face_count: 123,
+            cuboid_base: 0,
+            cull: BatchCull::North,
+            aabb_min: [0.0; 3],
+            aabb_max: [1.0; 3],
+        };
+        assert_eq!(batch.packed_face_count() & BATCH_FACE_COUNT_MASK, 123);
+        assert_eq!(batch.packed_face_count() >> BATCH_CULL_SHIFT, 2);
+    }
+
+    #[test]
     fn section_cuboid_roundtrips_rgb887() {
         let c = SectionCuboid::new([15, 7, 3], 0xabcd, [1.0, 128.0 / 255.0, 64.0 / 127.0]);
         assert_eq!(c.packed & 0xfff, 0x37f);
@@ -313,7 +441,7 @@ mod face_record_tests {
         assert_eq!((c.packed >> 44) & 0x7f, 64);
         assert_eq!(c.packed >> 51, 0);
         assert_eq!(size_of::<SectionCuboid>(), 8);
-        assert_eq!(size_of::<GpuFaceBatch>(), 32);
+        assert_eq!(size_of::<GpuFaceBatch>(), 64);
     }
 
     #[test]
@@ -340,6 +468,9 @@ mod face_record_tests {
                 face_offset: 0,
                 face_count: 3,
                 cuboid_base: 0,
+                cull: BatchCull::East,
+                aabb_min: [0.0, 1.0, 2.0],
+                aabb_max: [3.0, 4.0, 5.0],
             }],
             batch_counts: FaceBatchCounts {
                 regular_solid: 1,
@@ -458,13 +589,14 @@ impl SectionMeshData {
     }
 }
 
-/// Per-section meshing accumulator. Expanded four-corner quads exist only long
-/// enough to calculate bounds; final GPU data stores one u32 per face.
+/// Per-section meshing accumulator. Faces are separated immediately by render
+/// class, cuboid window, and coarse backface direction. Finalization only
+/// serializes these already-built batches.
 struct MeshSink {
-    solid_faces: Vec<PendingFace>,
-    cutout_faces: Vec<PendingFace>,
-    opaque_fluid_faces: Vec<PendingFace>,
-    translucent_fluid_faces: Vec<PendingFace>,
+    solid_batches: Vec<PendingBatch>,
+    cutout_batches: Vec<PendingBatch>,
+    opaque_fluid_batches: Vec<PendingBatch>,
+    translucent_fluid_batches: Vec<PendingBatch>,
     cuboids: Vec<SectionCuboid>,
     fluid_cuboids: Vec<SectionCuboid>,
     fluid_heights: Vec<u32>,
@@ -475,10 +607,10 @@ struct MeshSink {
 impl Default for MeshSink {
     fn default() -> Self {
         Self {
-            solid_faces: Vec::new(),
-            cutout_faces: Vec::new(),
-            opaque_fluid_faces: Vec::new(),
-            translucent_fluid_faces: Vec::new(),
+            solid_batches: Vec::new(),
+            cutout_batches: Vec::new(),
+            opaque_fluid_batches: Vec::new(),
+            translucent_fluid_batches: Vec::new(),
             cuboids: Vec::new(),
             fluid_cuboids: Vec::new(),
             fluid_heights: Vec::new(),
@@ -493,6 +625,36 @@ struct PendingFace {
     cuboid: u32,
     direction: Direction,
     shades: [u8; 4],
+}
+
+struct PendingBatch {
+    cuboid_base: u32,
+    cull: BatchCull,
+    faces: Vec<PendingFace>,
+    aabb_min: [f32; 3],
+    aabb_max: [f32; 3],
+}
+
+impl PendingBatch {
+    fn new(cuboid_base: u32, cull: BatchCull) -> Self {
+        Self {
+            cuboid_base,
+            cull,
+            faces: Vec::new(),
+            aabb_min: [f32::MAX; 3],
+            aabb_max: [f32::MIN; 3],
+        }
+    }
+
+    fn push(&mut self, positions: &[[f32; 3]; 4], face: PendingFace) {
+        for position in positions {
+            for (axis, &value) in position.iter().enumerate() {
+                self.aabb_min[axis] = self.aabb_min[axis].min(value);
+                self.aabb_max[axis] = self.aabb_max[axis].max(value);
+            }
+        }
+        self.faces.push(face);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -515,20 +677,39 @@ impl MeshSink {
         self.fluid_heights.push(heights);
         index
     }
-    fn push(&mut self, class: MeshClass, quad: [ChunkVertex; 4], face: PendingFace) {
-        for vertex in quad {
-            for axis in 0..3 {
-                self.aabb_min[axis] = self.aabb_min[axis].min(vertex.position[axis]);
-                self.aabb_max[axis] = self.aabb_max[axis].max(vertex.position[axis]);
+    fn push(
+        &mut self,
+        class: MeshClass,
+        mut cull: BatchCull,
+        positions: [[f32; 3]; 4],
+        face: PendingFace,
+    ) {
+        for position in positions {
+            for (axis, value) in position.into_iter().enumerate() {
+                self.aabb_min[axis] = self.aabb_min[axis].min(value);
+                self.aabb_max[axis] = self.aabb_max[axis].max(value);
             }
         }
-        let faces = match class {
-            MeshClass::Solid => &mut self.solid_faces,
-            MeshClass::OpaqueFluid => &mut self.opaque_fluid_faces,
-            MeshClass::Cutout => &mut self.cutout_faces,
-            MeshClass::TranslucentFluid => &mut self.translucent_fluid_faces,
+        if matches!(class, MeshClass::TranslucentFluid) {
+            cull = BatchCull::Uncullable;
+        }
+        let batches = match class {
+            MeshClass::Solid => &mut self.solid_batches,
+            MeshClass::OpaqueFluid => &mut self.opaque_fluid_batches,
+            MeshClass::Cutout => &mut self.cutout_batches,
+            MeshClass::TranslucentFluid => &mut self.translucent_fluid_batches,
         };
-        faces.push(face);
+        let (_, cuboid_base, _) = cuboid_window(face.cuboid);
+        let batch = if let Some(index) = batches
+            .iter()
+            .position(|batch| batch.cuboid_base == cuboid_base && batch.cull == cull)
+        {
+            &mut batches[index]
+        } else {
+            batches.push(PendingBatch::new(cuboid_base, cull));
+            batches.last_mut().unwrap()
+        };
+        batch.push(&positions, face);
     }
 }
 #[derive(Clone, Copy, Debug, Default)]
@@ -889,6 +1070,7 @@ pub(crate) fn mesh_section(
     uv_map: &AtlasUVMap,
     content_gen: u64,
     upload_epoch: u64,
+    batch_granularity: BatchGranularity,
 ) -> SectionMeshData {
     let relative_si = spos.y - snapshot.min_y.div_euclid(16);
     let mut sink = MeshSink::default();
@@ -907,8 +1089,8 @@ pub(crate) fn mesh_section(
                 let block_pos = [local_x as f32, local_y as f32, local_z as f32];
                 if let BlockKind::Water | BlockKind::Lava = kind {
                     emit_fluid(
-                        &mut sink, kind, block_pos, state, snapshot, registry, uv_map, local_x,
-                        local_y, local_z,
+                        &mut sink, kind, block_pos, state, snapshot, registry, local_x, local_y,
+                        local_z,
                     );
                 } else if let Some(baked) = registry.get_baked_model(state) {
                     emit_baked_model(
@@ -933,7 +1115,14 @@ pub(crate) fn mesh_section(
         }
     }
 
-    finalize_section(sink, spos, relative_si, content_gen, upload_epoch)
+    finalize_section(
+        sink,
+        spos,
+        relative_si,
+        content_gen,
+        upload_epoch,
+        batch_granularity,
+    )
 }
 
 /// Pack descriptors in the fixed ABI order: regular solid, opaque fluid,
@@ -944,88 +1133,113 @@ fn finalize_section(
     relative_si: i32,
     content_gen: u64,
     upload_epoch: u64,
+    batch_granularity: BatchGranularity,
 ) -> SectionMeshData {
-    let face_count = sink.solid_faces.len()
-        + sink.opaque_fluid_faces.len()
-        + sink.cutout_faces.len()
-        + sink.translucent_fluid_faces.len();
+    let MeshSink {
+        solid_batches,
+        cutout_batches,
+        opaque_fluid_batches,
+        translucent_fluid_batches,
+        cuboids,
+        fluid_cuboids,
+        fluid_heights,
+        aabb_min,
+        aabb_max,
+    } = sink;
+    let count_faces =
+        |batches: &[PendingBatch]| batches.iter().map(|batch| batch.faces.len()).sum::<usize>();
+    let solid_faces = count_faces(&solid_batches);
+    let cutout_faces = count_faces(&cutout_batches);
+    let opaque_fluid_faces = count_faces(&opaque_fluid_batches);
+    let translucent_fluid_faces = count_faces(&translucent_fluid_batches);
+    let face_count = solid_faces + cutout_faces + opaque_fluid_faces + translucent_fluid_faces;
     let aabb = if face_count == 0 {
         ChunkAABB::zeroed()
     } else {
         ChunkAABB {
-            min: [sink.aabb_min[0], sink.aabb_min[1], sink.aabb_min[2], 0.0],
-            max: [sink.aabb_max[0], sink.aabb_max[1], sink.aabb_max[2], 0.0],
+            min: [aabb_min[0], aabb_min[1], aabb_min[2], 0.0],
+            max: [aabb_max[0], aabb_max[1], aabb_max[2], 0.0],
         }
     };
-    fn append_windows(
+    fn append_batches(
         out: &mut Vec<FaceRecord>,
         batches: &mut Vec<FaceBatch>,
-        faces: &[PendingFace],
-        cuboid_count: usize,
+        mut pending: Vec<PendingBatch>,
+        directional: bool,
     ) {
-        for base in (0..cuboid_count as u32).step_by(MAX_CUBOIDS_PER_WINDOW as usize) {
-            let end = (base + MAX_CUBOIDS_PER_WINDOW).min(cuboid_count as u32);
+        pending.sort_by_key(|batch| (batch.cuboid_base, batch.cull as u8));
+        let mut pending = pending.into_iter().peekable();
+        while let Some(first) = pending.peek() {
+            let cuboid_base = first.cuboid_base;
+            let group_cull = first.cull;
             let face_offset = out.len() as u32;
-            for face in faces.iter().filter(|f| (base..end).contains(&f.cuboid)) {
-                let (_, face_base, local) = cuboid_window(face.cuboid);
-                debug_assert_eq!(face_base, base);
-                let quad_id = local * 6 + face.direction.index() as u32;
-                out.push(FaceRecord::new(quad_id as u16, face.shades));
+            let mut aabb_min = [f32::MAX; 3];
+            let mut aabb_max = [f32::MIN; 3];
+            while pending.peek().is_some_and(|batch| {
+                batch.cuboid_base == cuboid_base && (!directional || batch.cull == group_cull)
+            }) {
+                let batch = pending.next().unwrap();
+                for face in batch.faces {
+                    let (_, face_base, local) = cuboid_window(face.cuboid);
+                    debug_assert_eq!(face_base, cuboid_base);
+                    let quad_id = local * 6 + face.direction.index() as u32;
+                    out.push(FaceRecord::new(quad_id as u16, face.shades));
+                }
+                for axis in 0..3 {
+                    aabb_min[axis] = aabb_min[axis].min(batch.aabb_min[axis]);
+                    aabb_max[axis] = aabb_max[axis].max(batch.aabb_max[axis]);
+                }
             }
             let face_count = out.len() as u32 - face_offset;
-            if face_count != 0 {
-                batches.push(FaceBatch {
-                    face_offset,
-                    face_count,
-                    cuboid_base: base,
-                });
-            }
+            debug_assert_ne!(face_count, 0);
+            batches.push(FaceBatch {
+                face_offset,
+                face_count,
+                cuboid_base,
+                cull: if directional {
+                    group_cull
+                } else {
+                    BatchCull::Uncullable
+                },
+                aabb_min,
+                aabb_max,
+            });
         }
     }
-    let mut faces = Vec::with_capacity(sink.solid_faces.len() + sink.cutout_faces.len());
-    let mut fluid_faces =
-        Vec::with_capacity(sink.opaque_fluid_faces.len() + sink.translucent_fluid_faces.len());
+    let mut faces = Vec::with_capacity(solid_faces + cutout_faces);
+    let mut fluid_faces = Vec::with_capacity(opaque_fluid_faces + translucent_fluid_faces);
     let mut batches = Vec::new();
+    let directional = batch_granularity == BatchGranularity::Directional;
     let batch_start = batches.len();
-    append_windows(
-        &mut faces,
-        &mut batches,
-        &sink.solid_faces,
-        sink.cuboids.len(),
-    );
+    append_batches(&mut faces, &mut batches, solid_batches, directional);
     let regular_solid = (batches.len() - batch_start) as u32;
     let batch_start = batches.len();
-    append_windows(
+    append_batches(
         &mut fluid_faces,
         &mut batches,
-        &sink.opaque_fluid_faces,
-        sink.fluid_cuboids.len(),
+        opaque_fluid_batches,
+        directional,
     );
     let opaque_fluid = (batches.len() - batch_start) as u32;
     let batch_start = batches.len();
-    append_windows(
-        &mut faces,
-        &mut batches,
-        &sink.cutout_faces,
-        sink.cuboids.len(),
-    );
+    append_batches(&mut faces, &mut batches, cutout_batches, directional);
     let cutout = (batches.len() - batch_start) as u32;
     let batch_start = batches.len();
-    append_windows(
+    append_batches(
         &mut fluid_faces,
         &mut batches,
-        &sink.translucent_fluid_faces,
-        sink.fluid_cuboids.len(),
+        translucent_fluid_batches,
+        false,
     );
     let translucent_fluid = (batches.len() - batch_start) as u32;
     SectionMeshData {
         spos,
         relative_si,
         faces,
-        section_cuboids: sink.cuboids,
+        section_cuboids: cuboids,
         fluid_faces,
-        fluid_cuboids: sink.fluid_cuboids,
-        fluid_heights: sink.fluid_heights,
+        fluid_cuboids,
+        fluid_heights,
         batches,
         batch_counts: FaceBatchCounts {
             regular_solid,
@@ -1124,12 +1338,11 @@ fn emit_baked_cuboids(
                 sink,
                 cuboid,
                 quad.direction,
+                quad.batch_direction,
                 block_pos,
                 &quad.positions,
-                &quad.uvs,
                 lights,
                 region,
-                PACKED_WHITE_SHIFTED,
             );
         }
     }
@@ -1235,18 +1448,14 @@ fn emit_fluid(
     state: azalea_block::BlockState,
     snapshot: &SectionStoreSnapshot,
     registry: &BlockRegistry,
-    uv_map: &AtlasUVMap,
     lx: i32,
     ly: i32,
     lz: i32,
 ) {
-    let (region, tint) = if matches!(kind, BlockKind::Water) {
-        (
-            uv_map.get_region("water_still"),
-            pack_tint_shifted(snapshot.water_tint(lx, ly, lz)),
-        )
+    let tint = if matches!(kind, BlockKind::Water) {
+        pack_tint_shifted(snapshot.water_tint(lx, ly, lz))
     } else {
-        (uv_map.get_region("lava_still"), PACKED_WHITE_SHIFTED)
+        PACKED_WHITE_SHIFTED
     };
 
     let global_id = if matches!(kind, BlockKind::Water) {
@@ -1290,7 +1499,7 @@ fn emit_fluid(
         {
             continue;
         }
-        let (mut positions, uvs, light) = cube_face_geometry(*dir);
+        let (mut positions, _, light) = cube_face_geometry(*dir);
         for p in &mut positions {
             if p[1] > 0.5 {
                 let high_x = p[0] >= 0.5;
@@ -1306,11 +1515,17 @@ fn emit_fluid(
             }
         }
         emit_quad_into(
-            sink, class, cuboid, *dir, block_pos, &positions, &uvs, [light; 4], region, tint,
+            sink,
+            class,
+            cuboid,
+            *dir,
+            BatchCull::from_direction(*dir),
+            block_pos,
+            &positions,
+            [light; 4],
         );
     }
 }
-const MISSING_TINT: u32 = pack_tint_shifted([1.0, 0.0, 1.0]);
 #[allow(clippy::too_many_arguments)]
 fn emit_missing_cube(
     sink: &mut MeshSink,
@@ -1336,19 +1551,18 @@ fn emit_missing_cube(
             continue;
         }
         let (positions, _, light) = cube_face_geometry(*dir);
-        let quad: [ChunkVertex; 4] = core::array::from_fn(|i| ChunkVertex {
-            position: [
-                block_pos[0] + positions[i][0],
-                block_pos[1] + positions[i][1],
-                block_pos[2] + positions[i][2],
-            ],
-            tex_coords: pack_uv(0.0, 0.0),
-            light_tint: pack_light_tint(light, MISSING_TINT),
+        let positions = positions.map(|position| {
+            [
+                block_pos[0] + position[0],
+                block_pos[1] + position[1],
+                block_pos[2] + position[2],
+            ]
         });
         // The missing tile is a solid checker, so the cube goes in the solid pass.
         sink.push(
             MeshClass::Solid,
-            quad,
+            BatchCull::from_direction(*dir),
+            positions,
             PendingFace {
                 cuboid,
                 direction: *dir,
@@ -1372,12 +1586,11 @@ fn emit_face(
     sink: &mut MeshSink,
     cuboid: u32,
     direction: Direction,
+    batch_direction: Option<Direction>,
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
-    uvs: &[[f32; 2]; 4],
     lights: [f32; 4],
     region: AtlasRegion,
-    tint: u32,
 ) {
     emit_quad_into(
         sink,
@@ -1388,12 +1601,10 @@ fn emit_face(
         },
         cuboid,
         direction,
+        batch_direction.map_or(BatchCull::Uncullable, BatchCull::from_direction),
         block_pos,
         positions,
-        uvs,
         lights,
-        region,
-        tint,
     );
 }
 
@@ -1403,31 +1614,23 @@ fn emit_quad_into(
     class: MeshClass,
     cuboid: u32,
     direction: Direction,
+    cull: BatchCull,
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
-    uvs: &[[f32; 2]; 4],
     lights: [f32; 4],
-    region: AtlasRegion,
-    tint: u32,
 ) {
-    let u_span = region.u_max - region.u_min;
-    let v_span = region.v_max - region.v_min;
-    let quad: [ChunkVertex; 4] = core::array::from_fn(|i| ChunkVertex {
-        position: [
-            block_pos[0] + positions[i][0],
-            block_pos[1] + positions[i][1],
-            block_pos[2] + positions[i][2],
-        ],
-        tex_coords: pack_uv(
-            region.u_min + uvs[i][0] * u_span,
-            region.v_min + uvs[i][1] * v_span,
-        ),
-        light_tint: pack_light_tint(lights[i], tint),
+    let positions = positions.map(|position| {
+        [
+            block_pos[0] + position[0],
+            block_pos[1] + position[1],
+            block_pos[2] + position[2],
+        ]
     });
     let shades = lights.map(|light| (light.clamp(0.0, 1.0) * 31.0 + 0.5) as u8);
     sink.push(
         class,
-        quad,
+        cull,
+        positions,
         PendingFace {
             cuboid,
             direction,

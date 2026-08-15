@@ -23,8 +23,8 @@ pub enum ContextError {
     #[error("no suitable GPU found")]
     NoSuitableGpu,
 
-    #[error("mesh shaders unavailable: {0}")]
-    MeshShadersUnavailable(String),
+    #[error("task shaders unavailable: {0}")]
+    TaskShadersUnavailable(String),
 
     #[error("allocator error: {0}")]
     Allocator(#[from] pomme_gpu_allocator::AllocationError),
@@ -52,22 +52,29 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[
 
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceFeatures {
+    pub debug_labels: bool,
     pub timestamp_queries: bool,
     /// Valid low bits of the graphics queue's timestamps; deltas must be
     /// masked to this width or they read garbage at counter wrap.
     pub timestamp_valid_bits: u32,
-    pub mesh_shader: bool,
     pub representative_fragment_test: bool,
-    pub mesh_limits: MeshShaderLimits,
+    pub task_shader: bool,
+    pub task_limits: TaskShaderLimits,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct MeshShaderLimits {
-    pub max_work_group_count_x: u32,
-    pub max_work_group_invocations: u32,
-    pub max_work_group_size_x: u32,
-    pub max_output_vertices: u32,
-    pub max_output_primitives: u32,
+pub struct TaskShaderLimits {
+    pub max_task_work_group_total_count: u32,
+    pub max_task_work_group_count: [u32; 3],
+    pub max_mesh_work_group_total_count: u32,
+    pub max_mesh_work_group_count: [u32; 3],
+    pub max_task_work_group_invocations: u32,
+    pub max_task_work_group_size_x: u32,
+    pub max_task_payload_size: u32,
+    pub max_mesh_work_group_invocations: u32,
+    pub max_mesh_work_group_size_x: u32,
+    pub max_mesh_output_vertices: u32,
+    pub max_mesh_output_primitives: u32,
 }
 
 pub struct VulkanContext {
@@ -99,7 +106,11 @@ pub struct VulkanContext {
 }
 
 impl VulkanContext {
-    pub fn new(window: &Window, chunk_renderer: ChunkRendererMode) -> Result<Self, ContextError> {
+    pub fn new(
+        window: &Window,
+        chunk_renderer: ChunkRendererMode,
+        debug_labels: bool,
+    ) -> Result<Self, ContextError> {
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
 
@@ -112,11 +123,20 @@ impl VulkanContext {
         #[cfg(debug_assertions)]
         let validation_available = check_validation_layer_support();
 
+        let debug_utils_available = vk::enumerate_instance_extension_properties(None)?
+            .iter()
+            .any(|extension| unsafe {
+                CStr::from_ptr(extension.extension_name.as_ptr()) == pyronyx::ext::debug_utils::NAME
+            });
         #[cfg(debug_assertions)]
-        if validation_available {
-            use pyronyx::ext;
-
-            extensions.push(ext::debug_utils::NAME.as_ptr());
+        let debug_utils_requested = debug_labels || validation_available;
+        #[cfg(not(debug_assertions))]
+        let debug_utils_requested = debug_labels;
+        let debug_utils_enabled = debug_utils_requested && debug_utils_available;
+        if debug_utils_enabled {
+            extensions.push(pyronyx::ext::debug_utils::NAME.as_ptr());
+        } else if debug_labels {
+            tracing::warn!("--debug-labels requested, but VK_EXT_debug_utils is unavailable");
         }
 
         #[cfg(debug_assertions)]
@@ -157,15 +177,18 @@ impl VulkanContext {
         };
 
         #[cfg(debug_assertions)]
-        let mut debug_create_info = populate_debug_messenger_create_info();
+        let instance = if validation_available && debug_utils_enabled {
+            let mut debug_create_info = populate_debug_messenger_create_info();
+            unsafe { vk::Instance::create(&instance_info.next(&mut debug_create_info), None)? }
+        } else {
+            unsafe { vk::Instance::create(&instance_info, None)? }
+        };
 
-        #[cfg(debug_assertions)]
-        let instance_info = instance_info.next(&mut debug_create_info);
-
+        #[cfg(not(debug_assertions))]
         let instance = unsafe { vk::Instance::create(&instance_info, None)? };
 
         #[cfg(debug_assertions)]
-        let debug_messenger = if validation_available {
+        let debug_messenger = if validation_available && debug_utils_enabled {
             instance.create_debug_utils_messenger(&populate_debug_messenger_create_info(), None)?
         } else {
             vk::DebugUtilsMessengerEXT::null()
@@ -204,22 +227,20 @@ impl VulkanContext {
         let available_extensions = physical_device
             .enumerate_device_extension_properties(None)
             .unwrap_or_default();
-        let mesh_extension = available_extensions.iter().any(|ext| unsafe {
+        let task_extension = available_extensions.iter().any(|ext| unsafe {
             CStr::from_ptr(ext.extension_name.as_ptr()) == pyronyx::ext::mesh_shader::NAME
         });
         let representative_extension = available_extensions.iter().any(|ext| unsafe {
             CStr::from_ptr(ext.extension_name.as_ptr())
                 == pyronyx::nv::representative_fragment_test::NAME
         });
-        let mut mesh_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
         let mut representative_features =
             vk::PhysicalDeviceRepresentativeFragmentTestFeaturesNV::default();
-        let mut vk11_supported = vk::PhysicalDeviceVulkan11Features::default();
-        let features2 = vk::PhysicalDeviceFeatures2::default().next(&mut vk11_supported);
-        let features2 = if mesh_extension {
-            features2.next(&mut mesh_features)
+        let mut task_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+        let features2 = if task_extension {
+            vk::PhysicalDeviceFeatures2::default().next(&mut task_features)
         } else {
-            features2
+            vk::PhysicalDeviceFeatures2::default()
         };
         let mut features2 = if representative_extension {
             features2.next(&mut representative_features)
@@ -236,10 +257,10 @@ impl VulkanContext {
                 &mut features2,
             );
         }
-        let mut mesh_properties = vk::PhysicalDeviceMeshShaderPropertiesEXT::default();
-        if mesh_extension {
+        let mut task_properties = vk::PhysicalDeviceMeshShaderPropertiesEXT::default();
+        if task_extension {
             let mut properties2 =
-                vk::PhysicalDeviceProperties2::default().next(&mut mesh_properties);
+                vk::PhysicalDeviceProperties2::default().next(&mut task_properties);
             unsafe {
                 (physical_device
                     .fns()
@@ -251,23 +272,54 @@ impl VulkanContext {
                 );
             }
         }
-        let mesh_limits = MeshShaderLimits {
-            max_work_group_count_x: mesh_properties.max_mesh_work_group_count[0],
-            max_work_group_invocations: mesh_properties.max_mesh_work_group_invocations,
-            max_work_group_size_x: mesh_properties.max_mesh_work_group_size[0],
-            max_output_vertices: mesh_properties.max_mesh_output_vertices,
-            max_output_primitives: mesh_properties.max_mesh_output_primitives,
+        let task_limits = TaskShaderLimits {
+            max_task_work_group_total_count: task_properties.max_task_work_group_total_count,
+            max_task_work_group_count: task_properties.max_task_work_group_count,
+            max_mesh_work_group_total_count: task_properties.max_mesh_work_group_total_count,
+            max_mesh_work_group_count: task_properties.max_mesh_work_group_count,
+            max_task_work_group_invocations: task_properties.max_task_work_group_invocations,
+            max_task_work_group_size_x: task_properties.max_task_work_group_size[0],
+            max_task_payload_size: task_properties.max_task_payload_size,
+            max_mesh_work_group_invocations: task_properties.max_mesh_work_group_invocations,
+            max_mesh_work_group_size_x: task_properties.max_mesh_work_group_size[0],
+            max_mesh_output_vertices: task_properties.max_mesh_output_vertices,
+            max_mesh_output_primitives: task_properties.max_mesh_output_primitives,
         };
-        let mesh_limits_ok = mesh_limits.max_work_group_count_x >= 128
-            && mesh_limits.max_work_group_invocations >= 32
-            && mesh_limits.max_work_group_size_x >= 32
-            && mesh_limits.max_output_vertices >= 128
-            && mesh_limits.max_output_primitives >= 64;
-        let mesh_shader = chunk_renderer != ChunkRendererMode::Legacy
-            && mesh_extension
-            && mesh_features.mesh_shader == vk::TRUE
-            && vk11_supported.shader_draw_parameters == vk::TRUE
-            && mesh_limits_ok;
+        let task_limits_ok = task_limits.max_task_work_group_total_count > 0
+            && task_limits.max_task_work_group_count[0] > 0
+            && task_limits.max_task_work_group_invocations >= 32
+            && task_limits.max_task_work_group_size_x >= 32
+            && task_limits.max_task_payload_size >= 4
+            && task_limits.max_mesh_work_group_total_count >= 128
+            && task_limits.max_mesh_work_group_count[0] >= 128
+            && task_limits.max_mesh_work_group_invocations >= 32
+            && task_limits.max_mesh_work_group_size_x >= 32
+            && task_limits.max_mesh_output_vertices >= 128
+            && task_limits.max_mesh_output_primitives >= 64;
+        let task_shader = chunk_renderer != ChunkRendererMode::Indirect
+            && task_extension
+            && task_features.task_shader == vk::TRUE
+            && task_features.mesh_shader == vk::TRUE
+            && task_limits_ok;
+        if chunk_renderer == ChunkRendererMode::Task && !task_shader {
+            return Err(ContextError::TaskShadersUnavailable(format!(
+                "extension={task_extension}, taskShader={}, meshShader={}, limits={task_limits:?}",
+                task_features.task_shader == vk::TRUE,
+                task_features.mesh_shader == vk::TRUE,
+            )));
+        }
+        tracing::info!(
+            "Chunk terrain backend: {}{}",
+            if task_shader { "task" } else { "indirect" },
+            if chunk_renderer == ChunkRendererMode::Auto {
+                " (auto)"
+            } else {
+                ""
+            }
+        );
+        if task_shader {
+            tracing::info!("Task/mesh shader limits: {task_limits:?}");
+        }
         let representative_fragment_test = representative_extension
             && representative_features.representative_fragment_test == vk::TRUE;
         tracing::info!(
@@ -278,14 +330,6 @@ impl VulkanContext {
                 "portable fragment atomics"
             }
         );
-        if chunk_renderer == ChunkRendererMode::Mesh && !mesh_shader {
-            return Err(ContextError::MeshShadersUnavailable(format!(
-                "extension={mesh_extension}, meshShader={}, shaderDrawParameters={}, limits={mesh_limits:?}",
-                mesh_features.mesh_shader == vk::TRUE,
-                vk11_supported.shader_draw_parameters == vk::TRUE,
-            )));
-        }
-
         let queue_supports_timestamps = graphics_family_props.timestamp_valid_bits > 0;
         let timestamp_queries = properties.limits.timestamp_compute_and_graphics == vk::TRUE
             && properties.limits.timestamp_period > 0.0
@@ -346,11 +390,12 @@ impl VulkanContext {
         }
 
         let features = DeviceFeatures {
+            debug_labels: debug_labels && debug_utils_enabled,
             timestamp_queries,
             timestamp_valid_bits: graphics_family_props.timestamp_valid_bits,
-            mesh_shader,
             representative_fragment_test,
-            mesh_limits,
+            task_shader,
+            task_limits,
         };
 
         let queue_priority = 1.0f32;
@@ -390,7 +435,7 @@ impl VulkanContext {
         };
 
         let mut enabled_extensions = DEVICE_EXTENSIONS.to_vec();
-        if mesh_shader {
+        if task_shader {
             enabled_extensions.push(pyronyx::ext::mesh_shader::NAME);
         }
         if representative_fragment_test {
@@ -416,14 +461,6 @@ impl VulkanContext {
         }
         .next(&mut vk12_features);
 
-        let mut enabled_vk11 = vk::PhysicalDeviceVulkan11Features {
-            shader_draw_parameters: if mesh_shader { vk::TRUE } else { vk::FALSE },
-            ..Default::default()
-        };
-        let mut enabled_mesh = vk::PhysicalDeviceMeshShaderFeaturesEXT {
-            mesh_shader: if mesh_shader { vk::TRUE } else { vk::FALSE },
-            ..Default::default()
-        };
         let mut enabled_representative = vk::PhysicalDeviceRepresentativeFragmentTestFeaturesNV {
             representative_fragment_test: if representative_fragment_test {
                 vk::TRUE
@@ -432,12 +469,16 @@ impl VulkanContext {
             },
             ..Default::default()
         };
-        let device_info = match (mesh_shader, representative_fragment_test) {
+        let mut enabled_task = vk::PhysicalDeviceMeshShaderFeaturesEXT {
+            task_shader: if task_shader { vk::TRUE } else { vk::FALSE },
+            mesh_shader: if task_shader { vk::TRUE } else { vk::FALSE },
+            ..Default::default()
+        };
+        let device_info = match (task_shader, representative_fragment_test) {
             (true, true) => device_info
-                .next(&mut enabled_vk11)
-                .next(&mut enabled_mesh)
+                .next(&mut enabled_task)
                 .next(&mut enabled_representative),
-            (true, false) => device_info.next(&mut enabled_vk11).next(&mut enabled_mesh),
+            (true, false) => device_info.next(&mut enabled_task),
             (false, true) => device_info.next(&mut enabled_representative),
             (false, false) => device_info,
         };

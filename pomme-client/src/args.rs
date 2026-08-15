@@ -4,8 +4,8 @@ use clap::{Parser, ValueEnum};
 pub enum ChunkRendererMode {
     #[default]
     Auto,
-    Legacy,
-    Mesh,
+    Indirect,
+    Task,
 }
 
 #[derive(Parser, Debug)]
@@ -38,9 +38,14 @@ pub struct LaunchArgs {
     #[arg(long)]
     pub quick_access_multiplayer: Option<String>,
 
-    /// Terrain rendering backend. `mesh` fails at startup when unsupported.
+    /// Terrain renderer. `auto` prefers task shaders and falls back to indirect
+    /// draws.
     #[arg(long, value_enum, default_value_t)]
     pub chunk_renderer: ChunkRendererMode,
+
+    /// Add named regions to Vulkan command buffers for graphics debuggers.
+    #[arg(long)]
+    pub debug_labels: bool,
 }
 
 #[cfg(test)]
@@ -48,18 +53,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chunk_renderer_defaults_to_auto_and_accepts_forced_modes() {
+    fn chunk_renderer_modes_parse() {
         assert_eq!(
             LaunchArgs::parse_from(["pomme"]).chunk_renderer,
             ChunkRendererMode::Auto
         );
         assert_eq!(
-            LaunchArgs::parse_from(["pomme", "--chunk-renderer", "legacy"]).chunk_renderer,
-            ChunkRendererMode::Legacy,
+            LaunchArgs::parse_from(["pomme", "--chunk-renderer", "indirect"]).chunk_renderer,
+            ChunkRendererMode::Indirect
         );
         assert_eq!(
-            LaunchArgs::parse_from(["pomme", "--chunk-renderer", "mesh"]).chunk_renderer,
-            ChunkRendererMode::Mesh,
+            LaunchArgs::parse_from(["pomme", "--chunk-renderer", "task"]).chunk_renderer,
+            ChunkRendererMode::Task
         );
+    }
+
+    #[test]
+    fn debug_labels_are_opt_in() {
+        assert!(!LaunchArgs::parse_from(["pomme"]).debug_labels);
+        assert!(LaunchArgs::parse_from(["pomme", "--debug-labels"]).debug_labels);
     }
 }

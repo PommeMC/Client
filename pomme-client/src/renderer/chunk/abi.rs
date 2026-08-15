@@ -44,19 +44,13 @@ pub(crate) struct DrawCommand {
     pub(crate) first_instance: u32,
 }
 
-const _: () = assert!(
-    std::mem::size_of::<DrawCommand>()
-        == std::mem::size_of::<vk::DrawMeshTasksIndirectCommandEXT>() + 4
-);
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn indirect_command_has_mesh_dispatch_prefix_and_batch_word() {
+    fn indirect_command_matches_vulkan_draw_layout() {
         assert_eq!(size_of::<DrawCommand>(), 16);
-        assert_eq!(size_of::<vk::DrawMeshTasksIndirectCommandEXT>(), 12);
         assert_eq!(std::mem::offset_of!(DrawCommand, first_instance), 12);
     }
 
