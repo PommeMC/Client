@@ -1,8 +1,90 @@
 // ChunkRendererState culling responsibilities.
 
+use pyronyx::ext::mesh_shader::MeshShaderCommandBuffer;
+
 use super::*;
 
 impl ChunkRendererCore {
+    pub(super) fn grow_regions(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        let old = self.regions.metadata.mirror.len();
+        let new_capacity = old.max(1) * 2;
+        device.wait_idle().ok();
+        let meta_size = (new_capacity * size_of::<RegionMeta>()) as u64;
+        for frame in 0..MAX_FRAMES_IN_FLIGHT {
+            std::mem::take(&mut self.culling.region_meta_buffers[frame]).destroy(device, allocator);
+            std::mem::take(&mut self.culling.region_candidate_buffers[frame])
+                .destroy(device, allocator);
+            std::mem::take(&mut self.culling.region_visibility_buffers[frame])
+                .destroy(device, allocator);
+            self.culling.region_meta_buffers[frame] = Buffer::host(
+                device,
+                allocator,
+                meta_size,
+                vk::BufferUsageFlags::StorageBuffer,
+                "region_meta",
+            );
+            self.culling.region_candidate_buffers[frame] = Buffer::device(
+                device,
+                allocator,
+                new_capacity as u64 * 4,
+                vk::BufferUsageFlags::StorageBuffer,
+                "region_candidates",
+            );
+            self.culling.region_visibility_buffers[frame] = Buffer::device(
+                device,
+                allocator,
+                new_capacity as u64 * 4,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::TransferDst,
+                "region_visibility",
+            );
+            let specs = [
+                (6, self.culling.region_meta_buffers[frame].buffer, meta_size),
+                (
+                    7,
+                    self.culling.region_candidate_buffers[frame].buffer,
+                    new_capacity as u64 * 4,
+                ),
+                (
+                    9,
+                    self.culling.region_visibility_buffers[frame].buffer,
+                    new_capacity as u64 * 4,
+                ),
+            ];
+            let infos: Vec<_> = specs
+                .iter()
+                .map(|&(_, buffer, range)| vk::DescriptorBufferInfo {
+                    buffer,
+                    offset: 0,
+                    range,
+                })
+                .collect();
+            let writes: Vec<_> = specs
+                .iter()
+                .zip(&infos)
+                .map(|(&(binding, _, _), info)| vk::WriteDescriptorSet {
+                    dst_set: self.culling.compute_sets[frame],
+                    dst_binding: binding,
+                    descriptor_type: vk::DescriptorType::StorageBuffer,
+                    descriptor_count: 1,
+                    buffer_info: info,
+                    ..Default::default()
+                })
+                .collect();
+            device.update_descriptor_sets(&writes, &[]);
+        }
+        self.regions.metadata.slots.grow(new_capacity as u32);
+        self.regions
+            .metadata
+            .mirror
+            .resize(new_capacity, bytemuck::Zeroable::zeroed());
+        let bytes: &[u8] = bytemuck::cast_slice(&self.regions.metadata.mirror);
+        for buffer in &mut self.culling.region_meta_buffers {
+            buffer.mapped_slice_mut()[..bytes.len()].copy_from_slice(bytes);
+        }
+        self.regions.metadata.writes.clear();
+        self.regions.metadata.applied = [0; MAX_FRAMES_IN_FLIGHT];
+    }
+
     pub fn sections_drawn(&self) -> u32 {
         self.culling.last_draw_count
     }
@@ -53,7 +135,12 @@ impl ChunkRendererCore {
         // buffers have their own independently growing draw capacity.
         for i in 0..MAX_FRAMES_IN_FLIGHT {
             std::mem::take(&mut self.culling.water_candidate_buffers[i]).destroy(device, allocator);
+            std::mem::take(&mut self.culling.section_candidate_buffers[i])
+                .destroy(device, allocator);
+            std::mem::take(&mut self.culling.section_visibility_buffers[i])
+                .destroy(device, allocator);
         }
+        std::mem::take(&mut self.culling.history_buffer).destroy(device, allocator);
         self.culling.water_candidate_buffers = (0..MAX_FRAMES_IN_FLIGHT)
             .map(|_| {
                 Buffer::device(
@@ -65,17 +152,73 @@ impl ChunkRendererCore {
                 )
             })
             .collect();
+        self.culling.section_candidate_buffers = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| {
+                Buffer::device(
+                    device,
+                    allocator,
+                    new_max as u64 * 4,
+                    vk::BufferUsageFlags::StorageBuffer,
+                    "section_candidates",
+                )
+            })
+            .collect();
+        self.culling.section_visibility_buffers = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| {
+                Buffer::device(
+                    device,
+                    allocator,
+                    new_max as u64 * 4,
+                    vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::TransferDst,
+                    "section_visibility",
+                )
+            })
+            .collect();
+        self.culling.history_buffer = Buffer::device(
+            device,
+            allocator,
+            new_max as u64 * 4,
+            vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::TransferDst,
+            "section_visibility_history",
+        );
         for i in 0..MAX_FRAMES_IN_FLIGHT {
             let (candidates_info, mut candidates_write) = desc_write(
                 self.culling.compute_sets[i],
-                8,
+                19,
                 vk::DescriptorType::StorageBuffer,
                 self.culling.water_candidate_buffers[i].buffer,
                 new_max as u64 * 4,
             );
             candidates_write.buffer_info = candidates_info.as_ptr();
+            let specs = [
+                (10, self.culling.section_candidate_buffers[i].buffer),
+                (12, self.culling.section_visibility_buffers[i].buffer),
+                (13, self.culling.history_buffer.buffer),
+            ];
+            let infos: Vec<_> = specs
+                .iter()
+                .map(|&(_, buffer)| vk::DescriptorBufferInfo {
+                    buffer,
+                    offset: 0,
+                    range: new_max as u64 * 4,
+                })
+                .collect();
+            let writes: Vec<_> = specs
+                .iter()
+                .zip(&infos)
+                .map(|(&(binding, _), info)| vk::WriteDescriptorSet {
+                    dst_set: self.culling.compute_sets[i],
+                    dst_binding: binding,
+                    descriptor_type: vk::DescriptorType::StorageBuffer,
+                    descriptor_count: 1,
+                    buffer_info: info,
+                    ..Default::default()
+                })
+                .collect();
             device.update_descriptor_sets(&[candidates_write], &[]);
+            device.update_descriptor_sets(&writes, &[]);
         }
+        self.culling.history_reset_pending = true;
 
         self.metadata.slots.grow(new_max as u32);
         self.metadata
@@ -134,21 +277,27 @@ impl ChunkRendererCore {
                 device,
                 allocator,
                 indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                vk::BufferUsageFlags::StorageBuffer
+                    | vk::BufferUsageFlags::IndirectBuffer
+                    | vk::BufferUsageFlags::TransferDst,
                 "indirect_cmds",
             );
             self.culling.indirect_cutout_buffers[frame] = Buffer::host(
                 device,
                 allocator,
                 indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                vk::BufferUsageFlags::StorageBuffer
+                    | vk::BufferUsageFlags::IndirectBuffer
+                    | vk::BufferUsageFlags::TransferDst,
                 "indirect_cmds_cutout",
             );
             self.culling.water_indirect_buffers[frame] = Buffer::host(
                 device,
                 allocator,
                 indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                vk::BufferUsageFlags::StorageBuffer
+                    | vk::BufferUsageFlags::IndirectBuffer
+                    | vk::BufferUsageFlags::TransferDst,
                 "water_indirect",
             );
 
@@ -168,7 +317,7 @@ impl ChunkRendererCore {
             );
             let (water_info, mut water_write) = desc_write(
                 self.culling.compute_sets[frame],
-                9,
+                20,
                 vk::DescriptorType::StorageBuffer,
                 self.culling.water_indirect_buffers[frame].buffer,
                 indirect_size,
@@ -225,30 +374,6 @@ impl ChunkRendererCore {
         );
     }
 
-    pub fn set_hiz_descriptors(
-        &mut self,
-        device: &vk::Device,
-        view: vk::ImageView,
-        sampler: vk::Sampler,
-    ) {
-        let info = vk::DescriptorImageInfo {
-            sampler,
-            image_view: view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let write = vk::WriteDescriptorSet {
-                dst_set: self.culling.compute_sets[i],
-                dst_binding: 6,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-                image_info: &info,
-                ..Default::default()
-            };
-            device.update_descriptor_sets(&[write], &[]);
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_cull(
         &mut self,
@@ -259,7 +384,7 @@ impl ChunkRendererCore {
         eye: DVec3,
         player_chunk: ChunkPos,
         limit_rd: Option<u32>,
-        occlusion: Option<OcclusionCamera>,
+        occlusion_enabled: bool,
     ) {
         if self.metadata.high_water == 0 {
             return;
@@ -269,21 +394,31 @@ impl ChunkRendererCore {
         // no in-flight cull reads it). This is the only per-frame CPU cost and
         // it scales with *changed* sections, never with loaded ones.
         self.apply_meta_writes(frame);
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::ComputeShader,
+            vk::PipelineStageFlags::ComputeShader | vk::PipelineStageFlags::Transfer,
+            vk::DependencyFlags::empty(),
+            &[vk::MemoryBarrier {
+                src_access_mask: vk::AccessFlags::ShaderWrite,
+                dst_access_mask: vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
+                ..Default::default()
+            }],
+            &[],
+            &[],
+        );
         let count = self.metadata.high_water;
 
-        let occ = occlusion.unwrap_or_default();
         let frustum_data = FrustumData {
             planes: *frustum,
-            prev_view_proj: occ.view_proj,
             chunk_count: count,
+            region_count: self.regions.metadata.high_water,
             cam_block: anchor.as_ivec3().to_array(),
             frac: (eye - anchor).as_vec3().to_array(),
-            prev_cam_block: occ.cam_block.to_array(),
-            prev_frac: occ.frac.to_array(),
-            occlusion_valid: occlusion.is_some() as u32,
             player_chunk: [player_chunk.x, player_chunk.z],
             limit_rd: limit_rd.unwrap_or(0),
-            _pad: [self.culling.clamped_draw_count(), 0, 0],
+            draw_capacity: self.culling.clamped_draw_count(),
+            occlusion_enabled: occlusion_enabled as u32,
+            _pad: [0; 2],
         };
         let frustum_bytes = bytemuck::bytes_of(&frustum_data);
         self.culling.frustum_buffers[frame]
@@ -314,13 +449,28 @@ impl ChunkRendererCore {
                 water_bytes[2],
                 water_bytes[3],
             ]);
-            self.culling.last_draw_count = solid + cutout;
+            let stats = self.culling.stats_buffers[frame].mapped_slice_mut();
+            self.culling.last_draw_count = u32::from_ne_bytes(stats[0..4].try_into().unwrap());
+            stats[..16].fill(0);
             let capacity = self.culling.clamped_draw_count();
             let observed = solid.max(cutout).max(water);
             if observed > capacity {
                 self.culling.requested_draw_capacity =
                     self.culling.requested_draw_capacity.max(observed as usize);
             }
+        }
+
+        self.regions.metadata.apply_writes(
+            frame,
+            &mut self.culling.region_meta_buffers[frame],
+            self.regions.metadata.mirror.len(),
+        );
+        for buffer in [
+            &mut self.culling.region_command_buffers[frame],
+            &mut self.culling.section_command_buffers[frame],
+        ] {
+            let init: &[u8] = bytemuck::cast_slice(&[36u32, 0, 0, 0, 0]);
+            buffer.mapped_slice_mut()[..20].copy_from_slice(init);
         }
 
         // macOS draws the whole indirect buffer (no drawIndirectCount), so slots
@@ -348,6 +498,22 @@ impl ChunkRendererCore {
             (WATER_BUCKETS as u64 + 1) * 4,
             0,
         );
+        cmd.fill_buffer(
+            self.culling.region_visibility_buffers[frame].buffer,
+            0,
+            vk::WHOLE_SIZE,
+            0,
+        );
+        cmd.fill_buffer(
+            self.culling.section_visibility_buffers[frame].buffer,
+            0,
+            vk::WHOLE_SIZE,
+            0,
+        );
+        if self.culling.history_reset_pending {
+            cmd.fill_buffer(self.culling.history_buffer.buffer, 0, vk::WHOLE_SIZE, 0);
+            self.culling.history_reset_pending = false;
+        }
         let fill_barrier = vk::MemoryBarrier {
             src_access_mask: vk::AccessFlags::TransferWrite,
             dst_access_mask: vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
@@ -374,44 +540,31 @@ impl ChunkRendererCore {
             self.culling.compute_pipeline,
         );
         cmd.dispatch(count.div_ceil(64), 1, 1);
-
-        // Cull → scan → emit: each pass reads what the previous wrote.
-        let compute_barrier = vk::MemoryBarrier {
-            src_access_mask: vk::AccessFlags::ShaderWrite,
-            dst_access_mask: vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
-            ..Default::default()
-        };
-        let compute_to_compute = |cmd: vk::CommandBuffer| {
-            cmd.pipeline_barrier(
-                vk::PipelineStageFlags::ComputeShader,
-                vk::PipelineStageFlags::ComputeShader,
-                vk::DependencyFlags::empty(),
-                &[compute_barrier],
-                &[],
-                &[],
+        if occlusion_enabled {
+            cmd.bind_pipeline(
+                vk::PipelineBindPoint::Compute,
+                self.culling.region_prepare_pipeline,
             );
-        };
-        compute_to_compute(cmd);
-        cmd.bind_pipeline(
-            vk::PipelineBindPoint::Compute,
-            self.culling.water_scan_pipeline,
-        );
-        cmd.dispatch(1, 1, 1);
-        compute_to_compute(cmd);
-        cmd.bind_pipeline(
-            vk::PipelineBindPoint::Compute,
-            self.culling.water_emit_pipeline,
-        );
-        cmd.dispatch(count.div_ceil(64), 1, 1);
+            cmd.dispatch(self.regions.metadata.high_water.div_ceil(64), 1, 1);
+        } else {
+            self.dispatch_water_ordering(cmd, count);
+        }
 
         let barrier = vk::MemoryBarrier {
             src_access_mask: vk::AccessFlags::ShaderWrite,
-            dst_access_mask: vk::AccessFlags::IndirectCommandRead,
+            dst_access_mask: vk::AccessFlags::IndirectCommandRead | vk::AccessFlags::ShaderRead,
             ..Default::default()
         };
+        let dst_stages = vk::PipelineStageFlags::DrawIndirect
+            | vk::PipelineStageFlags::VertexShader
+            | if self.culling.backend == ChunkDrawBackend::Mesh {
+                vk::PipelineStageFlags::MeshShaderEXT
+            } else {
+                vk::PipelineStageFlags::empty()
+            };
         cmd.pipeline_barrier(
             vk::PipelineStageFlags::ComputeShader,
-            vk::PipelineStageFlags::DrawIndirect,
+            dst_stages,
             vk::DependencyFlags::empty(),
             &[barrier],
             &[],
@@ -420,6 +573,180 @@ impl ChunkRendererCore {
 
         if !self.culling.fade_enabled {
             self.culling.fade_enabled = true;
+        }
+    }
+
+    fn dispatch_water_ordering(&self, cmd: vk::CommandBuffer, count: u32) {
+        let barrier = vk::MemoryBarrier {
+            src_access_mask: vk::AccessFlags::ShaderWrite,
+            dst_access_mask: vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
+            ..Default::default()
+        };
+        let sync = |cmd: vk::CommandBuffer| {
+            cmd.pipeline_barrier(
+                vk::PipelineStageFlags::ComputeShader,
+                vk::PipelineStageFlags::ComputeShader,
+                vk::DependencyFlags::empty(),
+                &[barrier],
+                &[],
+                &[],
+            )
+        };
+        sync(cmd);
+        cmd.bind_pipeline(
+            vk::PipelineBindPoint::Compute,
+            self.culling.water_scan_pipeline,
+        );
+        cmd.dispatch(1, 1, 1);
+        sync(cmd);
+        cmd.bind_pipeline(
+            vk::PipelineBindPoint::Compute,
+            self.culling.water_emit_pipeline,
+        );
+        cmd.dispatch(count.div_ceil(64), 1, 1);
+    }
+
+    pub fn expand_sections(&self, cmd: vk::CommandBuffer, frame: usize) {
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::FragmentShader,
+            vk::PipelineStageFlags::ComputeShader,
+            vk::DependencyFlags::empty(),
+            &[vk::MemoryBarrier {
+                src_access_mask: vk::AccessFlags::ShaderWrite,
+                dst_access_mask: vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
+                ..Default::default()
+            }],
+            &[],
+            &[],
+        );
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Compute,
+            self.culling.compute_layout,
+            0,
+            &[self.culling.compute_sets[frame]],
+            &[],
+        );
+        cmd.bind_pipeline(
+            vk::PipelineBindPoint::Compute,
+            self.culling.section_expand_pipeline,
+        );
+        cmd.dispatch(self.metadata.high_water.div_ceil(64), 1, 1);
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::ComputeShader,
+            vk::PipelineStageFlags::DrawIndirect | vk::PipelineStageFlags::VertexShader,
+            vk::DependencyFlags::empty(),
+            &[vk::MemoryBarrier {
+                src_access_mask: vk::AccessFlags::ShaderWrite,
+                dst_access_mask: vk::AccessFlags::IndirectCommandRead | vk::AccessFlags::ShaderRead,
+                ..Default::default()
+            }],
+            &[],
+            &[],
+        );
+    }
+
+    pub fn finalize_occlusion(&self, cmd: vk::CommandBuffer, frame: usize) {
+        let mesh_stage = if self.culling.backend == ChunkDrawBackend::Mesh {
+            vk::PipelineStageFlags::MeshShaderEXT
+        } else {
+            vk::PipelineStageFlags::empty()
+        };
+        let draw_stages = vk::PipelineStageFlags::DrawIndirect
+            | vk::PipelineStageFlags::VertexShader
+            | mesh_stage;
+        cmd.pipeline_barrier(
+            draw_stages | vk::PipelineStageFlags::ComputeShader,
+            vk::PipelineStageFlags::Transfer,
+            vk::DependencyFlags::empty(),
+            &[vk::MemoryBarrier {
+                src_access_mask: vk::AccessFlags::IndirectCommandRead
+                    | vk::AccessFlags::ShaderRead
+                    | vk::AccessFlags::ShaderWrite,
+                dst_access_mask: vk::AccessFlags::TransferWrite,
+                ..Default::default()
+            }],
+            &[],
+            &[],
+        );
+        #[cfg(target_os = "macos")]
+        for buffer in [
+            &self.culling.indirect_buffers[frame],
+            &self.culling.indirect_cutout_buffers[frame],
+            &self.culling.water_indirect_buffers[frame],
+        ] {
+            cmd.fill_buffer(buffer.buffer, 0, vk::WHOLE_SIZE, 0);
+        }
+        cmd.fill_buffer(self.culling.count_buffers[frame].buffer, 0, 4, 0);
+        cmd.fill_buffer(self.culling.count_cutout_buffers[frame].buffer, 0, 4, 0);
+        cmd.fill_buffer(
+            self.culling.water_bucket_buffers[frame].buffer,
+            0,
+            (WATER_BUCKETS as u64 + 1) * 4,
+            0,
+        );
+        cmd.pipeline_barrier(
+            draw_stages | vk::PipelineStageFlags::FragmentShader | vk::PipelineStageFlags::Transfer,
+            vk::PipelineStageFlags::ComputeShader,
+            vk::DependencyFlags::empty(),
+            &[vk::MemoryBarrier {
+                src_access_mask: vk::AccessFlags::IndirectCommandRead
+                    | vk::AccessFlags::ShaderRead
+                    | vk::AccessFlags::ShaderWrite
+                    | vk::AccessFlags::TransferWrite,
+                dst_access_mask: vk::AccessFlags::ShaderRead | vk::AccessFlags::ShaderWrite,
+                ..Default::default()
+            }],
+            &[],
+            &[],
+        );
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Compute,
+            self.culling.compute_layout,
+            0,
+            &[self.culling.compute_sets[frame]],
+            &[],
+        );
+        cmd.bind_pipeline(
+            vk::PipelineBindPoint::Compute,
+            self.culling.finalize_pipeline,
+        );
+        cmd.dispatch(self.metadata.high_water.div_ceil(64), 1, 1);
+        self.dispatch_water_ordering(cmd, self.metadata.high_water);
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::ComputeShader,
+            vk::PipelineStageFlags::DrawIndirect
+                | vk::PipelineStageFlags::VertexShader
+                | mesh_stage,
+            vk::DependencyFlags::empty(),
+            &[vk::MemoryBarrier {
+                src_access_mask: vk::AccessFlags::ShaderWrite,
+                dst_access_mask: vk::AccessFlags::IndirectCommandRead | vk::AccessFlags::ShaderRead,
+                ..Default::default()
+            }],
+            &[],
+            &[],
+        );
+    }
+
+    pub fn aabb_resources(
+        &self,
+        frame: usize,
+        sections: bool,
+    ) -> (vk::Buffer, vk::Buffer, vk::Buffer, vk::Buffer) {
+        if sections {
+            (
+                self.culling.meta_buffers[frame].buffer,
+                self.culling.section_candidate_buffers[frame].buffer,
+                self.culling.section_visibility_buffers[frame].buffer,
+                self.culling.section_command_buffers[frame].buffer,
+            )
+        } else {
+            (
+                self.culling.region_meta_buffers[frame].buffer,
+                self.culling.region_candidate_buffers[frame].buffer,
+                self.culling.region_visibility_buffers[frame].buffer,
+                self.culling.region_command_buffers[frame].buffer,
+            )
         }
     }
 
@@ -445,10 +772,19 @@ impl ChunkRendererCore {
             )
         };
 
-        // Binding 0: the per-instance meta buffer, read for section origin and
-        // fade (indexed by `first_instance`). Face and cuboid data are pulled
-        // from graphics storage descriptors by the vertex shader.
-        if cfg!(target_os = "macos") {
+        // Legacy routes the batch word through firstInstance. Mesh commands
+        // store it after their 12-byte dispatch prefix and read it through the
+        // same buffer's storage descriptor using DrawIndex.
+        if self.culling.backend == ChunkDrawBackend::Mesh {
+            cmd.draw_mesh_tasks_indirect_count(
+                indirect,
+                0,
+                count,
+                0,
+                max_draws,
+                size_of::<DrawCommand>() as u32,
+            );
+        } else if cfg!(target_os = "macos") {
             cmd.draw_indirect(indirect, 0, max_draws, size_of::<DrawCommand>() as u32);
         } else {
             cmd.draw_indirect_count(
@@ -468,7 +804,16 @@ impl ChunkRendererCore {
         }
 
         let max_draws = self.clamped_draw_count();
-        if cfg!(target_os = "macos") {
+        if self.culling.backend == ChunkDrawBackend::Mesh {
+            cmd.draw_mesh_tasks_indirect_count(
+                self.culling.water_indirect_buffers[frame].buffer,
+                0,
+                self.culling.water_count_buffers[frame].buffer,
+                0,
+                max_draws,
+                size_of::<DrawCommand>() as u32,
+            );
+        } else if cfg!(target_os = "macos") {
             cmd.draw_indirect(
                 self.culling.water_indirect_buffers[frame].buffer,
                 0,
@@ -503,12 +848,24 @@ impl ChunkRendererCore {
             .chain(self.culling.water_bucket_buffers.drain(..))
             .chain(self.culling.water_candidate_buffers.drain(..))
             .chain(self.culling.frustum_buffers.drain(..))
+            .chain(self.culling.region_meta_buffers.drain(..))
+            .chain(self.culling.region_candidate_buffers.drain(..))
+            .chain(self.culling.region_command_buffers.drain(..))
+            .chain(self.culling.region_visibility_buffers.drain(..))
+            .chain(self.culling.section_candidate_buffers.drain(..))
+            .chain(self.culling.section_command_buffers.drain(..))
+            .chain(self.culling.section_visibility_buffers.drain(..))
+            .chain(self.culling.stats_buffers.drain(..))
             .chain(self.uploads.staging_buffers.drain(..))
         {
             buffer.destroy(device, allocator);
         }
+        std::mem::take(&mut self.culling.history_buffer).destroy(device, allocator);
 
         device.destroy_pipeline(self.culling.compute_pipeline, None);
+        device.destroy_pipeline(self.culling.region_prepare_pipeline, None);
+        device.destroy_pipeline(self.culling.section_expand_pipeline, None);
+        device.destroy_pipeline(self.culling.finalize_pipeline, None);
         device.destroy_pipeline(self.culling.water_scan_pipeline, None);
         device.destroy_pipeline(self.culling.water_emit_pipeline, None);
         device.destroy_pipeline_layout(self.culling.compute_layout, None);

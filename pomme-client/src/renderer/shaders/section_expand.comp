@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x=64) in;
+#include "chunk_meta.glsl"
+#include "frustum.glsl"
+layout(set=0,binding=0) readonly buffer Meta { ChunkMeta chunks[]; };
+layout(set=0,binding=9) readonly buffer RegionVisibility { uint region_visibility[]; };
+layout(set=0,binding=10) writeonly buffer Candidates { uint candidates[]; };
+layout(set=0,binding=11) buffer Command { uint index_count; uint instance_count; uint first_index; int vertex_offset; uint first_instance; };
+layout(set=0,binding=12) buffer Visibility { uint visibility[]; };
+void main(){
+ uint i=gl_GlobalInvocationID.x;if(i>=chunk_count)return;ChunkMeta m=chunks[i];
+ if(m.visibility_generation==0u||region_visibility[m.region_slot]==0u||!section_in_distance(m.origin)||!bounds_visible(m.origin,m.aabb_min,m.aabb_max))return;
+ if(camera_inside(m.origin,m.aabb_min,m.aabb_max)){visibility[i]=1u;return;}
+ uint out_i=atomicAdd(instance_count,1u);candidates[out_i]=i;
+}

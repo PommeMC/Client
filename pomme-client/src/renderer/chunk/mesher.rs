@@ -561,12 +561,12 @@ impl Default for BiomeClimate {
         }
     }
 }
-fn tint_color(tint: Tint, grass: [f32; 3], foliage: [f32; 3], dry_foliage: [f32; 3]) -> u32 {
+fn tint_color(snapshot: &SectionStoreSnapshot, tint: Tint, lx: i32, ly: i32, lz: i32) -> u32 {
     match tint {
         Tint::None => PACKED_WHITE_SHIFTED,
-        Tint::Grass => pack_tint_shifted(grass),
-        Tint::Foliage => pack_tint_shifted(foliage),
-        Tint::DryFoliage => pack_tint_shifted(dry_foliage),
+        Tint::Grass => pack_tint_shifted(snapshot.grass_tint(lx, ly, lz)),
+        Tint::Foliage => pack_tint_shifted(snapshot.foliage_tint(lx, ly, lz)),
+        Tint::DryFoliage => pack_tint_shifted(snapshot.dry_foliage_tint(lx, ly, lz)),
     }
 }
 #[derive(Clone)]
@@ -923,7 +923,7 @@ pub(crate) fn mesh_section(
                 } else {
                     let id = block_id(state);
                     if logged_missing.insert(id) {
-                        tracing::warn!("Missing model: {id}");
+                        tracing::debug!("Missing model: {id}");
                     }
                     emit_missing_cube(
                         &mut sink, block_pos, snapshot, registry, local_x, local_y, local_z,
@@ -1102,12 +1102,7 @@ fn emit_baked_cuboids(
             .iter()
             .find_map(|q| (!matches!(q.tint, Tint::None)).then_some(q.tint))
             .unwrap_or(Tint::None);
-        let packed_tint = tint_color(
-            tint_kind,
-            snapshot.grass_tint(lx, ly, lz),
-            snapshot.foliage_tint(lx, ly, lz),
-            snapshot.dry_foliage_tint(lx, ly, lz),
-        );
+        let packed_tint = tint_color(snapshot, tint_kind, lx, ly, lz);
         let lanes = packed_tint.to_le_bytes();
         let cuboid = sink.add_regular_cuboid(SectionCuboid::new(
             [lx as u8, ly as u8, lz as u8],

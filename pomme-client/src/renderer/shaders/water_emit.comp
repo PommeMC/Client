@@ -8,12 +8,14 @@
 #include "frustum.glsl"
 
 layout(local_size_x = 64) in;
+layout(constant_id = 0) const uint USE_MESH_SHADERS = 0u;
+const uint FACES_PER_MESH_WORKGROUP = 32u;
 
 struct DrawCmd {
-    uint vertex_count;
-    uint instance_count;
-    uint first_vertex;
-    uint first_instance;
+    uint count_x;
+    uint count_y;
+    uint count_z_or_first_vertex;
+    uint batch_word;
 };
 
 layout(set = 0, binding = 0) readonly buffer MetaBuf {
@@ -22,18 +24,18 @@ layout(set = 0, binding = 0) readonly buffer MetaBuf {
 
 // Offsets after the scan; atomicAdd doubles them as per-bucket cursors. The
 // slot past the buckets is the candidate count.
-layout(set = 0, binding = 7) buffer WaterBuckets {
+layout(set = 0, binding = 18) buffer WaterBuckets {
     uint water_buckets[];
 };
 
-layout(set = 0, binding = 8) readonly buffer WaterCandidates {
+layout(set = 0, binding = 19) readonly buffer WaterCandidates {
     uint water_candidates[];
 };
 
-layout(set = 0, binding = 9) writeonly buffer WaterIndirect {
+layout(set = 0, binding = 20) writeonly buffer WaterIndirect {
     DrawCmd water_draws[];
 };
-layout(set = 0, binding = 11, std430) readonly buffer MeshBuf { uint mesh_data[]; };
+layout(set = 0, binding = 22, std430) readonly buffer MeshBuf { uint mesh_data[]; };
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
@@ -49,13 +51,13 @@ void main() {
     for (uint j = 0u; j < m.fluid_batch_count; ++j) {
         uint batch_word = m.batch_word_offset + (fluid_start + j) * BATCH_WORDS;
         DrawCmd d;
-        d.vertex_count = mesh_data[batch_word + 1u] * 6u;
-        d.instance_count = 1u;
-        // The vertex shader rebases this draw-local index with the batch's
-        // absolute face-word offset. This avoids overflowing that offset when
-        // converting it into a global six-vertices-per-face index.
-        d.first_vertex = 0u;
-        d.first_instance = batch_word;
+        uint face_count = mesh_data[batch_word + 1u];
+        d.count_x = USE_MESH_SHADERS != 0u
+            ? (face_count + FACES_PER_MESH_WORKGROUP - 1u) / FACES_PER_MESH_WORKGROUP
+            : face_count * 6u;
+        d.count_y = 1u;
+        d.count_z_or_first_vertex = USE_MESH_SHADERS != 0u ? 1u : 0u;
+        d.batch_word = batch_word;
         uint out_index = atomicAdd(water_buckets[bucket], 1u);
         if (out_index < draw_capacity) water_draws[out_index] = d;
     }

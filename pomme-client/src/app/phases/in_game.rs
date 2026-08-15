@@ -164,8 +164,8 @@ pub struct GameState {
     pub f3_chord_consumed: bool,
     /// Set by F3+A; consumed by `update_game` to re-mesh every loaded chunk.
     pub pending_chunk_reload: bool,
-    /// F3+O: gates the cull's Hi-Z occlusion test (the pyramid keeps
-    /// rebuilding so re-enabling is instant); off = frustum culling only.
+    /// F3+O: enables current-frame raster occlusion; off = frustum culling
+    /// only.
     pub chunk_occlusion_enabled: bool,
     /// Game mode before the last change (vanilla `previousLocalPlayerMode`),
     /// the F3+N return target.
@@ -1174,13 +1174,16 @@ pub fn update_game(
             screen_h: gfx.renderer.screen_height(),
             timings: Some(hud::FrameTimings {
                 frame_ms: gfx.renderer.last_timings().frame_ms(),
-                cull_ms: gfx.renderer.last_timings().cull_ms(),
+                cull_prepare_ms: gfx.renderer.last_timings().cull_prepare_ms(),
+                cull_finalize_ms: gfx.renderer.last_timings().cull_finalize_ms(),
                 gui_bake_ms: gfx.renderer.last_timings().gui_bake_ms(),
-                terrain_ms: gfx.renderer.last_timings().terrain_ms(),
+                terrain_seed_ms: gfx.renderer.last_timings().terrain_seed_ms(),
+                terrain_new_ms: gfx.renderer.last_timings().terrain_new_ms(),
                 entities_ms: gfx.renderer.last_timings().entities_ms(),
                 translucent_ms: gfx.renderer.last_timings().translucent_ms(),
                 ui_ms: gfx.renderer.last_timings().ui_ms(),
-                hiz_ms: gfx.renderer.last_timings().hiz_ms(),
+                occlusion_region_ms: gfx.renderer.last_timings().occlusion_region_ms(),
+                occlusion_section_ms: gfx.renderer.last_timings().occlusion_section_ms(),
             }),
         })
     } else {

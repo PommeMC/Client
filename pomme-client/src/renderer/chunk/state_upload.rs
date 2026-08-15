@@ -200,6 +200,7 @@ impl ChunkRendererCore {
                     .sections
                     .push(SectionAlloc {
                         section_index: si,
+                        section_pos: mesh.spos,
                         meta_slot: TOMBSTONE_SLOT,
                         pool_offset: 0,
                         pool_len: 0,
@@ -268,6 +269,15 @@ impl ChunkRendererCore {
         let now_ms = crate::renderer::camera::session_millis();
         for entry in &mut entries {
             let spos = entry.mesh.spos;
+            let region_slot = loop {
+                if let Some(slot) = self.regions.add(spos) {
+                    break slot;
+                }
+                self.grow_regions(device, allocator);
+            };
+            self.next_visibility_generation =
+                self.next_visibility_generation.wrapping_add(1).max(1);
+            let visibility_generation = self.next_visibility_generation;
             // A re-meshed section swaps instantly and near columns never fade
             // (vanilla `isNearby`); everything else fades in from its upload
             // stamp, computed shader-side against the session clock.
@@ -285,14 +295,16 @@ impl ChunkRendererCore {
             self.queue_meta_write(
                 entry.meta_slot,
                 ChunkMeta {
-                    aabb_min: entry.mesh.aabb.min,
-                    aabb_max: entry.mesh.aabb.max,
+                    aabb_min: entry.mesh.aabb.min[..3].try_into().unwrap(),
+                    region_slot,
+                    aabb_max: entry.mesh.aabb.max[..3].try_into().unwrap(),
+                    visibility_generation,
+                    origin: [spos.x * 16, spos.y * 16, spos.z * 16],
+                    _pad: 0,
                     batch_word_offset: ((base_bytes + layout.batches) / 4) as u32,
                     solid_batch_count: entry.mesh.batch_counts.solid_draws(),
                     cutout_batch_count: entry.mesh.batch_counts.cutout,
                     fluid_batch_count: entry.mesh.batch_counts.translucent_fluid,
-                    origin: [spos.x * 16, spos.y * 16, spos.z * 16],
-                    _pad: 0,
                 },
             );
             self.geometry
@@ -304,6 +316,7 @@ impl ChunkRendererCore {
                 .sections
                 .push(SectionAlloc {
                     section_index: entry.si,
+                    section_pos: spos,
                     meta_slot: entry.meta_slot,
                     pool_offset: entry.pool_off,
                     pool_len: entry.pool_len,

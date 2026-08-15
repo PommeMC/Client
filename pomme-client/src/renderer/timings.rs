@@ -6,18 +6,24 @@ pub enum Timestamp {
     FrameEnd,
     CullStart,
     CullEnd,
+    CullFinalizeStart,
+    CullFinalizeEnd,
     GuiBakeStart,
     GuiBakeEnd,
     TerrainStart,
     TerrainEnd,
+    TerrainNewStart,
+    TerrainNewEnd,
     EntitiesStart,
     EntitiesEnd,
     TranslucentStart,
     TranslucentEnd,
     UiStart,
     UiEnd,
-    HizStart,
-    HizEnd,
+    OcclusionRegionStart,
+    OcclusionRegionEnd,
+    OcclusionSectionStart,
+    OcclusionSectionEnd,
     Count, // Automatically tracks the total number of timestamps needed
 }
 #[derive(Debug, Clone, Copy)]
@@ -38,13 +44,25 @@ impl RenderTimings {
         self.duration(Timestamp::FrameStart, Timestamp::FrameEnd)
     }
     pub fn cull_ms(&self) -> f32 {
+        self.cull_prepare_ms() + self.cull_finalize_ms()
+    }
+    pub fn cull_prepare_ms(&self) -> f32 {
         self.duration(Timestamp::CullStart, Timestamp::CullEnd)
+    }
+    pub fn cull_finalize_ms(&self) -> f32 {
+        self.duration(Timestamp::CullFinalizeStart, Timestamp::CullFinalizeEnd)
     }
     pub fn gui_bake_ms(&self) -> f32 {
         self.duration(Timestamp::GuiBakeStart, Timestamp::GuiBakeEnd)
     }
     pub fn terrain_ms(&self) -> f32 {
+        self.terrain_seed_ms() + self.terrain_new_ms()
+    }
+    pub fn terrain_seed_ms(&self) -> f32 {
         self.duration(Timestamp::TerrainStart, Timestamp::TerrainEnd)
+    }
+    pub fn terrain_new_ms(&self) -> f32 {
+        self.duration(Timestamp::TerrainNewStart, Timestamp::TerrainNewEnd)
     }
     pub fn entities_ms(&self) -> f32 {
         self.duration(Timestamp::EntitiesStart, Timestamp::EntitiesEnd)
@@ -55,8 +73,20 @@ impl RenderTimings {
     pub fn ui_ms(&self) -> f32 {
         self.duration(Timestamp::UiStart, Timestamp::UiEnd)
     }
-    pub fn hiz_ms(&self) -> f32 {
-        self.duration(Timestamp::HizStart, Timestamp::HizEnd)
+    pub fn occlusion_ms(&self) -> f32 {
+        self.occlusion_region_ms() + self.occlusion_section_ms()
+    }
+    pub fn occlusion_region_ms(&self) -> f32 {
+        self.duration(
+            Timestamp::OcclusionRegionStart,
+            Timestamp::OcclusionRegionEnd,
+        )
+    }
+    pub fn occlusion_section_ms(&self) -> f32 {
+        self.duration(
+            Timestamp::OcclusionSectionStart,
+            Timestamp::OcclusionSectionEnd,
+        )
     }
 }
 pub struct Timer {
@@ -71,6 +101,10 @@ impl Timer {
         if let Some(pool) = self.pool {
             self.cmd.write_timestamp(stage, pool, point as u32);
         }
+    }
+    pub fn zero_duration(&self, start: Timestamp, end: Timestamp) {
+        self.write(start, vk::PipelineStageFlags::BottomOfPipe);
+        self.write(end, vk::PipelineStageFlags::BottomOfPipe);
     }
     /// Returns a drop-guard that automatically writes the end timestamp when it
     /// goes out of scope. Both stamps use BottomOfPipe: a TopOfPipe start

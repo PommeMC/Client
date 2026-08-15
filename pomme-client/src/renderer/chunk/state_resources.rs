@@ -39,6 +39,7 @@ impl ChunkRendererCore {
         allocator: &Arc<Mutex<Allocator>>,
         global_cuboids: &[CuboidData],
         render_distance: u32,
+        backend: ChunkDrawBackend,
     ) -> Self {
         let dev_props = physical_device.get_properties();
         let descriptor_buckets =
@@ -118,7 +119,9 @@ impl ChunkRendererCore {
         let draw_capacity = initial_draw_capacity(render_distance)
             .min(max_draw_indirect_count as usize)
             .max(1);
+        let max_regions = (max_meta / 64).max(256);
         let meta_size = (max_meta * size_of::<ChunkMeta>()) as u64;
+        let region_meta_size = (max_regions * size_of::<RegionMeta>()) as u64;
         let indirect_size = (draw_capacity * size_of::<DrawCommand>()) as u64;
         tracing::info!(
             "Chunk indirect capacity: {} commands (render distance {})",
@@ -126,6 +129,7 @@ impl ChunkRendererCore {
             render_distance,
         );
         let count_size = 4u64;
+        let aabb_command_size = 20u64;
         let frustum_size = size_of::<FrustumData>() as u64;
 
         let mut meta_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -136,6 +140,14 @@ impl ChunkRendererCore {
         let mut frustum_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut water_count_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut water_bucket_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut region_meta_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut region_candidate_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut region_command_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut region_visibility_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut section_candidate_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut section_command_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut section_visibility_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut stats_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let buffer = Buffer::host(
@@ -151,7 +163,9 @@ impl ChunkRendererCore {
                 device,
                 allocator,
                 indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                vk::BufferUsageFlags::StorageBuffer
+                    | vk::BufferUsageFlags::IndirectBuffer
+                    | vk::BufferUsageFlags::TransferDst,
                 "indirect_cmds",
             );
             indirect_buffers.push(buffer);
@@ -160,7 +174,9 @@ impl ChunkRendererCore {
                 device,
                 allocator,
                 count_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                vk::BufferUsageFlags::StorageBuffer
+                    | vk::BufferUsageFlags::IndirectBuffer
+                    | vk::BufferUsageFlags::TransferDst,
                 "draw_count",
             );
             count_buffers.push(buffer);
@@ -169,7 +185,9 @@ impl ChunkRendererCore {
                 device,
                 allocator,
                 indirect_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                vk::BufferUsageFlags::StorageBuffer
+                    | vk::BufferUsageFlags::IndirectBuffer
+                    | vk::BufferUsageFlags::TransferDst,
                 "indirect_cmds_cutout",
             );
             indirect_cutout_buffers.push(buffer);
@@ -178,7 +196,9 @@ impl ChunkRendererCore {
                 device,
                 allocator,
                 count_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                vk::BufferUsageFlags::StorageBuffer
+                    | vk::BufferUsageFlags::IndirectBuffer
+                    | vk::BufferUsageFlags::TransferDst,
                 "draw_count_cutout",
             );
             count_cutout_buffers.push(buffer);
@@ -210,12 +230,77 @@ impl ChunkRendererCore {
                 "water_buckets",
             );
             water_bucket_buffers.push(buffer);
+
+            region_meta_buffers.push(Buffer::host(
+                device,
+                allocator,
+                region_meta_size,
+                vk::BufferUsageFlags::StorageBuffer,
+                "region_meta",
+            ));
+            region_candidate_buffers.push(Buffer::device(
+                device,
+                allocator,
+                max_regions as u64 * 4,
+                vk::BufferUsageFlags::StorageBuffer,
+                "region_candidates",
+            ));
+            region_command_buffers.push(Buffer::host(
+                device,
+                allocator,
+                aabb_command_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "region_aabb_command",
+            ));
+            region_visibility_buffers.push(Buffer::device(
+                device,
+                allocator,
+                max_regions as u64 * 4,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::TransferDst,
+                "region_visibility",
+            ));
+            section_candidate_buffers.push(Buffer::device(
+                device,
+                allocator,
+                max_meta as u64 * 4,
+                vk::BufferUsageFlags::StorageBuffer,
+                "section_candidates",
+            ));
+            section_command_buffers.push(Buffer::host(
+                device,
+                allocator,
+                aabb_command_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                "section_aabb_command",
+            ));
+            section_visibility_buffers.push(Buffer::device(
+                device,
+                allocator,
+                max_meta as u64 * 4,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::TransferDst,
+                "section_visibility",
+            ));
+            stats_buffers.push(Buffer::host(
+                device,
+                allocator,
+                16,
+                vk::BufferUsageFlags::StorageBuffer,
+                "occlusion_stats",
+            ));
         }
+
+        let history_buffer = Buffer::device(
+            device,
+            allocator,
+            max_meta as u64 * 4,
+            vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::TransferDst,
+            "section_visibility_history",
+        );
 
         let (water_indirect_buffers, water_candidate_buffers) =
             create_water_scaled_buffers(device, allocator, max_meta, indirect_size);
 
-        let compute_desc_layout = create_cull_desc_layout(device);
+        let compute_desc_layout = create_cull_desc_layout(device, backend);
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: 1,
             set_layouts: &compute_desc_layout,
@@ -225,11 +310,42 @@ impl ChunkRendererCore {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create compute pipeline layout");
 
+        let backend_value = u32::from(backend == ChunkDrawBackend::Mesh);
+        let map_entry = [vk::SpecializationMapEntry {
+            constant_id: 0,
+            offset: 0,
+            size: size_of::<u32>(),
+        }];
+        let specialization = vk::SpecializationInfo {
+            map_entry_count: 1,
+            map_entries: map_entry.as_ptr(),
+            data_size: size_of::<u32>(),
+            data: (&backend_value as *const u32).cast(),
+            ..Default::default()
+        };
         let compute_pipeline = create_compute_pipeline(
             device,
             compute_layout,
             shader::include_spirv!("cull.comp.spv"),
+            Some(&specialization),
+        );
+        let region_prepare_pipeline = create_compute_pipeline(
+            device,
+            compute_layout,
+            shader::include_spirv!("region_prepare.comp.spv"),
             None,
+        );
+        let section_expand_pipeline = create_compute_pipeline(
+            device,
+            compute_layout,
+            shader::include_spirv!("section_expand.comp.spv"),
+            None,
+        );
+        let finalize_pipeline = create_compute_pipeline(
+            device,
+            compute_layout,
+            shader::include_spirv!("cull_finalize.comp.spv"),
+            Some(&specialization),
         );
         let water_scan_pipeline = create_compute_pipeline(
             device,
@@ -241,23 +357,16 @@ impl ChunkRendererCore {
             device,
             compute_layout,
             shader::include_spirv!("water_emit.comp.spv"),
-            None,
+            Some(&specialization),
         );
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::StorageBuffer,
-                // meta + solid indirect/count + cutout indirect/count +
-                // water indirect/count/buckets/candidates = 9 per frame.
-                descriptor_count: 10 * MAX_FRAMES_IN_FLIGHT as u32,
+                descriptor_count: 23 * MAX_FRAMES_IN_FLIGHT as u32,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::CombinedImageSampler,
-                // The Hi-Z pyramid at binding 6.
                 descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
             },
         ];
@@ -286,119 +395,148 @@ impl ChunkRendererCore {
             .expect("failed to allocate cull desc sets");
 
         for i in 0..MAX_FRAMES_IN_FLIGHT {
-            let (meta_info, mut meta_write) = desc_write(
-                compute_sets[i],
-                0,
-                vk::DescriptorType::StorageBuffer,
-                meta_buffers[i].buffer,
-                meta_size,
-            );
-
-            let (frustum_info, mut frustum_write) = desc_write(
-                compute_sets[i],
-                1,
-                vk::DescriptorType::UniformBuffer,
-                frustum_buffers[i].buffer,
-                frustum_size,
-            );
-
-            let (indirect_info, mut indirect_write) = desc_write(
-                compute_sets[i],
-                2,
-                vk::DescriptorType::StorageBuffer,
-                indirect_buffers[i].buffer,
-                indirect_size,
-            );
-
-            let (count_info, mut count_write) = desc_write(
-                compute_sets[i],
-                3,
-                vk::DescriptorType::StorageBuffer,
-                count_buffers[i].buffer,
-                count_size,
-            );
-
-            let (indirect_c_info, mut indirect_c_write) = desc_write(
-                compute_sets[i],
-                4,
-                vk::DescriptorType::StorageBuffer,
-                indirect_cutout_buffers[i].buffer,
-                indirect_size,
-            );
-
-            let (count_c_info, mut count_c_write) = desc_write(
-                compute_sets[i],
-                5,
-                vk::DescriptorType::StorageBuffer,
-                count_cutout_buffers[i].buffer,
-                count_size,
-            );
-
-            let (buckets_info, mut buckets_write) = desc_write(
-                compute_sets[i],
-                7,
-                vk::DescriptorType::StorageBuffer,
-                water_bucket_buffers[i].buffer,
-                (WATER_BUCKETS as u64 + 1) * 4,
-            );
-
-            let (candidates_info, mut candidates_write) = desc_write(
-                compute_sets[i],
-                8,
-                vk::DescriptorType::StorageBuffer,
-                water_candidate_buffers[i].buffer,
-                max_meta as u64 * 4,
-            );
-
-            let (water_ind_info, mut water_ind_write) = desc_write(
-                compute_sets[i],
-                9,
-                vk::DescriptorType::StorageBuffer,
-                water_indirect_buffers[i].buffer,
-                indirect_size,
-            );
-
-            let (water_count_info, mut water_count_write) = desc_write(
-                compute_sets[i],
-                10,
-                vk::DescriptorType::StorageBuffer,
-                water_count_buffers[i].buffer,
-                count_size,
-            );
-            let (mesh_info, mut mesh_write) = desc_write(
-                compute_sets[i],
-                11,
-                vk::DescriptorType::StorageBuffer,
-                mesh_buffer.buffer,
-                mesh_size,
-            );
-
-            meta_write.buffer_info = meta_info.as_ptr();
-            frustum_write.buffer_info = frustum_info.as_ptr();
-            indirect_write.buffer_info = indirect_info.as_ptr();
-            count_write.buffer_info = count_info.as_ptr();
-            indirect_c_write.buffer_info = indirect_c_info.as_ptr();
-            count_c_write.buffer_info = count_c_info.as_ptr();
-            buckets_write.buffer_info = buckets_info.as_ptr();
-            candidates_write.buffer_info = candidates_info.as_ptr();
-            water_ind_write.buffer_info = water_ind_info.as_ptr();
-            water_count_write.buffer_info = water_count_info.as_ptr();
-            mesh_write.buffer_info = mesh_info.as_ptr();
-
-            let writes = [
-                meta_write,
-                frustum_write,
-                indirect_write,
-                count_write,
-                indirect_c_write,
-                count_c_write,
-                buckets_write,
-                candidates_write,
-                water_ind_write,
-                water_count_write,
-                mesh_write,
+            let bindings = [
+                (
+                    0,
+                    vk::DescriptorType::StorageBuffer,
+                    meta_buffers[i].buffer,
+                    meta_size,
+                ),
+                (
+                    1,
+                    vk::DescriptorType::UniformBuffer,
+                    frustum_buffers[i].buffer,
+                    frustum_size,
+                ),
+                (
+                    2,
+                    vk::DescriptorType::StorageBuffer,
+                    indirect_buffers[i].buffer,
+                    indirect_size,
+                ),
+                (
+                    3,
+                    vk::DescriptorType::StorageBuffer,
+                    count_buffers[i].buffer,
+                    4,
+                ),
+                (
+                    4,
+                    vk::DescriptorType::StorageBuffer,
+                    indirect_cutout_buffers[i].buffer,
+                    indirect_size,
+                ),
+                (
+                    5,
+                    vk::DescriptorType::StorageBuffer,
+                    count_cutout_buffers[i].buffer,
+                    4,
+                ),
+                (
+                    6,
+                    vk::DescriptorType::StorageBuffer,
+                    region_meta_buffers[i].buffer,
+                    region_meta_size,
+                ),
+                (
+                    7,
+                    vk::DescriptorType::StorageBuffer,
+                    region_candidate_buffers[i].buffer,
+                    max_regions as u64 * 4,
+                ),
+                (
+                    8,
+                    vk::DescriptorType::StorageBuffer,
+                    region_command_buffers[i].buffer,
+                    aabb_command_size,
+                ),
+                (
+                    9,
+                    vk::DescriptorType::StorageBuffer,
+                    region_visibility_buffers[i].buffer,
+                    max_regions as u64 * 4,
+                ),
+                (
+                    10,
+                    vk::DescriptorType::StorageBuffer,
+                    section_candidate_buffers[i].buffer,
+                    max_meta as u64 * 4,
+                ),
+                (
+                    11,
+                    vk::DescriptorType::StorageBuffer,
+                    section_command_buffers[i].buffer,
+                    aabb_command_size,
+                ),
+                (
+                    12,
+                    vk::DescriptorType::StorageBuffer,
+                    section_visibility_buffers[i].buffer,
+                    max_meta as u64 * 4,
+                ),
+                (
+                    13,
+                    vk::DescriptorType::StorageBuffer,
+                    history_buffer.buffer,
+                    max_meta as u64 * 4,
+                ),
+                (
+                    18,
+                    vk::DescriptorType::StorageBuffer,
+                    water_bucket_buffers[i].buffer,
+                    (WATER_BUCKETS as u64 + 1) * 4,
+                ),
+                (
+                    19,
+                    vk::DescriptorType::StorageBuffer,
+                    water_candidate_buffers[i].buffer,
+                    max_meta as u64 * 4,
+                ),
+                (
+                    20,
+                    vk::DescriptorType::StorageBuffer,
+                    water_indirect_buffers[i].buffer,
+                    indirect_size,
+                ),
+                (
+                    21,
+                    vk::DescriptorType::StorageBuffer,
+                    water_count_buffers[i].buffer,
+                    4,
+                ),
+                (
+                    22,
+                    vk::DescriptorType::StorageBuffer,
+                    mesh_buffer.buffer,
+                    mesh_size,
+                ),
+                (
+                    23,
+                    vk::DescriptorType::StorageBuffer,
+                    stats_buffers[i].buffer,
+                    16,
+                ),
             ];
-
+            let infos: Vec<_> = bindings
+                .iter()
+                .map(|&(_, _, buffer, range)| vk::DescriptorBufferInfo {
+                    buffer,
+                    offset: 0,
+                    range,
+                })
+                .collect();
+            let writes: Vec<_> = bindings
+                .iter()
+                .zip(&infos)
+                .map(|(&(binding, ty, _, _), info)| vk::WriteDescriptorSet {
+                    dst_set: compute_sets[i],
+                    dst_binding: binding,
+                    descriptor_type: ty,
+                    descriptor_count: 1,
+                    buffer_info: info,
+                    ..Default::default()
+                })
+                .collect();
             device.update_descriptor_sets(&writes, &[]);
         }
 
@@ -409,13 +547,19 @@ impl ChunkRendererCore {
             uploads: ChunkUploads::new(staging_buffers, staging_size, use_staging),
             geometry: ChunkGeometry::new((mesh_size / POOL_UNIT) as u32),
             metadata: ChunkMetadata::new(max_meta),
+            regions: crate::renderer::chunk::region::RegionStore::new(max_regions),
+            next_visibility_generation: 0,
             culling: ChunkCulling {
+                backend,
                 max_meta,
                 draw_capacity,
                 requested_draw_capacity: 0,
                 max_draw_indirect_count,
                 warned_draw_cap: false,
                 compute_pipeline,
+                region_prepare_pipeline,
+                section_expand_pipeline,
+                finalize_pipeline,
                 water_scan_pipeline,
                 water_emit_pipeline,
                 compute_layout,
@@ -432,6 +576,16 @@ impl ChunkRendererCore {
                 water_bucket_buffers,
                 water_candidate_buffers,
                 frustum_buffers,
+                region_meta_buffers,
+                region_candidate_buffers,
+                region_command_buffers,
+                region_visibility_buffers,
+                section_candidate_buffers,
+                section_command_buffers,
+                section_visibility_buffers,
+                history_buffer,
+                stats_buffers,
+                history_reset_pending: true,
                 fade_enabled: false,
                 last_draw_count: 0,
             },

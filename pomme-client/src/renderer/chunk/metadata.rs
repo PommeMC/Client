@@ -4,15 +4,15 @@ use crate::renderer::buffer::Buffer;
 
 /// Persistent CPU-side metadata bookkeeping. GPU buffer ownership remains in
 /// the culling component; this type owns slots, mirrors, and write ordering.
-pub(crate) struct ChunkMetadata {
+pub(crate) struct PersistentMetadata<T: bytemuck::Pod + bytemuck::Zeroable + Copy> {
     pub(crate) slots: FreeList,
-    pub(crate) mirror: Vec<ChunkMeta>,
+    pub(crate) mirror: Vec<T>,
     pub(crate) high_water: u32,
-    pub(crate) writes: Vec<(u32, ChunkMeta)>,
+    pub(crate) writes: Vec<(u32, T)>,
     pub(crate) applied: [usize; crate::renderer::MAX_FRAMES_IN_FLIGHT],
 }
 
-impl ChunkMetadata {
+impl<T: bytemuck::Pod + bytemuck::Zeroable + Copy> PersistentMetadata<T> {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             slots: FreeList::new(capacity as u32),
@@ -23,7 +23,7 @@ impl ChunkMetadata {
         }
     }
 
-    pub(crate) fn queue_write(&mut self, slot: u32, entry: ChunkMeta) {
+    pub(crate) fn queue_write(&mut self, slot: u32, entry: T) {
         self.mirror[slot as usize] = entry;
         self.writes.push((slot, entry));
     }
@@ -36,9 +36,8 @@ impl ChunkMetadata {
             dst[..bytes.len()].copy_from_slice(bytes);
         } else {
             for &(slot, entry) in pending {
-                let offset = slot as usize * size_of::<ChunkMeta>();
-                dst[offset..offset + size_of::<ChunkMeta>()]
-                    .copy_from_slice(bytemuck::bytes_of(&entry));
+                let offset = slot as usize * size_of::<T>();
+                dst[offset..offset + size_of::<T>()].copy_from_slice(bytemuck::bytes_of(&entry));
             }
         }
         self.applied[frame] = self.writes.len();
@@ -60,3 +59,5 @@ impl ChunkMetadata {
         self.applied = [0; crate::renderer::MAX_FRAMES_IN_FLIGHT];
     }
 }
+
+pub(crate) type ChunkMetadata = PersistentMetadata<ChunkMeta>;

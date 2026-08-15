@@ -123,6 +123,7 @@ fn main() {
         presence,
         user,
         args.quick_access_multiplayer,
+        args.chunk_renderer,
     )
     .run()
     {

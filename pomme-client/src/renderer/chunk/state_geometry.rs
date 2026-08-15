@@ -38,18 +38,24 @@ impl ChunkRendererCore {
     pub(super) fn take_section(&mut self, col_pos: ChunkPos, si: i32) -> bool {
         let mut was_present = false;
         let mut freed = Vec::new();
+        let mut removed_positions = Vec::new();
         if let Some(entry) = self.geometry.chunks.get_mut(&col_pos) {
             entry.sections.retain(|s| {
                 if s.section_index == si {
                     was_present = true;
                     if !s.is_tombstone() {
                         freed.push(slice_of(s));
+                        removed_positions.push(s.section_pos);
                     }
                     false
                 } else {
                     true
                 }
             });
+        }
+        for spos in removed_positions {
+            self.regions
+                .remove(spos, self.geometry.frame_seq, MAX_FRAMES_IN_FLIGHT as u64);
         }
         self.retire_freed(freed);
         was_present
@@ -80,6 +86,7 @@ impl ChunkRendererCore {
             let (_, slice) = self.geometry.pending_free.pop_front().unwrap();
             self.free_slice(slice);
         }
+        self.regions.reclaim(self.geometry.frame_seq);
     }
 
     pub fn frame_submitted(&mut self) {
@@ -88,6 +95,13 @@ impl ChunkRendererCore {
 
     pub fn remove(&mut self, pos: &ChunkPos) {
         if let Some(alloc) = self.geometry.chunks.remove(pos) {
+            for section in alloc.sections.iter().filter(|s| !s.is_tombstone()) {
+                self.regions.remove(
+                    section.section_pos,
+                    self.geometry.frame_seq,
+                    MAX_FRAMES_IN_FLIGHT as u64,
+                );
+            }
             let freed = alloc
                 .sections
                 .iter()
@@ -107,6 +121,8 @@ impl ChunkRendererCore {
         // Dropping the high-water mark to 0 makes every stale GPU meta entry
         // unreachable; no buffer scrub needed.
         self.metadata.reset();
+        self.regions.reset();
+        self.culling.history_reset_pending = true;
         self.culling.fade_enabled = false;
     }
 

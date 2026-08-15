@@ -23,7 +23,9 @@ pub(crate) fn create_water_scaled_buffers(
             device,
             allocator,
             indirect_size,
-            vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+            vk::BufferUsageFlags::StorageBuffer
+                | vk::BufferUsageFlags::IndirectBuffer
+                | vk::BufferUsageFlags::TransferDst,
             "water_indirect",
         ));
         candidate_buffers.push(Buffer::device(

@@ -9,11 +9,11 @@
 // Must equal WATER_BUCKETS (layout constants can't reference it).
 layout(local_size_x = 512) in;
 
-layout(set = 0, binding = 7) buffer WaterBuckets {
+layout(set = 0, binding = 18) buffer WaterBuckets {
     uint water_buckets[];
 };
 
-layout(set = 0, binding = 10) writeonly buffer WaterCount {
+layout(set = 0, binding = 21) writeonly buffer WaterCount {
     uint water_draw_count;
 };
 

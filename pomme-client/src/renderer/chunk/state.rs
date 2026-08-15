@@ -6,7 +6,7 @@ use glam::DVec3;
 use pomme_gpu_allocator::vulkan::Allocator;
 use pyronyx::vk;
 
-use super::abi::{ChunkMeta, DrawCommand, FrustumData};
+use super::abi::{ChunkMeta, DrawCommand, FrustumData, RegionMeta};
 use super::cull::{ChunkCulling, create_compute_pipeline, create_cull_desc_layout, desc_write};
 use super::dispatcher::pack_section_pos;
 use super::geometry::{ChunkAlloc, ChunkGeometry, SectionAlloc, TOMBSTONE_SLOT, slice_of};
@@ -17,8 +17,7 @@ use super::metadata::ChunkMetadata;
 use super::resources::create_water_scaled_buffers;
 use super::upload::{ChunkUploads, PendingCopy};
 use crate::renderer::buffer::Buffer;
-use crate::renderer::hiz::OcclusionCamera;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader};
+use crate::renderer::{ChunkDrawBackend, MAX_FRAMES_IN_FLIGHT, shader};
 
 const BUCKET_FACES: u32 = 32768;
 const FACE_RECORD_SIZE: u64 = size_of::<PackedFace>() as u64;

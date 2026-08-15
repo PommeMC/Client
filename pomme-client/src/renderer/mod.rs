@@ -4,7 +4,6 @@ pub mod camera;
 pub mod chunk;
 mod context;
 pub mod entity_model;
-pub mod hiz;
 pub mod pipelines;
 mod screenshot;
 pub(crate) mod shader;
@@ -28,7 +27,6 @@ use chunk::dispatcher::ChunkMeshing;
 use chunk::mesher::{SectionMeshData, build_global_cuboid_table};
 use context::VulkanContext;
 use glam::dvec3;
-use hiz::{HizPipeline, OcclusionCamera};
 use pipelines::block_entity::BlockEntityPipeline;
 pub use pipelines::block_entity::BlockEntityRenderInfo;
 use pipelines::block_overlay::BlockOverlayPipeline;
@@ -39,6 +37,7 @@ use pipelines::clouds::CloudPipeline;
 use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
 use pipelines::hand::HandPipeline;
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
+use pipelines::occlusion::OcclusionPipeline;
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
@@ -52,6 +51,7 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 use crate::app::input::InputState;
+use crate::args::ChunkRendererMode;
 use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
@@ -66,6 +66,15 @@ pub enum RendererError {
 
     #[error("vulkan error: {0}")]
     Vulkan(#[from] vk::Error),
+
+    #[error("mesh chunk renderer pipeline creation failed: {0}")]
+    MeshRendererUnavailable(vk::Error),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChunkDrawBackend {
+    Legacy,
+    Mesh,
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +170,8 @@ pub struct Renderer {
     asset_index: Option<AssetIndex>,
 
     chunk_pipeline: ChunkPipeline,
+    occlusion_pipeline: OcclusionPipeline,
+    chunk_backend: ChunkDrawBackend,
     hand_pipeline: HandPipeline,
     block_overlay_pipeline: BlockOverlayPipeline,
     sky_pipeline: SkyPipeline,
@@ -191,7 +202,6 @@ pub struct Renderer {
     query_pools: Option<[vk::QueryPool; MAX_FRAMES_IN_FLIGHT]>,
     query_reset: [bool; MAX_FRAMES_IN_FLIGHT],
     last_timings: RenderTimings,
-    hiz_pipeline: HizPipeline,
     /// CPU wait in the last frame's `acquire_next_image`: where FIFO vblank
     /// backpressure lands, consumed by the vsync frame pacer.
     last_acquire_ms: f32,
@@ -205,6 +215,7 @@ impl Renderer {
         game_dir: &Path,
         vsync: bool,
         render_distance: u32,
+        chunk_renderer: ChunkRendererMode,
     ) -> Result<Self, RendererError> {
         let size = window.inner_size();
 
@@ -217,8 +228,12 @@ impl Renderer {
             })
         };
 
-        let ctx = VulkanContext::new(&window)?;
-
+        let ctx = VulkanContext::new(&window, chunk_renderer)?;
+        let mut chunk_backend = if ctx.features.mesh_shader {
+            ChunkDrawBackend::Mesh
+        } else {
+            ChunkDrawBackend::Legacy
+        };
         let swapchain_state = Swapchain::new(
             &ctx,
             size.width.max(1),
@@ -275,11 +290,37 @@ impl Renderer {
 
         splash(&mut menu_pipeline, 0.5, "Creating pipelines...");
 
-        let chunk_pipeline = ChunkPipeline::new(
+        let chunk_pipeline = match ChunkPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
             &ctx.allocator,
             &atlas,
+            chunk_backend,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(error)
+                if chunk_renderer == ChunkRendererMode::Auto
+                    && chunk_backend == ChunkDrawBackend::Mesh =>
+            {
+                tracing::warn!("Mesh chunk pipeline creation failed ({error}); using legacy");
+                chunk_backend = ChunkDrawBackend::Legacy;
+                ChunkPipeline::new(
+                    &ctx.device,
+                    swapchain_state.render_pass,
+                    &ctx.allocator,
+                    &atlas,
+                    chunk_backend,
+                )?
+            }
+            Err(error) if chunk_renderer == ChunkRendererMode::Mesh => {
+                return Err(RendererError::MeshRendererUnavailable(error));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        tracing::info!(
+            "Chunk renderer: {:?} (mesh limits: {:?})",
+            chunk_backend,
+            ctx.features.mesh_limits,
         );
 
         let hand_pipeline = HandPipeline::new(
@@ -420,15 +461,23 @@ impl Renderer {
 
         let global_cuboid_table =
             std::sync::Arc::new(build_global_cuboid_table(&registry, &atlas.uv_map));
-        let mut chunk_buffers = ChunkRenderer::new(
+        let chunk_buffers = ChunkRenderer::new(
             &ctx.device,
             ctx.physical_device,
             &ctx.allocator,
             &global_cuboid_table.data,
             render_distance,
+            chunk_backend,
         );
         let (mesh_buffer, global_cuboid_buffer) = chunk_buffers.geometry_buffers();
         chunk_pipeline.set_geometry_buffers(&ctx.device, mesh_buffer, global_cuboid_buffer);
+        let occlusion_pipeline = OcclusionPipeline::new(
+            &ctx.device,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            chunk_pipeline.descriptor_set_layout_camera,
+            ctx.features.representative_fragment_test,
+        );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
             &ctx.device,
@@ -498,20 +547,6 @@ impl Renderer {
             0 | 64 => u64::MAX,
             bits => (1u64 << bits) - 1,
         };
-        let hiz_pipeline = HizPipeline::new(
-            &ctx.device,
-            &ctx.allocator,
-            ctx.graphics_queue,
-            ctx.command_pool,
-            swapchain_extent.width,
-            swapchain_extent.height,
-            swapchain_state.depth_view,
-        );
-        chunk_buffers.set_hiz_descriptors(
-            &ctx.device,
-            hiz_pipeline.full_view(),
-            hiz_pipeline.sampler(),
-        );
         Ok(Self {
             ctx,
             swapchain: swapchain_state,
@@ -523,6 +558,8 @@ impl Renderer {
             asset_index: asset_index.clone(),
             atlas,
             chunk_pipeline,
+            occlusion_pipeline,
+            chunk_backend,
             hand_pipeline,
             block_overlay_pipeline,
             sky_pipeline,
@@ -556,7 +593,6 @@ impl Renderer {
                 timestamp_period,
                 timestamp_mask,
             },
-            hiz_pipeline,
             last_acquire_ms: 0.0,
         })
     }
@@ -742,6 +778,8 @@ impl Renderer {
             self.ctx.device.destroy_semaphore(sem, None);
         }
 
+        self.occlusion_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
 
@@ -768,6 +806,14 @@ impl Renderer {
             self.swapchain.render_pass,
             &self.ctx.allocator,
             &self.atlas,
+            self.chunk_backend,
+        )?;
+        self.occlusion_pipeline = OcclusionPipeline::new(
+            &self.ctx.device,
+            self.swapchain.render_pass,
+            &self.ctx.allocator,
+            self.chunk_pipeline.descriptor_set_layout_camera,
+            self.ctx.features.representative_fragment_test,
         );
         let (mesh_buffer, global_cuboid_buffer) = self.chunk_buffers.geometry_buffers();
         self.chunk_pipeline.set_geometry_buffers(
@@ -816,20 +862,6 @@ impl Renderer {
             &self.ctx.device,
             self.blur_pipeline.blurred_view(),
             self.blur_pipeline.blurred_sampler(),
-        );
-        self.hiz_pipeline.resize(
-            &self.ctx.device,
-            &self.ctx.allocator,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            self.width,
-            self.height,
-            self.swapchain.depth_view,
-        );
-        self.chunk_buffers.set_hiz_descriptors(
-            &self.ctx.device,
-            self.hiz_pipeline.full_view(),
-            self.hiz_pipeline.sampler(),
         );
 
         let sem_info = vk::SemaphoreCreateInfo::default();
@@ -1077,8 +1109,6 @@ impl Renderer {
         // the fresh buffers they would draw as ghosts, and their pre-reset
         // epochs would out-rank every legitimate upload for those sections.
         self.mesh_queue.clear();
-        // The old world's depth pyramid must not cull the new one.
-        self.hiz_pipeline.invalidate_snapshot();
     }
 
     pub fn registry(&self) -> &BlockRegistry {
@@ -1532,6 +1562,7 @@ impl Renderer {
 
         let render_finished = self.render_finished_per_image[image_index as usize];
 
+        let raster_occlusion = occlusion_enabled && self.chunk_buffers.has_sections();
         if let RenderMode::World {
             ref sky,
             render_distance,
@@ -1599,16 +1630,6 @@ impl Renderer {
         let timer = Timer::new(cmd, timer_pool);
         let frame_start_timer = timer.scope(Timestamp::FrameStart, Timestamp::FrameEnd);
 
-        // The pyramid at this point still holds the previous frame's depth;
-        // the snapshot is the camera that drew it. F3+O gates only the
-        // consumption (None = fail open): the pyramid keeps rebuilding, so
-        // re-enabling is instant.
-        let occlusion = if occlusion_enabled {
-            self.hiz_pipeline.snapshot()
-        } else {
-            None
-        };
-
         if let RenderMode::World {
             render_distance, ..
         } = &mode
@@ -1631,7 +1652,7 @@ impl Renderer {
                 self.camera_render_position(),
                 player_chunk,
                 Some(render_distance),
-                occlusion,
+                raster_occlusion,
             );
             cull_timer.end();
         }
@@ -1662,39 +1683,28 @@ impl Renderer {
             RenderMode::MainMenu { elements, .. } => elements.as_slice(),
         };
 
-        // The depth image is shared by every frame in flight, and the previous
-        // frame's Hi-Z pass reads it on the compute stage after that frame's
-        // render pass ended; nothing else orders that read against this
-        // frame's depth writes (the render pass's external dependency only
-        // covers fragment stages, and the fence is several frames behind).
-        // Barriers are queue-scoped, so this execution dependency makes this
-        // frame's depth-writing stages wait out any in-flight Hi-Z read
-        // (write-after-read: no access masks needed).
-        cmd.pipeline_barrier(
-            vk::PipelineStageFlags::ComputeShader,
-            vk::PipelineStageFlags::EarlyFragmentTests | vk::PipelineStageFlags::LateFragmentTests,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[],
-        );
-
         let gui_bake_timer = timer.scope(Timestamp::GuiBakeStart, Timestamp::GuiBakeEnd);
         let item_atlas_uvs = self.run_gui_bake(cmd, menu_elements);
         gui_bake_timer.end();
 
         let use_scene_pass = matches!(&mode, RenderMode::MainMenu { blur, .. } if *blur > 0.01);
-        let (render_pass, framebuffer) = if use_scene_pass {
-            (
-                self.swapchain.render_pass_scene,
-                self.swapchain.framebuffers_scene[image_index as usize],
-            )
-        } else {
-            (
-                self.swapchain.render_pass,
-                self.swapchain.framebuffers[image_index as usize],
-            )
-        };
+        let (render_pass, framebuffer) =
+            if matches!(&mode, RenderMode::World { .. }) && raster_occlusion {
+                (
+                    self.swapchain.render_pass_occlusion_clear,
+                    self.swapchain.framebuffers[image_index as usize],
+                )
+            } else if use_scene_pass {
+                (
+                    self.swapchain.render_pass_scene,
+                    self.swapchain.framebuffers_scene[image_index as usize],
+                )
+            } else {
+                (
+                    self.swapchain.render_pass,
+                    self.swapchain.framebuffers[image_index as usize],
+                )
+            };
         let render_pass_info = vk::RenderPassBeginInfo {
             render_pass,
             framebuffer,
@@ -1748,11 +1758,87 @@ impl Renderer {
                 let terrain_timer = timer.scope(Timestamp::TerrainStart, Timestamp::TerrainEnd);
                 // Solid (no discard) first so it lays down depth and early-Z lets
                 // the front-to-back order reject occluded fragments; cutout after.
-                self.chunk_pipeline.bind(cmd, frame, false);
+                let chunk_draw_set = self.chunk_buffers.draw_set(frame);
+                self.chunk_pipeline.bind(cmd, frame, false, chunk_draw_set);
                 self.chunk_buffers.draw_indirect(cmd, frame, false);
-                self.chunk_pipeline.bind(cmd, frame, true);
+                self.chunk_pipeline.bind(cmd, frame, true, chunk_draw_set);
                 self.chunk_buffers.draw_indirect(cmd, frame, true);
                 terrain_timer.end();
+
+                if raster_occlusion {
+                    let region_timer = timer.scope(
+                        Timestamp::OcclusionRegionStart,
+                        Timestamp::OcclusionRegionEnd,
+                    );
+                    self.occlusion_pipeline.draw(
+                        &self.ctx.device,
+                        cmd,
+                        frame,
+                        false,
+                        self.chunk_pipeline.camera_sets[frame],
+                        self.chunk_buffers.aabb_resources(frame, false),
+                    );
+                    cmd.end_render_pass();
+                    self.chunk_buffers.expand_sections(cmd, frame);
+                    region_timer.end();
+                    let section_timer = timer.scope(
+                        Timestamp::OcclusionSectionStart,
+                        Timestamp::OcclusionSectionEnd,
+                    );
+                    self.resume_pass(
+                        cmd,
+                        self.swapchain.render_pass_occlusion_load,
+                        self.swapchain.framebuffers[image_index as usize],
+                        &[],
+                        viewport,
+                        scissor,
+                    );
+                    self.occlusion_pipeline.draw(
+                        &self.ctx.device,
+                        cmd,
+                        frame,
+                        true,
+                        self.chunk_pipeline.camera_sets[frame],
+                        self.chunk_buffers.aabb_resources(frame, true),
+                    );
+                    cmd.end_render_pass();
+                    section_timer.end();
+                    let finalize_timer =
+                        timer.scope(Timestamp::CullFinalizeStart, Timestamp::CullFinalizeEnd);
+                    self.chunk_buffers.finalize_occlusion(cmd, frame);
+                    finalize_timer.end();
+                    self.resume_pass(
+                        cmd,
+                        self.swapchain.render_pass_occlusion_final,
+                        self.swapchain.framebuffers[image_index as usize],
+                        &[],
+                        viewport,
+                        scissor,
+                    );
+
+                    let new_terrain_timer =
+                        timer.scope(Timestamp::TerrainNewStart, Timestamp::TerrainNewEnd);
+                    let chunk_draw_set = self.chunk_buffers.draw_set(frame);
+                    self.chunk_pipeline.bind(cmd, frame, false, chunk_draw_set);
+                    self.chunk_buffers.draw_indirect(cmd, frame, false);
+                    self.chunk_pipeline.bind(cmd, frame, true, chunk_draw_set);
+                    self.chunk_buffers.draw_indirect(cmd, frame, true);
+                    new_terrain_timer.end();
+                } else {
+                    // Every reset query must be written before the next use of
+                    // this frame slot. Leaving skipped optional-pass queries
+                    // unavailable makes the blocking timing readback hang.
+                    timer.zero_duration(
+                        Timestamp::OcclusionRegionStart,
+                        Timestamp::OcclusionRegionEnd,
+                    );
+                    timer.zero_duration(
+                        Timestamp::OcclusionSectionStart,
+                        Timestamp::OcclusionSectionEnd,
+                    );
+                    timer.zero_duration(Timestamp::CullFinalizeStart, Timestamp::CullFinalizeEnd);
+                    timer.zero_duration(Timestamp::TerrainNewStart, Timestamp::TerrainNewEnd);
+                }
 
                 let anchor = self.camera.anchor();
                 let eye = self.camera_render_position();
@@ -1804,78 +1890,9 @@ impl Renderer {
                 // blends over them; depth-tested (occluded by geometry in front)
                 // but doesn't write depth. GPU-culled and bucket-ordered
                 // back-to-front by the cull/scan/emit chain.
-                self.chunk_pipeline.bind_water(cmd, frame);
+                self.chunk_pipeline.bind_water(cmd, frame, chunk_draw_set);
                 self.chunk_buffers.draw_water(cmd, frame);
                 translucent_timer.end();
-
-                // Occluder geometry is complete: end the pass so the Hi-Z
-                // copy samples the stored depth now — before clouds and
-                // weather, whose depth writes must never occlusion-cull the
-                // terrain behind them (clouds are 80% alpha), and before the
-                // hand/HUD segment's depth clear wipes the buffer.
-                cmd.end_render_pass();
-
-                let hiz_timer = timer.scope(Timestamp::HizStart, Timestamp::HizEnd);
-                self.hiz_pipeline
-                    .execute(cmd, self.swapchain.depth_image, self.swapchain.extent);
-                hiz_timer.end();
-                // Next frame's occlusion test projects with the camera that
-                // drew this depth; same anchor/eye split as the cull,
-                // third-person offset included.
-                let anchor = self.camera.anchor();
-                let eye = self.camera_render_position();
-                self.hiz_pipeline.set_snapshot(OcclusionCamera {
-                    view_proj: self.camera.view_projection().to_cols_array_2d(),
-                    cam_block: anchor.as_ivec3(),
-                    frac: (eye - anchor).as_vec3(),
-                });
-
-                // Two hazards before resuming: the resumed pass writes the
-                // depth the Hi-Z copy samples (WAR, execution-only via the
-                // ComputeShader source stage), and the world pass left the
-                // color image in PresentSrcKHR while the load pass expects
-                // ColorAttachmentOptimal.
-                let color_barrier = vk::ImageMemoryBarrier {
-                    src_access_mask: vk::AccessFlags::ColorAttachmentWrite,
-                    dst_access_mask: vk::AccessFlags::ColorAttachmentRead
-                        | vk::AccessFlags::ColorAttachmentWrite,
-                    old_layout: vk::ImageLayout::PresentSrcKHR,
-                    new_layout: vk::ImageLayout::ColorAttachmentOptimal,
-                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                    image: self.swapchain.images[image_index as usize],
-                    subresource_range: vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::Color,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    },
-                    ..Default::default()
-                };
-                cmd.pipeline_barrier(
-                    vk::PipelineStageFlags::ColorAttachmentOutput
-                        | vk::PipelineStageFlags::ComputeShader,
-                    vk::PipelineStageFlags::ColorAttachmentOutput
-                        | vk::PipelineStageFlags::EarlyFragmentTests
-                        | vk::PipelineStageFlags::LateFragmentTests,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[color_barrier],
-                );
-
-                // Resume with the world depth preserved (load_depth variant)
-                // for the passes that depth-test against terrain but must not
-                // feed the occlusion pyramid.
-                self.resume_pass(
-                    cmd,
-                    self.swapchain.render_pass_load_depth,
-                    self.swapchain.framebuffers_load[image_index as usize],
-                    &[],
-                    viewport,
-                    scissor,
-                );
 
                 let ui_timer = timer.scope(Timestamp::UiStart, Timestamp::UiEnd);
 
@@ -2479,6 +2496,8 @@ impl Drop for Renderer {
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_buffers
             .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.occlusion_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.hand_pipeline
@@ -2492,8 +2511,6 @@ impl Drop for Renderer {
         self.menu_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.blur_pipeline
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.hiz_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.skin_preview
             .destroy(&self.ctx.device, &self.ctx.allocator);

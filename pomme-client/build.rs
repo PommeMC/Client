@@ -26,7 +26,7 @@ fn main() {
     let mut options = shaderc::CompileOptions::new().expect("failed to create compile options");
     options.set_target_env(
         shaderc::TargetEnv::Vulkan,
-        shaderc::EnvVersion::Vulkan1_0 as u32,
+        shaderc::EnvVersion::Vulkan1_2 as u32,
     );
     options.set_source_language(shaderc::SourceLanguage::GLSL);
 
@@ -55,6 +55,7 @@ fn main() {
 
     let shaders = [
         ("chunk.vert", shaderc::ShaderKind::Vertex),
+        ("chunk.mesh", shaderc::ShaderKind::Mesh),
         ("chunk.frag", shaderc::ShaderKind::Fragment),
         ("chunk_solid.frag", shaderc::ShaderKind::Fragment),
         ("water.frag", shaderc::ShaderKind::Fragment),
@@ -73,6 +74,11 @@ fn main() {
         ("sky.vert", shaderc::ShaderKind::Vertex),
         ("sky.frag", shaderc::ShaderKind::Fragment),
         ("cull.comp", shaderc::ShaderKind::Compute),
+        ("region_prepare.comp", shaderc::ShaderKind::Compute),
+        ("section_expand.comp", shaderc::ShaderKind::Compute),
+        ("cull_finalize.comp", shaderc::ShaderKind::Compute),
+        ("aabb.vert", shaderc::ShaderKind::Vertex),
+        ("aabb.frag", shaderc::ShaderKind::Fragment),
         ("blur.vert", shaderc::ShaderKind::Vertex),
         ("blur.frag", shaderc::ShaderKind::Fragment),
         ("entity.vert", shaderc::ShaderKind::Vertex),
@@ -88,8 +94,6 @@ fn main() {
         ("particle.frag", shaderc::ShaderKind::Fragment),
         ("clouds.vert", shaderc::ShaderKind::Vertex),
         ("clouds.frag", shaderc::ShaderKind::Fragment),
-        ("hiz_copy.comp", shaderc::ShaderKind::Compute),
-        ("hiz_reduce.comp", shaderc::ShaderKind::Compute),
     ];
 
     for (file, kind) in &shaders {

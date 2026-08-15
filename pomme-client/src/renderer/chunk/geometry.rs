@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use azalea_core::position::ChunkPos;
+use azalea_core::position::{ChunkPos, ChunkSectionPos};
 
 use super::pool::FreeList;
 
@@ -8,6 +8,7 @@ pub(crate) const TOMBSTONE_SLOT: u32 = u32::MAX;
 
 pub(crate) struct SectionAlloc {
     pub(crate) section_index: i32,
+    pub(crate) section_pos: ChunkSectionPos,
     /// Exactly one persistent metadata slot describes all batches in this
     /// section.
     pub(crate) meta_slot: u32,

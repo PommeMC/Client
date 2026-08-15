@@ -7,9 +7,11 @@ use pyronyx::vk;
 use crate::renderer::buffer::Buffer;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::TextureAtlas;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::chunk::cull::create_cull_desc_layout;
+use crate::renderer::{ChunkDrawBackend, MAX_FRAMES_IN_FLIGHT, shader, util};
 
 pub struct ChunkPipeline {
+    backend: ChunkDrawBackend,
     /// Opaque terrain: no discard, early-Z. Drawn first (front-to-back).
     pub pipeline_solid: vk::Pipeline,
     /// Cutout terrain: alpha-test discard. Drawn after solid.
@@ -21,6 +23,7 @@ pub struct ChunkPipeline {
     pub descriptor_set_layout_camera: vk::DescriptorSetLayout,
     pub descriptor_set_layout_atlas: vk::DescriptorSetLayout,
     pub descriptor_set_layout_geometry: vk::DescriptorSetLayout,
+    descriptor_set_layout_draws: vk::DescriptorSetLayout,
     pub descriptor_pool: vk::DescriptorPool,
     pub camera_sets: Vec<vk::DescriptorSet>,
     pub atlas_set: vk::DescriptorSet,
@@ -35,11 +38,18 @@ impl ChunkPipeline {
         render_pass: vk::RenderPass,
         allocator: &Arc<Mutex<Allocator>>,
         atlas: &TextureAtlas,
-    ) -> Self {
+        backend: ChunkDrawBackend,
+    ) -> Result<Self, vk::Error> {
+        let geometry_stage = vk::ShaderStageFlags::Vertex
+            | if backend == ChunkDrawBackend::Mesh {
+                vk::ShaderStageFlags::MeshEXT
+            } else {
+                vk::ShaderStageFlags::empty()
+            };
         let camera_layout = util::create_descriptor_set_layout(
             device,
             vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex,
+            geometry_stage,
         );
         let atlas_layout = util::create_descriptor_set_layout(
             device,
@@ -52,14 +62,14 @@ impl ChunkPipeline {
                 binding: 0,
                 descriptor_type: vk::DescriptorType::StorageBuffer,
                 descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::Vertex,
+                stage_flags: geometry_stage,
                 ..Default::default()
             },
             vk::DescriptorSetLayoutBinding {
                 binding: 1,
                 descriptor_type: vk::DescriptorType::StorageBuffer,
                 descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::Vertex,
+                stage_flags: geometry_stage,
                 ..Default::default()
             },
         ];
@@ -72,7 +82,15 @@ impl ChunkPipeline {
             .create_descriptor_set_layout(&geometry_layout_info, None)
             .expect("failed to create chunk geometry descriptor layout");
 
-        let layouts = [camera_layout, atlas_layout, geometry_layout];
+        let draw_layout = if backend == ChunkDrawBackend::Mesh {
+            create_cull_desc_layout(device, backend)
+        } else {
+            vk::DescriptorSetLayout::null()
+        };
+        let mut layouts = vec![camera_layout, atlas_layout, geometry_layout];
+        if backend == ChunkDrawBackend::Mesh {
+            layouts.push(draw_layout);
+        }
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
@@ -83,8 +101,35 @@ impl ChunkPipeline {
             .expect("failed to create pipeline layout");
 
         let (pipeline_solid, pipeline_cutout) =
-            create_pipelines(device, render_pass, pipeline_layout);
-        let water_pipeline = create_water_pipeline(device, render_pass, pipeline_layout);
+            match create_pipelines(device, render_pass, pipeline_layout, backend) {
+                Ok(pipelines) => pipelines,
+                Err(error) => {
+                    device.destroy_pipeline_layout(pipeline_layout, None);
+                    device.destroy_descriptor_set_layout(camera_layout, None);
+                    device.destroy_descriptor_set_layout(atlas_layout, None);
+                    device.destroy_descriptor_set_layout(geometry_layout, None);
+                    if draw_layout != vk::DescriptorSetLayout::null() {
+                        device.destroy_descriptor_set_layout(draw_layout, None);
+                    }
+                    return Err(error);
+                }
+            };
+        let water_pipeline =
+            match create_water_pipeline(device, render_pass, pipeline_layout, backend) {
+                Ok(pipeline) => pipeline,
+                Err(error) => {
+                    device.destroy_pipeline(pipeline_solid, None);
+                    device.destroy_pipeline(pipeline_cutout, None);
+                    device.destroy_pipeline_layout(pipeline_layout, None);
+                    device.destroy_descriptor_set_layout(camera_layout, None);
+                    device.destroy_descriptor_set_layout(atlas_layout, None);
+                    device.destroy_descriptor_set_layout(geometry_layout, None);
+                    if draw_layout != vk::DescriptorSetLayout::null() {
+                        device.destroy_descriptor_set_layout(draw_layout, None);
+                    }
+                    return Err(error);
+                }
+            };
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -190,7 +235,8 @@ impl ChunkPipeline {
         };
         device.update_descriptor_sets(&[atlas_write], &[]);
 
-        Self {
+        Ok(Self {
+            backend,
             pipeline_solid,
             pipeline_cutout,
             water_pipeline,
@@ -198,13 +244,14 @@ impl ChunkPipeline {
             descriptor_set_layout_camera: camera_layout,
             descriptor_set_layout_atlas: atlas_layout,
             descriptor_set_layout_geometry: geometry_layout,
+            descriptor_set_layout_draws: draw_layout,
             descriptor_pool,
             camera_sets,
             atlas_set,
             geometry_set,
             camera_buffers,
             camera_allocations,
-        }
+        })
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
@@ -269,32 +316,68 @@ impl ChunkPipeline {
         device.update_descriptor_sets(&[write], &[]);
     }
 
-    pub fn bind(&self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
+    pub fn bind(
+        &self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        cutout: bool,
+        draw_set: vk::DescriptorSet,
+    ) {
         let pipeline = if cutout {
             self.pipeline_cutout
         } else {
             self.pipeline_solid
         };
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.camera_sets[frame], self.atlas_set, self.geometry_set],
-            &[],
-        );
+        if self.backend == ChunkDrawBackend::Mesh {
+            cmd.bind_descriptor_sets(
+                vk::PipelineBindPoint::Graphics,
+                self.pipeline_layout,
+                0,
+                &[
+                    self.camera_sets[frame],
+                    self.atlas_set,
+                    self.geometry_set,
+                    draw_set,
+                ],
+                &[],
+            );
+        } else {
+            cmd.bind_descriptor_sets(
+                vk::PipelineBindPoint::Graphics,
+                self.pipeline_layout,
+                0,
+                &[self.camera_sets[frame], self.atlas_set, self.geometry_set],
+                &[],
+            );
+        }
     }
 
     /// Bind the translucent water pipeline (same descriptor sets as `bind`).
-    pub fn bind_water(&self, cmd: vk::CommandBuffer, frame: usize) {
+    pub fn bind_water(&self, cmd: vk::CommandBuffer, frame: usize, draw_set: vk::DescriptorSet) {
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.water_pipeline);
-        cmd.bind_descriptor_sets(
-            vk::PipelineBindPoint::Graphics,
-            self.pipeline_layout,
-            0,
-            &[self.camera_sets[frame], self.atlas_set, self.geometry_set],
-            &[],
-        );
+        if self.backend == ChunkDrawBackend::Mesh {
+            cmd.bind_descriptor_sets(
+                vk::PipelineBindPoint::Graphics,
+                self.pipeline_layout,
+                0,
+                &[
+                    self.camera_sets[frame],
+                    self.atlas_set,
+                    self.geometry_set,
+                    draw_set,
+                ],
+                &[],
+            );
+        } else {
+            cmd.bind_descriptor_sets(
+                vk::PipelineBindPoint::Graphics,
+                self.pipeline_layout,
+                0,
+                &[self.camera_sets[frame], self.atlas_set, self.geometry_set],
+                &[],
+            );
+        }
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -317,6 +400,9 @@ impl ChunkPipeline {
         device.destroy_descriptor_set_layout(self.descriptor_set_layout_camera, None);
         device.destroy_descriptor_set_layout(self.descriptor_set_layout_atlas, None);
         device.destroy_descriptor_set_layout(self.descriptor_set_layout_geometry, None);
+        if self.descriptor_set_layout_draws != vk::DescriptorSetLayout::null() {
+            device.destroy_descriptor_set_layout(self.descriptor_set_layout_draws, None);
+        }
     }
 }
 
@@ -339,7 +425,8 @@ fn create_pipelines(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-) -> (vk::Pipeline, vk::Pipeline) {
+    backend: ChunkDrawBackend,
+) -> Result<(vk::Pipeline, vk::Pipeline), vk::Error> {
     let blend_attachment = [vk::PipelineColorBlendAttachmentState {
         blend_enable: vk::FALSE,
         color_write_mask: vk::ColorComponentFlags::RGBA,
@@ -355,23 +442,31 @@ fn create_pipelines(
         device,
         render_pass,
         layout,
-        shader::include_spirv!("chunk.vert.spv"),
+        backend,
+        0,
         shader::include_spirv!("chunk_solid.frag.spv"),
         &color_blend,
         true,
         false,
-    );
-    let cutout = create_chunk_variant(
+    )?;
+    let cutout = match create_chunk_variant(
         device,
         render_pass,
         layout,
-        shader::include_spirv!("chunk.vert.spv"),
+        backend,
+        1,
         shader::include_spirv!("chunk.frag.spv"),
         &color_blend,
         true,
         false,
-    );
-    (solid, cutout)
+    ) {
+        Ok(pipeline) => pipeline,
+        Err(error) => {
+            device.destroy_pipeline(solid, None);
+            return Err(error);
+        }
+    };
+    Ok((solid, cutout))
 }
 
 /// Translucent water: standard alpha blending, depth test on but depth write
@@ -380,7 +475,8 @@ fn create_water_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-) -> vk::Pipeline {
+    backend: ChunkDrawBackend,
+) -> Result<vk::Pipeline, vk::Error> {
     let blend_attachment = [vk::PipelineColorBlendAttachmentState {
         blend_enable: vk::TRUE,
         src_color_blend_factor: vk::BlendFactor::SrcAlpha,
@@ -401,7 +497,8 @@ fn create_water_pipeline(
         device,
         render_pass,
         layout,
-        shader::include_spirv!("chunk.vert.spv"),
+        backend,
+        2,
         shader::include_spirv!("water.frag.spv"),
         &color_blend,
         false,
@@ -416,17 +513,46 @@ fn create_chunk_variant(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-    vert_spirv: &[u8],
+    backend: ChunkDrawBackend,
+    draw_stream: u32,
     frag_spirv: &[u8],
     color_blend: &vk::PipelineColorBlendStateCreateInfo,
     depth_write: bool,
     two_sided: bool,
-) -> vk::Pipeline {
-    let vert_module = shader::create_shader_module(device, vert_spirv);
+) -> Result<vk::Pipeline, vk::Error> {
+    let geometry_spirv: &[u8] = if backend == ChunkDrawBackend::Mesh {
+        &shader::include_spirv!("chunk.mesh.spv")[..]
+    } else {
+        &shader::include_spirv!("chunk.vert.spv")[..]
+    };
+    let geometry_module = shader::create_shader_module(device, geometry_spirv);
     let frag_module = shader::create_shader_module(device, frag_spirv);
 
+    let map_entry = [vk::SpecializationMapEntry {
+        constant_id: 0,
+        offset: 0,
+        size: size_of::<u32>(),
+    }];
+    let specialization = vk::SpecializationInfo {
+        map_entry_count: 1,
+        map_entries: map_entry.as_ptr(),
+        data_size: size_of::<u32>(),
+        data: (&draw_stream as *const u32).cast(),
+        ..Default::default()
+    };
+    let mut geometry_stage = shader_stage(
+        if backend == ChunkDrawBackend::Mesh {
+            vk::ShaderStageFlags::MeshEXT
+        } else {
+            vk::ShaderStageFlags::Vertex
+        },
+        geometry_module,
+    );
+    if backend == ChunkDrawBackend::Mesh {
+        geometry_stage.specialization_info = &specialization;
+    }
     let stages = [
-        shader_stage(vk::ShaderStageFlags::Vertex, vert_module),
+        geometry_stage,
         shader_stage(vk::ShaderStageFlags::Fragment, frag_module),
     ];
 
@@ -438,8 +564,9 @@ fn create_chunk_variant(
         color_blend,
         depth_write,
         two_sided,
+        backend,
     );
-    device.destroy_shader_module(vert_module, None);
+    device.destroy_shader_module(geometry_module, None);
     device.destroy_shader_module(frag_module, None);
     pipeline
 }
@@ -455,7 +582,8 @@ fn build_pipeline(
     color_blend: &vk::PipelineColorBlendStateCreateInfo,
     depth_write: bool,
     two_sided: bool,
-) -> vk::Pipeline {
+    backend: ChunkDrawBackend,
+) -> Result<vk::Pipeline, vk::Error> {
     use crate::renderer::chunk::{chunk_vertex_attributes, chunk_vertex_bindings};
     let binding_descs = chunk_vertex_bindings();
     let attr_descs = chunk_vertex_attributes();
@@ -514,7 +642,7 @@ fn build_pipeline(
         ..Default::default()
     };
 
-    let pipeline_info = [vk::GraphicsPipelineCreateInfo {
+    let mut pipeline_info = [vk::GraphicsPipelineCreateInfo {
         stage_count: stages.len() as u32,
         stages: stages.as_ptr(),
         vertex_input_state: &vertex_input,
@@ -530,15 +658,17 @@ fn build_pipeline(
         subpass: 0,
         ..Default::default()
     }];
+    if backend == ChunkDrawBackend::Mesh {
+        pipeline_info[0].vertex_input_state = std::ptr::null();
+        pipeline_info[0].input_assembly_state = std::ptr::null();
+    }
 
     let mut pipeline = vk::Pipeline::null();
-    device
-        .create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            &pipeline_info,
-            None,
-            slice::from_mut(&mut pipeline),
-        )
-        .expect("failed to create chunk pipeline");
-    pipeline
+    device.create_graphics_pipelines(
+        vk::PipelineCache::null(),
+        &pipeline_info,
+        None,
+        slice::from_mut(&mut pipeline),
+    )?;
+    Ok(pipeline)
 }

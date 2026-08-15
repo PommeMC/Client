@@ -13,6 +13,7 @@ pub mod held_item;
 pub mod item_display;
 pub mod item_entity;
 pub mod menu_overlay;
+pub mod occlusion;
 pub mod panorama;
 pub mod particle;
 pub mod skin_preview;

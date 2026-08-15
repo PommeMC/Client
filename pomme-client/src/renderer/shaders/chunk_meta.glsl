@@ -2,8 +2,12 @@
 // declaration shared by the passes so the layout can't drift from the Rust
 // struct (renderer/chunk/abi.rs `ChunkMeta`).
 struct ChunkMeta {
-    vec4 aabb_min;
-    vec4 aabb_max;
+    vec3 aabb_min;
+    uint region_slot;
+    vec3 aabb_max;
+    uint visibility_generation;
+    ivec3 origin;
+    uint _pad;
     // Descriptor ranges in fixed order: opaque (regular solid + lava),
     // cutout, then translucent water. Each descriptor draws a non-indexed
     // stream of six vertices per packed face.
@@ -11,8 +15,6 @@ struct ChunkMeta {
     uint solid_batch_count;
     uint cutout_batch_count;
     uint fluid_batch_count;
-    ivec3 origin;
-    uint _pad;
 };
 
 // Water ordering bucket count; matches renderer/chunk/state.rs

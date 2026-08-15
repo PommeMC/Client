@@ -1324,7 +1324,8 @@ impl AppCore {
 
         // Enqueue everything that needs meshing; newly lit columns marked
         // their dirty bits in GameState::update_light. Visibility itself is
-        // GPU-side (the Hi-Z pass), so no CPU visibility refresh runs here.
+        // GPU-side (the raster occlusion passes), so no CPU visibility refresh
+        // runs here.
         let t_rescan = std::time::Instant::now();
         game.rescan_mesh_jobs(
             player_chunk,

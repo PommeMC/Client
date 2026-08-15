@@ -13,6 +13,7 @@ use thiserror::Error;
 use winit::window::Window;
 
 use super::MAX_FRAMES_IN_FLIGHT;
+use crate::args::ChunkRendererMode;
 
 #[derive(Error, Debug)]
 pub enum ContextError {
@@ -21,6 +22,9 @@ pub enum ContextError {
 
     #[error("no suitable GPU found")]
     NoSuitableGpu,
+
+    #[error("mesh shaders unavailable: {0}")]
+    MeshShadersUnavailable(String),
 
     #[error("allocator error: {0}")]
     Allocator(#[from] pomme_gpu_allocator::AllocationError),
@@ -52,6 +56,18 @@ pub struct DeviceFeatures {
     /// Valid low bits of the graphics queue's timestamps; deltas must be
     /// masked to this width or they read garbage at counter wrap.
     pub timestamp_valid_bits: u32,
+    pub mesh_shader: bool,
+    pub representative_fragment_test: bool,
+    pub mesh_limits: MeshShaderLimits,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MeshShaderLimits {
+    pub max_work_group_count_x: u32,
+    pub max_work_group_invocations: u32,
+    pub max_work_group_size_x: u32,
+    pub max_output_vertices: u32,
+    pub max_output_primitives: u32,
 }
 
 pub struct VulkanContext {
@@ -83,7 +99,7 @@ pub struct VulkanContext {
 }
 
 impl VulkanContext {
-    pub fn new(window: &Window) -> Result<Self, ContextError> {
+    pub fn new(window: &Window, chunk_renderer: ChunkRendererMode) -> Result<Self, ContextError> {
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
 
@@ -185,6 +201,91 @@ impl VulkanContext {
         let draw_indirect_first_instance = base_features.draw_indirect_first_instance == vk::TRUE;
         let multi_draw_indirect = base_features.multi_draw_indirect == vk::TRUE;
 
+        let available_extensions = physical_device
+            .enumerate_device_extension_properties(None)
+            .unwrap_or_default();
+        let mesh_extension = available_extensions.iter().any(|ext| unsafe {
+            CStr::from_ptr(ext.extension_name.as_ptr()) == pyronyx::ext::mesh_shader::NAME
+        });
+        let representative_extension = available_extensions.iter().any(|ext| unsafe {
+            CStr::from_ptr(ext.extension_name.as_ptr())
+                == pyronyx::nv::representative_fragment_test::NAME
+        });
+        let mut mesh_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+        let mut representative_features =
+            vk::PhysicalDeviceRepresentativeFragmentTestFeaturesNV::default();
+        let mut vk11_supported = vk::PhysicalDeviceVulkan11Features::default();
+        let features2 = vk::PhysicalDeviceFeatures2::default().next(&mut vk11_supported);
+        let features2 = if mesh_extension {
+            features2.next(&mut mesh_features)
+        } else {
+            features2
+        };
+        let mut features2 = if representative_extension {
+            features2.next(&mut representative_features)
+        } else {
+            features2
+        };
+        unsafe {
+            (physical_device
+                .fns()
+                .v1_1
+                .get_physical_device_features2
+                .expect("Vulkan 1.1 feature query unavailable"))(
+                physical_device.handle(),
+                &mut features2,
+            );
+        }
+        let mut mesh_properties = vk::PhysicalDeviceMeshShaderPropertiesEXT::default();
+        if mesh_extension {
+            let mut properties2 =
+                vk::PhysicalDeviceProperties2::default().next(&mut mesh_properties);
+            unsafe {
+                (physical_device
+                    .fns()
+                    .v1_1
+                    .get_physical_device_properties2
+                    .expect("Vulkan 1.1 property query unavailable"))(
+                    physical_device.handle(),
+                    &mut properties2,
+                );
+            }
+        }
+        let mesh_limits = MeshShaderLimits {
+            max_work_group_count_x: mesh_properties.max_mesh_work_group_count[0],
+            max_work_group_invocations: mesh_properties.max_mesh_work_group_invocations,
+            max_work_group_size_x: mesh_properties.max_mesh_work_group_size[0],
+            max_output_vertices: mesh_properties.max_mesh_output_vertices,
+            max_output_primitives: mesh_properties.max_mesh_output_primitives,
+        };
+        let mesh_limits_ok = mesh_limits.max_work_group_count_x >= 128
+            && mesh_limits.max_work_group_invocations >= 32
+            && mesh_limits.max_work_group_size_x >= 32
+            && mesh_limits.max_output_vertices >= 128
+            && mesh_limits.max_output_primitives >= 64;
+        let mesh_shader = chunk_renderer != ChunkRendererMode::Legacy
+            && mesh_extension
+            && mesh_features.mesh_shader == vk::TRUE
+            && vk11_supported.shader_draw_parameters == vk::TRUE
+            && mesh_limits_ok;
+        let representative_fragment_test = representative_extension
+            && representative_features.representative_fragment_test == vk::TRUE;
+        tracing::info!(
+            "Raster occlusion representative-fragment mode: {}",
+            if representative_fragment_test {
+                "VK_NV_representative_fragment_test"
+            } else {
+                "portable fragment atomics"
+            }
+        );
+        if chunk_renderer == ChunkRendererMode::Mesh && !mesh_shader {
+            return Err(ContextError::MeshShadersUnavailable(format!(
+                "extension={mesh_extension}, meshShader={}, shaderDrawParameters={}, limits={mesh_limits:?}",
+                mesh_features.mesh_shader == vk::TRUE,
+                vk11_supported.shader_draw_parameters == vk::TRUE,
+            )));
+        }
+
         let queue_supports_timestamps = graphics_family_props.timestamp_valid_bits > 0;
         let timestamp_queries = properties.limits.timestamp_compute_and_graphics == vk::TRUE
             && properties.limits.timestamp_period > 0.0
@@ -247,6 +348,9 @@ impl VulkanContext {
         let features = DeviceFeatures {
             timestamp_queries,
             timestamp_valid_bits: graphics_family_props.timestamp_valid_bits,
+            mesh_shader,
+            representative_fragment_test,
+            mesh_limits,
         };
 
         let queue_priority = 1.0f32;
@@ -285,8 +389,15 @@ impl VulkanContext {
             ..Default::default()
         };
 
+        let mut enabled_extensions = DEVICE_EXTENSIONS.to_vec();
+        if mesh_shader {
+            enabled_extensions.push(pyronyx::ext::mesh_shader::NAME);
+        }
+        if representative_fragment_test {
+            enabled_extensions.push(pyronyx::nv::representative_fragment_test::NAME);
+        }
         let device_extension_names: Vec<*const c_char> =
-            DEVICE_EXTENSIONS.iter().map(|ext| ext.as_ptr()).collect();
+            enabled_extensions.iter().map(|ext| ext.as_ptr()).collect();
 
         let mut enabled_features = vk::PhysicalDeviceFeatures::default();
         if fill_mode_non_solid {
@@ -304,6 +415,32 @@ impl VulkanContext {
             ..Default::default()
         }
         .next(&mut vk12_features);
+
+        let mut enabled_vk11 = vk::PhysicalDeviceVulkan11Features {
+            shader_draw_parameters: if mesh_shader { vk::TRUE } else { vk::FALSE },
+            ..Default::default()
+        };
+        let mut enabled_mesh = vk::PhysicalDeviceMeshShaderFeaturesEXT {
+            mesh_shader: if mesh_shader { vk::TRUE } else { vk::FALSE },
+            ..Default::default()
+        };
+        let mut enabled_representative = vk::PhysicalDeviceRepresentativeFragmentTestFeaturesNV {
+            representative_fragment_test: if representative_fragment_test {
+                vk::TRUE
+            } else {
+                vk::FALSE
+            },
+            ..Default::default()
+        };
+        let device_info = match (mesh_shader, representative_fragment_test) {
+            (true, true) => device_info
+                .next(&mut enabled_vk11)
+                .next(&mut enabled_mesh)
+                .next(&mut enabled_representative),
+            (true, false) => device_info.next(&mut enabled_vk11).next(&mut enabled_mesh),
+            (false, true) => device_info.next(&mut enabled_representative),
+            (false, false) => device_info,
+        };
 
         let device = unsafe { physical_device.create_device(&device_info, None, &instance)? };
 

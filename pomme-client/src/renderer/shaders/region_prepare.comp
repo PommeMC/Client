@@ -1,0 +1,14 @@
+#version 450
+layout(local_size_x=64) in;
+#include "frustum.glsl"
+struct BoundsMeta { vec3 aabb_min; uint unused_slot; vec3 aabb_max; uint generation; ivec3 origin; uint pad; };
+layout(set=0,binding=6) readonly buffer Regions { BoundsMeta regions[]; };
+layout(set=0,binding=7) writeonly buffer Candidates { uint candidates[]; };
+layout(set=0,binding=8) buffer Command { uint index_count; uint instance_count; uint first_index; int vertex_offset; uint first_instance; };
+layout(set=0,binding=9) buffer Visibility { uint visibility[]; };
+void main(){
+ uint i=gl_GlobalInvocationID.x; if(i>=region_count)return; BoundsMeta r=regions[i]; if(r.generation==0u)return;
+ if(!bounds_visible(r.origin,r.aabb_min,r.aabb_max))return;
+ if(camera_inside(r.origin,r.aabb_min,r.aabb_max)){visibility[i]=1u;return;}
+ uint out_i=atomicAdd(instance_count,1u); candidates[out_i]=i;
+}

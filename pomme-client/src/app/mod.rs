@@ -20,6 +20,7 @@ use crate::app::phases::in_game::{GameState, GameUpdateResult, update_game};
 use crate::app::phases::in_menu::{MenuUpdateResult, update_menu};
 use crate::app::phases::{AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
 use crate::app::state_slot::StateSlot;
+use crate::args::ChunkRendererMode;
 use crate::dirs::DataDirs;
 use crate::net::connection::{ConnectArgs, spawn_connection};
 use crate::renderer::{self, Renderer};
@@ -52,6 +53,7 @@ pub struct App {
     refresh_period_ns: Option<u64>,
     /// Frame counter gating the refresh re-query (queries when it wraps to 0).
     refresh_poll: u32,
+    chunk_renderer: ChunkRendererMode,
 }
 
 /// Port of vanilla `FramerateLimiter`: paces to a target period by sleeping
@@ -123,6 +125,7 @@ impl App {
         presence: Option<crate::discord::DiscordPresence>,
         user: UserData,
         quick_access_multiplayer: Option<String>,
+        chunk_renderer: ChunkRendererMode,
     ) -> Self {
         Self {
             phase: StateSlot::new(AppPhase::Setup {
@@ -134,6 +137,7 @@ impl App {
             fps_limiter: FramerateLimiter::new(),
             refresh_period_ns: None,
             refresh_poll: 0,
+            chunk_renderer,
         }
     }
 
@@ -199,6 +203,7 @@ impl ApplicationHandler for App {
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
                     self.core.menu.render_distance,
+                    self.chunk_renderer,
                 ) {
                     Ok(r) => r,
                     Err(e) => {

@@ -6,9 +6,10 @@
 use pyronyx::vk;
 
 use crate::renderer::buffer::Buffer;
-use crate::renderer::shader;
+use crate::renderer::{ChunkDrawBackend, shader};
 
 pub(crate) struct ChunkCulling {
+    pub(crate) backend: ChunkDrawBackend,
     pub(crate) max_meta: usize,
     /// Allocated commands in each solid, cutout, and water indirect buffer.
     pub(crate) draw_capacity: usize,
@@ -18,6 +19,9 @@ pub(crate) struct ChunkCulling {
     pub(crate) max_draw_indirect_count: u32,
     pub(crate) warned_draw_cap: bool,
     pub(crate) compute_pipeline: vk::Pipeline,
+    pub(crate) region_prepare_pipeline: vk::Pipeline,
+    pub(crate) section_expand_pipeline: vk::Pipeline,
+    pub(crate) finalize_pipeline: vk::Pipeline,
     pub(crate) water_scan_pipeline: vk::Pipeline,
     pub(crate) water_emit_pipeline: vk::Pipeline,
     pub(crate) compute_layout: vk::PipelineLayout,
@@ -34,6 +38,16 @@ pub(crate) struct ChunkCulling {
     pub(crate) water_bucket_buffers: Vec<Buffer>,
     pub(crate) water_candidate_buffers: Vec<Buffer>,
     pub(crate) frustum_buffers: Vec<Buffer>,
+    pub(crate) region_meta_buffers: Vec<Buffer>,
+    pub(crate) region_candidate_buffers: Vec<Buffer>,
+    pub(crate) region_command_buffers: Vec<Buffer>,
+    pub(crate) region_visibility_buffers: Vec<Buffer>,
+    pub(crate) section_candidate_buffers: Vec<Buffer>,
+    pub(crate) section_command_buffers: Vec<Buffer>,
+    pub(crate) section_visibility_buffers: Vec<Buffer>,
+    pub(crate) history_buffer: Buffer,
+    pub(crate) stats_buffers: Vec<Buffer>,
+    pub(crate) history_reset_pending: bool,
     pub(crate) fade_enabled: bool,
     pub(crate) last_draw_count: u32,
 }
@@ -78,17 +92,23 @@ pub(crate) fn create_compute_pipeline(
     pipeline
 }
 
-pub(crate) fn create_cull_desc_layout(device: &vk::Device) -> vk::DescriptorSetLayout {
-    let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..=11)
+pub(crate) fn create_cull_desc_layout(
+    device: &vk::Device,
+    backend: ChunkDrawBackend,
+) -> vk::DescriptorSetLayout {
+    let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..=23)
         .map(|binding| vk::DescriptorSetLayoutBinding {
             binding,
             descriptor_type: match binding {
                 1 => vk::DescriptorType::UniformBuffer,
-                6 => vk::DescriptorType::CombinedImageSampler,
                 _ => vk::DescriptorType::StorageBuffer,
             },
             descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::Compute,
+            stage_flags: if backend == ChunkDrawBackend::Mesh && matches!(binding, 2 | 4 | 20) {
+                vk::ShaderStageFlags::Compute | vk::ShaderStageFlags::MeshEXT
+            } else {
+                vk::ShaderStageFlags::Compute
+            },
             ..Default::default()
         })
         .collect();

@@ -20,13 +20,16 @@ pub enum ContextualBarKind<'a> {
 
 pub struct FrameTimings {
     pub frame_ms: f32,
-    pub cull_ms: f32,
+    pub cull_prepare_ms: f32,
+    pub cull_finalize_ms: f32,
     pub gui_bake_ms: f32,
-    pub terrain_ms: f32,
+    pub terrain_seed_ms: f32,
+    pub terrain_new_ms: f32,
     pub entities_ms: f32,
     pub translucent_ms: f32,
     pub ui_ms: f32,
-    pub hiz_ms: f32,
+    pub occlusion_region_ms: f32,
+    pub occlusion_section_ms: f32,
 }
 pub struct DebugInfo<'a> {
     pub fps: u32,
@@ -545,14 +548,17 @@ pub fn build_debug_overlay(
     ];
     if let Some(t) = &info.timings {
         right_lines.push(String::new());
-        right_lines.push(format!("Frame: {:.2}ms", t.frame_ms));
-        right_lines.push(format!("  Cull: {:.2}ms", t.cull_ms));
-        right_lines.push(format!("  GuiBake: {:.2}ms", t.gui_bake_ms));
-        right_lines.push(format!("  Terrain: {:.2}ms", t.terrain_ms));
+        right_lines.push(format!("GPU frame: {:.2}ms", t.frame_ms));
+        right_lines.push(format!("  Cull prepare: {:.2}ms", t.cull_prepare_ms));
+        right_lines.push(format!("  Cull finalize: {:.2}ms", t.cull_finalize_ms));
+        right_lines.push(format!("  GUI bake: {:.2}ms", t.gui_bake_ms));
+        right_lines.push(format!("  Terrain seed: {:.2}ms", t.terrain_seed_ms));
+        right_lines.push(format!("  Terrain new: {:.2}ms", t.terrain_new_ms));
+        right_lines.push(format!("  Region raster: {:.2}ms", t.occlusion_region_ms));
+        right_lines.push(format!("  Section raster: {:.2}ms", t.occlusion_section_ms));
         right_lines.push(format!("  Entities: {:.2}ms", t.entities_ms));
         right_lines.push(format!("  Translucent: {:.2}ms", t.translucent_ms));
         right_lines.push(format!("  UI: {:.2}ms", t.ui_ms));
-        right_lines.push(format!("  HIZ: {:.2}ms", t.hiz_ms));
     }
     let right_x = info.screen_w as f32 - pad;
     push_debug_lines(

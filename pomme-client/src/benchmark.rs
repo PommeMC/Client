@@ -25,7 +25,7 @@ pub struct FrameSample {
     pub entities_ms: f32,
     pub translucent_ms: f32,
     pub ui_ms: f32,
-    pub hiz_ms: f32,
+    pub occlusion_ms: f32,
     pub chunk_count: u32,
     pub entity_count: u32,
 }
@@ -40,7 +40,7 @@ pub struct SpikeSample {
     pub entities_ms: f32,
     pub translucent_ms: f32,
     pub ui_ms: f32,
-    pub hiz_ms: f32,
+    pub occlusion_ms: f32,
     pub chunk_count: u32,
     pub entity_count: u32,
 }
@@ -78,7 +78,7 @@ pub struct BenchmarkResult {
     pub avg_entities_ms: f32,
     pub avg_translucent_ms: f32,
     pub avg_ui_ms: f32,
-    pub avg_hiz_ms: f32,
+    pub avg_occlusion_ms: f32,
     pub peak_chunk_count: u32,
     pub peak_entity_count: u32,
     pub spike_count: u32,
@@ -121,7 +121,7 @@ impl Benchmark {
             entities_ms: timings.entities_ms(),
             translucent_ms: timings.translucent_ms(),
             ui_ms: timings.ui_ms(),
-            hiz_ms: timings.hiz_ms(),
+            occlusion_ms: timings.occlusion_ms(),
             chunk_count,
             entity_count,
         };
@@ -136,7 +136,7 @@ impl Benchmark {
                 entities_ms: sample.entities_ms,
                 translucent_ms: sample.translucent_ms,
                 ui_ms: sample.ui_ms,
-                hiz_ms: sample.hiz_ms,
+                occlusion_ms: sample.occlusion_ms,
                 chunk_count: sample.chunk_count,
                 entity_count: sample.entity_count,
             });
@@ -162,7 +162,7 @@ impl Benchmark {
         let entities_sum: f32 = self.samples.iter().map(|s| s.entities_ms).sum();
         let translucent_sum: f32 = self.samples.iter().map(|s| s.translucent_ms).sum();
         let ui_sum: f32 = self.samples.iter().map(|s| s.ui_ms).sum();
-        let hiz_sum: f32 = self.samples.iter().map(|s| s.hiz_ms).sum();
+        let occlusion_sum: f32 = self.samples.iter().map(|s| s.occlusion_ms).sum();
 
         let peak_chunks = self
             .samples
@@ -201,7 +201,7 @@ impl Benchmark {
             avg_entities_ms: entities_sum / count as f32,
             avg_translucent_ms: translucent_sum / count as f32,
             avg_ui_ms: ui_sum / count as f32,
-            avg_hiz_ms: hiz_sum / count as f32,
+            avg_occlusion_ms: occlusion_sum / count as f32,
             peak_chunk_count: peak_chunks,
             peak_entity_count: peak_entities,
             spike_count: self.spikes.len() as u32,

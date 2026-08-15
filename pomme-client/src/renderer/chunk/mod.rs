@@ -7,6 +7,7 @@ pub(crate) mod geometry;
 pub mod mesher;
 pub(crate) mod metadata;
 pub(crate) mod pool;
+pub(crate) mod region;
 pub(crate) mod resources;
 pub mod section;
 mod state;
@@ -26,8 +27,8 @@ use self::mesher::SectionMeshData;
 use self::metadata::ChunkMetadata;
 use self::state::ChunkRendererCore;
 use self::upload::ChunkUploads;
+use crate::renderer::ChunkDrawBackend;
 use crate::renderer::buffer::Buffer;
-use crate::renderer::hiz::OcclusionCamera;
 
 pub(super) struct ChunkRendererState {
     last_pool_warn: Option<std::time::Instant>,
@@ -36,6 +37,8 @@ pub(super) struct ChunkRendererState {
     uploads: ChunkUploads,
     geometry: ChunkGeometry,
     metadata: ChunkMetadata,
+    regions: region::RegionStore,
+    next_visibility_generation: u32,
     culling: ChunkCulling,
 }
 
@@ -52,6 +55,7 @@ impl ChunkRenderer {
         allocator: &Arc<Mutex<Allocator>>,
         global_cuboids: &[mesher::CuboidData],
         render_distance: u32,
+        backend: ChunkDrawBackend,
     ) -> Self {
         Self {
             core: ChunkRendererCore::new(
@@ -60,12 +64,17 @@ impl ChunkRenderer {
                 allocator,
                 global_cuboids,
                 render_distance,
+                backend,
             ),
         }
     }
 
     pub fn sections_drawn(&self) -> u32 {
         self.core.sections_drawn()
+    }
+
+    pub fn has_sections(&self) -> bool {
+        self.core.metadata.high_water != 0
     }
     pub fn meta_rebuild_ms(&self) -> f32 {
         self.core.meta_rebuild_ms()
@@ -105,15 +114,6 @@ impl ChunkRenderer {
         self.core.clear();
     }
 
-    pub fn set_hiz_descriptors(
-        &mut self,
-        device: &vk::Device,
-        view: vk::ImageView,
-        sampler: vk::Sampler,
-    ) {
-        self.core.set_hiz_descriptors(device, view, sampler);
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_cull(
         &mut self,
@@ -124,7 +124,7 @@ impl ChunkRenderer {
         eye: DVec3,
         player_chunk: ChunkPos,
         limit_rd: Option<u32>,
-        occlusion: Option<OcclusionCamera>,
+        occlusion_enabled: bool,
     ) {
         self.core.dispatch_cull(
             cmd,
@@ -134,12 +134,28 @@ impl ChunkRenderer {
             eye,
             player_chunk,
             limit_rd,
-            occlusion,
+            occlusion_enabled,
         );
     }
 
     pub fn draw_indirect(&mut self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
         self.core.draw_indirect(cmd, frame, cutout);
+    }
+    pub fn expand_sections(&self, cmd: vk::CommandBuffer, frame: usize) {
+        self.core.expand_sections(cmd, frame);
+    }
+    pub fn finalize_occlusion(&self, cmd: vk::CommandBuffer, frame: usize) {
+        self.core.finalize_occlusion(cmd, frame);
+    }
+    pub fn aabb_resources(
+        &self,
+        frame: usize,
+        sections: bool,
+    ) -> (vk::Buffer, vk::Buffer, vk::Buffer, vk::Buffer) {
+        self.core.aabb_resources(frame, sections)
+    }
+    pub(crate) fn draw_set(&self, frame: usize) -> vk::DescriptorSet {
+        self.core.culling.compute_sets[frame]
     }
     pub fn draw_water(&mut self, cmd: vk::CommandBuffer, frame: usize) {
         self.core.draw_water(cmd, frame);

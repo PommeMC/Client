@@ -1,33 +1,46 @@
 layout(set = 0, binding = 1) uniform FrustumBuf {
     vec4 planes[6];
-    // Camera that drew the Hi-Z pyramid this dispatch samples (last frame's);
-    // occlusion tests must project with it, not the live camera.
-    mat4 prev_view_proj;
     uint chunk_count;
-    // Camera block position plus the eye's small offset from it; the origins
-    // are rebased in integer math so nothing here forms a large float.
+    uint region_count;
     int cam_x;
     int cam_y;
     int cam_z;
     float frac_x;
     float frac_y;
     float frac_z;
-    // The pyramid camera's anchor split, same convention as cam_*/frac_*.
-    int prev_cam_x;
-    int prev_cam_y;
-    int prev_cam_z;
-    float prev_frac_x;
-    float prev_frac_y;
-    float prev_frac_z;
-    // 0 = fail open, skip the occlusion test (no pyramid yet, world change,
-    // or F3+O off).
-    uint occlusion_valid;
-    // Player column + render distance for the column cull (0 = off).
     int player_cx;
     int player_cz;
     uint limit_rd;
-    // Allocated indirect-command capacity shared by all emit passes.
     uint draw_capacity;
+    uint occlusion_enabled;
+    uint _pad0;
     uint _pad1;
-    uint _pad2;
 };
+
+bool bounds_visible(ivec3 origin, vec3 aabb_min, vec3 aabb_max) {
+    vec3 base = vec3(origin - ivec3(cam_x, cam_y, cam_z)) - vec3(frac_x, frac_y, frac_z);
+    vec3 mn = base + aabb_min;
+    vec3 mx = base + aabb_max;
+    for (int i = 0; i < 6; ++i) {
+        vec4 p = planes[i];
+        float d = p.x * (p.x >= 0.0 ? mx.x : mn.x)
+                + p.y * (p.y >= 0.0 ? mx.y : mn.y)
+                + p.z * (p.z >= 0.0 ? mx.z : mn.z) + p.w;
+        if (d < 0.0) return false;
+    }
+    return true;
+}
+
+bool section_in_distance(ivec3 origin) {
+    if (limit_rd == 0u) return true;
+    int dx = abs((origin.x >> 4) - player_cx);
+    int dz = abs((origin.z >> 4) - player_cz);
+    return uint(max(dx, dz)) <= limit_rd;
+}
+
+bool camera_inside(ivec3 origin, vec3 aabb_min, vec3 aabb_max) {
+    vec3 eye = vec3(cam_x, cam_y, cam_z) + vec3(frac_x, frac_y, frac_z);
+    vec3 mn = vec3(origin) + aabb_min - vec3(0.1);
+    vec3 mx = vec3(origin) + aabb_max + vec3(0.1);
+    return all(greaterThanEqual(eye, mn)) && all(lessThanEqual(eye, mx));
+}

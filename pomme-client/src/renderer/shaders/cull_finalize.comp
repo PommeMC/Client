@@ -1,0 +1,20 @@
+#version 450
+layout(local_size_x=64) in;
+layout(constant_id=0) const uint USE_MESH_SHADERS=0u;
+#include "chunk_meta.glsl"
+#include "frustum.glsl"
+const uint BATCH_WORDS=8u;
+struct DrawCmd{uint x;uint y;uint z_or_first;uint batch;};
+layout(set=0,binding=0) readonly buffer Meta{ChunkMeta chunks[];};
+layout(set=0,binding=12) readonly buffer Visibility{uint visibility[];};
+layout(set=0,binding=13) buffer History{uint history[];};
+layout(set=0,binding=2) writeonly buffer NewSolid{DrawCmd new_solid[];};
+layout(set=0,binding=3) buffer NewSolidCount{uint new_solid_count;};
+layout(set=0,binding=4) writeonly buffer NewCutout{DrawCmd new_cutout[];};
+layout(set=0,binding=5) buffer NewCutoutCount{uint new_cutout_count;};
+layout(set=0,binding=18) buffer WaterBuckets{uint water_buckets[];};
+layout(set=0,binding=19) writeonly buffer WaterCandidates{uint water_candidates[];};
+layout(set=0,binding=22) readonly buffer MeshBuf{uint mesh_data[];};
+layout(set=0,binding=23) buffer Stats{uint visible_sections;uint seed_sections;uint new_sections;uint _s;};
+void emit(uint word,bool cutout){uint faces=mesh_data[word+1u];DrawCmd d=DrawCmd(USE_MESH_SHADERS!=0u?(faces+31u)/32u:faces*6u,1u,USE_MESH_SHADERS!=0u?1u:0u,word);uint o=cutout?atomicAdd(new_cutout_count,1u):atomicAdd(new_solid_count,1u);if(o<draw_capacity){if(cutout)new_cutout[o]=d;else new_solid[o]=d;}}
+void main(){uint i=gl_GlobalInvocationID.x;if(i>=chunk_count)return;ChunkMeta m=chunks[i];bool current=visibility[i]!=0u;bool previous=history[i]==m.visibility_generation;history[i]=current?m.visibility_generation:0u;if(!current)return;atomicAdd(visible_sections,1u);if(!previous){atomicAdd(new_sections,1u);for(uint j=0u;j<m.solid_batch_count;++j)emit(m.batch_word_offset+j*BATCH_WORDS,false);for(uint j=0u;j<m.cutout_batch_count;++j)emit(m.batch_word_offset+(m.solid_batch_count+j)*BATCH_WORDS,true);}if(m.fluid_batch_count!=0u){ivec3 s=m.origin>>4,c=ivec3(cam_x,cam_y,cam_z)>>4;int d=abs(s.x-c.x)+abs(s.y-c.y)+abs(s.z-c.z);uint b=uint(int(WATER_BUCKETS)-1-min(d,int(WATER_BUCKETS)-1));atomicAdd(water_buckets[b],m.fluid_batch_count);uint ci=atomicAdd(water_buckets[WATER_BUCKETS],1u);water_candidates[ci]=(i<<9)|b;}}

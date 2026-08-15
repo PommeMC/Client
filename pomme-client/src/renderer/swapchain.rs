@@ -23,12 +23,9 @@ pub struct Swapchain {
     pub render_pass: vk::RenderPass,
     pub render_pass_scene: vk::RenderPass,
     pub render_pass_load: vk::RenderPass,
-    /// Load variant that also preserves depth (initial layout = the
-    /// ShaderReadOnlyOptimal the Hi-Z pass leaves): the world frame resumes
-    /// here for clouds/weather, which must depth-test against the terrain but
-    /// stay out of the occlusion pyramid. Render-pass compatible with
-    /// `render_pass_load`, so it shares `framebuffers_load`.
-    pub render_pass_load_depth: vk::RenderPass,
+    pub render_pass_occlusion_clear: vk::RenderPass,
+    pub render_pass_occlusion_load: vk::RenderPass,
+    pub render_pass_occlusion_final: vk::RenderPass,
     pub framebuffers: Vec<vk::Framebuffer>,
     pub framebuffers_scene: Vec<vk::Framebuffer>,
     pub framebuffers_load: Vec<vk::Framebuffer>,
@@ -149,7 +146,12 @@ impl Swapchain {
         let render_pass = create_render_pass(&ctx.device, format.format)?;
         let render_pass_scene = create_render_pass_scene(&ctx.device, format.format)?;
         let render_pass_load = create_render_pass_load(&ctx.device, format.format)?;
-        let render_pass_load_depth = create_render_pass_load_depth(&ctx.device, format.format)?;
+        let render_pass_occlusion_clear =
+            create_occlusion_render_pass(&ctx.device, format.format, true, false)?;
+        let render_pass_occlusion_load =
+            create_occlusion_render_pass(&ctx.device, format.format, false, false)?;
+        let render_pass_occlusion_final =
+            create_occlusion_render_pass(&ctx.device, format.format, false, true)?;
 
         let make_fbs = |rp: vk::RenderPass| -> Result<Vec<vk::Framebuffer>, vk::Error> {
             image_views
@@ -186,7 +188,9 @@ impl Swapchain {
             render_pass,
             render_pass_scene,
             render_pass_load,
-            render_pass_load_depth,
+            render_pass_occlusion_clear,
+            render_pass_occlusion_load,
+            render_pass_occlusion_final,
             framebuffers,
             framebuffers_scene,
             framebuffers_load,
@@ -211,7 +215,9 @@ impl Swapchain {
             self.render_pass,
             self.render_pass_scene,
             self.render_pass_load,
-            self.render_pass_load_depth,
+            self.render_pass_occlusion_clear,
+            self.render_pass_occlusion_load,
+            self.render_pass_occlusion_final,
         ] {
             device.destroy_render_pass(rp, None);
         }
@@ -235,6 +241,101 @@ impl Swapchain {
     }
 }
 
+fn create_occlusion_render_pass(
+    device: &vk::Device,
+    color_format: vk::Format,
+    clear: bool,
+    present: bool,
+) -> Result<vk::RenderPass, vk::Error> {
+    let attachments = [
+        vk::AttachmentDescription {
+            format: color_format,
+            samples: vk::SampleCountFlags::Type1,
+            load_op: if clear {
+                vk::AttachmentLoadOp::Clear
+            } else {
+                vk::AttachmentLoadOp::Load
+            },
+            store_op: vk::AttachmentStoreOp::Store,
+            stencil_load_op: vk::AttachmentLoadOp::DontCare,
+            stencil_store_op: vk::AttachmentStoreOp::DontCare,
+            initial_layout: if clear {
+                vk::ImageLayout::Undefined
+            } else {
+                vk::ImageLayout::ColorAttachmentOptimal
+            },
+            final_layout: if present {
+                vk::ImageLayout::PresentSrcKHR
+            } else {
+                vk::ImageLayout::ColorAttachmentOptimal
+            },
+            ..Default::default()
+        },
+        vk::AttachmentDescription {
+            format: vk::Format::D32Sfloat,
+            samples: vk::SampleCountFlags::Type1,
+            load_op: if clear {
+                vk::AttachmentLoadOp::Clear
+            } else {
+                vk::AttachmentLoadOp::Load
+            },
+            store_op: vk::AttachmentStoreOp::Store,
+            stencil_load_op: vk::AttachmentLoadOp::DontCare,
+            stencil_store_op: vk::AttachmentStoreOp::DontCare,
+            initial_layout: if clear {
+                vk::ImageLayout::Undefined
+            } else {
+                vk::ImageLayout::DepthStencilAttachmentOptimal
+            },
+            final_layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
+            ..Default::default()
+        },
+    ];
+    let color = [vk::AttachmentReference {
+        attachment: 0,
+        layout: vk::ImageLayout::ColorAttachmentOptimal,
+    }];
+    let depth = vk::AttachmentReference {
+        attachment: 1,
+        layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
+    };
+    let subpass = [vk::SubpassDescription {
+        pipeline_bind_point: vk::PipelineBindPoint::Graphics,
+        color_attachment_count: 1,
+        color_attachments: color.as_ptr(),
+        depth_stencil_attachment: &depth,
+        ..Default::default()
+    }];
+    let dependency = [vk::SubpassDependency {
+        src_subpass: vk::SUBPASS_EXTERNAL,
+        dst_subpass: 0,
+        src_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
+            | vk::PipelineStageFlags::EarlyFragmentTests
+            | vk::PipelineStageFlags::LateFragmentTests,
+        src_access_mask: vk::AccessFlags::ColorAttachmentWrite
+            | vk::AccessFlags::DepthStencilAttachmentWrite,
+        dst_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
+            | vk::PipelineStageFlags::EarlyFragmentTests,
+        dst_access_mask: vk::AccessFlags::ColorAttachmentRead
+            | vk::AccessFlags::ColorAttachmentWrite
+            | vk::AccessFlags::DepthStencilAttachmentRead
+            | vk::AccessFlags::DepthStencilAttachmentWrite,
+        ..Default::default()
+    }];
+    device.create_render_pass(
+        &vk::RenderPassCreateInfo {
+            attachment_count: 2,
+            attachments: attachments.as_ptr(),
+            subpass_count: 1,
+            subpasses: subpass.as_ptr(),
+            dependency_count: 1,
+            dependencies: dependency.as_ptr(),
+            ..Default::default()
+        },
+        None,
+    )
+}
+
 fn create_depth_resources(
     device: &vk::Device,
     extent: vk::Extent2D,
@@ -254,7 +355,7 @@ fn create_depth_resources(
         array_layers: 1,
         samples: vk::SampleCountFlags::Type1,
         tiling: vk::ImageTiling::Optimal,
-        usage: vk::ImageUsageFlags::DepthStencilAttachment | vk::ImageUsageFlags::Sampled,
+        usage: vk::ImageUsageFlags::DepthStencilAttachment,
         ..Default::default()
     };
 
@@ -303,8 +404,8 @@ fn create_render_pass(
             format: vk::Format::D32Sfloat,
             samples: vk::SampleCountFlags::Type1,
             load_op: vk::AttachmentLoadOp::Clear,
-            // The Hi-Z pass samples this depth after the pass ends; DontCare
-            // would leave the contents undefined once the pass finishes.
+            // Raster occlusion and later world passes preserve and reuse the
+            // terrain depth attachment.
             store_op: vk::AttachmentStoreOp::Store,
             stencil_load_op: vk::AttachmentLoadOp::DontCare,
             stencil_store_op: vk::AttachmentStoreOp::DontCare,
@@ -335,11 +436,15 @@ fn create_render_pass(
         src_subpass: vk::SUBPASS_EXTERNAL,
         dst_subpass: 0,
         src_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
-            | vk::PipelineStageFlags::EarlyFragmentTests,
-        src_access_mask: vk::AccessFlags::empty(),
+            | vk::PipelineStageFlags::EarlyFragmentTests
+            | vk::PipelineStageFlags::LateFragmentTests,
+        src_access_mask: vk::AccessFlags::ColorAttachmentWrite
+            | vk::AccessFlags::DepthStencilAttachmentWrite,
         dst_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
             | vk::PipelineStageFlags::EarlyFragmentTests,
-        dst_access_mask: vk::AccessFlags::ColorAttachmentWrite
+        dst_access_mask: vk::AccessFlags::ColorAttachmentRead
+            | vk::AccessFlags::ColorAttachmentWrite
+            | vk::AccessFlags::DepthStencilAttachmentRead
             | vk::AccessFlags::DepthStencilAttachmentWrite,
         ..Default::default()
     }];
@@ -381,91 +486,6 @@ fn create_render_pass_load(
         vk::ImageLayout::ColorAttachmentOptimal,
         vk::ImageLayout::PresentSrcKHR,
     )
-}
-
-/// Color preserved like `create_render_pass_load`, and depth preserved too:
-/// loads the world segment's depth from the ShaderReadOnlyOptimal layout the
-/// Hi-Z copy leaves it in, so clouds/weather can depth-test against terrain
-/// after the occlusion pyramid was sourced. Last depth user of the frame
-/// (the hand/HUD segment re-clears in-pass), so the store op stays DontCare.
-fn create_render_pass_load_depth(
-    device: &vk::Device,
-    color_format: vk::Format,
-) -> Result<vk::RenderPass, vk::Error> {
-    let attachments = [
-        vk::AttachmentDescription {
-            format: color_format,
-            samples: vk::SampleCountFlags::Type1,
-            load_op: vk::AttachmentLoadOp::Load,
-            store_op: vk::AttachmentStoreOp::Store,
-            stencil_load_op: vk::AttachmentLoadOp::DontCare,
-            stencil_store_op: vk::AttachmentStoreOp::DontCare,
-            initial_layout: vk::ImageLayout::ColorAttachmentOptimal,
-            final_layout: vk::ImageLayout::PresentSrcKHR,
-            ..Default::default()
-        },
-        vk::AttachmentDescription {
-            format: vk::Format::D32Sfloat,
-            samples: vk::SampleCountFlags::Type1,
-            load_op: vk::AttachmentLoadOp::Load,
-            store_op: vk::AttachmentStoreOp::DontCare,
-            stencil_load_op: vk::AttachmentLoadOp::DontCare,
-            stencil_store_op: vk::AttachmentStoreOp::DontCare,
-            initial_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-            final_layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
-            ..Default::default()
-        },
-    ];
-
-    let color_ref = [vk::AttachmentReference {
-        attachment: 0,
-        layout: vk::ImageLayout::ColorAttachmentOptimal,
-    }];
-    let depth_ref = vk::AttachmentReference {
-        attachment: 1,
-        layout: vk::ImageLayout::DepthStencilAttachmentOptimal,
-    };
-
-    let subpass = [vk::SubpassDescription {
-        pipeline_bind_point: vk::PipelineBindPoint::Graphics,
-        color_attachment_count: color_ref.len() as u32,
-        color_attachments: color_ref.as_ptr(),
-        depth_stencil_attachment: &depth_ref,
-        ..Default::default()
-    }];
-
-    // The depth loadOp reads what the Hi-Z compute sampled; the caller's
-    // pre-pass barrier orders that read, and this external dependency orders
-    // the automatic ShaderReadOnly -> attachment transition against the
-    // pass's own depth accesses.
-    let dependency = [vk::SubpassDependency {
-        src_subpass: vk::SUBPASS_EXTERNAL,
-        dst_subpass: 0,
-        src_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
-            | vk::PipelineStageFlags::EarlyFragmentTests
-            | vk::PipelineStageFlags::LateFragmentTests,
-        src_access_mask: vk::AccessFlags::empty(),
-        dst_stage_mask: vk::PipelineStageFlags::ColorAttachmentOutput
-            | vk::PipelineStageFlags::EarlyFragmentTests
-            | vk::PipelineStageFlags::LateFragmentTests,
-        dst_access_mask: vk::AccessFlags::ColorAttachmentRead
-            | vk::AccessFlags::ColorAttachmentWrite
-            | vk::AccessFlags::DepthStencilAttachmentRead
-            | vk::AccessFlags::DepthStencilAttachmentWrite,
-        ..Default::default()
-    }];
-
-    let render_pass_info = vk::RenderPassCreateInfo {
-        attachment_count: attachments.len() as u32,
-        attachments: attachments.as_ptr(),
-        subpass_count: subpass.len() as u32,
-        subpasses: subpass.as_ptr(),
-        dependency_count: dependency.len() as u32,
-        dependencies: dependency.as_ptr(),
-        ..Default::default()
-    };
-
-    device.create_render_pass(&render_pass_info, None)
 }
 
 fn create_render_pass_variant(
