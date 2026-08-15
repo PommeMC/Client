@@ -1052,6 +1052,10 @@ impl Renderer {
         self.chunk_buffers.sections_drawn()
     }
 
+    pub fn chunk_mesh_pool_bytes(&self) -> (u64, u64) {
+        self.chunk_buffers.mesh_pool_bytes()
+    }
+
     pub fn meta_rebuild_ms(&self) -> f32 {
         self.chunk_buffers.meta_rebuild_ms()
     }
@@ -1776,18 +1780,11 @@ impl Renderer {
                     c"Terrain initial",
                     [0.25, 0.75, 0.3, 1.0],
                 );
-                // Solid (no discard) first so it lays down depth and early-Z lets
-                // the front-to-back order reject occluded fragments; cutout after.
-                let opaque_label = self.debug_labels.scope(cmd, c"Opaque terrain");
+                // Opaque and cutout share one alpha-tested draw so both land
+                // in the same pass.
                 self.chunk_pipeline
-                    .bind(cmd, frame, false, self.chunk_buffers.draw_set(frame));
-                self.chunk_buffers.draw_indirect(cmd, frame, false);
-                opaque_label.end();
-                let cutout_label = self.debug_labels.scope(cmd, c"Cutout terrain");
-                self.chunk_pipeline
-                    .bind(cmd, frame, true, self.chunk_buffers.draw_set(frame));
-                self.chunk_buffers.draw_indirect(cmd, frame, true);
-                cutout_label.end();
+                    .bind(cmd, frame, self.chunk_buffers.draw_set(frame));
+                self.chunk_buffers.draw_indirect(cmd, frame);
                 terrain_label.end();
                 terrain_timer.end();
 
@@ -1867,16 +1864,9 @@ impl Renderer {
                         c"Terrain newly visible",
                         [0.35, 0.85, 0.4, 1.0],
                     );
-                    let opaque_label = self.debug_labels.scope(cmd, c"Opaque terrain");
                     self.chunk_pipeline
-                        .bind(cmd, frame, false, self.chunk_buffers.draw_set(frame));
-                    self.chunk_buffers.draw_indirect(cmd, frame, false);
-                    opaque_label.end();
-                    let cutout_label = self.debug_labels.scope(cmd, c"Cutout terrain");
-                    self.chunk_pipeline
-                        .bind(cmd, frame, true, self.chunk_buffers.draw_set(frame));
-                    self.chunk_buffers.draw_indirect(cmd, frame, true);
-                    cutout_label.end();
+                        .bind(cmd, frame, self.chunk_buffers.draw_set(frame));
+                    self.chunk_buffers.draw_indirect(cmd, frame);
                     new_terrain_label.end();
                     new_terrain_timer.end();
                 } else {

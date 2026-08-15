@@ -17,11 +17,16 @@ layout(location = 2) in vec3 v_tint;
 layout(location = 3) flat in float v_visibility;
 layout(location = 4) in vec3 v_fog_color;
 layout(location = 5) in float v_fog;
+layout(location = 6) in vec4 v_region;
 
 layout(location = 0) out vec4 out_color;
 
+vec2 chunk_atlas_uv(vec2 tex_coords, vec4 region) {
+    return region.z > 0.0 ? region.xy + fract(tex_coords) * region.zw : tex_coords;
+}
+
 void main() {
-    vec4 color = texture(atlas_texture, v_tex_coords);
+    vec4 color = texture(atlas_texture, chunk_atlas_uv(v_tex_coords, v_region));
     vec3 shaded =
         shade_chunk_surface(color.rgb, v_tint, v_light, v_visibility, v_fog_color, v_fog);
     out_color = vec4(shaded, 1.0);

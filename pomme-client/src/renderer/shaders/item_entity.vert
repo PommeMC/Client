@@ -23,8 +23,8 @@ void main() {
     vec3 rel = world_pos.xyz - camera_pos.xyz;
     gl_Position = view_proj * vec4(rel, 1.0);
     v_tex_coords = tex_coords;
-    v_light = light_tint.r;
-    v_tint = light_tint.gba;
+    v_light = light_tint.a;
+    v_tint = light_tint.rgb;
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
 }

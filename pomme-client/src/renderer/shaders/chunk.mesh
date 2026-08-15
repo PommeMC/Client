@@ -18,12 +18,15 @@ struct GlobalCuboid { GlobalFace faces[6]; };
 layout(set = 2, binding = 0, std430) readonly buffer MeshData { uint meshData[]; };
 layout(set = 2, binding = 1, std430) readonly buffer CuboidBuffer { GlobalCuboid globalCuboids[]; };
 
+#include "greedy_face.glsl"
+
 layout(location = 0) out vec2 v_tex_coords[];
 layout(location = 1) out float v_light[];
 layout(location = 2) out vec3 v_tint[];
 layout(location = 3) flat out float v_visibility[];
 layout(location = 4) out vec3 v_fog_color[];
 layout(location = 5) out float v_fog[];
+layout(location = 6) out vec4 v_region[];
 
 uint faceBits(uint f, uint shift, uint mask) { return (f >> shift) & mask; }
 uint shadeCorner(uint f, uint corner) { return faceBits(f, 12u + corner * 5u, 0x1fu); }
@@ -41,38 +44,90 @@ void main() {
     uint face_in_batch = group_face + gl_LocalInvocationIndex;
     if (face_in_batch >= face_count) return;
 
-    uint face_id = meshData[batch_word] + face_in_batch;
-    uint f = meshData[face_id];
-    uint s0 = shadeCorner(f, 0u), s1 = shadeCorner(f, 1u);
-    uint s2 = shadeCorner(f, 2u), s3 = shadeCorner(f, 3u);
-    bool diagonal_a = abs(int(s0) - int(s2)) <= abs(int(s1) - int(s3));
-    uint quad_id = faceBits(f, 0u, 0xfffu);
-    uint direction = quad_id % 6u;
-    uint section_word = meshData[batch_word + 2u];
-    uvec2 section_cuboid = uvec2(meshData[section_word + (quad_id / 6u) * 2u],
-        meshData[section_word + (quad_id / 6u) * 2u + 1u]);
-    GlobalFace face = globalCuboids[(section_cuboid.x >> 12u) & 0xffffu].faces[direction];
+    bool is_fluid = meshData[batch_word + 3u] != 0xffffffffu;
     ivec3 origin = ivec3(int(meshData[batch_word + 4u]), int(meshData[batch_word + 5u]),
         int(meshData[batch_word + 6u]));
-    vec3 cuboid_offset = vec3(section_cuboid.x & 0xfu, (section_cuboid.x >> 4u) & 0xfu,
-        (section_cuboid.x >> 8u) & 0xfu);
-    vec3 tint = face.material.y != 0u ? sectionTint(section_cuboid) : vec3(1.0);
     float visibility = clamp(float(uint(camera_block.w) - meshData[batch_word + 7u]) / FADE_MS, 0.0, 1.0);
+
+    uint s0;
+    uint s1;
+    uint s2;
+    uint s3;
+    bool diagonal_a;
+    GlobalFace face;
+    vec3 tint;
+    vec4 region = vec4(0.0);
+    uint width = 1u;
+    uint height = 1u;
+    uint direction;
+    uint block_index;
+    uvec2 section_cuboid;
+    uint quad_id;
+
+    if (is_fluid) {
+        uint face_id = meshData[batch_word] + face_in_batch;
+        uint f = meshData[face_id];
+        s0 = shadeCorner(f, 0u);
+        s1 = shadeCorner(f, 1u);
+        s2 = shadeCorner(f, 2u);
+        s3 = shadeCorner(f, 3u);
+        diagonal_a = abs(int(s0) - int(s2)) <= abs(int(s1) - int(s3));
+        quad_id = faceBits(f, 0u, 0xfffu);
+        direction = quad_id % 6u;
+        uint section_word = meshData[batch_word + 2u];
+        section_cuboid = uvec2(meshData[section_word + (quad_id / 6u) * 2u],
+            meshData[section_word + (quad_id / 6u) * 2u + 1u]);
+        face = globalCuboids[(section_cuboid.x >> 12u) & 0xffffu].faces[direction];
+        tint = face.material.y != 0u ? sectionTint(section_cuboid) : vec3(1.0);
+    } else {
+        uvec2 words = loadGreedyFace(meshData[batch_word] + face_in_batch * 2u);
+        s0 = greedyShadeCorner(words, 0u);
+        s1 = greedyShadeCorner(words, 1u);
+        s2 = greedyShadeCorner(words, 2u);
+        s3 = greedyShadeCorner(words, 3u);
+        direction = greedyDirection(words);
+        width = greedyWidth(words);
+        height = greedyHeight(words);
+        diagonal_a = (width == 1u && height == 1u)
+            ? abs(int(s0) - int(s2)) <= abs(int(s1) - int(s3))
+            : true;
+        block_index = greedyBlockIndex(words);
+        face = globalCuboids[greedyGlobalId(words)].faces[direction];
+        region = greedyFaceRegion(face);
+        uint tint_index = greedyTintIndex(words);
+        tint = tint_index != 0u
+            ? greedyTint(meshData[batch_word + 2u], tint_index)
+            : vec3(1.0);
+    }
 
     uint vertex_base = gl_LocalInvocationIndex * 4u;
     for (uint corner = 0u; corner < 4u; ++corner) {
-        vec4 local = face.positions[corner];
-        if (meshData[batch_word + 3u] != 0xffffffffu) {
+        vec3 rel;
+        vec2 uv;
+        if (is_fluid) {
+            vec4 local = face.positions[corner];
             uint heights = meshData[meshData[batch_word + 3u] + quad_id / 6u];
-            bool high_x = local.x >= 0.5, high_z = local.z >= 0.5;
+            bool high_x = local.x >= 0.5;
+            bool high_z = local.z >= 0.5;
             uint height_corner = high_x ? (high_z ? 2u : 3u) : (high_z ? 1u : 0u);
             local.y *= float((heights >> (height_corner * 4u)) & 0x0fu) / 15.0;
+            rel = vec3(origin - camera_block.xyz) + local.xyz +
+                vec3(section_cuboid.x & 0xfu, (section_cuboid.x >> 4u) & 0xfu,
+                    (section_cuboid.x >> 8u) & 0xfu) - camera_pos.xyz;
+            uv = face.uvs[corner].xy;
+        } else {
+            vec3 block_origin = greedyBlockOrigin(block_index);
+            vec3 pos = greedyCornerPos(face, direction, block_origin, width, height, corner);
+            rel = vec3(origin - camera_block.xyz) + pos - camera_pos.xyz;
+            uv = greedyCornerUv(face, direction, width, height, corner);
         }
-        vec3 rel = vec3(origin - camera_block.xyz) + local.xyz + cuboid_offset - camera_pos.xyz;
         uint vertex = vertex_base + corner;
         gl_MeshVerticesEXT[vertex].gl_Position = view_proj * vec4(rel, 1.0);
-        v_tex_coords[vertex] = face.uvs[corner].xy;
-        v_light[vertex] = float(shadeCorner(f, corner)) / 31.0;
+        v_tex_coords[vertex] = uv;
+        v_region[vertex] = region;
+        v_light[vertex] = is_fluid
+            ? float(shadeCorner(meshData[meshData[batch_word] + face_in_batch], corner)) / 31.0
+            : float(greedyShadeCorner(loadGreedyFace(meshData[batch_word] + face_in_batch * 2u), corner)) / 15.0;
         v_tint[vertex] = tint;
         v_visibility[vertex] = visibility;
         v_fog_color[vertex] = fog_color.rgb;

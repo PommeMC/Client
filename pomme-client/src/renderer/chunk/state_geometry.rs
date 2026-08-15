@@ -129,4 +129,10 @@ impl ChunkRendererCore {
     pub fn chunk_count(&self) -> u32 {
         self.geometry.chunks.len() as u32
     }
+
+    pub fn mesh_pool_bytes(&self) -> (u64, u64) {
+        let used_units = self.geometry.mesh_free.used() as u64;
+        let capacity_units = self.geometry.mesh_free.capacity() as u64;
+        (used_units * POOL_UNIT, capacity_units * POOL_UNIT)
+    }
 }

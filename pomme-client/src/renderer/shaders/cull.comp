@@ -9,8 +9,6 @@ struct DrawCmd { uint x; uint y; uint z_or_first; uint batch; };
 layout(set=0,binding=0) readonly buffer Meta { ChunkMeta chunks[]; };
 layout(set=0,binding=2) writeonly buffer SeedSolid { DrawCmd seed_solid[]; };
 layout(set=0,binding=3) buffer SeedSolidCount { uint seed_solid_count; };
-layout(set=0,binding=4) writeonly buffer SeedCutout { DrawCmd seed_cutout[]; };
-layout(set=0,binding=5) buffer SeedCutoutCount { uint seed_cutout_count; };
 layout(set=0,binding=13) buffer History { uint history[]; };
 layout(set=0,binding=18) buffer WaterBuckets { uint water_buckets[]; };
 layout(set=0,binding=19) writeonly buffer WaterCandidates { uint water_candidates[]; };
@@ -18,7 +16,7 @@ layout(set=0,binding=22) readonly buffer MeshBuf { uint mesh_data[]; };
 layout(set=0,binding=23) buffer Stats { uint visible_sections; uint seed_sections; uint new_sections; uint _s; };
 #include "batch_cull.glsl"
 
-void emit(uint word, bool cutout) {
+void emit(uint word) {
     if (!TASK_BACKEND && batch_backfacing(word)) return;
     uint faces = batch_face_count(word);
     DrawCmd d = TASK_BACKEND
@@ -27,12 +25,8 @@ void emit(uint word, bool cutout) {
     // Let the count overflow the output allocation. Indirect draws clamp it
     // through maxDrawCount; task dispatch clamps it in task_dispatch.comp.
     // A global CAS loop here serializes every visible batch.
-    uint out_index = cutout
-        ? atomicAdd(seed_cutout_count, 1u)
-        : atomicAdd(seed_solid_count, 1u);
-    if (out_index < draw_capacity) {
-        if (cutout) seed_cutout[out_index] = d; else seed_solid[out_index] = d;
-    }
+    uint out_index = atomicAdd(seed_solid_count, 1u);
+    if (out_index < draw_capacity) seed_solid[out_index] = d;
 }
 
 void enqueue_water(uint idx, ChunkMeta m) {
@@ -49,7 +43,7 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= chunk_count) return;
     ChunkMeta m = chunks[idx];
-    uint batches = m.solid_batch_count + m.cutout_batch_count + m.fluid_batch_count;
+    uint batches = m.solid_batch_count + m.fluid_batch_count;
     if (batches == 0u || !section_in_distance(m.origin) || !bounds_visible(m.origin,m.aabb_min,m.aabb_max)) {
         history[idx] = 0u; return;
     }
@@ -62,6 +56,5 @@ void main() {
     }
     if (!previous) return;
     atomicAdd(seed_sections, 1u);
-    for (uint i=0u;i<m.solid_batch_count;++i) emit(m.batch_word_offset+i*BATCH_WORDS,false);
-    for (uint i=0u;i<m.cutout_batch_count;++i) emit(m.batch_word_offset+(m.solid_batch_count+i)*BATCH_WORDS,true);
+    for (uint i=0u;i<m.solid_batch_count;++i) emit(m.batch_word_offset+i*BATCH_WORDS);
 }

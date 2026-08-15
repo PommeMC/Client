@@ -1140,6 +1140,7 @@ pub fn update_game(
     let mut elements: Vec<MenuElement> = Vec::new();
 
     let debug = if game.show_debug {
+        let chunk_pool = gfx.renderer.chunk_mesh_pool_bytes();
         Some(hud::DebugInfo {
             fps: gfx.fps_counter.display_fps(),
             position: *game.player.position,
@@ -1168,6 +1169,8 @@ pub fn update_game(
             occlusion_on: game.chunk_occlusion_enabled,
             sections_total: game.chunk_store.section_count() as u32
                 * game.chunk_store.loaded_set().len() as u32,
+            chunk_pool_used_bytes: chunk_pool.0,
+            chunk_pool_capacity_bytes: chunk_pool.1,
             gpu_name: gfx.renderer.gpu_name(),
             vulkan_version: gfx.renderer.vulkan_version(),
             screen_w: gfx.renderer.screen_width(),

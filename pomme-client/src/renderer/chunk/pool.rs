@@ -72,6 +72,16 @@ impl FreeList {
         self.free.iter().map(|&(_, len)| len).max().unwrap_or(0)
     }
 
+    pub(crate) fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    /// Pool units currently allocated to live section meshes.
+    pub(crate) fn used(&self) -> u32 {
+        let free: u32 = self.free.iter().map(|&(_, len)| len).sum();
+        self.capacity.saturating_sub(free)
+    }
+
     pub(crate) fn grow(&mut self, capacity: u32) {
         if capacity > self.capacity {
             let old = self.capacity;
@@ -93,6 +103,18 @@ mod tests {
         list.free(0, 3);
         list.free(3, 2);
         assert_eq!(list.alloc(10), Some(0));
+    }
+
+    #[test]
+    fn used_tracks_allocations() {
+        let mut list = FreeList::new(10);
+        assert_eq!(list.used(), 0);
+        assert_eq!(list.alloc(3), Some(0));
+        assert_eq!(list.used(), 3);
+        assert_eq!(list.alloc(2), Some(3));
+        assert_eq!(list.used(), 5);
+        list.free(0, 3);
+        assert_eq!(list.used(), 2);
     }
 
     #[test]

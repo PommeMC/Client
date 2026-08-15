@@ -46,7 +46,7 @@ fn main() {
             content,
         })
     });
-    for include in ["fog.glsl", "camera_ubo.glsl", "batch_cull.glsl"] {
+    for include in ["fog.glsl", "camera_ubo.glsl", "batch_cull.glsl", "greedy_face.glsl"] {
         println!(
             "cargo:rerun-if-changed={}",
             shader_dir.join(include).display()

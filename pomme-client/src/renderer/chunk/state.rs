@@ -44,7 +44,7 @@ const MAX_BUCKETS: u32 = 4096;
 const MAX_BUCKETS_INTEGRATED: u32 = 1024;
 const STARTUP_SECTIONS_PER_COLUMN: u64 = 24;
 const STARTUP_DRAWS_PER_SECTION: u64 = 4;
-const VRAM_BUDGET_FRACTION: f64 = 0.25;
+const VRAM_BUDGET_FRACTION: f64 = 0.5;
 /// Sections whose center sits within this squared distance of the camera
 /// render opaque immediately and never fade in.
 const NEARBY_DIST_SQ: f32 = 768.0;
@@ -95,8 +95,8 @@ fn compute_bucket_count(physical_device: vk::PhysicalDevice) -> u32 {
     count
 }
 
-/// Initial indirect capacity for the default 384-block-tall world: two
-/// opaque batches plus one cutout and one translucent batch per section.
+/// Initial indirect capacity for the default 384-block-tall world: a few
+/// terrain batches plus one translucent batch per section.
 fn initial_draw_capacity(render_distance: u32) -> usize {
     let diameter = u64::from(render_distance)
         .saturating_mul(2)

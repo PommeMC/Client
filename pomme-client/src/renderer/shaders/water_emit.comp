@@ -45,7 +45,7 @@ void main() {
     ChunkMeta m = chunks[slot];
 
     const uint BATCH_WORDS = 16u;
-    uint fluid_start = m.solid_batch_count + m.cutout_batch_count;
+    uint fluid_start = m.solid_batch_count;
     for (uint j = 0u; j < m.fluid_batch_count; ++j) {
         uint batch_word = m.batch_word_offset + (fluid_start + j) * BATCH_WORDS;
         DrawCmd d;

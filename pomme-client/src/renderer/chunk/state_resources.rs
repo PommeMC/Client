@@ -128,10 +128,10 @@ impl ChunkRendererCore {
         // 27ms frame when an RD-32 world (~45k section draws) crossed 16x. The
         // grow path stays as a rare safety net.
         let max_meta = (total_buckets * 32).max(8192) as usize;
-        // Size draws from the requested startup view: two opaque batches plus
-        // one cutout and one translucent batch for each of the default
-        // overworld's 24 sections per column. Runtime overflow readback grows
-        // this independently from metadata by doubling.
+        // Size draws from the requested startup view: a few terrain batches
+        // plus one translucent batch for each of the default overworld's 24
+        // sections per column. Runtime overflow readback grows this
+        // independently from metadata by doubling.
         let draw_capacity = initial_draw_capacity(render_distance)
             .min(max_draw_indirect_count as usize)
             .max(1);

@@ -4,6 +4,8 @@ pub mod block_ao;
 pub(crate) mod cull;
 pub mod dispatcher;
 pub(crate) mod geometry;
+mod greedy_face;
+mod greedy_merge;
 pub mod mesher;
 pub(crate) mod metadata;
 pub(crate) mod pool;
@@ -89,6 +91,11 @@ impl ChunkRenderer {
         self.core.chunk_count()
     }
 
+    /// Live section mesh bytes in the GPU chunk pool (`used`, `capacity`).
+    pub fn mesh_pool_bytes(&self) -> (u64, u64) {
+        self.core.mesh_pool_bytes()
+    }
+
     pub fn record_copies(&mut self, cmd: vk::CommandBuffer, frame: usize) {
         self.core.record_copies(cmd, frame);
     }
@@ -141,8 +148,8 @@ impl ChunkRenderer {
         );
     }
 
-    pub fn draw_indirect(&mut self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
-        self.core.draw_indirect(cmd, frame, cutout);
+    pub fn draw_indirect(&mut self, cmd: vk::CommandBuffer, frame: usize) {
+        self.core.draw_indirect(cmd, frame);
     }
     pub fn draw_set(&self, frame: usize) -> vk::DescriptorSet {
         self.core.culling.compute_sets[frame]

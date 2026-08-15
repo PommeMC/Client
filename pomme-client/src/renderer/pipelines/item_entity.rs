@@ -440,9 +440,9 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ModelVertex> 
         let u_span = region.u_max - region.u_min;
         let v_span = region.v_max - region.v_min;
         let tint = if matches!(quad.tint, crate::world::block::registry::Tint::None) {
-            crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED
+            crate::renderer::chunk::mesher::PACKED_WHITE_RGB
         } else {
-            crate::renderer::chunk::mesher::pack_tint_shifted([0.569, 0.741, 0.349])
+            crate::renderer::chunk::mesher::pack_tint_rgb([0.569, 0.741, 0.349])
         };
 
         for i in [0, 1, 2, 2, 3, 0] {
@@ -498,7 +498,7 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Model
             tex_coords: crate::renderer::chunk::mesher::pack_uv(front_uvs[i][0], front_uvs[i][1]),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
                 1.0,
-                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+                crate::renderer::chunk::mesher::PACKED_WHITE_RGB,
             ),
         });
     }
@@ -525,7 +525,7 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<Model
             tex_coords: crate::renderer::chunk::mesher::pack_uv(back_uvs[i][0], back_uvs[i][1]),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
                 1.0,
-                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+                crate::renderer::chunk::mesher::PACKED_WHITE_RGB,
             ),
         });
     }
@@ -591,7 +591,7 @@ fn push_side_quad(
             tex_coords: crate::renderer::chunk::mesher::pack_uv(u, v),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
                 light,
-                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+                crate::renderer::chunk::mesher::PACKED_WHITE_RGB,
             ),
         });
     }
@@ -623,7 +623,7 @@ fn build_flat_quad(region: AtlasRegion) -> Vec<ModelVertex> {
             tex_coords: crate::renderer::chunk::mesher::pack_uv(uv[0], uv[1]),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
                 1.0,
-                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+                crate::renderer::chunk::mesher::PACKED_WHITE_RGB,
             ),
         })
         .collect()

@@ -12,10 +12,9 @@ use crate::renderer::{ChunkDrawBackend, MAX_FRAMES_IN_FLIGHT, shader, util};
 
 pub struct ChunkPipeline {
     backend: ChunkDrawBackend,
-    /// Opaque terrain: no discard, early-Z. Drawn first (front-to-back).
-    pub pipeline_solid: vk::Pipeline,
-    /// Cutout terrain: alpha-test discard. Drawn after solid.
-    pub pipeline_cutout: vk::Pipeline,
+    /// Terrain (opaque + cutout): alpha-test discard so both sprite classes
+    /// share one draw stream.
+    pub pipeline: vk::Pipeline,
     /// Translucent water variant: alpha blending on, depth write off. Shares
     /// the terrain pipelines' layout and descriptor sets.
     pub water_pipeline: vk::Pipeline,
@@ -93,23 +92,21 @@ impl ChunkPipeline {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create pipeline layout");
 
-        let (pipeline_solid, pipeline_cutout) =
-            match create_pipelines(device, render_pass, pipeline_layout, backend) {
-                Ok(pipelines) => pipelines,
-                Err(error) => {
-                    device.destroy_pipeline_layout(pipeline_layout, None);
-                    device.destroy_descriptor_set_layout(camera_layout, None);
-                    device.destroy_descriptor_set_layout(atlas_layout, None);
-                    device.destroy_descriptor_set_layout(geometry_layout, None);
-                    device.destroy_descriptor_set_layout(draw_layout, None);
-                    return Err(error);
-                }
-            };
+        let pipeline = match create_pipeline(device, render_pass, pipeline_layout, backend) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                device.destroy_pipeline_layout(pipeline_layout, None);
+                device.destroy_descriptor_set_layout(camera_layout, None);
+                device.destroy_descriptor_set_layout(atlas_layout, None);
+                device.destroy_descriptor_set_layout(geometry_layout, None);
+                device.destroy_descriptor_set_layout(draw_layout, None);
+                return Err(error);
+            }
+        };
         let water_pipeline = match create_water_pipeline(device, render_pass, pipeline_layout) {
             Ok(pipeline) => pipeline,
             Err(error) => {
-                device.destroy_pipeline(pipeline_solid, None);
-                device.destroy_pipeline(pipeline_cutout, None);
+                device.destroy_pipeline(pipeline, None);
                 device.destroy_pipeline_layout(pipeline_layout, None);
                 device.destroy_descriptor_set_layout(camera_layout, None);
                 device.destroy_descriptor_set_layout(atlas_layout, None);
@@ -225,8 +222,7 @@ impl ChunkPipeline {
 
         Ok(Self {
             backend,
-            pipeline_solid,
-            pipeline_cutout,
+            pipeline,
             water_pipeline,
             pipeline_layout,
             descriptor_set_layout_camera: camera_layout,
@@ -304,19 +300,8 @@ impl ChunkPipeline {
         device.update_descriptor_sets(&[write], &[]);
     }
 
-    pub fn bind(
-        &self,
-        cmd: vk::CommandBuffer,
-        frame: usize,
-        cutout: bool,
-        draw_set: vk::DescriptorSet,
-    ) {
-        let pipeline = if cutout {
-            self.pipeline_cutout
-        } else {
-            self.pipeline_solid
-        };
-        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
+    pub fn bind(&self, cmd: vk::CommandBuffer, frame: usize, draw_set: vk::DescriptorSet) {
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
         let base_sets = [self.camera_sets[frame], self.atlas_set, self.geometry_set];
         let task_sets = [
             self.camera_sets[frame],
@@ -362,8 +347,7 @@ impl ChunkPipeline {
         }
         drop(alloc);
 
-        device.destroy_pipeline(self.pipeline_solid, None);
-        device.destroy_pipeline(self.pipeline_cutout, None);
+        device.destroy_pipeline(self.pipeline, None);
         device.destroy_pipeline(self.water_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
@@ -386,15 +370,14 @@ fn shader_stage(
     }
 }
 
-/// Builds the two chunk pipelines: `solid` (chunk_solid.frag, no discard,
-/// early-Z) and `cutout` (chunk.frag, alpha-test discard). Identical state
-/// otherwise; both share the vertex shader and layout.
-fn create_pipelines(
+/// Terrain pipeline: `chunk.frag` alpha-test discard so opaque and cutout
+/// sprites share one draw stream.
+fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
     backend: ChunkDrawBackend,
-) -> Result<(vk::Pipeline, vk::Pipeline), vk::Error> {
+) -> Result<vk::Pipeline, vk::Error> {
     let blend_attachment = [vk::PipelineColorBlendAttachmentState {
         blend_enable: vk::FALSE,
         color_write_mask: vk::ColorComponentFlags::RGBA,
@@ -406,35 +389,17 @@ fn create_pipelines(
         ..Default::default()
     };
 
-    let solid = create_chunk_variant(
+    create_chunk_variant(
         device,
         render_pass,
         layout,
         backend,
         0,
-        shader::include_spirv!("chunk_solid.frag.spv"),
-        &color_blend,
-        true,
-        false,
-    )?;
-    let cutout = match create_chunk_variant(
-        device,
-        render_pass,
-        layout,
-        backend,
-        1,
         shader::include_spirv!("chunk.frag.spv"),
         &color_blend,
         true,
         false,
-    ) {
-        Ok(pipeline) => pipeline,
-        Err(error) => {
-            device.destroy_pipeline(solid, None);
-            return Err(error);
-        }
-    };
-    Ok((solid, cutout))
+    )
 }
 
 /// Translucent water: standard alpha blending, depth test on but depth write

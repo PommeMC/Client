@@ -14,8 +14,8 @@ pub(crate) struct ChunkMeta {
     pub(crate) _pad: u32,
     pub(crate) batch_word_offset: u32,
     pub(crate) solid_batch_count: u32,
-    pub(crate) cutout_batch_count: u32,
     pub(crate) fluid_batch_count: u32,
+    pub(crate) _pad_batch: u32,
 }
 
 /// Conservative occupied bounds for one 8x4x8-section region.  The prefix is

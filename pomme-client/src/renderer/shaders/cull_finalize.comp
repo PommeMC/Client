@@ -11,28 +11,21 @@ layout(set=0,binding=12) readonly buffer Visibility { uint visibility[]; };
 layout(set=0,binding=13) buffer History { uint history[]; };
 layout(set=0,binding=2) writeonly buffer NewSolid { DrawCmd new_solid[]; };
 layout(set=0,binding=3) buffer NewSolidCount { uint new_solid_count; };
-layout(set=0,binding=4) writeonly buffer NewCutout { DrawCmd new_cutout[]; };
-layout(set=0,binding=5) buffer NewCutoutCount { uint new_cutout_count; };
 layout(set=0,binding=18) buffer WaterBuckets { uint water_buckets[]; };
 layout(set=0,binding=19) writeonly buffer WaterCandidates { uint water_candidates[]; };
 layout(set=0,binding=22) readonly buffer MeshBuf { uint mesh_data[]; };
 layout(set=0,binding=23) buffer Stats { uint visible_sections; uint seed_sections; uint new_sections; uint _s; };
 #include "batch_cull.glsl"
 
-void emit(uint word, bool cutout) {
+void emit(uint word) {
     if (!TASK_BACKEND && batch_backfacing(word)) return;
     DrawCmd draw = TASK_BACKEND
         ? DrawCmd(0u, 0u, 0u, word)
         : DrawCmd(batch_face_count(word) * 6u, 1u, 0u, word);
     // See cull.comp: task dispatch clamps this count before it becomes a
     // task-workgroup count, so reserve with one atomic instead of a CAS loop.
-    uint out_index = cutout
-        ? atomicAdd(new_cutout_count, 1u)
-        : atomicAdd(new_solid_count, 1u);
-    if (out_index < draw_capacity) {
-        if (cutout) new_cutout[out_index] = draw;
-        else new_solid[out_index] = draw;
-    }
+    uint out_index = atomicAdd(new_solid_count, 1u);
+    if (out_index < draw_capacity) new_solid[out_index] = draw;
 }
 
 void main() {
@@ -48,10 +41,7 @@ void main() {
     if (!previous) {
         atomicAdd(new_sections, 1u);
         for (uint i = 0u; i < meta.solid_batch_count; ++i) {
-            emit(meta.batch_word_offset + i * BATCH_WORDS, false);
-        }
-        for (uint i = 0u; i < meta.cutout_batch_count; ++i) {
-            emit(meta.batch_word_offset + (meta.solid_batch_count + i) * BATCH_WORDS, true);
+            emit(meta.batch_word_offset + i * BATCH_WORDS);
         }
     }
 

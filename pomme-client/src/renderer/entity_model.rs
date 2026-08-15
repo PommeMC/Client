@@ -1734,7 +1734,7 @@ fn push_face(
             tex_coords: crate::renderer::chunk::mesher::pack_uv(uvs[i][0], uvs[i][1]),
             light_tint: crate::renderer::chunk::mesher::pack_light_tint(
                 1.0,
-                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+                crate::renderer::chunk::mesher::PACKED_WHITE_RGB,
             ),
         });
     }

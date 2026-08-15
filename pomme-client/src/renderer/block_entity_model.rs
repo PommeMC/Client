@@ -1,6 +1,6 @@
 use glam::Vec3;
 
-use super::chunk::mesher::{PACKED_WHITE_SHIFTED, pack_light_tint, pack_uv};
+use super::chunk::mesher::{PACKED_WHITE_RGB, pack_light_tint, pack_uv};
 use super::entity_model::{
     BakedEntityModel, EntityPart, ModelConvention, ModelCube, bake_model,
     generate_cube_vertices_faces,
@@ -184,7 +184,7 @@ fn emit_vanilla_cube(
                 tex_coords: pack_uv(u / tex_w as f32, v / tex_h as f32),
                 // TODO: full-bright; vanilla samples the lightmap at the block
                 // (pending lighting support in the entity pipeline).
-                light_tint: pack_light_tint(1.0, PACKED_WHITE_SHIFTED),
+                light_tint: pack_light_tint(1.0, PACKED_WHITE_RGB),
             });
         }
     }

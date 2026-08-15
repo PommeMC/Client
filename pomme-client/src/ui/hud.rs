@@ -45,6 +45,9 @@ pub struct DebugInfo<'a> {
     pub chunk_count: u32,
     pub sections_drawn: u32,
     pub occlusion_on: bool,
+    /// Bytes used in the GPU chunk mesh pool and its total capacity.
+    pub chunk_pool_used_bytes: u64,
+    pub chunk_pool_capacity_bytes: u64,
     /// Total sections across loaded columns, the denominator for the
     /// sections-drawn readout.
     pub sections_total: u32,
@@ -526,6 +529,7 @@ pub fn build_debug_overlay(
             info.sections_total,
             if info.occlusion_on { "on" } else { "off" }
         ),
+        format_chunk_pool_usage(info.chunk_pool_used_bytes, info.chunk_pool_capacity_bytes),
     ];
 
     if let Some((target, face, name, props)) = &info.target_block {
@@ -570,6 +574,18 @@ pub fn build_debug_overlay(
         false,
         text_width_fn,
     );
+}
+fn format_chunk_pool_usage(used_bytes: u64, capacity_bytes: u64) -> String {
+    let used_mb = used_bytes as f64 / (1024.0 * 1024.0);
+    let capacity_mb = capacity_bytes as f64 / (1024.0 * 1024.0);
+    let pct = if capacity_bytes == 0 {
+        0.0
+    } else {
+        used_bytes as f64 / capacity_bytes as f64 * 100.0
+    };
+    format!(
+        "Chunk buffer: {used_mb:.1} / {capacity_mb:.1} MB ({pct:.0}%)"
+    )
 }
 fn push_debug_lines(
     elements: &mut Vec<MenuElement>,

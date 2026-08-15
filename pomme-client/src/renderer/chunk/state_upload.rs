@@ -5,7 +5,7 @@ use super::*;
 fn build_mesh_payload(mesh: &SectionMeshData, pool_off: u32, uploaded_ms: u32) -> Vec<u8> {
     let counts = mesh.batch_counts;
     debug_assert_eq!(
-        counts.regular_solid + counts.opaque_fluid + counts.cutout + counts.translucent_fluid,
+        counts.regular_solid + counts.opaque_fluid + counts.translucent_fluid,
         mesh.batches.len() as u32,
     );
     let layout = mesh.layout();
@@ -15,10 +15,7 @@ fn build_mesh_payload(mesh: &SectionMeshData, pool_off: u32, uploaded_ms: u32) -
         bytes[offset..offset + src.len()].copy_from_slice(src);
     };
     write(layout.regular_faces, bytemuck::cast_slice(&mesh.faces));
-    write(
-        layout.regular_cuboids,
-        bytemuck::cast_slice(&mesh.section_cuboids),
-    );
+    write(layout.tint_table, bytemuck::cast_slice(&mesh.tint_table));
     write(layout.fluid_faces, bytemuck::cast_slice(&mesh.fluid_faces));
     write(
         layout.fluid_cuboids,
@@ -37,10 +34,7 @@ fn build_mesh_payload(mesh: &SectionMeshData, pool_off: u32, uploaded_ms: u32) -
         .map(|(index, batch)| {
             let index = index as u32;
             let opaque_fluid_start = counts.regular_solid;
-            let cutout_start = opaque_fluid_start + counts.opaque_fluid;
-            let translucent_fluid_start = cutout_start + counts.cutout;
-            let fluid = (opaque_fluid_start..cutout_start).contains(&index)
-                || index >= translucent_fluid_start;
+            let fluid = index >= opaque_fluid_start;
             let face_base = if fluid {
                 layout.fluid_faces
             } else {
@@ -49,14 +43,18 @@ fn build_mesh_payload(mesh: &SectionMeshData, pool_off: u32, uploaded_ms: u32) -
             let cuboid_base = if fluid {
                 layout.fluid_cuboids
             } else {
-                layout.regular_cuboids
+                layout.tint_table
             };
             GpuFaceBatch {
                 face_word_offset: ((base + face_base) / 4) as u32 + batch.face_offset,
                 face_count_and_cull: batch.packed_face_count(),
-                cuboid_word_offset: ((base + cuboid_base) / 4) as u32 + batch.cuboid_base * 2,
+                table_word_offset: if fluid {
+                    ((base + cuboid_base) / 4) as u32 + batch.table_offset * 2
+                } else {
+                    ((base + cuboid_base) / 4) as u32 + batch.table_offset
+                },
                 fluid_height_word_offset: if fluid {
-                    ((base + layout.fluid_heights) / 4) as u32 + batch.cuboid_base
+                    ((base + layout.fluid_heights) / 4) as u32 + batch.table_offset
                 } else {
                     u32::MAX
                 },
@@ -310,8 +308,8 @@ impl ChunkRendererCore {
                     _pad: 0,
                     batch_word_offset: ((base_bytes + layout.batches) / 4) as u32,
                     solid_batch_count: entry.mesh.batch_counts.solid_draws(),
-                    cutout_batch_count: entry.mesh.batch_counts.cutout,
                     fluid_batch_count: entry.mesh.batch_counts.translucent_fluid,
+                    _pad_batch: 0,
                 },
             );
             self.geometry
@@ -355,9 +353,10 @@ impl ChunkRendererCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::chunk::greedy_face::GreedyFaceRecord;
     use crate::renderer::chunk::mesher::{
         BATCH_CULL_SHIFT, BATCH_FACE_COUNT_MASK, BatchCull, ChunkAABB, FaceBatch, FaceBatchCounts,
-        FaceRecord,
+        FaceRecord, SectionCuboid,
     };
 
     #[test]
@@ -365,16 +364,16 @@ mod tests {
         let mesh = SectionMeshData {
             spos: ChunkSectionPos::new(2, 3, 4),
             relative_si: 3,
-            faces: vec![FaceRecord::new(0, [1; 4]); 2],
-            section_cuboids: vec![SectionCuboid { packed: 0 }; 3],
+            faces: vec![GreedyFaceRecord::new(0, 0, 1, 1, 0, [1; 4], 0); 2],
+            tint_table: vec![0, 0x00ff8040],
             fluid_faces: vec![FaceRecord::new(6, [2; 4]); 2],
             fluid_cuboids: vec![SectionCuboid { packed: 0 }; 3],
             fluid_heights: vec![0x4321; 3],
             batches: vec![
                 FaceBatch {
-                    face_offset: 1,
+                    face_offset: 2,
                     face_count: 1,
-                    cuboid_base: 0,
+                    table_offset: 1,
                     cull: BatchCull::East,
                     aabb_min: [1.0, 2.0, 3.0],
                     aabb_max: [4.0, 5.0, 6.0],
@@ -382,7 +381,7 @@ mod tests {
                 FaceBatch {
                     face_offset: 0,
                     face_count: 2,
-                    cuboid_base: 1,
+                    table_offset: 1,
                     cull: BatchCull::Uncullable,
                     aabb_min: [7.0, 8.0, 9.0],
                     aabb_max: [10.0, 11.0, 12.0],
@@ -391,7 +390,6 @@ mod tests {
             batch_counts: FaceBatchCounts {
                 regular_solid: 1,
                 opaque_fluid: 0,
-                cutout: 0,
                 translucent_fluid: 1,
             },
             aabb: ChunkAABB {
@@ -418,11 +416,11 @@ mod tests {
         let regular = read_batch(0);
         assert_eq!(
             regular.face_word_offset,
-            ((base + layout.regular_faces) / 4) as u32 + 1
+            ((base + layout.regular_faces) / 4) as u32 + 2
         );
         assert_eq!(
-            regular.cuboid_word_offset,
-            ((base + layout.regular_cuboids) / 4) as u32
+            regular.table_word_offset,
+            ((base + layout.tint_table) / 4) as u32 + 1
         );
         assert_eq!(regular.fluid_height_word_offset, u32::MAX);
         assert_eq!(regular.face_count_and_cull, 1 | (5 << BATCH_CULL_SHIFT));
@@ -437,7 +435,7 @@ mod tests {
             ((base + layout.fluid_faces) / 4) as u32
         );
         assert_eq!(
-            fluid.cuboid_word_offset,
+            fluid.table_word_offset,
             ((base + layout.fluid_cuboids) / 4) as u32 + 2
         );
         assert_eq!(

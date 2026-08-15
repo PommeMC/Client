@@ -8,13 +8,13 @@ struct ChunkMeta {
     uint visibility_generation;
     ivec3 origin;
     uint _pad;
-    // Descriptor ranges in fixed order: opaque (regular solid + lava),
-    // cutout, then translucent water. Each descriptor draws a non-indexed
-    // stream of six vertices per packed face.
+    // Descriptor ranges in fixed order: terrain (solid + opaque fluid),
+    // then translucent water.
+    // kept so this layout matches renderer/chunk/abi.rs `ChunkMeta`.
     uint batch_word_offset;
     uint solid_batch_count;
-    uint cutout_batch_count;
     uint fluid_batch_count;
+    uint _pad_batch;
 };
 
 // Water ordering bucket count; matches renderer/chunk/state.rs

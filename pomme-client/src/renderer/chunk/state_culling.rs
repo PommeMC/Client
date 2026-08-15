@@ -460,7 +460,7 @@ impl ChunkRendererCore {
 
         // This frame slot's GPU work has completed (fence-waited at frame start),
         // so the count buffers still hold their previous cull result; capture the
-        // total (solid + cutout draws) for the debug overlay before clearing them.
+        // terrain + water draws for the debug overlay before clearing them.
         {
             let capacity = self.culling.clamped_draw_count();
             let read_and_clear = |buffer: &mut Buffer| {
@@ -471,7 +471,7 @@ impl ChunkRendererCore {
                 n
             };
             let solid = read_and_clear(&mut self.culling.count_buffers[frame]);
-            let cutout = read_and_clear(&mut self.culling.count_cutout_buffers[frame]);
+            read_and_clear(&mut self.culling.count_cutout_buffers[frame]);
             let water_bytes = self.culling.water_count_buffers[frame]
                 .allocation
                 .mapped_slice()
@@ -498,7 +498,7 @@ impl ChunkRendererCore {
                 );
             }
             stats.fill(0);
-            let observed = solid.max(cutout).max(water);
+            let observed = solid.max(water);
             if observed > capacity {
                 self.culling.requested_draw_capacity =
                     self.culling.requested_draw_capacity.max(observed as usize);
@@ -794,32 +794,18 @@ impl ChunkRendererCore {
         self.culling.clamped_draw_count()
     }
 
-    pub fn draw_indirect(&mut self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
+    pub fn draw_indirect(&mut self, cmd: vk::CommandBuffer, frame: usize) {
         if self.metadata.high_water == 0 {
             return;
         }
 
         let max_draws = self.clamped_draw_count();
-        let (indirect, count) = if cutout {
-            (
-                self.culling.indirect_cutout_buffers[frame].buffer,
-                self.culling.count_cutout_buffers[frame].buffer,
-            )
-        } else {
-            (
-                self.culling.indirect_buffers[frame].buffer,
-                self.culling.count_buffers[frame].buffer,
-            )
-        };
+        let indirect = self.culling.indirect_buffers[frame].buffer;
+        let count = self.culling.count_buffers[frame].buffer;
 
         if self.culling.backend == ChunkDrawBackend::Task {
-            let command = if cutout {
-                self.culling.task_command_cutout_buffers[frame].buffer
-            } else {
-                self.culling.task_command_buffers[frame].buffer
-            };
             cmd.draw_mesh_tasks_indirect(
-                command,
+                self.culling.task_command_buffers[frame].buffer,
                 0,
                 1,
                 size_of::<vk::DrawMeshTasksIndirectCommandEXT>() as u32,
