@@ -1414,7 +1414,7 @@ impl ChunkBufferStore {
                 n
             };
             self.last_draw_count = read_and_clear(&mut self.count_allocs[frame])
-                + read_and_clear(&mut self.count_cutout_allocs[frame]);
+                .saturating_add(read_and_clear(&mut self.count_cutout_allocs[frame]));
         }
 
         // macOS draws the whole indirect buffer (no drawIndirectCount), so slots
