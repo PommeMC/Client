@@ -10,7 +10,9 @@ use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
-use crate::renderer::pipelines::entity_renderer::{CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER};
+use crate::renderer::pipelines::entity_renderer::{
+    CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
+};
 use crate::ui::text::format_text_spans;
 
 /// Dimension info from a login/respawn registry entry. `has_skylight` lives
@@ -513,6 +515,28 @@ pub fn handle_game_packet(
                         variant,
                     ));
                 }
+                // Cat / wolf variant Holders: 20 / 23 on 26.x, one lower on
+                // 1.21.9-1.21.11 (no AgeableMob age-locked slot).
+                if (item.index == 19 || item.index == 20)
+                    && let azalea_entity::EntityDataValue::CatVariant(variant) = &item.value
+                {
+                    let _ = event_tx.try_send(variant_event(
+                        registry_holder,
+                        p.id.0,
+                        EntityKind::Cat,
+                        variant,
+                    ));
+                }
+                if (item.index == 22 || item.index == 23)
+                    && let azalea_entity::EntityDataValue::WolfVariant(variant) = &item.value
+                {
+                    let _ = event_tx.try_send(variant_event(
+                        registry_holder,
+                        p.id.0,
+                        EntityKind::Wolf,
+                        variant,
+                    ));
+                }
                 // VillagerData (type/profession/level): villagers at 19 (18
                 // on 1.21.9-1.21.11), zombie villagers at 20.
                 if (18..=20).contains(&item.index)
@@ -534,6 +558,23 @@ pub fn handle_game_packet(
         // Event id 10 = sheep eat-grass animation start (40-tick head-dip).
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 10 => {
             let _ = event_tx.try_send(NetworkEvent::SheepEatStart { id: p.entity_id.0 });
+        }
+        // Event id 1 = rabbit jump start (15-tick hop).
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 1 => {
+            let _ = event_tx.try_send(NetworkEvent::RabbitJump { id: p.entity_id.0 });
+        }
+        // Events 8 / 56 = wolf wet-shake start / cancel.
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 8 => {
+            let _ = event_tx.try_send(NetworkEvent::WolfShaking {
+                id: p.entity_id.0,
+                shaking: true,
+            });
+        }
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 56 => {
+            let _ = event_tx.try_send(NetworkEvent::WolfShaking {
+                id: p.entity_id.0,
+                shaking: false,
+            });
         }
         // Arm-swing animation drives the zombie attack swing (skeleton aim uses the
         // aggressive flag instead). Both hands trigger the same swing timer.
@@ -677,19 +718,38 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedTe
 /// the mesh (its values name slots; absent means "normal" = slot 0), else the
 /// registry path as a last resort for entries synced without NBT.
 fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id: u32) -> u32 {
-    let (registry, order, asset_prefix) = match kind {
+    // (registry, pool order, asset prefix, vanilla's default texture variant).
+    let (registry, order, asset_prefix, default) = match kind {
         EntityKind::Cow => (
             "minecraft:cow_variant",
             COW_VARIANT_ORDER,
             "entity/cow/cow_",
+            "temperate",
         ),
         EntityKind::Chicken => (
             "minecraft:chicken_variant",
             CHICKEN_VARIANT_ORDER,
             "entity/chicken/chicken_",
+            "temperate",
+        ),
+        EntityKind::Cat => (
+            "minecraft:cat_variant",
+            CAT_VARIANT_ORDER,
+            "entity/cat/cat_",
+            "tabby",
+        ),
+        // TODO: wolf NBT nests its textures (assets.wild, no flat
+        // asset_id/model), so datapack wolves only resolve by registry path.
+        EntityKind::Wolf => (
+            "minecraft:wolf_variant",
+            WOLF_VARIANT_ORDER,
+            "entity/wolf/wolf_",
+            "pale",
         ),
         _ => return 0,
     };
+    let order_pos = |name: &str| order.iter().position(|p| *p == name).map(|i| i as u32);
+    let fallback = order_pos(default).unwrap_or(0);
     // Position == protocol id only holds because pomme answers
     // SelectKnownPacks with an empty list (connection.rs), forcing the server
     // to send NBT for every entry (azalea shift_removes NBT-less ones).
@@ -698,9 +758,8 @@ fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id
         .get(&azalea_registry::identifier::Identifier::new(registry))
         .and_then(|r| r.map.get_index(protocol_id as usize))
     else {
-        return 0;
+        return fallback;
     };
-    let order_pos = |name: &str| order.iter().position(|p| *p == name).map(|i| i as u32);
     if let Some(asset) = nbt.string("asset_id").map(|s| s.to_str())
         && let Some(suffix) = asset
             .strip_prefix("minecraft:")
@@ -715,7 +774,7 @@ fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id
     {
         return i;
     }
-    order_pos(ident.path()).unwrap_or(0)
+    order_pos(ident.path()).unwrap_or(fallback)
 }
 
 /// The kind-tagged variant event for a synced-registry holder value.

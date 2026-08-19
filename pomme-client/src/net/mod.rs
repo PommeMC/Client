@@ -314,6 +314,13 @@ pub enum NetworkEvent {
         kind: EntityKind,
         variant: u32,
     },
+    WolfShaking {
+        id: i32,
+        shaking: bool,
+    },
+    RabbitJump {
+        id: i32,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,

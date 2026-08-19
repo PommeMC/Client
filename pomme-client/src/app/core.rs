@@ -1112,6 +1112,12 @@ impl AppCore {
                 NetworkEvent::EntityVariant { id, kind, variant } => {
                     game.entity_store.set_variant(id, kind, variant);
                 }
+                NetworkEvent::WolfShaking { id, shaking } => {
+                    game.entity_store.set_wolf_shaking(id, shaking);
+                }
+                NetworkEvent::RabbitJump { id } => {
+                    game.entity_store.start_rabbit_jump(id);
+                }
                 NetworkEvent::VillagerData {
                     id,
                     kind,

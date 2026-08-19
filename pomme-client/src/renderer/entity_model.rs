@@ -838,6 +838,519 @@ pub fn bake_baby_zombie_villager_model(no_hat: bool) -> BakedEntityModel {
     bake_model(parts, 64, 64)
 }
 
+/// Bakes a flat part list under a synthetic cubeless root scaled by `factor`
+/// (vanilla `MeshTransformer.scaling` applied at render time, so UVs stay on
+/// the unscaled boxes). `factor` 1.0 still adds the root so scaled and
+/// unscaled bakes share one part order.
+fn bake_root_scaled(
+    parts: Vec<EntityPart>,
+    factor: f32,
+    tex_w: u32,
+    tex_h: u32,
+) -> BakedEntityModel {
+    let mut all = vec![vpart(
+        "root",
+        None,
+        Vec3::new(0.0, MODEL_REBASE_Y * (1.0 - factor), 0.0),
+        vec![],
+    )];
+    all.extend(parts.into_iter().map(|mut part| {
+        part.parent = Some(part.parent.map_or(0, |p| p + 1));
+        part
+    }));
+    let mut model = bake_model(all, tex_w, tex_h);
+    model.part_scales[0] = factor;
+    model
+}
+
+/// Vanilla `AdultWolfModel.createBodyLayer(g)`, 64x32. The `head` and `tail`
+/// parts are cubeless pivot containers; look goes on the container while the
+/// wet-shake roll and beg tilt go on the `real_*` child.
+fn wolf_parts(g: f32) -> Vec<EntityPart> {
+    let leg = |name: &str, x: f32, z: f32, mirror: bool| {
+        vpart(
+            name,
+            None,
+            Vec3::new(x, 16.0, z),
+            vec![ModelCube {
+                deformation: g,
+                mirror,
+                ..vbox((0, 18), (0.0, 0.0, -1.0), (2.0, 8.0, 2.0))
+            }],
+        )
+    };
+    let cube = |uv: (u32, u32), origin: (f32, f32, f32), size: (f32, f32, f32)| ModelCube {
+        deformation: g,
+        ..vbox(uv, origin, size)
+    };
+    vec![
+        vpart("head", None, Vec3::new(-1.0, 13.5, -7.0), vec![]),
+        vpart(
+            "real_head",
+            Some(0),
+            Vec3::ZERO,
+            vec![
+                cube((0, 0), (-2.0, -3.0, -2.0), (6.0, 6.0, 4.0)),
+                // Both ears share one UV patch (vanilla quirk).
+                cube((16, 14), (-2.0, -5.0, 0.0), (2.0, 2.0, 1.0)),
+                cube((16, 14), (2.0, -5.0, 0.0), (2.0, 2.0, 1.0)),
+                cube((0, 10), (-0.5, -0.001, -5.0), (3.0, 3.0, 4.0)),
+            ],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+            ..vpart(
+                "body",
+                None,
+                Vec3::new(0.0, 14.0, 2.0),
+                vec![cube((18, 14), (-3.0, -2.0, -3.0), (6.0, 9.0, 6.0))],
+            )
+        },
+        // The mane.
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+            ..vpart(
+                "upper_body",
+                None,
+                Vec3::new(-1.0, 14.0, -3.0),
+                vec![cube((21, 0), (-3.0, -3.0, -3.0), (8.0, 6.0, 7.0))],
+            )
+        },
+        leg("right_hind_leg", -2.5, 7.0, true),
+        leg("left_hind_leg", 0.5, 7.0, false),
+        leg("right_front_leg", -2.5, -4.0, true),
+        leg("left_front_leg", 0.5, -4.0, false),
+        EntityPart {
+            default_rotation: Vec3::new(0.62831855, 0.0, 0.0),
+            ..vpart("tail", None, Vec3::new(-1.0, 12.0, 8.0), vec![])
+        },
+        vpart(
+            "real_tail",
+            Some(8),
+            Vec3::ZERO,
+            vec![cube((9, 18), (0.0, 0.0, -1.0), (2.0, 8.0, 2.0))],
+        ),
+    ]
+}
+
+pub fn bake_wolf_model() -> BakedEntityModel {
+    bake_model(wolf_parts(0.0), 64, 32)
+}
+
+// TODO: wolf armor layer (needs the equipment-asset pipeline).
+pub fn bake_wolf_collar_model() -> BakedEntityModel {
+    bake_model(wolf_parts(0.0), 64, 32)
+}
+
+/// Vanilla `BabyWolfModel`, 32x32 dedicated mesh: head cubes live directly on
+/// `head` with separate ear parts, no mane, and the shake targets `head`/`tail`
+/// themselves.
+fn baby_wolf_parts() -> Vec<EntityPart> {
+    let leg = |name: &str, x: f32, z: f32, uv: (u32, u32)| {
+        vpart(
+            name,
+            None,
+            Vec3::new(x, 21.0, z),
+            vec![vbox(uv, (-1.0, 0.0, -1.0), (2.0, 3.0, 2.0))],
+        )
+    };
+    vec![
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, 18.25, -4.0),
+            vec![
+                ModelCube {
+                    deformation: 0.025,
+                    ..vbox((0, 12), (-2.99, -3.25, -3.0), (6.0, 5.0, 5.0))
+                },
+                vbox((17, 12), (-1.5, -0.24, -5.0), (3.0, 2.0, 2.0)),
+            ],
+        ),
+        vpart(
+            "right_ear",
+            Some(0),
+            Vec3::new(-2.0, -4.25, -0.5),
+            vec![vbox((0, 5), (-1.0, -1.0, -0.5), (2.0, 2.0, 1.0))],
+        ),
+        vpart(
+            "left_ear",
+            Some(0),
+            Vec3::new(2.0, -4.25, -0.5),
+            vec![vbox((20, 5), (-1.0, -1.0, -0.5), (2.0, 2.0, 1.0))],
+        ),
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 19.0, 0.0),
+            vec![vbox((0, 0), (-3.0, -2.0, -4.0), (6.0, 4.0, 8.0))],
+        ),
+        leg("right_hind_leg", -1.5, 3.0, (0, 22)),
+        leg("left_hind_leg", 1.5, 3.0, (8, 22)),
+        // The right front leg reuses the body's UV origin (vanilla quirk).
+        leg("right_front_leg", -1.5, -3.0, (0, 0)),
+        leg("left_front_leg", 1.5, -3.0, (20, 0)),
+        EntityPart {
+            default_rotation: Vec3::new(-std::f32::consts::FRAC_PI_6, 0.0, 0.0),
+            ..vpart("tail", None, Vec3::new(0.0, 19.0, 3.0), vec![])
+        },
+        EntityPart {
+            default_rotation: Vec3::new(-3.1, 0.0, 0.0),
+            ..vpart(
+                "tail_r1",
+                Some(8),
+                Vec3::new(0.0, -0.6, 0.2),
+                vec![vbox((22, 16), (-1.0, -5.7, -1.0), (2.0, 6.0, 2.0))],
+            )
+        },
+    ]
+}
+
+pub fn bake_baby_wolf_model() -> BakedEntityModel {
+    bake_model(baby_wolf_parts(), 32, 32)
+}
+
+/// Vanilla `AdultFelineModel.createBodyMesh(g)`, 64x32, shared by cat and
+/// ocelot. `tail2` keeps its hardcoded -0.02 deformation even in the collar
+/// bake. Left/right leg pairs share one UV patch (vanilla quirk).
+fn feline_parts(g: f32) -> Vec<EntityPart> {
+    let cube = |uv: (u32, u32), origin: (f32, f32, f32), size: (f32, f32, f32)| ModelCube {
+        deformation: g,
+        ..vbox(uv, origin, size)
+    };
+    let leg = |name: &str, x: f32, y: f32, z: f32, uv: (u32, u32), origin_z: f32, h: f32| {
+        vpart(
+            name,
+            None,
+            Vec3::new(x, y, z),
+            vec![cube(uv, (-1.0, 0.0, origin_z), (2.0, h, 2.0))],
+        )
+    };
+    vec![
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, 15.0, -9.0),
+            vec![
+                cube((0, 0), (-2.5, -2.0, -3.0), (5.0, 4.0, 5.0)),
+                cube((0, 24), (-1.5, -0.001, -4.0), (3.0, 2.0, 2.0)),
+                cube((0, 10), (-2.0, -3.0, 0.0), (1.0, 1.0, 2.0)),
+                cube((6, 10), (1.0, -3.0, 0.0), (1.0, 1.0, 2.0)),
+            ],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+            ..vpart(
+                "body",
+                None,
+                Vec3::new(0.0, 12.0, -10.0),
+                vec![cube((20, 0), (-2.0, 3.0, -8.0), (4.0, 16.0, 6.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(0.9, 0.0, 0.0),
+            ..vpart(
+                "tail1",
+                None,
+                Vec3::new(0.0, 15.0, 8.0),
+                vec![cube((0, 15), (-0.5, 0.0, 0.0), (1.0, 8.0, 1.0))],
+            )
+        },
+        vpart(
+            "tail2",
+            None,
+            Vec3::new(0.0, 20.0, 14.0),
+            vec![ModelCube {
+                deformation: -0.02,
+                ..vbox((4, 15), (-0.5, 0.0, 0.0), (1.0, 8.0, 1.0))
+            }],
+        ),
+        leg("left_hind_leg", 1.1, 18.0, 5.0, (8, 13), 1.0, 6.0),
+        leg("right_hind_leg", -1.1, 18.0, 5.0, (8, 13), 1.0, 6.0),
+        leg("left_front_leg", 1.2, 14.1, -5.0, (40, 0), 0.0, 10.0),
+        leg("right_front_leg", -1.2, 14.1, -5.0, (40, 0), 0.0, 10.0),
+    ]
+}
+
+/// Vanilla `BabyFelineModel`, 32x32 dedicated mesh. `tail2` is kept as an
+/// empty part for name parity with the adult.
+fn baby_feline_parts() -> Vec<EntityPart> {
+    let leg = |name: &str, x: f32, z: f32, uv: (u32, u32)| {
+        vpart(
+            name,
+            None,
+            Vec3::new(x, 22.0, z),
+            vec![vbox(uv, (-0.5, 0.0, -1.0), (1.0, 2.0, 2.0))],
+        )
+    };
+    vec![
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, 20.0, -3.125),
+            vec![
+                vbox((0, 0), (-2.5, -3.0, -2.875), (5.0, 4.0, 4.0)),
+                vbox((18, 0), (-2.0, -4.0, -0.875), (1.0, 1.0, 2.0)),
+                vbox((24, 0), (1.0, -4.0, -0.875), (1.0, 1.0, 2.0)),
+                vbox((18, 3), (-1.5, -1.0, -3.875), (3.0, 2.0, 1.0)),
+            ],
+        ),
+        leg("left_front_leg", 1.0, -1.5, (18, 18)),
+        leg("right_front_leg", -1.0, -1.5, (12, 18)),
+        leg("left_hind_leg", 1.0, 2.5, (18, 22)),
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 20.5, 0.5),
+            vec![vbox((0, 8), (-2.0, -1.5, -3.5), (4.0, 3.0, 7.0))],
+        ),
+        leg("right_hind_leg", -1.0, 2.5, (12, 22)),
+        EntityPart {
+            default_rotation: Vec3::new(-0.567232, 0.0, 0.0),
+            ..vpart(
+                "tail1",
+                None,
+                Vec3::new(0.0, 19.107, 3.9151),
+                vec![vbox((0, 18), (-0.5, -0.107, 0.0849), (1.0, 1.0, 5.0))],
+            )
+        },
+        vpart("tail2", None, Vec3::ZERO, vec![]),
+    ]
+}
+
+/// The cat renders the feline mesh under a 0.8 render-time root scale
+/// (`AdultCatModel.CAT_TRANSFORMER`); the collar bakes inflate by 0.01 (adult)
+/// or scale 1.01 (baby). The unscaled baby base still gets a root part so
+/// base and collar share one part order.
+pub fn bake_cat_model() -> BakedEntityModel {
+    bake_root_scaled(feline_parts(0.0), 0.8, 64, 32)
+}
+
+pub fn bake_cat_collar_model() -> BakedEntityModel {
+    bake_root_scaled(feline_parts(0.01), 0.8, 64, 32)
+}
+
+pub fn bake_baby_cat_model() -> BakedEntityModel {
+    bake_root_scaled(baby_feline_parts(), 1.0, 32, 32)
+}
+
+pub fn bake_baby_cat_collar_model() -> BakedEntityModel {
+    bake_root_scaled(baby_feline_parts(), 1.01, 32, 32)
+}
+
+pub fn bake_ocelot_model() -> BakedEntityModel {
+    bake_model(feline_parts(0.0), 64, 32)
+}
+
+pub fn bake_baby_ocelot_model() -> BakedEntityModel {
+    bake_model(baby_feline_parts(), 32, 32)
+}
+
+/// Vanilla `AdultRabbitModel`, 64x64. `frontlegs`/`backlegs` and the hind-leg
+/// parts are cubeless pivot containers; the haunches hang off the hind legs.
+fn rabbit_parts() -> Vec<EntityPart> {
+    vec![
+        EntityPart {
+            default_rotation: Vec3::new(-std::f32::consts::FRAC_PI_8, 0.0, 0.0),
+            ..vpart(
+                "body",
+                None,
+                Vec3::new(0.0, 23.0, 4.0),
+                vec![vbox((0, 0), (-4.0, -6.0, -9.0), (8.0, 6.0, 10.0))],
+            )
+        },
+        vpart(
+            "tail",
+            Some(0),
+            Vec3::new(0.0, -4.9916, 0.0125),
+            vec![vbox((20, 16), (-2.0, -3.0084, -1.0125), (4.0, 4.0, 4.0))],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_8, 0.0, 0.0),
+            ..vpart(
+                "head",
+                Some(0),
+                Vec3::new(0.0, -5.2929, -8.1213),
+                vec![vbox((0, 16), (-2.5, -3.0, -4.0), (5.0, 5.0, 5.0))],
+            )
+        },
+        vpart(
+            "left_ear",
+            Some(2),
+            Vec3::new(1.5, -3.7071, -0.8787),
+            vec![vbox((32, 0), (-1.0, -4.2929, -0.1213), (2.0, 5.0, 1.0))],
+        ),
+        vpart(
+            "right_ear",
+            Some(2),
+            Vec3::new(-1.5, -3.7071, -0.8787),
+            vec![vbox((26, 0), (-1.0, -4.2929, -0.1213), (2.0, 5.0, 1.0))],
+        ),
+        vpart(
+            "frontlegs",
+            Some(0),
+            Vec3::new(0.0, -1.5349, -6.3108),
+            vec![],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_8, 0.0, 0.0),
+            ..vpart(
+                "right_front_leg",
+                Some(5),
+                Vec3::new(-2.0, 1.9239, 0.3827),
+                vec![vbox((36, 18), (-0.9, -1.0, -0.9), (2.0, 4.0, 2.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_8, 0.0, 0.0),
+            ..vpart(
+                "left_front_leg",
+                Some(5),
+                Vec3::new(2.0, 1.9239, 0.4827),
+                vec![vbox((44, 18), (-1.0, -1.0, -1.0), (2.0, 4.0, 2.0))],
+            )
+        },
+        vpart("backlegs", None, Vec3::new(0.0, 23.0, 4.0), vec![]),
+        vpart("right_hind_leg", Some(8), Vec3::new(-3.0, 0.5, 0.0), vec![]),
+        EntityPart {
+            default_rotation: Vec3::new(0.0, std::f32::consts::FRAC_PI_8, 0.0),
+            ..vpart(
+                "right_haunch",
+                Some(9),
+                Vec3::new(0.0, -0.5, 0.0),
+                vec![vbox((20, 24), (-1.0, 0.0, -5.0), (2.0, 1.0, 6.0))],
+            )
+        },
+        vpart("left_hind_leg", Some(8), Vec3::new(3.0, 0.5, 0.0), vec![]),
+        EntityPart {
+            default_rotation: Vec3::new(0.0, -std::f32::consts::FRAC_PI_8, 0.0),
+            ..vpart(
+                "left_haunch",
+                Some(11),
+                Vec3::new(0.0, -0.5, 0.0),
+                vec![vbox((36, 24), (-1.0, 0.0, -5.0), (2.0, 1.0, 6.0))],
+            )
+        },
+    ]
+}
+
+pub fn bake_rabbit_model() -> BakedEntityModel {
+    bake_model(rabbit_parts(), 64, 64)
+}
+
+/// Vanilla `BabyRabbitModel`, 32x32: deeper nesting with `_r1`
+/// rotation-carrier parts.
+fn baby_rabbit_parts() -> Vec<EntityPart> {
+    vec![
+        vpart("body", None, Vec3::new(0.0, 23.0, 1.6), vec![]),
+        EntityPart {
+            default_rotation: Vec3::new(-std::f32::consts::FRAC_PI_6, 0.0, 0.0),
+            ..vpart(
+                "body_r1",
+                Some(0),
+                Vec3::new(0.0, -2.0, -1.6),
+                vec![vbox((0, 8), (-2.0, -2.0, -3.0), (4.0, 3.0, 6.0))],
+            )
+        },
+        vpart("tail", Some(0), Vec3::new(0.0, -2.2, 2.0), vec![]),
+        EntityPart {
+            default_rotation: Vec3::new(-std::f32::consts::FRAC_PI_6, 0.0, 0.0),
+            ..vpart(
+                "tail_r1",
+                Some(2),
+                Vec3::new(-0.1, 0.0, 0.0),
+                vec![vbox((0, 21), (-1.4, -2.0268, -1.0177), (3.0, 3.0, 3.0))],
+            )
+        },
+        vpart(
+            "head",
+            Some(0),
+            Vec3::new(0.0, -5.0, -2.6),
+            vec![vbox((0, 0), (-2.5, -3.0, -3.0), (5.0, 4.0, 4.0))],
+        ),
+        vpart(
+            "right_ear",
+            Some(4),
+            Vec3::new(-1.5, -3.5, -0.5),
+            vec![vbox((18, 0), (-1.0, -3.5, -0.5), (2.0, 4.0, 1.0))],
+        ),
+        vpart(
+            "left_ear",
+            Some(4),
+            Vec3::new(1.5, -3.5, -0.5),
+            vec![vbox((24, 0), (-1.0, -3.5, -0.5), (2.0, 4.0, 1.0))],
+        ),
+        vpart("frontlegs", Some(0), Vec3::new(0.0, -2.5, -2.6), vec![]),
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_8, 0.0, 0.0),
+            ..vpart("left_front_leg", Some(7), Vec3::new(1.0, 1.0, -0.5), vec![])
+        },
+        EntityPart {
+            default_rotation: Vec3::new(-std::f32::consts::FRAC_PI_8, 0.0, 0.0),
+            ..vpart(
+                "left_front_leg_r1",
+                Some(8),
+                Vec3::new(0.0, 1.0, 0.0),
+                vec![vbox((18, 8), (-0.5, -1.5, -0.5), (1.0, 3.0, 1.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(std::f32::consts::FRAC_PI_8, 0.0, 0.0),
+            ..vpart(
+                "right_front_leg",
+                Some(7),
+                Vec3::new(-1.0, 1.0, -0.5),
+                vec![],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(-std::f32::consts::FRAC_PI_8, 0.0, 0.0),
+            ..vpart(
+                "right_front_leg_r1",
+                Some(10),
+                Vec3::new(0.0, 1.0, 0.0),
+                vec![vbox((14, 8), (-0.5, -1.5, -0.5), (1.0, 3.0, 1.0))],
+            )
+        },
+        vpart("backlegs", None, Vec3::new(0.0, 23.0, 2.0), vec![]),
+        EntityPart {
+            default_rotation: Vec3::new(0.0, std::f32::consts::PI, 0.0),
+            ..vpart("left_hind_leg", Some(12), Vec3::new(1.5, 0.5, 0.5), vec![])
+        },
+        EntityPart {
+            default_rotation: Vec3::new(0.0, -std::f32::consts::FRAC_PI_4, 0.0),
+            ..vpart(
+                "left_haunch",
+                Some(13),
+                Vec3::new(1.0, 0.0, 0.5),
+                vec![vbox((10, 17), (-2.0, -0.5, 0.0), (2.0, 1.0, 3.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(0.0, std::f32::consts::PI, 0.0),
+            ..vpart(
+                "right_hind_leg",
+                Some(12),
+                Vec3::new(-1.5, 0.5, 0.5),
+                vec![],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(0.0, std::f32::consts::FRAC_PI_4, 0.0),
+            ..vpart(
+                "right_haunch",
+                Some(15),
+                Vec3::new(0.5, 0.0, -0.9),
+                vec![vbox((0, 17), (-2.0, -0.5, 0.0), (2.0, 1.0, 3.0))],
+            )
+        },
+    ]
+}
+
+pub fn bake_baby_rabbit_model() -> BakedEntityModel {
+    bake_model(baby_rabbit_parts(), 32, 32)
+}
+
 /// Skeleton: humanoid layout with thin 2×12×2 limbs, 64×32 sheet
 /// (`SkeletonModel.createDefaultSkeletonMesh`).
 fn skeleton_parts() -> Vec<EntityPart> {
@@ -2428,6 +2941,850 @@ pub fn compute_witch_anim(
         }
     }
 
+    anim
+}
+
+/// Inputs for the wolf pose (`WolfModel.setupAnim` + the adult/baby
+/// overrides).
+pub struct WolfAnimInputs {
+    pub is_sitting: bool,
+    pub is_angry: bool,
+    pub is_baby: bool,
+    /// Vanilla `getTailAngle()` in radians, resolved by the caller.
+    pub tail_angle: f32,
+    /// Beg head tilt (`getHeadRollAngle`), radians.
+    pub head_roll_angle: f32,
+    /// Wet-shake progress 0..2 (`getShakeAnim`), lerped.
+    pub shake_anim: f32,
+}
+
+/// The head-to-tail shake ripple (`WolfRenderState.getBodyRollAngle`).
+fn wolf_body_roll(shake_anim: f32, offset: f32) -> f32 {
+    use std::f32::consts::PI;
+    let progress = ((shake_anim + offset) / 1.8).clamp(0.0, 1.0);
+    (progress * PI).sin() * (progress * PI * 11.0).sin() * 0.15 * PI
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compute_wolf_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    inputs: &WolfAnimInputs,
+) -> PartAnim {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let mut anim = PartAnim::default();
+    let age_scale = if inputs.is_baby { 0.5 } else { 1.0 };
+    let roll = |offset: f32| wolf_body_roll(inputs.shake_anim, offset);
+    // Beg tilt + shake stack on the head segment.
+    let head_z = inputs.head_roll_angle + roll(0.0);
+    let tail_wag = if inputs.is_angry {
+        0.0
+    } else {
+        (walk_pos * 0.6662).cos() * 1.4 * walk_speed
+    };
+    let walk = |phase: f32| (walk_pos * 0.6662 + phase).cos() * 1.4 * walk_speed;
+
+    for (i, part) in model.parts.iter().enumerate() {
+        let name = part.name.as_str();
+        let rot = match name {
+            // Adult: look on the container, shake/beg on real_head. Baby: all
+            // on head (it has no real_head).
+            "head" if inputs.is_baby => vanilla_rot(
+                head_x_rot_deg.to_radians(),
+                local_head_y_rot_deg.to_radians(),
+                head_z,
+            ),
+            "head" => head_rotation(head_x_rot_deg, local_head_y_rot_deg),
+            "real_head" => Vec3::new(0.0, 0.0, head_z),
+            "body" => {
+                let x = if inputs.is_sitting {
+                    // Baby `setSittingPose` subtracts a further PI/2.
+                    if inputs.is_baby {
+                        std::f32::consts::FRAC_PI_4 - FRAC_PI_2
+                    } else {
+                        std::f32::consts::FRAC_PI_4
+                    }
+                } else if inputs.is_baby {
+                    0.0
+                } else {
+                    FRAC_PI_2
+                };
+                if inputs.is_sitting {
+                    anim.translation
+                        .push((i, Vec3::new(0.0, 4.0 * age_scale, -2.0 * age_scale)));
+                }
+                vanilla_rot(x, 0.0, roll(-0.16))
+            }
+            "upper_body" => {
+                if inputs.is_sitting {
+                    // Vanilla shifts the mane down 2 unscaled by age.
+                    anim.translation.push((i, Vec3::new(0.0, 2.0, 0.0)));
+                    vanilla_rot(1.2566371, 0.0, roll(-0.08))
+                } else {
+                    vanilla_rot(FRAC_PI_2, 0.0, roll(-0.08))
+                }
+            }
+            "tail" => {
+                if inputs.is_sitting {
+                    anim.translation
+                        .push((i, Vec3::new(0.0, 9.0 * age_scale, -2.0 * age_scale)));
+                }
+                let z = if inputs.is_baby { roll(-0.2) } else { 0.0 };
+                vanilla_rot(inputs.tail_angle, tail_wag, z)
+            }
+            "real_tail" => Vec3::new(0.0, 0.0, roll(-0.2)),
+            "right_hind_leg" | "left_hind_leg" => {
+                if inputs.is_sitting {
+                    anim.translation
+                        .push((i, Vec3::new(0.0, 6.7 * age_scale, -5.0 * age_scale)));
+                    Vec3::new(4.712389, 0.0, 0.0)
+                } else {
+                    let phase = if name == "right_hind_leg" { 0.0 } else { PI };
+                    Vec3::new(walk(phase), 0.0, 0.0)
+                }
+            }
+            "right_front_leg" | "left_front_leg" => {
+                if inputs.is_sitting {
+                    let dx = if name == "right_front_leg" {
+                        0.01
+                    } else {
+                        -0.01
+                    };
+                    anim.translation
+                        .push((i, Vec3::new(dx * age_scale, 1.0 * age_scale, 0.0)));
+                    Vec3::new(5.811947, 0.0, 0.0)
+                } else {
+                    let phase = if name == "right_front_leg" { PI } else { 0.0 };
+                    Vec3::new(walk(phase), 0.0, 0.0)
+                }
+            }
+            _ => continue,
+        };
+        anim.rotation.push((i, rot));
+    }
+
+    anim
+}
+
+/// Inputs for the feline pose (`AdultFelineModel`/`BabyFelineModel`
+/// `setupAnim`). Ocelots pass everything but crouch/sprint as false/zero.
+pub struct FelineAnimInputs {
+    pub is_crouching: bool,
+    pub is_sprinting: bool,
+    pub is_sitting: bool,
+    pub lie_down_amount: f32,
+    pub lie_down_amount_tail: f32,
+    pub relax_state_one_amount: f32,
+    pub is_baby: bool,
+}
+
+/// Ported line-by-line from the two vanilla `setupAnim` bodies; the adult and
+/// baby sitting/lying blocks differ materially. Vanilla's `rotLerp` here is a
+/// plain lerp (every span is far below the wrap threshold).
+pub fn compute_feline_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    inputs: &FelineAnimInputs,
+) -> PartAnim {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, FRAC_PI_6, PI};
+    let b = inputs.is_baby;
+    let age = if b { 0.5 } else { 1.0 };
+    let lerp = |a: f32, from: f32, to: f32| from + a * (to - from);
+
+    // Vanilla-space euler + pivot-delta accumulators, seeded from the mesh
+    // defaults (vanilla resetPose) with the head look applied.
+    let mut head = Vec3::new(
+        head_x_rot_deg.to_radians(),
+        local_head_y_rot_deg.to_radians(),
+        0.0,
+    );
+    let mut head_t = Vec3::ZERO;
+    let mut body_x = if b { 0.0 } else { FRAC_PI_2 };
+    let mut body_t = Vec3::ZERO;
+    let mut tail1 = Vec3::new(if b { -0.567232 } else { 0.9 }, 0.0, 0.0);
+    let mut tail1_t = Vec3::ZERO;
+    let mut tail2_x = 0.0f32;
+    let mut tail2_t = Vec3::ZERO;
+    let mut lhl = Vec3::ZERO;
+    let mut rhl = Vec3::ZERO;
+    let mut lfl = Vec3::ZERO;
+    let mut rfl = Vec3::ZERO;
+    let mut lhl_t = Vec3::ZERO;
+    let mut rhl_t = Vec3::ZERO;
+    let mut lfl_t = Vec3::ZERO;
+    let mut rfl_t = Vec3::ZERO;
+    let tail1_default_y = if b { 19.107 } else { 15.0 };
+    let tail2_default_y = if b { 0.0 } else { 20.0 };
+
+    if inputs.is_crouching {
+        body_t.y += 1.0 * age;
+        head_t.y += 2.0 * age;
+        tail1_t.y += 1.0 * age;
+        tail2_t.y += -4.0 * age;
+        tail2_t.z += 2.0 * age;
+        tail1.x = FRAC_PI_2;
+        tail2_x = FRAC_PI_2;
+    } else if inputs.is_sprinting {
+        // Vanilla copies the pivot absolutely: tail2.y = tail1.y.
+        tail2_t.y = (tail1_default_y + tail1_t.y) - tail2_default_y;
+        tail2_t.z += 2.0 * age;
+        tail1.x = FRAC_PI_2;
+        tail2_x = FRAC_PI_2;
+    }
+
+    if !inputs.is_sitting {
+        if !b {
+            body_x = FRAC_PI_2;
+        }
+        let pos = walk_pos * 0.6662;
+        if inputs.is_sprinting {
+            lhl.x = pos.cos() * walk_speed;
+            rhl.x = (pos + 0.3).cos() * walk_speed;
+            lfl.x = (pos + PI + 0.3).cos() * walk_speed;
+            rfl.x = (pos + PI).cos() * walk_speed;
+            tail2_x = 1.7278761 + 0.31415927 * walk_pos.cos() * walk_speed;
+        } else {
+            lhl.x = pos.cos() * walk_speed;
+            rhl.x = (pos + PI).cos() * walk_speed;
+            lfl.x = (pos + PI).cos() * walk_speed;
+            rfl.x = pos.cos() * walk_speed;
+            let sway = if inputs.is_crouching {
+                0.47123894
+            } else {
+                FRAC_PI_4
+            };
+            tail2_x = 1.7278761 + sway * walk_pos.cos() * walk_speed;
+        }
+    } else if b {
+        body_x += -0.43633232;
+        body_t.y += 1.25;
+        head_t.z += 0.75;
+        tail1.x += 0.5454154;
+        tail1_t.y += 4.0;
+        tail1_t.z -= 0.9;
+        lhl_t.z -= 0.9;
+        rhl_t.z -= 0.9;
+    } else {
+        body_x = FRAC_PI_4;
+        body_t.y += -4.0 * age;
+        body_t.z += 5.0 * age;
+        head_t.y += -3.3 * age;
+        head_t.z += 1.0 * age;
+        tail1_t.y += 8.0 * age;
+        tail1_t.z += -2.0 * age;
+        tail2_t.y += 2.0 * age;
+        tail2_t.z += -0.8 * age;
+        tail1.x = 1.7278761;
+        tail2_x = 2.670354;
+        lfl.x = -0.15707964;
+        lfl_t.y += 2.0 * age;
+        lfl_t.z -= 2.0 * age;
+        rfl.x = -0.15707964;
+        rfl_t.y += 2.0 * age;
+        rfl_t.z -= 2.0 * age;
+        lhl.x = -FRAC_PI_2;
+        lhl_t.y += 3.0 * age;
+        lhl_t.z -= 4.0 * age;
+        rhl.x = -FRAC_PI_2;
+        rhl_t.y += 3.0 * age;
+        rhl_t.z -= 4.0 * age;
+    }
+
+    let a = inputs.lie_down_amount;
+    let at = inputs.lie_down_amount_tail;
+    if a > 0.0 {
+        if b {
+            body_t.x += 1.0;
+            head.x = lerp(a, head.x, 0.17453292);
+            head.z = lerp(a, head.z, -1.3089969);
+            head_t += Vec3::new(1.5, 0.75, -0.5);
+            rfl.x = -FRAC_PI_4;
+            rfl_t += Vec3::new(3.5, -0.5, 0.0);
+            lfl.x = -FRAC_PI_2;
+            lfl_t += Vec3::new(1.5, -1.0, -2.0);
+            rhl = Vec3::new(0.6981317, 0.34906584, -0.34906584);
+            rhl_t += Vec3::new(2.5, -0.25, 0.5);
+            lhl_t += Vec3::new(1.5, 0.0, -1.0);
+            // Vanilla `+=` on a rotLerp result (double-applies); ported
+            // verbatim.
+            tail1.x += lerp(at, tail1.x, -FRAC_PI_6);
+            tail1.y += lerp(at, tail1.y, 0.0);
+            tail1.z += lerp(at, tail1.z, -0.17453292);
+            tail1_t += Vec3::new(1.0, 0.5, -0.25);
+        } else {
+            head.z = lerp(a, head.z, -1.2707963);
+            head.y = lerp(a, head.y, 1.2707963);
+            lfl.x = -1.2707963;
+            rfl.x = -0.47079635;
+            rfl.z = -0.2;
+            rfl_t.x += age;
+            lhl.x = -0.4;
+            rhl.x = 0.5;
+            rhl.z = -0.5;
+            rhl_t.x += 0.8 * age;
+            rhl_t.y += 2.0 * age;
+            tail1.x = lerp(at, tail1.x, 0.8);
+            tail2_x = lerp(at, tail2_x, -0.4);
+        }
+    }
+    let r = inputs.relax_state_one_amount;
+    if r > 0.0 {
+        head.x = lerp(r, head.x, -0.58177644);
+    }
+
+    let mut anim = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        let (rot, tr) = match part.name.as_str() {
+            "head" => (vanilla_rot(head.x, head.y, head.z), head_t),
+            "body" => (Vec3::new(body_x, 0.0, 0.0), body_t),
+            "tail1" => (vanilla_rot(tail1.x, tail1.y, tail1.z), tail1_t),
+            "tail2" => (Vec3::new(tail2_x, 0.0, 0.0), tail2_t),
+            "left_hind_leg" => (vanilla_rot(lhl.x, lhl.y, lhl.z), lhl_t),
+            "right_hind_leg" => (vanilla_rot(rhl.x, rhl.y, rhl.z), rhl_t),
+            "left_front_leg" => (vanilla_rot(lfl.x, lfl.y, lfl.z), lfl_t),
+            "right_front_leg" => (vanilla_rot(rfl.x, rfl.y, rfl.z), rfl_t),
+            _ => continue,
+        };
+        anim.rotation.push((i, rot));
+        if tr != Vec3::ZERO {
+            anim.translation.push((i, tr));
+        }
+    }
+    anim
+}
+
+/// Keyframe interpolation mode; vanilla stores it per keyframe and uses the
+/// NEXT keyframe's mode for each span.
+#[derive(Clone, Copy)]
+enum Kfi {
+    Lin,
+    Cat,
+}
+
+/// One keyframe: timestamp (seconds) + raw vanilla values (rotation channels
+/// in degrees, position channels in y-down model units).
+struct Kf {
+    t: f32,
+    x: f32,
+    y: f32,
+    z: f32,
+    i: Kfi,
+}
+
+struct KfChannel {
+    part: &'static str,
+    rotation: bool,
+    frames: &'static [Kf],
+}
+
+struct KfAnim {
+    length: f32,
+    looping: bool,
+    channels: &'static [KfChannel],
+}
+
+const fn kf(t: f32, x: f32, y: f32, z: f32, i: Kfi) -> Kf {
+    Kf { t, x, y, z, i }
+}
+
+/// Vanilla `Mth.catmullrom`.
+fn catmullrom(a: f32, p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3) -> Vec3 {
+    0.5 * (2.0 * p1
+        + (p2 - p0) * a
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * a * a
+        + (3.0 * p1 - p0 - 3.0 * p2 + p3) * a * a * a)
+}
+
+/// Vanilla `KeyframeAnimation.apply` sampling: previous keyframe by binary
+/// search, alpha clamped, interpolation taken from the next keyframe.
+fn kf_sample(frames: &[Kf], t: f32) -> Vec3 {
+    let v = |k: &Kf| Vec3::new(k.x, k.y, k.z);
+    let prev = frames.partition_point(|k| k.t < t).saturating_sub(1);
+    let next = (prev + 1).min(frames.len() - 1);
+    if next == prev {
+        return v(&frames[prev]);
+    }
+    let alpha = ((t - frames[prev].t) / (frames[next].t - frames[prev].t)).clamp(0.0, 1.0);
+    match frames[next].i {
+        Kfi::Lin => v(&frames[prev]).lerp(v(&frames[next]), alpha),
+        Kfi::Cat => catmullrom(
+            alpha,
+            v(&frames[prev.saturating_sub(1)]),
+            v(&frames[prev]),
+            v(&frames[next]),
+            v(&frames[(next + 1).min(frames.len() - 1)]),
+        ),
+    }
+}
+
+/// Applies a keyframe animation additively into vanilla-space euler/pivot
+/// deltas (vanilla `offsetRotation`/`offsetPos`; the position Y-negation of
+/// `KeyframeAnimations.posVec` is applied here).
+fn apply_kf_anim(
+    anim: &KfAnim,
+    model: &BakedEntityModel,
+    elapsed_secs: f32,
+    rot_delta: &mut [Vec3],
+    pos_delta: &mut [Vec3],
+    touched_rot: &mut [bool],
+) {
+    use std::f32::consts::PI;
+    let t = if anim.looping {
+        elapsed_secs % anim.length
+    } else {
+        elapsed_secs
+    };
+    for ch in anim.channels {
+        let Some(idx) = model.parts.iter().position(|p| p.name == ch.part) else {
+            continue;
+        };
+        let v = kf_sample(ch.frames, t);
+        if ch.rotation {
+            rot_delta[idx] += v * (PI / 180.0);
+            touched_rot[idx] = true;
+        } else {
+            pos_delta[idx] += Vec3::new(v.x, -v.y, v.z);
+        }
+    }
+}
+
+/// `RabbitAnimation.HOP` (0.75s, looping) — transcribed from the decompiled
+/// definition; all-zero channels omitted. `BABY_RABBIT_HOP` is the
+/// `BabyRabbitAnimation` counterpart.
+static RABBIT_HOP: KfAnim = {
+    use Kfi::{Cat, Lin};
+    KfAnim {
+        length: 0.75,
+        looping: true,
+        channels: &[
+            KfChannel {
+                part: "body",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.2083, 4.0, 0.0, 0.0, Cat),
+                    kf(0.2917, 32.5, 0.0, 0.0, Lin),
+                    kf(0.4167, 33.0, 0.0, 0.0, Cat),
+                    kf(0.5833, 18.0, 0.0, 0.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "head",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.2083, -4.0, 0.0, 0.0, Lin),
+                    kf(0.2917, -32.17, 0.0, 0.0, Lin),
+                    kf(0.375, -34.58, 0.0, 0.0, Lin),
+                    kf(0.5833, -20.0, 0.0, 0.0, Lin),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "backlegs",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.25, 125.0, 0.0, 0.0, Lin),
+                    kf(0.2917, 125.0, 0.0, 0.0, Lin),
+                    kf(0.375, 120.0, 0.0, 0.0, Lin),
+                    kf(0.4583, 95.0, 0.0, 0.0, Lin),
+                    kf(0.5417, 42.0, 0.0, 0.0, Lin),
+                    kf(0.6667, 0.0, 0.0, 0.0, Lin),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "frontlegs",
+                rotation: true,
+                frames: &[
+                    kf(0.0, -0.17, 0.0, 0.0, Lin),
+                    kf(0.125, -0.17, 0.0, 0.0, Lin),
+                    kf(0.2083, 25.25, 0.0, 0.0, Lin),
+                    kf(0.2917, -65.0, 0.0, 0.0, Cat),
+                    kf(0.4583, -67.5, 0.0, 0.0, Cat),
+                    kf(0.625, -1.25, 0.0, 0.0, Lin),
+                    kf(0.749, -1.25, 0.0, 0.0, Lin),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "frontlegs",
+                rotation: false,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.3333, 0.0, 0.5, 0.6, Lin),
+                    kf(0.4167, 0.0, 0.9, 0.4, Lin),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "right_front_leg",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Cat),
+                    kf(0.125, 0.0, 0.0, 0.0, Cat),
+                    kf(0.2083, 0.0, 0.0, 0.0, Cat),
+                    kf(0.3333, 0.0, 0.0, -17.5, Cat),
+                    kf(0.5, 0.0, 0.0, -17.5, Cat),
+                    kf(0.5833, 0.0, 0.0, -2.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Cat),
+                ],
+            },
+            KfChannel {
+                part: "left_front_leg",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Cat),
+                    kf(0.125, 0.0, 0.0, 0.0, Cat),
+                    kf(0.2083, 0.0, 0.0, 0.0, Cat),
+                    kf(0.3333, 0.0, 0.0, 20.0, Cat),
+                    kf(0.5, 0.0, 0.0, 20.0, Cat),
+                    kf(0.5833, 0.0, 0.0, 2.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Cat),
+                ],
+            },
+            KfChannel {
+                part: "left_ear",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Cat),
+                    kf(0.125, 2.5, 0.0, 0.0, Cat),
+                    kf(0.375, -48.5, 0.0, 0.0, Cat),
+                    kf(0.5417, -41.24, 0.0, 0.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "left_ear",
+                rotation: false,
+                frames: &[
+                    kf(0.0, -0.025, 0.0, 0.0, Cat),
+                    kf(0.2083, -0.025, -0.2, 0.0, Cat),
+                    kf(0.375, -0.02, -0.3, 0.0, Cat),
+                    kf(0.75, -0.025, 0.0, 0.0, Cat),
+                ],
+            },
+            KfChannel {
+                part: "right_ear",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Cat),
+                    kf(0.125, 7.5, 0.0, 0.0, Cat),
+                    kf(0.375, -31.5, 0.0, 0.0, Cat),
+                    kf(0.5, -35.33, 0.0, 0.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Cat),
+                ],
+            },
+            KfChannel {
+                part: "right_ear",
+                rotation: false,
+                frames: &[
+                    kf(0.0, 0.025, 0.0, 0.0, Cat),
+                    kf(0.2083, 0.025, -0.3, 0.0, Cat),
+                    kf(0.375, 0.02, -0.23, 0.0, Cat),
+                    kf(0.75, 0.025, 0.0, 0.0, Cat),
+                ],
+            },
+            KfChannel {
+                part: "right_hind_leg",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, -2.5, 0.0, Lin),
+                    kf(0.1667, 0.0, -2.5, 0.0, Lin),
+                    kf(0.2083, 47.5, 0.0, 0.0, Cat),
+                    kf(0.4167, 47.5, 0.0, 0.0, Cat),
+                    kf(0.4583, 0.0, 0.0, 0.0, Lin),
+                    kf(0.75, 0.0, -2.5, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "left_hind_leg",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.1667, 0.0, 0.0, 0.0, Lin),
+                    kf(0.2083, 47.5, 0.0, 0.0, Lin),
+                    kf(0.4167, 47.5, 0.0, 0.0, Cat),
+                    kf(0.4583, 0.0, 0.0, 0.0, Lin),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "tail",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, -25.0, 0.0, 0.0, Lin),
+                    kf(0.3333, 15.0, 0.0, 0.0, Lin),
+                    kf(0.375, 27.5, 0.0, 0.0, Lin),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+        ],
+    }
+};
+
+static BABY_RABBIT_HOP: KfAnim = {
+    use Kfi::{Cat, Lin};
+    KfAnim {
+        length: 0.75,
+        looping: true,
+        channels: &[
+            KfChannel {
+                part: "body",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.01, Lin),
+                    kf(0.125, 0.0, 0.0, 0.01, Lin),
+                    kf(0.2083, 3.75, 0.0, 0.0, Cat),
+                    kf(0.2917, 32.5, 0.0, 0.0, Lin),
+                    kf(0.4167, 33.0, 0.0, 0.0, Cat),
+                    kf(0.5833, 18.0, 0.0, 0.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.01, Lin),
+                ],
+            },
+            KfChannel {
+                part: "head",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.2083, -5.25, 0.0, 0.0, Cat),
+                    kf(0.2917, -32.17, 0.0, 0.0, Cat),
+                    kf(0.375, -34.58, 0.0, 0.0, Cat),
+                    kf(0.5833, -20.0, 0.0, 0.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "backlegs",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.25, 125.0, 0.0, 0.0, Cat),
+                    kf(0.375, 125.5, 0.0, 0.0, Cat),
+                    kf(0.4583, 95.0, 0.0, 0.0, Lin),
+                    kf(0.5417, 42.0, 0.0, 0.0, Lin),
+                    kf(0.6667, 0.0, 0.0, 0.0, Lin),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "frontlegs",
+                rotation: true,
+                frames: &[
+                    kf(0.0, -0.17, 0.0, 0.0, Lin),
+                    kf(0.125, -0.17, 0.0, 0.0, Lin),
+                    kf(0.2083, 14.61, 0.0, 0.0, Lin),
+                    kf(0.3333, -74.37, 0.0, 0.0, Cat),
+                    kf(0.5, -78.19, 0.0, 0.0, Cat),
+                    kf(0.5417, -62.47, 0.0, 0.0, Cat),
+                    kf(0.625, -1.25, 0.0, 0.0, Lin),
+                    kf(0.749, -1.25, 0.0, 0.0, Lin),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "frontlegs",
+                rotation: false,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.2083, 0.0, -0.16, 0.16, Lin),
+                    kf(0.3333, 0.0, 0.1, -0.1, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "right_front_leg",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.375, 0.0, 0.0, -8.45, Cat),
+                    kf(0.4583, 0.0, 0.0, -8.48, Cat),
+                    kf(0.5833, 0.0, 0.0, -2.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Cat),
+                ],
+            },
+            KfChannel {
+                part: "right_front_leg",
+                rotation: false,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.2083, 0.0, 0.5, -0.5, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "left_front_leg",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.375, 0.0, 0.0, 10.44, Cat),
+                    kf(0.4583, 0.0, 0.0, 10.61, Cat),
+                    kf(0.5833, 0.0, 0.0, 2.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Cat),
+                ],
+            },
+            KfChannel {
+                part: "left_front_leg",
+                rotation: false,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.2083, 0.0, 0.5, -0.5, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "left_ear",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.1667, 0.0, 0.0, 0.0, Lin),
+                    kf(0.375, -48.5, 0.0, 0.0, Cat),
+                    kf(0.5417, -41.24, 0.0, 0.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "left_ear",
+                rotation: false,
+                frames: &[
+                    kf(0.0, -0.02, 0.0, 0.0, Lin),
+                    kf(0.1667, -0.02, 0.0, 0.0, Lin),
+                    kf(0.375, -0.025, -0.5, 0.0, Cat),
+                    kf(0.5417, -0.02, -0.38, 0.0, Cat),
+                    kf(0.75, -0.02, 0.0, 0.0, Cat),
+                ],
+            },
+            KfChannel {
+                part: "right_ear",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.1667, 0.0, 0.0, 0.0, Lin),
+                    kf(0.375, -44.95, 0.0, 0.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Cat),
+                ],
+            },
+            KfChannel {
+                part: "right_ear",
+                rotation: false,
+                frames: &[
+                    kf(0.0, 0.05, 0.0, 0.0, Lin),
+                    kf(0.1667, 0.05, 0.0, 0.0, Lin),
+                    kf(0.3333, 0.05, -0.475, 0.0, Lin),
+                    kf(0.5417, 0.04, -0.385, 0.0, Cat),
+                    kf(0.75, 0.05, 0.0, 0.0, Cat),
+                ],
+            },
+            KfChannel {
+                part: "right_hind_leg",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, -2.5, 0.0, Lin),
+                    kf(0.0833, 0.0, -2.5, 0.0, Lin),
+                    kf(0.25, -25.0, -22.5, -17.5, Cat),
+                    kf(0.375, -25.0, -22.5, -17.5, Cat),
+                    kf(0.5417, 0.0, -2.5, 0.0, Lin),
+                    kf(0.75, 0.0, -2.5, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "left_hind_leg",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.0833, 0.0, 0.0, 0.0, Lin),
+                    kf(0.25, -25.0, 25.0, 22.5, Cat),
+                    kf(0.375, -25.0, 25.0, 22.5, Cat),
+                    kf(0.5417, 0.0, 0.0, 0.0, Lin),
+                    kf(0.75, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "tail",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 0.0, 0.0, Lin),
+                    kf(0.3333, 15.0, 0.0, 0.0, Cat),
+                    kf(0.375, 47.5, 0.0, 0.0, Cat),
+                    kf(0.5, 43.33, 0.0, 0.0, Cat),
+                    kf(0.75, 0.0, 0.0, 0.0, Cat),
+                ],
+            },
+        ],
+    }
+};
+
+/// Rabbit: head look plus the HOP keyframe animation (vanilla 26.2 rabbits
+/// are keyframe-animated; there is no walk cycle).
+// TODO: IDLE_HEAD_TILT keyframe animation (idle flavor only; head look covers
+// the idle pose meanwhile).
+pub fn compute_rabbit_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    hop_elapsed_secs: Option<f32>,
+    is_baby: bool,
+) -> PartAnim {
+    let mut anim = PartAnim::default();
+    let mut rot_delta = vec![Vec3::ZERO; model.parts.len()];
+    let mut pos_delta = vec![Vec3::ZERO; model.parts.len()];
+    let mut touched_rot = vec![false; model.parts.len()];
+
+    if let Some(elapsed) = hop_elapsed_secs {
+        let table = if is_baby {
+            &BABY_RABBIT_HOP
+        } else {
+            &RABBIT_HOP
+        };
+        apply_kf_anim(
+            table,
+            model,
+            elapsed,
+            &mut rot_delta,
+            &mut pos_delta,
+            &mut touched_rot,
+        );
+    }
+
+    for (i, part) in model.parts.iter().enumerate() {
+        if part.name == "head" {
+            // The look replaces the default pose (vanilla assigns absolutely);
+            // keyframe offsets add on top.
+            let e = Vec3::new(
+                head_x_rot_deg.to_radians(),
+                local_head_y_rot_deg.to_radians(),
+                0.0,
+            ) + rot_delta[i];
+            anim.rotation.push((i, vanilla_rot(e.x, e.y, e.z)));
+        } else if touched_rot[i] {
+            let e = part.default_rotation + rot_delta[i];
+            anim.rotation.push((i, vanilla_rot(e.x, e.y, e.z)));
+        }
+        if pos_delta[i] != Vec3::ZERO {
+            anim.translation.push((i, pos_delta[i]));
+        }
+    }
     anim
 }
 
