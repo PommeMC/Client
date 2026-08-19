@@ -1125,8 +1125,11 @@ impl AppCore {
                 NetworkEvent::SquidTentacleReset { id } => {
                     game.entity_store.squid_tentacle_reset(id);
                 }
-                NetworkEvent::GolemEvent { id, event_id } => {
-                    game.entity_store.golem_event(id, event_id);
+                NetworkEvent::GolemPunch { id } => {
+                    game.entity_store.golem_punch(id);
+                }
+                NetworkEvent::GolemOfferFlower { id, offering } => {
+                    game.entity_store.set_golem_offering_flower(id, offering);
                 }
                 NetworkEvent::VillagerData {
                     id,

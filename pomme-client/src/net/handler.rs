@@ -567,11 +567,21 @@ pub fn handle_game_packet(
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 19 => {
             let _ = event_tx.try_send(NetworkEvent::SquidTentacleReset { id: p.entity_id.0 });
         }
-        // Events 4 / 11 / 34 = iron golem punch / flower offer start / stop.
-        ClientboundGamePacket::EntityEvent(p) if matches!(p.event_id, 4 | 11 | 34) => {
-            let _ = event_tx.try_send(NetworkEvent::GolemEvent {
+        // Event id 4 = iron golem punch (10-tick swing).
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 4 => {
+            let _ = event_tx.try_send(NetworkEvent::GolemPunch { id: p.entity_id.0 });
+        }
+        // Events 11 / 34 = iron golem flower offer start / stop.
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 11 => {
+            let _ = event_tx.try_send(NetworkEvent::GolemOfferFlower {
                 id: p.entity_id.0,
-                event_id: p.event_id,
+                offering: true,
+            });
+        }
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 34 => {
+            let _ = event_tx.try_send(NetworkEvent::GolemOfferFlower {
+                id: p.entity_id.0,
+                offering: false,
             });
         }
         // Events 8 / 56 = wolf wet-shake start / cancel.

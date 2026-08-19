@@ -268,7 +268,13 @@ impl LivingEntity {
             collar_color: 14,
             is_interested: false,
             anger_end_time: -1,
-            health: 20.0,
+            // Vanilla constructs at max health; the golem's crack overlay
+            // reads it before the metadata arrives.
+            health: if entity_type == EntityKind::IronGolem {
+                100.0
+            } else {
+                20.0
+            },
             interested_angle: 0.0,
             prev_interested_angle: 0.0,
             shake_anim: 0.0,
@@ -1225,18 +1231,22 @@ impl EntityStore {
         }
     }
 
-    /// Vanilla `IronGolem.handleEntityEvent`: 4 = punch (10 ticks), 11 / 34 =
-    /// flower offer start (400 ticks) / stop.
-    pub fn golem_event(&mut self, id: i32, event_id: u8) {
+    /// Iron golem punch (entity event 4): vanilla runs a 10-tick swing.
+    pub fn golem_punch(&mut self, id: i32) {
         if let Some(entity) = self.living.get_mut(&id)
             && entity.entity_type == EntityKind::IronGolem
         {
-            match event_id {
-                4 => entity.golem_attack_ticks = 10,
-                11 => entity.golem_offer_flower_ticks = 400,
-                34 => entity.golem_offer_flower_ticks = 0,
-                _ => {}
-            }
+            entity.golem_attack_ticks = 10;
+        }
+    }
+
+    /// Iron golem flower offer start / stop (entity events 11 / 34): a
+    /// 400-tick hold.
+    pub fn set_golem_offering_flower(&mut self, id: i32, offering: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::IronGolem
+        {
+            entity.golem_offer_flower_ticks = if offering { 400 } else { 0 };
         }
     }
 
