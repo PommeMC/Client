@@ -196,7 +196,6 @@ public final class StateDump {
         final Method shapeIsEmpty;
         final Method toAabbs;
         final Method getBlock;
-        /** BlockBehaviour.hasCollision, the per-block Properties.noCollision() flag. */
         final Field hasCollision;
         private final Class<?> aabbClass;
         private final Map<String, Field> aabbFields = new LinkedHashMap<>();

@@ -332,8 +332,8 @@ struct StateDumpFile {
     propagates_skylight_down: Vec<u8>,
     can_occlude: Vec<u8>,
     use_shape_for_light_occlusion: Vec<u8>,
-    /// `BlockBehaviour.hasCollision`; a block-level flag, so uniform across
-    /// each block's states (the tool hard-fails otherwise).
+    /// `BlockBehaviour.hasCollision`; block-level, so uniform across each
+    /// block's states.
     has_collision: Vec<u8>,
     /// State id (as string) -> 6 face masks, 64 hex chars each, present
     /// exactly for states with `can_occlude && use_shape_for_light_occlusion`.
