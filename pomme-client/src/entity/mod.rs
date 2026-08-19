@@ -39,7 +39,7 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::Cat
             | EntityKind::Ocelot
             | EntityKind::Rabbit
-    )
+    ) || is_equine(&kind)
 }
 
 /// Kinds whose entity-data index 16 is the baby flag: `AgeableMob`
@@ -143,6 +143,17 @@ pub struct LivingEntity {
     pub prev_relax_state_one_amount: f32,
     /// Tick the rabbit hop keyframe clock started at, while hopping.
     pub hop_anim_start: Option<u32>,
+    /// Equine flag-byte state (grass eating, rearing, open mouth).
+    pub is_eating: bool,
+    pub is_standing: bool,
+    pub is_open_mouth: bool,
+    pub eat_anim: f32,
+    pub prev_eat_anim: f32,
+    pub stand_anim: f32,
+    pub prev_stand_anim: f32,
+    pub mouth_anim: f32,
+    pub prev_mouth_anim: f32,
+    pub has_chest: bool,
     pub villager_kind: VillagerKind,
     pub villager_profession: VillagerProfession,
     pub villager_level: u32,
@@ -170,6 +181,7 @@ pub struct LivingEntity {
     is_shaking: bool,
     jump_ticks: i32,
     jump_duration: i32,
+    tail_counter: u8,
     interp_target: Position,
     interp_look_dir: LookDirection,
     interp_steps: i32,
@@ -238,6 +250,16 @@ impl LivingEntity {
             relax_state_one_amount: 0.0,
             prev_relax_state_one_amount: 0.0,
             hop_anim_start: None,
+            is_eating: false,
+            is_standing: false,
+            is_open_mouth: false,
+            eat_anim: 0.0,
+            prev_eat_anim: 0.0,
+            stand_anim: 0.0,
+            prev_stand_anim: 0.0,
+            mouth_anim: 0.0,
+            prev_mouth_anim: 0.0,
+            has_chest: false,
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
             villager_level: 0,
@@ -259,6 +281,7 @@ impl LivingEntity {
             is_shaking: false,
             jump_ticks: 0,
             jump_duration: 0,
+            tail_counter: 0,
             interp_target: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
@@ -388,6 +411,49 @@ impl LivingEntity {
         (0.75 + shake / 2.0 * 0.25).min(1.0)
     }
 
+    pub fn tail_swishing(&self) -> bool {
+        self.tail_counter > 0
+    }
+
+    /// Vanilla `AbstractHorse.tick`/`aiStep` springs for the grass-eat,
+    /// rear-up and feeding-mouth animations, plus the client-local tail-swish
+    /// counter. Gated on the equine kinds (the tail RNG isn't free).
+    fn tick_equine_anims(&mut self) {
+        if fastrand::u32(0..200) == 0 {
+            self.tail_counter = 1;
+        }
+        if self.tail_counter > 0 {
+            self.tail_counter += 1;
+            if self.tail_counter > 8 {
+                self.tail_counter = 0;
+            }
+        }
+        self.prev_eat_anim = self.eat_anim;
+        if self.is_eating {
+            self.eat_anim = (self.eat_anim + (1.0 - self.eat_anim) * 0.4 + 0.05).min(1.0);
+        } else {
+            self.eat_anim = (self.eat_anim - self.eat_anim * 0.4 - 0.05).max(0.0);
+        }
+        self.prev_stand_anim = self.stand_anim;
+        if self.is_standing {
+            self.prev_eat_anim = 0.0;
+            self.eat_anim = 0.0;
+            self.stand_anim = (self.stand_anim + (1.0 - self.stand_anim) * 0.4 + 0.05).min(1.0);
+        } else {
+            self.stand_anim = (self.stand_anim
+                + (0.8 * self.stand_anim * self.stand_anim * self.stand_anim - self.stand_anim)
+                    * 0.6
+                - 0.05)
+                .max(0.0);
+        }
+        self.prev_mouth_anim = self.mouth_anim;
+        if self.is_open_mouth {
+            self.mouth_anim = (self.mouth_anim + (1.0 - self.mouth_anim) * 0.7 + 0.05).min(1.0);
+        } else {
+            self.mouth_anim = (self.mouth_anim - self.mouth_anim * 0.7 - 0.05).max(0.0);
+        }
+    }
+
     /// Vanilla `AbstractCubeMob.tick` squish spring; the update order matters.
     fn tick_squish(&mut self) {
         self.prev_squish = self.squish;
@@ -407,6 +473,7 @@ impl LivingEntity {
         match self.entity_type {
             EntityKind::Chicken => self.tick_flap(),
             EntityKind::Slime => self.tick_squish(),
+            k if is_equine(&k) => self.tick_equine_anims(),
             _ => {}
         }
     }
@@ -831,6 +898,20 @@ impl EntityStore {
                     _ => 0,
                 }
             }
+            // Equine flags byte: bit 0x10 = eating, 0x20 = standing (rear),
+            // 0x40 = open mouth.
+            (k, 18, Byte(f)) if is_equine(&k) => {
+                entity.is_eating = f & 0x10 != 0;
+                entity.is_standing = f & 0x20 != 0;
+                entity.is_open_mouth = f & 0x40 != 0;
+            }
+            (EntityKind::Donkey | EntityKind::Mule, 19, Bool(b)) => entity.has_chest = b,
+            // Horse packed variant: `color | markings << 8`, both wrapping
+            // their id ranges (vanilla `ByIdMap` WRAP).
+            (EntityKind::Horse, 19, Int(v)) => {
+                let v = v as u32;
+                entity.variant = ((v & 0xFF) % 7) | ((((v >> 8) & 0xFF) % 5) << 8);
+            }
             // Tamable flags byte: bit 0x01 = sitting, 0x04 = tame.
             (EntityKind::Wolf | EntityKind::Cat, 18, Byte(f)) => {
                 entity.is_sitting = f & 0x01 != 0;
@@ -1037,30 +1118,43 @@ pub fn lerp_angle(from: f32, to: f32, alpha: f32) -> f32 {
     from + wrap_degrees(to - from) * alpha
 }
 
-pub fn is_living_mob(kind: &EntityKind) -> bool {
+/// The horse family (vanilla `AbstractHorse` subclasses pomme renders).
+pub fn is_equine(kind: &EntityKind) -> bool {
     matches!(
         kind,
-        EntityKind::Player
-            | EntityKind::Pig
-            | EntityKind::Cow
-            | EntityKind::Sheep
-            | EntityKind::Chicken
-            | EntityKind::Zombie
-            | EntityKind::Skeleton
-            | EntityKind::Creeper
-            | EntityKind::Spider
-            | EntityKind::Villager
-            | EntityKind::Enderman
-            | EntityKind::Slime
-            | EntityKind::Witch
-            | EntityKind::Husk
-            | EntityKind::Drowned
-            | EntityKind::ZombieVillager
-            | EntityKind::Stray
-            | EntityKind::Bogged
-            | EntityKind::Wolf
-            | EntityKind::Cat
-            | EntityKind::Ocelot
-            | EntityKind::Rabbit
+        EntityKind::Horse
+            | EntityKind::Donkey
+            | EntityKind::Mule
+            | EntityKind::SkeletonHorse
+            | EntityKind::ZombieHorse
     )
+}
+
+pub fn is_living_mob(kind: &EntityKind) -> bool {
+    is_equine(kind)
+        || matches!(
+            kind,
+            EntityKind::Player
+                | EntityKind::Pig
+                | EntityKind::Cow
+                | EntityKind::Sheep
+                | EntityKind::Chicken
+                | EntityKind::Zombie
+                | EntityKind::Skeleton
+                | EntityKind::Creeper
+                | EntityKind::Spider
+                | EntityKind::Villager
+                | EntityKind::Enderman
+                | EntityKind::Slime
+                | EntityKind::Witch
+                | EntityKind::Husk
+                | EntityKind::Drowned
+                | EntityKind::ZombieVillager
+                | EntityKind::Stray
+                | EntityKind::Bogged
+                | EntityKind::Wolf
+                | EntityKind::Cat
+                | EntityKind::Ocelot
+                | EntityKind::Rabbit
+        )
 }
