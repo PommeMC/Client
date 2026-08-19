@@ -174,8 +174,9 @@ impl MobEntry {
 
 pub const WHITE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-/// Registry-path order of each mob's flattened variant pool; the net handler
-/// resolves synced registry ids against these same slices, and the renderer
+/// Each mob's flattened variant pool by registry path; the net handler
+/// resolves synced registry entries by name against these same slices (so
+/// their order is pomme's, not the protocol id's), and the renderer
 /// constructor asserts the pools line up.
 pub const CHICKEN_VARIANT_ORDER: &[&str] = &["temperate", "warm", "cold"];
 pub const COW_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
@@ -183,7 +184,6 @@ pub const COW_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
 pub const WOLF_VARIANT_ORDER: &[&str] = &[
     "pale", "spotted", "snowy", "black", "ashen", "rusty", "woods", "chestnut", "striped",
 ];
-/// Registry-path-alphabetical, matching the cat pool.
 pub const CAT_VARIANT_ORDER: &[&str] = &[
     "all_black",
     "black",
@@ -333,7 +333,7 @@ enum AnimationType {
     Villager,
     Witch,
     Wolf,
-    /// Cat and ocelot (ocelots never set the pose inputs).
+    /// Cat and ocelot (ocelots only drive the crouch/sprint inputs).
     Feline,
     Rabbit,
     /// No part animation (slime — size/squish live in the body transform).
@@ -468,7 +468,7 @@ fn mob_definitions() -> Vec<MobDef> {
         "wolf_striped_baby", "wolf_striped_tame_baby", "wolf_striped_angry_baby");
     const WOLF_COLLAR_TEX: &[&[&str]] = tex_table!("wolf" => "wolf_collar");
     const WOLF_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("wolf" => "wolf_collar_baby");
-    // Cat pool follows CAT_VARIANT_ORDER (registry-path-alphabetical).
+    // Cat pool follows CAT_VARIANT_ORDER.
     const CAT_TEX: &[&[&str]] = tex_table!("cat" =>
         "cat_all_black", "cat_black", "cat_british_shorthair", "cat_calico", "cat_jellie",
         "cat_persian", "cat_ragdoll", "cat_red", "cat_siamese", "cat_tabby", "cat_white");
