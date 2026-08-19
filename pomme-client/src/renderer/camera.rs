@@ -467,13 +467,14 @@ impl CameraUniform {
         }
     }
 
+    /// Unfogged camera: both bands at `f32::MAX` like vanilla's empty fog
+    /// buffer (a zero band reads as "everything past 0 is fogged").
     pub fn with_view_proj(view_proj: Mat4) -> Self {
         Self {
             view_proj: view_proj.to_cols_array_2d(),
-            camera_pos: [0.0; 4],
-            fog_color: [0.0; 4],
+            camera_pos: [0.0, 0.0, 0.0, f32::MAX],
+            fog_color: [0.0, 0.0, 0.0, f32::MAX],
             camera_block: [0; 4],
-            // A zero band would read as "everything past 0 is fogged".
             fog_env: [f32::MAX, f32::MAX, 0.0, 0.0],
         }
     }
