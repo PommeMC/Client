@@ -43,14 +43,14 @@ registrygen version="26.2":
 blockgen version="26.2":
     @cargo run -p blockgen -- blocks reference/{{ version }}/generated/reports/blocks.json {{ version }} pomme-client/src/world/block/data/blocks-{{ version }}.json
 
-# JDK 25 bin dir for lightgen; override with `just jdk=<path> lightgen`.
+# JDK 25 bin dir for stategen; override with `just jdk=<path> stategen`.
 jdk := "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"
 
-# Regenerate a version's light-property table by running vanilla's own code
-# (tools/lightgen/LightDump.java) against the reference server jar, then
-# compacting the dump with `blockgen light`. Uses the deobf server jar when
+# Regenerate a version's per-state property table by running vanilla's own code
+# (tools/stategen/StateDump.java) against the reference server jar, then
+# compacting the dump with `blockgen state`. Uses the deobf server jar when
 # one exists (pre-26.x); needs the Corretto JDK for 26.x class files.
-lightgen version="26.2":
+stategen version="26.2":
     #!/usr/bin/env bash
     set -euo pipefail
     v="{{ version }}"
@@ -64,7 +64,7 @@ lightgen version="26.2":
             | xargs unzip -qn "$ref/server.jar" -d "$ref/bundler"
     fi
     libs=$(find "$ref/bundler" -name '*.jar' | tr '\n' ';')
-    mkdir -p tools/lightgen/out
-    "$jdk/javac.exe" --release 21 -d tools/lightgen/out tools/lightgen/LightDump.java
-    "$jdk/java.exe" -cp "$classes;${libs}tools/lightgen/out" LightDump "$v" "$ref/generated/light.json"
-    cargo run -p blockgen -- light "$ref/generated/light.json" pomme-client/src/world/block/data/blocks-"$v".json pomme-client/src/world/block/data/light-"$v".json
+    mkdir -p tools/stategen/out
+    "$jdk/javac.exe" --release 21 -d tools/stategen/out tools/stategen/StateDump.java
+    "$jdk/java.exe" -cp "$classes;${libs}tools/stategen/out" StateDump "$v" "$ref/generated/state.json"
+    cargo run -p blockgen -- state "$ref/generated/state.json" pomme-client/src/world/block/data/blocks-"$v".json pomme-client/src/world/block/data/state-"$v".json

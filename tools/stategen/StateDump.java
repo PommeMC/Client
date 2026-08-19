@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Dumps per-block-state light properties by running vanilla's own code:
+ * Dumps per-block-state properties (the baked light set) by running vanilla's own code:
  * bootstraps the block registry from the server jar on the classpath, then
  * iterates Block.BLOCK_STATE_REGISTRY in state-id order.
  *
@@ -24,16 +24,16 @@ import java.util.Map;
  * that reduces to 2D coverage — exact as long as every shape is 1/16-aligned,
  * which this tool hard-fails on if violated.
  *
- * Usage: java -cp <server-classes-jar>;<bundled-libs...>;. LightDump <version> <out.json>
+ * Usage: java -cp <server-classes-jar>;<bundled-libs...>;. StateDump <version> <out.json>
  */
-public final class LightDump {
+public final class StateDump {
     // Direction.values() order (DOWN, UP, NORTH, SOUTH, WEST, EAST) -> slice axis:
     // Y for down/up, Z for north/south, X for west/east.
     private static final char[] AXIS_BY_ORDINAL = {'Y', 'Y', 'Z', 'Z', 'X', 'X'};
 
     public static void main(String[] args) throws Exception {
         if (args.length != 2) {
-            System.err.println("usage: LightDump <version> <out.json>");
+            System.err.println("usage: StateDump <version> <out.json>");
             System.exit(2);
         }
         String version = args[0];
@@ -230,5 +230,5 @@ public final class LightDump {
         }
     }
 
-    private LightDump() {}
+    private StateDump() {}
 }
