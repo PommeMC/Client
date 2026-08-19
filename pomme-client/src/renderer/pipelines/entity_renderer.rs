@@ -59,6 +59,8 @@ pub struct EntityRenderInfo {
     pub flap_speed: f32,
     /// Enderman screaming state — raises the head.
     pub is_creepy: bool,
+    /// Zombie-family conversion — shakes the whole body.
+    pub is_converting: bool,
     /// Witch drinking. Driven by the using-item metadata flag rather than
     /// vanilla's `isHoldingItem` (main-hand item check) — pomme tracks no
     /// mob equipment; the two only diverge for command-equipped witches.
@@ -101,6 +103,10 @@ struct MobVariant {
     texture_allocation: Allocation,
     texture_set: vk::DescriptorSet,
     overlay_kind: OverlayKind,
+    /// Overlay whose part poses (pivots/rotations/scales) differ from the
+    /// base model's, so its part transforms can't be shared with the base
+    /// (stray/bogged clothing: humanoid ±1.9 legs over skeleton ±2.0).
+    own_pivots: bool,
 }
 
 struct MobEntry {
@@ -285,6 +291,35 @@ struct MobDef {
 }
 
 fn mob_definitions() -> Vec<MobDef> {
+    // One single-fallback texture entry per name under an entity texture dir.
+    macro_rules! tex_table {
+        ($dir:expr => $($name:literal),+ $(,)?) => {
+            &[$(&[concat!("minecraft/textures/entity/", $dir, "/", $name, ".png")]),+]
+        };
+    }
+    // The villager and zombie-villager overlay dirs ship identical
+    // registry-ordered file names; each list is written once here and both
+    // mobs' tables expand from it. Types index by the builtin VillagerKind
+    // registry order, professions by VillagerProfession order minus "none"
+    // (which has no texture), levels by profession level 1-5 minus one.
+    macro_rules! villager_type_table {
+        ($dir:expr) => {
+            tex_table!($dir => "desert", "jungle", "plains", "savanna", "snow", "swamp", "taiga")
+        };
+    }
+    macro_rules! villager_profession_table {
+        ($dir:expr) => {
+            tex_table!($dir => "armorer", "butcher", "cartographer", "cleric", "farmer",
+                "fisherman", "fletcher", "leatherworker", "librarian", "mason", "nitwit",
+                "shepherd", "toolsmith", "weaponsmith")
+        };
+    }
+    macro_rules! villager_level_table {
+        ($dir:expr) => {
+            tex_table!($dir => "stone", "iron", "gold", "emerald", "diamond")
+        };
+    }
+
     const PIG_ADULT_TEX: &[&[&str]] = &[&[
         "minecraft/textures/entity/pig/pig_temperate.png",
         "minecraft/textures/entity/pig/temperate_pig.png",
@@ -318,77 +353,51 @@ fn mob_definitions() -> Vec<MobDef> {
         &["minecraft/textures/entity/chicken/chicken_warm_baby.png"],
         &["minecraft/textures/entity/chicken/chicken_cold_baby.png"],
     ];
-    const SHEEP_ADULT_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep.png"]];
-    const SHEEP_BABY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep_baby.png"]];
-    const SHEEP_WOOL_UNDERCOAT_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/sheep/sheep_wool_undercoat.png"]];
-    const SHEEP_WOOL_TEX: &[&[&str]] = &[&["minecraft/textures/entity/sheep/sheep_wool.png"]];
-    const SHEEP_BABY_WOOL_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/sheep/sheep_wool_baby.png"]];
-    const PLAYER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/player/wide/steve.png"]];
-    const ZOMBIE_TEX: &[&[&str]] = &[&["minecraft/textures/entity/zombie/zombie.png"]];
-    const SKELETON_TEX: &[&[&str]] = &[&["minecraft/textures/entity/skeleton/skeleton.png"]];
-    const CREEPER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/creeper/creeper.png"]];
-    const CREEPER_ARMOR_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/creeper/creeper_armor.png"]];
-    const SPIDER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/spider/spider.png"]];
-    const SPIDER_EYES_TEX: &[&[&str]] = &[&["minecraft/textures/entity/spider/spider_eyes.png"]];
-    const ENDERMAN_TEX: &[&[&str]] = &[&["minecraft/textures/entity/enderman/enderman.png"]];
-    const ENDERMAN_EYES_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/enderman/enderman_eyes.png"]];
-    const SLIME_TEX: &[&[&str]] = &[&["minecraft/textures/entity/slime/slime.png"]];
+    const SHEEP_ADULT_TEX: &[&[&str]] = tex_table!("sheep" => "sheep");
+    const SHEEP_BABY_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_baby");
+    const SHEEP_WOOL_UNDERCOAT_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool_undercoat");
+    const SHEEP_WOOL_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool");
+    const SHEEP_BABY_WOOL_TEX: &[&[&str]] = tex_table!("sheep" => "sheep_wool_baby");
+    const PLAYER_TEX: &[&[&str]] = tex_table!("player/wide" => "steve");
+    const ZOMBIE_TEX: &[&[&str]] = tex_table!("zombie" => "zombie");
+    const ZOMBIE_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "zombie_baby");
+    const HUSK_TEX: &[&[&str]] = tex_table!("zombie" => "husk");
+    const HUSK_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "husk_baby");
+    const DROWNED_TEX: &[&[&str]] = tex_table!("zombie" => "drowned");
+    const DROWNED_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_baby");
+    const DROWNED_OUTER_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_outer_layer");
+    const DROWNED_OUTER_BABY_TEX: &[&[&str]] = tex_table!("zombie" => "drowned_outer_layer_baby");
+    const ZOMBIE_VILLAGER_TEX: &[&[&str]] = tex_table!("zombie_villager" => "zombie_villager");
+    const ZOMBIE_VILLAGER_BABY_TEX: &[&[&str]] =
+        tex_table!("zombie_villager" => "zombie_villager_baby");
+    const ZOMBIE_VILLAGER_TYPE_TEX: &[&[&str]] = villager_type_table!("zombie_villager/type");
+    const ZOMBIE_VILLAGER_BABY_TYPE_TEX: &[&[&str]] = villager_type_table!("zombie_villager/baby");
+    const ZOMBIE_VILLAGER_PROFESSION_TEX: &[&[&str]] =
+        villager_profession_table!("zombie_villager/profession");
+    const ZOMBIE_VILLAGER_LEVEL_TEX: &[&[&str]] =
+        villager_level_table!("zombie_villager/profession_level");
+    const SKELETON_TEX: &[&[&str]] = tex_table!("skeleton" => "skeleton");
+    const STRAY_TEX: &[&[&str]] = tex_table!("skeleton" => "stray");
+    const STRAY_OVERLAY_TEX: &[&[&str]] = tex_table!("skeleton" => "stray_overlay");
+    const BOGGED_TEX: &[&[&str]] = tex_table!("skeleton" => "bogged");
+    const BOGGED_OVERLAY_TEX: &[&[&str]] = tex_table!("skeleton" => "bogged_overlay");
+    const CREEPER_TEX: &[&[&str]] = tex_table!("creeper" => "creeper");
+    const CREEPER_ARMOR_TEX: &[&[&str]] = tex_table!("creeper" => "creeper_armor");
+    const SPIDER_TEX: &[&[&str]] = tex_table!("spider" => "spider");
+    const SPIDER_EYES_TEX: &[&[&str]] = tex_table!("spider" => "spider_eyes");
+    const ENDERMAN_TEX: &[&[&str]] = tex_table!("enderman" => "enderman");
+    const ENDERMAN_EYES_TEX: &[&[&str]] = tex_table!("enderman" => "enderman_eyes");
+    const SLIME_TEX: &[&[&str]] = tex_table!("slime" => "slime");
     const WITCH_TEX: &[&[&str]] = &[&[
         "minecraft/textures/entity/witch/witch.png",
         "minecraft/textures/entity/witch.png",
     ]];
-    const VILLAGER_TEX: &[&[&str]] = &[&["minecraft/textures/entity/villager/villager.png"]];
-    const VILLAGER_BABY_TEX: &[&[&str]] =
-        &[&["minecraft/textures/entity/villager/villager_baby.png"]];
-    // Indexed by the builtin VillagerKind registry order.
-    const VILLAGER_TYPE_TEX: &[&[&str]] = &[
-        &["minecraft/textures/entity/villager/type/desert.png"],
-        &["minecraft/textures/entity/villager/type/jungle.png"],
-        &["minecraft/textures/entity/villager/type/plains.png"],
-        &["minecraft/textures/entity/villager/type/savanna.png"],
-        &["minecraft/textures/entity/villager/type/snow.png"],
-        &["minecraft/textures/entity/villager/type/swamp.png"],
-        &["minecraft/textures/entity/villager/type/taiga.png"],
-    ];
-    const VILLAGER_BABY_TYPE_TEX: &[&[&str]] = &[
-        &["minecraft/textures/entity/villager/baby/desert.png"],
-        &["minecraft/textures/entity/villager/baby/jungle.png"],
-        &["minecraft/textures/entity/villager/baby/plains.png"],
-        &["minecraft/textures/entity/villager/baby/savanna.png"],
-        &["minecraft/textures/entity/villager/baby/snow.png"],
-        &["minecraft/textures/entity/villager/baby/swamp.png"],
-        &["minecraft/textures/entity/villager/baby/taiga.png"],
-    ];
-    // Indexed by VillagerProfession registry order minus one ("none" has no
-    // texture).
-    const VILLAGER_PROFESSION_TEX: &[&[&str]] = &[
-        &["minecraft/textures/entity/villager/profession/armorer.png"],
-        &["minecraft/textures/entity/villager/profession/butcher.png"],
-        &["minecraft/textures/entity/villager/profession/cartographer.png"],
-        &["minecraft/textures/entity/villager/profession/cleric.png"],
-        &["minecraft/textures/entity/villager/profession/farmer.png"],
-        &["minecraft/textures/entity/villager/profession/fisherman.png"],
-        &["minecraft/textures/entity/villager/profession/fletcher.png"],
-        &["minecraft/textures/entity/villager/profession/leatherworker.png"],
-        &["minecraft/textures/entity/villager/profession/librarian.png"],
-        &["minecraft/textures/entity/villager/profession/mason.png"],
-        &["minecraft/textures/entity/villager/profession/nitwit.png"],
-        &["minecraft/textures/entity/villager/profession/shepherd.png"],
-        &["minecraft/textures/entity/villager/profession/toolsmith.png"],
-        &["minecraft/textures/entity/villager/profession/weaponsmith.png"],
-    ];
-    // Indexed by profession level 1-5 minus one.
-    const VILLAGER_LEVEL_TEX: &[&[&str]] = &[
-        &["minecraft/textures/entity/villager/profession_level/stone.png"],
-        &["minecraft/textures/entity/villager/profession_level/iron.png"],
-        &["minecraft/textures/entity/villager/profession_level/gold.png"],
-        &["minecraft/textures/entity/villager/profession_level/emerald.png"],
-        &["minecraft/textures/entity/villager/profession_level/diamond.png"],
-    ];
+    const VILLAGER_TEX: &[&[&str]] = tex_table!("villager" => "villager");
+    const VILLAGER_BABY_TEX: &[&[&str]] = tex_table!("villager" => "villager_baby");
+    const VILLAGER_TYPE_TEX: &[&[&str]] = villager_type_table!("villager/type");
+    const VILLAGER_BABY_TYPE_TEX: &[&[&str]] = villager_type_table!("villager/baby");
+    const VILLAGER_PROFESSION_TEX: &[&[&str]] = villager_profession_table!("villager/profession");
+    const VILLAGER_LEVEL_TEX: &[&[&str]] = villager_level_table!("villager/profession_level");
 
     // Base and baby models, plus opaque overlays (sheep wool), are all Opaque.
     fn opaque(
@@ -402,6 +411,38 @@ fn mob_definitions() -> Vec<MobDef> {
             tex_size,
             overlay_kind: OverlayKind::Opaque,
         }
+    }
+
+    // Cutout layers over a villager-like base skin (vanilla
+    // `VillagerProfessionLayer`, shared by villager and zombie villager):
+    // slot 0 = biome type, slot 1 = biome type on the no-hat model (used when
+    // the profession texture brings its own hat), slot 2 = profession, slot 3
+    // = profession level badge. entity_extras gates slot 0 xor 1 and picks
+    // each slot's texture variant. The `bake` parameter takes `no_hat`.
+    fn villager_like_overlays(
+        bake: fn(bool) -> BakedEntityModel,
+        type_tex: &'static [&'static [&'static str]],
+        profession_tex: &'static [&'static [&'static str]],
+        level_tex: &'static [&'static [&'static str]],
+    ) -> Vec<VariantDef> {
+        // Slots 0/2/3 share one bake of the hatted model.
+        let hatted = bake(false);
+        vec![
+            opaque(hatted.clone(), type_tex, 64),
+            opaque(bake(true), type_tex, 64),
+            opaque(hatted.clone(), profession_tex, 64),
+            opaque(hatted, level_tex, 64),
+        ]
+    }
+
+    fn villager_like_baby_overlays(
+        bake: fn(bool) -> BakedEntityModel,
+        type_tex: &'static [&'static [&'static str]],
+    ) -> Vec<VariantDef> {
+        vec![
+            opaque(bake(false), type_tex, 64),
+            opaque(bake(true), type_tex, 64),
+        ]
     }
 
     vec![
@@ -494,11 +535,71 @@ fn mob_definitions() -> Vec<MobDef> {
             adult: vec![opaque(entity_model::bake_zombie_model(), ZOMBIE_TEX, 64)],
             baby: Some(opaque(
                 entity_model::bake_baby_zombie_model(),
-                ZOMBIE_TEX,
+                ZOMBIE_BABY_TEX,
                 64,
             )),
             adult_overlays: vec![],
             baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Husk,
+            anim: AnimationType::Zombie,
+            adult: vec![opaque(entity_model::bake_husk_model(), HUSK_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_zombie_model(),
+                HUSK_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Drowned,
+            anim: AnimationType::Zombie,
+            adult: vec![opaque(
+                entity_model::bake_drowned_model(0.0),
+                DROWNED_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_zombie_model(),
+                DROWNED_BABY_TEX,
+                64,
+            )),
+            adult_overlays: vec![opaque(
+                entity_model::bake_drowned_model(0.25),
+                DROWNED_OUTER_TEX,
+                64,
+            )],
+            baby_overlays: vec![opaque(
+                entity_model::bake_baby_drowned_outer_model(),
+                DROWNED_OUTER_BABY_TEX,
+                64,
+            )],
+        },
+        MobDef {
+            kind: EntityKind::ZombieVillager,
+            anim: AnimationType::Zombie,
+            adult: vec![opaque(
+                entity_model::bake_zombie_villager_model(false),
+                ZOMBIE_VILLAGER_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_zombie_villager_model(false),
+                ZOMBIE_VILLAGER_BABY_TEX,
+                64,
+            )),
+            adult_overlays: villager_like_overlays(
+                entity_model::bake_zombie_villager_model,
+                ZOMBIE_VILLAGER_TYPE_TEX,
+                ZOMBIE_VILLAGER_PROFESSION_TEX,
+                ZOMBIE_VILLAGER_LEVEL_TEX,
+            ),
+            baby_overlays: villager_like_baby_overlays(
+                entity_model::bake_baby_zombie_villager_model,
+                ZOMBIE_VILLAGER_BABY_TYPE_TEX,
+            ),
         },
         MobDef {
             kind: EntityKind::Skeleton,
@@ -510,6 +611,37 @@ fn mob_definitions() -> Vec<MobDef> {
             )],
             baby: None,
             adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Stray,
+            anim: AnimationType::Skeleton,
+            adult: vec![opaque(entity_model::bake_skeleton_model(), STRAY_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![opaque(
+                entity_model::bake_skeleton_clothing_model(0.25),
+                STRAY_OVERLAY_TEX,
+                64,
+            )],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Bogged,
+            anim: AnimationType::Skeleton,
+            // Variant 0 = mushrooms, 1 = sheared (empty mushroom parts).
+            // TODO: replace with a per-part visibility mask (vanilla
+            // `mushrooms.visible = !isSheared`) instead of a second baked
+            // model; would also drop the cubeless overlay padding.
+            adult: vec![
+                opaque(entity_model::bake_bogged_model(false), BOGGED_TEX, 64),
+                opaque(entity_model::bake_bogged_model(true), BOGGED_TEX, 64),
+            ],
+            baby: None,
+            adult_overlays: vec![opaque(
+                entity_model::bake_bogged_clothing_model(),
+                BOGGED_OVERLAY_TEX,
+                64,
+            )],
             baby_overlays: vec![],
         },
         MobDef {
@@ -540,47 +672,18 @@ fn mob_definitions() -> Vec<MobDef> {
                 VILLAGER_BABY_TEX,
                 64,
             )),
-            // Cutout layers over the base skin (vanilla `VillagerProfessionLayer`):
-            // slot 0 = biome type, slot 1 = biome type on the no-hat model (used
-            // when the profession texture brings its own hat), slot 2 =
-            // profession, slot 3 = profession level badge. entity_extras gates
-            // slot 0 xor 1 and picks each slot's texture variant.
             // TODO: CustomHeadLayer (worn head items) and CrossedArmsItemLayer
             // (held item) need a held-item layer first.
-            adult_overlays: vec![
-                opaque(
-                    entity_model::bake_villager_model(false),
-                    VILLAGER_TYPE_TEX,
-                    64,
-                ),
-                opaque(
-                    entity_model::bake_villager_model(true),
-                    VILLAGER_TYPE_TEX,
-                    64,
-                ),
-                opaque(
-                    entity_model::bake_villager_model(false),
-                    VILLAGER_PROFESSION_TEX,
-                    64,
-                ),
-                opaque(
-                    entity_model::bake_villager_model(false),
-                    VILLAGER_LEVEL_TEX,
-                    64,
-                ),
-            ],
-            baby_overlays: vec![
-                opaque(
-                    entity_model::bake_baby_villager_model(false),
-                    VILLAGER_BABY_TYPE_TEX,
-                    64,
-                ),
-                opaque(
-                    entity_model::bake_baby_villager_model(true),
-                    VILLAGER_BABY_TYPE_TEX,
-                    64,
-                ),
-            ],
+            adult_overlays: villager_like_overlays(
+                entity_model::bake_villager_model,
+                VILLAGER_TYPE_TEX,
+                VILLAGER_PROFESSION_TEX,
+                VILLAGER_LEVEL_TEX,
+            ),
+            baby_overlays: villager_like_baby_overlays(
+                entity_model::bake_baby_villager_model,
+                VILLAGER_BABY_TYPE_TEX,
+            ),
         },
         MobDef {
             kind: EntityKind::Spider,
@@ -755,17 +858,14 @@ impl EntityRenderer {
             let adult_variants: Vec<MobVariant> =
                 def.adult.into_iter().flat_map(&mut build).collect();
             let baby_variants = def.baby.map(&mut build);
-            let adult_overlays: Vec<Vec<MobVariant>> =
+            let mut adult_overlays: Vec<Vec<MobVariant>> =
                 def.adult_overlays.into_iter().map(&mut build).collect();
-            let baby_overlays: Vec<Vec<MobVariant>> =
+            let mut baby_overlays: Vec<Vec<MobVariant>> =
                 def.baby_overlays.into_iter().map(&mut build).collect();
 
-            // Anim part-name indices are computed against the base variant's model and
-            // reused for each overlay draw. Catch mismatched part order at construction
-            // time rather than rendering wrong limbs in production.
-            assert_part_order_matches(&adult_variants, &adult_overlays);
+            link_overlays(&adult_variants, &mut adult_overlays);
             if let Some(baby) = &baby_variants {
-                assert_part_order_matches(baby, &baby_overlays);
+                link_overlays(baby, &mut baby_overlays);
             }
 
             if let Some(n) = expected_variant_count(def.kind) {
@@ -1035,8 +1135,17 @@ impl EntityRenderer {
     /// The translation is anchor-relative, subtracted in f64 (see
     /// `Camera::anchor`).
     fn entity_matrix(info: &EntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
+        let mut body_y_rot_deg = info.body_y_rot_deg;
+        if info.is_converting {
+            // Vanilla `setupRotations` isShaking: a per-tick body-yaw jitter.
+            // The addend is a radians-magnitude value applied to degrees —
+            // vanilla's own unit mixing, ported literally (~±1.26 degrees).
+            // Applied here, after the head-vs-body split, so the head shakes
+            // with the body like vanilla.
+            body_y_rot_deg += (info.age_in_ticks.floor() * 3.25).cos() * std::f32::consts::PI * 0.4;
+        }
         let base = glam::Mat4::from_translation((*info.position - anchor).as_vec3())
-            * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians());
+            * glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
         // body_transform sits before the parts (whose root transforms carry
         // the convention's X flip), matching vanilla's setupRotations order.
         info.body_transform.map_or(base, |m| base * m)
@@ -1074,11 +1183,14 @@ impl EntityRenderer {
                 let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
                 let entity_mat = Self::entity_matrix(info, anchor);
                 let anim = self.compute_anim(entry.anim, &variant.model, info);
+                // Shared with every overlay that isn't `own_pivots`.
+                let part_transforms = variant.model.compute_part_transforms(&anim);
                 vis.push(VisEntity {
                     info,
                     entry,
                     entity_mat,
                     anim,
+                    part_transforms,
                 });
             }
             if vis.is_empty() {
@@ -1340,13 +1452,14 @@ fn create_camera_sets(
     (sets, buffers, allocations)
 }
 
-/// A culled, drawable entity with its world transform and animation
-/// precomputed.
+/// A culled, drawable entity with its world transform, animation, and the
+/// base model's per-part matrices precomputed.
 struct VisEntity<'a> {
     info: &'a EntityRenderInfo,
     entry: &'a MobEntry,
     entity_mat: glam::Mat4,
     anim: entity_model::PartAnim,
+    part_transforms: Vec<glam::Mat4>,
 }
 
 /// One instanced (variant, part) draw: a run of `instance_count` instances from
@@ -1389,18 +1502,23 @@ impl<'a> VariantGroups<'a> {
     fn emit(&self, vis: &[VisEntity], instances: &mut Vec<EntityInstance>) -> Vec<DrawRecord> {
         let mut records = Vec::new();
         for (variant, texture_set, members) in &self.groups {
-            // Part transforms differ per entity (animation), so compute per member.
-            let pts: Vec<Vec<glam::Mat4>> = members
-                .iter()
-                .map(|(vi, ..)| variant.model.compute_part_transforms(&vis[*vi].anim))
-                .collect();
+            let own: Option<Vec<Vec<glam::Mat4>>> = variant.own_pivots.then(|| {
+                members
+                    .iter()
+                    .map(|(vi, ..)| variant.model.compute_part_transforms(&vis[*vi].anim))
+                    .collect()
+            });
             for (p, (start, part_count)) in variant.model.part_ranges.iter().enumerate() {
                 if *part_count == 0 {
                     continue;
                 }
                 let first_instance = instances.len() as u32;
                 for (k, (vi, tint, overlay, uv)) in members.iter().enumerate() {
-                    let model = vis[*vi].entity_mat * pts[k][p];
+                    let part = match &own {
+                        Some(own) => own[k][p],
+                        None => vis[*vi].part_transforms[p],
+                    };
+                    let model = vis[*vi].entity_mat * part;
                     instances.push(EntityInstance {
                         model: model.to_cols_array_2d(),
                         tint: *tint,
@@ -1468,21 +1586,36 @@ const ANIM_MARGIN: f32 = 0.5;
 /// Vanilla (width, height) hitbox per supported mob, scaled for babies; used to
 /// build the cull bounding sphere.
 fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
+    // Vanilla babies declare explicit BABY_DIMENSIONS rather than a scale;
+    // list kinds whose constant isn't the half-scale the fallback below
+    // assumes. Every new baby mob must be checked against its class.
+    if is_baby {
+        match kind {
+            EntityKind::Chicken => return (0.3, 0.4),
+            EntityKind::Zombie
+            | EntityKind::Husk
+            | EntityKind::Drowned
+            | EntityKind::ZombieVillager
+            | EntityKind::Villager => return (0.49, 0.98),
+            _ => {}
+        }
+    }
     let (w, h) = match kind {
         EntityKind::Pig => (0.9, 0.9),
         EntityKind::Cow => (0.9, 1.4),
-        // Vanilla Chicken.BABY_DIMENSIONS is an explicit 0.3x0.4, not half scale.
-        EntityKind::Chicken if is_baby => return (0.3, 0.4),
         EntityKind::Chicken => (0.4, 0.7),
         EntityKind::Sheep => (0.9, 1.3),
-        EntityKind::Zombie => (0.6, 1.95),
-        EntityKind::Skeleton => (0.6, 1.99),
+        EntityKind::Zombie
+        | EntityKind::Husk
+        | EntityKind::Drowned
+        | EntityKind::ZombieVillager
+        | EntityKind::Villager
+        | EntityKind::Witch => (0.6, 1.95),
+        EntityKind::Skeleton | EntityKind::Stray | EntityKind::Bogged => (0.6, 1.99),
         EntityKind::Creeper => (0.6, 1.7),
         EntityKind::Spider => (1.4, 0.9),
-        EntityKind::Villager => (0.6, 1.95),
         EntityKind::Enderman => (0.6, 2.9),
         EntityKind::Slime => (0.52, 0.52),
-        EntityKind::Witch => (0.6, 1.95),
         EntityKind::Player => (0.6, 1.8),
         _ => (1.0, 1.0),
     };
@@ -1527,7 +1660,12 @@ fn entity_visible(
     true
 }
 
-fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) {
+/// Anim part-name indices are computed against the base variant's model and
+/// reused for each overlay draw, so overlay part order must match the base
+/// (asserted at construction rather than rendering wrong limbs). Overlays
+/// whose part poses also match share the base's transforms; the rest are
+/// flagged `own_pivots` and get their own.
+fn link_overlays(base: &[MobVariant], overlays: &mut [Vec<MobVariant>]) {
     let Some(base_first) = base.first() else {
         return;
     };
@@ -1537,7 +1675,7 @@ fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) 
         .iter()
         .map(|p| p.name.as_str())
         .collect();
-    for overlay in overlays.iter().flatten() {
+    for overlay in overlays.iter_mut().flatten() {
         let overlay_names: Vec<&str> = overlay
             .model
             .parts
@@ -1548,9 +1686,13 @@ fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) 
             base_names, overlay_names,
             "overlay part order must match base; anim indices are shared across both"
         );
+        overlay.own_pivots = !base_first.model.same_part_poses(&overlay.model);
     }
 }
 
+// TODO: share one vertex buffer + model per distinct mesh across texture
+// variants (a zombie villager's 33 texture variants clone 2 meshes), and
+// batch the per-texture one-time upload submits into one fence wait.
 #[allow(clippy::too_many_arguments)]
 fn build_variants(
     device: &vk::Device,
@@ -1635,6 +1777,7 @@ fn build_variants(
                 texture_allocation,
                 texture_set,
                 overlay_kind,
+                own_pivots: false,
             }
         })
         .collect()

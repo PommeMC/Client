@@ -14,13 +14,35 @@ use crate::physics::collision::resolve_collision;
 use crate::world::block::{FluidKind, fluid};
 use crate::world::chunk::ChunkStore;
 
-/// Kind-gated boolean mob states; each flag belongs to one mob kind and
-/// [`EntityStore::set_mob_flag`] drops writes for a mismatched entity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MobFlag {
-    CreeperPowered,
-    EndermanCreepy,
-    WitchDrinking,
+/// A scalar synched-entity-data value, forwarded raw from the wire;
+/// [`EntityStore::apply_entity_data`] gives it meaning per (kind, index).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MetaValue {
+    Bool(bool),
+    Int(i32),
+    Byte(u8),
+    Float(f32),
+    Long(i64),
+}
+
+/// Kinds whose entity-data index 16 is the baby flag: `AgeableMob`
+/// descendants plus the zombie family (which defines its own baby flag at
+/// the same index). NOT baby at 16: Bogged (sheared), Skeleton (stray
+/// conversion), Witch (Raider celebrating), fish (from-bucket).
+fn is_baby_kind(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Pig
+            | EntityKind::Cow
+            | EntityKind::Sheep
+            | EntityKind::Chicken
+            | EntityKind::Villager
+            | EntityKind::Slime
+            | EntityKind::Zombie
+            | EntityKind::Husk
+            | EntityKind::Drowned
+            | EntityKind::ZombieVillager
+    )
 }
 
 const INTERPOLATION_STEPS: i32 = 3;
@@ -48,9 +70,11 @@ pub struct LivingEntity {
     pub is_crouching: bool,
     pub on_ground: bool,
     pub wool_color: Option<u8>,
+    /// Sheep wool shorn / bogged mushrooms shorn.
     pub is_sheared: bool,
-    /// Registry/wire variant slot; meaning is per-kind (pool index for
-    /// cow/chicken). Normalized in `EntityStore::set_variant`.
+    /// Registry/wire variant slot; meaning is per-kind. Holder-backed values
+    /// are pre-resolved to pool indices by the net handler; raw-int kinds are
+    /// normalized in `EntityStore::apply_entity_data`.
     pub variant: u32,
     /// Chicken wing-flap state (vanilla `Chicken.aiStep`): `flap` is the
     /// unbounded wing-cycle phase, `flap_speed` the 0..1 amplitude.
@@ -66,6 +90,8 @@ pub struct LivingEntity {
     /// Enderman screaming flag — raises the head and jitters the render
     /// position.
     pub is_creepy: bool,
+    /// Zombie-family conversion (drowning / villager cure) — body-yaw shake.
+    pub is_converting: bool,
     /// Witch drinking flag — swings the nose down toward the potion.
     pub witch_drinking: bool,
     pub villager_kind: VillagerKind,
@@ -138,6 +164,7 @@ impl LivingEntity {
             prev_squish: 0.0,
             slime_size: 1,
             is_creepy: false,
+            is_converting: false,
             witch_drinking: false,
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
@@ -619,24 +646,52 @@ impl EntityStore {
         }
     }
 
-    pub fn set_baby(&mut self, id: i32, is_baby: bool) {
-        if let Some(entity) = self.living.get_mut(&id) {
-            entity.is_baby = is_baby;
+    /// Resolves a raw synched-entity-data scalar per (kind, index), the
+    /// direct analogue of vanilla's per-class `onSyncedDataUpdated`. Index
+    /// arithmetic follows the registration chain: `Entity` 0-7,
+    /// `LivingEntity` 8-14, `Mob` 15, `AgeableMob` 16 baby + 17 age-locked,
+    /// first subclass field 18. Where an index moved between supported
+    /// versions both spots are accepted (the other index carries an
+    /// incompatible type or kind on each version).
+    pub fn apply_entity_data(&mut self, id: i32, index: u8, value: MetaValue) {
+        use MetaValue::{Bool, Byte, Int};
+        let Some(entity) = self.living.get_mut(&id) else {
+            return;
+        };
+        match (entity.entity_type, index, value) {
+            // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
+            // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
+            (k, 15, Byte(f)) if k != EntityKind::Player => entity.aggressive = f & 0x04 != 0,
+            (k, 16, Bool(b)) if is_baby_kind(k) => entity.is_baby = b,
+            // Skeleton: powder-snow stray conversion; drives the vanilla
+            // `isShaking` body jitter.
+            (EntityKind::Skeleton, 16, Bool(b)) => entity.is_converting = b,
+            (EntityKind::Bogged, 16, Bool(b)) => entity.is_sheared = b,
+            // Slime size: 16 on 1.21.9-26.1.x, 18 since Slime joined
+            // AgeableMob in 26.2.
+            (EntityKind::Slime, 16 | 18, Int(s)) => entity.slime_size = s.clamp(1, 127) as u8,
+            // Sheep wool byte (low nibble = DyeColor, bit 0x10 = sheared):
+            // 17 on 1.21.9-1.21.11, 18 since 26.1 added AgeableMob's
+            // age-locked flag at 17.
+            (EntityKind::Sheep, 17 | 18, Byte(w)) => {
+                entity.wool_color = Some(w & 0x0F);
+                entity.is_sheared = w & 0x10 != 0;
+            }
+            (EntityKind::Creeper, 17, Bool(b)) => entity.powered = b,
+            (EntityKind::Enderman, 17, Bool(b)) => entity.is_creepy = b,
+            (EntityKind::Witch, 17, Bool(b)) => entity.witch_drinking = b,
+            // Zombie-family underwater conversion / zombie villager curing.
+            (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b))
+            | (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
+            // Same 17 -> 18 shift as the sheep.
+            (EntityKind::Villager, 17 | 18, Int(c)) => entity.unhappy_counter = c,
+            _ => {}
         }
     }
 
     pub fn set_crouching(&mut self, id: i32, is_crouching: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.is_crouching = is_crouching;
-        }
-    }
-
-    pub fn set_sheep_wool(&mut self, id: i32, color: u8, sheared: bool) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Sheep
-        {
-            entity.wool_color = Some(color);
-            entity.is_sheared = sheared;
         }
     }
 
@@ -651,29 +706,6 @@ impl EntityStore {
         }
     }
 
-    /// Applies a [`MobFlag`] write, dropping it when the entity isn't the
-    /// flag's mob (metadata indices are overloaded across kinds, so the net
-    /// handler emits every candidate flag for an ambiguous boolean).
-    pub fn set_mob_flag(&mut self, id: i32, flag: MobFlag, value: bool) {
-        let Some(entity) = self.living.get_mut(&id) else {
-            return;
-        };
-        match (flag, entity.entity_type) {
-            (MobFlag::CreeperPowered, EntityKind::Creeper) => entity.powered = value,
-            (MobFlag::EndermanCreepy, EntityKind::Enderman) => entity.is_creepy = value,
-            (MobFlag::WitchDrinking, EntityKind::Witch) => entity.witch_drinking = value,
-            _ => {}
-        }
-    }
-
-    pub fn set_slime_size(&mut self, id: i32, size: i32) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Slime
-        {
-            entity.slime_size = size.clamp(1, 127) as u8;
-        }
-    }
-
     pub fn set_villager_data(
         &mut self,
         id: i32,
@@ -682,19 +714,14 @@ impl EntityStore {
         level: u32,
     ) {
         if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Villager
+            && matches!(
+                entity.entity_type,
+                EntityKind::Villager | EntityKind::ZombieVillager
+            )
         {
             entity.villager_kind = kind;
             entity.villager_profession = profession;
             entity.villager_level = level;
-        }
-    }
-
-    pub fn set_villager_unhappy(&mut self, id: i32, counter: i32) {
-        if let Some(entity) = self.living.get_mut(&id)
-            && entity.entity_type == EntityKind::Villager
-        {
-            entity.unhappy_counter = counter;
         }
     }
 
@@ -717,12 +744,6 @@ impl EntityStore {
     pub fn set_custom_name(&mut self, id: i32, name: Option<String>) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.custom_name = name;
-        }
-    }
-
-    pub fn set_aggressive(&mut self, id: i32, aggressive: bool) {
-        if let Some(entity) = self.living.get_mut(&id) {
-            entity.aggressive = aggressive;
         }
     }
 
@@ -846,5 +867,10 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
             | EntityKind::Enderman
             | EntityKind::Slime
             | EntityKind::Witch
+            | EntityKind::Husk
+            | EntityKind::Drowned
+            | EntityKind::ZombieVillager
+            | EntityKind::Stray
+            | EntityKind::Bogged
     )
 }

@@ -1085,14 +1085,11 @@ impl AppCore {
                         mesh.z_size,
                     );
                 }
-                NetworkEvent::EntityBabyFlag { id, is_baby } => {
-                    game.entity_store.set_baby(id, is_baby);
+                NetworkEvent::EntityData { id, index, value } => {
+                    game.entity_store.apply_entity_data(id, index, value);
                 }
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
-                }
-                NetworkEvent::SheepWoolData { id, color, sheared } => {
-                    game.entity_store.set_sheep_wool(id, color, sheared);
                 }
                 NetworkEvent::SheepEatStart { id } => {
                     game.entity_store.start_sheep_eat(id);
@@ -1115,12 +1112,6 @@ impl AppCore {
                 NetworkEvent::EntityVariant { id, kind, variant } => {
                     game.entity_store.set_variant(id, kind, variant);
                 }
-                NetworkEvent::MobFlag { id, flag, value } => {
-                    game.entity_store.set_mob_flag(id, flag, value);
-                }
-                NetworkEvent::SlimeSize { id, size } => {
-                    game.entity_store.set_slime_size(id, size);
-                }
                 NetworkEvent::VillagerData {
                     id,
                     kind,
@@ -1130,14 +1121,8 @@ impl AppCore {
                     game.entity_store
                         .set_villager_data(id, kind, profession, level);
                 }
-                NetworkEvent::VillagerUnhappy { id, counter } => {
-                    game.entity_store.set_villager_unhappy(id, counter);
-                }
                 NetworkEvent::EntityCustomName { id, name } => {
                     game.entity_store.set_custom_name(id, name);
-                }
-                NetworkEvent::EntityAggressive { id, aggressive } => {
-                    game.entity_store.set_aggressive(id, aggressive);
                 }
                 NetworkEvent::EntitySwing { id } => {
                     game.entity_store.start_swing(id);

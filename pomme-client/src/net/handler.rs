@@ -8,7 +8,7 @@ use crossbeam_channel::Sender;
 use super::NetworkEvent;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
-use crate::entity::MobFlag;
+use crate::entity::MetaValue;
 use crate::entity::components::Position;
 use crate::renderer::pipelines::entity_renderer::{CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER};
 use crate::ui::text::format_text_spans;
@@ -455,67 +455,34 @@ pub fn handle_game_packet(
                         is_crouching: matches!(pose, azalea_entity::Pose::Crouching),
                     });
                 }
-                if item.index == 16
-                    && let azalea_entity::EntityDataValue::Boolean(is_baby) = &item.value
-                {
-                    let _ = event_tx.try_send(NetworkEvent::EntityBabyFlag {
+                // Scalar values are forwarded raw; the store resolves their
+                // meaning per (kind, index) like vanilla `onSyncedDataUpdated`
+                // (`EntityStore::apply_entity_data`).
+                let scalar = match &item.value {
+                    azalea_entity::EntityDataValue::Boolean(v) => Some(MetaValue::Bool(*v)),
+                    azalea_entity::EntityDataValue::Int(v) => Some(MetaValue::Int(*v)),
+                    azalea_entity::EntityDataValue::Byte(v) => Some(MetaValue::Byte(*v)),
+                    azalea_entity::EntityDataValue::Float(v) => Some(MetaValue::Float(*v)),
+                    azalea_entity::EntityDataValue::Long(v) => Some(MetaValue::Long(*v)),
+                    _ => None,
+                };
+                if let Some(value) = scalar {
+                    let _ = event_tx.try_send(NetworkEvent::EntityData {
                         id: p.id.0,
-                        is_baby: *is_baby,
+                        index: item.index,
+                        value,
                     });
                 }
-                // Index 16 (Int) = player score / slime size (Slime's
-                // DATA_ID_SIZE sits at 16 on 1.21.9-26.1.x; 26.2 moved it to
-                // 18 when Slime gained AgeableMob's fields). Emit both;
-                // consumers filter by entity type.
-                if item.index == 16
+                // Index 18 (Int) on players = score (Avatar holds 15/16 on
+                // every supported version). Kind-blind; the consumer applies
+                // it only to the local player.
+                if item.index == 18
                     && let azalea_entity::EntityDataValue::Int(score) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::PlayerScore {
                         entity_id: p.id.0,
                         score: *score,
                     });
-                    let _ = event_tx.try_send(NetworkEvent::SlimeSize {
-                        id: p.id.0,
-                        size: *score,
-                    });
-                }
-                // Index 15 = mob flags byte (AbstractInsentient): bit 0x04 = aggressive.
-                if item.index == 15
-                    && let azalea_entity::EntityDataValue::Byte(flags) = &item.value
-                {
-                    let _ = event_tx.try_send(NetworkEvent::EntityAggressive {
-                        id: p.id.0,
-                        aggressive: (*flags & 0x04) != 0,
-                    });
-                }
-                // Index 17 = sheep wool/sheared byte (low nibble = DyeColor, bit 4 = sheared).
-                // Emit unconditionally; consumer filters by entity type.
-                if item.index == 17
-                    && let azalea_entity::EntityDataValue::Byte(packed) = &item.value
-                {
-                    let _ = event_tx.try_send(NetworkEvent::SheepWoolData {
-                        id: p.id.0,
-                        color: *packed & 0x0F,
-                        sheared: (*packed & 0x10) != 0,
-                    });
-                }
-                // Index 17 (Boolean) = creeper powered / enderman creepy / witch
-                // drinking. Emit every candidate; the store applies only the
-                // flag matching the entity's kind.
-                if item.index == 17
-                    && let azalea_entity::EntityDataValue::Boolean(flag) = &item.value
-                {
-                    for f in [
-                        MobFlag::CreeperPowered,
-                        MobFlag::EndermanCreepy,
-                        MobFlag::WitchDrinking,
-                    ] {
-                        let _ = event_tx.try_send(NetworkEvent::MobFlag {
-                            id: p.id.0,
-                            flag: f,
-                            value: *flag,
-                        });
-                    }
                 }
                 // Index 2 = custom name (Optional<Component>); needed for jeb_ sheep detection.
                 if item.index == 2
@@ -528,42 +495,27 @@ pub fn handle_game_packet(
                 if item.index == 18
                     && let azalea_entity::EntityDataValue::CowVariant(variant) = &item.value
                 {
-                    use azalea_registry::DataRegistry;
                     let _ = event_tx.try_send(variant_event(
                         registry_holder,
                         p.id.0,
                         EntityKind::Cow,
-                        variant.protocol_id(),
+                        variant,
                     ));
                 }
                 // Index 18 on chickens = ChickenVariant Holder.
                 if item.index == 18
                     && let azalea_entity::EntityDataValue::ChickenVariant(variant) = &item.value
                 {
-                    use azalea_registry::DataRegistry;
                     let _ = event_tx.try_send(variant_event(
                         registry_holder,
                         p.id.0,
                         EntityKind::Chicken,
-                        variant.protocol_id(),
+                        variant,
                     ));
                 }
-                // Index 18 (Int) = villager unhappy counter / slime size. Emit
-                // both; consumers filter by entity type.
-                if item.index == 18
-                    && let azalea_entity::EntityDataValue::Int(value) = &item.value
-                {
-                    let _ = event_tx.try_send(NetworkEvent::VillagerUnhappy {
-                        id: p.id.0,
-                        counter: *value,
-                    });
-                    let _ = event_tx.try_send(NetworkEvent::SlimeSize {
-                        id: p.id.0,
-                        size: *value,
-                    });
-                }
-                // Index 19 on villagers = VillagerData (type/profession/level).
-                if item.index == 19
+                // VillagerData (type/profession/level): villagers at 19 (18
+                // on 1.21.9-1.21.11), zombie villagers at 20.
+                if (18..=20).contains(&item.index)
                     && let azalea_entity::EntityDataValue::VillagerData(data) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::VillagerData {
@@ -771,12 +723,12 @@ fn variant_event(
     registry_holder: &RegistryHolder,
     id: i32,
     kind: EntityKind,
-    protocol_id: u32,
+    holder: &impl azalea_registry::DataRegistry,
 ) -> NetworkEvent {
     NetworkEvent::EntityVariant {
         id,
         kind,
-        variant: variant_index(registry_holder, kind, protocol_id),
+        variant: variant_index(registry_holder, kind, holder.protocol_id()),
     }
 }
 

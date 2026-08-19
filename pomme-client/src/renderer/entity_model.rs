@@ -39,6 +39,16 @@ fn quadruped_legs(
     ]
 }
 
+/// Index of the named part, panicking at bake time if the mesh changed
+/// shape — positional indexing into a shared parts builder goes stale
+/// silently.
+fn part_index(parts: &[EntityPart], name: &str) -> usize {
+    parts
+        .iter()
+        .position(|p| p.name == name)
+        .unwrap_or_else(|| panic!("mesh has a {name} part"))
+}
+
 /// Mirror a cube's geometry across x=0 WITHOUT flipping UVs (e.g. chicken
 /// wings and legs share one un-mirrored texture — vanilla quirk). Pair with
 /// `mirror: true` where vanilla's `.mirror()` UV flip is also wanted.
@@ -114,6 +124,21 @@ impl BakedEntityModel {
         self
     }
 
+    /// True when every input to `compute_part_transforms` other than the anim
+    /// (part order, pivots, rest rotations, parents, scales, convention)
+    /// matches `other`'s, so the two models can share one transform set.
+    pub fn same_part_poses(&self, other: &Self) -> bool {
+        self.convention == other.convention
+            && self.part_scales == other.part_scales
+            && self.parts.len() == other.parts.len()
+            && self.parts.iter().zip(&other.parts).all(|(a, b)| {
+                a.name == b.name
+                    && a.offset == b.offset
+                    && a.default_rotation == b.default_rotation
+                    && a.parent == b.parent
+            })
+    }
+
     pub fn compute_part_transforms(&self, anim: &PartAnim) -> Vec<Mat4> {
         let mut transforms = Vec::with_capacity(self.parts.len());
 
@@ -131,6 +156,12 @@ impl BakedEntityModel {
                     extra_translation = t;
                     break;
                 }
+            }
+            // Scaled roots (`bake_scaled`) pre-bake `offset * factor`, so an
+            // anim translation must scale too; children inherit the scale
+            // through the parent matrix instead. No-op at the default 1.0.
+            if part.parent.is_none() {
+                extra_translation *= self.part_scales.get(i).copied().unwrap_or(1.0);
             }
 
             let pivot = part.offset + extra_translation;
@@ -561,31 +592,255 @@ pub fn bake_zombie_model() -> BakedEntityModel {
     bake_model(zombie_parts(), 64, 64)
 }
 
-/// Baby zombie: adult mesh transformed per vanilla `BabyModelTransform` — head
-/// scales 0.75, body/limbs 0.5, each pivot shifted so the feet stay grounded.
-/// Per-part scaling is geometry-only, so UVs are untouched.
-pub fn bake_baby_zombie_model() -> BakedEntityModel {
-    const HEAD_SCALE: f32 = 0.75;
-    const BODY_SCALE: f32 = 0.5;
-    let mut parts = zombie_parts();
-    let mut scales = Vec::with_capacity(parts.len());
-    for part in &mut parts {
-        let (scale, lift) = if part.name == "head" {
-            (HEAD_SCALE, 16.0)
-        } else {
-            (BODY_SCALE, 24.0)
-        };
-        part.offset = (part.offset + Vec3::new(0.0, lift, 0.0)) * scale;
-        scales.push(scale);
+/// Vanilla `CubeDeformation` inflate applied mesh-wide (vanilla rebuilds
+/// layer meshes at `createMesh(g)`): every cube grows by `g` on top of its
+/// own deformation.
+fn inflate(parts: &mut [EntityPart], g: f32) {
+    for part in parts {
+        for cube in &mut part.cubes {
+            cube.deformation += g;
+        }
     }
-    let mut model = bake_model(parts, 64, 64);
-    model.part_scales = scales;
-    model
+}
+
+/// Vanilla `BabyZombieModel.createBodyLayer(g)`: a dedicated 64x64 baby mesh
+/// with its own UVs, not a scaled adult. `g` inflates everything but the
+/// head, whose second cube is a fixed 0.25 overlay.
+fn baby_zombie_parts(g: f32) -> Vec<EntityPart> {
+    let limb = |name: &str, pivot: Vec3, uv: (u32, u32), origin_y: f32, h: f32| {
+        vpart(
+            name,
+            None,
+            pivot,
+            vec![ModelCube {
+                deformation: g,
+                ..vbox(uv, (-1.0, origin_y, -1.0), (2.0, h, 2.0))
+            }],
+        )
+    };
+    vec![
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 17.5, 0.0),
+            vec![ModelCube {
+                deformation: g,
+                ..vbox((16, 16), (-2.0, -2.5, -1.0), (4.0, 5.0, 2.0))
+            }],
+        ),
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, 15.25, 0.0),
+            vec![
+                vbox((3, 3), (-3.0, -6.25, -3.0), (6.0, 6.0, 6.0)),
+                ModelCube {
+                    deformation: 0.25,
+                    ..vbox((35, 3), (-3.0, -6.15, -3.0), (6.0, 6.0, 6.0))
+                },
+            ],
+        ),
+        limb("right_arm", Vec3::new(-3.0, 15.5, 0.0), (36, 16), -0.5, 5.0),
+        limb("left_arm", Vec3::new(3.0, 15.5, 0.0), (28, 16), -0.5, 5.0),
+        limb("right_leg", Vec3::new(-1.0, 20.0, 0.0), (8, 16), 0.0, 4.0),
+        limb("left_leg", Vec3::new(1.0, 20.0, 0.0), (0, 16), 0.0, 4.0),
+    ]
+}
+
+pub fn bake_baby_zombie_model() -> BakedEntityModel {
+    bake_model(baby_zombie_parts(0.0), 64, 64)
+}
+
+/// Husk: the zombie mesh under vanilla's `MeshTransformer.scaling(1.0625)`
+/// (`ModelLayers.HUSK`). The baby husk is NOT scaled.
+pub fn bake_husk_model() -> BakedEntityModel {
+    bake_scaled(zombie_parts(), 1.0625, 64)
+}
+
+/// Vanilla `DrownedModel.createBodyLayer(g)`: the zombie mesh with the left
+/// arm and leg given their own UV regions instead of mirrored ones. `g` 0.25
+/// is the clothing layer.
+// TODO: swim pose and body pitch (`DrownedModel.setupAnim` swimAmount path)
+// once a swim_amount ramp from the pose metadata exists.
+pub fn bake_drowned_model(g: f32) -> BakedEntityModel {
+    let mut parts = zombie_parts();
+    // Vanilla gives the drowned's left limbs their own UV regions.
+    let left_arm = part_index(&parts, "left_arm");
+    parts[left_arm].cubes = vec![vbox((32, 48), (-1.0, -2.0, -2.0), (4.0, 12.0, 4.0))];
+    let left_leg = part_index(&parts, "left_leg");
+    parts[left_leg].cubes = vec![vbox((16, 48), (-2.0, 0.0, -2.0), (4.0, 12.0, 4.0))];
+    inflate(&mut parts, g);
+    bake_model(parts, 64, 64)
+}
+
+/// Vanilla `BabyDrownedModel` delegates to `BabyZombieModel` — zombie UVs,
+/// not the drowned left-limb remap.
+pub fn bake_baby_drowned_outer_model() -> BakedEntityModel {
+    bake_model(baby_zombie_parts(0.25), 64, 64)
+}
+
+/// Vanilla `ZombieVillagerModel`: villager-shaped 10-tall head (the nose is a
+/// cube inside the head part) and jacketed body on zombie-animated limbs,
+/// 64x64 sheet. NOT villager-scaled (`LayerDefinitions` applies no
+/// `villagerLikeScale` here).
+fn zombie_villager_parts() -> Vec<EntityPart> {
+    vec![
+        vpart(
+            "head",
+            None,
+            Vec3::ZERO,
+            vec![
+                vbox((0, 0), (-4.0, -10.0, -4.0), (8.0, 10.0, 8.0)),
+                // Nose.
+                vbox((24, 0), (-1.0, -3.0, -6.0), (2.0, 4.0, 2.0)),
+            ],
+        ),
+        vpart(
+            "hat",
+            Some(0),
+            Vec3::ZERO,
+            vec![ModelCube {
+                deformation: 0.5,
+                ..vbox((32, 0), (-4.0, -10.0, -4.0), (8.0, 10.0, 8.0))
+            }],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(-std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+            ..vpart(
+                "hat_rim",
+                Some(1),
+                Vec3::ZERO,
+                vec![vbox((30, 47), (-8.0, -8.0, -6.0), (16.0, 16.0, 1.0))],
+            )
+        },
+        vpart(
+            "body",
+            None,
+            Vec3::ZERO,
+            vec![
+                vbox((16, 20), (-4.0, 0.0, -3.0), (8.0, 12.0, 6.0)),
+                // Jacket.
+                ModelCube {
+                    deformation: 0.05,
+                    ..vbox((0, 38), (-4.0, 0.0, -3.0), (8.0, 20.0, 6.0))
+                },
+            ],
+        ),
+        vpart(
+            "right_arm",
+            None,
+            Vec3::new(-5.0, 2.0, 0.0),
+            vec![vbox((44, 22), (-3.0, -2.0, -2.0), (4.0, 12.0, 4.0))],
+        ),
+        vpart(
+            "left_arm",
+            None,
+            Vec3::new(5.0, 2.0, 0.0),
+            vec![ModelCube {
+                mirror: true,
+                ..vbox((44, 22), (-1.0, -2.0, -2.0), (4.0, 12.0, 4.0))
+            }],
+        ),
+        vpart(
+            "right_leg",
+            None,
+            Vec3::new(-2.0, 12.0, 0.0),
+            vec![vbox((0, 22), (-2.0, 0.0, -2.0), (4.0, 12.0, 4.0))],
+        ),
+        vpart(
+            "left_leg",
+            None,
+            Vec3::new(2.0, 12.0, 0.0),
+            vec![ModelCube {
+                mirror: true,
+                ..vbox((0, 22), (-2.0, 0.0, -2.0), (4.0, 12.0, 4.0))
+            }],
+        ),
+    ]
+}
+
+pub fn bake_zombie_villager_model(no_hat: bool) -> BakedEntityModel {
+    let mut parts = zombie_villager_parts();
+    if no_hat {
+        clear_head_subtree(&mut parts);
+    }
+    bake_model(parts, 64, 64)
+}
+
+/// Vanilla `BabyZombieVillagerModel`: hand-authored 64x64 baby mesh with real
+/// arm/leg parts (humanoid-animated, unlike the crossed-arm baby villager).
+/// The hat_rim hangs off the head, not the hat.
+fn baby_zombie_villager_parts() -> Vec<EntityPart> {
+    let limb = |name: &str, pivot: Vec3, uv: (u32, u32), h: f32| {
+        vpart(
+            name,
+            None,
+            pivot,
+            vec![vbox(uv, (-1.0, -0.5, -1.0), (2.0, h, 2.0))],
+        )
+    };
+    let mut parts = vec![
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 18.75, 0.0),
+            vec![
+                vbox((0, 15), (-2.0, -2.75, -1.5), (4.0, 5.0, 3.0)),
+                ModelCube {
+                    deformation: 0.1,
+                    ..vbox((16, 22), (-2.0, -2.75, -1.5), (4.0, 6.0, 3.0))
+                },
+            ],
+        ),
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, 16.0, 0.0),
+            vec![vbox((0, 0), (-4.0, -8.0, -3.5), (8.0, 8.0, 7.0))],
+        ),
+    ];
+    let head = Some(part_index(&parts, "head"));
+    parts.extend([
+        vpart(
+            "hat",
+            head,
+            Vec3::new(0.0, -4.0, 0.0),
+            vec![ModelCube {
+                deformation: 0.3,
+                ..vbox((0, 31), (-4.0, -4.0, -3.5), (8.0, 8.0, 7.0))
+            }],
+        ),
+        vpart(
+            "hat_rim",
+            head,
+            Vec3::new(0.0, -4.5, 0.0),
+            vec![vbox((0, 46), (-7.0, -0.5, -6.0), (14.0, 1.0, 12.0))],
+        ),
+        vpart(
+            "nose",
+            head,
+            Vec3::new(0.0, -1.0, -4.0),
+            vec![vbox((23, 0), (-1.0, -1.0, -0.5), (2.0, 2.0, 1.0))],
+        ),
+        limb("right_arm", Vec3::new(-3.0, 15.5, 0.0), (24, 15), 5.0),
+        limb("left_arm", Vec3::new(3.0, 15.5, 0.0), (16, 15), 5.0),
+        limb("right_leg", Vec3::new(-1.0, 21.5, 0.0), (8, 23), 3.0),
+        limb("left_leg", Vec3::new(1.0, 21.5, 0.0), (0, 23), 3.0),
+    ]);
+    parts
+}
+
+pub fn bake_baby_zombie_villager_model(no_hat: bool) -> BakedEntityModel {
+    let mut parts = baby_zombie_villager_parts();
+    if no_hat {
+        clear_head_subtree(&mut parts);
+    }
+    bake_model(parts, 64, 64)
 }
 
 /// Skeleton: humanoid layout with thin 2×12×2 limbs, 64×32 sheet
 /// (`SkeletonModel.createDefaultSkeletonMesh`).
-pub fn bake_skeleton_model() -> BakedEntityModel {
+fn skeleton_parts() -> Vec<EntityPart> {
     let arm = ModelCube {
         origin: Vec3::new(-1.0, -2.0, -1.0),
         size: Vec3::new(2.0, 12.0, 2.0),
@@ -600,7 +855,93 @@ pub fn bake_skeleton_model() -> BakedEntityModel {
         deformation: 0.0,
         mirror: false,
     };
-    bake_model(humanoid_parts(arm, leg, 2.0), 64, 32)
+    humanoid_parts(arm, leg, 2.0)
+}
+
+pub fn bake_skeleton_model() -> BakedEntityModel {
+    bake_model(skeleton_parts(), 64, 32)
+}
+
+/// Stray/bogged clothing (`SkeletonClothingLayer`): the thick humanoid mesh
+/// inflated by `g`, worn over the thin skeleton bones. 64×32 sheet.
+fn skeleton_clothing_parts(g: f32) -> Vec<EntityPart> {
+    let mut parts = zombie_parts();
+    inflate(&mut parts, g);
+    parts
+}
+
+pub fn bake_skeleton_clothing_model(g: f32) -> BakedEntityModel {
+    bake_model(skeleton_clothing_parts(g), 64, 32)
+}
+
+/// The six mushroom quads on a bogged's head, three crossed pairs at 45/135
+/// degrees (vanilla `BoggedModel`; the empty `mushrooms` container part is
+/// flattened away, angle literals are pi/4, 3pi/4 and -pi/2 rounded to f32).
+/// Sheared keeps the parts with no cubes so every bogged model shares one
+/// part order.
+fn mushroom_parts(sheared: bool) -> Vec<EntityPart> {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+    // (name, first index, texOffs, origin y, pivot, laid flat on the back)
+    let pairs = [
+        (
+            "red_mushroom",
+            1,
+            (50, 16),
+            -3.0,
+            Vec3::new(3.0, -8.0, 3.0),
+            false,
+        ),
+        (
+            "brown_mushroom",
+            1,
+            (50, 22),
+            -3.0,
+            Vec3::new(-3.0, -8.0, -3.0),
+            false,
+        ),
+        (
+            "brown_mushroom",
+            3,
+            (50, 28),
+            -4.0,
+            Vec3::new(-2.0, -1.0, 4.0),
+            true,
+        ),
+    ];
+    let mut parts = Vec::with_capacity(6);
+    for (name, first, uv, origin_y, pivot, flat) in pairs {
+        for (i, angle) in [FRAC_PI_4, 3.0 * FRAC_PI_4].into_iter().enumerate() {
+            let rot = if flat {
+                Vec3::new(-FRAC_PI_2, 0.0, angle)
+            } else {
+                Vec3::new(0.0, angle, 0.0)
+            };
+            let cubes = if sheared {
+                vec![]
+            } else {
+                vec![vbox(uv, (-3.0, origin_y, 0.0), (6.0, 4.0, 0.0))]
+            };
+            parts.push(EntityPart {
+                default_rotation: rot,
+                ..vpart(&format!("{name}_{}", first + i), Some(0), pivot, cubes)
+            });
+        }
+    }
+    parts
+}
+
+pub fn bake_bogged_model(sheared: bool) -> BakedEntityModel {
+    let mut parts = skeleton_parts();
+    parts.extend(mushroom_parts(sheared));
+    bake_model(parts, 64, 32)
+}
+
+/// Bogged clothing padded with the empty mushroom parts (overlay part order
+/// must match the base's).
+pub fn bake_bogged_clothing_model() -> BakedEntityModel {
+    let mut parts = skeleton_clothing_parts(0.2);
+    parts.extend(mushroom_parts(true));
+    bake_model(parts, 64, 32)
 }
 
 /// Creeper: head + upright body + four legs, animated as a quadruped
@@ -1463,18 +1804,18 @@ fn clear_head_subtree(parts: &mut [EntityPart]) {
 /// grounded (`PartPose.scaled(f).translated(0, 24.016 * (1 - f), 0)`).
 const VILLAGER_SCALE: f32 = 0.9375;
 
-/// Bakes with `VILLAGER_SCALE` applied to the roots only: the transform chain
-/// propagates a root's scale to child pivots and geometry like vanilla's pose
-/// stack (children would double-scale).
-fn bake_villager_like(mut parts: Vec<EntityPart>, tex_h: u32) -> BakedEntityModel {
+/// Bakes with vanilla's `MeshTransformer.scaling(factor)` applied to the
+/// roots only: the transform chain propagates a root's scale to child pivots
+/// and geometry like vanilla's pose stack (children would double-scale).
+fn bake_scaled(mut parts: Vec<EntityPart>, factor: f32, tex_h: u32) -> BakedEntityModel {
     let mut scales = Vec::with_capacity(parts.len());
     for part in parts.iter_mut() {
         let is_root = part.parent.is_none();
         if is_root {
-            part.offset = part.offset * VILLAGER_SCALE
-                + Vec3::new(0.0, MODEL_REBASE_Y * (1.0 - VILLAGER_SCALE), 0.0);
+            part.offset =
+                part.offset * factor + Vec3::new(0.0, MODEL_REBASE_Y * (1.0 - factor), 0.0);
         }
-        scales.push(if is_root { VILLAGER_SCALE } else { 1.0 });
+        scales.push(if is_root { factor } else { 1.0 });
     }
     let mut model = bake_model(parts, 64, tex_h);
     model.part_scales = scales;
@@ -1486,7 +1827,7 @@ pub fn bake_villager_model(no_hat: bool) -> BakedEntityModel {
     if no_hat {
         clear_head_subtree(&mut parts);
     }
-    bake_villager_like(parts, 64)
+    bake_scaled(parts, VILLAGER_SCALE, 64)
 }
 
 pub fn bake_baby_villager_model(no_hat: bool) -> BakedEntityModel {
@@ -1603,22 +1944,16 @@ pub fn bake_slime_outer_model() -> BakedEntityModel {
 /// its witch.png region is fully transparent, so its cubes are dropped.
 fn witch_parts() -> Vec<EntityPart> {
     let mut parts = villager_parts();
-    let index_of = |parts: &[EntityPart], name: &str| {
-        parts
-            .iter()
-            .position(|p| p.name == name)
-            .unwrap_or_else(|| panic!("villager mesh has a {name}"))
-    };
-    let head = index_of(&parts, "head");
-    let hat = index_of(&parts, "hat");
-    let nose = index_of(&parts, "nose");
+    let head = part_index(&parts, "head");
+    let hat = part_index(&parts, "hat");
+    let nose = part_index(&parts, "nose");
     parts[hat] = vpart(
         "hat",
         Some(head),
         Vec3::new(-5.0, -10.03125, -5.0),
         vec![vbox((0, 64), (0.0, 0.0, 0.0), (10.0, 2.0, 10.0))],
     );
-    let hat_rim = index_of(&parts, "hat_rim");
+    let hat_rim = part_index(&parts, "hat_rim");
     parts[hat_rim].cubes.clear();
     // The cone stacks parent hat -> hat2 -> hat3 -> hat4; the appended parts
     // land at indices n, n+1, n+2.
@@ -1669,7 +2004,7 @@ fn witch_parts() -> Vec<EntityPart> {
 }
 
 pub fn bake_witch_model() -> BakedEntityModel {
-    bake_villager_like(witch_parts(), 128)
+    bake_scaled(witch_parts(), VILLAGER_SCALE, 128)
 }
 
 pub fn compute_humanoid_anim(

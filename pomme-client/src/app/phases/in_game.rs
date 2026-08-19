@@ -2270,6 +2270,7 @@ pub fn update_game(
                     flap: extras.flap,
                     flap_speed: extras.flap_speed,
                     is_creepy: e.is_creepy,
+                    is_converting: e.is_converting,
                     // TODO: derive from the main-hand item (vanilla
                     // `isHoldingItem`) once mob equipment tracking lands.
                     is_holding_item: e.witch_drinking,
@@ -2319,6 +2320,7 @@ pub fn update_game(
             flap: 0.0,
             flap_speed: 0.0,
             is_creepy: false,
+            is_converting: false,
             is_holding_item: false,
             nose_wobble_speed: 0.0,
             body_transform: None,
@@ -2821,9 +2823,15 @@ fn entity_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) ->
             ..Default::default()
         },
         EntityKind::Sheep => sheep_extras(entity_id, e, alpha),
-        EntityKind::Villager => villager_extras(e),
-        // Spider eyes overlay is always visible (slot 0).
-        EntityKind::Spider => EntityExtras {
+        EntityKind::Villager => villager_like_extras(e, &VILLAGER_TYPE_HAT),
+        EntityKind::ZombieVillager => villager_like_extras(e, &ZOMBIE_VILLAGER_TYPE_HAT),
+        EntityKind::Bogged => EntityExtras {
+            overlay_tints: SLOT0_TINTS,
+            variant_index: e.is_sheared as u32,
+            ..Default::default()
+        },
+        // Always-visible slot-0 overlay (spider eyes, drowned/stray clothing).
+        EntityKind::Spider | EntityKind::Drowned | EntityKind::Stray => EntityExtras {
             overlay_tints: SLOT0_TINTS,
             ..Default::default()
         },
@@ -2916,6 +2924,8 @@ fn sheep_extras(entity_id: i32, e: &crate::entity::LivingEntity, alpha: f32) -> 
 /// `.png.mcmeta` files under `textures/entity/villager/` (hardcoded — no
 /// resource-pack support). 0 = none, 1 = partial, 2 = full.
 const VILLAGER_TYPE_HAT: [u8; 7] = [2, 0, 0, 0, 2, 0, 0]; // desert, snow = full
+// `zombie_villager/type/` ships no `.mcmeta` files at all.
+const ZOMBIE_VILLAGER_TYPE_HAT: [u8; 7] = [0; 7];
 const VILLAGER_PROFESSION_HAT: [u8; 15] = [
     0, // none
     0, // armorer
@@ -2936,14 +2946,15 @@ const VILLAGER_PROFESSION_HAT: [u8; 15] = [
 
 /// Overlay slots: 0 = biome type (full model), 1 = biome type (no-hat model),
 /// 2 = profession, 3 = profession level. Mirrors vanilla
-/// `VillagerProfessionLayer.submit`.
-fn villager_extras(e: &crate::entity::LivingEntity) -> EntityExtras {
+/// `VillagerProfessionLayer.submit`, shared by villager and zombie villager
+/// (which differ only in their type-hat `.mcmeta` tables).
+fn villager_like_extras(e: &crate::entity::LivingEntity, type_hat_table: &[u8; 7]) -> EntityExtras {
     use crate::entity::villager::VillagerProfession;
 
     let kind = e.villager_kind as usize;
     let profession = e.villager_profession as usize;
 
-    let type_hat = VILLAGER_TYPE_HAT[kind];
+    let type_hat = type_hat_table[kind];
     let prof_hat = VILLAGER_PROFESSION_HAT[profession];
     let type_hat_visible = prof_hat == 0 || (prof_hat == 1 && type_hat != 2);
 
