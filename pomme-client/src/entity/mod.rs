@@ -25,29 +25,48 @@ pub enum MetaValue {
     Long(i64),
 }
 
+/// `AgeableMob` descendants on every supported version (Slime joined only
+/// in 26.2, so it's excluded here and special-cased where it matters).
+fn is_ageable_mob(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Pig
+            | EntityKind::Cow
+            | EntityKind::Sheep
+            | EntityKind::Chicken
+            | EntityKind::Villager
+            | EntityKind::Wolf
+            | EntityKind::Cat
+            | EntityKind::Ocelot
+            | EntityKind::Rabbit
+    ) || is_equine(&kind)
+}
+
 /// Kinds whose entity-data index 16 is the baby flag: `AgeableMob`
 /// descendants plus the zombie family (which defines its own baby flag at
 /// the same index). NOT baby at 16: Bogged (sheared), Skeleton (stray
 /// conversion), Witch (Raider celebrating), fish (from-bucket).
 fn is_baby_kind(kind: EntityKind) -> bool {
-    is_equine(&kind)
+    is_ageable_mob(kind)
         || matches!(
             kind,
-            EntityKind::Pig
-                | EntityKind::Cow
-                | EntityKind::Sheep
-                | EntityKind::Chicken
-                | EntityKind::Villager
-                | EntityKind::Slime
+            EntityKind::Slime
                 | EntityKind::Zombie
                 | EntityKind::Husk
                 | EntityKind::Drowned
                 | EntityKind::ZombieVillager
-                | EntityKind::Wolf
-                | EntityKind::Cat
-                | EntityKind::Ocelot
-                | EntityKind::Rabbit
         )
+}
+
+/// 26.1 (protocol 775) added `AgeableMob`'s age-locked flag at 17, pushing
+/// every subclass index up by one; older wire versions are lifted to the
+/// 26.x numbering so `apply_entity_data` matches one index per field.
+fn normalize_ageable_index(kind: EntityKind, index: u8) -> u8 {
+    if is_ageable_mob(kind) && index >= 17 && crate::version::session_protocol() < 775 {
+        index + 1
+    } else {
+        index
+    }
 }
 
 const INTERPOLATION_STEPS: i32 = 3;
@@ -405,19 +424,21 @@ impl LivingEntity {
         self.relax_state_one_amount =
             spring(self.relax_state_one_amount, self.relax_state_one, 0.1, 0.13);
 
-        // Vanilla `Rabbit.aiStep` jump counter + `setupAnimationStates`.
+        // Vanilla `Rabbit.setupAnimationStates` (baseTick) then the
+        // `aiStep` jump counter. The clock starts at vanilla's post-increment
+        // tickCount; `age_in_ticks` only increments after this tick body.
+        if self.jump_ticks > 0 {
+            if self.hop_anim_start.is_none() {
+                self.hop_anim_start = Some(self.age_in_ticks + 1);
+            }
+        } else {
+            self.hop_anim_start = None;
+        }
         if self.jump_ticks != self.jump_duration {
             self.jump_ticks += 1;
         } else if self.jump_duration != 0 {
             self.jump_ticks = 0;
             self.jump_duration = 0;
-        }
-        if self.jump_ticks > 0 {
-            if self.hop_anim_start.is_none() {
-                self.hop_anim_start = Some(self.age_in_ticks);
-            }
-        } else {
-            self.hop_anim_start = None;
         }
     }
 
@@ -984,20 +1005,21 @@ impl EntityStore {
     /// direct analogue of vanilla's per-class `onSyncedDataUpdated`. Index
     /// arithmetic follows the registration chain: `Entity` 0-7,
     /// `LivingEntity` 8-14, `Mob` 15, `AgeableMob` 16 baby + 17 age-locked,
-    /// first subclass field 18. Where an index moved between supported
-    /// versions both spots are accepted (the other index carries an
-    /// incompatible type or kind on each version).
+    /// first subclass field 18, in the 26.x numbering
+    /// (`normalize_ageable_index`).
     pub fn apply_entity_data(&mut self, id: i32, index: u8, value: MetaValue) {
         use MetaValue::{Bool, Byte, Float, Int, Long};
         let Some(entity) = self.living.get_mut(&id) else {
             return;
         };
-        match (entity.entity_type, index, value) {
+        let kind = entity.entity_type;
+        match (kind, normalize_ageable_index(kind, index), value) {
             // Shared entity flags byte: bit 0x08 = sprinting.
             (_, 0, Byte(f)) => entity.is_sprinting = f & 0x08 != 0,
             (_, 9, Float(h)) => entity.health = h,
-            // Mob flags byte: bit 0x04 = aggressive.
-            (_, 15, Byte(f)) => entity.aggressive = f & 0x04 != 0,
+            // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
+            // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
+            (k, 15, Byte(f)) if k != EntityKind::Player => entity.aggressive = f & 0x04 != 0,
             (k, 16, Bool(b)) if is_baby_kind(k) => entity.is_baby = b,
             // Skeleton: powder-snow stray conversion; drives the vanilla
             // `isShaking` body jitter.
@@ -1006,9 +1028,8 @@ impl EntityStore {
             // Slime size: 16 on 1.21.9-26.1.x, 18 since Slime joined
             // AgeableMob in 26.2.
             (EntityKind::Slime, 16 | 18, Int(s)) => entity.slime_size = s.clamp(1, 127) as u8,
-            // Sheep wool byte (low nibble = DyeColor, bit 0x10 = sheared):
-            // 17 on 1.21.9-26.1.x, 18 on 26.2.
-            (EntityKind::Sheep, 17 | 18, Byte(w)) => {
+            // Sheep wool byte: low nibble = DyeColor, bit 0x10 = sheared.
+            (EntityKind::Sheep, 18, Byte(w)) => {
                 entity.wool_color = Some(w & 0x0F);
                 entity.is_sheared = w & 0x10 != 0;
             }
@@ -1052,8 +1073,13 @@ impl EntityStore {
                 entity.collar_color = c as u8 & 0x0F
             }
             (EntityKind::Cat, 21, Bool(b)) => entity.is_lying = b,
-            // Vanilla persistent-anger end time (game-time tick).
+            // Persistent anger: a game-time end tick since 1.21.11; on
+            // 1.21.9-1.21.10 a remaining-tick countdown the server re-syncs
+            // as it decrements, so any positive value means angry.
             (EntityKind::Wolf, 22, Long(t)) => entity.anger_end_time = t,
+            (EntityKind::Wolf, 22, Int(t)) => {
+                entity.anger_end_time = if t > 0 { i64::MAX } else { -1 }
+            }
             (EntityKind::Cat, 22, Bool(b)) => entity.relax_state_one = b,
             // Bat flags byte: bit 0x01 = resting (hanging); a flip restarts
             // the fly/rest animation clock.

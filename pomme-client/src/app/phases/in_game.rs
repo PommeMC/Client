@@ -2286,7 +2286,7 @@ pub fn update_game(
                     lie_down_amount_tail: extras.lie_down_amount_tail,
                     relax_state_one_amount: extras.relax_state_one_amount,
                     hop_elapsed_secs: extras.hop_elapsed_secs,
-                    base_tint: extras.base_tint,
+                    base_tint: extras.base_tint.unwrap_or(WHITE_TINT),
                     eat_anim: extras.eat_anim,
                     stand_anim: extras.stand_anim,
                     feeding_anim: extras.feeding_anim,
@@ -2792,6 +2792,7 @@ fn build_item_render_infos(
     infos
 }
 
+#[derive(Default)]
 struct EntityExtras {
     variant_index: u32,
     overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
@@ -2811,46 +2812,15 @@ struct EntityExtras {
     lie_down_amount_tail: f32,
     relax_state_one_amount: f32,
     hop_elapsed_secs: Option<f32>,
-    base_tint: [f32; 4],
+    /// Base-model tint (wolf wet shade, glow squid dimming, tropical fish
+    /// base dye); `None` = white.
+    base_tint: Option<[f32; 4]>,
     eat_anim: f32,
     stand_anim: f32,
     feeding_anim: f32,
     animate_tail: bool,
     tentacle_angle: f32,
     bat_elapsed_secs: Option<f32>,
-}
-
-/// Manual impl because `base_tint` defaults to white, not zero.
-impl Default for EntityExtras {
-    fn default() -> Self {
-        Self {
-            variant_index: 0,
-            overlay_tints: [None; MAX_OVERLAYS],
-            overlay_variants: [0; MAX_OVERLAYS],
-            head_y_offset: 0.0,
-            head_x_rot_deg_override: None,
-            flap: 0.0,
-            flap_speed: 0.0,
-            body_transform: None,
-            render_offset: glam::DVec3::ZERO,
-            nose_wobble_speed: 0.0,
-            is_angry: false,
-            tail_angle: 0.0,
-            head_roll_angle: 0.0,
-            shake_anim: 0.0,
-            lie_down_amount: 0.0,
-            lie_down_amount_tail: 0.0,
-            relax_state_one_amount: 0.0,
-            hop_elapsed_secs: None,
-            base_tint: WHITE_TINT,
-            eat_anim: 0.0,
-            stand_anim: 0.0,
-            feeding_anim: 0.0,
-            animate_tail: false,
-            tentacle_angle: 0.0,
-            bat_elapsed_secs: None,
-        }
-    }
 }
 
 /// Only the first overlay slot visible, untinted.
@@ -2990,12 +2960,10 @@ fn squid_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
     // Approximation: vanilla drops the glow light level while dark and lets
     // ambient light take over; pomme's entity pipeline is unlit, so darken
     // the tint instead.
-    let base_tint = if e.entity_type == EntityKind::GlowSquid {
+    let base_tint = (e.entity_type == EntityKind::GlowSquid).then(|| {
         let k = (1.0 - e.dark_ticks as f32 / 10.0).clamp(0.0, 1.0);
         [k, k, k, 1.0]
-    } else {
-        WHITE_TINT
-    };
+    });
     EntityExtras {
         tentacle_angle: e.prev_tentacle_angle + (e.tentacle_angle - e.prev_tentacle_angle) * alpha,
         // The axial spin is applied about Y, after the pitch (vanilla).
@@ -3052,7 +3020,7 @@ fn fish_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
             let shape = ((v & 0xFF) % 2) as usize;
             let pattern = (((v >> 8) & 0xFF) % 6) as u32;
             extras.variant_index = shape as u32;
-            extras.base_tint = dye_color_tint(((v >> 16) & 0xFF) as u8);
+            extras.base_tint = Some(dye_color_tint(((v >> 16) & 0xFF) as u8));
             extras.overlay_tints[shape] = Some(dye_color_tint(((v >> 24) & 0xFF) as u8));
             extras.overlay_variants = [pattern, pattern, 0, 0];
         }
@@ -3108,7 +3076,7 @@ fn wolf_extras(e: &crate::entity::LivingEntity, alpha: f32, game_time: i64) -> E
             * 0.15
             * PI,
         shake_anim: e.prev_shake_anim + (e.shake_anim - e.prev_shake_anim) * alpha,
-        base_tint: [wet, wet, wet, 1.0],
+        base_tint: Some([wet, wet, wet, 1.0]),
         ..Default::default()
     }
 }

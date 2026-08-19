@@ -194,6 +194,10 @@ struct MobVariant {
     texture_allocation: Allocation,
     texture_set: vk::DescriptorSet,
     overlay_kind: OverlayKind,
+    /// Overlay whose part poses (pivots/rotations/scales) differ from the
+    /// base model's, so its part transforms can't be shared with the base
+    /// (stray/bogged clothing: humanoid ±1.9 legs over skeleton ±2.0).
+    own_pivots: bool,
 }
 
 struct MobEntry {
@@ -242,8 +246,9 @@ impl MobEntry {
 
 pub const WHITE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-/// Registry-path order of each mob's flattened variant pool; the net handler
-/// resolves synced registry ids against these same slices, and the renderer
+/// Each mob's flattened variant pool by registry path; the net handler
+/// resolves synced registry entries by name against these same slices (so
+/// their order is pomme's, not the protocol id's), and the renderer
 /// constructor asserts the pools line up.
 pub const CHICKEN_VARIANT_ORDER: &[&str] = &["temperate", "warm", "cold"];
 pub const COW_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
@@ -251,7 +256,6 @@ pub const COW_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
 pub const WOLF_VARIANT_ORDER: &[&str] = &[
     "pale", "spotted", "snowy", "black", "ashen", "rusty", "woods", "chestnut", "striped",
 ];
-/// Registry-path-alphabetical, matching the cat pool.
 pub const CAT_VARIANT_ORDER: &[&str] = &[
     "all_black",
     "black",
@@ -406,7 +410,7 @@ enum AnimationType {
     Villager,
     Witch,
     Wolf,
-    /// Cat and ocelot (ocelots never set the pose inputs).
+    /// Cat and ocelot (ocelots only drive the crouch/sprint inputs).
     Feline,
     Rabbit,
     /// Horse family; the hook set is derived from (entity kind, is_baby).
@@ -547,7 +551,7 @@ fn mob_definitions() -> Vec<MobDef> {
         "wolf_striped_baby", "wolf_striped_tame_baby", "wolf_striped_angry_baby");
     const WOLF_COLLAR_TEX: &[&[&str]] = tex_table!("wolf" => "wolf_collar");
     const WOLF_COLLAR_BABY_TEX: &[&[&str]] = tex_table!("wolf" => "wolf_collar_baby");
-    // Cat pool follows CAT_VARIANT_ORDER (registry-path-alphabetical).
+    // Cat pool follows CAT_VARIANT_ORDER.
     const CAT_TEX: &[&[&str]] = tex_table!("cat" =>
         "cat_all_black", "cat_black", "cat_british_shorthair", "cat_calico", "cat_jellie",
         "cat_persian", "cat_ragdoll", "cat_red", "cat_siamese", "cat_tabby", "cat_white");
@@ -1066,7 +1070,8 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Donkey,
             anim: AnimationType::Equine,
-            // Variant 0 = no chest, 1 = chest.
+            // Variant 0 = no chest, 1 = chest; the single baby bake absorbs
+            // both through `base_variant`'s pool clamp.
             adult: vec![
                 opaque(entity_model::bake_donkey_model(0.87, false), DONKEY_TEX, 64),
                 opaque(entity_model::bake_donkey_model(0.87, true), DONKEY_TEX, 64),
@@ -1351,17 +1356,14 @@ impl EntityRenderer {
             let adult_variants: Vec<MobVariant> =
                 def.adult.into_iter().flat_map(&mut build).collect();
             let baby_variants = def.baby.map(&mut build);
-            let adult_overlays: Vec<Vec<MobVariant>> =
+            let mut adult_overlays: Vec<Vec<MobVariant>> =
                 def.adult_overlays.into_iter().map(&mut build).collect();
-            let baby_overlays: Vec<Vec<MobVariant>> =
+            let mut baby_overlays: Vec<Vec<MobVariant>> =
                 def.baby_overlays.into_iter().map(&mut build).collect();
 
-            // Anim part-name indices are computed against the base variant's model and
-            // reused for each overlay draw. Catch mismatched part order at construction
-            // time rather than rendering wrong limbs in production.
-            assert_part_order_matches(&adult_variants, &adult_overlays);
+            link_overlays(&adult_variants, &mut adult_overlays);
             if let Some(baby) = &baby_variants {
-                assert_part_order_matches(baby, &baby_overlays);
+                link_overlays(baby, &mut baby_overlays);
             }
 
             if let Some(n) = expected_variant_count(def.kind) {
@@ -1543,7 +1545,9 @@ impl EntityRenderer {
         model: &BakedEntityModel,
         info: &EntityRenderInfo,
     ) -> entity_model::PartAnim {
-        let local_head_y = info.head_y_rot_deg - info.body_y_rot_deg;
+        // Vanilla `wrapDegrees(headRot - bodyRot)`; matters once a model
+        // clamps it (equine +-20).
+        let local_head_y = crate::entity::wrap_degrees(info.head_y_rot_deg - info.body_y_rot_deg);
         match anim_type {
             AnimationType::Quadruped => entity_model::compute_quadruped_anim(
                 model,
@@ -1752,15 +1756,13 @@ impl EntityRenderer {
                 let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
                 let entity_mat = Self::entity_matrix(info, anchor);
                 let anim = self.compute_anim(entry.anim, &variant.model, info);
-                // Computed once per entity and shared with the overlay draws:
-                // overlays match the base's part order AND pivots (only cube
-                // geometry differs), and cubeless padding parts are never
-                // drawn, so their transforms are unused.
+                // Shared with every overlay that isn't `own_pivots`.
                 let part_transforms = variant.model.compute_part_transforms(&anim);
                 vis.push(VisEntity {
                     info,
                     entry,
                     entity_mat,
+                    anim,
                     part_transforms,
                 });
             }
@@ -2036,12 +2038,13 @@ fn create_camera_sets(
     (sets, buffers, allocations)
 }
 
-/// A culled, drawable entity with its world transform and per-part
-/// animation matrices precomputed (shared by the base and overlay draws).
+/// A culled, drawable entity with its world transform, animation, and the
+/// base model's per-part matrices precomputed.
 struct VisEntity<'a> {
     info: &'a EntityRenderInfo,
     entry: &'a MobEntry,
     entity_mat: glam::Mat4,
+    anim: entity_model::PartAnim,
     part_transforms: Vec<glam::Mat4>,
 }
 
@@ -2085,13 +2088,23 @@ impl<'a> VariantGroups<'a> {
     fn emit(&self, vis: &[VisEntity], instances: &mut Vec<EntityInstance>) -> Vec<DrawRecord> {
         let mut records = Vec::new();
         for (variant, texture_set, members) in &self.groups {
+            let own: Option<Vec<Vec<glam::Mat4>>> = variant.own_pivots.then(|| {
+                members
+                    .iter()
+                    .map(|(vi, ..)| variant.model.compute_part_transforms(&vis[*vi].anim))
+                    .collect()
+            });
             for (p, (start, part_count)) in variant.model.part_ranges.iter().enumerate() {
                 if *part_count == 0 {
                     continue;
                 }
                 let first_instance = instances.len() as u32;
-                for (vi, tint, overlay, uv) in members.iter() {
-                    let model = vis[*vi].entity_mat * vis[*vi].part_transforms[p];
+                for (k, (vi, tint, overlay, uv)) in members.iter().enumerate() {
+                    let part = match &own {
+                        Some(own) => own[k][p],
+                        None => vis[*vi].part_transforms[p],
+                    };
+                    let model = vis[*vi].entity_mat * part;
                     instances.push(EntityInstance {
                         model: model.to_cols_array_2d(),
                         tint: *tint,
@@ -2193,8 +2206,9 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::Wolf => (0.6, 0.85),
         EntityKind::Cat | EntityKind::Ocelot => (0.6, 0.7),
         EntityKind::Rabbit => (0.49, 0.6),
-        // Vanilla horse babies scale 0.7 (Horse.BABY_DIMENSIONS), not 0.5;
-        // donkey/mule babies are the generic half scale.
+        // Horse babies scale 0.7 since 26.1 (`Horse.BABY_DIMENSIONS`; 1.21.x
+        // halved, harmless for the cull sphere); donkey/mule babies are the
+        // generic half scale.
         EntityKind::Horse | EntityKind::SkeletonHorse | EntityKind::ZombieHorse if is_baby => {
             return (1.3964844 * 0.7, 1.6 * 0.7);
         }
@@ -2261,7 +2275,12 @@ fn entity_visible(
     true
 }
 
-fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) {
+/// Anim part-name indices are computed against the base variant's model and
+/// reused for each overlay draw, so overlay part order must match the base
+/// (asserted at construction rather than rendering wrong limbs). Overlays
+/// whose part poses also match share the base's transforms; the rest are
+/// flagged `own_pivots` and get their own.
+fn link_overlays(base: &[MobVariant], overlays: &mut [Vec<MobVariant>]) {
     let Some(base_first) = base.first() else {
         return;
     };
@@ -2271,7 +2290,7 @@ fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) 
         .iter()
         .map(|p| p.name.as_str())
         .collect();
-    for overlay in overlays.iter().flatten() {
+    for overlay in overlays.iter_mut().flatten() {
         let overlay_names: Vec<&str> = overlay
             .model
             .parts
@@ -2282,6 +2301,7 @@ fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) 
             base_names, overlay_names,
             "overlay part order must match base; anim indices are shared across both"
         );
+        overlay.own_pivots = !base_first.model.same_part_poses(&overlay.model);
     }
 }
 
@@ -2372,6 +2392,7 @@ fn build_variants(
                 texture_allocation,
                 texture_set,
                 overlay_kind,
+                own_pivots: false,
             }
         })
         .collect()

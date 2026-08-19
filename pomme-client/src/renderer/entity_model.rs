@@ -125,6 +125,21 @@ impl BakedEntityModel {
         self
     }
 
+    /// True when every input to `compute_part_transforms` other than the anim
+    /// (part order, pivots, rest rotations, parents, scales, convention)
+    /// matches `other`'s, so the two models can share one transform set.
+    pub fn same_part_poses(&self, other: &Self) -> bool {
+        self.convention == other.convention
+            && self.part_scales == other.part_scales
+            && self.parts.len() == other.parts.len()
+            && self.parts.iter().zip(&other.parts).all(|(a, b)| {
+                a.name == b.name
+                    && a.offset == b.offset
+                    && a.default_rotation == b.default_rotation
+                    && a.parent == b.parent
+            })
+    }
+
     pub fn compute_part_transforms(&self, anim: &PartAnim) -> Vec<Mat4> {
         let mut transforms = Vec::with_capacity(self.parts.len());
 
@@ -765,7 +780,7 @@ fn baby_zombie_villager_parts() -> Vec<EntityPart> {
             vec![vbox(uv, (-1.0, -0.5, -1.0), (2.0, h, 2.0))],
         )
     };
-    vec![
+    let mut parts = vec![
         vpart(
             "body",
             None,
@@ -784,9 +799,12 @@ fn baby_zombie_villager_parts() -> Vec<EntityPart> {
             Vec3::new(0.0, 16.0, 0.0),
             vec![vbox((0, 0), (-4.0, -8.0, -3.5), (8.0, 8.0, 7.0))],
         ),
+    ];
+    let head = Some(part_index(&parts, "head"));
+    parts.extend([
         vpart(
             "hat",
-            Some(1),
+            head,
             Vec3::new(0.0, -4.0, 0.0),
             vec![ModelCube {
                 deformation: 0.3,
@@ -795,13 +813,13 @@ fn baby_zombie_villager_parts() -> Vec<EntityPart> {
         ),
         vpart(
             "hat_rim",
-            Some(1),
+            head,
             Vec3::new(0.0, -4.5, 0.0),
             vec![vbox((0, 46), (-7.0, -0.5, -6.0), (14.0, 1.0, 12.0))],
         ),
         vpart(
             "nose",
-            Some(1),
+            head,
             Vec3::new(0.0, -1.0, -4.0),
             vec![vbox((23, 0), (-1.0, -1.0, -0.5), (2.0, 2.0, 1.0))],
         ),
@@ -809,7 +827,8 @@ fn baby_zombie_villager_parts() -> Vec<EntityPart> {
         limb("left_arm", Vec3::new(3.0, 15.5, 0.0), (16, 15), 5.0),
         limb("right_leg", Vec3::new(-1.0, 21.5, 0.0), (8, 23), 3.0),
         limb("left_leg", Vec3::new(1.0, 21.5, 0.0), (0, 23), 3.0),
-    ]
+    ]);
+    parts
 }
 
 pub fn bake_baby_zombie_villager_model(no_hat: bool) -> BakedEntityModel {
@@ -4700,6 +4719,8 @@ pub fn compute_equine_anim(
     let standing = inputs.stand_anim;
     let i_standing = 1.0 - standing;
     let feeding = inputs.feeding_anim;
+    // `LivingEntity.getAgeScale` (0.5); `AbstractHorse.BABY_SCALE` 0.7 is
+    // unused in vanilla.
     let age_scale = if kind == EquineKind::Adult { 1.0 } else { 0.5 };
 
     // Per-model hooks (vanilla `getLegStandAngle` etc.).
