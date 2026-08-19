@@ -39,6 +39,8 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::Cat
             | EntityKind::Ocelot
             | EntityKind::Rabbit
+            | EntityKind::Squid
+            | EntityKind::GlowSquid
     ) || is_equine(&kind)
 }
 
@@ -154,6 +156,24 @@ pub struct LivingEntity {
     pub mouth_anim: f32,
     pub prev_mouth_anim: f32,
     pub has_chest: bool,
+    /// Packet-driven velocity (vanilla remote entities never integrate their
+    /// own); feeds the squid body-rotation sim.
+    pub velocity: DVec3,
+    /// Vanilla `wasTouchingWater`, probed per tick for aquatic kinds.
+    pub is_in_water: bool,
+    /// Squid client sim (vanilla `Squid.aiStep`), degrees.
+    pub x_body_rot: f32,
+    pub prev_x_body_rot: f32,
+    pub z_body_rot: f32,
+    pub prev_z_body_rot: f32,
+    pub tentacle_angle: f32,
+    pub prev_tentacle_angle: f32,
+    pub bat_resting: bool,
+    /// Tick the bat's current fly/rest animation started at.
+    pub bat_anim_start: Option<u32>,
+    pub puff_state: u8,
+    /// Glow squid post-hurt dim timer, synced then decremented client-side.
+    pub dark_ticks: i32,
     pub villager_kind: VillagerKind,
     pub villager_profession: VillagerProfession,
     pub villager_level: u32,
@@ -182,6 +202,9 @@ pub struct LivingEntity {
     jump_ticks: i32,
     jump_duration: i32,
     tail_counter: u8,
+    tentacle_movement: f32,
+    tentacle_speed: f32,
+    rotate_speed: f32,
     interp_target: Position,
     interp_look_dir: LookDirection,
     interp_steps: i32,
@@ -219,7 +242,13 @@ impl LivingEntity {
             on_ground: true,
             wool_color: None,
             is_sheared: false,
-            variant: 0,
+            // Vanilla salmon default is MEDIUM (id 1); non-default-only
+            // metadata means the size may never be synced.
+            variant: if entity_type == EntityKind::Salmon {
+                1
+            } else {
+                0
+            },
             flap: 0.0,
             prev_flap: 0.0,
             flap_speed: 0.0,
@@ -260,6 +289,18 @@ impl LivingEntity {
             mouth_anim: 0.0,
             prev_mouth_anim: 0.0,
             has_chest: false,
+            velocity: DVec3::ZERO,
+            is_in_water: false,
+            x_body_rot: 0.0,
+            prev_x_body_rot: 0.0,
+            z_body_rot: 0.0,
+            prev_z_body_rot: 0.0,
+            tentacle_angle: 0.0,
+            prev_tentacle_angle: 0.0,
+            bat_resting: false,
+            bat_anim_start: None,
+            puff_state: 0,
+            dark_ticks: 0,
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
             villager_level: 0,
@@ -282,6 +323,9 @@ impl LivingEntity {
             jump_ticks: 0,
             jump_duration: 0,
             tail_counter: 0,
+            tentacle_movement: 0.0,
+            tentacle_speed: 1.0 / (fastrand::f32() + 1.0) * 0.2,
+            rotate_speed: 0.0,
             interp_target: position,
             interp_look_dir: look_dir,
             interp_steps: 0,
@@ -454,6 +498,105 @@ impl LivingEntity {
         }
     }
 
+    /// Vanilla `Entity.updateFluidInteraction`: true when any water column in
+    /// the (slightly deflated) AABB's block range reaches above the box
+    /// bottom. The AABB matches the entity's actual dimensions, including the
+    /// baby-squid override and the salmon/pufferfish variant scale.
+    fn probe_water(&self, chunks: &ChunkStore) -> bool {
+        let (w, h): (f64, f64) = match self.entity_type {
+            // `Squid.BABY_DIMENSIONS` is an explicit 0.5x0.5.
+            EntityKind::Squid | EntityKind::GlowSquid if self.is_baby => (0.5, 0.5),
+            EntityKind::Squid | EntityKind::GlowSquid => (0.8, 0.8),
+            EntityKind::Cod => (0.5, 0.3),
+            // `Salmon.getSalmonScale`: small 0.5, medium 1.0, large 1.5.
+            EntityKind::Salmon => {
+                let scale = match self.variant {
+                    0 => 0.5,
+                    2 => 1.5,
+                    _ => 1.0,
+                };
+                (0.7 * scale, 0.4 * scale)
+            }
+            EntityKind::TropicalFish => (0.5, 0.4),
+            // `Pufferfish.getScale`: states 0/1/2 = 0.5/0.7/1.0.
+            EntityKind::Pufferfish => {
+                let scale = match self.puff_state {
+                    0 => 0.5,
+                    1 => 0.7,
+                    _ => 1.0,
+                };
+                (0.7 * scale, 0.7 * scale)
+            }
+            _ => (0.6, 0.6),
+        };
+        let min_x = self.position.x - w / 2.0 + 0.001;
+        let min_y = self.position.y + 0.001;
+        let min_z = self.position.z - w / 2.0 + 0.001;
+        let max_x = self.position.x + w / 2.0 - 0.001;
+        let max_y = self.position.y + h - 0.001;
+        let max_z = self.position.z + w / 2.0 - 0.001;
+        for bx in (min_x.floor() as i32)..=(max_x.ceil() as i32 - 1) {
+            for by in (min_y.floor() as i32)..=(max_y.ceil() as i32 - 1) {
+                for bz in (min_z.floor() as i32)..=(max_z.ceil() as i32 - 1) {
+                    let f = fluid(chunks.get_block_state(bx, by, bz));
+                    if f.kind != FluidKind::Water {
+                        continue;
+                    }
+                    // Full height when the block above is also water.
+                    let above = fluid(chunks.get_block_state(bx, by + 1, bz));
+                    let top = by as f64
+                        + if above.kind == FluidKind::Water {
+                            1.0
+                        } else {
+                            f.height() as f64
+                        };
+                    if top >= min_y {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Vanilla `Squid.aiStep` body/tentacle sim. The tentacle stroke clock
+    /// clamps at 2*pi on the client and only entity event 19 resets it; the
+    /// body yaw and pitch follow the packet-driven velocity (vanilla steers
+    /// remote squids client-side too, overriding the synced yaw).
+    fn tick_squid(&mut self) {
+        use std::f32::consts::PI;
+        self.prev_x_body_rot = self.x_body_rot;
+        self.prev_z_body_rot = self.z_body_rot;
+        self.prev_tentacle_angle = self.tentacle_angle;
+        self.tentacle_movement += self.tentacle_speed;
+        if self.tentacle_movement > PI * 2.0 {
+            self.tentacle_movement = PI * 2.0;
+        }
+        if self.is_in_water {
+            if self.tentacle_movement < PI {
+                let scale = self.tentacle_movement / PI;
+                self.tentacle_angle = (scale * scale * PI).sin() * PI * 0.25;
+                if scale > 0.75 {
+                    self.rotate_speed = 1.0;
+                } else {
+                    self.rotate_speed *= 0.8;
+                }
+            } else {
+                self.tentacle_angle = 0.0;
+                self.rotate_speed *= 0.99;
+            }
+            let v = self.velocity;
+            let horiz = (v.x * v.x + v.z * v.z).sqrt();
+            self.body_y_rot_deg +=
+                (-(v.x.atan2(v.z) as f32).to_degrees() - self.body_y_rot_deg) * 0.1;
+            self.z_body_rot += PI * self.rotate_speed * 1.5;
+            self.x_body_rot += (-(horiz.atan2(v.y) as f32).to_degrees() - self.x_body_rot) * 0.1;
+        } else {
+            self.tentacle_angle = self.tentacle_movement.sin().abs() * PI * 0.25;
+            self.x_body_rot += (-90.0 - self.x_body_rot) * 0.02;
+        }
+    }
+
     /// Vanilla `AbstractCubeMob.tick` squish spring; the update order matters.
     fn tick_squish(&mut self) {
         self.prev_squish = self.squish;
@@ -473,6 +616,18 @@ impl LivingEntity {
         match self.entity_type {
             EntityKind::Chicken => self.tick_flap(),
             EntityKind::Slime => self.tick_squish(),
+            EntityKind::Squid | EntityKind::GlowSquid => {
+                self.tick_squid();
+                if self.dark_ticks > 0 {
+                    self.dark_ticks -= 1;
+                }
+            }
+            // One animation clock, restarted whenever the resting flag
+            // flips (the setter restarts it); vanilla starts it at the
+            // post-increment tickCount.
+            EntityKind::Bat if self.bat_anim_start.is_none() => {
+                self.bat_anim_start = Some(self.age_in_ticks + 1);
+            }
             k if is_equine(&k) => self.tick_equine_anims(),
             _ => {}
         }
@@ -930,6 +1085,23 @@ impl EntityStore {
                 entity.anger_end_time = if t > 0 { i64::MAX } else { -1 }
             }
             (EntityKind::Cat, 22, Bool(b)) => entity.relax_state_one = b,
+            // Bat flags byte: bit 0x01 = resting (hanging); a flip restarts
+            // the fly/rest animation clock.
+            (EntityKind::Bat, 16, Byte(f)) => {
+                let resting = f & 0x01 != 0;
+                if entity.bat_resting != resting {
+                    entity.bat_resting = resting;
+                    entity.bat_anim_start = Some(entity.age_in_ticks + 1);
+                }
+            }
+            // Salmon size ids clamp to SMALL..LARGE; a pufferfish puff state
+            // outside 0/1 renders big (vanilla `switch` default).
+            (EntityKind::Salmon, 17, Int(v)) => entity.variant = v.clamp(0, 2) as u32,
+            (EntityKind::TropicalFish, 17, Int(v)) => entity.variant = v as u32,
+            (EntityKind::Pufferfish, 17, Int(s)) => {
+                entity.puff_state = if (0..=1).contains(&s) { s as u8 } else { 2 }
+            }
+            (EntityKind::GlowSquid, 18, Int(t)) => entity.dark_ticks = t,
             _ => {}
         }
     }
@@ -1013,6 +1185,24 @@ impl EntityStore {
         }
     }
 
+    pub fn set_living_motion(&mut self, id: i32, velocity: DVec3) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.velocity = velocity;
+        }
+    }
+
+    /// Entity event 19: the server rolled the tentacle clock over.
+    pub fn squid_tentacle_reset(&mut self, id: i32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && matches!(
+                entity.entity_type,
+                EntityKind::Squid | EntityKind::GlowSquid
+            )
+        {
+            entity.tentacle_movement = 0.0;
+        }
+    }
+
     /// Begins an arm swing (server `Animate` packet). Restarts when idle or
     /// past the halfway point (vanilla `LivingEntity.swing`); `swing_time`
     /// counts down, so that is `swing_time <= SWING_DURATION / 2`.
@@ -1056,7 +1246,7 @@ impl EntityStore {
             .find(|entity| entity.player_uuid == Some(*uuid))
     }
 
-    pub fn tick_living(&mut self) {
+    pub fn tick_living(&mut self, chunks: &ChunkStore) {
         for entity in self.living.values_mut() {
             entity.tick_interpolation();
             entity.tick_body_rotation();
@@ -1069,6 +1259,9 @@ impl EntityStore {
                 &mut entity.walk_anim_speed,
                 &mut entity.prev_walk_anim_speed,
             );
+            if probes_water(&entity.entity_type) {
+                entity.is_in_water = entity.probe_water(chunks);
+            }
             entity.tick_kind_anims();
             entity.tick_tamable_anims();
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
@@ -1156,5 +1349,26 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::Cat
                 | EntityKind::Ocelot
                 | EntityKind::Rabbit
+                | EntityKind::Squid
+                | EntityKind::GlowSquid
+                | EntityKind::Bat
+                | EntityKind::Cod
+                | EntityKind::Salmon
+                | EntityKind::TropicalFish
+                | EntityKind::Pufferfish
         )
+}
+
+/// Kinds whose `wasTouchingWater` matters for rendering (fish flop pose,
+/// squid body rotation).
+fn probes_water(kind: &EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Squid
+            | EntityKind::GlowSquid
+            | EntityKind::Cod
+            | EntityKind::Salmon
+            | EntityKind::TropicalFish
+            | EntityKind::Pufferfish
+    )
 }

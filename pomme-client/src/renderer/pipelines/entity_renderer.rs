@@ -90,6 +90,13 @@ pub struct EntityRenderInfo {
     pub feeding_anim: f32,
     /// Equine tail swish (client-local RNG counter).
     pub animate_tail: bool,
+    /// Fish flop pose / squid body branch.
+    pub is_in_water: bool,
+    /// Squid tentacle stroke angle, interpolated.
+    pub tentacle_angle: f32,
+    /// Bat pose flag + its fly/rest animation clock.
+    pub bat_resting: bool,
+    pub bat_elapsed_secs: Option<f32>,
     /// Base-model tint (wolf wet-shade grayscale); white for everyone else.
     pub base_tint: [f32; 4],
     /// Extra scale applied after the entity rotation (slime size + squish),
@@ -147,6 +154,10 @@ impl Default for EntityRenderInfo {
             stand_anim: 0.0,
             feeding_anim: 0.0,
             animate_tail: false,
+            is_in_water: false,
+            tentacle_angle: 0.0,
+            bat_resting: false,
+            bat_elapsed_secs: None,
             base_tint: WHITE_TINT,
             body_transform: None,
             age_in_ticks: 0.0,
@@ -161,6 +172,9 @@ impl Default for EntityRenderInfo {
 enum OverlayKind {
     /// Cutout, depth-writing — sheep wool and all base models.
     Opaque,
+    /// `Opaque` with backface culling (vanilla `entityCutoutCull`) — meshes
+    /// with coplanar zero-depth quads (bat wings).
+    OpaqueCulled,
     /// Translucent, depth-writing — the slime shell (vanilla
     /// `entityTranslucent`; the alpha lives in the texture).
     BodyTranslucent,
@@ -324,8 +338,12 @@ pub const DYE_COLOR_RGBA: [[f32; 4]; 16] = [
     rgb(0x1D1D21), // 15 black
 ];
 
+/// Out-of-range ids are white (vanilla `DyeColor.byId`).
 pub fn dye_color_tint(color: u8) -> [f32; 4] {
-    DYE_COLOR_RGBA[(color & 0x0F) as usize]
+    DYE_COLOR_RGBA
+        .get(color as usize)
+        .copied()
+        .unwrap_or(DYE_COLOR_RGBA[0])
 }
 
 pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
@@ -345,6 +363,8 @@ pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
 
 pub struct EntityRenderer {
     pipeline: vk::Pipeline,
+    /// Opaque with backface culling — bat wings.
+    culled_pipeline: vk::Pipeline,
     /// Translucent, depth-writing — slime shell.
     body_translucent_pipeline: vk::Pipeline,
     /// Translucent, depth-write off — spider eyes.
@@ -372,6 +392,9 @@ pub struct EntityRenderer {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BlendMode {
     Opaque,
+    /// Opaque with backface culling (vanilla `entityCutoutCull`) — used by
+    /// meshes with coplanar zero-depth quads (bat wings).
+    OpaqueCulled,
     Translucent,
     /// Same blend as `Translucent` but keeps depth writes (vanilla
     /// `entityTranslucent` vs `EYES`).
@@ -396,6 +419,10 @@ enum AnimationType {
     Rabbit,
     /// Horse family; the hook set is derived from (entity kind, is_baby).
     Equine,
+    Squid,
+    Bat,
+    /// Cod, salmon, tropical fish, pufferfish.
+    Fish,
     /// No part animation (slime — size/squish live in the body transform).
     Static,
 }
@@ -570,6 +597,22 @@ fn mob_definitions() -> Vec<MobDef> {
     const SKELETON_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "horse_skeleton_baby");
     const ZOMBIE_HORSE_TEX: &[&[&str]] = tex_table!("horse" => "horse_zombie");
     const ZOMBIE_HORSE_BABY_TEX: &[&[&str]] = tex_table!("horse" => "horse_zombie_baby");
+    const SQUID_TEX: &[&[&str]] = tex_table!("squid" => "squid");
+    const SQUID_BABY_TEX: &[&[&str]] = tex_table!("squid" => "squid_baby");
+    const GLOW_SQUID_TEX: &[&[&str]] = tex_table!("squid" => "glow_squid");
+    const GLOW_SQUID_BABY_TEX: &[&[&str]] = tex_table!("squid" => "glow_squid_baby");
+    const BAT_TEX: &[&[&str]] = tex_table!("bat" => "bat");
+    const COD_TEX: &[&[&str]] = tex_table!("fish" => "cod");
+    const SALMON_TEX: &[&[&str]] = tex_table!("fish" => "salmon");
+    const PUFFERFISH_TEX: &[&[&str]] = tex_table!("fish" => "pufferfish");
+    const TROPICAL_A_TEX: &[&[&str]] = tex_table!("fish" => "tropical_a");
+    const TROPICAL_B_TEX: &[&[&str]] = tex_table!("fish" => "tropical_b");
+    const TROPICAL_A_PATTERN_TEX: &[&[&str]] = tex_table!("fish" =>
+        "tropical_a_pattern_1", "tropical_a_pattern_2", "tropical_a_pattern_3",
+        "tropical_a_pattern_4", "tropical_a_pattern_5", "tropical_a_pattern_6");
+    const TROPICAL_B_PATTERN_TEX: &[&[&str]] = tex_table!("fish" =>
+        "tropical_b_pattern_1", "tropical_b_pattern_2", "tropical_b_pattern_3",
+        "tropical_b_pattern_4", "tropical_b_pattern_5", "tropical_b_pattern_6");
     const SKELETON_TEX: &[&[&str]] = tex_table!("skeleton" => "skeleton");
     const STRAY_TEX: &[&[&str]] = tex_table!("skeleton" => "stray");
     const STRAY_OVERLAY_TEX: &[&[&str]] = tex_table!("skeleton" => "stray_overlay");
@@ -1092,6 +1135,113 @@ fn mob_definitions() -> Vec<MobDef> {
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
+        MobDef {
+            kind: EntityKind::Squid,
+            anim: AnimationType::Squid,
+            adult: vec![opaque(entity_model::bake_squid_model(), SQUID_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_squid_model(),
+                SQUID_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // The glow itself is free (the entity pipeline is unlit/fullbright);
+        // the post-hurt dimming rides base_tint.
+        MobDef {
+            kind: EntityKind::GlowSquid,
+            anim: AnimationType::Squid,
+            adult: vec![opaque(entity_model::bake_squid_model(), GLOW_SQUID_TEX, 64)],
+            baby: Some(opaque(
+                entity_model::bake_baby_squid_model(),
+                GLOW_SQUID_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Bat,
+            anim: AnimationType::Bat,
+            // Backface-culled: the bat's zero-depth quads are coplanar
+            // front/back pairs (vanilla `entityCutoutCull`).
+            adult: vec![VariantDef {
+                model: entity_model::bake_bat_model(),
+                tex_variants: BAT_TEX,
+                tex_size: 32,
+                overlay_kind: OverlayKind::OpaqueCulled,
+            }],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Cod,
+            anim: AnimationType::Fish,
+            adult: vec![opaque(entity_model::bake_cod_model(), COD_TEX, 32)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // Variant = size (small/medium/large), three root-scaled bakes.
+        MobDef {
+            kind: EntityKind::Salmon,
+            anim: AnimationType::Fish,
+            adult: vec![
+                opaque(entity_model::bake_salmon_model(0.5), SALMON_TEX, 32),
+                opaque(entity_model::bake_salmon_model(1.0), SALMON_TEX, 32),
+                opaque(entity_model::bake_salmon_model(1.5), SALMON_TEX, 32),
+            ],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        // Variant = shape; the dye-tinted pattern layer picks the matching
+        // shape slot (0 small / 1 large, xor-gated in entity_extras).
+        MobDef {
+            kind: EntityKind::TropicalFish,
+            anim: AnimationType::Fish,
+            adult: vec![
+                opaque(
+                    entity_model::bake_tropical_fish_model(false, 0.0),
+                    TROPICAL_A_TEX,
+                    32,
+                ),
+                opaque(
+                    entity_model::bake_tropical_fish_model(true, 0.0),
+                    TROPICAL_B_TEX,
+                    32,
+                ),
+            ],
+            baby: None,
+            adult_overlays: vec![
+                opaque(
+                    entity_model::bake_tropical_fish_model(false, 0.008),
+                    TROPICAL_A_PATTERN_TEX,
+                    32,
+                ),
+                opaque(
+                    entity_model::bake_tropical_fish_model(true, 0.008),
+                    TROPICAL_B_PATTERN_TEX,
+                    32,
+                ),
+            ],
+            baby_overlays: vec![],
+        },
+        // Variant = puff state (three meshes).
+        MobDef {
+            kind: EntityKind::Pufferfish,
+            anim: AnimationType::Fish,
+            adult: vec![
+                opaque(entity_model::bake_pufferfish_model(0), PUFFERFISH_TEX, 32),
+                opaque(entity_model::bake_pufferfish_model(1), PUFFERFISH_TEX, 32),
+                opaque(entity_model::bake_pufferfish_model(2), PUFFERFISH_TEX, 32),
+            ],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
     ]
 }
 
@@ -1128,6 +1278,7 @@ impl EntityRenderer {
 
         let [
             pipeline,
+            culled_pipeline,
             body_translucent_pipeline,
             eyes_pipeline,
             swirl_pipeline,
@@ -1250,6 +1401,7 @@ impl EntityRenderer {
 
         Self {
             pipeline,
+            culled_pipeline,
             body_translucent_pipeline,
             eyes_pipeline,
             swirl_pipeline,
@@ -1540,6 +1692,19 @@ impl EntityRenderer {
                     animate_tail: info.animate_tail,
                 },
             ),
+            AnimationType::Squid => entity_model::compute_squid_anim(model, info.tentacle_angle),
+            AnimationType::Bat => entity_model::compute_bat_anim(
+                model,
+                local_head_y,
+                info.bat_elapsed_secs,
+                info.bat_resting,
+            ),
+            AnimationType::Fish => entity_model::compute_fish_anim(
+                model,
+                info.age_in_ticks,
+                info.is_in_water,
+                info.entity_kind == EntityKind::Pufferfish,
+            ),
             AnimationType::Static => entity_model::PartAnim::default(),
         }
     }
@@ -1583,7 +1748,7 @@ impl EntityRenderer {
         // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
         // and are dropped at the end of this block, before the buffer write below.
         let mut instances: Vec<EntityInstance> = Vec::new();
-        let (opaque, body, eyes, swirl) = {
+        let (opaque, culled, body, eyes, swirl) = {
             let mut vis: Vec<VisEntity> = Vec::new();
             for info in entities {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
@@ -1617,12 +1782,18 @@ impl EntityRenderer {
             // created by an earlier entity draw a later entity's lower layer
             // after its upper one.
             let mut opaque = VariantGroups::default();
+            let mut culled = VariantGroups::default();
             for (vi, v) in vis.iter().enumerate() {
                 let base = v
                     .entry
                     .base_variant(v.info.is_baby, self.effective_variant_index(v.info));
                 let texture_set = self.player_texture_set(v.info, base.texture_set);
-                opaque.add(
+                let group = if base.overlay_kind == OverlayKind::OpaqueCulled {
+                    &mut culled
+                } else {
+                    &mut opaque
+                };
+                group.add(
                     base,
                     texture_set,
                     (vi, v.info.base_tint, hurt_color(v.info), [0.0, 0.0]),
@@ -1638,11 +1809,13 @@ impl EntityRenderer {
                         slot,
                         v.info.overlay_variants[slot],
                     );
-                    if overlay.overlay_kind != OverlayKind::Opaque {
-                        continue;
-                    }
+                    let group = match overlay.overlay_kind {
+                        OverlayKind::Opaque => &mut opaque,
+                        OverlayKind::OpaqueCulled => &mut culled,
+                        _ => continue,
+                    };
                     if let Some(tint) = v.info.overlay_tints[slot] {
-                        opaque.add(
+                        group.add(
                             overlay,
                             overlay.texture_set,
                             (vi, tint, hurt_color(v.info), [0.0, 0.0]),
@@ -1657,6 +1830,7 @@ impl EntityRenderer {
 
             (
                 opaque.emit(&vis, &mut instances),
+                culled.emit(&vis, &mut instances),
                 body.emit(&vis, &mut instances),
                 eyes.emit(&vis, &mut instances),
                 swirl.emit(&vis, &mut instances),
@@ -1678,6 +1852,7 @@ impl EntityRenderer {
             .copy_from_slice(bytes);
 
         self.record_pass(cmd, frame, self.pipeline, &opaque, count);
+        self.record_pass(cmd, frame, self.culled_pipeline, &culled, count);
         self.record_pass(cmd, frame, self.body_translucent_pipeline, &body, count);
         self.record_pass(cmd, frame, self.eyes_pipeline, &eyes, count);
         self.record_pass(cmd, frame, self.swirl_pipeline, &swirl, count);
@@ -1727,11 +1902,13 @@ impl EntityRenderer {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.culled_pipeline, None);
         device.destroy_pipeline(self.body_translucent_pipeline, None);
         device.destroy_pipeline(self.eyes_pipeline, None);
         device.destroy_pipeline(self.swirl_pipeline, None);
         [
             self.pipeline,
+            self.culled_pipeline,
             self.body_translucent_pipeline,
             self.eyes_pipeline,
             self.swirl_pipeline,
@@ -1790,6 +1967,7 @@ impl EntityRenderer {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.culled_pipeline, None);
         device.destroy_pipeline(self.body_translucent_pipeline, None);
         device.destroy_pipeline(self.eyes_pipeline, None);
         device.destroy_pipeline(self.swirl_pipeline, None);
@@ -2043,6 +2221,16 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         | EntityKind::SkeletonHorse
         | EntityKind::ZombieHorse => (1.3964844, 1.6),
         EntityKind::Donkey => (1.3964844, 1.5),
+        // Baby squid dimensions are an explicit 0.5x0.5 in vanilla, not the
+        // generic half scale.
+        EntityKind::Squid | EntityKind::GlowSquid if is_baby => return (0.5, 0.5),
+        EntityKind::Squid | EntityKind::GlowSquid => (0.8, 0.8),
+        EntityKind::Bat => (0.5, 0.9),
+        EntityKind::Cod => (0.5, 0.3),
+        // Salmon/pufferfish scale with their variant; use the largest.
+        EntityKind::Salmon => (1.05, 0.6),
+        EntityKind::TropicalFish => (0.5, 0.4),
+        EntityKind::Pufferfish => (0.7, 0.7),
         EntityKind::Player => (0.6, 1.8),
         _ => (1.0, 1.0),
     };
@@ -2061,16 +2249,20 @@ fn entity_visible(
 ) -> bool {
     let (w, h) = entity_bounds(info.entity_kind, info.is_baby);
     // A body transform (slime size/squish) can grow the entity well past its
-    // base bounds; scale the sphere and its center by the largest axis scale.
-    let scale = info.body_transform.map_or(1.0, |m| {
-        m.x_axis
+    // base bounds: scale the sphere and its center by the largest axis scale,
+    // and pad the radius by the translation (pure-rotation transforms still
+    // displace pivots — squid pitch, cat lie-down).
+    let (scale, shift) = info.body_transform.map_or((1.0, 0.0), |m| {
+        let s = m
+            .x_axis
             .length_squared()
             .max(m.y_axis.length_squared())
             .max(m.z_axis.length_squared())
             .sqrt()
-            .max(1.0)
+            .max(1.0);
+        (s, m.w_axis.truncate().length())
     });
-    let radius = (0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN) * scale;
+    let radius = (0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN) * scale + shift;
     let mut q = (*info.position - eye).as_vec3();
     q.y += h * 0.5 * scale;
     // Distance-cull with the radius as margin so an oversized entity stays
@@ -2317,13 +2509,20 @@ fn create_pipelines(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-) -> [vk::Pipeline; 4] {
+) -> [vk::Pipeline; 5] {
     [
         create_pipeline(
             device,
             render_pass,
             layout,
             BlendMode::Opaque,
+            ModelInput::Instanced,
+        ),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::OpaqueCulled,
             ModelInput::Instanced,
         ),
         create_pipeline(
@@ -2431,7 +2630,11 @@ pub(super) fn create_pipeline(
 
     let rasterizer = vk::PipelineRasterizationStateCreateInfo {
         polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeFlags::None,
+        cull_mode: if blend == BlendMode::OpaqueCulled {
+            vk::CullModeFlags::Back
+        } else {
+            vk::CullModeFlags::None
+        },
         front_face: vk::FrontFace::CounterClockwise,
         line_width: 1.0,
         ..Default::default()
@@ -2456,7 +2659,7 @@ pub(super) fn create_pipeline(
     };
 
     let blend_attachment = match blend {
-        BlendMode::Opaque => vk::PipelineColorBlendAttachmentState {
+        BlendMode::Opaque | BlendMode::OpaqueCulled => vk::PipelineColorBlendAttachmentState {
             blend_enable: vk::FALSE,
             color_write_mask: vk::ColorComponentFlags::RGBA,
             ..Default::default()
@@ -2530,4 +2733,14 @@ pub(super) fn create_pipeline(
     device.destroy_shader_module(frag_module, None);
 
     pipeline
+}
+
+#[cfg(test)]
+mod tests {
+    /// Bakes every mob model; `generate_cube_vertices`' UV seam
+    /// `debug_assert!` fires for any mesh that straddles its sheet.
+    #[test]
+    fn all_mob_meshes_bake() {
+        super::mob_definitions();
+    }
 }

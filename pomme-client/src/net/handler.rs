@@ -563,6 +563,10 @@ pub fn handle_game_packet(
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 1 => {
             let _ = event_tx.try_send(NetworkEvent::RabbitJump { id: p.entity_id.0 });
         }
+        // Event id 19 = squid tentacle-clock rollover.
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 19 => {
+            let _ = event_tx.try_send(NetworkEvent::SquidTentacleReset { id: p.entity_id.0 });
+        }
         // Events 8 / 56 = wolf wet-shake start / cancel.
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 8 => {
             let _ = event_tx.try_send(NetworkEvent::WolfShaking {

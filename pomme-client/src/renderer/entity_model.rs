@@ -11,7 +11,8 @@ const MODEL_REBASE_Y: f32 = 24.016;
 pub struct ModelCube {
     pub origin: Vec3,
     pub size: Vec3,
-    pub tex_offset: (u32, u32),
+    /// Signed: several vanilla fish parts use negative texOffs.
+    pub tex_offset: (i32, i32),
     pub deformation: f32,
     pub mirror: bool,
 }
@@ -607,7 +608,7 @@ fn inflate(parts: &mut [EntityPart], g: f32) {
 /// with its own UVs, not a scaled adult. `g` inflates everything but the
 /// head, whose second cube is a fixed 0.25 overlay.
 fn baby_zombie_parts(g: f32) -> Vec<EntityPart> {
-    let limb = |name: &str, pivot: Vec3, uv: (u32, u32), origin_y: f32, h: f32| {
+    let limb = |name: &str, pivot: Vec3, uv: (i32, i32), origin_y: f32, h: f32| {
         vpart(
             name,
             None,
@@ -771,7 +772,7 @@ pub fn bake_zombie_villager_model(no_hat: bool) -> BakedEntityModel {
 /// arm/leg parts (humanoid-animated, unlike the crossed-arm baby villager).
 /// The hat_rim hangs off the head, not the hat.
 fn baby_zombie_villager_parts() -> Vec<EntityPart> {
-    let limb = |name: &str, pivot: Vec3, uv: (u32, u32), h: f32| {
+    let limb = |name: &str, pivot: Vec3, uv: (i32, i32), h: f32| {
         vpart(
             name,
             None,
@@ -879,7 +880,7 @@ fn wolf_parts(g: f32) -> Vec<EntityPart> {
             }],
         )
     };
-    let cube = |uv: (u32, u32), origin: (f32, f32, f32), size: (f32, f32, f32)| ModelCube {
+    let cube = |uv: (i32, i32), origin: (f32, f32, f32), size: (f32, f32, f32)| ModelCube {
         deformation: g,
         ..vbox(uv, origin, size)
     };
@@ -946,7 +947,7 @@ pub fn bake_wolf_collar_model() -> BakedEntityModel {
 /// `head` with separate ear parts, no mane, and the shake targets `head`/`tail`
 /// themselves.
 fn baby_wolf_parts() -> Vec<EntityPart> {
-    let leg = |name: &str, x: f32, z: f32, uv: (u32, u32)| {
+    let leg = |name: &str, x: f32, z: f32, uv: (i32, i32)| {
         vpart(
             name,
             None,
@@ -1014,11 +1015,11 @@ pub fn bake_baby_wolf_model() -> BakedEntityModel {
 /// ocelot. `tail2` keeps its hardcoded -0.02 deformation even in the collar
 /// bake. Left/right leg pairs share one UV patch (vanilla quirk).
 fn feline_parts(g: f32) -> Vec<EntityPart> {
-    let cube = |uv: (u32, u32), origin: (f32, f32, f32), size: (f32, f32, f32)| ModelCube {
+    let cube = |uv: (i32, i32), origin: (f32, f32, f32), size: (f32, f32, f32)| ModelCube {
         deformation: g,
         ..vbox(uv, origin, size)
     };
-    let leg = |name: &str, x: f32, y: f32, z: f32, uv: (u32, u32), origin_z: f32, h: f32| {
+    let leg = |name: &str, x: f32, y: f32, z: f32, uv: (i32, i32), origin_z: f32, h: f32| {
         vpart(
             name,
             None,
@@ -1075,7 +1076,7 @@ fn feline_parts(g: f32) -> Vec<EntityPart> {
 /// Vanilla `BabyFelineModel`, 32x32 dedicated mesh. `tail2` is kept as an
 /// empty part for name parity with the adult.
 fn baby_feline_parts() -> Vec<EntityPart> {
-    let leg = |name: &str, x: f32, z: f32, uv: (u32, u32)| {
+    let leg = |name: &str, x: f32, z: f32, uv: (i32, i32)| {
         vpart(
             name,
             None,
@@ -1499,7 +1500,7 @@ pub fn bake_donkey_model(scale: f32, chest: bool) -> BakedEntityModel {
 /// Vanilla `BabyHorseModel.createBabyMesh(NONE)`, 64x64 dedicated mesh — no
 /// mane or upper mouth.
 fn baby_horse_parts() -> Vec<EntityPart> {
-    let leg = |name: &str, x: f32, z: f32, uv: (u32, u32)| {
+    let leg = |name: &str, x: f32, z: f32, uv: (i32, i32)| {
         vpart(
             name,
             None,
@@ -1571,7 +1572,7 @@ pub fn bake_baby_horse_model() -> BakedEntityModel {
 /// `body`, with `_r1` rotation-carrier parts and cubeless chest stubs (baby
 /// donkeys/mules never show a chest).
 fn baby_donkey_parts() -> Vec<EntityPart> {
-    let leg = |name: &str, pivot: Vec3, uv: (u32, u32), origin: (f32, f32, f32)| {
+    let leg = |name: &str, pivot: Vec3, uv: (i32, i32), origin: (f32, f32, f32)| {
         vpart(
             name,
             Some(0),
@@ -1668,6 +1669,568 @@ fn baby_donkey_parts() -> Vec<EntityPart> {
 
 pub fn bake_baby_donkey_model() -> BakedEntityModel {
     bake_model(baby_donkey_parts(), 64, 64)
+}
+
+/// The eight tentacles shared by both squid meshes (vanilla `SquidModel`'s
+/// placement loop; the yRot values are deliberately unwrapped).
+fn squid_tentacles(radius: f32, y: f32, cube: ModelCube) -> Vec<EntityPart> {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    (0..8)
+        .map(|i| {
+            let angle = i as f32 * PI * 2.0 / 8.0;
+            EntityPart {
+                default_rotation: Vec3::new(0.0, i as f32 * PI * -2.0 / 8.0 + FRAC_PI_2, 0.0),
+                ..vpart(
+                    &format!("tentacle{i}"),
+                    None,
+                    Vec3::new(angle.cos() * radius, y, angle.sin() * radius),
+                    vec![cube],
+                )
+            }
+        })
+        .collect()
+}
+
+/// Vanilla `SquidModel`, 64x32, shared by squid and glow squid.
+pub fn bake_squid_model() -> BakedEntityModel {
+    let mut parts = vec![vpart(
+        "body",
+        None,
+        Vec3::new(0.0, 8.0, 0.0),
+        vec![ModelCube {
+            deformation: 0.02,
+            ..vbox((0, 0), (-6.0, -8.0, -6.0), (12.0, 16.0, 12.0))
+        }],
+    )];
+    parts.extend(squid_tentacles(
+        5.0,
+        15.0,
+        vbox((48, 0), (-1.0, 0.0, -1.0), (2.0, 18.0, 2.0)),
+    ));
+    bake_model(parts, 64, 32)
+}
+
+/// Vanilla `BabySquidModel`, 32x32 dedicated mesh (the 0.5 baby transformer
+/// exists in vanilla but is unused).
+pub fn bake_baby_squid_model() -> BakedEntityModel {
+    let mut parts = vec![vpart(
+        "body",
+        None,
+        Vec3::new(0.0, 13.0, 0.0),
+        vec![vbox((0, 0), (-4.0, -5.0, -4.0), (8.0, 10.0, 8.0))],
+    )];
+    parts.extend(squid_tentacles(
+        3.0,
+        18.5,
+        vbox((0, 18), (-1.0, -0.5, -1.0), (2.0, 6.0, 2.0)),
+    ));
+    bake_model(parts, 32, 32)
+}
+
+/// Vanilla `BatModel`, 32x32: six of the nine parts are zero-depth quads
+/// with distinct front/back UVs — the bat renders through the backface-culled
+/// pipeline (vanilla `entityCutoutCull`) so the coplanar pairs don't fight.
+fn bat_parts() -> Vec<EntityPart> {
+    vec![
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 17.0, 0.0),
+            vec![vbox((0, 0), (-1.5, 0.0, -1.0), (3.0, 5.0, 2.0))],
+        ),
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, 17.0, 0.0),
+            vec![vbox((0, 7), (-2.0, -3.0, -1.0), (4.0, 3.0, 2.0))],
+        ),
+        vpart(
+            "right_ear",
+            Some(1),
+            Vec3::new(-1.5, -2.0, 0.0),
+            vec![vbox((1, 15), (-2.5, -4.0, 0.0), (3.0, 5.0, 0.0))],
+        ),
+        vpart(
+            "left_ear",
+            Some(1),
+            Vec3::new(1.1, -3.0, 0.0),
+            vec![vbox((8, 15), (-0.1, -3.0, 0.0), (3.0, 5.0, 0.0))],
+        ),
+        vpart(
+            "right_wing",
+            Some(0),
+            Vec3::new(-1.5, 0.0, 0.0),
+            vec![vbox((12, 0), (-2.0, -2.0, 0.0), (2.0, 7.0, 0.0))],
+        ),
+        vpart(
+            "right_wing_tip",
+            Some(4),
+            Vec3::new(-2.0, 0.0, 0.0),
+            vec![vbox((16, 0), (-6.0, -2.0, 0.0), (6.0, 8.0, 0.0))],
+        ),
+        vpart(
+            "left_wing",
+            Some(0),
+            Vec3::new(1.5, 0.0, 0.0),
+            vec![vbox((12, 7), (0.0, -2.0, 0.0), (2.0, 7.0, 0.0))],
+        ),
+        vpart(
+            "left_wing_tip",
+            Some(6),
+            Vec3::new(2.0, 0.0, 0.0),
+            vec![vbox((16, 8), (0.0, -2.0, 0.0), (6.0, 8.0, 0.0))],
+        ),
+        vpart(
+            "feet",
+            Some(0),
+            Vec3::new(0.0, 5.0, 0.0),
+            vec![vbox((16, 16), (-1.5, 0.0, 0.0), (3.0, 2.0, 0.0))],
+        ),
+    ]
+}
+
+pub fn bake_bat_model() -> BakedEntityModel {
+    bake_model(bat_parts(), 32, 32)
+}
+
+/// Vanilla `CodModel`, 32x32.
+pub fn bake_cod_model() -> BakedEntityModel {
+    use std::f32::consts::FRAC_PI_4;
+    let parts = vec![
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, 22.0, 0.0),
+            vec![vbox((0, 0), (-1.0, -2.0, 0.0), (2.0, 4.0, 7.0))],
+        ),
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, 22.0, 0.0),
+            vec![vbox((11, 0), (-1.0, -2.0, -3.0), (2.0, 4.0, 3.0))],
+        ),
+        vpart(
+            "nose",
+            None,
+            Vec3::new(0.0, 22.0, -3.0),
+            vec![vbox((0, 0), (-1.0, -2.0, -1.0), (2.0, 3.0, 1.0))],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(0.0, 0.0, -FRAC_PI_4),
+            ..vpart(
+                "right_fin",
+                None,
+                Vec3::new(-1.0, 23.0, 0.0),
+                vec![vbox((22, 1), (-2.0, 0.0, -1.0), (2.0, 0.0, 2.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(0.0, 0.0, FRAC_PI_4),
+            ..vpart(
+                "left_fin",
+                None,
+                Vec3::new(1.0, 23.0, 0.0),
+                vec![vbox((22, 4), (0.0, 0.0, -1.0), (2.0, 0.0, 2.0))],
+            )
+        },
+        vpart(
+            "tail_fin",
+            None,
+            Vec3::new(0.0, 22.0, 7.0),
+            vec![vbox((22, 3), (0.0, -2.0, 0.0), (0.0, 4.0, 4.0))],
+        ),
+        vpart(
+            "top_fin",
+            None,
+            Vec3::new(0.0, 20.0, 0.0),
+            vec![vbox((20, -6), (0.0, -1.0, -1.0), (0.0, 1.0, 6.0))],
+        ),
+    ];
+    bake_model(parts, 32, 32)
+}
+
+/// Vanilla `SalmonModel`, 32x32; the back fins ride `body_back` so the tail
+/// wobble carries them. Baked at 0.5 / 1.0 / 1.5 root scale for the size
+/// variants (`SalmonModel.SMALL_TRANSFORMER` / `LARGE_TRANSFORMER`).
+fn salmon_parts() -> Vec<EntityPart> {
+    use std::f32::consts::FRAC_PI_4;
+    vec![
+        vpart(
+            "body_front",
+            None,
+            Vec3::new(0.0, 20.0, -7.2),
+            vec![vbox((0, 0), (-1.5, -2.5, 0.0), (3.0, 5.0, 8.0))],
+        ),
+        vpart(
+            "body_back",
+            None,
+            Vec3::new(0.0, 20.0, 0.8000002),
+            vec![vbox((0, 13), (-1.5, -2.5, 0.0), (3.0, 5.0, 8.0))],
+        ),
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, 20.0, -7.2),
+            vec![vbox((22, 0), (-1.0, -2.0, -3.0), (2.0, 4.0, 3.0))],
+        ),
+        vpart(
+            "back_fin",
+            Some(1),
+            Vec3::new(0.0, 0.0, 8.0),
+            vec![vbox((20, 10), (0.0, -2.5, 0.0), (0.0, 5.0, 6.0))],
+        ),
+        vpart(
+            "top_front_fin",
+            Some(0),
+            Vec3::new(0.0, -4.5, 5.0),
+            vec![vbox((2, 1), (0.0, 0.0, 0.0), (0.0, 2.0, 3.0))],
+        ),
+        vpart(
+            "top_back_fin",
+            Some(1),
+            Vec3::new(0.0, -4.5, -1.0),
+            vec![vbox((0, 2), (0.0, 0.0, 0.0), (0.0, 2.0, 4.0))],
+        ),
+        EntityPart {
+            default_rotation: Vec3::new(0.0, 0.0, -FRAC_PI_4),
+            ..vpart(
+                "right_fin",
+                None,
+                Vec3::new(-1.5, 21.5, -7.2),
+                vec![vbox((-4, 0), (-2.0, 0.0, 0.0), (2.0, 0.0, 2.0))],
+            )
+        },
+        EntityPart {
+            default_rotation: Vec3::new(0.0, 0.0, FRAC_PI_4),
+            ..vpart(
+                "left_fin",
+                None,
+                Vec3::new(1.5, 21.5, -7.2),
+                vec![vbox((0, 0), (0.0, 0.0, 0.0), (2.0, 0.0, 2.0))],
+            )
+        },
+    ]
+}
+
+pub fn bake_salmon_model(scale: f32) -> BakedEntityModel {
+    bake_root_scaled(salmon_parts(), scale, 32, 32)
+}
+
+/// Vanilla `TropicalFishSmallModel` / `TropicalFishLargeModel` (shape A / B),
+/// 32x32. `g` is the 0.008 pattern-layer inflate. The small mesh carries a
+/// cubeless `bottom_fin` so both shapes (and their pattern overlays) share
+/// one part order (`assert_part_order_matches`).
+fn tropical_fish_parts(large: bool, g: f32) -> Vec<EntityPart> {
+    use std::f32::consts::FRAC_PI_4;
+    let cube = |uv: (i32, i32), origin: (f32, f32, f32), size: (f32, f32, f32)| ModelCube {
+        deformation: g,
+        ..vbox(uv, origin, size)
+    };
+    if large {
+        vec![
+            vpart(
+                "body",
+                None,
+                Vec3::new(0.0, 19.0, 0.0),
+                vec![cube((0, 20), (-1.0, -3.0, -3.0), (2.0, 6.0, 6.0))],
+            ),
+            vpart(
+                "tail",
+                None,
+                Vec3::new(0.0, 19.0, 3.0),
+                vec![cube((21, 16), (0.0, -3.0, 0.0), (0.0, 6.0, 5.0))],
+            ),
+            EntityPart {
+                default_rotation: Vec3::new(0.0, FRAC_PI_4, 0.0),
+                ..vpart(
+                    "right_fin",
+                    None,
+                    Vec3::new(-1.0, 20.0, 0.0),
+                    vec![cube((2, 16), (-2.0, 0.0, 0.0), (2.0, 2.0, 0.0))],
+                )
+            },
+            EntityPart {
+                default_rotation: Vec3::new(0.0, -FRAC_PI_4, 0.0),
+                ..vpart(
+                    "left_fin",
+                    None,
+                    Vec3::new(1.0, 20.0, 0.0),
+                    vec![cube((2, 12), (0.0, 0.0, 0.0), (2.0, 2.0, 0.0))],
+                )
+            },
+            vpart(
+                "top_fin",
+                None,
+                Vec3::new(0.0, 16.0, -3.0),
+                vec![cube((20, 11), (0.0, -4.0, 0.0), (0.0, 4.0, 6.0))],
+            ),
+            vpart(
+                "bottom_fin",
+                None,
+                Vec3::new(0.0, 22.0, -3.0),
+                vec![cube((20, 21), (0.0, 0.0, 0.0), (0.0, 4.0, 6.0))],
+            ),
+        ]
+    } else {
+        vec![
+            vpart(
+                "body",
+                None,
+                Vec3::new(0.0, 22.0, 0.0),
+                vec![cube((0, 0), (-1.0, -1.5, -3.0), (2.0, 3.0, 6.0))],
+            ),
+            vpart(
+                "tail",
+                None,
+                Vec3::new(0.0, 22.0, 3.0),
+                vec![cube((22, -6), (0.0, -1.5, 0.0), (0.0, 3.0, 6.0))],
+            ),
+            EntityPart {
+                default_rotation: Vec3::new(0.0, FRAC_PI_4, 0.0),
+                ..vpart(
+                    "right_fin",
+                    None,
+                    Vec3::new(-1.0, 22.5, 0.0),
+                    vec![cube((2, 16), (-2.0, -1.0, 0.0), (2.0, 2.0, 0.0))],
+                )
+            },
+            EntityPart {
+                default_rotation: Vec3::new(0.0, -FRAC_PI_4, 0.0),
+                ..vpart(
+                    "left_fin",
+                    None,
+                    Vec3::new(1.0, 22.5, 0.0),
+                    vec![cube((2, 12), (0.0, -1.0, 0.0), (2.0, 2.0, 0.0))],
+                )
+            },
+            vpart(
+                "top_fin",
+                None,
+                Vec3::new(0.0, 20.5, -3.0),
+                vec![cube((10, -5), (0.0, -3.0, 0.0), (0.0, 3.0, 6.0))],
+            ),
+            vpart("bottom_fin", None, Vec3::ZERO, vec![]),
+        ]
+    }
+}
+
+pub fn bake_tropical_fish_model(large: bool, g: f32) -> BakedEntityModel {
+    bake_model(tropical_fish_parts(large, g), 32, 32)
+}
+
+/// Vanilla `PufferfishSmallModel` / `PufferfishMidModel` / `PufferfishBigModel`
+/// (puff states 0/1/2), all 32x32.
+pub fn bake_pufferfish_model(puff_state: u32) -> BakedEntityModel {
+    use std::f32::consts::FRAC_PI_4;
+    let rot = |x: f32, y: f32, name: &str, pivot: (f32, f32, f32), cube: ModelCube| EntityPart {
+        default_rotation: Vec3::new(x, y, 0.0),
+        ..vpart(name, None, Vec3::new(pivot.0, pivot.1, pivot.2), vec![cube])
+    };
+    let parts = match puff_state {
+        0 => vec![
+            vpart(
+                "body",
+                None,
+                Vec3::new(0.0, 23.0, 0.0),
+                vec![vbox((0, 27), (-1.5, -2.0, -1.5), (3.0, 2.0, 3.0))],
+            ),
+            vpart(
+                "right_eye",
+                None,
+                Vec3::new(0.0, 20.0, 0.0),
+                vec![vbox((24, 6), (-1.5, 0.0, -1.5), (1.0, 1.0, 1.0))],
+            ),
+            vpart(
+                "left_eye",
+                None,
+                Vec3::new(0.0, 20.0, 0.0),
+                vec![vbox((28, 6), (0.5, 0.0, -1.5), (1.0, 1.0, 1.0))],
+            ),
+            vpart(
+                "back_fin",
+                None,
+                Vec3::new(0.0, 22.0, 1.5),
+                vec![vbox((-3, 0), (-1.5, 0.0, 0.0), (3.0, 0.0, 3.0))],
+            ),
+            vpart(
+                "right_fin",
+                None,
+                Vec3::new(-1.5, 22.0, -1.5),
+                vec![vbox((25, 0), (-1.0, 0.0, 0.0), (1.0, 0.0, 2.0))],
+            ),
+            vpart(
+                "left_fin",
+                None,
+                Vec3::new(1.5, 22.0, -1.5),
+                vec![vbox((25, 0), (0.0, 0.0, 0.0), (1.0, 0.0, 2.0))],
+            ),
+        ],
+        1 => vec![
+            vpart(
+                "body",
+                None,
+                Vec3::new(0.0, 22.0, 0.0),
+                vec![vbox((12, 22), (-2.5, -5.0, -2.5), (5.0, 5.0, 5.0))],
+            ),
+            vpart(
+                "right_blue_fin",
+                None,
+                Vec3::new(-2.5, 18.0, -1.5),
+                vec![vbox((24, 0), (-2.0, 0.0, 0.0), (2.0, 0.0, 2.0))],
+            ),
+            vpart(
+                "left_blue_fin",
+                None,
+                Vec3::new(2.5, 18.0, -1.5),
+                vec![vbox((24, 3), (0.0, 0.0, 0.0), (2.0, 0.0, 2.0))],
+            ),
+            rot(
+                FRAC_PI_4,
+                0.0,
+                "top_front_fin",
+                (0.0, 17.0, -2.5),
+                vbox((19, 17), (-2.5, -1.0, 0.0), (5.0, 1.0, 0.0)),
+            ),
+            rot(
+                -FRAC_PI_4,
+                0.0,
+                "top_back_fin",
+                (0.0, 17.0, 2.5),
+                vbox((11, 17), (-2.5, -1.0, 0.0), (5.0, 1.0, 0.0)),
+            ),
+            rot(
+                0.0,
+                -FRAC_PI_4,
+                "right_front_fin",
+                (-2.5, 22.0, -2.5),
+                vbox((5, 17), (-1.0, -5.0, 0.0), (1.0, 5.0, 0.0)),
+            ),
+            rot(
+                0.0,
+                FRAC_PI_4,
+                "right_back_fin",
+                (-2.5, 22.0, 2.5),
+                vbox((9, 17), (-1.0, -5.0, 0.0), (1.0, 5.0, 0.0)),
+            ),
+            rot(
+                0.0,
+                -FRAC_PI_4,
+                "left_back_fin",
+                (2.5, 22.0, 2.5),
+                vbox((1, 17), (0.0, -5.0, 0.0), (1.0, 5.0, 0.0)),
+            ),
+            rot(
+                0.0,
+                FRAC_PI_4,
+                "left_front_fin",
+                (2.5, 22.0, -2.5),
+                vbox((1, 17), (0.0, -5.0, 0.0), (1.0, 5.0, 0.0)),
+            ),
+            rot(
+                FRAC_PI_4,
+                0.0,
+                "bottom_back_fin",
+                (-2.5, 22.0, 2.5),
+                vbox((18, 20), (0.0, 0.0, 0.0), (5.0, 1.0, 0.0)),
+            ),
+            rot(
+                -FRAC_PI_4,
+                0.0,
+                "bottom_front_fin",
+                (0.0, 22.0, -2.5),
+                vbox((17, 19), (-2.5, 0.0, 0.0), (5.0, 1.0, 1.0)),
+            ),
+        ],
+        _ => vec![
+            vpart(
+                "body",
+                None,
+                Vec3::new(0.0, 22.0, 0.0),
+                vec![vbox((0, 0), (-4.0, -8.0, -4.0), (8.0, 8.0, 8.0))],
+            ),
+            vpart(
+                "right_blue_fin",
+                None,
+                Vec3::new(-4.0, 15.0, -2.0),
+                vec![vbox((24, 0), (-2.0, 0.0, -1.0), (2.0, 1.0, 2.0))],
+            ),
+            vpart(
+                "left_blue_fin",
+                None,
+                Vec3::new(4.0, 15.0, -2.0),
+                vec![vbox((24, 3), (0.0, 0.0, -1.0), (2.0, 1.0, 2.0))],
+            ),
+            rot(
+                FRAC_PI_4,
+                0.0,
+                "top_front_fin",
+                (0.0, 14.0, -4.0),
+                vbox((15, 17), (-4.0, -1.0, 0.0), (8.0, 1.0, 0.0)),
+            ),
+            vpart(
+                "top_middle_fin",
+                None,
+                Vec3::new(0.0, 14.0, 0.0),
+                vec![vbox((14, 16), (-4.0, -1.0, 0.0), (8.0, 1.0, 1.0))],
+            ),
+            rot(
+                -FRAC_PI_4,
+                0.0,
+                "top_back_fin",
+                (0.0, 14.0, 4.0),
+                vbox((23, 18), (-4.0, -1.0, 0.0), (8.0, 1.0, 0.0)),
+            ),
+            rot(
+                0.0,
+                -FRAC_PI_4,
+                "right_front_fin",
+                (-4.0, 22.0, -4.0),
+                vbox((5, 17), (-1.0, -8.0, 0.0), (1.0, 8.0, 0.0)),
+            ),
+            rot(
+                0.0,
+                FRAC_PI_4,
+                "left_front_fin",
+                (4.0, 22.0, -4.0),
+                vbox((1, 17), (0.0, -8.0, 0.0), (1.0, 8.0, 0.0)),
+            ),
+            rot(
+                -FRAC_PI_4,
+                0.0,
+                "bottom_front_fin",
+                (0.0, 22.0, -4.0),
+                vbox((15, 20), (-4.0, 0.0, 0.0), (8.0, 1.0, 0.0)),
+            ),
+            vpart(
+                "bottom_middle_fin",
+                None,
+                Vec3::new(0.0, 22.0, 0.0),
+                vec![vbox((15, 20), (-4.0, 0.0, 0.0), (8.0, 1.0, 0.0))],
+            ),
+            rot(
+                FRAC_PI_4,
+                0.0,
+                "bottom_back_fin",
+                (0.0, 22.0, 4.0),
+                vbox((15, 20), (-4.0, 0.0, 0.0), (8.0, 1.0, 0.0)),
+            ),
+            rot(
+                0.0,
+                FRAC_PI_4,
+                "right_back_fin",
+                (-4.0, 22.0, 4.0),
+                vbox((9, 17), (-1.0, -8.0, 0.0), (1.0, 8.0, 0.0)),
+            ),
+            rot(
+                0.0,
+                -FRAC_PI_4,
+                "left_back_fin",
+                (4.0, 22.0, 4.0),
+                vbox((9, 17), (0.0, -8.0, 0.0), (1.0, 8.0, 0.0)),
+            ),
+        ],
+    };
+    bake_model(parts, 32, 32)
 }
 
 /// Skeleton: humanoid layout with thin 2×12×2 limbs, 64×32 sheet
@@ -2207,7 +2770,7 @@ pub fn bake_cold_chicken_model() -> BakedEntityModel {
 /// fused into the body (so no head look). The wing pivots are X-flipped
 /// relative to the adult (vanilla quirk; the legs are not).
 pub fn bake_baby_chicken_model() -> BakedEntityModel {
-    let leg = |name: &str, x: f32, shin_uv: (u32, u32), foot_uv: (u32, u32)| {
+    let leg = |name: &str, x: f32, shin_uv: (i32, i32), foot_uv: (i32, i32)| {
         vpart(
             name,
             None,
@@ -2218,7 +2781,7 @@ pub fn bake_baby_chicken_model() -> BakedEntityModel {
             ],
         )
     };
-    let wing = |name: &str, x: f32, origin_x: f32, uv: (u32, u32)| {
+    let wing = |name: &str, x: f32, origin_x: f32, uv: (i32, i32)| {
         vpart(
             name,
             None,
@@ -2433,7 +2996,7 @@ pub fn bake_baby_sheep_wool_model() -> BakedEntityModel {
 }
 
 /// One vanilla `texOffs(u, v).addBox(origin, size)`.
-fn vbox(tex_offset: (u32, u32), origin: (f32, f32, f32), size: (f32, f32, f32)) -> ModelCube {
+fn vbox(tex_offset: (i32, i32), origin: (f32, f32, f32), size: (f32, f32, f32)) -> ModelCube {
     ModelCube {
         origin: origin.into(),
         size: size.into(),
@@ -4278,6 +4841,258 @@ pub fn compute_equine_anim(
     anim
 }
 
+/// Squid (`SquidModel.setupAnim`): every tentacle pitches by the stroke
+/// angle on top of its baked yaw.
+pub fn compute_squid_anim(model: &BakedEntityModel, tentacle_angle: f32) -> PartAnim {
+    let mut anim = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        if part.name.starts_with("tentacle") {
+            anim.rotation
+                .push((i, vanilla_rot(tentacle_angle, part.default_rotation.y, 0.0)));
+        }
+    }
+    anim
+}
+
+/// `BatAnimation.BAT_RESTING` — a single-keyframe static pose (the 180
+/// degree head/body flip is the upside-down hang). 0.5s looping.
+static BAT_RESTING: KfAnim = {
+    use Kfi::Lin;
+    KfAnim {
+        length: 0.5,
+        looping: true,
+        channels: &[
+            KfChannel {
+                part: "head",
+                rotation: true,
+                frames: &[kf(0.0, 180.0, 0.0, 0.0, Lin)],
+            },
+            KfChannel {
+                part: "head",
+                rotation: false,
+                frames: &[kf(0.0, 0.0, 0.5, 0.0, Lin)],
+            },
+            KfChannel {
+                part: "body",
+                rotation: true,
+                frames: &[kf(0.0, 180.0, 0.0, 0.0, Lin)],
+            },
+            KfChannel {
+                part: "body",
+                rotation: false,
+                frames: &[kf(0.0, 0.0, 0.5, 0.0, Lin)],
+            },
+            KfChannel {
+                part: "right_wing",
+                rotation: true,
+                frames: &[kf(0.0, 0.0, -10.0, 0.0, Lin)],
+            },
+            KfChannel {
+                part: "right_wing",
+                rotation: false,
+                frames: &[kf(0.0, 0.0, 0.0, 1.0, Lin)],
+            },
+            KfChannel {
+                part: "right_wing_tip",
+                rotation: true,
+                frames: &[kf(0.0, 0.0, -120.0, 0.0, Lin)],
+            },
+            KfChannel {
+                part: "left_wing",
+                rotation: true,
+                frames: &[kf(0.0, 0.0, 10.0, 0.0, Lin)],
+            },
+            KfChannel {
+                part: "left_wing",
+                rotation: false,
+                frames: &[kf(0.0, 0.0, 0.0, 1.0, Lin)],
+            },
+            KfChannel {
+                part: "left_wing_tip",
+                rotation: true,
+                frames: &[kf(0.0, 0.0, 120.0, 0.0, Lin)],
+            },
+        ],
+    }
+};
+
+/// `BatAnimation.BAT_FLYING`, 0.5s looping.
+static BAT_FLYING: KfAnim = {
+    use Kfi::Lin;
+    KfAnim {
+        length: 0.5,
+        looping: true,
+        channels: &[
+            KfChannel {
+                part: "head",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 20.0, 0.0, 0.0, Lin),
+                    kf(0.5, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "head",
+                rotation: false,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 2.0, 0.0, Lin),
+                    kf(0.25, 0.0, 1.0, 0.0, Lin),
+                    kf(0.375, 0.0, 0.0, 0.0, Lin),
+                    kf(0.4583, 0.0, -1.0, 0.0, Lin),
+                    kf(0.5, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "body",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 40.0, 0.0, 0.0, Lin),
+                    kf(0.25, 52.5, 0.0, 0.0, Lin),
+                    kf(0.5, 40.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "body",
+                rotation: false,
+                frames: &[
+                    kf(0.0, 0.0, 0.0, 0.0, Lin),
+                    kf(0.125, 0.0, 2.0, 0.0, Lin),
+                    kf(0.25, 0.0, 1.0, 0.0, Lin),
+                    kf(0.375, 0.0, 0.0, 0.0, Lin),
+                    kf(0.4583, 0.0, -1.0, 0.0, Lin),
+                    kf(0.5, 0.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "feet",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 10.0, 0.0, 0.0, Lin),
+                    kf(0.125, -21.25, 0.0, 0.0, Lin),
+                    kf(0.25, -12.5, 0.0, 0.0, Lin),
+                    kf(0.5, 10.0, 0.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "right_wing",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 85.0, 0.0, Lin),
+                    kf(0.125, 0.0, -55.0, 0.0, Lin),
+                    kf(0.25, 0.0, 50.0, 0.0, Lin),
+                    kf(0.375, 0.0, 70.0, 0.0, Lin),
+                    kf(0.5, 0.0, 85.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "left_wing",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, -85.0, 0.0, Lin),
+                    kf(0.125, 0.0, 55.0, 0.0, Lin),
+                    kf(0.25, 0.0, -50.0, 0.0, Lin),
+                    kf(0.375, 0.0, -70.0, 0.0, Lin),
+                    kf(0.5, 0.0, -85.0, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "right_wing_tip",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, 10.5, 0.0, Lin),
+                    kf(0.0417, 0.0, 65.5, 0.0, Lin),
+                    kf(0.2083, 0.0, -135.0, 0.0, Lin),
+                    kf(0.5, 0.0, 10.5, 0.0, Lin),
+                ],
+            },
+            KfChannel {
+                part: "left_wing_tip",
+                rotation: true,
+                frames: &[
+                    kf(0.0, 0.0, -10.5, 0.0, Lin),
+                    kf(0.0417, 0.0, -65.5, 0.0, Lin),
+                    kf(0.2083, 0.0, 135.0, 0.0, Lin),
+                    kf(0.5, 0.0, -10.5, 0.0, Lin),
+                ],
+            },
+        ],
+    }
+};
+
+/// Bat (`BatModel.setupAnim`): purely keyframe-driven; resting adds the
+/// absolute head yaw before the keyframe offsets.
+pub fn compute_bat_anim(
+    model: &BakedEntityModel,
+    local_head_y_rot_deg: f32,
+    elapsed_secs: Option<f32>,
+    resting: bool,
+) -> PartAnim {
+    let mut anim = PartAnim::default();
+    let mut rot_delta = vec![Vec3::ZERO; model.parts.len()];
+    let mut pos_delta = vec![Vec3::ZERO; model.parts.len()];
+    let mut touched_rot = vec![false; model.parts.len()];
+
+    if let Some(elapsed) = elapsed_secs {
+        let table = if resting { &BAT_RESTING } else { &BAT_FLYING };
+        apply_kf_anim(
+            table,
+            model,
+            elapsed,
+            &mut rot_delta,
+            &mut pos_delta,
+            &mut touched_rot,
+        );
+    }
+
+    for (i, part) in model.parts.iter().enumerate() {
+        let head_look = resting && part.name == "head";
+        if touched_rot[i] || head_look {
+            let mut e = part.default_rotation + rot_delta[i];
+            if head_look {
+                e.y += local_head_y_rot_deg.to_radians();
+            }
+            anim.rotation.push((i, vanilla_rot(e.x, e.y, e.z)));
+        }
+        if pos_delta[i] != Vec3::ZERO {
+            anim.translation.push((i, pos_delta[i]));
+        }
+    }
+    anim
+}
+
+/// The four fish (`CodModel`/`SalmonModel`/`TropicalFish*Model`/
+/// `Pufferfish*Model` `setupAnim`). The pufferfish gate keeps the other
+/// fishes' identically-named static pectoral fins on their default pose.
+pub fn compute_fish_anim(
+    model: &BakedEntityModel,
+    age_in_ticks: f32,
+    is_in_water: bool,
+    is_pufferfish: bool,
+) -> PartAnim {
+    let amp = if is_in_water { 1.0 } else { 1.5 };
+    let mut anim = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        let rot = match part.name.as_str() {
+            "tail_fin" | "tail" => Vec3::new(0.0, -amp * 0.45 * (0.6 * age_in_ticks).sin(), 0.0),
+            "body_back" => {
+                let (a, ang) = if is_in_water { (1.0, 1.0) } else { (1.3, 1.7) };
+                Vec3::new(0.0, -a * 0.25 * (ang * 0.6 * age_in_ticks).sin(), 0.0)
+            }
+            "right_fin" | "right_blue_fin" if is_pufferfish => {
+                Vec3::new(0.0, 0.0, -0.2 + 0.4 * (age_in_ticks * 0.2).sin())
+            }
+            "left_fin" | "left_blue_fin" if is_pufferfish => {
+                Vec3::new(0.0, 0.0, 0.2 - 0.4 * (age_in_ticks * 0.2).sin())
+            }
+            _ => continue,
+        };
+        anim.rotation.push((i, rot));
+    }
+    anim
+}
+
 /// The four corner positions of each cube face, ported from vanilla
 /// `ModelPart.Cube`: eight shared corners (`t*` on minZ, `l*` on maxZ) with
 /// model Y negated for the engine's y-up render space (the entity matrix
@@ -4395,20 +5210,80 @@ pub(crate) fn generate_cube_vertices(
     ];
 
     let positions = cube_face_positions(cube, y_down);
+
+    // Vanilla samplers REPEAT while pomme's vertex format clamps UVs to the
+    // sheet; shift any face rect that lies wholly off-sheet (negative
+    // texOffs fins) back into range. A rect still straddling the right seam
+    // afterwards is split below; other straddles keep the clamp.
+    let wrap = |lo: f32, hi: f32, extent: f32| {
+        let shift = -(lo / extent).floor() * extent;
+        if shift != 0.0 && hi + shift <= extent {
+            (lo + shift, hi + shift)
+        } else {
+            (lo, hi)
+        }
+    };
+
     for (slot, (pos, uv)) in positions.iter().zip(&face_uv).enumerate() {
         if faces & (1 << slot) == 0 {
             continue;
         }
-        push_face(
-            pos,
-            uv[0] / tw,
-            uv[1] / th,
-            uv[2] / tw,
-            uv[3] / th,
-            cube.mirror,
-            vertices,
-        );
+        let (su, eu) = wrap(uv[0], uv[2], tw);
+        // The maxY face's V rect runs reversed; wrap on ordered bounds and
+        // restore the orientation.
+        let (sv, ev) = if uv[1] <= uv[3] {
+            wrap(uv[1], uv[3], th)
+        } else {
+            let (lo, hi) = wrap(uv[3], uv[1], th);
+            (hi, lo)
+        };
+        if !cube.mirror && su >= 0.0 && su < tw && eu > tw {
+            // Still straddles the right sheet seam after the wrap (small
+            // tropical fish tail +X, big pufferfish top_back_fin +Z): split at
+            // the seam so both halves land in range. U runs from `u0` at
+            // corners 1/2 to `u1` at corners 0/3.
+            let t = (tw - su) / (eu - su);
+            let m10 = mix3(pos[1], pos[0], t);
+            let m23 = mix3(pos[2], pos[3], t);
+            let quad_a = [m10, pos[1], pos[2], m23];
+            let quad_b = [pos[0], m10, m23, pos[3]];
+            push_face(&quad_a, su / tw, sv / th, 1.0, ev / th, false, vertices);
+            push_face(
+                &quad_b,
+                0.0,
+                sv / th,
+                (eu - tw) / tw,
+                ev / th,
+                false,
+                vertices,
+            );
+        } else {
+            // Any other straddle would clamp; only zero-area faces may.
+            debug_assert!(
+                su == eu
+                    || sv == ev
+                    || (su >= 0.0 && eu <= tw && sv.min(ev) >= 0.0 && sv.max(ev) <= th),
+                "cube face UVs ({su},{sv})-({eu},{ev}) straddle the {tw}x{th} sheet"
+            );
+            push_face(
+                pos,
+                su / tw,
+                sv / th,
+                eu / tw,
+                ev / th,
+                cube.mirror,
+                vertices,
+            );
+        }
     }
+}
+
+fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 /// Like [`generate_cube_vertices`] but with explicit per-face UV rects (face

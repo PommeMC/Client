@@ -2286,11 +2286,15 @@ pub fn update_game(
                     lie_down_amount_tail: extras.lie_down_amount_tail,
                     relax_state_one_amount: extras.relax_state_one_amount,
                     hop_elapsed_secs: extras.hop_elapsed_secs,
-                    base_tint: extras.base_shade.map_or(WHITE_TINT, |s| [s, s, s, 1.0]),
+                    base_tint: extras.base_tint.unwrap_or(WHITE_TINT),
                     eat_anim: extras.eat_anim,
                     stand_anim: extras.stand_anim,
                     feeding_anim: extras.feeding_anim,
                     animate_tail: extras.animate_tail,
+                    is_in_water: e.is_in_water,
+                    tentacle_angle: extras.tentacle_angle,
+                    bat_resting: e.bat_resting,
+                    bat_elapsed_secs: extras.bat_elapsed_secs,
                     body_transform: extras.body_transform,
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
@@ -2808,12 +2812,15 @@ struct EntityExtras {
     lie_down_amount_tail: f32,
     relax_state_one_amount: f32,
     hop_elapsed_secs: Option<f32>,
-    /// Grayscale base-model shade (wolf wet shade); `None` = untinted.
-    base_shade: Option<f32>,
+    /// Base-model tint (wolf wet shade, glow squid dimming, tropical fish
+    /// base dye); `None` = white.
+    base_tint: Option<[f32; 4]>,
     eat_anim: f32,
     stand_anim: f32,
     feeding_anim: f32,
     animate_tail: bool,
+    tentacle_angle: f32,
+    bat_elapsed_secs: Option<f32>,
 }
 
 /// Only the first overlay slot visible, untinted.
@@ -2898,6 +2905,15 @@ fn entity_extras(
             ..equine_extras(e, alpha)
         },
         EntityKind::SkeletonHorse | EntityKind::ZombieHorse => equine_extras(e, alpha),
+        EntityKind::Squid | EntityKind::GlowSquid => squid_extras(e, alpha),
+        EntityKind::Bat => EntityExtras {
+            bat_elapsed_secs: e.bat_anim_start.map(|s| anim_clock_secs(e, s, alpha)),
+            ..Default::default()
+        },
+        EntityKind::Cod
+        | EntityKind::Salmon
+        | EntityKind::TropicalFish
+        | EntityKind::Pufferfish => fish_extras(e, alpha),
         EntityKind::Rabbit => EntityExtras {
             // "Toast" overrides the variant texture (slot 7).
             variant_index: if e.custom_name.as_deref() == Some("Toast") {
@@ -2905,9 +2921,7 @@ fn entity_extras(
             } else {
                 e.variant
             },
-            hop_elapsed_secs: e
-                .hop_anim_start
-                .map(|start| (e.age_in_ticks.wrapping_sub(start) as f32 + alpha) * 0.05),
+            hop_elapsed_secs: e.hop_anim_start.map(|s| anim_clock_secs(e, s, alpha)),
             ..Default::default()
         },
         // Charged-creeper aura overlay (slot 0) only when powered.
@@ -2917,6 +2931,12 @@ fn entity_extras(
         },
         _ => EntityExtras::default(),
     }
+}
+
+/// Seconds on a vanilla `AnimationState` clock started at tick `start`
+/// (clocks start one tick ahead of the current age, so clamp at 0).
+fn anim_clock_secs(e: &crate::entity::LivingEntity, start: u32, alpha: f32) -> f32 {
+    (e.age_in_ticks as f32 - start as f32 + alpha).max(0.0) * 0.05
 }
 
 /// Vanilla `AbstractCubeMobRenderer.applySizeAndSquish` plus the slime-only
@@ -2930,6 +2950,88 @@ fn slime_body_transform(e: &crate::entity::LivingEntity, alpha: f32) -> glam::Ma
     glam::Mat4::from_scale(glam::Vec3::splat(0.999))
         * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.001, 0.0))
         * glam::Mat4::from_scale(glam::Vec3::new(w * size, size / w, w * size))
+}
+
+/// Squid tentacle stroke + the `SquidRenderer.setupRotations` body pitch and
+/// axial spin; glow squid adds the post-hurt dimming.
+fn squid_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    let x_rot = e.prev_x_body_rot + (e.x_body_rot - e.prev_x_body_rot) * alpha;
+    // z_body_rot grows without bound; wrap only here, after the lerp.
+    let z_rot = (e.prev_z_body_rot + (e.z_body_rot - e.prev_z_body_rot) * alpha).rem_euclid(360.0);
+    let (up, down) = if e.is_baby { (0.25, -0.6) } else { (0.5, -1.2) };
+    // Approximation: vanilla drops the glow light level while dark and lets
+    // ambient light take over; pomme's entity pipeline is unlit, so darken
+    // the tint instead.
+    let base_tint = (e.entity_type == EntityKind::GlowSquid).then(|| {
+        let k = (1.0 - e.dark_ticks as f32 / 10.0).clamp(0.0, 1.0);
+        [k, k, k, 1.0]
+    });
+    EntityExtras {
+        tentacle_angle: e.prev_tentacle_angle + (e.tentacle_angle - e.prev_tentacle_angle) * alpha,
+        // The axial spin is applied about Y, after the pitch (vanilla).
+        body_transform: Some(
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, up, 0.0))
+                * glam::Mat4::from_rotation_x(x_rot.to_radians())
+                * glam::Mat4::from_rotation_y(z_rot.to_radians())
+                * glam::Mat4::from_translation(glam::Vec3::new(0.0, down, 0.0)),
+        ),
+        base_tint,
+        ..Default::default()
+    }
+}
+
+/// The four fish renderers' `setupRotations`: body wobble about Y, the
+/// on-land 90 degree flop roll, and the pufferfish bob; plus per-kind variant
+/// and tint selection.
+fn fish_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    use std::f32::consts::FRAC_PI_2;
+    let age = e.age_in_ticks as f32 + alpha;
+    if e.entity_type == EntityKind::Pufferfish {
+        return EntityExtras {
+            variant_index: e.puff_state as u32,
+            render_offset: glam::DVec3::new(0.0, ((age * 0.05).cos() * 0.08) as f64, 0.0),
+            ..Default::default()
+        };
+    }
+    // Only the salmon scales its wobble when out of water.
+    let (amp, ang) = if e.entity_type == EntityKind::Salmon && !e.is_in_water {
+        (1.3, 1.7)
+    } else {
+        (1.0, 1.0)
+    };
+    let wobble = (amp * 4.3 * (ang * 0.6 * age).sin()).to_radians();
+    let mut m = glam::Mat4::from_rotation_y(wobble);
+    if !e.is_in_water {
+        let t = if e.entity_type == EntityKind::Cod {
+            glam::Vec3::new(0.1, 0.1, -0.1)
+        } else {
+            glam::Vec3::new(0.2, 0.1, 0.0)
+        };
+        m *= glam::Mat4::from_translation(t) * glam::Mat4::from_rotation_z(FRAC_PI_2);
+    }
+    let mut extras = EntityExtras {
+        body_transform: Some(m),
+        ..Default::default()
+    };
+    match e.entity_type {
+        EntityKind::Salmon => extras.variant_index = e.variant,
+        EntityKind::TropicalFish => {
+            // Packed variant: b0 shape, b1 pattern, b2 base dye, b3 pattern
+            // dye. An unknown shape/pattern pair falls back to KOB (small,
+            // pattern 0) like vanilla's sparse id map.
+            let v = e.variant as i32;
+            let (shape, pattern) = match ((v & 0xFF) as usize, ((v >> 8) & 0xFF) as u32) {
+                (shape @ 0..=1, pattern @ 0..=5) => (shape, pattern),
+                _ => (0, 0),
+            };
+            extras.variant_index = shape as u32;
+            extras.base_tint = Some(dye_color_tint(((v >> 16) & 0xFF) as u8));
+            extras.overlay_tints[shape] = Some(dye_color_tint(((v >> 24) & 0xFF) as u8));
+            extras.overlay_variants = [pattern, pattern, 0, 0];
+        }
+        _ => {}
+    }
+    extras
 }
 
 fn equine_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
@@ -2968,6 +3070,7 @@ fn wolf_extras(e: &crate::entity::LivingEntity, alpha: f32, game_time: i64) -> E
     if e.is_tame {
         overlay_tints[0] = Some(dye_color_tint(e.collar_color));
     }
+    let wet = e.wet_shade(alpha);
     EntityExtras {
         variant_index: e.variant * 3 + state,
         overlay_tints,
@@ -2978,7 +3081,7 @@ fn wolf_extras(e: &crate::entity::LivingEntity, alpha: f32, game_time: i64) -> E
             * 0.15
             * PI,
         shake_anim: e.prev_shake_anim + (e.shake_anim - e.prev_shake_anim) * alpha,
-        base_shade: Some(e.wet_shade(alpha)),
+        base_tint: Some([wet, wet, wet, 1.0]),
         ..Default::default()
     }
 }

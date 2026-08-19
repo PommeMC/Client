@@ -15,7 +15,7 @@ use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerA
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use azalea_registry::builtin::{BlockKind, ItemKind};
+use azalea_registry::builtin::{BlockKind, EntityKind, ItemKind};
 use glam::{DVec3, Vec3, dvec3};
 use pomme_protocol::wire;
 
@@ -1337,8 +1337,18 @@ fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<
     for (&entity_id, entity) in &entities.living {
         let mut dims = EntityDimensions::from(entity.entity_type);
         if entity.is_baby {
-            dims.width *= 0.5;
-            dims.height *= 0.5;
+            // `Squid.BABY_DIMENSIONS` is an explicit 0.5x0.5, not the
+            // generic half scale.
+            if matches!(
+                entity.entity_type,
+                EntityKind::Squid | EntityKind::GlowSquid
+            ) {
+                dims.width = 0.5;
+                dims.height = 0.5;
+            } else {
+                dims.width *= 0.5;
+                dims.height *= 0.5;
+            }
         }
         let aabb = dims.make_bounding_box(entity.position.into());
 

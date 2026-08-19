@@ -321,6 +321,9 @@ pub enum NetworkEvent {
     RabbitJump {
         id: i32,
     },
+    SquidTentacleReset {
+        id: i32,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,
