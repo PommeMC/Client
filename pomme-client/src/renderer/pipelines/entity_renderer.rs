@@ -103,6 +103,10 @@ struct MobVariant {
     texture_allocation: Allocation,
     texture_set: vk::DescriptorSet,
     overlay_kind: OverlayKind,
+    /// Overlay whose part poses (pivots/rotations/scales) differ from the
+    /// base model's, so its part transforms can't be shared with the base
+    /// (stray/bogged clothing: humanoid ±1.9 legs over skeleton ±2.0).
+    own_pivots: bool,
 }
 
 struct MobEntry {
@@ -854,17 +858,14 @@ impl EntityRenderer {
             let adult_variants: Vec<MobVariant> =
                 def.adult.into_iter().flat_map(&mut build).collect();
             let baby_variants = def.baby.map(&mut build);
-            let adult_overlays: Vec<Vec<MobVariant>> =
+            let mut adult_overlays: Vec<Vec<MobVariant>> =
                 def.adult_overlays.into_iter().map(&mut build).collect();
-            let baby_overlays: Vec<Vec<MobVariant>> =
+            let mut baby_overlays: Vec<Vec<MobVariant>> =
                 def.baby_overlays.into_iter().map(&mut build).collect();
 
-            // Anim part-name indices are computed against the base variant's model and
-            // reused for each overlay draw. Catch mismatched part order at construction
-            // time rather than rendering wrong limbs in production.
-            assert_part_order_matches(&adult_variants, &adult_overlays);
+            link_overlays(&adult_variants, &mut adult_overlays);
             if let Some(baby) = &baby_variants {
-                assert_part_order_matches(baby, &baby_overlays);
+                link_overlays(baby, &mut baby_overlays);
             }
 
             if let Some(n) = expected_variant_count(def.kind) {
@@ -1182,15 +1183,13 @@ impl EntityRenderer {
                 let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
                 let entity_mat = Self::entity_matrix(info, anchor);
                 let anim = self.compute_anim(entry.anim, &variant.model, info);
-                // Computed once per entity and shared with the overlay draws:
-                // overlays match the base's part order AND pivots (only cube
-                // geometry differs), and cubeless padding parts are never
-                // drawn, so their transforms are unused.
+                // Shared with every overlay that isn't `own_pivots`.
                 let part_transforms = variant.model.compute_part_transforms(&anim);
                 vis.push(VisEntity {
                     info,
                     entry,
                     entity_mat,
+                    anim,
                     part_transforms,
                 });
             }
@@ -1453,12 +1452,13 @@ fn create_camera_sets(
     (sets, buffers, allocations)
 }
 
-/// A culled, drawable entity with its world transform and per-part
-/// animation matrices precomputed (shared by the base and overlay draws).
+/// A culled, drawable entity with its world transform, animation, and the
+/// base model's per-part matrices precomputed.
 struct VisEntity<'a> {
     info: &'a EntityRenderInfo,
     entry: &'a MobEntry,
     entity_mat: glam::Mat4,
+    anim: entity_model::PartAnim,
     part_transforms: Vec<glam::Mat4>,
 }
 
@@ -1502,13 +1502,23 @@ impl<'a> VariantGroups<'a> {
     fn emit(&self, vis: &[VisEntity], instances: &mut Vec<EntityInstance>) -> Vec<DrawRecord> {
         let mut records = Vec::new();
         for (variant, texture_set, members) in &self.groups {
+            let own: Option<Vec<Vec<glam::Mat4>>> = variant.own_pivots.then(|| {
+                members
+                    .iter()
+                    .map(|(vi, ..)| variant.model.compute_part_transforms(&vis[*vi].anim))
+                    .collect()
+            });
             for (p, (start, part_count)) in variant.model.part_ranges.iter().enumerate() {
                 if *part_count == 0 {
                     continue;
                 }
                 let first_instance = instances.len() as u32;
-                for (vi, tint, overlay, uv) in members.iter() {
-                    let model = vis[*vi].entity_mat * vis[*vi].part_transforms[p];
+                for (k, (vi, tint, overlay, uv)) in members.iter().enumerate() {
+                    let part = match &own {
+                        Some(own) => own[k][p],
+                        None => vis[*vi].part_transforms[p],
+                    };
+                    let model = vis[*vi].entity_mat * part;
                     instances.push(EntityInstance {
                         model: model.to_cols_array_2d(),
                         tint: *tint,
@@ -1650,7 +1660,12 @@ fn entity_visible(
     true
 }
 
-fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) {
+/// Anim part-name indices are computed against the base variant's model and
+/// reused for each overlay draw, so overlay part order must match the base
+/// (asserted at construction rather than rendering wrong limbs). Overlays
+/// whose part poses also match share the base's transforms; the rest are
+/// flagged `own_pivots` and get their own.
+fn link_overlays(base: &[MobVariant], overlays: &mut [Vec<MobVariant>]) {
     let Some(base_first) = base.first() else {
         return;
     };
@@ -1660,7 +1675,7 @@ fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) 
         .iter()
         .map(|p| p.name.as_str())
         .collect();
-    for overlay in overlays.iter().flatten() {
+    for overlay in overlays.iter_mut().flatten() {
         let overlay_names: Vec<&str> = overlay
             .model
             .parts
@@ -1671,6 +1686,7 @@ fn assert_part_order_matches(base: &[MobVariant], overlays: &[Vec<MobVariant>]) 
             base_names, overlay_names,
             "overlay part order must match base; anim indices are shared across both"
         );
+        overlay.own_pivots = !base_first.model.same_part_poses(&overlay.model);
     }
 }
 
@@ -1761,6 +1777,7 @@ fn build_variants(
                 texture_allocation,
                 texture_set,
                 overlay_kind,
+                own_pivots: false,
             }
         })
         .collect()
