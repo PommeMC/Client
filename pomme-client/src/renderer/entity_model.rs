@@ -4156,6 +4156,8 @@ pub fn compute_equine_anim(
     let standing = inputs.stand_anim;
     let i_standing = 1.0 - standing;
     let feeding = inputs.feeding_anim;
+    // `LivingEntity.getAgeScale` (0.5); `AbstractHorse.BABY_SCALE` 0.7 is
+    // unused in vanilla.
     let age_scale = if kind == EquineKind::Adult { 1.0 } else { 0.5 };
 
     // Per-model hooks (vanilla `getLegStandAngle` etc.).

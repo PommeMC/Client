@@ -39,7 +39,7 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::Cat
             | EntityKind::Ocelot
             | EntityKind::Rabbit
-    )
+    ) || is_equine(&kind)
 }
 
 /// Kinds whose entity-data index 16 is the baby flag: `AgeableMob`
@@ -48,7 +48,6 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
 /// conversion), Witch (Raider celebrating), fish (from-bucket).
 fn is_baby_kind(kind: EntityKind) -> bool {
     is_ageable_mob(kind)
-        || is_equine(&kind)
         || matches!(
             kind,
             EntityKind::Slime

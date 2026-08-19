@@ -1031,7 +1031,8 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Donkey,
             anim: AnimationType::Equine,
-            // Variant 0 = no chest, 1 = chest.
+            // Variant 0 = no chest, 1 = chest; the single baby bake absorbs
+            // both through `base_variant`'s pool clamp.
             adult: vec![
                 opaque(entity_model::bake_donkey_model(0.87, false), DONKEY_TEX, 64),
                 opaque(entity_model::bake_donkey_model(0.87, true), DONKEY_TEX, 64),
@@ -1396,7 +1397,9 @@ impl EntityRenderer {
         model: &BakedEntityModel,
         info: &EntityRenderInfo,
     ) -> entity_model::PartAnim {
-        let local_head_y = info.head_y_rot_deg - info.body_y_rot_deg;
+        // Vanilla `wrapDegrees(headRot - bodyRot)`; matters once a model
+        // clamps it (equine +-20).
+        let local_head_y = crate::entity::wrap_degrees(info.head_y_rot_deg - info.body_y_rot_deg);
         match anim_type {
             AnimationType::Quadruped => entity_model::compute_quadruped_anim(
                 model,
@@ -2029,8 +2032,9 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::Wolf => (0.6, 0.85),
         EntityKind::Cat | EntityKind::Ocelot => (0.6, 0.7),
         EntityKind::Rabbit => (0.49, 0.6),
-        // Vanilla horse babies scale 0.7 (Horse.BABY_DIMENSIONS), not 0.5;
-        // donkey/mule babies are the generic half scale.
+        // Horse babies scale 0.7 since 26.1 (`Horse.BABY_DIMENSIONS`; 1.21.x
+        // halved, harmless for the cull sphere); donkey/mule babies are the
+        // generic half scale.
         EntityKind::Horse | EntityKind::SkeletonHorse | EntityKind::ZombieHorse if is_baby => {
             return (1.3964844 * 0.7, 1.6 * 0.7);
         }
