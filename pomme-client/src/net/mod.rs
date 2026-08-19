@@ -324,6 +324,11 @@ pub enum NetworkEvent {
     SquidTentacleReset {
         id: i32,
     },
+    /// Iron golem entity event (4 punch, 11 / 34 flower offer start / stop).
+    GolemEvent {
+        id: i32,
+        event_id: u8,
+    },
     VillagerData {
         id: i32,
         kind: VillagerKind,

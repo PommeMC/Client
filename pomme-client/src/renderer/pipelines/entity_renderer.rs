@@ -97,6 +97,9 @@ pub struct EntityRenderInfo {
     /// Bat pose flag + its fly/rest animation clock.
     pub bat_resting: bool,
     pub bat_elapsed_secs: Option<f32>,
+    /// Iron golem countdowns; the punch one is partial-tick adjusted.
+    pub golem_attack_ticks: f32,
+    pub golem_offer_flower_ticks: u32,
     /// Base-model tint (wolf wet-shade grayscale); white for everyone else.
     pub base_tint: [f32; 4],
     /// Extra scale applied after the entity rotation (slime size + squish),
@@ -158,6 +161,8 @@ impl Default for EntityRenderInfo {
             tentacle_angle: 0.0,
             bat_resting: false,
             bat_elapsed_secs: None,
+            golem_attack_ticks: 0.0,
+            golem_offer_flower_ticks: 0,
             base_tint: WHITE_TINT,
             body_transform: None,
             age_in_ticks: 0.0,
@@ -423,6 +428,7 @@ enum AnimationType {
     Bat,
     /// Cod, salmon, tropical fish, pufferfish.
     Fish,
+    Golem,
     /// No part animation (slime — size/squish live in the body transform).
     Static,
 }
@@ -605,6 +611,11 @@ fn mob_definitions() -> Vec<MobDef> {
     const COD_TEX: &[&[&str]] = tex_table!("fish" => "cod");
     const SALMON_TEX: &[&[&str]] = tex_table!("fish" => "salmon");
     const PUFFERFISH_TEX: &[&[&str]] = tex_table!("fish" => "pufferfish");
+    const IRON_GOLEM_TEX: &[&[&str]] = tex_table!("iron_golem" => "iron_golem");
+    // Indexed by crackiness level minus one (low, medium, high).
+    const IRON_GOLEM_CRACKINESS_TEX: &[&[&str]] = tex_table!("iron_golem" =>
+        "iron_golem_crackiness_low", "iron_golem_crackiness_medium",
+        "iron_golem_crackiness_high");
     const TROPICAL_A_TEX: &[&[&str]] = tex_table!("fish" => "tropical_a");
     const TROPICAL_B_TEX: &[&[&str]] = tex_table!("fish" => "tropical_b");
     const TROPICAL_A_PATTERN_TEX: &[&[&str]] = tex_table!("fish" =>
@@ -1242,6 +1253,25 @@ fn mob_definitions() -> Vec<MobDef> {
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
+        // TODO: `IronGolemFlowerLayer` (the offered poppy) needs block models
+        // rendered inside an entity pose.
+        MobDef {
+            kind: EntityKind::IronGolem,
+            anim: AnimationType::Golem,
+            adult: vec![opaque(
+                entity_model::bake_iron_golem_model(),
+                IRON_GOLEM_TEX,
+                128,
+            )],
+            baby: None,
+            // Slot 0: crack overlay, gated on health in entity_extras.
+            adult_overlays: vec![opaque(
+                entity_model::bake_iron_golem_model(),
+                IRON_GOLEM_CRACKINESS_TEX,
+                128,
+            )],
+            baby_overlays: vec![],
+        },
     ]
 }
 
@@ -1704,6 +1734,15 @@ impl EntityRenderer {
                 info.age_in_ticks,
                 info.is_in_water,
                 info.entity_kind == EntityKind::Pufferfish,
+            ),
+            AnimationType::Golem => entity_model::compute_golem_anim(
+                model,
+                info.head_x_rot_deg,
+                local_head_y,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+                info.golem_attack_ticks,
+                info.golem_offer_flower_ticks,
             ),
             AnimationType::Static => entity_model::PartAnim::default(),
         }
@@ -2231,6 +2270,7 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::Salmon => (1.05, 0.6),
         EntityKind::TropicalFish => (0.5, 0.4),
         EntityKind::Pufferfish => (0.7, 0.7),
+        EntityKind::IronGolem => (1.4, 2.7),
         EntityKind::Player => (0.6, 1.8),
         _ => (1.0, 1.0),
     };
