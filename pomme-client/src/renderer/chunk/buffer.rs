@@ -511,6 +511,20 @@ impl ChunkBufferStore {
         let mut frustum_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut frustum_allocs = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
+        // Zeroed so the first readback (before any cull has written the slot)
+        // sees a real count, not whatever the allocation held.
+        let create_count_buffer = |name: &str| {
+            let (b, mut a) = util::create_host_buffer(
+                device,
+                allocator,
+                count_size,
+                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
+                name,
+            );
+            a.mapped_slice_mut().unwrap()[..count_size as usize].fill(0);
+            (b, a)
+        };
+
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let (b, a) = util::create_host_buffer(
                 device,
@@ -532,13 +546,7 @@ impl ChunkBufferStore {
             indirect_buffers.push(b);
             indirect_allocs.push(a);
 
-            let (b, a) = util::create_host_buffer(
-                device,
-                allocator,
-                count_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
-                "draw_count",
-            );
+            let (b, a) = create_count_buffer("draw_count");
             count_buffers.push(b);
             count_allocs.push(a);
 
@@ -552,13 +560,7 @@ impl ChunkBufferStore {
             indirect_cutout_buffers.push(b);
             indirect_cutout_allocs.push(a);
 
-            let (b, a) = util::create_host_buffer(
-                device,
-                allocator,
-                count_size,
-                vk::BufferUsageFlags::StorageBuffer | vk::BufferUsageFlags::IndirectBuffer,
-                "draw_count_cutout",
-            );
+            let (b, a) = create_count_buffer("draw_count_cutout");
             count_cutout_buffers.push(b);
             count_cutout_allocs.push(a);
 
@@ -1414,7 +1416,7 @@ impl ChunkBufferStore {
                 n
             };
             self.last_draw_count = read_and_clear(&mut self.count_allocs[frame])
-                .saturating_add(read_and_clear(&mut self.count_cutout_allocs[frame]));
+                + read_and_clear(&mut self.count_cutout_allocs[frame]);
         }
 
         // macOS draws the whole indirect buffer (no drawIndirectCount), so slots

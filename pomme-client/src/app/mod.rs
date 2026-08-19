@@ -71,19 +71,12 @@ impl FramerateLimiter {
     }
 
     fn limit_display_fps(&mut self, framerate_limit: u32) {
-        let frame_duration = Duration::from_nanos(1_000_000_000 / framerate_limit.max(1) as u64);
-        let target_time = self.last_frame + frame_duration;
+        let target_time =
+            self.last_frame + Duration::from_nanos(1_000_000_000 / framerate_limit.max(1) as u64);
         if framerate_limit != self.last_limit {
             self.average_overshoot_ns = 0;
             self.last_limit = framerate_limit;
         }
-
-        let now = Instant::now();
-        if now.saturating_duration_since(self.last_frame) > frame_duration * 2 {
-            self.last_frame = now;
-            return;
-        }
-
         loop {
             let now = Instant::now();
             if now >= target_time {
@@ -108,7 +101,7 @@ impl FramerateLimiter {
                 std::hint::spin_loop();
             }
         }
-        self.last_frame = target_time;
+        self.last_frame = Instant::now();
     }
 }
 

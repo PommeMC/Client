@@ -157,7 +157,7 @@ impl MainMenu {
         let rd_frac = ((self.render_distance as f32 - 2.0) / (rd_max as f32 - 2.0)).clamp(0.0, 1.0);
         let cd_frac = ((self.chunk_detail as f32 - 8.0) / 40.0).clamp(0.0, 1.0);
         let sd_frac = (self.simulation_distance as f32 - 5.0) / 27.0;
-        let mf_frac = ((self.max_framerate as f32 - 30.0) / 230.0).clamp(0.0, 1.0);
+        let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
             ("Chunk Detail:", cd_frac),
@@ -792,7 +792,7 @@ impl MainMenu {
                     self.simulation_distance = (5.0 + v * 27.0).round() as u32
                 }
                 "Max Framerate:" => {
-                    self.max_framerate = (((30.0 + v * 230.0) / 10.0).round() * 10.0) as u32
+                    self.max_framerate = (((10.0 + v * 250.0) / 10.0).round() * 10.0) as u32
                 }
                 "FOV:" => self.fov = (30.0 + v * 80.0).round() as u32,
                 "FOV Effects:" => self.fov_effect_scale = v,
