@@ -174,6 +174,9 @@ pub struct LivingEntity {
     pub puff_state: u8,
     /// Glow squid post-hurt dim timer, synced then decremented client-side.
     pub dark_ticks: i32,
+    /// Iron golem punch / flower-offer countdowns (entity events 4, 11, 34).
+    pub golem_attack_ticks: u8,
+    pub golem_offer_flower_ticks: u16,
     pub villager_kind: VillagerKind,
     pub villager_profession: VillagerProfession,
     pub villager_level: u32,
@@ -265,7 +268,13 @@ impl LivingEntity {
             collar_color: 14,
             is_interested: false,
             anger_end_time: -1,
-            health: 20.0,
+            // Vanilla constructs at max health; the golem's crack overlay
+            // reads it before the metadata arrives.
+            health: if entity_type == EntityKind::IronGolem {
+                100.0
+            } else {
+                20.0
+            },
             interested_angle: 0.0,
             prev_interested_angle: 0.0,
             shake_anim: 0.0,
@@ -301,6 +310,8 @@ impl LivingEntity {
             bat_anim_start: None,
             puff_state: 0,
             dark_ticks: 0,
+            golem_attack_ticks: 0,
+            golem_offer_flower_ticks: 0,
             villager_kind: VillagerKind::default(),
             villager_profession: VillagerProfession::default(),
             villager_level: 0,
@@ -378,6 +389,19 @@ impl LivingEntity {
     pub fn swing_progress(&self, partial: f32) -> f32 {
         ((SWING_DURATION as f32 - self.swing_time as f32 + partial) / SWING_DURATION as f32)
             .clamp(0.0, 1.0)
+    }
+
+    /// Vanilla `WalkAnimationState.position(partialTick)` (babies run the
+    /// cycle 3x).
+    pub fn walk_pos(&self, partial: f32) -> f32 {
+        let scale = if self.is_baby { 3.0 } else { 1.0 };
+        (self.walk_anim_pos - self.walk_anim_speed * (1.0 - partial)) * scale
+    }
+
+    /// Vanilla `WalkAnimationState.speed(partialTick)`.
+    pub fn walk_speed(&self, partial: f32) -> f32 {
+        (self.prev_walk_anim_speed + (self.walk_anim_speed - self.prev_walk_anim_speed) * partial)
+            .min(1.0)
     }
 
     /// Vanilla `Chicken.aiStep` wing flap; the update order matters.
@@ -629,6 +653,10 @@ impl LivingEntity {
                 self.bat_anim_start = Some(self.age_in_ticks + 1);
             }
             k if is_equine(&k) => self.tick_equine_anims(),
+            EntityKind::IronGolem => {
+                self.golem_attack_ticks = self.golem_attack_ticks.saturating_sub(1);
+                self.golem_offer_flower_ticks = self.golem_offer_flower_ticks.saturating_sub(1);
+            }
             _ => {}
         }
     }
@@ -1203,6 +1231,25 @@ impl EntityStore {
         }
     }
 
+    /// Iron golem punch (entity event 4): vanilla runs a 10-tick swing.
+    pub fn golem_punch(&mut self, id: i32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::IronGolem
+        {
+            entity.golem_attack_ticks = 10;
+        }
+    }
+
+    /// Iron golem flower offer start / stop (entity events 11 / 34): a
+    /// 400-tick hold.
+    pub fn set_golem_offering_flower(&mut self, id: i32, offering: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::IronGolem
+        {
+            entity.golem_offer_flower_ticks = if offering { 400 } else { 0 };
+        }
+    }
+
     /// Begins an arm swing (server `Animate` packet). Restarts when idle or
     /// past the halfway point (vanilla `LivingEntity.swing`); `swing_time`
     /// counts down, so that is `swing_time <= SWING_DURATION / 2`.
@@ -1356,6 +1403,7 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::Salmon
                 | EntityKind::TropicalFish
                 | EntityKind::Pufferfish
+                | EntityKind::IronGolem
         )
 }
 

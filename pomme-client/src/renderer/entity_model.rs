@@ -2233,6 +2233,62 @@ pub fn bake_pufferfish_model(puff_state: u32) -> BakedEntityModel {
     bake_model(parts, 32, 32)
 }
 
+/// Vanilla `IronGolemModel.createBodyLayer`, 128x128.
+pub fn bake_iron_golem_model() -> BakedEntityModel {
+    let parts = vec![
+        vpart(
+            "head",
+            None,
+            Vec3::new(0.0, -7.0, -2.0),
+            vec![
+                vbox((0, 0), (-4.0, -12.0, -5.5), (8.0, 10.0, 8.0)),
+                vbox((24, 0), (-1.0, -5.0, -7.5), (2.0, 4.0, 2.0)),
+            ],
+        ),
+        vpart(
+            "body",
+            None,
+            Vec3::new(0.0, -7.0, 0.0),
+            vec![
+                vbox((0, 40), (-9.0, -2.0, -6.0), (18.0, 12.0, 11.0)),
+                ModelCube {
+                    deformation: 0.5,
+                    ..vbox((0, 70), (-4.5, 10.0, -3.0), (9.0, 5.0, 6.0))
+                },
+            ],
+        ),
+        vpart(
+            "right_arm",
+            None,
+            Vec3::new(0.0, -7.0, 0.0),
+            vec![vbox((60, 21), (-13.0, -2.5, -3.0), (4.0, 30.0, 6.0))],
+        ),
+        vpart(
+            "left_arm",
+            None,
+            Vec3::new(0.0, -7.0, 0.0),
+            vec![vbox((60, 58), (9.0, -2.5, -3.0), (4.0, 30.0, 6.0))],
+        ),
+        vpart(
+            "right_leg",
+            None,
+            Vec3::new(-4.0, 11.0, 0.0),
+            vec![vbox((37, 0), (-3.5, -3.0, -3.0), (6.0, 16.0, 5.0))],
+        ),
+        // Vanilla's +5 (not +4) is deliberate.
+        vpart(
+            "left_leg",
+            None,
+            Vec3::new(5.0, 11.0, 0.0),
+            vec![ModelCube {
+                mirror: true,
+                ..vbox((60, 0), (-3.5, -3.0, -3.0), (6.0, 16.0, 5.0))
+            }],
+        ),
+    ];
+    bake_model(parts, 128, 128)
+}
+
 /// Skeleton: humanoid layout with thin 2×12×2 limbs, 64×32 sheet
 /// (`SkeletonModel.createDefaultSkeletonMesh`).
 fn skeleton_parts() -> Vec<EntityPart> {
@@ -3551,6 +3607,12 @@ fn lerp(delta: f32, from: f32, to: f32) -> f32 {
     from + delta * (to - from)
 }
 
+/// Vanilla `Mth.triangleWave`: -1..1 over `period` (Rust's `%` keeps the
+/// dividend's sign like Java's).
+pub fn triangle_wave(index: f32, period: f32) -> f32 {
+    ((index % period - period * 0.5).abs() - period * 0.25) / (period * 0.25)
+}
+
 /// Vanilla `AnimationUtils.bobModelPart`: a gentle idle sway added to undead
 /// arms. Returns the (xRot, zRot) delta; `side` is +1.0 for the right arm, -1.0
 /// left.
@@ -3603,6 +3665,49 @@ pub fn compute_zombie_anim(
         anim.rotation.push((i, rot));
     }
 
+    anim
+}
+
+/// Vanilla `IronGolemModel.setupAnim`: triangle-wave limb swing, the attack
+/// punch (both arms, 10-tick countdown) and the flower-offer hold (right arm,
+/// 400-tick countdown). `attack_ticks` is already partial-tick adjusted.
+pub fn compute_golem_anim(
+    model: &BakedEntityModel,
+    head_x_rot_deg: f32,
+    local_head_y_rot_deg: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+    attack_ticks: f32,
+    offer_flower_ticks: u32,
+) -> PartAnim {
+    let mut anim = PartAnim::default();
+    let swing = triangle_wave(walk_pos, 13.0);
+    let (right_arm_x, left_arm_x) = if attack_ticks > 0.0 {
+        let punch = -2.0 + 1.5 * triangle_wave(attack_ticks, 10.0);
+        (punch, punch)
+    } else if offer_flower_ticks > 0 {
+        (
+            -0.8 + 0.025 * triangle_wave(offer_flower_ticks as f32, 70.0),
+            0.0,
+        )
+    } else {
+        (
+            (-0.2 + 1.5 * swing) * walk_speed,
+            (-0.2 - 1.5 * swing) * walk_speed,
+        )
+    };
+
+    for (i, part) in model.parts.iter().enumerate() {
+        let rot = match part.name.as_str() {
+            "head" => head_rotation(head_x_rot_deg, local_head_y_rot_deg),
+            "right_arm" => Vec3::new(right_arm_x, 0.0, 0.0),
+            "left_arm" => Vec3::new(left_arm_x, 0.0, 0.0),
+            "right_leg" => Vec3::new(-1.5 * swing * walk_speed, 0.0, 0.0),
+            "left_leg" => Vec3::new(1.5 * swing * walk_speed, 0.0, 0.0),
+            _ => continue,
+        };
+        anim.rotation.push((i, rot));
+    }
     anim
 }
 

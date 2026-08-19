@@ -27,6 +27,7 @@ use crate::player::tab_list::TabList;
 use crate::renderer::chunk::buffer::column_is_near;
 use crate::renderer::chunk::mesher::{BiomeClimate, ChunkMeshData, MeshDispatcher};
 use crate::renderer::chunk::occlusion_graph::{self, VisibilitySet};
+use crate::renderer::entity_model::triangle_wave;
 use crate::renderer::pipelines::block_entity;
 use crate::renderer::pipelines::entity_renderer::{
     EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint, wool_color_tint,
@@ -2251,13 +2252,8 @@ pub fn update_game(
                     ),
                     is_baby: e.is_baby,
                     is_crouching: e.is_crouching,
-                    walk_anim_pos: {
-                        let scale = if e.is_baby { 3.0 } else { 1.0 };
-                        (e.walk_anim_pos - e.walk_anim_speed * (1.0 - partial_tick)) * scale
-                    },
-                    walk_anim_speed: (e.prev_walk_anim_speed
-                        + (e.walk_anim_speed - e.prev_walk_anim_speed) * partial_tick)
-                        .min(1.0),
+                    walk_anim_pos: e.walk_pos(partial_tick),
+                    walk_anim_speed: e.walk_speed(partial_tick),
                     entity_kind: e.entity_type,
                     player_uuid: e.player_uuid,
                     variant_index: extras.variant_index,
@@ -2295,6 +2291,8 @@ pub fn update_game(
                     tentacle_angle: extras.tentacle_angle,
                     bat_resting: e.bat_resting,
                     bat_elapsed_secs: extras.bat_elapsed_secs,
+                    golem_attack_ticks: extras.golem_attack_ticks,
+                    golem_offer_flower_ticks: extras.golem_offer_flower_ticks,
                     body_transform: extras.body_transform,
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
@@ -2821,6 +2819,8 @@ struct EntityExtras {
     animate_tail: bool,
     tentacle_angle: f32,
     bat_elapsed_secs: Option<f32>,
+    golem_attack_ticks: f32,
+    golem_offer_flower_ticks: u32,
 }
 
 /// Only the first overlay slot visible, untinted.
@@ -2829,6 +2829,17 @@ const SLOT0_TINTS: [Option<[f32; 4]>; MAX_OVERLAYS] = {
     tints[0] = Some(WHITE_TINT);
     tints
 };
+
+/// Slot-0 overlay picked by a 1-based id (0 draws nothing), as
+/// (`overlay_tints`, `overlay_variants`).
+fn slot0_overlay(id: u32) -> ([Option<[f32; 4]>; MAX_OVERLAYS], [u32; MAX_OVERLAYS]) {
+    let tints = if id != 0 {
+        SLOT0_TINTS
+    } else {
+        [None; MAX_OVERLAYS]
+    };
+    (tints, [id.saturating_sub(1), 0, 0, 0])
+}
 
 fn entity_extras(
     entity_id: i32,
@@ -2887,16 +2898,12 @@ fn entity_extras(
         EntityKind::Wolf => wolf_extras(e, alpha, game_time),
         EntityKind::Cat => cat_extras(e, alpha),
         EntityKind::Horse => {
-            let markings = (e.variant >> 8) & 0xFF;
+            // Markings overlay; id 0 = NONE.
+            let (overlay_tints, overlay_variants) = slot0_overlay((e.variant >> 8) & 0xFF);
             EntityExtras {
                 variant_index: e.variant & 0xFF,
-                // Markings slot; id 0 = NONE draws nothing.
-                overlay_tints: if markings != 0 {
-                    SLOT0_TINTS
-                } else {
-                    [None; MAX_OVERLAYS]
-                },
-                overlay_variants: [markings.saturating_sub(1), 0, 0, 0],
+                overlay_tints,
+                overlay_variants,
                 ..equine_extras(e, alpha)
             }
         }
@@ -2914,6 +2921,7 @@ fn entity_extras(
         | EntityKind::Salmon
         | EntityKind::TropicalFish
         | EntityKind::Pufferfish => fish_extras(e, alpha),
+        EntityKind::IronGolem => golem_extras(e, alpha),
         EntityKind::Rabbit => EntityExtras {
             // "Toast" overrides the variant texture (slot 7).
             variant_index: if e.custom_name.as_deref() == Some("Toast") {
@@ -2950,6 +2958,36 @@ fn slime_body_transform(e: &crate::entity::LivingEntity, alpha: f32) -> glam::Ma
     glam::Mat4::from_scale(glam::Vec3::splat(0.999))
         * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.001, 0.0))
         * glam::Mat4::from_scale(glam::Vec3::new(w * size, size / w, w * size))
+}
+
+/// Iron golem: `IronGolemRenderer.setupRotations` body sway, the punch /
+/// flower countdowns, and the `IronGolemCrackinessLayer` health overlay.
+fn golem_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
+    // `Crackiness.GOLEM` thresholds over max health 100 (attributes aren't
+    // parsed; vanilla never modifies the golem's).
+    let crack_level = match e.health / 100.0 {
+        f if f < 0.25 => 3,
+        f if f < 0.5 => 2,
+        f if f < 0.75 => 1,
+        _ => 0,
+    };
+    let (overlay_tints, overlay_variants) = slot0_overlay(crack_level);
+    EntityExtras {
+        golem_attack_ticks: if e.golem_attack_ticks > 0 {
+            e.golem_attack_ticks as f32 - alpha
+        } else {
+            0.0
+        },
+        golem_offer_flower_ticks: e.golem_offer_flower_ticks as u32,
+        // +-6.5 degree roll in step with the walk cycle.
+        body_transform: (e.walk_speed(alpha) >= 0.01).then(|| {
+            let sway = 6.5 * triangle_wave(e.walk_pos(alpha) + 6.0, 13.0);
+            glam::Mat4::from_rotation_z(sway.to_radians())
+        }),
+        overlay_tints,
+        overlay_variants,
+        ..Default::default()
+    }
 }
 
 /// Squid tentacle stroke + the `SquidRenderer.setupRotations` body pitch and
