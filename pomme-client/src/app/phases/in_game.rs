@@ -2907,9 +2907,7 @@ fn entity_extras(
         EntityKind::SkeletonHorse | EntityKind::ZombieHorse => equine_extras(e, alpha),
         EntityKind::Squid | EntityKind::GlowSquid => squid_extras(e, alpha),
         EntityKind::Bat => EntityExtras {
-            bat_elapsed_secs: e
-                .bat_anim_start
-                .map(|start| (e.age_in_ticks.wrapping_sub(start) as f32 + alpha) * 0.05),
+            bat_elapsed_secs: e.bat_anim_start.map(|s| anim_clock_secs(e, s, alpha)),
             ..Default::default()
         },
         EntityKind::Cod
@@ -2923,9 +2921,7 @@ fn entity_extras(
             } else {
                 e.variant
             },
-            hop_elapsed_secs: e
-                .hop_anim_start
-                .map(|start| (e.age_in_ticks.wrapping_sub(start) as f32 + alpha) * 0.05),
+            hop_elapsed_secs: e.hop_anim_start.map(|s| anim_clock_secs(e, s, alpha)),
             ..Default::default()
         },
         // Charged-creeper aura overlay (slot 0) only when powered.
@@ -2935,6 +2931,12 @@ fn entity_extras(
         },
         _ => EntityExtras::default(),
     }
+}
+
+/// Seconds on a vanilla `AnimationState` clock started at tick `start`
+/// (clocks start one tick ahead of the current age, so clamp at 0).
+fn anim_clock_secs(e: &crate::entity::LivingEntity, start: u32, alpha: f32) -> f32 {
+    (e.age_in_ticks as f32 - start as f32 + alpha).max(0.0) * 0.05
 }
 
 /// Vanilla `AbstractCubeMobRenderer.applySizeAndSquish` plus the slime-only
@@ -3015,10 +3017,13 @@ fn fish_extras(e: &crate::entity::LivingEntity, alpha: f32) -> EntityExtras {
         EntityKind::Salmon => extras.variant_index = e.variant,
         EntityKind::TropicalFish => {
             // Packed variant: b0 shape, b1 pattern, b2 base dye, b3 pattern
-            // dye (unknown ids fall back like vanilla's sparse maps).
+            // dye. An unknown shape/pattern pair falls back to KOB (small,
+            // pattern 0) like vanilla's sparse id map.
             let v = e.variant as i32;
-            let shape = ((v & 0xFF) % 2) as usize;
-            let pattern = (((v >> 8) & 0xFF) % 6) as u32;
+            let (shape, pattern) = match ((v & 0xFF) as usize, ((v >> 8) & 0xFF) as u32) {
+                (shape @ 0..=1, pattern @ 0..=5) => (shape, pattern),
+                _ => (0, 0),
+            };
             extras.variant_index = shape as u32;
             extras.base_tint = Some(dye_color_tint(((v >> 16) & 0xFF) as u8));
             extras.overlay_tints[shape] = Some(dye_color_tint(((v >> 24) & 0xFF) as u8));

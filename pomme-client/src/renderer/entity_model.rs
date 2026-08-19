@@ -5238,10 +5238,10 @@ pub(crate) fn generate_cube_vertices(
             (hi, lo)
         };
         if !cube.mirror && su >= 0.0 && su < tw && eu > tw {
-            // Still straddles the right sheet seam after the wrap (the small
-            // tropical fish tail's +X face): split at the seam so both
-            // halves land in range. U runs from `u0` at corners 1/2 to `u1`
-            // at corners 0/3.
+            // Still straddles the right sheet seam after the wrap (small
+            // tropical fish tail +X, big pufferfish top_back_fin +Z): split at
+            // the seam so both halves land in range. U runs from `u0` at
+            // corners 1/2 to `u1` at corners 0/3.
             let t = (tw - su) / (eu - su);
             let m10 = mix3(pos[1], pos[0], t);
             let m23 = mix3(pos[2], pos[3], t);
@@ -5258,6 +5258,13 @@ pub(crate) fn generate_cube_vertices(
                 vertices,
             );
         } else {
+            // Any other straddle would clamp; only zero-area faces may.
+            debug_assert!(
+                su == eu
+                    || sv == ev
+                    || (su >= 0.0 && eu <= tw && sv.min(ev) >= 0.0 && sv.max(ev) <= th),
+                "cube face UVs ({su},{sv})-({eu},{ev}) straddle the {tw}x{th} sheet"
+            );
             push_face(
                 pos,
                 su / tw,

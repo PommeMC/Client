@@ -338,8 +338,12 @@ pub const DYE_COLOR_RGBA: [[f32; 4]; 16] = [
     rgb(0x1D1D21), // 15 black
 ];
 
+/// Out-of-range ids are white (vanilla `DyeColor.byId`).
 pub fn dye_color_tint(color: u8) -> [f32; 4] {
-    DYE_COLOR_RGBA[(color & 0x0F) as usize]
+    DYE_COLOR_RGBA
+        .get(color as usize)
+        .copied()
+        .unwrap_or(DYE_COLOR_RGBA[0])
 }
 
 pub fn jeb_sheep_tint(entity_id: i32, age_in_ticks: u32) -> [f32; 4] {
@@ -2729,4 +2733,14 @@ pub(super) fn create_pipeline(
     device.destroy_shader_module(frag_module, None);
 
     pipeline
+}
+
+#[cfg(test)]
+mod tests {
+    /// Bakes every mob model; `generate_cube_vertices`' UV seam
+    /// `debug_assert!` fires for any mesh that straddles its sheet.
+    #[test]
+    fn all_mob_meshes_bake() {
+        super::mob_definitions();
+    }
 }

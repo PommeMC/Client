@@ -39,6 +39,8 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::Cat
             | EntityKind::Ocelot
             | EntityKind::Rabbit
+            | EntityKind::Squid
+            | EntityKind::GlowSquid
     ) || is_equine(&kind)
 }
 
@@ -548,7 +550,7 @@ impl LivingEntity {
                         } else {
                             f.height() as f64
                         };
-                    if top > min_y {
+                    if top >= min_y {
                         return true;
                     }
                 }
@@ -559,8 +561,8 @@ impl LivingEntity {
 
     /// Vanilla `Squid.aiStep` body/tentacle sim. The tentacle stroke clock
     /// clamps at 2*pi on the client and only entity event 19 resets it; the
-    /// body pitch follows the packet-driven velocity. Vanilla's yaw steering
-    /// is skipped (pomme body yaw stays packet-driven).
+    /// body yaw and pitch follow the packet-driven velocity (vanilla steers
+    /// remote squids client-side too, overriding the synced yaw).
     fn tick_squid(&mut self) {
         use std::f32::consts::PI;
         self.prev_x_body_rot = self.x_body_rot;
@@ -583,11 +585,12 @@ impl LivingEntity {
                 self.tentacle_angle = 0.0;
                 self.rotate_speed *= 0.99;
             }
-            let horiz =
-                (self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z).sqrt();
+            let v = self.velocity;
+            let horiz = (v.x * v.x + v.z * v.z).sqrt();
+            self.body_y_rot_deg +=
+                (-(v.x.atan2(v.z) as f32).to_degrees() - self.body_y_rot_deg) * 0.1;
             self.z_body_rot += PI * self.rotate_speed * 1.5;
-            self.x_body_rot +=
-                (-(horiz.atan2(self.velocity.y) as f32).to_degrees() - self.x_body_rot) * 0.1;
+            self.x_body_rot += (-(horiz.atan2(v.y) as f32).to_degrees() - self.x_body_rot) * 0.1;
         } else {
             self.tentacle_angle = self.tentacle_movement.sin().abs() * PI * 0.25;
             self.x_body_rot += (-90.0 - self.x_body_rot) * 0.02;
@@ -620,9 +623,10 @@ impl LivingEntity {
                 }
             }
             // One animation clock, restarted whenever the resting flag
-            // flips (the setter clears it).
+            // flips (the setter restarts it); vanilla starts it at the
+            // post-increment tickCount.
             EntityKind::Bat if self.bat_anim_start.is_none() => {
-                self.bat_anim_start = Some(self.age_in_ticks);
+                self.bat_anim_start = Some(self.age_in_ticks + 1);
             }
             k if is_equine(&k) => self.tick_equine_anims(),
             _ => {}
@@ -1087,13 +1091,16 @@ impl EntityStore {
                 let resting = f & 0x01 != 0;
                 if entity.bat_resting != resting {
                     entity.bat_resting = resting;
-                    entity.bat_anim_start = None;
+                    entity.bat_anim_start = Some(entity.age_in_ticks + 1);
                 }
             }
-            // Salmon size ids stop at LARGE (2).
-            (EntityKind::Salmon, 17, Int(v)) => entity.variant = (v as u32).min(2),
+            // Salmon size ids clamp to SMALL..LARGE; a pufferfish puff state
+            // outside 0/1 renders big (vanilla `switch` default).
+            (EntityKind::Salmon, 17, Int(v)) => entity.variant = v.clamp(0, 2) as u32,
             (EntityKind::TropicalFish, 17, Int(v)) => entity.variant = v as u32,
-            (EntityKind::Pufferfish, 17, Int(s)) => entity.puff_state = s.clamp(0, 2) as u8,
+            (EntityKind::Pufferfish, 17, Int(s)) => {
+                entity.puff_state = if (0..=1).contains(&s) { s as u8 } else { 2 }
+            }
             (EntityKind::GlowSquid, 18, Int(t)) => entity.dark_ticks = t,
             _ => {}
         }
@@ -1252,11 +1259,11 @@ impl EntityStore {
                 &mut entity.walk_anim_speed,
                 &mut entity.prev_walk_anim_speed,
             );
-            entity.tick_kind_anims();
-            entity.tick_tamable_anims();
             if probes_water(&entity.entity_type) {
                 entity.is_in_water = entity.probe_water(chunks);
             }
+            entity.tick_kind_anims();
+            entity.tick_tamable_anims();
             entity.prev_eat_anim_tick = entity.eat_anim_tick;
             if entity.eat_anim_tick > 0 {
                 entity.eat_anim_tick -= 1;
