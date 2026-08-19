@@ -777,8 +777,9 @@ impl EntityStore {
             // Shared entity flags byte: bit 0x08 = sprinting.
             (_, 0, Byte(f)) => entity.is_sprinting = f & 0x08 != 0,
             (_, 9, Float(h)) => entity.health = h,
-            // Mob flags byte: bit 0x04 = aggressive.
-            (_, 15, Byte(f)) => entity.aggressive = f & 0x04 != 0,
+            // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
+            // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
+            (k, 15, Byte(f)) if k != EntityKind::Player => entity.aggressive = f & 0x04 != 0,
             (k, 16, Bool(b)) if is_baby_kind(k) => entity.is_baby = b,
             // Skeleton: powder-snow stray conversion; drives the vanilla
             // `isShaking` body jitter.
@@ -788,7 +789,8 @@ impl EntityStore {
             // AgeableMob in 26.2.
             (EntityKind::Slime, 16 | 18, Int(s)) => entity.slime_size = s.clamp(1, 127) as u8,
             // Sheep wool byte (low nibble = DyeColor, bit 0x10 = sheared):
-            // 17 on 1.21.9-26.1.x, 18 on 26.2.
+            // 17 on 1.21.9-1.21.11, 18 since 26.1 added AgeableMob's
+            // age-locked flag at 17.
             (EntityKind::Sheep, 17 | 18, Byte(w)) => {
                 entity.wool_color = Some(w & 0x0F);
                 entity.is_sheared = w & 0x10 != 0;
@@ -799,7 +801,8 @@ impl EntityStore {
             // Zombie-family underwater conversion / zombie villager curing.
             (EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned, 18, Bool(b))
             | (EntityKind::ZombieVillager, 19, Bool(b)) => entity.is_converting = b,
-            (EntityKind::Villager, 18, Int(c)) => entity.unhappy_counter = c,
+            // Same 17 -> 18 shift as the sheep.
+            (EntityKind::Villager, 17 | 18, Int(c)) => entity.unhappy_counter = c,
             // Vanilla sparse rabbit id map: 99 = evil, unknown ids fall back
             // to brown.
             (EntityKind::Rabbit, 18, Int(v)) => {

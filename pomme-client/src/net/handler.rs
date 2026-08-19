@@ -475,10 +475,10 @@ pub fn handle_game_packet(
                         value,
                     });
                 }
-                // Index 18 (Int) on players = score (16 on 1.21.9-26.1.x,
-                // before Avatar took 15/16). Kind-blind; the consumer applies
+                // Index 18 (Int) on players = score (Avatar holds 15/16 on
+                // every supported version). Kind-blind; the consumer applies
                 // it only to the local player.
-                if (item.index == 16 || item.index == 18)
+                if item.index == 18
                     && let azalea_entity::EntityDataValue::Int(score) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::PlayerScore {
@@ -537,9 +537,9 @@ pub fn handle_game_packet(
                         variant,
                     ));
                 }
-                // Index 19 on villagers / 20 on zombie villagers = VillagerData
-                // (type/profession/level).
-                if (item.index == 19 || item.index == 20)
+                // VillagerData (type/profession/level): villagers at 19 (18
+                // on 1.21.9-1.21.11), zombie villagers at 20.
+                if (18..=20).contains(&item.index)
                     && let azalea_entity::EntityDataValue::VillagerData(data) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::VillagerData {
