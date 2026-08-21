@@ -10,9 +10,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Dumps per-block-state properties (the baked light set) by running vanilla's own code:
- * bootstraps the block registry from the server jar on the classpath, then
- * iterates Block.BLOCK_STATE_REGISTRY in state-id order.
+ * Dumps per-block-state properties (the baked light set plus hasCollision) by
+ * running vanilla's own code: bootstraps the block registry from the server jar
+ * on the classpath, then iterates Block.BLOCK_STATE_REGISTRY in state-id order.
  *
  * Everything is reflection so one binary covers both the 26.x API
  * (getLightDampening) and the 1.21.x API (getLightBlock); it also means the
@@ -55,6 +55,7 @@ public final class StateDump {
         List<Integer> propagates = new ArrayList<>();
         List<Integer> canOcclude = new ArrayList<>();
         List<Integer> useShape = new ArrayList<>();
+        List<Integer> hasCollision = new ArrayList<>();
         // state id -> 6 face masks (64 hex chars each), only for canOcclude && useShape states
         Map<Integer, String[]> faceMasks = new LinkedHashMap<>();
 
@@ -71,6 +72,7 @@ public final class StateDump {
             propagates.add(((Boolean) m.propagatesSkylightDown.invoke(state)) ? 1 : 0);
             canOcclude.add(occludes ? 1 : 0);
             useShape.add(shaped ? 1 : 0);
+            hasCollision.add(m.hasCollision.getBoolean(m.getBlock.invoke(state)) ? 1 : 0);
             if (occludes && shaped) {
                 String[] masks = new String[6];
                 for (int d = 0; d < 6; d++) {
@@ -91,6 +93,7 @@ public final class StateDump {
             writeIntArray(w, "propagates_skylight_down", propagates);
             writeIntArray(w, "can_occlude", canOcclude);
             writeIntArray(w, "use_shape_for_light_occlusion", useShape);
+            writeIntArray(w, "has_collision", hasCollision);
             w.write("  \"face_masks\": {");
             boolean first = true;
             for (Map.Entry<Integer, String[]> e : faceMasks.entrySet()) {
@@ -192,6 +195,8 @@ public final class StateDump {
         final Method getFaceOcclusionShape;
         final Method shapeIsEmpty;
         final Method toAabbs;
+        final Method getBlock;
+        final Field hasCollision;
         private final Class<?> aabbClass;
         private final Map<String, Field> aabbFields = new LinkedHashMap<>();
 
@@ -206,6 +211,10 @@ public final class StateDump {
             Class<?> voxelShape = Class.forName("net.minecraft.world.phys.shapes.VoxelShape");
             shapeIsEmpty = voxelShape.getMethod("isEmpty");
             toAabbs = voxelShape.getMethod("toAabbs");
+            getBlock = stateClass.getMethod("getBlock");
+            hasCollision = Class.forName("net.minecraft.world.level.block.state.BlockBehaviour")
+                    .getDeclaredField("hasCollision");
+            hasCollision.setAccessible(true);
             aabbClass = Class.forName("net.minecraft.world.phys.AABB");
         }
 

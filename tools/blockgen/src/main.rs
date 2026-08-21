@@ -332,6 +332,9 @@ struct StateDumpFile {
     propagates_skylight_down: Vec<u8>,
     can_occlude: Vec<u8>,
     use_shape_for_light_occlusion: Vec<u8>,
+    /// `BlockBehaviour.hasCollision`; block-level, so uniform across each
+    /// block's states.
+    has_collision: Vec<u8>,
     /// State id (as string) -> 6 face masks, 64 hex chars each, present
     /// exactly for states with `can_occlude && use_shape_for_light_occlusion`.
     face_masks: std::collections::HashMap<String, [String; 6]>,
@@ -383,6 +386,7 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
             "use_shape_for_light_occlusion",
             dump.use_shape_for_light_occlusion.len(),
         ),
+        ("has_collision", dump.has_collision.len()),
     ] {
         if len != n {
             return Err(format!("{key} has {len} entries, expected {n}").into());
@@ -399,6 +403,7 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
                 "use_shape_for_light_occlusion",
                 dump.use_shape_for_light_occlusion[i],
             ),
+            ("has_collision", dump.has_collision[i]),
         ] {
             if v > 1 {
                 return Err(format!("state {i}: {key} is {v}, expected 0/1").into());
@@ -480,6 +485,11 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
         ] {
             write!(line, ", \"{key}\": {}", scalar_or_array(values)?)?;
         }
+        let collision = &dump.has_collision[range.clone()];
+        if collision.iter().any(|&c| c != collision[0]) {
+            return Err(format!("{}: has_collision varies across states", block.name).into());
+        }
+        write!(line, ", \"c\": {}", collision[0])?;
         let masks = &state_masks[range];
         if masks.iter().any(Option::is_some) {
             if masks.iter().all(|m| *m == masks[0]) {
