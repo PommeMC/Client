@@ -5,6 +5,7 @@ use glam::DVec3;
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::ui::text::TextSpan;
 use crate::world::waypoints::{LocatorDot, PitchDirection, WaypointStyleId};
 
 /// Which bar occupies the slot above the hotbar (vanilla `ContextualInfo`).
@@ -101,6 +102,7 @@ pub fn build_hud(
     game_mode: u8,
     hotbar: &[ItemStack],
     held_item_tooltip_ticks: Option<u64>,
+    action_bar: Option<(&[TextSpan], u64)>,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
@@ -178,6 +180,24 @@ pub fn build_hud(
                 centered: true,
             });
         }
+    }
+
+    if let Some((spans, ticks)) = action_bar
+        && ticks < 60
+    {
+        let alpha = ((60 - ticks).min(20) as f32) / 20.0;
+        let mut spans = spans.to_vec();
+        for span in &mut spans {
+            span.color[3] *= alpha;
+        }
+        elements.push(MenuElement::McText {
+            x: cx,
+            y: screen_h - 68.0 * gs,
+            spans,
+            scale: FONT_SIZE * gs,
+            centered: true,
+            shadow: true,
+        });
     }
 
     let status_bar_y = (hotbar_y - (XP_BAR_H + 1.0 + 2.0) * gs).round();

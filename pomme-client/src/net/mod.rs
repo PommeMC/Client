@@ -130,6 +130,9 @@ pub enum NetworkEvent {
     ChatMessage {
         spans: Vec<crate::ui::text::TextSpan>,
     },
+    ActionBar {
+        spans: Vec<crate::ui::text::TextSpan>,
+    },
     CommandTree {
         tree: Arc<crate::net::commands::CommandTree>,
     },

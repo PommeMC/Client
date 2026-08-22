@@ -726,6 +726,9 @@ impl AppCore {
                 NetworkEvent::ChatMessage { spans } => {
                     game.chat.push_message(spans);
                 }
+                NetworkEvent::ActionBar { spans } => {
+                    game.action_bar = Some((spans, game.tick_count));
+                }
                 NetworkEvent::CommandTree { tree } => {
                     game.command_tree = Some(tree);
                 }

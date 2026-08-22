@@ -268,8 +268,15 @@ pub fn handle_game_packet(
                 walking_speed: p.walking_speed,
             });
         }
-        ClientboundGamePacket::SystemChat(p) if !p.overlay => {
-            send_chat(event_tx, &p.content);
+        ClientboundGamePacket::SystemChat(p) => {
+            if p.overlay {
+                send_action_bar(event_tx, &p.content);
+            } else {
+                send_chat(event_tx, &p.content);
+            }
+        }
+        ClientboundGamePacket::SetActionBarText(p) => {
+            send_action_bar(event_tx, &p.text);
         }
         ClientboundGamePacket::PlayerChat(p) => {
             send_chat(event_tx, &p.message());
@@ -731,6 +738,11 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedTe
     let text: String = spans.iter().map(|s| s.text.as_str()).collect();
     tracing::info!("Chat: {text}");
     let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
+}
+
+fn send_action_bar(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
+    let spans = format_text_spans(message, [1.0; 4]);
+    let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
 }
 
 /// Resolves a variant registry holder id to the mob's renderer pool slot.
