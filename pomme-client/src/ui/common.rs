@@ -1,3 +1,4 @@
+use azalea_inventory::components::{CustomName, ItemName};
 use azalea_inventory::{ItemStack, ItemStackData};
 
 use crate::benchmark::UploadStatus;
@@ -13,6 +14,16 @@ pub const SLOT_SIZE: f32 = 16.0;
 pub const SLOT_STRIDE: f32 = 18.0;
 pub const SLOT_LABEL_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 const BTN_BORDER: f32 = 3.0;
+
+pub fn item_display_name(data: &ItemStackData) -> String {
+    if let Some(name) = data.get_component::<CustomName>() {
+        return name.name.to_string();
+    }
+    if let Some(name) = data.get_component::<ItemName>() {
+        return name.name.to_string();
+    }
+    crate::lang::item_display_name(data.kind)
+}
 
 pub const fn rgb(hex: u32) -> [f32; 4] {
     [

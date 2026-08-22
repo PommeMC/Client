@@ -100,6 +100,7 @@ pub fn build_hud(
     bar: ContextualBarKind<'_>,
     game_mode: u8,
     hotbar: &[ItemStack],
+    held_item_tooltip_ticks: Option<u64>,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
@@ -160,6 +161,22 @@ pub fn build_hud(
             if data.count > 1 {
                 push_item_count(elements, ix, iy, item_size, gs, data.count);
             }
+        }
+    }
+
+    if let Some(ticks) = held_item_tooltip_ticks
+        && let Some(ItemStack::Present(data)) = hotbar.get(selected_slot as usize)
+    {
+        let alpha = ((60_u64.saturating_sub(ticks)).min(10) as f32) / 10.0;
+        if alpha > 0.0 {
+            elements.push(MenuElement::Text {
+                x: cx,
+                y: hotbar_y - 24.0 * gs,
+                text: super::common::item_display_name(data),
+                scale: FONT_SIZE * gs,
+                color: [1.0, 1.0, 1.0, alpha],
+                centered: true,
+            });
         }
     }
 

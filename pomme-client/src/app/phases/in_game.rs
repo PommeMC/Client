@@ -146,6 +146,8 @@ pub struct GameState {
     pub tab_list: TabList,
     /// Locator bar waypoints tracked by the server.
     pub waypoints: crate::world::waypoints::WaypointMap,
+    pub held_item_slot: u8,
+    pub held_item_tooltip_tick: Option<u64>,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
     /// Tick of the last XP progress change; the XP bar outprioritizes the
@@ -323,6 +325,8 @@ impl GameState {
             command_tree: None,
             tab_list: TabList::new(),
             waypoints: crate::world::waypoints::WaypointMap::default(),
+            held_item_slot: 0,
+            held_item_tooltip_tick: None,
             tick_count: 0,
             xp_display_start_tick: i64::MIN,
             interaction: InteractionState::new(),
@@ -1648,11 +1652,16 @@ pub fn update_game(
         } else {
             hud::ContextualBarKind::Empty
         };
+        let selected_slot = core.input.selected_slot();
+        if selected_slot != game.held_item_slot {
+            game.held_item_slot = selected_slot;
+            game.held_item_tooltip_tick = Some(game.tick_count);
+        }
         hud::build_hud(
             &mut elements,
             sw,
             sh,
-            core.input.selected_slot(),
+            selected_slot,
             game.player.health,
             game.player.food,
             game.player.armor,
@@ -1664,6 +1673,8 @@ pub fn update_game(
             bar,
             game.player.game_mode,
             game.player.inventory.hotbar_slots(),
+            game.held_item_tooltip_tick
+                .map(|tick| game.tick_count.saturating_sub(tick)),
             gfx.renderer.is_first_person(),
             debug.as_ref(),
             core.menu.gui_scale_setting,

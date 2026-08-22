@@ -4,8 +4,7 @@
 
 use std::time::Instant;
 
-use azalea_inventory::components::{CustomName, ItemName};
-use azalea_inventory::{ItemStack, ItemStackData};
+use azalea_inventory::ItemStack;
 
 use super::common::{FONT_SIZE, WHITE, push_field_text};
 use super::container::{
@@ -50,16 +49,6 @@ impl AnvilState {
 
 /// The item's hover name: custom name, else item-name component, else the
 /// translated kind name.
-fn hover_name(data: &ItemStackData) -> String {
-    if let Some(c) = data.get_component::<CustomName>() {
-        return c.name.to_string();
-    }
-    if let Some(c) = data.get_component::<ItemName>() {
-        return c.name.to_string();
-    }
-    crate::lang::item_display_name(data.kind)
-}
-
 /// Applies this frame's typing to the rename field, mirroring vanilla
 /// `AnvilScreen.slotChanged` + `onNameChanged`: reset the text when input
 /// slot 0 changes, edit it while the slot is filled, normalize an unchanged
@@ -73,7 +62,10 @@ pub fn update_rename(
 ) -> Option<String> {
     let input = slots.first().cloned().unwrap_or(ItemStack::Empty);
     if input != state.last_input {
-        let name = input.as_present().map(hover_name).unwrap_or_default();
+        let name = input
+            .as_present()
+            .map(super::common::item_display_name)
+            .unwrap_or_default();
         state.field.set_value(&name, FIELD_INNER_W, width_fn);
         state.last_input = input.clone();
     }
@@ -89,7 +81,11 @@ pub fn update_rename(
     }
 
     let mut name = state.field.value().to_string();
-    if data.get_component::<CustomName>().is_none() && name == hover_name(data) {
+    if data
+        .get_component::<azalea_inventory::components::CustomName>()
+        .is_none()
+        && name == super::common::item_display_name(data)
+    {
         name = String::new();
     }
     if name != state.sent {
