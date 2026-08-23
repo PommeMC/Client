@@ -5,7 +5,7 @@
 //! Usage:
 //!   blockgen blocks <reports/blocks.json> <version> <out.json>
 //!   blockgen behavior <azalea generated.rs> <out.json>
-//!   blockgen light <generated/light.json> <blocks-<v>.json> <out.json>
+//!   blockgen state <generated/state.json> <blocks-<v>.json> <out.json>
 //!
 //! `blocks` flattens the report into a compact per-block table (name, first
 //! state id, default state id, ordered property lists). Every explicit state
@@ -18,12 +18,12 @@
 //! src/generated.rs`); new blocks the seed doesn't know must be appended by
 //! hand from the decompiled `Blocks.java`.
 //!
-//! `light` compacts the raw per-state light-property dump produced by
-//! `tools/lightgen/LightDump.java` (see `just lightgen`) into the per-block
-//! table the client embeds: each field is a scalar when uniform across the
-//! block's states, else a per-state array, and face-occlusion masks are
-//! deduped into a dictionary. State counts and value ranges are cross-checked
-//! against the version's blocks table.
+//! `state` compacts the raw per-state property dump produced by running
+//! vanilla (`tools/stategen/StateDump.java`, see `just stategen`) into the
+//! per-block table the client embeds: each field is a scalar when uniform
+//! across the block's states, else a per-state array, and face-occlusion
+//! masks are deduped into a dictionary. State counts and value ranges are
+//! cross-checked against the version's blocks table.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -34,8 +34,8 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         [cmd, report, version, out] if cmd == "blocks" => gen_blocks(report, version, out),
         [cmd, generated, out] if cmd == "behavior" => gen_behavior(generated, out),
-        [cmd, dump, blocks, out] if cmd == "light" => gen_light(dump, blocks, out),
-        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>\n       blockgen light <light.json> <blocks-<v>.json> <out.json>".into()),
+        [cmd, dump, blocks, out] if cmd == "state" => gen_state(dump, blocks, out),
+        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>\n       blockgen state <state.json> <blocks-<v>.json> <out.json>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -322,9 +322,9 @@ fn extract_float_arg(text: &str, method: &str) -> Option<f32> {
     rest[..end].trim().parse().ok()
 }
 
-/// Raw per-state dump written by `tools/lightgen/LightDump.java`.
+/// Raw per-state dump written by `tools/stategen/StateDump.java`.
 #[derive(serde::Deserialize)]
-struct LightDumpFile {
+struct StateDumpFile {
     version: String,
     state_count: u32,
     emission: Vec<u8>,
@@ -352,20 +352,20 @@ struct BlocksEntry {
     props: Vec<(String, Vec<String>)>,
 }
 
-fn gen_light(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), Error> {
-    let dump: LightDumpFile = serde_json::from_str(&std::fs::read_to_string(dump_path)?)?;
+fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), Error> {
+    let dump: StateDumpFile = serde_json::from_str(&std::fs::read_to_string(dump_path)?)?;
     let blocks: BlocksFile = serde_json::from_str(&std::fs::read_to_string(blocks_path)?)?;
 
     if dump.version != blocks.version {
         return Err(format!(
-            "version mismatch: light dump is '{}', blocks table is '{}'",
+            "version mismatch: state dump is '{}', blocks table is '{}'",
             dump.version, blocks.version
         )
         .into());
     }
     if dump.state_count != blocks.state_count {
         return Err(format!(
-            "state count mismatch: light dump has {}, blocks table has {}",
+            "state count mismatch: state dump has {}, blocks table has {}",
             dump.state_count, blocks.state_count
         )
         .into());
@@ -505,7 +505,7 @@ fn gen_light(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
 
     std::fs::write(out_path, &out)?;
     println!(
-        "wrote light data for {} states ({} shaped, {} distinct masks) to {out_path}",
+        "wrote state data for {} states ({} shaped, {} distinct masks) to {out_path}",
         n,
         masks_by_state.len(),
         dict.len()
