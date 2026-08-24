@@ -259,12 +259,23 @@ impl Default for BiomeClimate {
     }
 }
 
-fn tint_color(tint: Tint, grass: [f32; 3], foliage: [f32; 3], dry_foliage: [f32; 3]) -> u32 {
+/// For paths `Tint::Redstone` can't reach (redstone wire always has multipart
+/// quads): greedy meshing and plain cubes.
+const NO_REDSTONE: [f32; 3] = [1.0; 3];
+
+fn tint_color(
+    tint: Tint,
+    grass: [f32; 3],
+    foliage: [f32; 3],
+    dry_foliage: [f32; 3],
+    redstone: [f32; 3],
+) -> u32 {
     match tint {
         Tint::None => PACKED_WHITE_SHIFTED,
         Tint::Grass => pack_tint_shifted(grass),
         Tint::Foliage => pack_tint_shifted(foliage),
         Tint::DryFoliage => pack_tint_shifted(dry_foliage),
+        Tint::Redstone => pack_tint_shifted(redstone),
     }
 }
 
@@ -1345,6 +1356,7 @@ fn greedy_mesh_section(
                 snapshot.grass_tint(block_x, section_y, block_z),
                 snapshot.foliage_tint(block_x, section_y, block_z),
                 snapshot.dry_foliage_tint(block_x, section_y, block_z),
+                NO_REDSTONE,
             );
 
             let ao = quad.ao_levels();
@@ -1526,11 +1538,11 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(baked) = registry.get_baked_model(state) {
                     emit_baked_model(
-                        sink, block_pos, baked, snapshot, registry, uv_map, bx, by, bz,
+                        sink, block_pos, state, baked, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(quads) = registry.get_multipart_quads(state) {
                     emit_multipart(
-                        sink, block_pos, &quads, snapshot, registry, uv_map, bx, by, bz,
+                        sink, block_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
@@ -1596,6 +1608,7 @@ fn mesh_chunk_snapshot(
 fn emit_baked_model(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
+    state: azalea_block::BlockState,
     model: &BakedModel,
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -1604,6 +1617,7 @@ fn emit_baked_model(
     by: i32,
     bz: i32,
 ) {
+    let redstone = crate::world::block::redstone_wire_rgb(state);
     for quad in &model.quads {
         if let Some(cullface) = quad.cullface {
             let offset = cullface.offset();
@@ -1619,6 +1633,7 @@ fn emit_baked_model(
             snapshot.grass_tint(bx, by, bz),
             snapshot.foliage_tint(bx, by, bz),
             snapshot.dry_foliage_tint(bx, by, bz),
+            redstone,
         );
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, registry, bx, by, bz, dir)
@@ -1654,6 +1669,7 @@ fn emit_cube_faces(
         snapshot.grass_tint(bx, by, bz),
         snapshot.foliage_tint(bx, by, bz),
         snapshot.dry_foliage_tint(bx, by, bz),
+        NO_REDSTONE,
     );
 
     for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
@@ -1763,6 +1779,7 @@ fn block_face_tex_tint(
                     snapshot.grass_tint(bx, by, bz),
                     snapshot.foliage_tint(bx, by, bz),
                     snapshot.dry_foliage_tint(bx, by, bz),
+                    crate::world::block::redstone_wire_rgb(state),
                 );
                 let tex_name = match dir {
                     Direction::Up => &textures.top,
@@ -1859,6 +1876,7 @@ fn emit_fluid(
 fn emit_multipart(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
+    state: azalea_block::BlockState,
     quads: &[&crate::world::block::model::BakedQuad],
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -1867,6 +1885,7 @@ fn emit_multipart(
     by: i32,
     bz: i32,
 ) {
+    let redstone = crate::world::block::redstone_wire_rgb(state);
     for quad in quads {
         if let Some(cullface) = quad.cullface {
             let offset = cullface.offset();
@@ -1882,6 +1901,7 @@ fn emit_multipart(
             snapshot.grass_tint(bx, by, bz),
             snapshot.foliage_tint(bx, by, bz),
             snapshot.dry_foliage_tint(bx, by, bz),
+            redstone,
         );
         emit_face(
             sink,

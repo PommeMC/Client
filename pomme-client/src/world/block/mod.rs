@@ -515,6 +515,25 @@ pub fn block_behavior(state: BlockState) -> &'static BlockBehavior {
     &block_data(state).behavior
 }
 
+/// Vanilla `RedStoneWireBlock.getColorForPower`: dust tint for the state's
+/// `power` value.
+pub fn redstone_wire_rgb(state: BlockState) -> [f32; 3] {
+    static COLORS: std::sync::LazyLock<[[f32; 3]; 16]> = std::sync::LazyLock::new(|| {
+        std::array::from_fn(|power| {
+            let f = power as f32 / 15.0;
+            let red = f * 0.6 + if power > 0 { 0.4 } else { 0.3 };
+            let green = (f * f * 0.7 - 0.5).clamp(0.0, 1.0);
+            let blue = (f * f * 0.6 - 0.7).clamp(0.0, 1.0);
+            [red, green, blue]
+        })
+    });
+    let power: usize = block_properties(state)
+        .get("power")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    COLORS[power.min(15)]
+}
+
 /// Vanilla `isAir`: includes cave and void air.
 pub fn is_air(state: BlockState) -> bool {
     block_data(state).is_air
@@ -611,6 +630,17 @@ mod tests {
         let count = table().len() as u32;
         assert!(try_state(count).is_none());
         assert!(try_state(count - 1).is_some());
+    }
+
+    #[test]
+    fn redstone_wire_colors() {
+        setup();
+        let unpowered = find_state("redstone_wire", &[("power", "0")]);
+        assert_eq!(redstone_wire_rgb(unpowered), [0.3, 0.0, 0.0]);
+        let full = redstone_wire_rgb(find_state("redstone_wire", &[("power", "15")]));
+        for (got, want) in full.iter().zip([1.0, 0.2, 0.0]) {
+            assert!((got - want).abs() < 1e-6, "{full:?}");
+        }
     }
 
     #[test]

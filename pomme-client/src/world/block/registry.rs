@@ -4,7 +4,7 @@ use std::path::Path;
 use azalea_block::BlockState;
 use serde::{Deserialize, Serialize};
 
-pub const BLOCK_CACHE_FILE: &str = "block_cache_v2.json";
+pub const BLOCK_CACHE_FILE: &str = "block_cache_v3.json";
 
 use super::model;
 use super::model::BakedModel;
@@ -16,6 +16,8 @@ pub enum Tint {
     Grass,
     Foliage,
     DryFoliage,
+    /// Power-level color, resolved at mesh time from the state's `power`.
+    Redstone,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

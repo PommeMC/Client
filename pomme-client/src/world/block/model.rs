@@ -1401,7 +1401,9 @@ fn is_non_occluding(block_name: &str) -> bool {
 }
 
 fn determine_tint(block_name: &str) -> Tint {
-    if GRASS_TINTED.contains(&block_name) {
+    if block_name == "redstone_wire" {
+        Tint::Redstone
+    } else if GRASS_TINTED.contains(&block_name) {
         Tint::Grass
     } else if DRY_FOLIAGE_TINTED.contains(&block_name) {
         Tint::DryFoliage
