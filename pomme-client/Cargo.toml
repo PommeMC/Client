@@ -55,7 +55,7 @@ image = "0.25"
 fontdue = "0.9.3"
 simdnbt = "0.10"
 discord-rich-presence = "1.1"
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 scopeguard = "1.2"
 rodio = "0.22"
 fastrand = "2"
