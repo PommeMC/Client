@@ -729,6 +729,43 @@ impl AppCore {
                 NetworkEvent::ActionBar { spans } => {
                     game.action_bar = Some((spans, game.tick_count));
                 }
+                NetworkEvent::ScoreboardObjective { name, display } => {
+                    game.scoreboard.set_objective(name, display);
+                }
+                NetworkEvent::ScoreboardDisplay { name } => {
+                    game.scoreboard.set_display(name);
+                }
+                NetworkEvent::ScoreboardScore {
+                    owner,
+                    objective,
+                    score,
+                    display,
+                } => {
+                    game.scoreboard.set_score(owner, objective, score, display);
+                }
+                NetworkEvent::ScoreboardReset { owner, objective } => {
+                    game.scoreboard.reset_score(&owner, objective.as_deref());
+                }
+                NetworkEvent::ScoreboardTeam {
+                    name,
+                    prefix,
+                    suffix,
+                    color,
+                    members,
+                } => {
+                    game.scoreboard
+                        .set_team(name, prefix, suffix, color, members);
+                }
+                NetworkEvent::ScoreboardTeamMembers {
+                    name,
+                    members,
+                    join,
+                } => {
+                    game.scoreboard.update_team_members(&name, members, join);
+                }
+                NetworkEvent::ScoreboardTeamRemoved { name } => {
+                    game.scoreboard.remove_team(&name);
+                }
                 NetworkEvent::CommandTree { tree } => {
                     game.command_tree = Some(tree);
                 }
@@ -1231,6 +1268,7 @@ impl AppCore {
                     tracing::warn!("Disconnected: {reason}");
                     disconnect_reason = Some(reason);
                     game.tab_list.clear();
+                    game.scoreboard.clear();
                     self.requested_player_skins.clear();
                     renderer.clear_player_entity_skins();
                 }

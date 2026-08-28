@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
 use glam::DVec3;
@@ -26,6 +28,141 @@ pub struct FrameTimings {
     pub cull_ms: f32,
     pub draw_ms: f32,
     pub present_ms: f32,
+}
+
+#[derive(Default)]
+pub struct Scoreboard {
+    sidebar: Option<String>,
+    objectives: HashMap<String, Vec<TextSpan>>,
+    scores: HashMap<(String, String), (u32, Option<Vec<TextSpan>>)>,
+    teams: HashMap<String, ScoreboardTeam>,
+}
+
+struct ScoreboardTeam {
+    prefix: Vec<TextSpan>,
+    suffix: Vec<TextSpan>,
+    color: [f32; 4],
+    members: HashSet<String>,
+}
+
+impl Scoreboard {
+    pub fn clear(&mut self) {
+        self.sidebar = None;
+        self.objectives.clear();
+        self.scores.clear();
+        self.teams.clear();
+    }
+
+    pub fn set_objective(&mut self, name: String, display: Option<Vec<TextSpan>>) {
+        if let Some(display) = display {
+            self.objectives.insert(name, display);
+        } else {
+            self.objectives.remove(&name);
+            self.scores.retain(|(objective, _), _| objective != &name);
+            if self.sidebar.as_deref() == Some(&name) {
+                self.sidebar = None;
+            }
+        }
+    }
+
+    pub fn set_display(&mut self, name: Option<String>) {
+        self.sidebar = name;
+    }
+
+    pub fn set_score(
+        &mut self,
+        owner: String,
+        objective: String,
+        score: u32,
+        display: Option<Vec<TextSpan>>,
+    ) {
+        self.scores.insert((objective, owner), (score, display));
+    }
+
+    pub fn reset_score(&mut self, owner: &str, objective: Option<&str>) {
+        self.scores.retain(|(entry_objective, entry_owner), _| {
+            entry_owner != owner || objective.is_some_and(|objective| entry_objective != objective)
+        });
+    }
+
+    pub fn set_team(
+        &mut self,
+        name: String,
+        prefix: Vec<TextSpan>,
+        suffix: Vec<TextSpan>,
+        color: [f32; 4],
+        members: Option<Vec<String>>,
+    ) {
+        if let Some(members) = &members {
+            for team in self.teams.values_mut() {
+                team.members.retain(|member| !members.contains(member));
+            }
+        }
+        let team = self.teams.entry(name).or_insert_with(|| ScoreboardTeam {
+            prefix: Vec::new(),
+            suffix: Vec::new(),
+            color,
+            members: HashSet::new(),
+        });
+        team.prefix = prefix;
+        team.suffix = suffix;
+        team.color = color;
+        if let Some(members) = members {
+            team.members = members.into_iter().collect();
+        }
+    }
+
+    pub fn update_team_members(&mut self, name: &str, members: Vec<String>, join: bool) {
+        if join {
+            for team in self.teams.values_mut() {
+                team.members.retain(|member| !members.contains(member));
+            }
+        }
+        if let Some(team) = self.teams.get_mut(name) {
+            for member in members {
+                if join {
+                    team.members.insert(member);
+                } else {
+                    team.members.remove(&member);
+                }
+            }
+        }
+    }
+
+    pub fn remove_team(&mut self, name: &str) {
+        self.teams.remove(name);
+    }
+
+    pub fn player_name(&self, name: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
+        display
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.line(name, None))
+    }
+
+    pub fn team_name(&self, member: &str) -> &str {
+        self.teams
+            .iter()
+            .find(|(_, team)| team.members.contains(member))
+            .map_or("", |(name, _)| name)
+    }
+
+    fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
+        let team = self
+            .teams
+            .values()
+            .find(|team| team.members.contains(owner));
+        let mut line = team.map_or_else(Vec::new, |team| team.prefix.clone());
+        line.extend(display.map(ToOwned::to_owned).unwrap_or_else(|| {
+            vec![TextSpan::new(
+                owner.into(),
+                team.map_or(WHITE, |team| team.color),
+            )]
+        }));
+        if let Some(team) = team {
+            line.extend(team.suffix.clone());
+        }
+        line
+    }
 }
 
 pub struct DebugInfo<'a> {
@@ -103,6 +240,7 @@ pub fn build_hud(
     hotbar: &[ItemStack],
     held_item_tooltip_ticks: Option<u64>,
     action_bar: Option<(&[TextSpan], u64)>,
+    scoreboard: &Scoreboard,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
@@ -199,6 +337,8 @@ pub fn build_hud(
             shadow: true,
         });
     }
+
+    build_scoreboard(elements, screen_w, screen_h, gs, scoreboard, text_width_fn);
 
     let status_bar_y = (hotbar_y - (XP_BAR_H + 1.0 + 2.0) * gs).round();
     let is_survival = crate::player::is_survival(game_mode);
@@ -352,6 +492,91 @@ pub fn build_hud(
             });
         }
     }
+}
+
+fn build_scoreboard(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    scoreboard: &Scoreboard,
+    text_width_fn: TextWidthFn,
+) {
+    let Some(objective) = scoreboard.sidebar.as_ref() else {
+        return;
+    };
+    let Some(title) = scoreboard.objectives.get(objective) else {
+        return;
+    };
+    let mut entries: Vec<_> = scoreboard
+        .scores
+        .iter()
+        .filter_map(|((entry_objective, owner), (score, display))| {
+            (entry_objective == objective)
+                .then(|| (*score, owner, scoreboard.line(owner, display.as_deref())))
+        })
+        .collect();
+    entries.sort_by(|(a_score, a, _), (b_score, b, _)| b_score.cmp(a_score).then_with(|| a.cmp(b)));
+    entries.truncate(15);
+    if entries.is_empty() {
+        return;
+    }
+
+    let fs = FONT_SIZE * gs;
+    let right = screen_w - 4.0 * gs;
+    let title_w = spans_width(title, fs, text_width_fn);
+    let width = entries.iter().fold(title_w, |width, (score, _, spans)| {
+        width.max(
+            spans_width(spans, fs, text_width_fn)
+                + text_width_fn(&score.to_string(), fs)
+                + 5.0 * gs,
+        )
+    });
+    let x = right - width - 2.0 * gs;
+    let line_h = 9.0 * gs;
+    let y = (screen_h - (entries.len() as f32 + 1.0) * line_h) / 2.0;
+    elements.push(MenuElement::Rect {
+        x,
+        y,
+        w: width + 4.0 * gs,
+        h: (entries.len() as f32 + 1.0) * line_h,
+        corner_radius: 0.0,
+        color: [0.0, 0.0, 0.0, 0.5],
+    });
+    elements.push(MenuElement::McText {
+        x: right - width / 2.0,
+        y,
+        spans: title.clone(),
+        scale: fs,
+        centered: true,
+        shadow: true,
+    });
+    for (index, (score, _, spans)) in entries.iter().enumerate() {
+        let row_y = y + (index as f32 + 1.0) * line_h;
+        elements.push(MenuElement::McText {
+            x: x + 2.0 * gs,
+            y: row_y,
+            spans: spans.clone(),
+            scale: fs,
+            centered: false,
+            shadow: true,
+        });
+        elements.push(MenuElement::Text {
+            x: right - text_width_fn(&score.to_string(), fs),
+            y: row_y,
+            text: score.to_string(),
+            scale: fs,
+            color: [1.0, 0.33, 0.33, 1.0],
+            centered: false,
+        });
+    }
+}
+
+fn spans_width(spans: &[TextSpan], scale: f32, text_width_fn: TextWidthFn) -> f32 {
+    spans
+        .iter()
+        .map(|span| text_width_fn(&span.text, scale))
+        .sum()
 }
 
 /// Right-aligned status icon x, matching vanilla `xRight - i * 8 - 9`.

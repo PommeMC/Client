@@ -1,9 +1,12 @@
 //! Ported 1:1 from vanilla `PlayerTabOverlay.extractRenderState`
 //! (reference/26.1/decompiled/.../PlayerTabOverlay.java:103-204).
 
+use crate::entity::EntityStore;
 use crate::player::tab_list::{TabList, TabListPlayer};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::common::FONT_SIZE;
+use crate::ui::hud::Scoreboard;
+use crate::ui::text::TextSpan;
 
 const MAX_ROWS_PER_COL: usize = 20;
 const HEAD_COL_W: i32 = 9;
@@ -21,10 +24,11 @@ pub fn build_player_tab_overlay(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
     tab_list: &TabList,
+    scoreboard: &Scoreboard,
     gs: f32,
     text_width: &dyn Fn(&str, f32) -> f32,
 ) {
-    let players = tab_list.sorted_listed();
+    let players = tab_list.sorted_listed(scoreboard);
     if players.is_empty() {
         return;
     }
@@ -32,10 +36,13 @@ pub fn build_player_tab_overlay(
     let gw = (screen_w / gs).floor();
     let font_w = |s: &str| text_width(s, FONT_SIZE);
 
-    let display_names: Vec<String> = players.iter().map(|p| display_name_for(p)).collect();
+    let display_names: Vec<Vec<TextSpan>> = players
+        .iter()
+        .map(|p| display_name_for(p, scoreboard))
+        .collect();
     let max_name_w: i32 = display_names
         .iter()
-        .map(|n| font_w(n).ceil() as i32)
+        .map(|n| font_w(&span_text(n)).ceil() as i32)
         .max()
         .unwrap_or(0);
 
@@ -58,11 +65,11 @@ pub fn build_player_tab_overlay(
     let header_lines = tab_list
         .header
         .as_ref()
-        .map(|h| wrap_text(h, wrap_width_px, &font_w));
+        .map(|h| wrap_text(&span_text(h), wrap_width_px, &font_w));
     let footer_lines = tab_list
         .footer
         .as_ref()
-        .map(|f| wrap_text(f, wrap_width_px, &font_w));
+        .map(|f| wrap_text(&span_text(f), wrap_width_px, &font_w));
 
     let mut max_line_w = grid_w;
     for lines in [&header_lines, &footer_lines].into_iter().flatten() {
@@ -93,6 +100,15 @@ pub fn build_player_tab_overlay(
                 centered: false,
             });
         };
+    let push_spans = |elements: &mut Vec<MenuElement>, spans: Vec<TextSpan>, x: i32, y: i32| {
+        elements.push(MenuElement::TextSpans {
+            x: x as f32 * gs,
+            y: y as f32 * gs,
+            spans,
+            scale: FONT_SIZE * gs,
+            centered: false,
+        });
+    };
     let push_image =
         |elements: &mut Vec<MenuElement>, x: i32, y: i32, w: i32, h: i32, sprite: SpriteId| {
             elements.push(MenuElement::Image {
@@ -158,18 +174,13 @@ pub fn build_player_tab_overlay(
         push_image(elements, row_left, yo, 8, 8, SpriteId::SteveHead);
 
         let info = players[i];
-        let name_color = if info.game_mode == SPECTATOR_GAME_MODE {
-            COL_SPECTATOR
-        } else {
-            COL_NAME
-        };
-        push_text(
-            elements,
-            display_names[i].clone(),
-            row_left + HEAD_COL_W,
-            yo,
-            name_color,
-        );
+        let mut spans = display_names[i].clone();
+        if info.game_mode == SPECTATOR_GAME_MODE {
+            for span in &mut spans {
+                span.color[3] *= COL_SPECTATOR[3];
+            }
+        }
+        push_spans(elements, spans, row_left + HEAD_COL_W, yo);
         push_image(
             elements,
             row_left + slot_width - 11,
@@ -186,8 +197,54 @@ pub fn build_player_tab_overlay(
     }
 }
 
-fn display_name_for(p: &TabListPlayer) -> String {
-    p.display_name.clone().unwrap_or_else(|| p.name.clone())
+fn display_name_for(p: &TabListPlayer, scoreboard: &Scoreboard) -> Vec<TextSpan> {
+    scoreboard.player_name(&p.name, p.display_name.as_deref())
+}
+
+fn span_text(spans: &[TextSpan]) -> String {
+    spans.iter().map(|span| span.text.as_str()).collect()
+}
+
+pub fn build_player_nameplates(
+    elements: &mut Vec<MenuElement>,
+    entity_store: &EntityStore,
+    tab_list: &TabList,
+    scoreboard: &Scoreboard,
+    local_uuid: uuid::Uuid,
+    partial_tick: f32,
+    gs: f32,
+    camera_pos: glam::DVec3,
+    project: &dyn Fn(glam::DVec3) -> Option<(f32, f32)>,
+) {
+    for entity in entity_store.living.values() {
+        let Some(uuid) = entity.player_uuid else {
+            continue;
+        };
+        if uuid == local_uuid {
+            continue;
+        }
+        let Some(player) = tab_list.players.get(&uuid) else {
+            continue;
+        };
+        let pos = entity
+            .prev_position
+            .lerp(entity.position, partial_tick as f64)
+            + glam::DVec3::Y * if entity.is_crouching { 1.8 } else { 2.1 };
+        let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
+        if (*pos - camera_pos).length_squared() > max_distance * max_distance {
+            continue;
+        }
+        let Some((x, y)) = project(*pos) else {
+            continue;
+        };
+        elements.push(MenuElement::TextSpans {
+            x,
+            y: y - 4.0 * gs,
+            spans: display_name_for(player, scoreboard),
+            scale: FONT_SIZE * gs,
+            centered: true,
+        });
+    }
 }
 
 fn ping_sprite(latency: i32) -> SpriteId {

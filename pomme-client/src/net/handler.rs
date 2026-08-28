@@ -278,6 +278,69 @@ pub fn handle_game_packet(
         ClientboundGamePacket::SetActionBarText(p) => {
             send_action_bar(event_tx, &p.text);
         }
+        ClientboundGamePacket::SetObjective(p) => {
+            use azalea_protocol::packets::game::c_set_objective::Method;
+            let display = match &p.method {
+                Method::Add { display_name, .. } | Method::Change { display_name, .. } => {
+                    Some(format_text_spans(display_name, [1.0; 4]))
+                }
+                Method::Remove => None,
+            };
+            let _ = event_tx.try_send(NetworkEvent::ScoreboardObjective {
+                name: p.objective_name.clone(),
+                display,
+            });
+        }
+        ClientboundGamePacket::SetDisplayObjective(p)
+            if matches!(
+                p.slot,
+                azalea_protocol::packets::game::c_set_display_objective::DisplaySlot::Sidebar
+            ) =>
+        {
+            let _ = event_tx.try_send(NetworkEvent::ScoreboardDisplay {
+                name: (!p.objective_name.is_empty()).then(|| p.objective_name.clone()),
+            });
+        }
+        ClientboundGamePacket::SetScore(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ScoreboardScore {
+                owner: p.owner.clone(),
+                objective: p.objective_name.clone(),
+                score: p.score,
+                display: p
+                    .display
+                    .as_ref()
+                    .map(|text| format_text_spans(text, [1.0; 4])),
+            });
+        }
+        ClientboundGamePacket::ResetScore(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ScoreboardReset {
+                owner: p.owner.clone(),
+                objective: p.objective_name.clone(),
+            });
+        }
+        ClientboundGamePacket::SetPlayerTeam(p) => {
+            use azalea_protocol::packets::game::c_set_player_team::Method;
+            match &p.method {
+                Method::Add((parameters, members)) => {
+                    send_scoreboard_team(event_tx, &p.name, parameters, Some(members.clone()))
+                }
+                Method::Change(parameters) => {
+                    send_scoreboard_team(event_tx, &p.name, parameters, None)
+                }
+                Method::Join(members) | Method::Leave(members) => {
+                    let _ = event_tx.try_send(NetworkEvent::ScoreboardTeamMembers {
+                        name: p.name.clone(),
+                        members: members.clone(),
+                        join: matches!(p.method, Method::Join(_)),
+                    });
+                }
+                Method::Remove => {
+                    let _ = event_tx.try_send(NetworkEvent::ScoreboardTeamRemoved {
+                        name: p.name.clone(),
+                    });
+                }
+            }
+        }
         ClientboundGamePacket::PlayerChat(p) => {
             send_chat(event_tx, &p.message());
         }
@@ -688,7 +751,10 @@ pub fn handle_game_packet(
                     game_mode: e.game_mode.to_id(),
                     listed: e.listed,
                     latency: e.latency,
-                    display_name: e.display_name.as_ref().map(|c| c.to_string()),
+                    display_name: e
+                        .display_name
+                        .as_ref()
+                        .map(|c| crate::ui::text::format_text_spans(c, [1.0, 1.0, 1.0, 1.0])),
                     list_order: e.list_order,
                 })
                 .collect();
@@ -701,8 +767,8 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::TabList(p) => {
             let _ = event_tx.try_send(NetworkEvent::TabListHeaderFooter {
-                header: p.header.to_string(),
-                footer: p.footer.to_string(),
+                header: crate::ui::text::format_text_spans(&p.header, [1.0, 1.0, 1.0, 1.0]),
+                footer: crate::ui::text::format_text_spans(&p.footer, [1.0, 1.0, 1.0, 1.0]),
             });
         }
         ClientboundGamePacket::Commands(p) => {
@@ -743,6 +809,33 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedTe
 fn send_action_bar(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
     let spans = format_text_spans(message, [1.0; 4]);
     let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
+}
+
+fn send_scoreboard_team(
+    event_tx: &Sender<NetworkEvent>,
+    name: &str,
+    parameters: &azalea_protocol::packets::game::c_set_player_team::Parameters,
+    members: Option<Vec<String>>,
+) {
+    let color = team_color(parameters.color);
+    let _ = event_tx.try_send(NetworkEvent::ScoreboardTeam {
+        name: name.into(),
+        prefix: format_text_spans(&parameters.player_prefix, color),
+        suffix: format_text_spans(&parameters.player_suffix, color),
+        color,
+        members,
+    });
+}
+
+fn team_color(color: azalea_chat::style::ChatFormatting) -> [f32; 4] {
+    let hex = [
+        0x000000, 0x0000aa, 0x00aa00, 0x00aaaa, 0xaa0000, 0xaa00aa, 0xffaa00, 0xaaaaaa, 0x555555,
+        0x5555ff, 0x55ff55, 0x55ffff, 0xff5555, 0xff55ff, 0xffff55, 0xffffff,
+    ]
+    .get(color as usize)
+    .copied()
+    .unwrap_or(0xffffff);
+    crate::ui::common::rgb(hex)
 }
 
 /// Resolves a variant registry holder id to the mob's renderer pool slot.

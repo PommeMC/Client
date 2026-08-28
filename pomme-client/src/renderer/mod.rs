@@ -889,6 +889,21 @@ impl Renderer {
         self.camera.anchor()
     }
 
+    pub fn project_world_to_screen(&self, position: glam::DVec3) -> Option<(f32, f32)> {
+        let clip = self.camera.view_rotation_projection()
+            * (position - self.camera_render_position())
+                .as_vec3()
+                .extend(1.0);
+        if clip.w <= 0.0 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        (ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && ndc.z.abs() <= 1.0).then_some((
+            (ndc.x + 1.0) * self.width as f32 * 0.5,
+            (1.0 - ndc.y) * self.height as f32 * 0.5,
+        ))
+    }
+
     /// Six normalized frustum planes (camera-relative, same convention as the
     /// GPU cull), for CPU-side visibility classification of
     /// mesh-scheduling.

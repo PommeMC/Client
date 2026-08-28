@@ -726,6 +726,23 @@ impl MenuOverlayPipeline {
                         push_mc_text(&mut vertices, gm, *x, *y, &[span], *scale, false);
                     }
                 }
+                MenuElement::TextSpans {
+                    x,
+                    y,
+                    spans,
+                    scale,
+                    centered,
+                } => {
+                    if let Some(ref gm) = self.mc_glyph_map {
+                        let text: String = spans.iter().map(|span| span.text.as_str()).collect();
+                        let start_x = if *centered {
+                            *x - self.mc_text_width(&text, *scale) / 2.0
+                        } else {
+                            *x
+                        };
+                        push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale, true);
+                    }
+                }
                 MenuElement::Icon {
                     x,
                     y,
@@ -1458,6 +1475,13 @@ pub enum MenuElement {
         text: String,
         scale: f32,
         color: [f32; 4],
+        centered: bool,
+    },
+    TextSpans {
+        x: f32,
+        y: f32,
+        spans: Vec<crate::ui::text::TextSpan>,
+        scale: f32,
         centered: bool,
     },
     TextFlat {

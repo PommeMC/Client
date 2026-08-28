@@ -133,6 +133,38 @@ pub enum NetworkEvent {
     ActionBar {
         spans: Vec<crate::ui::text::TextSpan>,
     },
+    ScoreboardObjective {
+        name: String,
+        display: Option<Vec<crate::ui::text::TextSpan>>,
+    },
+    ScoreboardDisplay {
+        name: Option<String>,
+    },
+    ScoreboardScore {
+        owner: String,
+        objective: String,
+        score: u32,
+        display: Option<Vec<crate::ui::text::TextSpan>>,
+    },
+    ScoreboardReset {
+        owner: String,
+        objective: Option<String>,
+    },
+    ScoreboardTeam {
+        name: String,
+        prefix: Vec<crate::ui::text::TextSpan>,
+        suffix: Vec<crate::ui::text::TextSpan>,
+        color: [f32; 4],
+        members: Option<Vec<String>>,
+    },
+    ScoreboardTeamMembers {
+        name: String,
+        members: Vec<String>,
+        join: bool,
+    },
+    ScoreboardTeamRemoved {
+        name: String,
+    },
     CommandTree {
         tree: Arc<crate::net::commands::CommandTree>,
     },
@@ -387,7 +419,7 @@ pub enum NetworkEvent {
         uuids: Vec<uuid::Uuid>,
     },
     TabListHeaderFooter {
-        header: String,
-        footer: String,
+        header: Vec<crate::ui::text::TextSpan>,
+        footer: Vec<crate::ui::text::TextSpan>,
     },
 }

@@ -149,6 +149,7 @@ pub struct GameState {
     pub held_item_slot: u8,
     pub held_item_tooltip_tick: Option<u64>,
     pub action_bar: Option<(Vec<crate::ui::text::TextSpan>, u64)>,
+    pub scoreboard: crate::ui::hud::Scoreboard,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
     /// Tick of the last XP progress change; the XP bar outprioritizes the
@@ -329,6 +330,7 @@ impl GameState {
             held_item_slot: 0,
             held_item_tooltip_tick: None,
             action_bar: None,
+            scoreboard: crate::ui::hud::Scoreboard::default(),
             tick_count: 0,
             xp_display_start_tick: i64::MIN,
             interaction: InteractionState::new(),
@@ -1680,6 +1682,7 @@ pub fn update_game(
             game.action_bar
                 .as_ref()
                 .map(|(spans, tick)| (spans.as_slice(), game.tick_count.wrapping_sub(*tick))),
+            &game.scoreboard,
             gfx.renderer.is_first_person(),
             debug.as_ref(),
             core.menu.gui_scale_setting,
@@ -1699,8 +1702,24 @@ pub fn update_game(
             &mut elements,
             sw,
             &game.tab_list,
+            &game.scoreboard,
             gs,
             &|t, s| r.menu_text_width(t, s),
+        );
+    }
+
+    if !benchmark_running && !game.hide_gui {
+        let renderer = &gfx.renderer;
+        crate::ui::player_tab::build_player_nameplates(
+            &mut elements,
+            &game.entity_store,
+            &game.tab_list,
+            &game.scoreboard,
+            core.user.uuid,
+            partial_tick,
+            gs,
+            renderer.camera_render_position(),
+            &|position| renderer.project_world_to_screen(position),
         );
     }
 
