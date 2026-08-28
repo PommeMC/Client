@@ -170,11 +170,6 @@ fn translate_game_login_26_1() {
     assert_eq!(&translated[..], &frame[..]);
 }
 
-/// 26.1's team `Parameters` order is `displayName, options, visibility,
-/// collision, color, prefix, suffix` with color as a `ChatFormatting`
-/// ordinal; 26.2 reordered to `displayName, prefix, suffix, visibility,
-/// collision, color, options` with color as `Optional<TeamColor>`
-/// (`ClientboundSetPlayerTeamPacket.Parameters` in both references).
 #[test]
 fn translate_set_player_team_26_1() {
     let team_id = table_id(Direction::Clientbound, "set_player_team");
@@ -208,13 +203,11 @@ fn translate_set_player_team_26_1() {
     expected.extend_from_slice(suffix);
     expected.push(0); // visibility
     expected.push(1); // collision
-    expected.extend_from_slice(&[1, 5]); // color: Some(TeamColor 5)
+    expected.push(5);
     expected.push(3); // options
     assert_eq!(&translated[..], &expected[..]);
 }
 
-/// RESET (ChatFormatting ordinal 21) has no TeamColor equivalent and maps to
-/// an empty optional; the method-0 player list is copied verbatim.
 #[test]
 fn translate_set_player_team_26_1_reset_color() {
     let team_id = table_id(Direction::Clientbound, "set_player_team");
@@ -246,7 +239,7 @@ fn translate_set_player_team_26_1_reset_color() {
     expected.extend_from_slice(component);
     expected.push(0); // visibility
     expected.push(0); // collision
-    expected.push(0); // color: None
+    expected.push(21);
     expected.push(0); // options
     expected.extend_from_slice(&[1, 3, b'b', b'o', b'b']);
     assert_eq!(&translated[..], &expected[..]);
