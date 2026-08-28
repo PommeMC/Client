@@ -30,11 +30,14 @@ pub struct FrameTimings {
     pub present_ms: f32,
 }
 
+type ScoreKey = (String, String);
+type ScoreEntry = (u32, Option<Vec<TextSpan>>);
+
 #[derive(Default)]
 pub struct Scoreboard {
     sidebar: Option<String>,
     objectives: HashMap<String, Vec<TextSpan>>,
-    scores: HashMap<(String, String), (u32, Option<Vec<TextSpan>>)>,
+    scores: HashMap<ScoreKey, ScoreEntry>,
     teams: HashMap<String, ScoreboardTeam>,
 }
 
@@ -511,9 +514,9 @@ fn build_scoreboard(
     let mut entries: Vec<_> = scoreboard
         .scores
         .iter()
-        .filter_map(|((entry_objective, owner), (score, display))| {
-            (entry_objective == objective)
-                .then(|| (*score, owner, scoreboard.line(owner, display.as_deref())))
+        .filter(|((entry_objective, _), _)| entry_objective == objective)
+        .map(|((_, owner), (score, display))| {
+            (*score, owner, scoreboard.line(owner, display.as_deref()))
         })
         .collect();
     entries.sort_by(|(a_score, a, _), (b_score, b, _)| b_score.cmp(a_score).then_with(|| a.cmp(b)));

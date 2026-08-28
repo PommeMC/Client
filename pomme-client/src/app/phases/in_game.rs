@@ -1712,14 +1712,16 @@ pub fn update_game(
         let renderer = &gfx.renderer;
         crate::ui::player_tab::build_player_nameplates(
             &mut elements,
-            &game.entity_store,
-            &game.tab_list,
-            &game.scoreboard,
-            core.user.uuid,
-            partial_tick,
-            gs,
-            renderer.camera_render_position(),
-            &|position| renderer.project_world_to_screen(position),
+            crate::ui::player_tab::PlayerNameplates {
+                entity_store: &game.entity_store,
+                tab_list: &game.tab_list,
+                scoreboard: &game.scoreboard,
+                local_uuid: core.user.uuid,
+                partial_tick,
+                gs,
+                camera_pos: renderer.camera_render_position(),
+                project: &|position| renderer.project_world_to_screen(position),
+            },
         );
     }
 

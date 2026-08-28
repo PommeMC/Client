@@ -205,43 +205,44 @@ fn span_text(spans: &[TextSpan]) -> String {
     spans.iter().map(|span| span.text.as_str()).collect()
 }
 
-pub fn build_player_nameplates(
-    elements: &mut Vec<MenuElement>,
-    entity_store: &EntityStore,
-    tab_list: &TabList,
-    scoreboard: &Scoreboard,
-    local_uuid: uuid::Uuid,
-    partial_tick: f32,
-    gs: f32,
-    camera_pos: glam::DVec3,
-    project: &dyn Fn(glam::DVec3) -> Option<(f32, f32)>,
-) {
-    for entity in entity_store.living.values() {
+pub struct PlayerNameplates<'a> {
+    pub entity_store: &'a EntityStore,
+    pub tab_list: &'a TabList,
+    pub scoreboard: &'a Scoreboard,
+    pub local_uuid: uuid::Uuid,
+    pub partial_tick: f32,
+    pub gs: f32,
+    pub camera_pos: glam::DVec3,
+    pub project: &'a dyn Fn(glam::DVec3) -> Option<(f32, f32)>,
+}
+
+pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: PlayerNameplates<'_>) {
+    for entity in nameplates.entity_store.living.values() {
         let Some(uuid) = entity.player_uuid else {
             continue;
         };
-        if uuid == local_uuid {
+        if uuid == nameplates.local_uuid {
             continue;
         }
-        let Some(player) = tab_list.players.get(&uuid) else {
+        let Some(player) = nameplates.tab_list.players.get(&uuid) else {
             continue;
         };
         let pos = entity
             .prev_position
-            .lerp(entity.position, partial_tick as f64)
+            .lerp(entity.position, nameplates.partial_tick as f64)
             + glam::DVec3::Y * if entity.is_crouching { 1.8 } else { 2.1 };
         let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
-        if (*pos - camera_pos).length_squared() > max_distance * max_distance {
+        if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
             continue;
         }
-        let Some((x, y)) = project(*pos) else {
+        let Some((x, y)) = (nameplates.project)(*pos) else {
             continue;
         };
         elements.push(MenuElement::TextSpans {
             x,
-            y: y - 4.0 * gs,
-            spans: display_name_for(player, scoreboard),
-            scale: FONT_SIZE * gs,
+            y: y - 4.0 * nameplates.gs,
+            spans: display_name_for(player, nameplates.scoreboard),
+            scale: FONT_SIZE * nameplates.gs,
             centered: true,
         });
     }
