@@ -403,6 +403,57 @@ fn translate_entity_data_774() {
     ));
 }
 
+#[test]
+fn translate_entity_profile_774() {
+    use azalea_buf::AzBuf;
+    use azalea_inventory::components::Profile;
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(774, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9);
+    old.extend_from_slice(&[0, 37]);
+    Profile::default().azalea_write(&mut old).unwrap();
+    old.extend_from_slice(&[1, 38, 1, 0xFF]);
+
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(774, old) else {
+        panic!("wrong packet");
+    };
+    assert!(matches!(
+        p.packed_items.0[0].value,
+        azalea_entity::EntityDataValue::ResolvableProfile(_)
+    ));
+    assert!(matches!(
+        p.packed_items.0[1].value,
+        azalea_entity::EntityDataValue::HumanoidArm(_)
+    ));
+}
+
+#[test]
+fn translate_empty_entity_particles_774() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(774, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9);
+    old.extend_from_slice(&[10, 17, 0, 11, 8, 1, 0xFF]);
+
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(774, old) else {
+        panic!("wrong packet");
+    };
+    assert!(matches!(
+        p.packed_items.0[0].value,
+        azalea_entity::EntityDataValue::Particles(_)
+    ));
+    assert!(matches!(
+        p.packed_items.0[1].value,
+        azalea_entity::EntityDataValue::Boolean(true)
+    ));
+}
+
 /// The per-section `fluidCount` insertion (see `translate_chunk`).
 #[test]
 fn translate_chunk_774() {

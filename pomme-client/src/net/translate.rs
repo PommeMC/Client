@@ -54,8 +54,9 @@
 use std::io::Cursor;
 use std::sync::Mutex;
 
-use azalea_buf::AzBufVar;
+use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::sound::CustomSound;
+use azalea_inventory::components::Profile;
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_protocol::packets::game::s_container_click::HashedStack;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
@@ -198,7 +199,7 @@ impl Translation {
             translate_team(id, payload)
         } else if let Some(ids) = &self.game_ids {
             if id == ids.set_entity_data_id {
-                translate_entity_data(id, payload, ids.serializer_map)
+                translate_entity_data(id, payload, ids.serializer_map, self.to_latest)
             } else if id == ids.level_chunk_id {
                 translate_chunk(id, payload)
             } else if id == ids.set_time_id {
@@ -556,6 +557,7 @@ fn translate_entity_data(
     id: u32,
     payload: &[u8],
     serializer_map: fn(u32) -> Option<u32>,
+    remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
@@ -573,8 +575,11 @@ fn translate_entity_data(
         let new = serializer_map(old)?;
         wire::write_varint(&mut out, new);
         let value_at = cur.position() as usize;
+        if new == 7 {
+            translate_item_stack(&mut cur, &mut out, remaps)?;
+            continue;
+        }
         if !skip_metadata_value(&mut cur, new)? {
-            tracing::debug!("Copying entity data tail verbatim past serializer {old}");
             out.extend_from_slice(&payload[value_at..]);
             return Some(out);
         }
@@ -582,6 +587,53 @@ fn translate_entity_data(
     }
     out.extend_from_slice(&payload[cur.position() as usize..]);
     Some(out)
+}
+
+fn translate_item_stack(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let count_at = cur.position() as usize;
+    let count = i32::azalea_read_var(cur).ok()?;
+    out.extend_from_slice(&cur.get_ref()[count_at..cur.position() as usize]);
+    if count <= 0 {
+        return Some(());
+    }
+    let item = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+    let added_at = cur.position() as usize;
+    let added = u32::azalea_read_var(cur).ok()?;
+    out.extend_from_slice(&cur.get_ref()[added_at..cur.position() as usize]);
+    let removed_at = cur.position() as usize;
+    let removed = u32::azalea_read_var(cur).ok()?;
+    out.extend_from_slice(&cur.get_ref()[removed_at..cur.position() as usize]);
+    for _ in 0..added {
+        let component = u32::azalea_read_var(cur).ok()?;
+        wire::write_varint(
+            out,
+            remaps.remap(ClientRegistry::DataComponentType, component)?,
+        );
+        let value_at = cur.position() as usize;
+        match component {
+            44 => {
+                varint_span(cur)?;
+            }
+            68 => {
+                Profile::azalea_read(cur).ok()?;
+            }
+            _ => return None,
+        }
+        out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
+    }
+    for _ in 0..removed {
+        let component = u32::azalea_read_var(cur).ok()?;
+        wire::write_varint(
+            out,
+            remaps.remap(ClientRegistry::DataComponentType, component)?,
+        );
+    }
+    Some(())
 }
 
 /// Advances past one entity-data value of the given latest-version
@@ -596,6 +648,14 @@ fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool>
         10 => advance(cur, 8)?,    // block_pos
         39 => advance(cur, 12)?,   // vector3
         40 => advance(cur, 16)?,   // quaternion
+        41 => {
+            Profile::azalea_read(cur).ok()?;
+        }
+        17 => {
+            if u32::azalea_read_var(cur).ok()? != 0 {
+                return Some(false);
+            }
+        }
         // varint-shaped: int, enums, registry/holder ids, optional ints
         1 | 12 | 14 | 15 | 19 | 20 | 21 | 22..=32 | 35..=38 | 42 => {
             varint_span(cur)?;
@@ -830,14 +890,7 @@ fn translate_team(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(&payload[suffix]);
         out.extend_from_slice(&payload[visibility]);
         out.extend_from_slice(&payload[collision]);
-        // ChatFormatting ordinals 0..=15 are the colors, in TeamColor id
-        // order; formats (16..=20) and RESET (21) have no team color.
-        if color <= 15 {
-            out.push(1);
-            out.push(color as u8);
-        } else {
-            out.push(0);
-        }
+        out.push(color as u8);
         out.push(options);
     }
 

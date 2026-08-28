@@ -1,5 +1,5 @@
 use azalea_protocol::address::ServerAddr;
-use azalea_protocol::connect::{Connection, ReadConnection, WriteConnection};
+use azalea_protocol::connect::Connection;
 use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
@@ -108,7 +108,7 @@ pub async fn connect_to_server(
     event_tx: Sender<NetworkEvent>,
     chat_rx: crossbeam_channel::Receiver<String>,
     game_packet_tx: mpsc::UnboundedSender<Outbound>,
-    game_packet_rx: mpsc::UnboundedReceiver<Outbound>,
+    mut game_packet_rx: mpsc::UnboundedReceiver<Outbound>,
 ) -> Result<(), ConnectionError> {
     let server_addr: ServerAddr = args
         .server
@@ -140,7 +140,13 @@ pub async fn connect_to_server(
     let mut conn = conn.config();
 
     tracing::info!("Entering configuration phase");
-    let registry_holder = config_sequence(&mut conn, args.view_distance, &event_tx).await?;
+    let registry_holder = config_sequence(
+        &mut conn,
+        args.view_distance,
+        &event_tx,
+        &mut game_packet_rx,
+    )
+    .await?;
 
     let conn = conn.game();
     tracing::info!("Entering game state");
@@ -157,6 +163,7 @@ pub async fn connect_to_server(
         game_packet_tx,
         game_packet_rx,
         registry_holder,
+        args.view_distance,
     )
     .await
 }
@@ -294,6 +301,7 @@ async fn config_sequence(
     conn: &mut Connection<ClientboundConfigPacket, ServerboundConfigPacket>,
     view_distance: u8,
     event_tx: &Sender<NetworkEvent>,
+    outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
 ) -> Result<azalea_core::registry_holder::RegistryHolder, ConnectionError> {
     use azalea_core::delta::AzBuf;
     use azalea_core::registry_holder::RegistryHolder;
@@ -342,7 +350,30 @@ async fn config_sequence(
     .await?;
 
     loop {
-        let packet: ClientboundConfigPacket = conn.read().await?;
+        let packet = tokio::select! {
+            packet = conn.read() => packet?,
+            outbound = outbound_rx.recv() => {
+                if let Some(Outbound::Packet(packet)) = outbound
+                    && let ServerboundGamePacket::ResourcePack(p) = *packet
+                {
+                    use azalea_protocol::packets::config::s_resource_pack as config_pack;
+                    use azalea_protocol::packets::game::s_resource_pack as game_pack;
+                    let action = match p.action {
+                        game_pack::Action::SuccessfullyLoaded => config_pack::Action::SuccessfullyLoaded,
+                        game_pack::Action::Declined => config_pack::Action::Declined,
+                        game_pack::Action::FailedDownload => config_pack::Action::FailedDownload,
+                        game_pack::Action::Accepted => config_pack::Action::Accepted,
+                        game_pack::Action::InvalidUrl => config_pack::Action::InvalidUrl,
+                        game_pack::Action::FailedReload => config_pack::Action::FailedReload,
+                        game_pack::Action::Discarded => config_pack::Action::Discarded,
+                    };
+                    conn.write(ServerboundConfigPacket::ResourcePack(
+                        config_pack::ServerboundResourcePack { id: p.id, action },
+                    )).await?;
+                }
+                continue;
+            }
+        };
         match packet {
             ClientboundConfigPacket::RegistryData(p) => {
                 registry_holder.append(p.registry_id, p.entries);
@@ -501,56 +532,18 @@ fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -
 }
 
 async fn game_loop(
-    conn: Connection<ClientboundGamePacket, ServerboundGamePacket>,
+    mut conn: Connection<ClientboundGamePacket, ServerboundGamePacket>,
     event_tx: &Sender<NetworkEvent>,
     chat_rx: crossbeam_channel::Receiver<String>,
     outbound_tx: mpsc::UnboundedSender<Outbound>,
     mut outbound_rx: mpsc::UnboundedReceiver<Outbound>,
     registry_holder: azalea_core::registry_holder::RegistryHolder,
+    view_distance: u8,
 ) -> Result<(), ConnectionError> {
-    let (mut reader, mut writer): (
-        ReadConnection<ClientboundGamePacket>,
-        WriteConnection<ServerboundGamePacket>,
-    ) = conn.into_split();
-
     let sender = PacketSender::new(outbound_tx.clone());
 
     let shared_tree: crate::net::commands::SharedCommandTree =
         std::sync::Arc::new(parking_lot::Mutex::new(None));
-
-    tokio::spawn(async move {
-        let translation = super::translate::active();
-        'writer: while let Some(out) = outbound_rx.recv().await {
-            // Frames are in the latest layout (azalea's serializer and
-            // `wire`'s encoders both emit it); older wire versions get them
-            // translated before framing.
-            let frame = match out {
-                Outbound::Packet(mut packet) => {
-                    if let Some(t) = translation {
-                        t.remap_outbound(&mut packet);
-                    }
-                    match azalea_protocol::write::serialize_packet(&*packet) {
-                        Ok(frame) => Vec::from(frame),
-                        Err(e) => {
-                            tracing::error!("Failed to serialize packet: {e}");
-                            break;
-                        }
-                    }
-                }
-                Outbound::Raw(bytes) => bytes,
-            };
-            let frames = match translation {
-                Some(t) if t.translates_outbound() => t.translate_outbound_game_frame(frame),
-                _ => vec![frame],
-            };
-            for frame in frames {
-                if let Err(e) = writer.raw.write(&frame).await {
-                    tracing::error!("Failed to write packet: {e}");
-                    break 'writer;
-                }
-            }
-        }
-    });
 
     let chat_outbound_tx = outbound_tx;
     let chat_tree = shared_tree.clone();
@@ -605,12 +598,36 @@ async fn game_loop(
 
     // Share the registries with the game loop for hashing predicted container
     // clicks.
-    let registry_holder = std::sync::Arc::new(registry_holder);
+    let mut registry_holder = std::sync::Arc::new(registry_holder);
     let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
 
     let translation = super::translate::active();
     loop {
-        let raw = match reader.raw.read().await {
+        let raw = tokio::select! {
+            Some(out) = outbound_rx.recv() => {
+                let frame = match out {
+                    Outbound::Packet(mut packet) => {
+                        if let Some(t) = translation {
+                            t.remap_outbound(&mut packet);
+                        }
+                        azalea_protocol::write::serialize_packet(&*packet)
+                            .map(Vec::from)
+                            .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))?
+                    }
+                    Outbound::Raw(bytes) => bytes,
+                };
+                let frames = match translation {
+                    Some(t) if t.translates_outbound() => t.translate_outbound_game_frame(frame),
+                    _ => vec![frame],
+                };
+                for frame in frames {
+                    conn.writer.raw.write(&frame).await?;
+                }
+                continue;
+            }
+            raw = conn.reader.raw.read() => raw,
+        };
+        let raw = match raw {
             Ok(raw) => raw,
             Err(e) => {
                 skip_malformed_packet(e)?;
@@ -629,6 +646,31 @@ async fn game_loop(
         }
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
             Ok(mut packet) => {
+                if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
+                    let ack = ServerboundGamePacket::ConfigurationAcknowledged(
+                        azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
+                    );
+                    let frame = azalea_protocol::write::serialize_packet(&ack)
+                        .map(Vec::from)
+                        .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))?;
+                    let frames = match translation {
+                        Some(t) if t.translates_outbound() => {
+                            t.translate_outbound_game_frame(frame)
+                        }
+                        _ => vec![frame],
+                    };
+                    for frame in frames {
+                        conn.writer.raw.write(&frame).await?;
+                    }
+                    let mut config = conn.config();
+                    let holder =
+                        config_sequence(&mut config, view_distance, event_tx, &mut outbound_rx)
+                            .await?;
+                    conn = config.game();
+                    registry_holder = std::sync::Arc::new(holder);
+                    let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
+                    continue;
+                }
                 if let Some(t) = translation
                     && !t.remap_inbound(&mut packet)
                 {
