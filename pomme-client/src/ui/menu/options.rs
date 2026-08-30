@@ -130,6 +130,7 @@ impl MainMenu {
             "VSync: OFF"
         };
         let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
+        let attack_label = format!("Attack Indicator: {}", self.attack_indicator.label());
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
             OptRow::Big("Fullscreen Resolution: Current"),
@@ -152,7 +153,7 @@ impl MainMenu {
             OptRow::PairLeft("Weather Radius: 10"),
             OptRow::Header("Preferences"),
             OptRow::Pair("Show Autosave Indicator: ON", "Vignette: ON"),
-            OptRow::Pair("Attack Indicator: Crosshair", "Chunk Fade-in: 1.0s"),
+            OptRow::Pair(&attack_label, "Chunk Fade-in: 1.0s"),
         ];
         let rd_frac = ((self.render_distance as f32 - 2.0) / (rd_max as f32 - 2.0)).clamp(0.0, 1.0);
         let cd_frac = ((self.chunk_detail as f32 - 8.0) / 40.0).clamp(0.0, 1.0);
@@ -725,6 +726,10 @@ impl MainMenu {
                     }
                     if label.starts_with("Clouds:") {
                         self.cloud_mode = self.cloud_mode.cycle();
+                        self.save_settings();
+                    }
+                    if label.starts_with("Attack Indicator:") {
+                        self.attack_indicator = self.attack_indicator.cycle();
                         self.save_settings();
                     }
                     if label.starts_with("View Bobbing:") {

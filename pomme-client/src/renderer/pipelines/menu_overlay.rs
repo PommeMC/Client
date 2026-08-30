@@ -46,6 +46,27 @@ struct DrawOp {
     start: u32,
     count: u32,
     scissor: Option<[f32; 4]>,
+    invert: bool,
+}
+
+/// Ends the current batch (if non-empty) as a `DrawOp` and starts the next
+/// one at `end`.
+fn flush_draw_op(
+    draw_ops: &mut Vec<DrawOp>,
+    cmd_start: &mut u32,
+    end: u32,
+    scissor: Option<[f32; 4]>,
+    invert: bool,
+) {
+    if end > *cmd_start {
+        draw_ops.push(DrawOp {
+            start: *cmd_start,
+            count: end - *cmd_start,
+            scissor,
+            invert,
+        });
+    }
+    *cmd_start = end;
 }
 
 struct GlyphEntry {
@@ -172,6 +193,8 @@ pub(crate) fn extract_face_8x8(rgba: &[u8], sw: u32, sh: u32) -> Option<Vec<u8>>
 
 pub struct MenuOverlayPipeline {
     pipeline: vk::Pipeline,
+    /// Vanilla `RenderPipelines.CROSSHAIR`: same shaders, INVERT blend.
+    invert_pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     globals_layout: vk::DescriptorSetLayout,
     tex_layout: vk::DescriptorSetLayout,
@@ -293,7 +316,8 @@ impl MenuOverlayPipeline {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create menu overlay pipeline layout");
 
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout);
+        let pipeline = create_pipeline(device, render_pass, pipeline_layout, false);
+        let invert_pipeline = create_pipeline(device, render_pass, pipeline_layout, true);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -567,6 +591,7 @@ impl MenuOverlayPipeline {
 
         Self {
             pipeline,
+            invert_pipeline,
             pipeline_layout,
             globals_layout,
             tex_layout,
@@ -645,6 +670,7 @@ impl MenuOverlayPipeline {
         let mut draw_ops: Vec<DrawOp> = Vec::new();
         let mut scissor_stack: Vec<[f32; 4]> = Vec::new();
         let mut cmd_start: u32 = 0;
+        let mut cur_invert = false;
 
         for elem in elements {
             if matches!(
@@ -658,15 +684,13 @@ impl MenuOverlayPipeline {
                 elem,
                 MenuElement::ScissorPush { .. } | MenuElement::ScissorPop
             ) {
-                let count = vertices.len() as u32 - cmd_start;
-                if count > 0 {
-                    draw_ops.push(DrawOp {
-                        start: cmd_start,
-                        count,
-                        scissor: scissor_stack.last().copied(),
-                    });
-                }
-                cmd_start = vertices.len() as u32;
+                flush_draw_op(
+                    &mut draw_ops,
+                    &mut cmd_start,
+                    vertices.len() as u32,
+                    scissor_stack.last().copied(),
+                    cur_invert,
+                );
                 if let MenuElement::ScissorPush { x, y, w, h } = elem {
                     // Nested regions clip to the intersection with the enclosing one.
                     let rect = match scissor_stack.last() {
@@ -684,6 +708,19 @@ impl MenuOverlayPipeline {
                     scissor_stack.pop();
                 }
                 continue;
+            }
+            // Invert-blended elements need their own pipeline, so they split the
+            // batch the same way a scissor change does.
+            let invert = matches!(elem, MenuElement::ImageInvert { .. });
+            if invert != cur_invert {
+                flush_draw_op(
+                    &mut draw_ops,
+                    &mut cmd_start,
+                    vertices.len() as u32,
+                    scissor_stack.last().copied(),
+                    cur_invert,
+                );
+                cur_invert = invert;
             }
             match elem {
                 MenuElement::Rect {
@@ -752,6 +789,14 @@ impl MenuOverlayPipeline {
                     push_icon_glyph(&mut vertices, &self.atlas, *x, *y, *icon, *scale, *color);
                 }
                 MenuElement::Image {
+                    x,
+                    y,
+                    w,
+                    h,
+                    sprite,
+                    tint,
+                }
+                | MenuElement::ImageInvert {
                     x,
                     y,
                     w,
@@ -943,6 +988,18 @@ impl MenuOverlayPipeline {
             }
         }
 
+        // Deferred tooltips always draw with the normal pipeline.
+        if cur_invert {
+            flush_draw_op(
+                &mut draw_ops,
+                &mut cmd_start,
+                vertices.len() as u32,
+                scissor_stack.last().copied(),
+                true,
+            );
+            cur_invert = false;
+        }
+
         for elem in &deferred_tooltips {
             if let MenuElement::Tooltip {
                 x,
@@ -1111,14 +1168,13 @@ impl MenuOverlayPipeline {
             }
         }
 
-        let final_count = vertices.len() as u32 - cmd_start;
-        if final_count > 0 {
-            draw_ops.push(DrawOp {
-                start: cmd_start,
-                count: final_count,
-                scissor: scissor_stack.last().copied(),
-            });
-        }
+        flush_draw_op(
+            &mut draw_ops,
+            &mut cmd_start,
+            vertices.len() as u32,
+            scissor_stack.last().copied(),
+            cur_invert,
+        );
 
         if draw_ops.is_empty() {
             return vertex_base;
@@ -1149,7 +1205,8 @@ impl MenuOverlayPipeline {
         };
 
         if !draw_ops.is_empty() {
-            cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+            // Descriptor sets and vertex buffer stay valid across pipeline
+            // switches (both pipelines share the layout).
             cmd.bind_descriptor_sets(
                 vk::PipelineBindPoint::Graphics,
                 self.pipeline_layout,
@@ -1159,7 +1216,19 @@ impl MenuOverlayPipeline {
             );
             cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
         }
+        let mut bound_invert: Option<bool> = None;
         for op in &draw_ops {
+            if bound_invert != Some(op.invert) {
+                cmd.bind_pipeline(
+                    vk::PipelineBindPoint::Graphics,
+                    if op.invert {
+                        self.invert_pipeline
+                    } else {
+                        self.pipeline
+                    },
+                );
+                bound_invert = Some(op.invert);
+            }
             let rect = if let Some(s) = op.scissor {
                 vk::Rect2D {
                     offset: vk::Offset2D {
@@ -1359,7 +1428,9 @@ impl MenuOverlayPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout);
+        device.destroy_pipeline(self.invert_pipeline, None);
+        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout, false);
+        self.invert_pipeline = create_pipeline(device, render_pass, self.pipeline_layout, true);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -1426,6 +1497,7 @@ impl MenuOverlayPipeline {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.invert_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.globals_layout, None);
@@ -1504,6 +1576,15 @@ pub enum MenuElement {
         color: [f32; 4],
     },
     Image {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        sprite: SpriteId,
+        tint: [f32; 4],
+    },
+    /// `Image` drawn with vanilla's INVERT blend (`RenderPipelines.CROSSHAIR`).
+    ImageInvert {
         x: f32,
         y: f32,
         w: f32,
@@ -1616,6 +1697,12 @@ pub enum SpriteId {
     ArmorFull,
     ExperienceBarBackground,
     ExperienceBarProgress,
+    Crosshair,
+    CrosshairAttackIndicatorFull,
+    CrosshairAttackIndicatorBackground,
+    CrosshairAttackIndicatorProgress,
+    HotbarAttackIndicatorBackground,
+    HotbarAttackIndicatorProgress,
     LocatorBarBackground,
     LocatorDotDefault0,
     LocatorDotDefault1,
@@ -1917,6 +2004,36 @@ fn build_sprite_atlas(
         (
             SpriteId::ExperienceBarProgress,
             "minecraft/textures/gui/sprites/hud/experience_bar_progress.png",
+            0.0,
+        ),
+        (
+            SpriteId::Crosshair,
+            "minecraft/textures/gui/sprites/hud/crosshair.png",
+            0.0,
+        ),
+        (
+            SpriteId::CrosshairAttackIndicatorFull,
+            "minecraft/textures/gui/sprites/hud/crosshair_attack_indicator_full.png",
+            0.0,
+        ),
+        (
+            SpriteId::CrosshairAttackIndicatorBackground,
+            "minecraft/textures/gui/sprites/hud/crosshair_attack_indicator_background.png",
+            0.0,
+        ),
+        (
+            SpriteId::CrosshairAttackIndicatorProgress,
+            "minecraft/textures/gui/sprites/hud/crosshair_attack_indicator_progress.png",
+            0.0,
+        ),
+        (
+            SpriteId::HotbarAttackIndicatorBackground,
+            "minecraft/textures/gui/sprites/hud/hotbar_attack_indicator_background.png",
+            0.0,
+        ),
+        (
+            SpriteId::HotbarAttackIndicatorProgress,
+            "minecraft/textures/gui/sprites/hud/hotbar_attack_indicator_progress.png",
             0.0,
         ),
         (
@@ -3215,6 +3332,7 @@ fn create_pipeline(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
+    invert: bool,
 ) -> vk::Pipeline {
     let vert_spv = shader::include_spirv!("menu_overlay.vert.spv");
     let frag_spv = shader::include_spirv!("menu_overlay.frag.spv");
@@ -3319,13 +3437,29 @@ fn create_pipeline(
         ..Default::default()
     };
 
+    // Normal path is premultiplied alpha; invert is vanilla `BlendFunction.INVERT`
+    // (transparent texels output rgb 0 / alpha 0, so ONE_MINUS_SRC_COLOR keeps
+    // dst).
+    let (src_color, dst_color, dst_alpha) = if invert {
+        (
+            vk::BlendFactor::OneMinusDstColor,
+            vk::BlendFactor::OneMinusSrcColor,
+            vk::BlendFactor::Zero,
+        )
+    } else {
+        (
+            vk::BlendFactor::One,
+            vk::BlendFactor::OneMinusSrcAlpha,
+            vk::BlendFactor::OneMinusSrcAlpha,
+        )
+    };
     let blend_attachment = [vk::PipelineColorBlendAttachmentState {
         blend_enable: vk::TRUE,
-        src_color_blend_factor: vk::BlendFactor::One,
-        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        src_color_blend_factor: src_color,
+        dst_color_blend_factor: dst_color,
         color_blend_op: vk::BlendOp::Add,
         src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        dst_alpha_blend_factor: dst_alpha,
         alpha_blend_op: vk::BlendOp::Add,
         color_write_mask: vk::ColorComponentFlags::RGBA,
     }];
