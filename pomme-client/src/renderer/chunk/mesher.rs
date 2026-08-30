@@ -261,21 +261,21 @@ impl Default for BiomeClimate {
 
 /// For paths `Tint::Redstone` can't reach (redstone wire always has multipart
 /// quads): greedy meshing and plain cubes.
-const NO_REDSTONE: [f32; 3] = [1.0; 3];
+const NO_REDSTONE: fn() -> [f32; 3] = || [1.0; 3];
 
 fn tint_color(
     tint: Tint,
     grass: [f32; 3],
     foliage: [f32; 3],
     dry_foliage: [f32; 3],
-    redstone: [f32; 3],
+    redstone: impl FnOnce() -> [f32; 3],
 ) -> u32 {
     match tint {
         Tint::None => PACKED_WHITE_SHIFTED,
         Tint::Grass => pack_tint_shifted(grass),
         Tint::Foliage => pack_tint_shifted(foliage),
         Tint::DryFoliage => pack_tint_shifted(dry_foliage),
-        Tint::Redstone => pack_tint_shifted(redstone),
+        Tint::Redstone => pack_tint_shifted(redstone()),
     }
 }
 
@@ -1617,7 +1617,6 @@ fn emit_baked_model(
     by: i32,
     bz: i32,
 ) {
-    let redstone = crate::world::block::redstone_wire_rgb(state);
     for quad in &model.quads {
         if let Some(cullface) = quad.cullface {
             let offset = cullface.offset();
@@ -1633,7 +1632,7 @@ fn emit_baked_model(
             snapshot.grass_tint(bx, by, bz),
             snapshot.foliage_tint(bx, by, bz),
             snapshot.dry_foliage_tint(bx, by, bz),
-            redstone,
+            || crate::world::block::redstone_wire_rgb(state),
         );
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, registry, bx, by, bz, dir)
@@ -1779,7 +1778,7 @@ fn block_face_tex_tint(
                     snapshot.grass_tint(bx, by, bz),
                     snapshot.foliage_tint(bx, by, bz),
                     snapshot.dry_foliage_tint(bx, by, bz),
-                    crate::world::block::redstone_wire_rgb(state),
+                    NO_REDSTONE,
                 );
                 let tex_name = match dir {
                     Direction::Up => &textures.top,
@@ -1885,7 +1884,6 @@ fn emit_multipart(
     by: i32,
     bz: i32,
 ) {
-    let redstone = crate::world::block::redstone_wire_rgb(state);
     for quad in quads {
         if let Some(cullface) = quad.cullface {
             let offset = cullface.offset();
@@ -1901,7 +1899,7 @@ fn emit_multipart(
             snapshot.grass_tint(bx, by, bz),
             snapshot.foliage_tint(bx, by, bz),
             snapshot.dry_foliage_tint(bx, by, bz),
-            redstone,
+            || crate::world::block::redstone_wire_rgb(state),
         );
         emit_face(
             sink,
