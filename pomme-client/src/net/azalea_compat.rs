@@ -50,6 +50,17 @@ fn packet_ids_match_azalea() {
         particles.id(),
         table_id(Direction::Clientbound, "level_particles")
     );
+
+    let boss_event = ClientboundGamePacket::BossEvent(
+        azalea_protocol::packets::game::c_boss_event::ClientboundBossEvent {
+            id: uuid::Uuid::nil(),
+            operation: azalea_protocol::packets::game::c_boss_event::Operation::Remove,
+        },
+    );
+    assert_eq!(
+        boss_event.id(),
+        table_id(Direction::Clientbound, "boss_event")
+    );
 }
 
 /// Round-trip through azalea's `LpVec3` decoder to cross-check the port.

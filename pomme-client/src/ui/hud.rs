@@ -8,6 +8,7 @@ use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
 use crate::mob_effect::ActiveMobEffects;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::ui::boss_bar::BossBarState;
 use crate::ui::text::TextSpan;
 use crate::world::waypoints::{LocatorDot, PitchDirection, WaypointStyleId};
 
@@ -376,6 +377,7 @@ pub fn build_hud(
     spans_width_fn: super::common::SpansWidthFn<'_>,
     scoreboard: &Scoreboard,
     effects: &ActiveMobEffects,
+    boss_bars: &BossBarState,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
@@ -543,6 +545,8 @@ pub fn build_hud(
     }
 
     build_effect_icons(elements, screen_w, gs, effects);
+
+    build_boss_bars(elements, screen_w, screen_h, gs, boss_bars);
 
     build_scoreboard(
         elements,
@@ -769,6 +773,73 @@ fn build_effect_icons(
             sprite: SpriteId::MobEffect(instance.effect_id as u8),
             tint: [1.0, 1.0, 1.0, alpha],
         });
+    }
+}
+
+/// Vanilla `BossHealthOverlay.extractRenderState`: bars centered at the top
+/// starting y=12, name centered 9 above each bar, rows 19 apart, stopping
+/// once past a third of the screen (checked after drawing, so at least one
+/// bar always shows). Per bar: colored background, notched background, then
+/// progress variants of both cropped to the fill width.
+fn build_boss_bars(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    boss_bars: &BossBarState,
+) {
+    const BAR_WIDTH: f32 = 182.0;
+    const BAR_HEIGHT: f32 = 5.0;
+    let x = (screen_w / 2.0 - 91.0 * gs).round();
+    let w = BAR_WIDTH * gs;
+    let h = BAR_HEIGHT * gs;
+    let mut y_units = 12.0;
+    for bar in boss_bars.iter() {
+        let y = (y_units * gs).round();
+        let bar_image = |sprite| MenuElement::Image {
+            x,
+            y,
+            w,
+            h,
+            sprite,
+            tint: WHITE,
+        };
+        elements.push(bar_image(SpriteId::BossBarBackground(bar.color)));
+        if bar.overlay != 0 {
+            elements.push(bar_image(SpriteId::BossBarNotchedBackground(
+                bar.overlay - 1,
+            )));
+        }
+        let progress = bar.progress();
+        // Vanilla `Mth.lerpDiscrete(progress, 0, 182)`: any nonzero progress
+        // fills at least one pixel.
+        let fill_px =
+            (progress * (BAR_WIDTH - 1.0)).floor() + if progress > 0.0 { 1.0 } else { 0.0 };
+        if fill_px > 0.0 {
+            elements.push(MenuElement::ScissorPush {
+                x,
+                y,
+                w: (fill_px * gs).round(),
+                h,
+            });
+            elements.push(bar_image(SpriteId::BossBarProgress(bar.color)));
+            if bar.overlay != 0 {
+                elements.push(bar_image(SpriteId::BossBarNotchedProgress(bar.overlay - 1)));
+            }
+            elements.push(MenuElement::ScissorPop);
+        }
+        elements.push(MenuElement::McText {
+            x: screen_w / 2.0,
+            y: ((y_units - 9.0) * gs).round(),
+            spans: bar.name.clone(),
+            scale: FONT_SIZE * gs,
+            centered: true,
+            shadow: true,
+        });
+        y_units += 10.0 + 9.0;
+        if y_units >= screen_h / gs / 3.0 {
+            break;
+        }
     }
 }
 

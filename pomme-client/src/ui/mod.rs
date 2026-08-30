@@ -1,4 +1,5 @@
 pub mod anvil;
+pub mod boss_bar;
 pub mod chat;
 pub mod chest;
 pub mod common;

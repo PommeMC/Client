@@ -185,6 +185,10 @@ mod tests {
             Some(0x84)
         );
         assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "boss_event"),
+            Some(9)
+        );
+        assert_eq!(
             t.name_of(Phase::Game, Direction::Clientbound, 0),
             Some("bundle_delimiter")
         );

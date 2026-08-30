@@ -1707,6 +1707,12 @@ pub enum SpriteId {
     EffectBackgroundAmbient,
     /// Index into `mob_effect::MOB_EFFECTS`.
     MobEffect(u8),
+    /// Boss bar sprites, indexed by the wire ordinals: color 0..=6 (pink,
+    /// blue, red, green, yellow, purple, white), notch 0..=3 (6/10/12/20).
+    BossBarBackground(u8),
+    BossBarProgress(u8),
+    BossBarNotchedBackground(u8),
+    BossBarNotchedProgress(u8),
     LocatorBarBackground,
     LocatorDotDefault0,
     LocatorDotDefault1,
@@ -2457,11 +2463,34 @@ fn build_sprite_atlas(
                 0.0,
             )
         });
+    let mut boss_bar_sprites: Vec<(SpriteId, String, f32)> = Vec::new();
+    let mut boss_bar_sprite = |id: SpriteId, name: &str, kind: &str| {
+        boss_bar_sprites.push((
+            id,
+            format!("minecraft/textures/gui/sprites/boss_bar/{name}_{kind}.png"),
+            0.0,
+        ));
+    };
+    let colors = ["pink", "blue", "red", "green", "yellow", "purple", "white"];
+    for (i, name) in colors.iter().enumerate() {
+        boss_bar_sprite(SpriteId::BossBarBackground(i as u8), name, "background");
+        boss_bar_sprite(SpriteId::BossBarProgress(i as u8), name, "progress");
+    }
+    let notches = ["notched_6", "notched_10", "notched_12", "notched_20"];
+    for (i, name) in notches.iter().enumerate() {
+        boss_bar_sprite(
+            SpriteId::BossBarNotchedBackground(i as u8),
+            name,
+            "background",
+        );
+        boss_bar_sprite(SpriteId::BossBarNotchedProgress(i as u8), name, "progress");
+    }
     let mut images: Vec<(SpriteId, Vec<u8>, u32, u32, f32)> = Vec::new();
     for (id, asset_key, border) in sprites
         .iter()
         .map(|&(id, key, border)| (id, key.to_string(), border))
         .chain(effect_icons)
+        .chain(boss_bar_sprites)
     {
         let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
         match crate::assets::load_image(&path) {

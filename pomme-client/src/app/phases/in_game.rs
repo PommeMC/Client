@@ -152,6 +152,7 @@ pub struct GameState {
     pub last_tool_highlight: azalea_inventory::ItemStack,
     pub action_bar: Option<(Vec<crate::ui::text::TextSpan>, u64)>,
     pub scoreboard: crate::ui::hud::Scoreboard,
+    pub boss_bars: crate::ui::boss_bar::BossBarState,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
     /// Tick of the last XP progress change; the XP bar outprioritizes the
@@ -333,6 +334,7 @@ impl GameState {
             last_tool_highlight: azalea_inventory::ItemStack::Empty,
             action_bar: None,
             scoreboard: crate::ui::hud::Scoreboard::default(),
+            boss_bars: crate::ui::boss_bar::BossBarState::default(),
             tick_count: 0,
             xp_display_start_tick: i64::MIN,
             interaction: InteractionState::new(),
@@ -1731,6 +1733,7 @@ pub fn update_game(
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
             &game.scoreboard,
             &game.player.effects,
+            &game.boss_bars,
             gfx.renderer.is_first_person(),
             debug.as_ref(),
             core.menu.gui_scale_setting,

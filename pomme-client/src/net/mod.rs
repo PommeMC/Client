@@ -142,6 +142,10 @@ pub enum NetworkEvent {
     ActionBar {
         spans: Vec<crate::ui::text::TextSpan>,
     },
+    BossBarUpdate {
+        id: uuid::Uuid,
+        op: crate::ui::boss_bar::BossBarOp,
+    },
     ScoreboardObjective {
         name: String,
         display: Option<Vec<crate::ui::text::TextSpan>>,
