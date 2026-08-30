@@ -340,7 +340,11 @@ impl ParticleStore {
             && faces.tint != Tint::None
             && block_id != "grass_block"
         {
-            let tint = self.blend_tint(faces.tint, pos, chunks, biome_climate);
+            let tint = if faces.tint == Tint::Redstone {
+                crate::world::block::redstone_wire_rgb(state)
+            } else {
+                self.blend_tint(faces.tint, pos, chunks, biome_climate)
+            };
             for (c, t) in color.iter_mut().zip(tint) {
                 *c *= t;
             }
@@ -510,7 +514,8 @@ impl ParticleStore {
                 Tint::Grass => grass_color(&climate, &self.grass_colormap, x, z),
                 Tint::Foliage => foliage_color(&climate, &self.foliage_colormap),
                 Tint::DryFoliage => dry_foliage_color(&climate, &self.dry_foliage_colormap),
-                Tint::None => [1.0; 3],
+                // Redstone is state-derived, resolved by the caller.
+                Tint::None | Tint::Redstone => [1.0; 3],
             }
         })
     }
