@@ -694,6 +694,28 @@ body {
   cursor: wait;
 }
 
+.auth-copy-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.auth-copy-link:hover {
+  background: var(--glass-hover);
+  color: var(--accent);
+}
+
 /* ═══ Hero Banner ═══ */
 
 .hero-banner {

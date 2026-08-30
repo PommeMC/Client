@@ -51,6 +51,7 @@ export const commands = {
 
 /** Events */
 export const events = {
+	authUrlEvent: makeEvent<pomme_launcher$auth.AuthUrlEvent>("auth-url-event"),
 	consoleMessageEvent: makeEvent<pomme_launcher$commands.ConsoleMessageEvent>("console-message-event"),
 	downloadProgressEvent: makeEvent<pomme_launcher$downloader.DownloadProgressEvent>("download-progress-event"),
 	gameExitedEvent: makeEvent<pomme_launcher$commands.GameExitedEvent>("game-exited-event"),

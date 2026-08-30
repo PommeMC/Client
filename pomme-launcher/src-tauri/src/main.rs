@@ -24,6 +24,7 @@ fn main() {
         })
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(invoke_handler)
         .run(tauri::generate_context!())
         .expect("failed to run Pomme launcher");

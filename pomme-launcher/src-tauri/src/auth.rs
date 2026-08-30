@@ -6,6 +6,11 @@ const CLIENT_ID: &str = "b2dd2c0f-8a09-4549-9d76-ab43b8572695";
 const REDIRECT_URI: &str = "http://localhost:25585";
 const SCOPE: &str = "XboxLive.signin offline_access";
 
+#[derive(Serialize, Clone, specta::Type, tauri_specta::Event)]
+pub struct AuthUrlEvent {
+    pub url: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
 pub struct AuthAccount {
     pub username: String,
@@ -168,7 +173,9 @@ fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-pub async fn oauth_sign_in() -> Result<AuthAccount, String> {
+pub async fn oauth_sign_in(app: tauri::AppHandle) -> Result<AuthAccount, String> {
+    use tauri_specta::Event;
+
     let (verifier, challenge) = generate_pkce();
 
     let state: String = (0..16)
@@ -187,9 +194,21 @@ pub async fn oauth_sign_in() -> Result<AuthAccount, String> {
         urlencoding::encode(SCOPE),
     );
 
-    let _ = open::that(&auth_url);
+    // Bind before opening the browser so a taken port fails immediately.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:25585")
+        .await
+        .map_err(|e| format!("Failed to bind callback listener: {e}"))?;
 
-    let code = listen_for_callback(&state).await?;
+    let _ = AuthUrlEvent {
+        url: auth_url.clone(),
+    }
+    .emit(&app);
+
+    if let Err(e) = open::that_detached(&auth_url) {
+        log::warn!("failed to open browser for sign-in: {e}");
+    }
+
+    let code = listen_for_callback(listener, &state).await?;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -233,12 +252,11 @@ async fn finish_msa_exchange(
     Ok(account)
 }
 
-async fn listen_for_callback(expected_state: &str) -> Result<String, String> {
+async fn listen_for_callback(
+    listener: tokio::net::TcpListener,
+    expected_state: &str,
+) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:25585")
-        .await
-        .map_err(|e| format!("Failed to bind callback listener: {e}"))?;
 
     let timeout = Duration::from_secs(300);
     let (mut stream, _) = tokio::time::timeout(timeout, listener.accept())
@@ -265,17 +283,19 @@ async fn listen_for_callback(expected_state: &str) -> Result<String, String> {
 
     if let Some(error) = params.get("error") {
         let desc = params.get("error_description").unwrap_or(error);
-        let body = format!("Authentication failed: {desc}");
-        send_http_response(&mut stream, 400, &body).await;
+        reject(&mut stream, desc).await;
         return Err(format!("OAuth error: {desc}"));
     }
 
-    let state = params.get("state").ok_or("Missing state")?;
-    if *state != expected_state {
+    if params.get("state").copied() != Some(expected_state) {
+        reject(&mut stream, "state mismatch").await;
         return Err("State mismatch".to_string());
     }
 
-    let raw_code = params.get("code").ok_or("Missing auth code")?;
+    let Some(raw_code) = params.get("code") else {
+        reject(&mut stream, "missing auth code").await;
+        return Err("Missing auth code".to_string());
+    };
     let code = urlencoding::decode(raw_code)
         .map_err(|e| format!("Failed to decode auth code: {e}"))?
         .into_owned();
@@ -288,6 +308,10 @@ async fn listen_for_callback(expected_state: &str) -> Result<String, String> {
     .await;
 
     Ok(code)
+}
+
+async fn reject(stream: &mut tokio::net::TcpStream, desc: &str) {
+    send_http_response(stream, 400, &format!("Authentication failed: {desc}")).await;
 }
 
 async fn send_http_response(stream: &mut tokio::net::TcpStream, status: u16, body: &str) {
