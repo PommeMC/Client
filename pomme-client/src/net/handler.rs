@@ -268,8 +268,95 @@ pub fn handle_game_packet(
                 walking_speed: p.walking_speed,
             });
         }
-        ClientboundGamePacket::SystemChat(p) if !p.overlay => {
-            send_chat(event_tx, &p.content);
+        ClientboundGamePacket::SystemChat(p) => {
+            if p.overlay {
+                send_action_bar(event_tx, &p.content);
+            } else {
+                send_chat(event_tx, &p.content);
+            }
+        }
+        ClientboundGamePacket::SetActionBarText(p) => {
+            send_action_bar(event_tx, &p.text);
+        }
+        ClientboundGamePacket::SetObjective(p) => {
+            use azalea_protocol::packets::game::c_set_objective::Method;
+            let (display, number_format) = match &p.method {
+                Method::Add {
+                    display_name,
+                    number_format,
+                    ..
+                }
+                | Method::Change {
+                    display_name,
+                    number_format,
+                    ..
+                } => (
+                    Some(format_text_spans(display_name, [1.0; 4])),
+                    objective_number_format(number_format),
+                ),
+                Method::Remove => (None, None),
+            };
+            let _ = event_tx.try_send(NetworkEvent::ScoreboardObjective {
+                name: p.objective_name.clone(),
+                display,
+                number_format,
+            });
+        }
+        // TODO: track the other display slots too — vanilla prefers the
+        // local team's `sidebar.team.<color>` slot over SIDEBAR, and LIST
+        // drives the tab-overlay score column.
+        ClientboundGamePacket::SetDisplayObjective(p)
+            if matches!(
+                p.slot,
+                azalea_protocol::packets::game::c_set_display_objective::DisplaySlot::Sidebar
+            ) =>
+        {
+            let _ = event_tx.try_send(NetworkEvent::ScoreboardDisplay {
+                name: (!p.objective_name.is_empty()).then(|| p.objective_name.clone()),
+            });
+        }
+        ClientboundGamePacket::SetScore(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ScoreboardScore {
+                owner: p.owner.clone(),
+                objective: p.objective_name.clone(),
+                // Wire scores are signed varints; azalea models the field
+                // unsigned.
+                score: p.score as i32,
+                display: p
+                    .display
+                    .as_ref()
+                    .map(|text| format_text_spans(text, [1.0; 4])),
+                number_format: p.number_format.as_ref().map(score_number_format),
+            });
+        }
+        ClientboundGamePacket::ResetScore(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ScoreboardReset {
+                owner: p.owner.clone(),
+                objective: p.objective_name.clone(),
+            });
+        }
+        ClientboundGamePacket::SetPlayerTeam(p) => {
+            use azalea_protocol::packets::game::c_set_player_team::Method;
+            match &p.method {
+                Method::Add((parameters, members)) => {
+                    send_scoreboard_team(event_tx, &p.name, parameters, Some(members.clone()))
+                }
+                Method::Change(parameters) => {
+                    send_scoreboard_team(event_tx, &p.name, parameters, None)
+                }
+                Method::Join(members) | Method::Leave(members) => {
+                    let _ = event_tx.try_send(NetworkEvent::ScoreboardTeamMembers {
+                        name: p.name.clone(),
+                        members: members.clone(),
+                        join: matches!(p.method, Method::Join(_)),
+                    });
+                }
+                Method::Remove => {
+                    let _ = event_tx.try_send(NetworkEvent::ScoreboardTeamRemoved {
+                        name: p.name.clone(),
+                    });
+                }
+            }
         }
         ClientboundGamePacket::PlayerChat(p) => {
             send_chat(event_tx, &p.message());
@@ -681,7 +768,10 @@ pub fn handle_game_packet(
                     game_mode: e.game_mode.to_id(),
                     listed: e.listed,
                     latency: e.latency,
-                    display_name: e.display_name.as_ref().map(|c| c.to_string()),
+                    display_name: e
+                        .display_name
+                        .as_ref()
+                        .map(|c| crate::ui::text::format_text_spans(c, [1.0, 1.0, 1.0, 1.0])),
                     list_order: e.list_order,
                 })
                 .collect();
@@ -694,8 +784,8 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::TabList(p) => {
             let _ = event_tx.try_send(NetworkEvent::TabListHeaderFooter {
-                header: p.header.to_string(),
-                footer: p.footer.to_string(),
+                header: crate::ui::text::format_text_spans(&p.header, [1.0, 1.0, 1.0, 1.0]),
+                footer: crate::ui::text::format_text_spans(&p.footer, [1.0, 1.0, 1.0, 1.0]),
             });
         }
         ClientboundGamePacket::Commands(p) => {
@@ -731,6 +821,72 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedTe
     let text: String = spans.iter().map(|s| s.text.as_str()).collect();
     tracing::info!("Chat: {text}");
     let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
+}
+
+fn send_action_bar(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
+    let spans = format_text_spans(message, [1.0; 4]);
+    let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
+}
+
+fn send_scoreboard_team(
+    event_tx: &Sender<NetworkEvent>,
+    name: &str,
+    parameters: &azalea_protocol::packets::game::c_set_player_team::Parameters,
+    members: Option<Vec<String>>,
+) {
+    let color = team_color(parameters.color);
+    let _ = event_tx.try_send(NetworkEvent::ScoreboardTeam {
+        name: name.into(),
+        prefix: format_text_spans(&parameters.player_prefix, color),
+        suffix: format_text_spans(&parameters.player_suffix, color),
+        color,
+        members,
+    });
+}
+
+fn score_number_format(
+    format: &azalea_chat::numbers::NumberFormat,
+) -> crate::ui::hud::ScoreNumberFormat {
+    use azalea_chat::numbers::NumberFormat;
+
+    use crate::ui::hud::ScoreNumberFormat as F;
+    match format {
+        NumberFormat::Blank => F::Blank,
+        // Vanilla applies the style to the plain number; only the color
+        // matters for rendering, an unstyled number stays white.
+        NumberFormat::Styled { style } => F::Styled(styled_color(style).unwrap_or([1.0; 4])),
+        NumberFormat::Fixed { value } => F::Fixed(format_text_spans(value, [1.0; 4])),
+    }
+}
+
+/// azalea's `SetObjective` reads the number format without vanilla's
+/// `Optional` bool, so the decode lands shifted: vanilla `None` (the common
+/// case) arrives as `Blank`, vanilla `Blank` arrives as `Styled` with empty
+/// NBT, and real styled/fixed formats fail to decode the whole packet. Undo
+/// the shift for the two recoverable cases.
+fn objective_number_format(
+    format: &azalea_chat::numbers::NumberFormat,
+) -> Option<crate::ui::hud::ScoreNumberFormat> {
+    use azalea_chat::numbers::NumberFormat;
+    match format {
+        NumberFormat::Blank => None,
+        NumberFormat::Styled { style } if style.is_none() => {
+            Some(crate::ui::hud::ScoreNumberFormat::Blank)
+        }
+        other => Some(score_number_format(other)),
+    }
+}
+
+fn styled_color(style: &simdnbt::owned::Nbt) -> Option<[f32; 4]> {
+    let color = style
+        .iter()
+        .find_map(|(key, value)| (key.to_str() == "color").then(|| value.string()).flatten())?;
+    let value = azalea_chat::style::TextColor::parse(&color.to_str())?.value;
+    Some(crate::ui::common::rgb(value))
+}
+
+fn team_color(color: azalea_chat::style::ChatFormatting) -> [f32; 4] {
+    crate::ui::common::rgb(color.color().unwrap_or(0xffffff))
 }
 
 /// Resolves a variant registry holder id to the mob's renderer pool slot.

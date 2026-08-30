@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+use crate::ui::hud::Scoreboard;
+use crate::ui::text::TextSpan;
+
 #[derive(Clone, Debug)]
 pub struct PlayerInfoEntry {
     pub uuid: Uuid,
@@ -11,7 +14,7 @@ pub struct PlayerInfoEntry {
     pub game_mode: u8,
     pub listed: bool,
     pub latency: i32,
-    pub display_name: Option<String>,
+    pub display_name: Option<Vec<TextSpan>>,
     pub list_order: i32,
 }
 
@@ -31,7 +34,7 @@ pub struct TabListPlayer {
     pub uuid: Uuid,
     pub name: String,
     pub textures: Option<String>,
-    pub display_name: Option<String>,
+    pub display_name: Option<Vec<TextSpan>>,
     pub game_mode: u8,
     pub latency: i32,
     pub listed: bool,
@@ -41,8 +44,8 @@ pub struct TabListPlayer {
 #[derive(Default)]
 pub struct TabList {
     pub players: HashMap<Uuid, TabListPlayer>,
-    pub header: Option<String>,
-    pub footer: Option<String>,
+    pub header: Option<Vec<TextSpan>>,
+    pub footer: Option<Vec<TextSpan>>,
 }
 
 impl TabList {
@@ -101,19 +104,24 @@ impl TabList {
         }
     }
 
-    pub fn set_header_footer(&mut self, header: String, footer: String) {
+    pub fn set_header_footer(&mut self, header: Vec<TextSpan>, footer: Vec<TextSpan>) {
         self.header = (!header.is_empty()).then_some(header);
         self.footer = (!footer.is_empty()).then_some(footer);
     }
 
     /// Vanilla PlayerTabOverlay PLAYER_COMPARATOR (PlayerTabOverlay.java:63).
-    /// Teams aren't tracked, so the team-name tiebreaker is skipped.
-    pub fn sorted_listed(&self) -> Vec<&TabListPlayer> {
+    pub fn sorted_listed(&self, scoreboard: &Scoreboard) -> Vec<&TabListPlayer> {
         let mut out: Vec<&TabListPlayer> = self.players.values().filter(|p| p.listed).collect();
         out.sort_by(|a, b| {
-            a.list_order
-                .cmp(&b.list_order)
+            // `comparingInt(p -> -p.getTabListOrder())`: higher order first.
+            b.list_order
+                .cmp(&a.list_order)
                 .then_with(|| (a.game_mode == 3).cmp(&(b.game_mode == 3)))
+                .then_with(|| {
+                    scoreboard
+                        .team_name(&a.name)
+                        .cmp(scoreboard.team_name(&b.name))
+                })
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         out.truncate(80);

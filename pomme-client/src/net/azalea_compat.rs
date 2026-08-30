@@ -173,8 +173,12 @@ fn translate_game_login_26_1() {
 /// 26.1's team `Parameters` order is `displayName, options, visibility,
 /// collision, color, prefix, suffix` with color as a `ChatFormatting`
 /// ordinal; 26.2 reordered to `displayName, prefix, suffix, visibility,
-/// collision, color, options` with color as `Optional<TeamColor>`
-/// (`ClientboundSetPlayerTeamPacket.Parameters` in both references).
+/// collision, color, options` (`ClientboundSetPlayerTeamPacket.Parameters`
+/// in both references). Vanilla 26.2 also changed color to
+/// `Optional<TeamColor>`, but azalea (ffedf17) still decodes a plain
+/// `ChatFormatting` ordinal, so these frames target azalea's layout — the
+/// ordinal is copied through unchanged. Teams on native 26.2 servers
+/// misdecode until azalea catches up.
 #[test]
 fn translate_set_player_team_26_1() {
     let team_id = table_id(Direction::Clientbound, "set_player_team");
@@ -208,13 +212,14 @@ fn translate_set_player_team_26_1() {
     expected.extend_from_slice(suffix);
     expected.push(0); // visibility
     expected.push(1); // collision
-    expected.extend_from_slice(&[1, 5]); // color: Some(TeamColor 5)
+    expected.push(5);
     expected.push(3); // options
     assert_eq!(&translated[..], &expected[..]);
 }
 
-/// RESET (ChatFormatting ordinal 21) has no TeamColor equivalent and maps to
-/// an empty optional; the method-0 player list is copied verbatim.
+/// RESET (ChatFormatting ordinal 21) passes through as-is — azalea's enum
+/// has all 22 formatting variants; the method-0 player list is copied
+/// verbatim.
 #[test]
 fn translate_set_player_team_26_1_reset_color() {
     let team_id = table_id(Direction::Clientbound, "set_player_team");
@@ -246,7 +251,7 @@ fn translate_set_player_team_26_1_reset_color() {
     expected.extend_from_slice(component);
     expected.push(0); // visibility
     expected.push(0); // collision
-    expected.push(0); // color: None
+    expected.push(21);
     expected.push(0); // options
     expected.extend_from_slice(&[1, 3, b'b', b'o', b'b']);
     assert_eq!(&translated[..], &expected[..]);
@@ -401,6 +406,103 @@ fn translate_entity_data_774() {
         items[1].value,
         azalea_entity::EntityDataValue::CowVariant(_)
     ));
+}
+
+#[test]
+fn translate_entity_profile_774() {
+    use azalea_buf::AzBuf;
+    use azalea_inventory::components::Profile;
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(774, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9);
+    old.extend_from_slice(&[0, 37]);
+    Profile::default().azalea_write(&mut old).unwrap();
+    old.extend_from_slice(&[1, 38, 1, 0xFF]);
+
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(774, old) else {
+        panic!("wrong packet");
+    };
+    assert!(matches!(
+        p.packed_items.0[0].value,
+        azalea_entity::EntityDataValue::ResolvableProfile(_)
+    ));
+    assert!(matches!(
+        p.packed_items.0[1].value,
+        azalea_entity::EntityDataValue::HumanoidArm(_)
+    ));
+}
+
+#[test]
+fn translate_empty_entity_particles_774() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(774, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9);
+    old.extend_from_slice(&[10, 17, 0, 11, 8, 1, 0xFF]);
+
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(774, old) else {
+        panic!("wrong packet");
+    };
+    assert!(matches!(
+        p.packed_items.0[0].value,
+        azalea_entity::EntityDataValue::Particles(_)
+    ));
+    assert!(matches!(
+        p.packed_items.0[1].value,
+        azalea_entity::EntityDataValue::Boolean(true)
+    ));
+}
+
+/// A stack component the walker doesn't know falls back to the verbatim-tail
+/// copy instead of dropping the packet. `damage` (id 3 in both 774 and the
+/// latest registry, varint payload) keeps the verbatim bytes decodable.
+#[test]
+fn translate_entity_item_stack_fallback_774() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(774, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9);
+    // index 5, serializer 7 (item stack): count 1, item 1, 1 added
+    // component, 0 removed, component 3 (damage) = 7.
+    old.extend_from_slice(&[5, 7, 1, 1, 1, 0, 3, 7, 0xFF]);
+
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(774, old) else {
+        panic!("wrong packet");
+    };
+    assert!(matches!(
+        p.packed_items.0[0].value,
+        azalea_entity::EntityDataValue::ItemStack(_)
+    ));
+}
+
+/// `translate_item_stack`'s component ids against the latest registry table.
+#[test]
+fn component_id_anchors() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let table = RegistryTable::latest();
+    assert_eq!(
+        table.name_of(
+            ClientRegistry::DataComponentType,
+            super::translate::COMPONENT_MAP_ID
+        ),
+        Some("map_id")
+    );
+    assert_eq!(
+        table.name_of(
+            ClientRegistry::DataComponentType,
+            super::translate::COMPONENT_PROFILE
+        ),
+        Some("profile")
+    );
 }
 
 /// The per-section `fluidCount` insertion (see `translate_chunk`).

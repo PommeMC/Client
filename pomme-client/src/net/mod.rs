@@ -130,6 +130,43 @@ pub enum NetworkEvent {
     ChatMessage {
         spans: Vec<crate::ui::text::TextSpan>,
     },
+    ActionBar {
+        spans: Vec<crate::ui::text::TextSpan>,
+    },
+    ScoreboardObjective {
+        name: String,
+        display: Option<Vec<crate::ui::text::TextSpan>>,
+        number_format: Option<crate::ui::hud::ScoreNumberFormat>,
+    },
+    ScoreboardDisplay {
+        name: Option<String>,
+    },
+    ScoreboardScore {
+        owner: String,
+        objective: String,
+        score: i32,
+        display: Option<Vec<crate::ui::text::TextSpan>>,
+        number_format: Option<crate::ui::hud::ScoreNumberFormat>,
+    },
+    ScoreboardReset {
+        owner: String,
+        objective: Option<String>,
+    },
+    ScoreboardTeam {
+        name: String,
+        prefix: Vec<crate::ui::text::TextSpan>,
+        suffix: Vec<crate::ui::text::TextSpan>,
+        color: [f32; 4],
+        members: Option<Vec<String>>,
+    },
+    ScoreboardTeamMembers {
+        name: String,
+        members: Vec<String>,
+        join: bool,
+    },
+    ScoreboardTeamRemoved {
+        name: String,
+    },
     CommandTree {
         tree: Arc<crate::net::commands::CommandTree>,
     },
@@ -373,6 +410,9 @@ pub enum NetworkEvent {
     ResourcePackPop {
         id: Option<uuid::Uuid>,
     },
+    /// The server re-entered the configuration phase (a proxy transfer);
+    /// world-scoped state resets like vanilla's `clearClientLevel`.
+    Reconfiguring,
     Disconnected {
         reason: String,
     },
@@ -384,7 +424,7 @@ pub enum NetworkEvent {
         uuids: Vec<uuid::Uuid>,
     },
     TabListHeaderFooter {
-        header: String,
-        footer: String,
+        header: Vec<crate::ui::text::TextSpan>,
+        footer: Vec<crate::ui::text::TextSpan>,
     },
 }

@@ -137,6 +137,51 @@ impl GlyphMap {
             pixels.extend_from_slice(sga.as_raw());
         }
 
+        let nonlatin_path = resolve_asset_path(
+            jar_assets_dir,
+            asset_index,
+            "minecraft/textures/font/nonlatin_european.png",
+        );
+        if let Ok(image) = load_image(&nonlatin_path) {
+            let nonlatin = image.to_rgba8();
+            if nonlatin.width() == tex_w && nonlatin.width() % GRID_COLS == 0 {
+                let nonlatin_cell_w = nonlatin.width() / GRID_COLS;
+                let base_row = tex_h / cell_h;
+                let cyrillic_rows = [
+                    "ЅІЈЉЊЋАБВГДЕЖЗИК",
+                    "ЛМНОПРСТУФХЦЧШЩЪ",
+                    "ЫЬЭЮЯабвгдежзикл",
+                    "мнопрстуфхцчшщъы",
+                    "ьэюяєѕіјљњ–—‘’“”",
+                ];
+                for (source_row, chars) in cyrillic_rows.iter().enumerate() {
+                    for (col, ch) in chars.chars().enumerate() {
+                        let Some((width, y_offset, height)) = detect_glyph_bounds(
+                            &nonlatin,
+                            col as u32 * nonlatin_cell_w,
+                            (source_row as u32 + 4) * nonlatin_cell_w,
+                            nonlatin_cell_w,
+                            nonlatin_cell_w,
+                        ) else {
+                            continue;
+                        };
+                        glyphs.insert(
+                            ch,
+                            GlyphInfo {
+                                col: col as u32,
+                                row: base_row + source_row as u32 + 4,
+                                width,
+                                y_offset,
+                                height,
+                            },
+                        );
+                    }
+                }
+                pixels.extend_from_slice(nonlatin.as_raw());
+                tex_h += nonlatin.height();
+            }
+        }
+
         Some(Self {
             glyphs,
             sga_glyphs,

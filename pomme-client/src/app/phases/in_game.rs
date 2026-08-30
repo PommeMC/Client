@@ -146,6 +146,12 @@ pub struct GameState {
     pub tab_list: TabList,
     /// Locator bar waypoints tracked by the server.
     pub waypoints: crate::world::waypoints::WaypointMap,
+    /// Vanilla `Hud.toolHighlightTimer` / `lastToolHighlight` (see
+    /// `tick_tool_highlight`).
+    pub tool_highlight_timer: u32,
+    pub last_tool_highlight: azalea_inventory::ItemStack,
+    pub action_bar: Option<(Vec<crate::ui::text::TextSpan>, u64)>,
+    pub scoreboard: crate::ui::hud::Scoreboard,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
     /// Tick of the last XP progress change; the XP bar outprioritizes the
@@ -323,6 +329,10 @@ impl GameState {
             command_tree: None,
             tab_list: TabList::new(),
             waypoints: crate::world::waypoints::WaypointMap::default(),
+            tool_highlight_timer: 0,
+            last_tool_highlight: azalea_inventory::ItemStack::Empty,
+            action_bar: None,
+            scoreboard: crate::ui::hud::Scoreboard::default(),
             tick_count: 0,
             xp_display_start_tick: i64::MIN,
             interaction: InteractionState::new(),
@@ -1235,6 +1245,32 @@ fn send_container_clicks(
     }
 }
 
+/// Vanilla `Hud.tick`: the held-item tooltip timer resets to 40 when the
+/// selected item's type or hover name changes, clears when the slot empties,
+/// and otherwise counts down.
+fn tick_tool_highlight(core: &AppCore, game: &mut GameState) {
+    use azalea_inventory::ItemStack;
+    let selected = game
+        .player
+        .inventory
+        .hotbar_slots()
+        .get(core.input.selected_slot() as usize)
+        .cloned()
+        .unwrap_or(ItemStack::Empty);
+    match (&selected, &game.last_tool_highlight) {
+        (ItemStack::Empty, _) => game.tool_highlight_timer = 0,
+        (ItemStack::Present(new), ItemStack::Present(old))
+            if new.kind == old.kind
+                && crate::ui::common::item_display_name(new)
+                    == crate::ui::common::item_display_name(old) =>
+        {
+            game.tool_highlight_timer = game.tool_highlight_timer.saturating_sub(1);
+        }
+        _ => game.tool_highlight_timer = 40,
+    }
+    game.last_tool_highlight = selected;
+}
+
 pub fn update_game(
     core: &mut AppCore,
     dt: f32,
@@ -1342,6 +1378,7 @@ pub fn update_game(
         game.item_entity_store.tick(&game.chunk_store);
         game.particle_store.tick(&game.chunk_store);
         game.block_entity_anim.tick();
+        tick_tool_highlight(core, game);
         if let Some(c) = &mut game.open_container
             && let Some(state) = &mut c.enchant
         {
@@ -1664,6 +1701,12 @@ pub fn update_game(
             bar,
             game.player.game_mode,
             game.player.inventory.hotbar_slots(),
+            game.tool_highlight_timer,
+            game.action_bar
+                .as_ref()
+                .map(|(spans, tick)| (spans.as_slice(), game.tick_count.wrapping_sub(*tick))),
+            &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+            &game.scoreboard,
             gfx.renderer.is_first_person(),
             debug.as_ref(),
             core.menu.gui_scale_setting,
@@ -1683,8 +1726,27 @@ pub fn update_game(
             &mut elements,
             sw,
             &game.tab_list,
+            &game.scoreboard,
             gs,
             &|t, s| r.menu_text_width(t, s),
+            &|spans, s| r.menu_spans_width(spans, s),
+        );
+    }
+
+    if !benchmark_running && !game.hide_gui {
+        let renderer = &gfx.renderer;
+        crate::ui::player_tab::build_player_nameplates(
+            &mut elements,
+            crate::ui::player_tab::PlayerNameplates {
+                entity_store: &game.entity_store,
+                tab_list: &game.tab_list,
+                scoreboard: &game.scoreboard,
+                local_uuid: core.user.uuid,
+                partial_tick,
+                gs,
+                camera_pos: renderer.camera_render_position(),
+                project: &|position| renderer.project_world_to_screen(position),
+            },
         );
     }
 

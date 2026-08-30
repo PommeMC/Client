@@ -1,5 +1,5 @@
 use azalea_protocol::address::ServerAddr;
-use azalea_protocol::connect::{Connection, ReadConnection, WriteConnection};
+use azalea_protocol::connect::{Connection, WriteConnection};
 use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
@@ -108,7 +108,7 @@ pub async fn connect_to_server(
     event_tx: Sender<NetworkEvent>,
     chat_rx: crossbeam_channel::Receiver<String>,
     game_packet_tx: mpsc::UnboundedSender<Outbound>,
-    game_packet_rx: mpsc::UnboundedReceiver<Outbound>,
+    mut game_packet_rx: mpsc::UnboundedReceiver<Outbound>,
 ) -> Result<(), ConnectionError> {
     let server_addr: ServerAddr = args
         .server
@@ -140,7 +140,14 @@ pub async fn connect_to_server(
     let mut conn = conn.config();
 
     tracing::info!("Entering configuration phase");
-    let registry_holder = config_sequence(&mut conn, args.view_distance, &event_tx).await?;
+    let registry_holder = config_sequence(
+        &mut conn,
+        args.view_distance,
+        &event_tx,
+        &mut game_packet_rx,
+        None,
+    )
+    .await?;
 
     let conn = conn.game();
     tracing::info!("Entering game state");
@@ -157,6 +164,7 @@ pub async fn connect_to_server(
         game_packet_tx,
         game_packet_rx,
         registry_holder,
+        args.view_distance,
     )
     .await
 }
@@ -294,7 +302,12 @@ async fn config_sequence(
     conn: &mut Connection<ClientboundConfigPacket, ServerboundConfigPacket>,
     view_distance: u8,
     event_tx: &Sender<NetworkEvent>,
-) -> Result<azalea_core::registry_holder::RegistryHolder, ConnectionError> {
+    outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
+    // `Some` on a mid-session reconfiguration: the previous registries,
+    // kept when the server re-sends nothing (vanilla's RegistryDataCollector
+    // returns the original registries unchanged in that case).
+    previous_registries: Option<&std::sync::Arc<azalea_core::registry_holder::RegistryHolder>>,
+) -> Result<std::sync::Arc<azalea_core::registry_holder::RegistryHolder>, ConnectionError> {
     use azalea_core::delta::AzBuf;
     use azalea_core::registry_holder::RegistryHolder;
     use azalea_entity::HumanoidArm;
@@ -302,49 +315,83 @@ async fn config_sequence(
     use azalea_protocol::packets::config::*;
 
     let mut registry_holder = RegistryHolder::default();
+    let mut received_registry_data = false;
 
-    // Vanilla announces its brand in the config phase; some servers key off it.
-    let mut brand_payload = Vec::new();
-    String::from("pomme")
-        .azalea_write(&mut brand_payload)
-        .unwrap();
-    conn.write(ServerboundConfigPacket::CustomPayload(
-        s_custom_payload::ServerboundCustomPayload {
-            identifier: "minecraft:brand".into(),
-            data: brand_payload.into(),
-        },
-    ))
-    .await?;
-
-    conn.write(ServerboundConfigPacket::ClientInformation(
-        s_client_information::ServerboundClientInformation {
-            information: ClientInformation {
-                language: "en_us".into(),
-                view_distance,
-                chat_visibility: ChatVisibility::Full,
-                chat_colors: true,
-                model_customization: ModelCustomization {
-                    cape: true,
-                    jacket: true,
-                    left_sleeve: true,
-                    right_sleeve: true,
-                    left_pants: true,
-                    right_pants: true,
-                    hat: true,
-                },
-                main_hand: HumanoidArm::Right,
-                text_filtering_enabled: false,
-                allows_listing: true,
-                particle_status: ParticleStatus::All,
+    // Vanilla sends brand and client information once, from the login
+    // listener; a reconfiguration sends neither.
+    if previous_registries.is_none() {
+        // Some servers key off the brand.
+        let mut brand_payload = Vec::new();
+        String::from("pomme")
+            .azalea_write(&mut brand_payload)
+            .unwrap();
+        conn.write(ServerboundConfigPacket::CustomPayload(
+            s_custom_payload::ServerboundCustomPayload {
+                identifier: "minecraft:brand".into(),
+                data: brand_payload.into(),
             },
-        },
-    ))
-    .await?;
+        ))
+        .await?;
+
+        conn.write(ServerboundConfigPacket::ClientInformation(
+            s_client_information::ServerboundClientInformation {
+                information: ClientInformation {
+                    language: "en_us".into(),
+                    view_distance,
+                    chat_visibility: ChatVisibility::Full,
+                    chat_colors: true,
+                    model_customization: ModelCustomization {
+                        cape: true,
+                        jacket: true,
+                        left_sleeve: true,
+                        right_sleeve: true,
+                        left_pants: true,
+                        right_pants: true,
+                        hat: true,
+                    },
+                    main_hand: HumanoidArm::Right,
+                    text_filtering_enabled: false,
+                    allows_listing: true,
+                    particle_status: ParticleStatus::All,
+                },
+            },
+        ))
+        .await?;
+    }
 
     loop {
-        let packet: ClientboundConfigPacket = conn.read().await?;
+        let packet = tokio::select! {
+            packet = conn.read() => packet?,
+            // `Some(..)` disables the branch when the channel closes instead
+            // of busy-looping on a closed receiver.
+            Some(outbound) = outbound_rx.recv() => {
+                if let Outbound::Packet(packet) = outbound
+                    && let ServerboundGamePacket::ResourcePack(p) = *packet
+                {
+                    use azalea_protocol::packets::config::s_resource_pack as config_pack;
+                    use azalea_protocol::packets::game::s_resource_pack as game_pack;
+                    let action = match p.action {
+                        game_pack::Action::SuccessfullyLoaded => config_pack::Action::SuccessfullyLoaded,
+                        game_pack::Action::Declined => config_pack::Action::Declined,
+                        game_pack::Action::FailedDownload => config_pack::Action::FailedDownload,
+                        game_pack::Action::Accepted => config_pack::Action::Accepted,
+                        game_pack::Action::InvalidUrl => config_pack::Action::InvalidUrl,
+                        game_pack::Action::FailedReload => config_pack::Action::FailedReload,
+                        game_pack::Action::Discarded => config_pack::Action::Discarded,
+                    };
+                    conn.write(ServerboundConfigPacket::ResourcePack(
+                        config_pack::ServerboundResourcePack { id: p.id, action },
+                    )).await?;
+                }
+                // Anything else is discarded: vanilla defers its outbound
+                // queue, but pomme's game keeps ticking through a
+                // reconfiguration, so stale movement/actions are best dropped.
+                continue;
+            }
+        };
         match packet {
             ClientboundConfigPacket::RegistryData(p) => {
+                received_registry_data = true;
                 registry_holder.append(p.registry_id, p.entries);
             }
             ClientboundConfigPacket::UpdateTags(_) => {
@@ -372,7 +419,10 @@ async fn config_sequence(
                     s_finish_configuration::ServerboundFinishConfiguration {},
                 ))
                 .await?;
-                return Ok(registry_holder);
+                return Ok(match previous_registries {
+                    Some(previous) if !received_registry_data => previous.clone(),
+                    _ => std::sync::Arc::new(registry_holder),
+                });
             }
             ClientboundConfigPacket::Disconnect(p) => {
                 return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
@@ -501,56 +551,18 @@ fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -
 }
 
 async fn game_loop(
-    conn: Connection<ClientboundGamePacket, ServerboundGamePacket>,
+    mut conn: Connection<ClientboundGamePacket, ServerboundGamePacket>,
     event_tx: &Sender<NetworkEvent>,
     chat_rx: crossbeam_channel::Receiver<String>,
     outbound_tx: mpsc::UnboundedSender<Outbound>,
     mut outbound_rx: mpsc::UnboundedReceiver<Outbound>,
-    registry_holder: azalea_core::registry_holder::RegistryHolder,
+    mut registry_holder: std::sync::Arc<azalea_core::registry_holder::RegistryHolder>,
+    view_distance: u8,
 ) -> Result<(), ConnectionError> {
-    let (mut reader, mut writer): (
-        ReadConnection<ClientboundGamePacket>,
-        WriteConnection<ServerboundGamePacket>,
-    ) = conn.into_split();
-
     let sender = PacketSender::new(outbound_tx.clone());
 
     let shared_tree: crate::net::commands::SharedCommandTree =
         std::sync::Arc::new(parking_lot::Mutex::new(None));
-
-    tokio::spawn(async move {
-        let translation = super::translate::active();
-        'writer: while let Some(out) = outbound_rx.recv().await {
-            // Frames are in the latest layout (azalea's serializer and
-            // `wire`'s encoders both emit it); older wire versions get them
-            // translated before framing.
-            let frame = match out {
-                Outbound::Packet(mut packet) => {
-                    if let Some(t) = translation {
-                        t.remap_outbound(&mut packet);
-                    }
-                    match azalea_protocol::write::serialize_packet(&*packet) {
-                        Ok(frame) => Vec::from(frame),
-                        Err(e) => {
-                            tracing::error!("Failed to serialize packet: {e}");
-                            break;
-                        }
-                    }
-                }
-                Outbound::Raw(bytes) => bytes,
-            };
-            let frames = match translation {
-                Some(t) if t.translates_outbound() => t.translate_outbound_game_frame(frame),
-                _ => vec![frame],
-            };
-            for frame in frames {
-                if let Err(e) = writer.raw.write(&frame).await {
-                    tracing::error!("Failed to write packet: {e}");
-                    break 'writer;
-                }
-            }
-        }
-    });
 
     let chat_outbound_tx = outbound_tx;
     let chat_tree = shared_tree.clone();
@@ -605,12 +617,27 @@ async fn game_loop(
 
     // Share the registries with the game loop for hashing predicted container
     // clicks.
-    let registry_holder = std::sync::Arc::new(registry_holder);
     let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
 
     let translation = super::translate::active();
     loop {
-        let raw = match reader.raw.read().await {
+        let raw = tokio::select! {
+            Some(out) = outbound_rx.recv() => {
+                let frame = match out {
+                    Outbound::Packet(mut packet) => {
+                        if let Some(t) = translation {
+                            t.remap_outbound(&mut packet);
+                        }
+                        serialize_game_packet(&packet)?
+                    }
+                    Outbound::Raw(bytes) => bytes,
+                };
+                write_game_frame(&mut conn.writer, translation, frame).await?;
+                continue;
+            }
+            raw = conn.reader.raw.read() => raw,
+        };
+        let raw = match raw {
             Ok(raw) => raw,
             Err(e) => {
                 skip_malformed_packet(e)?;
@@ -629,6 +656,36 @@ async fn game_loop(
         }
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
             Ok(mut packet) => {
+                if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
+                    // Vanilla clears the client level before acknowledging
+                    // (ClientPacketListener.handleConfigurationStart); chat
+                    // survives the transition.
+                    let _ = event_tx.try_send(NetworkEvent::Reconfiguring);
+                    let ack = ServerboundGamePacket::ConfigurationAcknowledged(
+                        azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
+                    );
+                    write_game_frame(&mut conn.writer, translation, serialize_game_packet(&ack)?)
+                        .await?;
+                    let mut config = conn.config();
+                    let holder = config_sequence(
+                        &mut config,
+                        view_distance,
+                        event_tx,
+                        &mut outbound_rx,
+                        Some(&registry_holder),
+                    )
+                    .await?;
+                    conn = config.game();
+                    if !std::sync::Arc::ptr_eq(&holder, &registry_holder) {
+                        registry_holder = holder;
+                        let _ =
+                            event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
+                        let _ = event_tx.try_send(NetworkEvent::BiomeColors {
+                            colors: extract_biome_climate(&registry_holder),
+                        });
+                    }
+                    continue;
+                }
                 if let Some(t) = translation
                     && !t.remap_inbound(&mut packet)
                 {
@@ -639,6 +696,28 @@ async fn game_loop(
             Err(e) => skip_malformed_packet(e)?,
         }
     }
+}
+
+fn serialize_game_packet(packet: &ServerboundGamePacket) -> Result<Vec<u8>, ConnectionError> {
+    azalea_protocol::write::serialize_packet(packet)
+        .map(Vec::from)
+        .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))
+}
+
+/// Writes one latest-layout frame, translating it for older wire versions.
+async fn write_game_frame(
+    writer: &mut WriteConnection<ServerboundGamePacket>,
+    translation: Option<&super::translate::Translation>,
+    frame: Vec<u8>,
+) -> Result<(), ConnectionError> {
+    let frames = match translation {
+        Some(t) if t.translates_outbound() => t.translate_outbound_game_frame(frame),
+        _ => vec![frame],
+    };
+    for frame in frames {
+        writer.raw.write(&frame).await?;
+    }
+    Ok(())
 }
 
 /// Recoverable decode errors skip the packet; anything else tears down the

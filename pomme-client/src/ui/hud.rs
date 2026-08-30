@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
 use glam::DVec3;
@@ -5,6 +7,7 @@ use glam::DVec3;
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::ui::text::TextSpan;
 use crate::world::waypoints::{LocatorDot, PitchDirection, WaypointStyleId};
 
 /// Which bar occupies the slot above the hotbar (vanilla `ContextualInfo`).
@@ -25,6 +28,221 @@ pub struct FrameTimings {
     pub cull_ms: f32,
     pub draw_ms: f32,
     pub present_ms: f32,
+}
+
+type ScoreKey = (String, String);
+
+/// Vanilla `NumberFormat`: how a score's value renders in the sidebar.
+/// Styled keeps only the resolved color; a per-score format overrides the
+/// objective's, and no format at all means the styled-red default.
+#[derive(Clone)]
+pub enum ScoreNumberFormat {
+    Blank,
+    Styled([f32; 4]),
+    Fixed(Vec<TextSpan>),
+}
+
+struct ScoreEntry {
+    score: i32,
+    display: Option<Vec<TextSpan>>,
+    number_format: Option<ScoreNumberFormat>,
+}
+
+struct Objective {
+    display: Vec<TextSpan>,
+    number_format: Option<ScoreNumberFormat>,
+}
+
+#[derive(Default)]
+pub struct Scoreboard {
+    sidebar: Option<String>,
+    objectives: HashMap<String, Objective>,
+    scores: HashMap<ScoreKey, ScoreEntry>,
+    teams: HashMap<String, ScoreboardTeam>,
+}
+
+struct ScoreboardTeam {
+    prefix: Vec<TextSpan>,
+    suffix: Vec<TextSpan>,
+    color: [f32; 4],
+    members: HashSet<String>,
+}
+
+impl Scoreboard {
+    pub fn clear(&mut self) {
+        self.sidebar = None;
+        self.objectives.clear();
+        self.scores.clear();
+        self.teams.clear();
+    }
+
+    pub fn set_objective(
+        &mut self,
+        name: String,
+        display: Option<Vec<TextSpan>>,
+        number_format: Option<ScoreNumberFormat>,
+    ) {
+        if let Some(display) = display {
+            self.objectives.insert(
+                name,
+                Objective {
+                    display,
+                    number_format,
+                },
+            );
+        } else {
+            self.objectives.remove(&name);
+            self.scores.retain(|(objective, _), _| objective != &name);
+            if self.sidebar.as_deref() == Some(&name) {
+                self.sidebar = None;
+            }
+        }
+    }
+
+    pub fn set_display(&mut self, name: Option<String>) {
+        // Vanilla resolves the objective at packet time; an unknown name
+        // leaves the slot empty even if the objective arrives later.
+        self.sidebar = name.filter(|name| self.objectives.contains_key(name));
+    }
+
+    pub fn set_score(
+        &mut self,
+        owner: String,
+        objective: String,
+        score: i32,
+        display: Option<Vec<TextSpan>>,
+        number_format: Option<ScoreNumberFormat>,
+    ) {
+        // Vanilla drops scores for objectives it doesn't know.
+        if !self.objectives.contains_key(&objective) {
+            return;
+        }
+        self.scores.insert(
+            (objective, owner),
+            ScoreEntry {
+                score,
+                display,
+                number_format,
+            },
+        );
+    }
+
+    pub fn reset_score(&mut self, owner: &str, objective: Option<&str>) {
+        self.scores.retain(|(entry_objective, entry_owner), _| {
+            entry_owner != owner || objective.is_some_and(|objective| entry_objective != objective)
+        });
+    }
+
+    pub fn set_team(
+        &mut self,
+        name: String,
+        prefix: Vec<TextSpan>,
+        suffix: Vec<TextSpan>,
+        color: [f32; 4],
+        members: Option<Vec<String>>,
+    ) {
+        // Vanilla ignores a parameter change for a team it doesn't know;
+        // only method ADD creates one.
+        if members.is_none() && !self.teams.contains_key(&name) {
+            return;
+        }
+        if let Some(members) = &members {
+            self.strip_members(members);
+        }
+        let team = self.teams.entry(name).or_insert_with(|| ScoreboardTeam {
+            prefix: Vec::new(),
+            suffix: Vec::new(),
+            color,
+            members: HashSet::new(),
+        });
+        team.prefix = prefix;
+        team.suffix = suffix;
+        team.color = color;
+        // ADD unions its player list onto an existing team, like vanilla's
+        // addPlayerTeam + per-player addPlayerToTeam.
+        if let Some(members) = members {
+            team.members.extend(members);
+        }
+    }
+
+    pub fn update_team_members(&mut self, name: &str, members: Vec<String>, join: bool) {
+        // Vanilla ignores joins/leaves for unknown teams without touching
+        // other teams' rosters.
+        if !self.teams.contains_key(name) {
+            return;
+        }
+        if join {
+            self.strip_members(&members);
+        }
+        if let Some(team) = self.teams.get_mut(name) {
+            for member in members {
+                if join {
+                    team.members.insert(member);
+                } else {
+                    team.members.remove(&member);
+                }
+            }
+        }
+    }
+
+    pub fn remove_team(&mut self, name: &str) {
+        self.teams.remove(name);
+    }
+
+    /// Team membership is exclusive: joining players leave their old team.
+    fn strip_members(&mut self, members: &[String]) {
+        for team in self.teams.values_mut() {
+            team.members.retain(|member| !members.contains(member));
+        }
+    }
+
+    pub fn player_name(&self, name: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
+        display
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.line(name, None))
+    }
+
+    pub fn team_name(&self, member: &str) -> &str {
+        self.teams
+            .iter()
+            .find(|(_, team)| team.members.contains(member))
+            .map_or("", |(name, _)| name)
+    }
+
+    fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
+        let team = self
+            .teams
+            .values()
+            .find(|team| team.members.contains(owner));
+        let mut line = team.map_or_else(Vec::new, |team| team.prefix.clone());
+        line.extend(display.map_or_else(
+            || {
+                vec![TextSpan::new(
+                    owner.into(),
+                    team.map_or(WHITE, |team| team.color),
+                )]
+            },
+            |display| {
+                let mut display = display.to_owned();
+                // Vanilla's team color is the root style over the display
+                // component too; spans were formatted with a white base, so
+                // recolor the base-white ones (an explicitly white-styled
+                // span is indistinguishable and rare).
+                if let Some(team) = team {
+                    for span in &mut display {
+                        if span.color == WHITE {
+                            span.color = team.color;
+                        }
+                    }
+                }
+                display
+            },
+        ));
+        if let Some(team) = team {
+            line.extend(team.suffix.clone());
+        }
+        line
+    }
 }
 
 pub struct DebugInfo<'a> {
@@ -100,6 +318,10 @@ pub fn build_hud(
     bar: ContextualBarKind<'_>,
     game_mode: u8,
     hotbar: &[ItemStack],
+    tool_highlight_timer: u32,
+    action_bar: Option<(&[TextSpan], u64)>,
+    spans_width_fn: super::common::SpansWidthFn<'_>,
+    scoreboard: &Scoreboard,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
@@ -162,6 +384,73 @@ pub fn build_hud(
             }
         }
     }
+
+    // Vanilla `Hud.extractSelectedItemName`: rarity-colored, italic for
+    // custom names, alpha `timer * 256 / 10` (10-tick fade), y = height - 59
+    // (+14 when the player can't be hurt). Spectators get none.
+    if tool_highlight_timer > 0
+        && game_mode != 3
+        && let Some(ItemStack::Present(data)) = hotbar.get(selected_slot as usize)
+    {
+        use azalea_inventory::components::{CustomName, Rarity};
+        let alpha = (tool_highlight_timer as f32 * 256.0 / 10.0 / 255.0).min(1.0);
+        // Default-component rarities aren't synced; absent means common.
+        let color = match data.get_component::<Rarity>().as_deref() {
+            Some(Rarity::Uncommon) => super::common::rgb(0xffff55),
+            Some(Rarity::Rare) => super::common::rgb(0x55ffff),
+            Some(Rarity::Epic) => super::common::rgb(0xff55ff),
+            _ => WHITE,
+        };
+        // The rarity color and custom-name italic are vanilla's parent
+        // style: the name's own styling wins where it sets one.
+        let italic = data.get_component::<CustomName>().is_some();
+        let mut spans = super::common::item_display_spans(data, color);
+        for span in &mut spans {
+            span.color[3] *= alpha;
+            span.italic |= italic;
+        }
+        let mut y = screen_h - 59.0 * gs;
+        if game_mode == 1 {
+            y += 14.0 * gs;
+        }
+        elements.push(MenuElement::McText {
+            x: cx,
+            y,
+            spans,
+            scale: FONT_SIZE * gs,
+            centered: true,
+            shadow: true,
+        });
+    }
+
+    if let Some((spans, ticks)) = action_bar
+        && ticks < 60
+    {
+        let alpha = ((60 - ticks).min(20) as f32) / 20.0;
+        let mut spans = spans.to_vec();
+        for span in &mut spans {
+            span.color[3] *= alpha;
+        }
+        elements.push(MenuElement::McText {
+            x: cx,
+            // Vanilla translates to height - 68 and draws at local y -4.
+            y: screen_h - 72.0 * gs,
+            spans,
+            scale: FONT_SIZE * gs,
+            centered: true,
+            shadow: true,
+        });
+    }
+
+    build_scoreboard(
+        elements,
+        screen_w,
+        screen_h,
+        gs,
+        scoreboard,
+        text_width_fn,
+        spans_width_fn,
+    );
 
     let status_bar_y = (hotbar_y - (XP_BAR_H + 1.0 + 2.0) * gs).round();
     let is_survival = crate::player::is_survival(game_mode);
@@ -312,6 +601,129 @@ pub fn build_hud(
                 h: icon_size,
                 sprite,
                 tint: WHITE,
+            });
+        }
+    }
+}
+
+/// Vanilla `Hud.displayScoreboardSidebar`: entries sorted by score
+/// descending then owner case-insensitive, `#`-prefixed owners hidden, at
+/// most 15 rows, number format per score falling back to the objective's and
+/// then to styled red, block anchored at `height/2 + rowsHeight/3`, title
+/// background 0.4 over rows 0.3, no text shadow.
+fn build_scoreboard(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    scoreboard: &Scoreboard,
+    text_width_fn: TextWidthFn,
+    spans_width_fn: super::common::SpansWidthFn<'_>,
+) {
+    let Some(objective) = scoreboard.sidebar.as_ref() else {
+        return;
+    };
+    let Some(obj) = scoreboard.objectives.get(objective) else {
+        return;
+    };
+    let fs = FONT_SIZE * gs;
+    let mut entries: Vec<_> = scoreboard
+        .scores
+        .iter()
+        .filter(|((entry_objective, owner), _)| {
+            entry_objective == objective && !owner.starts_with('#')
+        })
+        .collect();
+    entries.sort_by(|((_, a), a_entry), ((_, b), b_entry)| {
+        b_entry
+            .score
+            .cmp(&a_entry.score)
+            .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+    });
+    entries.truncate(15);
+    let rows: Vec<(Vec<TextSpan>, Vec<TextSpan>, f32)> = entries
+        .iter()
+        .map(|((_, owner), entry)| {
+            let name = scoreboard.line(owner, entry.display.as_deref());
+            let number = match entry
+                .number_format
+                .as_ref()
+                .or(obj.number_format.as_ref())
+                .cloned()
+                .unwrap_or(ScoreNumberFormat::Styled(super::common::rgb(0xff5555)))
+            {
+                ScoreNumberFormat::Blank => Vec::new(),
+                ScoreNumberFormat::Styled(color) => {
+                    vec![TextSpan::new(entry.score.to_string(), color)]
+                }
+                ScoreNumberFormat::Fixed(spans) => spans,
+            };
+            let number_w = spans_width_fn(&number, fs);
+            (name, number, number_w)
+        })
+        .collect();
+
+    let title = &obj.display;
+    let title_w = spans_width_fn(title, fs);
+    let spacer_w = text_width_fn(": ", fs);
+    let width = rows.iter().fold(title_w, |width, (name, _, number_w)| {
+        let extra = if *number_w > 0.0 {
+            spacer_w + number_w
+        } else {
+            0.0
+        };
+        width.max(spans_width_fn(name, fs) + extra)
+    });
+
+    let line_h = 9.0 * gs;
+    let height = rows.len() as f32 * line_h;
+    let bottom = screen_h / 2.0 + height / 3.0;
+    let header_y = bottom - height;
+    let left = screen_w - width - 3.0 * gs;
+    let right = screen_w - 1.0 * gs;
+    let bg_x = left - 2.0 * gs;
+    elements.push(MenuElement::Rect {
+        x: bg_x,
+        y: header_y - line_h - gs,
+        w: right - bg_x,
+        h: line_h,
+        corner_radius: 0.0,
+        color: [0.0, 0.0, 0.0, 0.4],
+    });
+    elements.push(MenuElement::Rect {
+        x: bg_x,
+        y: header_y - gs,
+        w: right - bg_x,
+        h: bottom - (header_y - gs),
+        corner_radius: 0.0,
+        color: [0.0, 0.0, 0.0, 0.3],
+    });
+    elements.push(MenuElement::McText {
+        x: left + width / 2.0 - title_w / 2.0,
+        y: header_y - line_h,
+        spans: title.clone(),
+        scale: fs,
+        centered: false,
+        shadow: false,
+    });
+    for (index, (name, number, number_w)) in rows.iter().enumerate() {
+        let row_y = bottom - (rows.len() - index) as f32 * line_h;
+        elements.push(MenuElement::McText {
+            x: left,
+            y: row_y,
+            spans: name.clone(),
+            scale: fs,
+            centered: false,
+            shadow: false,
+        });
+        if *number_w > 0.0 {
+            elements.push(MenuElement::McText {
+                x: right - number_w,
+                y: row_y,
+                spans: number.clone(),
+                scale: fs,
+                centered: false,
+                shadow: false,
             });
         }
     }

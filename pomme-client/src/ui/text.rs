@@ -5,7 +5,7 @@ use azalea_chat::style::Style;
 
 /// A styled run of text (color plus formatting flags). The shared span type for
 /// rendering rich chat and server-MOTD text.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TextSpan {
     pub text: String,
     pub color: [f32; 4],

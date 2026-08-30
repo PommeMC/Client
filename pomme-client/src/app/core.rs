@@ -352,6 +352,13 @@ impl AppCore {
         renderer.remove_player_entity_skin(uuid);
     }
 
+    fn clear_server_ui(&mut self, game: &mut GameState, renderer: &mut Renderer) {
+        game.tab_list.clear();
+        game.scoreboard.clear();
+        self.requested_player_skins.clear();
+        renderer.clear_player_entity_skins();
+    }
+
     pub fn drain_network_events(
         &mut self,
         connection: &ConnectionHandle,
@@ -725,6 +732,52 @@ impl AppCore {
                 }
                 NetworkEvent::ChatMessage { spans } => {
                     game.chat.push_message(spans);
+                }
+                NetworkEvent::ActionBar { spans } => {
+                    game.action_bar = Some((spans, game.tick_count));
+                }
+                NetworkEvent::ScoreboardObjective {
+                    name,
+                    display,
+                    number_format,
+                } => {
+                    game.scoreboard.set_objective(name, display, number_format);
+                }
+                NetworkEvent::ScoreboardDisplay { name } => {
+                    game.scoreboard.set_display(name);
+                }
+                NetworkEvent::ScoreboardScore {
+                    owner,
+                    objective,
+                    score,
+                    display,
+                    number_format,
+                } => {
+                    game.scoreboard
+                        .set_score(owner, objective, score, display, number_format);
+                }
+                NetworkEvent::ScoreboardReset { owner, objective } => {
+                    game.scoreboard.reset_score(&owner, objective.as_deref());
+                }
+                NetworkEvent::ScoreboardTeam {
+                    name,
+                    prefix,
+                    suffix,
+                    color,
+                    members,
+                } => {
+                    game.scoreboard
+                        .set_team(name, prefix, suffix, color, members);
+                }
+                NetworkEvent::ScoreboardTeamMembers {
+                    name,
+                    members,
+                    join,
+                } => {
+                    game.scoreboard.update_team_members(&name, members, join);
+                }
+                NetworkEvent::ScoreboardTeamRemoved { name } => {
+                    game.scoreboard.remove_team(&name);
                 }
                 NetworkEvent::CommandTree { tree } => {
                     game.command_tree = Some(tree);
@@ -1224,12 +1277,18 @@ impl AppCore {
                     self.menu.active_packs = self.resource_packs.active_pack_info();
                     self.menu.reload_assets = true;
                 }
+                NetworkEvent::Reconfiguring => {
+                    tracing::info!("Server re-entered configuration");
+                    game.entity_store = crate::entity::EntityStore::new();
+                    game.item_entity_store = crate::entity::ItemEntityStore::new();
+                    game.action_bar = None;
+                    game.waypoints = crate::world::waypoints::WaypointMap::default();
+                    self.clear_server_ui(game, renderer);
+                }
                 NetworkEvent::Disconnected { reason } => {
                     tracing::warn!("Disconnected: {reason}");
                     disconnect_reason = Some(reason);
-                    game.tab_list.clear();
-                    self.requested_player_skins.clear();
-                    renderer.clear_player_entity_skins();
+                    self.clear_server_ui(game, renderer);
                 }
                 NetworkEvent::PlayerInfoUpdate { actions, entries } => {
                     if actions.add_player {

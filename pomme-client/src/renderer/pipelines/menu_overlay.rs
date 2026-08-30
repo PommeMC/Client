@@ -726,6 +726,22 @@ impl MenuOverlayPipeline {
                         push_mc_text(&mut vertices, gm, *x, *y, &[span], *scale, false);
                     }
                 }
+                MenuElement::TextSpans {
+                    x,
+                    y,
+                    spans,
+                    scale,
+                    centered,
+                } => {
+                    let start_x = if *centered {
+                        *x - self.spans_width(spans, *scale) / 2.0
+                    } else {
+                        *x
+                    };
+                    if let Some(ref gm) = self.mc_glyph_map {
+                        push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale, true);
+                    }
+                }
                 MenuElement::Icon {
                     x,
                     y,
@@ -1321,15 +1337,21 @@ impl MenuOverlayPipeline {
         raw.ceil()
     }
 
-    /// Width of a multi-span line, honoring each span's font.
-    fn spans_width(&self, spans: &[TextSpan], scale: f32) -> f32 {
+    /// Width of a multi-span line, honoring each span's font and the extra
+    /// per-glyph advance of bold text.
+    pub fn spans_width(&self, spans: &[TextSpan], scale: f32) -> f32 {
         let Some(ref gm) = self.mc_glyph_map else {
             return 0.0;
         };
         let px_scale = scale / gm.cell_h as f32;
         let raw: f32 = spans
             .iter()
-            .flat_map(|s| s.text.chars().map(|ch| glyph_advance(gm, ch, s.sga)))
+            .flat_map(|s| {
+                let bold = if s.bold { 1.0 } else { 0.0 };
+                s.text
+                    .chars()
+                    .map(move |ch| glyph_advance(gm, ch, s.sga) + bold)
+            })
             .sum::<f32>()
             * px_scale;
         raw.ceil()
@@ -1458,6 +1480,13 @@ pub enum MenuElement {
         text: String,
         scale: f32,
         color: [f32; 4],
+        centered: bool,
+    },
+    TextSpans {
+        x: f32,
+        y: f32,
+        spans: Vec<crate::ui::text::TextSpan>,
+        scale: f32,
         centered: bool,
     },
     TextFlat {
