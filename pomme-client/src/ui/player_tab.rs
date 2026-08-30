@@ -16,7 +16,6 @@ const SPECTATOR_GAME_MODE: u8 = 3;
 const BG_BACKDROP: [f32; 4] = [0.0, 0.0, 0.0, 0.5]; // Integer.MIN_VALUE (0x80000000)
 const BG_ROW: [f32; 4] = [1.0, 1.0, 1.0, 0x20 as f32 / 255.0]; // 0x20FFFFFF
 const COL_NAME: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-const COL_SPECTATOR: [f32; 4] = [1.0, 1.0, 1.0, 0x90 as f32 / 255.0]; // 0x90FFFFFF
 
 /// `text_width(text, FONT_SIZE)` must return the width in pixels at 1x GUI
 /// scale.
@@ -62,6 +61,8 @@ pub fn build_player_tab_overlay(
     let cx = (gw as i32) / 2;
 
     let wrap_width_px = (gw - 50.0).max(1.0);
+    // TODO: wrapping flattens the header/footer to plain text, dropping
+    // their formatting; wrap the spans themselves to keep it.
     let header_lines = tab_list
         .header
         .as_ref()
@@ -176,8 +177,9 @@ pub fn build_player_tab_overlay(
         let info = players[i];
         let mut spans = display_names[i].clone();
         if info.game_mode == SPECTATOR_GAME_MODE {
+            // Vanilla `decorateName`: spectators are italicized, nothing else.
             for span in &mut spans {
-                span.color[3] *= COL_SPECTATOR[3];
+                span.italic = true;
             }
         }
         push_spans(elements, spans, row_left + HEAD_COL_W, yo);
@@ -216,6 +218,11 @@ pub struct PlayerNameplates<'a> {
     pub project: &'a dyn Fn(glam::DVec3) -> Option<(f32, f32)>,
 }
 
+// TODO: vanilla renders name tags as world-space billboards (0.025 scale,
+// shrinking with distance, 25% black backdrop, a see-through pass behind
+// walls, sneak dimming, no shadow) and honors team nametagVisibility; this
+// screen-space projection is an approximation until a world-space text path
+// exists.
 pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: PlayerNameplates<'_>) {
     for entity in nameplates.entity_store.living.values() {
         let Some(uuid) = entity.player_uuid else {
@@ -230,7 +237,8 @@ pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: Play
         let pos = entity
             .prev_position
             .lerp(entity.position, nameplates.partial_tick as f64)
-            + glam::DVec3::Y * if entity.is_crouching { 1.8 } else { 2.1 };
+            // Vanilla anchors at the pose bounding-box height + 0.5.
+            + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
         let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
         if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
             continue;
@@ -241,7 +249,9 @@ pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: Play
         elements.push(MenuElement::TextSpans {
             x,
             y: y - 4.0 * nameplates.gs,
-            spans: display_name_for(player, nameplates.scoreboard),
+            // The tab-list display name is tab-only in vanilla; name tags
+            // always use the team-formatted profile name.
+            spans: nameplates.scoreboard.player_name(&player.name, None),
             scale: FONT_SIZE * nameplates.gs,
             centered: true,
         });

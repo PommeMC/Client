@@ -280,15 +280,26 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::SetObjective(p) => {
             use azalea_protocol::packets::game::c_set_objective::Method;
-            let display = match &p.method {
-                Method::Add { display_name, .. } | Method::Change { display_name, .. } => {
-                    Some(format_text_spans(display_name, [1.0; 4]))
+            let (display, number_format) = match &p.method {
+                Method::Add {
+                    display_name,
+                    number_format,
+                    ..
                 }
-                Method::Remove => None,
+                | Method::Change {
+                    display_name,
+                    number_format,
+                    ..
+                } => (
+                    Some(format_text_spans(display_name, [1.0; 4])),
+                    objective_number_format(number_format),
+                ),
+                Method::Remove => (None, None),
             };
             let _ = event_tx.try_send(NetworkEvent::ScoreboardObjective {
                 name: p.objective_name.clone(),
                 display,
+                number_format,
             });
         }
         ClientboundGamePacket::SetDisplayObjective(p)
@@ -305,11 +316,14 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ScoreboardScore {
                 owner: p.owner.clone(),
                 objective: p.objective_name.clone(),
-                score: p.score,
+                // Wire scores are signed varints; azalea models the field
+                // unsigned.
+                score: p.score as i32,
                 display: p
                     .display
                     .as_ref()
                     .map(|text| format_text_spans(text, [1.0; 4])),
+                number_format: p.number_format.as_ref().map(score_number_format),
             });
         }
         ClientboundGamePacket::ResetScore(p) => {
@@ -827,15 +841,49 @@ fn send_scoreboard_team(
     });
 }
 
+fn score_number_format(
+    format: &azalea_chat::numbers::NumberFormat,
+) -> crate::ui::hud::ScoreNumberFormat {
+    use azalea_chat::numbers::NumberFormat;
+
+    use crate::ui::hud::ScoreNumberFormat as F;
+    match format {
+        NumberFormat::Blank => F::Blank,
+        // Vanilla applies the style to the plain number; only the color
+        // matters for rendering, an unstyled number stays white.
+        NumberFormat::Styled { style } => F::Styled(styled_color(style).unwrap_or([1.0; 4])),
+        NumberFormat::Fixed { value } => F::Fixed(format_text_spans(value, [1.0; 4])),
+    }
+}
+
+/// azalea's `SetObjective` reads the number format without vanilla's
+/// `Optional` bool, so the decode lands shifted: vanilla `None` (the common
+/// case) arrives as `Blank`, vanilla `Blank` arrives as `Styled` with empty
+/// NBT, and real styled/fixed formats fail to decode the whole packet. Undo
+/// the shift for the two recoverable cases.
+fn objective_number_format(
+    format: &azalea_chat::numbers::NumberFormat,
+) -> Option<crate::ui::hud::ScoreNumberFormat> {
+    use azalea_chat::numbers::NumberFormat;
+    match format {
+        NumberFormat::Blank => None,
+        NumberFormat::Styled { style } if style.is_none() => {
+            Some(crate::ui::hud::ScoreNumberFormat::Blank)
+        }
+        other => Some(score_number_format(other)),
+    }
+}
+
+fn styled_color(style: &simdnbt::owned::Nbt) -> Option<[f32; 4]> {
+    let color = style
+        .iter()
+        .find_map(|(key, value)| (key.to_str() == "color").then(|| value.string()).flatten())?;
+    let value = azalea_chat::style::TextColor::parse(&color.to_str())?.value;
+    Some(crate::ui::common::rgb(value))
+}
+
 fn team_color(color: azalea_chat::style::ChatFormatting) -> [f32; 4] {
-    let hex = [
-        0x000000, 0x0000aa, 0x00aa00, 0x00aaaa, 0xaa0000, 0xaa00aa, 0xffaa00, 0xaaaaaa, 0x555555,
-        0x5555ff, 0x55ff55, 0x55ffff, 0xff5555, 0xff55ff, 0xffff55, 0xffffff,
-    ]
-    .get(color as usize)
-    .copied()
-    .unwrap_or(0xffffff);
-    crate::ui::common::rgb(hex)
+    crate::ui::common::rgb(color.color().unwrap_or(0xffffff))
 }
 
 /// Resolves a variant registry holder id to the mob's renderer pool slot.

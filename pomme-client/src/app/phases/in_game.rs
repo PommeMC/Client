@@ -146,8 +146,10 @@ pub struct GameState {
     pub tab_list: TabList,
     /// Locator bar waypoints tracked by the server.
     pub waypoints: crate::world::waypoints::WaypointMap,
-    pub held_item_slot: u8,
-    pub held_item_tooltip_tick: Option<u64>,
+    /// Vanilla `Hud.toolHighlightTimer` / `lastToolHighlight` (see
+    /// `tick_tool_highlight`).
+    pub tool_highlight_timer: u32,
+    pub last_tool_highlight: azalea_inventory::ItemStack,
     pub action_bar: Option<(Vec<crate::ui::text::TextSpan>, u64)>,
     pub scoreboard: crate::ui::hud::Scoreboard,
     /// Client tick counter (vanilla `player.tickCount`).
@@ -327,8 +329,8 @@ impl GameState {
             command_tree: None,
             tab_list: TabList::new(),
             waypoints: crate::world::waypoints::WaypointMap::default(),
-            held_item_slot: 0,
-            held_item_tooltip_tick: None,
+            tool_highlight_timer: 0,
+            last_tool_highlight: azalea_inventory::ItemStack::Empty,
             action_bar: None,
             scoreboard: crate::ui::hud::Scoreboard::default(),
             tick_count: 0,
@@ -1243,6 +1245,32 @@ fn send_container_clicks(
     }
 }
 
+/// Vanilla `Hud.tick`: the held-item tooltip timer resets to 40 when the
+/// selected item's type or hover name changes, clears when the slot empties,
+/// and otherwise counts down.
+fn tick_tool_highlight(core: &AppCore, game: &mut GameState) {
+    use azalea_inventory::ItemStack;
+    let selected = game
+        .player
+        .inventory
+        .hotbar_slots()
+        .get(core.input.selected_slot() as usize)
+        .cloned()
+        .unwrap_or(ItemStack::Empty);
+    match (&selected, &game.last_tool_highlight) {
+        (ItemStack::Empty, _) => game.tool_highlight_timer = 0,
+        (ItemStack::Present(new), ItemStack::Present(old))
+            if new.kind == old.kind
+                && crate::ui::common::item_display_name(new)
+                    == crate::ui::common::item_display_name(old) =>
+        {
+            game.tool_highlight_timer = game.tool_highlight_timer.saturating_sub(1);
+        }
+        _ => game.tool_highlight_timer = 40,
+    }
+    game.last_tool_highlight = selected;
+}
+
 pub fn update_game(
     core: &mut AppCore,
     dt: f32,
@@ -1350,6 +1378,7 @@ pub fn update_game(
         game.item_entity_store.tick(&game.chunk_store);
         game.particle_store.tick(&game.chunk_store);
         game.block_entity_anim.tick();
+        tick_tool_highlight(core, game);
         if let Some(c) = &mut game.open_container
             && let Some(state) = &mut c.enchant
         {
@@ -1656,16 +1685,11 @@ pub fn update_game(
         } else {
             hud::ContextualBarKind::Empty
         };
-        let selected_slot = core.input.selected_slot();
-        if selected_slot != game.held_item_slot {
-            game.held_item_slot = selected_slot;
-            game.held_item_tooltip_tick = Some(game.tick_count);
-        }
         hud::build_hud(
             &mut elements,
             sw,
             sh,
-            selected_slot,
+            core.input.selected_slot(),
             game.player.health,
             game.player.food,
             game.player.armor,
@@ -1677,8 +1701,7 @@ pub fn update_game(
             bar,
             game.player.game_mode,
             game.player.inventory.hotbar_slots(),
-            game.held_item_tooltip_tick
-                .map(|tick| game.tick_count.saturating_sub(tick)),
+            game.tool_highlight_timer,
             game.action_bar
                 .as_ref()
                 .map(|(spans, tick)| (spans.as_slice(), game.tick_count.wrapping_sub(*tick))),

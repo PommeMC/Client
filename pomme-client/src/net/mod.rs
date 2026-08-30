@@ -136,6 +136,7 @@ pub enum NetworkEvent {
     ScoreboardObjective {
         name: String,
         display: Option<Vec<crate::ui::text::TextSpan>>,
+        number_format: Option<crate::ui::hud::ScoreNumberFormat>,
     },
     ScoreboardDisplay {
         name: Option<String>,
@@ -143,8 +144,9 @@ pub enum NetworkEvent {
     ScoreboardScore {
         owner: String,
         objective: String,
-        score: u32,
+        score: i32,
         display: Option<Vec<crate::ui::text::TextSpan>>,
+        number_format: Option<crate::ui::hud::ScoreNumberFormat>,
     },
     ScoreboardReset {
         owner: String,
@@ -408,6 +410,9 @@ pub enum NetworkEvent {
     ResourcePackPop {
         id: Option<uuid::Uuid>,
     },
+    /// The server re-entered the configuration phase (a proxy transfer);
+    /// world-scoped state resets like vanilla's `clearClientLevel`.
+    Reconfiguring,
     Disconnected {
         reason: String,
     },

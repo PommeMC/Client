@@ -31,12 +31,32 @@ pub struct FrameTimings {
 }
 
 type ScoreKey = (String, String);
-type ScoreEntry = (u32, Option<Vec<TextSpan>>);
+
+/// Vanilla `NumberFormat`: how a score's value renders in the sidebar.
+/// Styled keeps only the resolved color; a per-score format overrides the
+/// objective's, and no format at all means the styled-red default.
+#[derive(Clone)]
+pub enum ScoreNumberFormat {
+    Blank,
+    Styled([f32; 4]),
+    Fixed(Vec<TextSpan>),
+}
+
+struct ScoreEntry {
+    score: i32,
+    display: Option<Vec<TextSpan>>,
+    number_format: Option<ScoreNumberFormat>,
+}
+
+struct Objective {
+    display: Vec<TextSpan>,
+    number_format: Option<ScoreNumberFormat>,
+}
 
 #[derive(Default)]
 pub struct Scoreboard {
     sidebar: Option<String>,
-    objectives: HashMap<String, Vec<TextSpan>>,
+    objectives: HashMap<String, Objective>,
     scores: HashMap<ScoreKey, ScoreEntry>,
     teams: HashMap<String, ScoreboardTeam>,
 }
@@ -56,9 +76,20 @@ impl Scoreboard {
         self.teams.clear();
     }
 
-    pub fn set_objective(&mut self, name: String, display: Option<Vec<TextSpan>>) {
+    pub fn set_objective(
+        &mut self,
+        name: String,
+        display: Option<Vec<TextSpan>>,
+        number_format: Option<ScoreNumberFormat>,
+    ) {
         if let Some(display) = display {
-            self.objectives.insert(name, display);
+            self.objectives.insert(
+                name,
+                Objective {
+                    display,
+                    number_format,
+                },
+            );
         } else {
             self.objectives.remove(&name);
             self.scores.retain(|(objective, _), _| objective != &name);
@@ -76,10 +107,18 @@ impl Scoreboard {
         &mut self,
         owner: String,
         objective: String,
-        score: u32,
+        score: i32,
         display: Option<Vec<TextSpan>>,
+        number_format: Option<ScoreNumberFormat>,
     ) {
-        self.scores.insert((objective, owner), (score, display));
+        self.scores.insert(
+            (objective, owner),
+            ScoreEntry {
+                score,
+                display,
+                number_format,
+            },
+        );
     }
 
     pub fn reset_score(&mut self, owner: &str, objective: Option<&str>) {
@@ -241,7 +280,7 @@ pub fn build_hud(
     bar: ContextualBarKind<'_>,
     game_mode: u8,
     hotbar: &[ItemStack],
-    held_item_tooltip_ticks: Option<u64>,
+    tool_highlight_timer: u32,
     action_bar: Option<(&[TextSpan], u64)>,
     scoreboard: &Scoreboard,
     first_person: bool,
@@ -307,20 +346,37 @@ pub fn build_hud(
         }
     }
 
-    if let Some(ticks) = held_item_tooltip_ticks
+    // Vanilla `Hud.extractSelectedItemName`: rarity-colored, italic for
+    // custom names, alpha `timer * 256 / 10` (10-tick fade), y = height - 59
+    // (+14 when the player can't be hurt). Spectators get none.
+    if tool_highlight_timer > 0
+        && game_mode != 3
         && let Some(ItemStack::Present(data)) = hotbar.get(selected_slot as usize)
     {
-        let alpha = ((60_u64.saturating_sub(ticks)).min(10) as f32) / 10.0;
-        if alpha > 0.0 {
-            elements.push(MenuElement::Text {
-                x: cx,
-                y: hotbar_y - 24.0 * gs,
-                text: super::common::item_display_name(data),
-                scale: FONT_SIZE * gs,
-                color: [1.0, 1.0, 1.0, alpha],
-                centered: true,
-            });
+        use azalea_inventory::components::{CustomName, Rarity};
+        let alpha = (tool_highlight_timer as f32 * 256.0 / 10.0 / 255.0).min(1.0);
+        // Default-component rarities aren't synced; absent means common.
+        let mut color = match data.get_component::<Rarity>().as_deref() {
+            Some(Rarity::Uncommon) => super::common::rgb(0xffff55),
+            Some(Rarity::Rare) => super::common::rgb(0x55ffff),
+            Some(Rarity::Epic) => super::common::rgb(0xff55ff),
+            _ => WHITE,
+        };
+        color[3] = alpha;
+        let mut span = TextSpan::new(super::common::item_display_name(data), color);
+        span.italic = data.get_component::<CustomName>().is_some();
+        let mut y = screen_h - 59.0 * gs;
+        if game_mode == 1 {
+            y += 14.0 * gs;
         }
+        elements.push(MenuElement::McText {
+            x: cx,
+            y,
+            spans: vec![span],
+            scale: FONT_SIZE * gs,
+            centered: true,
+            shadow: true,
+        });
     }
 
     if let Some((spans, ticks)) = action_bar
@@ -333,7 +389,8 @@ pub fn build_hud(
         }
         elements.push(MenuElement::McText {
             x: cx,
-            y: screen_h - 68.0 * gs,
+            // Vanilla translates to height - 68 and draws at local y -4.
+            y: screen_h - 72.0 * gs,
             spans,
             scale: FONT_SIZE * gs,
             centered: true,
@@ -497,6 +554,11 @@ pub fn build_hud(
     }
 }
 
+/// Vanilla `Hud.displayScoreboardSidebar`: entries sorted by score
+/// descending then owner case-insensitive, `#`-prefixed owners hidden, at
+/// most 15 rows, number format per score falling back to the objective's and
+/// then to styled red, block anchored at `height/2 + rowsHeight/3`, title
+/// background 0.4 over rows 0.3, no text shadow.
 fn build_scoreboard(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
@@ -508,70 +570,112 @@ fn build_scoreboard(
     let Some(objective) = scoreboard.sidebar.as_ref() else {
         return;
     };
-    let Some(title) = scoreboard.objectives.get(objective) else {
+    let Some(obj) = scoreboard.objectives.get(objective) else {
         return;
     };
+    let fs = FONT_SIZE * gs;
     let mut entries: Vec<_> = scoreboard
         .scores
         .iter()
-        .filter(|((entry_objective, _), _)| entry_objective == objective)
-        .map(|((_, owner), (score, display))| {
-            (*score, owner, scoreboard.line(owner, display.as_deref()))
+        .filter(|((entry_objective, owner), _)| {
+            entry_objective == objective && !owner.starts_with('#')
         })
         .collect();
-    entries.sort_by(|(a_score, a, _), (b_score, b, _)| b_score.cmp(a_score).then_with(|| a.cmp(b)));
+    entries.sort_by(|((_, a), a_entry), ((_, b), b_entry)| {
+        b_entry
+            .score
+            .cmp(&a_entry.score)
+            .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+    });
     entries.truncate(15);
     if entries.is_empty() {
         return;
     }
+    let rows: Vec<(Vec<TextSpan>, Vec<TextSpan>, f32)> = entries
+        .iter()
+        .map(|((_, owner), entry)| {
+            let name = scoreboard.line(owner, entry.display.as_deref());
+            let number = match entry
+                .number_format
+                .as_ref()
+                .or(obj.number_format.as_ref())
+                .cloned()
+                .unwrap_or(ScoreNumberFormat::Styled(super::common::rgb(0xff5555)))
+            {
+                ScoreNumberFormat::Blank => Vec::new(),
+                ScoreNumberFormat::Styled(color) => {
+                    vec![TextSpan::new(entry.score.to_string(), color)]
+                }
+                ScoreNumberFormat::Fixed(spans) => spans,
+            };
+            let number_w = spans_width(&number, fs, text_width_fn);
+            (name, number, number_w)
+        })
+        .collect();
 
-    let fs = FONT_SIZE * gs;
-    let right = screen_w - 4.0 * gs;
+    let title = &obj.display;
     let title_w = spans_width(title, fs, text_width_fn);
-    let width = entries.iter().fold(title_w, |width, (score, _, spans)| {
-        width.max(
-            spans_width(spans, fs, text_width_fn)
-                + text_width_fn(&score.to_string(), fs)
-                + 5.0 * gs,
-        )
+    let spacer_w = text_width_fn(": ", fs);
+    let width = rows.iter().fold(title_w, |width, (name, _, number_w)| {
+        let extra = if *number_w > 0.0 {
+            spacer_w + number_w
+        } else {
+            0.0
+        };
+        width.max(spans_width(name, fs, text_width_fn) + extra)
     });
-    let x = right - width - 2.0 * gs;
+
     let line_h = 9.0 * gs;
-    let y = (screen_h - (entries.len() as f32 + 1.0) * line_h) / 2.0;
+    let height = rows.len() as f32 * line_h;
+    let bottom = screen_h / 2.0 + height / 3.0;
+    let header_y = bottom - height;
+    let left = screen_w - width - 3.0 * gs;
+    let right = screen_w - 1.0 * gs;
+    let bg_x = left - 2.0 * gs;
     elements.push(MenuElement::Rect {
-        x,
-        y,
-        w: width + 4.0 * gs,
-        h: (entries.len() as f32 + 1.0) * line_h,
+        x: bg_x,
+        y: header_y - line_h - gs,
+        w: right - bg_x,
+        h: line_h,
         corner_radius: 0.0,
-        color: [0.0, 0.0, 0.0, 0.5],
+        color: [0.0, 0.0, 0.0, 0.4],
+    });
+    elements.push(MenuElement::Rect {
+        x: bg_x,
+        y: header_y - gs,
+        w: right - bg_x,
+        h: bottom - (header_y - gs),
+        corner_radius: 0.0,
+        color: [0.0, 0.0, 0.0, 0.3],
     });
     elements.push(MenuElement::McText {
-        x: right - width / 2.0,
-        y,
+        x: left + width / 2.0 - title_w / 2.0,
+        y: header_y - line_h,
         spans: title.clone(),
         scale: fs,
-        centered: true,
-        shadow: true,
+        centered: false,
+        shadow: false,
     });
-    for (index, (score, _, spans)) in entries.iter().enumerate() {
-        let row_y = y + (index as f32 + 1.0) * line_h;
+    for (index, (name, number, number_w)) in rows.iter().enumerate() {
+        let row_y = bottom - (rows.len() - index) as f32 * line_h;
         elements.push(MenuElement::McText {
-            x: x + 2.0 * gs,
+            x: left,
             y: row_y,
-            spans: spans.clone(),
+            spans: name.clone(),
             scale: fs,
             centered: false,
-            shadow: true,
+            shadow: false,
         });
-        elements.push(MenuElement::Text {
-            x: right - text_width_fn(&score.to_string(), fs),
-            y: row_y,
-            text: score.to_string(),
-            scale: fs,
-            color: [1.0, 0.33, 0.33, 1.0],
-            centered: false,
-        });
+        if *number_w > 0.0 {
+            elements.push(MenuElement::McText {
+                x: right - number_w,
+                y: row_y,
+                spans: number.clone(),
+                scale: fs,
+                centered: false,
+                shadow: false,
+            });
+        }
     }
 }
 

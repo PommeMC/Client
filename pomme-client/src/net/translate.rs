@@ -576,10 +576,17 @@ fn translate_entity_data(
         wire::write_varint(&mut out, new);
         let value_at = cur.position() as usize;
         if new == 7 {
-            translate_item_stack(&mut cur, &mut out, remaps)?;
-            continue;
+            let mut stack = Vec::new();
+            if translate_item_stack(&mut cur, &mut stack, remaps).is_some() {
+                out.extend_from_slice(&stack);
+                continue;
+            }
+            tracing::debug!("Copying entity data tail verbatim past an item stack");
+            out.extend_from_slice(&payload[value_at..]);
+            return Some(out);
         }
         if !skip_metadata_value(&mut cur, new)? {
+            tracing::debug!("Copying entity data tail verbatim past serializer {old}");
             out.extend_from_slice(&payload[value_at..]);
             return Some(out);
         }
@@ -589,6 +596,17 @@ fn translate_entity_data(
     Some(out)
 }
 
+/// Latest-registry component ids whose payloads the stack walker can advance
+/// past (26.2 `DataComponents` registration order; anchored in
+/// `component_id_anchors` in `azalea_compat`). Matching happens after the
+/// remap, so one set of ids serves every wire version.
+pub(crate) const COMPONENT_MAP_ID: u32 = 46;
+pub(crate) const COMPONENT_PROFILE: u32 = 70;
+
+/// Remaps one entity-data item stack (count, item id, component patch) into
+/// the latest registry space. `None` means a component payload the walker
+/// doesn't know (or a malformed stack); the caller falls back to the
+/// verbatim-tail copy.
 fn translate_item_stack(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
@@ -610,16 +628,14 @@ fn translate_item_stack(
     out.extend_from_slice(&cur.get_ref()[removed_at..cur.position() as usize]);
     for _ in 0..added {
         let component = u32::azalea_read_var(cur).ok()?;
-        wire::write_varint(
-            out,
-            remaps.remap(ClientRegistry::DataComponentType, component)?,
-        );
+        let latest = remaps.remap(ClientRegistry::DataComponentType, component)?;
+        wire::write_varint(out, latest);
         let value_at = cur.position() as usize;
-        match component {
-            44 => {
+        match latest {
+            COMPONENT_MAP_ID => {
                 varint_span(cur)?;
             }
-            68 => {
+            COMPONENT_PROFILE => {
                 Profile::azalea_read(cur).ok()?;
             }
             _ => return None,
@@ -890,6 +906,11 @@ fn translate_team(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(&payload[suffix]);
         out.extend_from_slice(&payload[visibility]);
         out.extend_from_slice(&payload[collision]);
+        // Vanilla 26.2 changed color from a ChatFormatting ordinal to
+        // Optional<TeamColor>, but azalea still decodes the plain ordinal,
+        // and these frames feed azalea — copy it through unchanged (all
+        // ordinals fit one varint byte). See the team tests in
+        // azalea_compat.
         out.push(color as u8);
         out.push(options);
     }

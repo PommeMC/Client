@@ -1,5 +1,5 @@
 use azalea_protocol::address::ServerAddr;
-use azalea_protocol::connect::Connection;
+use azalea_protocol::connect::{Connection, WriteConnection};
 use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
@@ -352,8 +352,10 @@ async fn config_sequence(
     loop {
         let packet = tokio::select! {
             packet = conn.read() => packet?,
-            outbound = outbound_rx.recv() => {
-                if let Some(Outbound::Packet(packet)) = outbound
+            // `Some(..)` disables the branch when the channel closes instead
+            // of busy-looping on a closed receiver.
+            Some(outbound) = outbound_rx.recv() => {
+                if let Outbound::Packet(packet) = outbound
                     && let ServerboundGamePacket::ResourcePack(p) = *packet
                 {
                     use azalea_protocol::packets::config::s_resource_pack as config_pack;
@@ -610,19 +612,11 @@ async fn game_loop(
                         if let Some(t) = translation {
                             t.remap_outbound(&mut packet);
                         }
-                        azalea_protocol::write::serialize_packet(&*packet)
-                            .map(Vec::from)
-                            .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))?
+                        serialize_game_packet(&packet)?
                     }
                     Outbound::Raw(bytes) => bytes,
                 };
-                let frames = match translation {
-                    Some(t) if t.translates_outbound() => t.translate_outbound_game_frame(frame),
-                    _ => vec![frame],
-                };
-                for frame in frames {
-                    conn.writer.raw.write(&frame).await?;
-                }
+                write_game_frame(&mut conn.writer, translation, frame).await?;
                 continue;
             }
             raw = conn.reader.raw.read() => raw,
@@ -647,21 +641,15 @@ async fn game_loop(
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
             Ok(mut packet) => {
                 if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
+                    // Vanilla clears the client level before acknowledging
+                    // (ClientPacketListener.handleConfigurationStart); chat
+                    // survives the transition.
+                    let _ = event_tx.try_send(NetworkEvent::Reconfiguring);
                     let ack = ServerboundGamePacket::ConfigurationAcknowledged(
                         azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
                     );
-                    let frame = azalea_protocol::write::serialize_packet(&ack)
-                        .map(Vec::from)
-                        .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))?;
-                    let frames = match translation {
-                        Some(t) if t.translates_outbound() => {
-                            t.translate_outbound_game_frame(frame)
-                        }
-                        _ => vec![frame],
-                    };
-                    for frame in frames {
-                        conn.writer.raw.write(&frame).await?;
-                    }
+                    write_game_frame(&mut conn.writer, translation, serialize_game_packet(&ack)?)
+                        .await?;
                     let mut config = conn.config();
                     let holder =
                         config_sequence(&mut config, view_distance, event_tx, &mut outbound_rx)
@@ -681,6 +669,28 @@ async fn game_loop(
             Err(e) => skip_malformed_packet(e)?,
         }
     }
+}
+
+fn serialize_game_packet(packet: &ServerboundGamePacket) -> Result<Vec<u8>, ConnectionError> {
+    azalea_protocol::write::serialize_packet(packet)
+        .map(Vec::from)
+        .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))
+}
+
+/// Writes one latest-layout frame, translating it for older wire versions.
+async fn write_game_frame(
+    writer: &mut WriteConnection<ServerboundGamePacket>,
+    translation: Option<&super::translate::Translation>,
+    frame: Vec<u8>,
+) -> Result<(), ConnectionError> {
+    let frames = match translation {
+        Some(t) if t.translates_outbound() => t.translate_outbound_game_frame(frame),
+        _ => vec![frame],
+    };
+    for frame in frames {
+        writer.raw.write(&frame).await?;
+    }
+    Ok(())
 }
 
 /// Recoverable decode errors skip the packet; anything else tears down the

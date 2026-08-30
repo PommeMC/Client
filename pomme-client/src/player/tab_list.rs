@@ -110,7 +110,6 @@ impl TabList {
     }
 
     /// Vanilla PlayerTabOverlay PLAYER_COMPARATOR (PlayerTabOverlay.java:63).
-    /// Teams aren't tracked, so the team-name tiebreaker is skipped.
     pub fn sorted_listed(&self, scoreboard: &Scoreboard) -> Vec<&TabListPlayer> {
         let mut out: Vec<&TabListPlayer> = self.players.values().filter(|p| p.listed).collect();
         out.sort_by(|a, b| {

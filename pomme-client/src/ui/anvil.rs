@@ -47,8 +47,6 @@ impl AnvilState {
     }
 }
 
-/// The item's hover name: custom name, else item-name component, else the
-/// translated kind name.
 /// Applies this frame's typing to the rename field, mirroring vanilla
 /// `AnvilScreen.slotChanged` + `onNameChanged`: reset the text when input
 /// slot 0 changes, edit it while the slot is filled, normalize an unchanged
