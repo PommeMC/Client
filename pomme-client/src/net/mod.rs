@@ -92,6 +92,15 @@ pub enum NetworkEvent {
         progress: f32,
         level: i32,
     },
+    UpdateMobEffect {
+        entity_id: i32,
+        effect: crate::mob_effect::MobEffectInstance,
+    },
+    RemoveMobEffect {
+        entity_id: i32,
+        effect_id: u32,
+    },
+    ClearMobEffects,
     Waypoint {
         operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
         waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,

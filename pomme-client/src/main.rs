@@ -14,6 +14,7 @@ mod discord;
 mod entity;
 mod lang;
 mod logging;
+mod mob_effect;
 mod net;
 mod particle;
 mod physics;

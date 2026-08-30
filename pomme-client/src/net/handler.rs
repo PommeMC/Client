@@ -2,6 +2,7 @@ use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::position::ChunkPos;
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
+use azalea_registry::Registry;
 use azalea_registry::builtin::EntityKind;
 use crossbeam_channel::Sender;
 
@@ -224,6 +225,23 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::PlayerExperience {
                 progress: p.experience_progress,
                 level: p.experience_level as i32,
+            });
+        }
+        ClientboundGamePacket::UpdateMobEffect(p) => {
+            let _ = event_tx.try_send(NetworkEvent::UpdateMobEffect {
+                entity_id: p.entity_id.0,
+                effect: crate::mob_effect::MobEffectInstance {
+                    effect_id: p.mob_effect.to_u32(),
+                    duration: p.data.duration,
+                    ambient: p.data.flags.ambient,
+                    show_icon: p.data.flags.show_icon,
+                },
+            });
+        }
+        ClientboundGamePacket::RemoveMobEffect(p) => {
+            let _ = event_tx.try_send(NetworkEvent::RemoveMobEffect {
+                entity_id: p.entity_id.0,
+                effect_id: p.effect.to_u32(),
             });
         }
         ClientboundGamePacket::Waypoint(p) => {
@@ -526,7 +544,6 @@ pub fn handle_game_packet(
                         azalea_inventory::ItemStack::Present(data),
                     ) = &item.value
                 {
-                    use azalea_registry::Registry;
                     let name = crate::player::inventory::item_resource_name(data.kind);
                     let _ = event_tx.try_send(NetworkEvent::EntityItemData {
                         id: p.id.0,
@@ -713,6 +730,9 @@ pub fn handle_game_packet(
                 game_mode: p.common.game_type as u8,
                 previous: Some(p.common.previous_game_type.0.map(|m| m.to_id())),
             });
+            // Vanilla recreates the player on respawn; the server re-sends any
+            // effects kept across it.
+            let _ = event_tx.try_send(NetworkEvent::ClearMobEffects);
         }
         ClientboundGamePacket::PlayerCombatKill(p) => {
             tracing::info!("Player died: {}", p.message);

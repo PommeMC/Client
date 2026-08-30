@@ -5,6 +5,7 @@ use azalea_inventory::ItemStack;
 use glam::DVec3;
 
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
+use crate::mob_effect::ActiveMobEffects;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::text::TextSpan;
@@ -374,6 +375,7 @@ pub fn build_hud(
     action_bar: Option<(&[TextSpan], u64)>,
     spans_width_fn: super::common::SpansWidthFn<'_>,
     scoreboard: &Scoreboard,
+    effects: &ActiveMobEffects,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
@@ -540,6 +542,8 @@ pub fn build_hud(
         });
     }
 
+    build_effect_icons(elements, screen_w, gs, effects);
+
     build_scoreboard(
         elements,
         screen_w,
@@ -701,6 +705,70 @@ pub fn build_hud(
                 tint: WHITE,
             });
         }
+    }
+}
+
+/// Vanilla `Hud.extractEffects`: active effect icons anchored to the top-right,
+/// beneficial on the first row, everything else (harmful and neutral) on the
+/// second.
+// TODO: hide while a screen showing effects is open, once the vanilla
+// `EffectsInInventory` panel is ported.
+fn build_effect_icons(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    gs: f32,
+    effects: &ActiveMobEffects,
+) {
+    if effects.is_empty() {
+        return;
+    }
+    let mut beneficial_count = 0;
+    let mut harmful_count = 0;
+    for instance in effects.sorted_desc() {
+        if !instance.show_icon {
+            continue;
+        }
+        let Some(info) = crate::mob_effect::info(instance.effect_id) else {
+            continue;
+        };
+        let (n, y_gui) = if info.beneficial {
+            beneficial_count += 1;
+            (beneficial_count, 1.0)
+        } else {
+            harmful_count += 1;
+            (harmful_count, 27.0)
+        };
+        let x_gui = -25.0 * n as f32;
+        let background = if instance.ambient {
+            SpriteId::EffectBackgroundAmbient
+        } else {
+            SpriteId::EffectBackground
+        };
+        elements.push(MenuElement::Image {
+            x: (screen_w + x_gui * gs).round(),
+            y: (y_gui * gs).round(),
+            w: 24.0 * gs,
+            h: 24.0 * gs,
+            sprite: background,
+            tint: WHITE,
+        });
+        let mut alpha = 1.0f32;
+        if !instance.ambient && instance.ends_within(200) {
+            let d = instance.duration as f32;
+            let used_seconds = 10 - instance.duration / 20;
+            alpha = (d / 10.0 / 5.0 * 0.5).clamp(0.0, 0.5)
+                + (d * std::f32::consts::PI / 5.0).cos()
+                    * (used_seconds as f32 / 10.0 * 0.25).clamp(0.0, 0.25);
+            alpha = alpha.clamp(0.0, 1.0);
+        }
+        elements.push(MenuElement::Image {
+            x: (screen_w + (x_gui + 3.0) * gs).round(),
+            y: ((y_gui + 3.0) * gs).round(),
+            w: 18.0 * gs,
+            h: 18.0 * gs,
+            sprite: SpriteId::MobEffect(instance.effect_id as u8),
+            tint: [1.0, 1.0, 1.0, alpha],
+        });
     }
 }
 

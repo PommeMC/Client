@@ -1375,6 +1375,7 @@ pub fn update_game(
     while core.tick_accumulator >= TICK_RATE {
         game.tick_count = game.tick_count.wrapping_add(1);
         core.tick_physics(&mut gfx.renderer, connection, game);
+        game.player.effects.tick();
         game.item_entity_store.tick(&game.chunk_store);
         game.particle_store.tick(&game.chunk_store);
         game.block_entity_anim.tick();
@@ -1729,6 +1730,7 @@ pub fn update_game(
                 .map(|(spans, tick)| (spans.as_slice(), game.tick_count.wrapping_sub(*tick))),
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
             &game.scoreboard,
+            &game.player.effects,
             gfx.renderer.is_first_person(),
             debug.as_ref(),
             core.menu.gui_scale_setting,

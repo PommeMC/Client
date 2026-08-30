@@ -79,6 +79,7 @@ pub struct LocalPlayer {
     pub entity_id: i32,
     pub experience_level: i32,
     pub experience_progress: f32,
+    pub effects: crate::mob_effect::ActiveMobEffects,
 }
 
 impl LocalPlayer {
@@ -124,6 +125,7 @@ impl LocalPlayer {
             entity_id: -1,
             experience_level: 0,
             experience_progress: 0.0,
+            effects: crate::mob_effect::ActiveMobEffects::default(),
         }
     }
 

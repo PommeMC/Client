@@ -177,6 +177,14 @@ mod tests {
             Some(47)
         );
         assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "remove_mob_effect"),
+            Some(0x4E)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "update_mob_effect"),
+            Some(0x84)
+        );
+        assert_eq!(
             t.name_of(Phase::Game, Direction::Clientbound, 0),
             Some("bundle_delimiter")
         );
