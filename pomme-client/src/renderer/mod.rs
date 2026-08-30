@@ -1275,6 +1275,10 @@ impl Renderer {
         self.menu_pipeline.mc_text_width_sga(text, scale)
     }
 
+    pub fn menu_spans_width(&self, spans: &[crate::ui::text::TextSpan], scale: f32) -> f32 {
+        self.menu_pipeline.spans_width(spans, scale)
+    }
+
     /// Builds the item mesh if needed; returns whether it has a 3D model
     /// (vs a flat sprite), used to pick the first-person transform.
     pub fn ensure_item_mesh(&mut self, name: &str) -> pipelines::item_entity::ItemMeshInfo {

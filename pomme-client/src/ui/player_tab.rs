@@ -26,6 +26,7 @@ pub fn build_player_tab_overlay(
     scoreboard: &Scoreboard,
     gs: f32,
     text_width: &dyn Fn(&str, f32) -> f32,
+    spans_width: crate::ui::common::SpansWidthFn<'_>,
 ) {
     let players = tab_list.sorted_listed(scoreboard);
     if players.is_empty() {
@@ -41,7 +42,7 @@ pub fn build_player_tab_overlay(
         .collect();
     let max_name_w: i32 = display_names
         .iter()
-        .map(|n| font_w(&span_text(n)).ceil() as i32)
+        .map(|n| spans_width(n, FONT_SIZE).ceil() as i32)
         .max()
         .unwrap_or(0);
 

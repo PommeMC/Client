@@ -302,6 +302,9 @@ pub fn handle_game_packet(
                 number_format,
             });
         }
+        // TODO: track the other display slots too — vanilla prefers the
+        // local team's `sidebar.team.<color>` slot over SIDEBAR, and LIST
+        // drives the tab-overlay score column.
         ClientboundGamePacket::SetDisplayObjective(p)
             if matches!(
                 p.slot,

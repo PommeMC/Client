@@ -1705,6 +1705,7 @@ pub fn update_game(
             game.action_bar
                 .as_ref()
                 .map(|(spans, tick)| (spans.as_slice(), game.tick_count.wrapping_sub(*tick))),
+            &|spans, s| gfx.renderer.menu_spans_width(spans, s),
             &game.scoreboard,
             gfx.renderer.is_first_person(),
             debug.as_ref(),
@@ -1728,6 +1729,7 @@ pub fn update_game(
             &game.scoreboard,
             gs,
             &|t, s| r.menu_text_width(t, s),
+            &|spans, s| r.menu_spans_width(spans, s),
         );
     }
 

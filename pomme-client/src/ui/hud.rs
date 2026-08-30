@@ -100,7 +100,9 @@ impl Scoreboard {
     }
 
     pub fn set_display(&mut self, name: Option<String>) {
-        self.sidebar = name;
+        // Vanilla resolves the objective at packet time; an unknown name
+        // leaves the slot empty even if the objective arrives later.
+        self.sidebar = name.filter(|name| self.objectives.contains_key(name));
     }
 
     pub fn set_score(
@@ -111,6 +113,10 @@ impl Scoreboard {
         display: Option<Vec<TextSpan>>,
         number_format: Option<ScoreNumberFormat>,
     ) {
+        // Vanilla drops scores for objectives it doesn't know.
+        if !self.objectives.contains_key(&objective) {
+            return;
+        }
         self.scores.insert(
             (objective, owner),
             ScoreEntry {
@@ -135,10 +141,13 @@ impl Scoreboard {
         color: [f32; 4],
         members: Option<Vec<String>>,
     ) {
+        // Vanilla ignores a parameter change for a team it doesn't know;
+        // only method ADD creates one.
+        if members.is_none() && !self.teams.contains_key(&name) {
+            return;
+        }
         if let Some(members) = &members {
-            for team in self.teams.values_mut() {
-                team.members.retain(|member| !members.contains(member));
-            }
+            self.strip_members(members);
         }
         let team = self.teams.entry(name).or_insert_with(|| ScoreboardTeam {
             prefix: Vec::new(),
@@ -149,16 +158,21 @@ impl Scoreboard {
         team.prefix = prefix;
         team.suffix = suffix;
         team.color = color;
+        // ADD unions its player list onto an existing team, like vanilla's
+        // addPlayerTeam + per-player addPlayerToTeam.
         if let Some(members) = members {
-            team.members = members.into_iter().collect();
+            team.members.extend(members);
         }
     }
 
     pub fn update_team_members(&mut self, name: &str, members: Vec<String>, join: bool) {
+        // Vanilla ignores joins/leaves for unknown teams without touching
+        // other teams' rosters.
+        if !self.teams.contains_key(name) {
+            return;
+        }
         if join {
-            for team in self.teams.values_mut() {
-                team.members.retain(|member| !members.contains(member));
-            }
+            self.strip_members(&members);
         }
         if let Some(team) = self.teams.get_mut(name) {
             for member in members {
@@ -173,6 +187,13 @@ impl Scoreboard {
 
     pub fn remove_team(&mut self, name: &str) {
         self.teams.remove(name);
+    }
+
+    /// Team membership is exclusive: joining players leave their old team.
+    fn strip_members(&mut self, members: &[String]) {
+        for team in self.teams.values_mut() {
+            team.members.retain(|member| !members.contains(member));
+        }
     }
 
     pub fn player_name(&self, name: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
@@ -194,12 +215,29 @@ impl Scoreboard {
             .values()
             .find(|team| team.members.contains(owner));
         let mut line = team.map_or_else(Vec::new, |team| team.prefix.clone());
-        line.extend(display.map(ToOwned::to_owned).unwrap_or_else(|| {
-            vec![TextSpan::new(
-                owner.into(),
-                team.map_or(WHITE, |team| team.color),
-            )]
-        }));
+        line.extend(display.map_or_else(
+            || {
+                vec![TextSpan::new(
+                    owner.into(),
+                    team.map_or(WHITE, |team| team.color),
+                )]
+            },
+            |display| {
+                let mut display = display.to_owned();
+                // Vanilla's team color is the root style over the display
+                // component too; spans were formatted with a white base, so
+                // recolor the base-white ones (an explicitly white-styled
+                // span is indistinguishable and rare).
+                if let Some(team) = team {
+                    for span in &mut display {
+                        if span.color == WHITE {
+                            span.color = team.color;
+                        }
+                    }
+                }
+                display
+            },
+        ));
         if let Some(team) = team {
             line.extend(team.suffix.clone());
         }
@@ -282,6 +320,7 @@ pub fn build_hud(
     hotbar: &[ItemStack],
     tool_highlight_timer: u32,
     action_bar: Option<(&[TextSpan], u64)>,
+    spans_width_fn: super::common::SpansWidthFn<'_>,
     scoreboard: &Scoreboard,
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
@@ -356,15 +395,20 @@ pub fn build_hud(
         use azalea_inventory::components::{CustomName, Rarity};
         let alpha = (tool_highlight_timer as f32 * 256.0 / 10.0 / 255.0).min(1.0);
         // Default-component rarities aren't synced; absent means common.
-        let mut color = match data.get_component::<Rarity>().as_deref() {
+        let color = match data.get_component::<Rarity>().as_deref() {
             Some(Rarity::Uncommon) => super::common::rgb(0xffff55),
             Some(Rarity::Rare) => super::common::rgb(0x55ffff),
             Some(Rarity::Epic) => super::common::rgb(0xff55ff),
             _ => WHITE,
         };
-        color[3] = alpha;
-        let mut span = TextSpan::new(super::common::item_display_name(data), color);
-        span.italic = data.get_component::<CustomName>().is_some();
+        // The rarity color and custom-name italic are vanilla's parent
+        // style: the name's own styling wins where it sets one.
+        let italic = data.get_component::<CustomName>().is_some();
+        let mut spans = super::common::item_display_spans(data, color);
+        for span in &mut spans {
+            span.color[3] *= alpha;
+            span.italic |= italic;
+        }
         let mut y = screen_h - 59.0 * gs;
         if game_mode == 1 {
             y += 14.0 * gs;
@@ -372,7 +416,7 @@ pub fn build_hud(
         elements.push(MenuElement::McText {
             x: cx,
             y,
-            spans: vec![span],
+            spans,
             scale: FONT_SIZE * gs,
             centered: true,
             shadow: true,
@@ -398,7 +442,15 @@ pub fn build_hud(
         });
     }
 
-    build_scoreboard(elements, screen_w, screen_h, gs, scoreboard, text_width_fn);
+    build_scoreboard(
+        elements,
+        screen_w,
+        screen_h,
+        gs,
+        scoreboard,
+        text_width_fn,
+        spans_width_fn,
+    );
 
     let status_bar_y = (hotbar_y - (XP_BAR_H + 1.0 + 2.0) * gs).round();
     let is_survival = crate::player::is_survival(game_mode);
@@ -566,6 +618,7 @@ fn build_scoreboard(
     gs: f32,
     scoreboard: &Scoreboard,
     text_width_fn: TextWidthFn,
+    spans_width_fn: super::common::SpansWidthFn<'_>,
 ) {
     let Some(objective) = scoreboard.sidebar.as_ref() else {
         return;
@@ -588,9 +641,6 @@ fn build_scoreboard(
             .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
     });
     entries.truncate(15);
-    if entries.is_empty() {
-        return;
-    }
     let rows: Vec<(Vec<TextSpan>, Vec<TextSpan>, f32)> = entries
         .iter()
         .map(|((_, owner), entry)| {
@@ -608,13 +658,13 @@ fn build_scoreboard(
                 }
                 ScoreNumberFormat::Fixed(spans) => spans,
             };
-            let number_w = spans_width(&number, fs, text_width_fn);
+            let number_w = spans_width_fn(&number, fs);
             (name, number, number_w)
         })
         .collect();
 
     let title = &obj.display;
-    let title_w = spans_width(title, fs, text_width_fn);
+    let title_w = spans_width_fn(title, fs);
     let spacer_w = text_width_fn(": ", fs);
     let width = rows.iter().fold(title_w, |width, (name, _, number_w)| {
         let extra = if *number_w > 0.0 {
@@ -622,7 +672,7 @@ fn build_scoreboard(
         } else {
             0.0
         };
-        width.max(spans_width(name, fs, text_width_fn) + extra)
+        width.max(spans_width_fn(name, fs) + extra)
     });
 
     let line_h = 9.0 * gs;
@@ -677,13 +727,6 @@ fn build_scoreboard(
             });
         }
     }
-}
-
-fn spans_width(spans: &[TextSpan], scale: f32, text_width_fn: TextWidthFn) -> f32 {
-    spans
-        .iter()
-        .map(|span| text_width_fn(&span.text, scale))
-        .sum()
 }
 
 /// Right-aligned status icon x, matching vanilla `xRight - i * 8 - 9`.

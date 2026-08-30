@@ -113,8 +113,9 @@ impl TabList {
     pub fn sorted_listed(&self, scoreboard: &Scoreboard) -> Vec<&TabListPlayer> {
         let mut out: Vec<&TabListPlayer> = self.players.values().filter(|p| p.listed).collect();
         out.sort_by(|a, b| {
-            a.list_order
-                .cmp(&b.list_order)
+            // `comparingInt(p -> -p.getTabListOrder())`: higher order first.
+            b.list_order
+                .cmp(&a.list_order)
                 .then_with(|| (a.game_mode == 3).cmp(&(b.game_mode == 3)))
                 .then_with(|| {
                     scoreboard

@@ -145,6 +145,7 @@ pub async fn connect_to_server(
         args.view_distance,
         &event_tx,
         &mut game_packet_rx,
+        None,
     )
     .await?;
 
@@ -302,7 +303,11 @@ async fn config_sequence(
     view_distance: u8,
     event_tx: &Sender<NetworkEvent>,
     outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
-) -> Result<azalea_core::registry_holder::RegistryHolder, ConnectionError> {
+    // `Some` on a mid-session reconfiguration: the previous registries,
+    // kept when the server re-sends nothing (vanilla's RegistryDataCollector
+    // returns the original registries unchanged in that case).
+    previous_registries: Option<&std::sync::Arc<azalea_core::registry_holder::RegistryHolder>>,
+) -> Result<std::sync::Arc<azalea_core::registry_holder::RegistryHolder>, ConnectionError> {
     use azalea_core::delta::AzBuf;
     use azalea_core::registry_holder::RegistryHolder;
     use azalea_entity::HumanoidArm;
@@ -310,44 +315,49 @@ async fn config_sequence(
     use azalea_protocol::packets::config::*;
 
     let mut registry_holder = RegistryHolder::default();
+    let mut received_registry_data = false;
 
-    // Vanilla announces its brand in the config phase; some servers key off it.
-    let mut brand_payload = Vec::new();
-    String::from("pomme")
-        .azalea_write(&mut brand_payload)
-        .unwrap();
-    conn.write(ServerboundConfigPacket::CustomPayload(
-        s_custom_payload::ServerboundCustomPayload {
-            identifier: "minecraft:brand".into(),
-            data: brand_payload.into(),
-        },
-    ))
-    .await?;
-
-    conn.write(ServerboundConfigPacket::ClientInformation(
-        s_client_information::ServerboundClientInformation {
-            information: ClientInformation {
-                language: "en_us".into(),
-                view_distance,
-                chat_visibility: ChatVisibility::Full,
-                chat_colors: true,
-                model_customization: ModelCustomization {
-                    cape: true,
-                    jacket: true,
-                    left_sleeve: true,
-                    right_sleeve: true,
-                    left_pants: true,
-                    right_pants: true,
-                    hat: true,
-                },
-                main_hand: HumanoidArm::Right,
-                text_filtering_enabled: false,
-                allows_listing: true,
-                particle_status: ParticleStatus::All,
+    // Vanilla sends brand and client information once, from the login
+    // listener; a reconfiguration sends neither.
+    if previous_registries.is_none() {
+        // Some servers key off the brand.
+        let mut brand_payload = Vec::new();
+        String::from("pomme")
+            .azalea_write(&mut brand_payload)
+            .unwrap();
+        conn.write(ServerboundConfigPacket::CustomPayload(
+            s_custom_payload::ServerboundCustomPayload {
+                identifier: "minecraft:brand".into(),
+                data: brand_payload.into(),
             },
-        },
-    ))
-    .await?;
+        ))
+        .await?;
+
+        conn.write(ServerboundConfigPacket::ClientInformation(
+            s_client_information::ServerboundClientInformation {
+                information: ClientInformation {
+                    language: "en_us".into(),
+                    view_distance,
+                    chat_visibility: ChatVisibility::Full,
+                    chat_colors: true,
+                    model_customization: ModelCustomization {
+                        cape: true,
+                        jacket: true,
+                        left_sleeve: true,
+                        right_sleeve: true,
+                        left_pants: true,
+                        right_pants: true,
+                        hat: true,
+                    },
+                    main_hand: HumanoidArm::Right,
+                    text_filtering_enabled: false,
+                    allows_listing: true,
+                    particle_status: ParticleStatus::All,
+                },
+            },
+        ))
+        .await?;
+    }
 
     loop {
         let packet = tokio::select! {
@@ -373,11 +383,15 @@ async fn config_sequence(
                         config_pack::ServerboundResourcePack { id: p.id, action },
                     )).await?;
                 }
+                // Anything else is discarded: vanilla defers its outbound
+                // queue, but pomme's game keeps ticking through a
+                // reconfiguration, so stale movement/actions are best dropped.
                 continue;
             }
         };
         match packet {
             ClientboundConfigPacket::RegistryData(p) => {
+                received_registry_data = true;
                 registry_holder.append(p.registry_id, p.entries);
             }
             ClientboundConfigPacket::UpdateTags(_) => {
@@ -405,7 +419,10 @@ async fn config_sequence(
                     s_finish_configuration::ServerboundFinishConfiguration {},
                 ))
                 .await?;
-                return Ok(registry_holder);
+                return Ok(match previous_registries {
+                    Some(previous) if !received_registry_data => previous.clone(),
+                    _ => std::sync::Arc::new(registry_holder),
+                });
             }
             ClientboundConfigPacket::Disconnect(p) => {
                 return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
@@ -539,7 +556,7 @@ async fn game_loop(
     chat_rx: crossbeam_channel::Receiver<String>,
     outbound_tx: mpsc::UnboundedSender<Outbound>,
     mut outbound_rx: mpsc::UnboundedReceiver<Outbound>,
-    registry_holder: azalea_core::registry_holder::RegistryHolder,
+    mut registry_holder: std::sync::Arc<azalea_core::registry_holder::RegistryHolder>,
     view_distance: u8,
 ) -> Result<(), ConnectionError> {
     let sender = PacketSender::new(outbound_tx.clone());
@@ -600,7 +617,6 @@ async fn game_loop(
 
     // Share the registries with the game loop for hashing predicted container
     // clicks.
-    let mut registry_holder = std::sync::Arc::new(registry_holder);
     let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
 
     let translation = super::translate::active();
@@ -651,12 +667,23 @@ async fn game_loop(
                     write_game_frame(&mut conn.writer, translation, serialize_game_packet(&ack)?)
                         .await?;
                     let mut config = conn.config();
-                    let holder =
-                        config_sequence(&mut config, view_distance, event_tx, &mut outbound_rx)
-                            .await?;
+                    let holder = config_sequence(
+                        &mut config,
+                        view_distance,
+                        event_tx,
+                        &mut outbound_rx,
+                        Some(&registry_holder),
+                    )
+                    .await?;
                     conn = config.game();
-                    registry_holder = std::sync::Arc::new(holder);
-                    let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
+                    if !std::sync::Arc::ptr_eq(&holder, &registry_holder) {
+                        registry_holder = holder;
+                        let _ =
+                            event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
+                        let _ = event_tx.try_send(NetworkEvent::BiomeColors {
+                            colors: extract_biome_climate(&registry_holder),
+                        });
+                    }
                     continue;
                 }
                 if let Some(t) = translation

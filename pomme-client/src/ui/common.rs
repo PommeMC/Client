@@ -15,14 +15,37 @@ pub const SLOT_STRIDE: f32 = 18.0;
 pub const SLOT_LABEL_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 const BTN_BORDER: f32 = 3.0;
 
-pub fn item_display_name(data: &ItemStackData) -> String {
+pub type SpansWidthFn<'a> = &'a dyn Fn(&[crate::ui::text::TextSpan], f32) -> f32;
+
+/// The hover-name component: custom name, else item-name component.
+fn item_hover_component(data: &ItemStackData) -> Option<azalea_chat::FormattedText> {
     if let Some(name) = data.get_component::<CustomName>() {
-        return name.name.to_string();
+        return Some(name.name.clone());
     }
-    if let Some(name) = data.get_component::<ItemName>() {
-        return name.name.to_string();
-    }
-    crate::lang::item_display_name(data.kind)
+    data.get_component::<ItemName>()
+        .map(|name| name.name.clone())
+}
+
+pub fn item_display_name(data: &ItemStackData) -> String {
+    item_hover_component(data)
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| crate::lang::item_display_name(data.kind))
+}
+
+/// The hover name as styled spans; `base_color` fills wherever the name
+/// component carries no explicit color (vanilla's parent style).
+pub fn item_display_spans(
+    data: &ItemStackData,
+    base_color: [f32; 4],
+) -> Vec<crate::ui::text::TextSpan> {
+    item_hover_component(data)
+        .map(|name| crate::ui::text::format_text_spans(&name, base_color))
+        .unwrap_or_else(|| {
+            vec![crate::ui::text::TextSpan::new(
+                crate::lang::item_display_name(data.kind),
+                base_color,
+            )]
+        })
 }
 
 pub const fn rgb(hex: u32) -> [f32; 4] {
