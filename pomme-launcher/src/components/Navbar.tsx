@@ -1,3 +1,4 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useEffect, useState } from "react";
 import {
@@ -61,6 +62,11 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
     friendsList,
   } = useAppStateContext();
 
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    getVersion().then(setVersion).catch(console.error);
+  }, []);
+
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -89,7 +95,7 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
           <span className="brand-name">POMME</span>
           <span className="brand-sub">LAUNCHER</span>
         </div>
-        <span className="brand-version">v0.1.0</span>
+        <span className="brand-version">{version && `v${version}`}</span>
       </div>
 
       <div className="sidebar-nav">
