@@ -144,6 +144,11 @@ impl MainMenu {
         } else {
             "Vignette: OFF"
         };
+        let autosave_label = if self.show_autosave_indicator {
+            "Show Autosave Indicator: ON"
+        } else {
+            "Show Autosave Indicator: OFF"
+        };
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
             OptRow::Big("Fullscreen Resolution: Current"),
@@ -165,7 +170,7 @@ impl MainMenu {
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
             OptRow::PairLeft("Weather Radius: 10"),
             OptRow::Header("Preferences"),
-            OptRow::Pair("Show Autosave Indicator: ON", vignette_label),
+            OptRow::Pair(autosave_label, vignette_label),
             OptRow::Pair(&attack_label, "Chunk Fade-in: 1.0s"),
         ];
         let rd_frac = ((self.render_distance as f32 - 2.0) / (rd_max as f32 - 2.0)).clamp(0.0, 1.0);
@@ -747,6 +752,10 @@ impl MainMenu {
                     }
                     if label.starts_with("View Bobbing:") {
                         self.view_bobbing = !self.view_bobbing;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Show Autosave Indicator:") {
+                        self.show_autosave_indicator = !self.show_autosave_indicator;
                         self.save_settings();
                     }
                     if label.starts_with("VSync:") {

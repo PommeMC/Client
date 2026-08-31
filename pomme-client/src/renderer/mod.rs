@@ -960,6 +960,11 @@ impl Renderer {
         self.screenshot.drain_results()
     }
 
+    /// A screenshot capture or encode is still in flight.
+    pub fn screenshot_saving(&self) -> bool {
+        self.screenshot.saving()
+    }
+
     pub fn wait_for_all_frames(&self) {
         let _ = self
             .ctx

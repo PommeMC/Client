@@ -1125,6 +1125,33 @@ fn build_scoreboard(
     }
 }
 
+/// Vanilla `Hud.extractSavingIndicator`: "Saving world" text 5 GUI units from
+/// the bottom-right, faded by `alpha`. No backdrop rect: vanilla's
+/// `getBackgroundColor(0.0f)` is 0 under default options.
+pub fn build_saving_indicator(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    alpha: f32,
+    text_width_fn: TextWidthFn,
+) {
+    let text = crate::lang::translate("menu.savingLevel").unwrap_or("Saving world");
+    let fs = FONT_SIZE * gs;
+    let w = text_width_fn(text, fs);
+    let mut span = TextSpan::new(text.into(), WHITE);
+    span.color[3] *= alpha;
+    elements.push(MenuElement::McText {
+        x: (screen_w - w - 5.0 * gs).round(),
+        // Vanilla `guiHeight - lineHeight(9) - 5`.
+        y: (screen_h - 14.0 * gs).round(),
+        spans: vec![span],
+        scale: fs,
+        centered: false,
+        shadow: true,
+    });
+}
+
 /// Right-aligned status icon x, matching vanilla `xRight - i * 8 - 9`.
 fn icon_row_x_rtl(x_right: f32, i: i32, gs: f32) -> f32 {
     (x_right - i as f32 * ICON_STRIDE * gs - ICON_SIZE * gs).round()

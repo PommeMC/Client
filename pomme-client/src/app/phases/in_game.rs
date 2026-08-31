@@ -158,6 +158,10 @@ pub struct GameState {
     pub subtitles: crate::ui::subtitles::SubtitleOverlayState,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
+    /// Vanilla `Hud.autosaveIndicatorValue` / `lastAutosaveIndicatorValue`;
+    /// driven by in-flight screenshot writes (pomme saves no worlds).
+    pub saving_indicator_value: f32,
+    pub last_saving_indicator_value: f32,
     /// Tick of the last XP progress change; the XP bar outprioritizes the
     /// locator bar for 100 ticks after it (vanilla
     /// `experienceDisplayStartTick`; `i64::MIN` = untouched since (re)spawn,
@@ -352,6 +356,8 @@ impl GameState {
             toasts: crate::ui::toast::ToastState::default(),
             subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
             tick_count: 0,
+            saving_indicator_value: 0.0,
+            last_saving_indicator_value: 0.0,
             xp_display_start_tick: i64::MIN,
             controlled_vehicle_id: None,
             riding_vehicle_id: None,
@@ -1486,6 +1492,14 @@ pub fn update_game(
         // the darkness of the eye block's light level.
         let target = (1.0 - eye_lightmap_brightness(game)).clamp(0.0, 1.0);
         game.vignette_brightness += (target - game.vignette_brightness) * 0.01;
+        // Vanilla `Hud.tickAutosaveIndicator`.
+        game.last_saving_indicator_value = game.saving_indicator_value;
+        let target = if gfx.renderer.screenshot_saving() {
+            1.0
+        } else {
+            0.0
+        };
+        game.saving_indicator_value = game.saving_indicator_value.lerp(target, 0.2);
         if let Some(c) = &mut game.open_container
             && let Some(state) = &mut c.enchant
         {
@@ -2768,6 +2782,20 @@ pub fn update_game(
             _ => None,
         }
     };
+    // Last element pushed: vanilla draws the saving indicator on its own
+    // stratum above screens, with the GUI hidden (F1) included.
+    if !benchmark_running && core.menu.show_autosave_indicator {
+        let alpha = game
+            .last_saving_indicator_value
+            .lerp(game.saving_indicator_value, partial_tick)
+            .clamp(0.0, 1.0);
+        if (alpha * 255.0).floor() > 0.0 {
+            hud::build_saving_indicator(&mut elements, sw, sh, gs, alpha, &|t, s| {
+                gfx.renderer.menu_text_width(t, s)
+            });
+        }
+    }
+
     // Recompute after this frame's state changes (a finished benchmark releases
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();

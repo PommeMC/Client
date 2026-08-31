@@ -38,6 +38,8 @@ struct Settings {
     #[serde(default = "default_true")]
     vignette: bool,
     #[serde(default = "default_true")]
+    show_autosave_indicator: bool,
+    #[serde(default = "default_true")]
     vsync: bool,
     #[serde(default = "default_max_framerate")]
     max_framerate: u32,
@@ -136,6 +138,7 @@ impl Default for Settings {
             fov_effect_scale: 1.0,
             view_bobbing: true,
             show_subtitles: false,
+            show_autosave_indicator: true,
             vignette: true,
             vsync: true,
             max_framerate: 120,
@@ -421,6 +424,7 @@ pub struct MainMenu {
     pub fov_effect_scale: f32,
     pub view_bobbing: bool,
     pub show_subtitles: bool,
+    pub show_autosave_indicator: bool,
     pub vignette: bool,
     pub vsync: bool,
     pub max_framerate: u32,
@@ -528,6 +532,7 @@ impl MainMenu {
             fov_effect_scale: settings.fov_effect_scale,
             view_bobbing: settings.view_bobbing,
             show_subtitles: settings.show_subtitles,
+            show_autosave_indicator: settings.show_autosave_indicator,
             vignette: settings.vignette,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
@@ -624,6 +629,7 @@ impl MainMenu {
                 fov_effect_scale: self.fov_effect_scale,
                 view_bobbing: self.view_bobbing,
                 show_subtitles: self.show_subtitles,
+                show_autosave_indicator: self.show_autosave_indicator,
                 vignette: self.vignette,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
