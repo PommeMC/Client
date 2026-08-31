@@ -355,6 +355,7 @@ impl AppCore {
     fn clear_server_ui(&mut self, game: &mut GameState, renderer: &mut Renderer) {
         game.tab_list.clear();
         game.scoreboard.clear();
+        game.player.effects.clear();
         self.requested_player_skins.clear();
         renderer.clear_player_entity_skins();
     }
@@ -592,6 +593,22 @@ impl AppCore {
                     if entity_id == game.player.entity_id {
                         game.player.armor = armor;
                     }
+                }
+                NetworkEvent::UpdateMobEffect { entity_id, effect } => {
+                    if entity_id == game.player.entity_id {
+                        game.player.effects.update(effect);
+                    }
+                }
+                NetworkEvent::RemoveMobEffect {
+                    entity_id,
+                    effect_id,
+                } => {
+                    if entity_id == game.player.entity_id {
+                        game.player.effects.remove(effect_id);
+                    }
+                }
+                NetworkEvent::ClearMobEffects => {
+                    game.player.effects.clear();
                 }
                 NetworkEvent::ContainerContent {
                     container_id,

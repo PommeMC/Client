@@ -1703,6 +1703,10 @@ pub enum SpriteId {
     CrosshairAttackIndicatorProgress,
     HotbarAttackIndicatorBackground,
     HotbarAttackIndicatorProgress,
+    EffectBackground,
+    EffectBackgroundAmbient,
+    /// Index into `mob_effect::MOB_EFFECTS`.
+    MobEffect(u8),
     LocatorBarBackground,
     LocatorDotDefault0,
     LocatorDotDefault1,
@@ -1934,6 +1938,16 @@ fn build_sprite_atlas(
         (
             SpriteId::HotbarSelection,
             "minecraft/textures/gui/sprites/hud/hotbar_selection.png",
+            0.0,
+        ),
+        (
+            SpriteId::EffectBackground,
+            "minecraft/textures/gui/sprites/hud/effect_background.png",
+            0.0,
+        ),
+        (
+            SpriteId::EffectBackgroundAmbient,
+            "minecraft/textures/gui/sprites/hud/effect_background_ambient.png",
             0.0,
         ),
         (
@@ -2433,9 +2447,23 @@ fn build_sprite_atlas(
         ),
     ];
 
+    let effect_icons = crate::mob_effect::MOB_EFFECTS
+        .iter()
+        .enumerate()
+        .map(|(i, info)| {
+            (
+                SpriteId::MobEffect(i as u8),
+                format!("minecraft/textures/mob_effect/{}.png", info.name),
+                0.0,
+            )
+        });
     let mut images: Vec<(SpriteId, Vec<u8>, u32, u32, f32)> = Vec::new();
-    for &(id, asset_key, border) in sprites {
-        let path = resolve_asset_path(jar_assets_dir, asset_index, asset_key);
+    for (id, asset_key, border) in sprites
+        .iter()
+        .map(|&(id, key, border)| (id, key.to_string(), border))
+        .chain(effect_icons)
+    {
+        let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
         match crate::assets::load_image(&path) {
             Ok(img) => {
                 let rgba = img.to_rgba8();
