@@ -12,10 +12,17 @@ pub struct SoundVariant {
     pub volume: f32,
 }
 
+/// A sound event's entry in `sounds.json`: its variants and optional
+/// subtitle translation key.
+struct SoundEvent {
+    variants: Vec<SoundVariant>,
+    subtitle: Option<String>,
+}
+
 /// Parsed `sounds.json`: a map from event name (e.g. `music.menu`) to its
-/// variants.
+/// definition.
 pub struct SoundsIndex {
-    events: HashMap<String, Vec<SoundVariant>>,
+    events: HashMap<String, SoundEvent>,
 }
 
 impl SoundsIndex {
@@ -77,7 +84,11 @@ impl SoundsIndex {
                 }
             }
             if !variants.is_empty() {
-                events.insert(event.clone(), variants);
+                let subtitle = def
+                    .get("subtitle")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string);
+                events.insert(event.clone(), SoundEvent { variants, subtitle });
             }
         }
 
@@ -85,7 +96,13 @@ impl SoundsIndex {
     }
 
     pub fn variants(&self, event: &str) -> Option<&[SoundVariant]> {
-        self.events.get(event).map(Vec::as_slice)
+        self.events.get(event).map(|e| e.variants.as_slice())
+    }
+
+    /// The subtitle translation key for an event, e.g.
+    /// `subtitles.block.anvil.land`.
+    pub fn subtitle(&self, event: &str) -> Option<&str> {
+        self.events.get(event)?.subtitle.as_deref()
     }
 }
 

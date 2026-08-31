@@ -155,6 +155,7 @@ pub struct GameState {
     pub scoreboard: crate::ui::hud::Scoreboard,
     pub boss_bars: crate::ui::boss_bar::BossBarState,
     pub toasts: crate::ui::toast::ToastState,
+    pub subtitles: crate::ui::subtitles::SubtitleOverlayState,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
     /// Tick of the last XP progress change; the XP bar outprioritizes the
@@ -339,6 +340,7 @@ impl GameState {
             scoreboard: crate::ui::hud::Scoreboard::default(),
             boss_bars: crate::ui::boss_bar::BossBarState::default(),
             toasts: crate::ui::toast::ToastState::default(),
+            subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
             tick_count: 0,
             xp_display_start_tick: i64::MIN,
             interaction: InteractionState::new(),
@@ -1296,6 +1298,7 @@ pub fn update_game(
     core.audio
         .set_listener(listener_pos, game.player.look_dir.y_rot_deg());
     core.audio.set_volumes(core.menu.category_volumes());
+    core.audio.set_subtitles_enabled(core.menu.show_subtitles);
 
     gfx.renderer.set_vsync(core.menu.vsync);
 
@@ -2310,6 +2313,28 @@ pub fn update_game(
         game.chat.build(&mut elements, sw, sh, gs, &|t, s| {
             gfx.renderer.menu_text_width(t, s)
         });
+    }
+
+    // Subtitles draw above chat and the tab list; toasts stay on top
+    // (vanilla extract order). The queue is empty while the option is off.
+    let subtitle_now = std::time::Instant::now();
+    for ev in core.audio.take_subtitle_events() {
+        game.subtitles
+            .on_play_sound(&ev.key, *ev.pos, ev.range, subtitle_now);
+    }
+    if core.menu.show_subtitles && !benchmark_running && !game.hide_gui {
+        let (yaw_deg, pitch_deg) = gfx.renderer.camera_effective_look_deg();
+        game.subtitles.build(
+            &mut elements,
+            sw,
+            sh,
+            gs,
+            gfx.renderer.camera_render_position(),
+            yaw_deg,
+            pitch_deg,
+            subtitle_now,
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+        );
     }
 
     // Vanilla Gui.update() runs the toast manager every frame regardless of

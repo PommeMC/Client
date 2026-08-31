@@ -20,6 +20,7 @@ pub mod menu;
 pub mod pause;
 pub mod player_tab;
 pub mod server_list;
+pub mod subtitles;
 pub mod text;
 pub mod text_edit;
 pub mod title;

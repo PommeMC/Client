@@ -33,6 +33,8 @@ struct Settings {
     fov_effect_scale: f32,
     #[serde(default = "default_true")]
     view_bobbing: bool,
+    #[serde(default)]
+    show_subtitles: bool,
     #[serde(default = "default_true")]
     vsync: bool,
     #[serde(default = "default_max_framerate")]
@@ -131,6 +133,7 @@ impl Default for Settings {
             fov: 70,
             fov_effect_scale: 1.0,
             view_bobbing: true,
+            show_subtitles: false,
             vsync: true,
             max_framerate: 120,
             show_online_status: true,
@@ -414,6 +417,7 @@ pub struct MainMenu {
     /// FOV Effects slider fraction (0..1); squared by `fov_effect()`.
     pub fov_effect_scale: f32,
     pub view_bobbing: bool,
+    pub show_subtitles: bool,
     pub vsync: bool,
     pub max_framerate: u32,
     pub show_online_status: bool,
@@ -519,6 +523,7 @@ impl MainMenu {
             fov: settings.fov,
             fov_effect_scale: settings.fov_effect_scale,
             view_bobbing: settings.view_bobbing,
+            show_subtitles: settings.show_subtitles,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
             show_online_status: settings.show_online_status,
@@ -613,6 +618,7 @@ impl MainMenu {
                 fov: self.fov,
                 fov_effect_scale: self.fov_effect_scale,
                 view_bobbing: self.view_bobbing,
+                show_subtitles: self.show_subtitles,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
                 show_online_status: self.show_online_status,
