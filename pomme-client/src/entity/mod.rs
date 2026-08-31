@@ -131,6 +131,8 @@ pub struct LivingEntity {
     pub anger_end_time: i64,
     /// Metadata health; drives the tame wolf's tail angle.
     pub health: f32,
+    /// `max_health` attribute (`UpdateAttributes`); sizes the mount heart row.
+    pub max_health: f32,
     pub interested_angle: f32,
     pub prev_interested_angle: f32,
     pub shake_anim: f32,
@@ -226,6 +228,11 @@ impl LivingEntity {
         body_y_rot_deg: f32,
         player_uuid: Option<uuid::Uuid>,
     ) -> Self {
+        let default_health = if entity_type == EntityKind::IronGolem {
+            100.0
+        } else {
+            20.0
+        };
         Self {
             position,
             prev_position: position,
@@ -272,11 +279,8 @@ impl LivingEntity {
             anger_end_time: -1,
             // Vanilla constructs at max health; the golem's crack overlay
             // reads it before the metadata arrives.
-            health: if entity_type == EntityKind::IronGolem {
-                100.0
-            } else {
-                20.0
-            },
+            health: default_health,
+            max_health: default_health,
             interested_angle: 0.0,
             prev_interested_angle: 0.0,
             shake_anim: 0.0,

@@ -372,6 +372,8 @@ pub fn build_hud(
     // Gated to survival by the caller.
     air_bubbles: Option<AirBubbles>,
     eyes_in_water: bool,
+    // (health, max health) of the ridden living vehicle, if any.
+    vehicle_health: Option<(f32, f32)>,
     tick: u64,
     experience_level: i32,
     experience_progress: f32,
@@ -565,6 +567,9 @@ pub fn build_hud(
     // Vanilla Hud shares one Random across heart jitter, food shake and bubble
     // wobble, seeded once per frame; `tickCount * 312871` wraps at 32 bits.
     let mut hud_rng = crate::util::JavaRandom::new((tick as i32).wrapping_mul(312871) as i64);
+    // Vanilla getVehicleMaxHearts: (maxHealth + 0.5) / 2 hearts, capped at 30.
+    let vehicle_hearts = vehicle_health.map_or(0, |(_, max)| ((max + 0.5) as i32 / 2).min(30));
+    let vehicle_rows = (vehicle_hearts + 9) / 10;
     let is_survival = crate::player::is_survival(game_mode);
     if is_survival {
         let absorption_halves = absorption.ceil().max(0.0) as i32;
@@ -579,19 +584,22 @@ pub fn build_hud(
             &mut hud_rng,
             gs,
         );
+        // Mount hearts replace the food bar (vanilla extractPlayerHealth).
         // TODO: food shake consumes from hud_rng between hearts and bubbles in
         // vanilla.
-        build_status_bar(
-            elements,
-            hotbar_x + hotbar_w,
-            status_bar_y,
-            food as f32,
-            true,
-            SpriteId::FoodEmpty,
-            SpriteId::FoodFull,
-            SpriteId::FoodHalf,
-            gs,
-        );
+        if vehicle_hearts == 0 {
+            build_status_bar(
+                elements,
+                hotbar_x + hotbar_w,
+                status_bar_y,
+                food as f32,
+                true,
+                SpriteId::FoodEmpty,
+                SpriteId::FoodFull,
+                SpriteId::FoodHalf,
+                gs,
+            );
+        }
 
         if armor > 0 {
             // Vanilla `yLineBase - (rows - 1) * rowHeight - 10`.
@@ -609,6 +617,21 @@ pub fn build_hud(
                 gs,
             );
         }
+    }
+
+    // Vanilla draws these outside the canHurtPlayer gate, so creative shows
+    // mount hearts too.
+    if let Some((vehicle_hp, _)) = vehicle_health
+        && vehicle_hearts > 0
+    {
+        build_vehicle_hearts(
+            elements,
+            hotbar_x + hotbar_w,
+            status_bar_y,
+            vehicle_hearts,
+            vehicle_hp,
+            gs,
+        );
     }
 
     let bar_w = XP_BAR_W * gs;
@@ -705,7 +728,12 @@ pub fn build_hud(
     }
 
     if let Some(bubbles) = air_bubbles {
-        let bubble_y = (status_bar_y - (ICON_SIZE * 2.0 + 1.0) * gs).round();
+        // Vanilla getAirBubbleYLine: one 10px slot above the topmost mount
+        // heart row (or the food bar when there is no mount).
+        let bubble_y = (status_bar_y
+            - (ICON_SIZE * 2.0 + 1.0) * gs
+            - (vehicle_rows.max(1) - 1) as f32 * 10.0 * gs)
+            .round();
         let icon_size = ICON_SIZE * gs;
         let wobbling = bubbles.empty == 10 && tick.is_multiple_of(2);
         for b in 1..=10i32 {
@@ -1305,6 +1333,51 @@ fn build_status_bar(
                 tint: WHITE,
             });
         }
+    }
+}
+
+/// Vanilla `Hud.extractVehicleHealth`: right-aligned mount hearts in rows of
+/// 10 stacked 10px apart, bottom row first; no blink or hardcore variants.
+fn build_vehicle_hearts(
+    elements: &mut Vec<MenuElement>,
+    x_right: f32,
+    y: f32,
+    hearts: i32,
+    health: f32,
+    gs: f32,
+) {
+    let icon_size = ICON_SIZE * gs;
+    let current = health.ceil() as i32;
+    let mut remaining = hearts;
+    let mut row_y = y;
+    let mut base_health = 0;
+    while remaining > 0 {
+        let row_hearts = remaining.min(10);
+        remaining -= row_hearts;
+        let iy = (row_y - icon_size).round();
+        for i in 0..row_hearts {
+            let x = icon_row_x_rtl(x_right, i, gs);
+            let mut push = |sprite| {
+                elements.push(MenuElement::Image {
+                    x,
+                    y: iy,
+                    w: icon_size,
+                    h: icon_size,
+                    sprite,
+                    tint: WHITE,
+                });
+            };
+            push(SpriteId::HeartVehicleContainer);
+            let halves = i * 2 + 1 + base_health;
+            if halves < current {
+                push(SpriteId::HeartVehicleFull);
+            }
+            if halves == current {
+                push(SpriteId::HeartVehicleHalf);
+            }
+        }
+        row_y -= 10.0 * gs;
+        base_health += 20;
     }
 }
 

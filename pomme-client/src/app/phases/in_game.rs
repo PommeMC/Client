@@ -166,6 +166,8 @@ pub struct GameState {
     /// Vehicle we are the controlling (first) passenger of, from
     /// `SetPassengers` (vanilla `getControlledVehicle`).
     pub controlled_vehicle_id: Option<i32>,
+    /// Vehicle we are any passenger of (vanilla `getVehicle`).
+    pub riding_vehicle_id: Option<i32>,
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
@@ -347,6 +349,7 @@ impl GameState {
             tick_count: 0,
             xp_display_start_tick: i64::MIN,
             controlled_vehicle_id: None,
+            riding_vehicle_id: None,
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
             show_debug: false,
@@ -397,6 +400,15 @@ impl GameState {
         self.controlled_vehicle_id
             .and_then(|id| self.entity_store.living.get(&id))
             .is_some_and(|e| crate::entity::is_equine(&e.entity_type) && e.saddled)
+    }
+
+    /// Vanilla `Hud.getPlayerVehicleWithHealth`: (health, max health) of the
+    /// ridden vehicle when it is living (`Entity.showVehicleHealth`); the
+    /// living-store lookup is the `instanceof LivingEntity` gate.
+    pub fn vehicle_health(&self) -> Option<(f32, f32)> {
+        self.riding_vehicle_id
+            .and_then(|id| self.entity_store.living.get(&id))
+            .map(|e| (e.health, e.max_health))
     }
 
     pub fn gui_open(&self) -> bool {
@@ -1769,6 +1781,7 @@ pub fn update_game(
             game.player.armor,
             air_bubbles,
             game.player.eyes_in_water,
+            game.vehicle_health(),
             game.tick_count,
             game.player.experience_level,
             game.player.experience_progress,

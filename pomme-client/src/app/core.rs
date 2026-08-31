@@ -423,6 +423,7 @@ impl AppCore {
                     // the XP display sentinel; waypoints persist.
                     game.xp_display_start_tick = i64::MIN;
                     game.controlled_vehicle_id = None;
+                    game.riding_vehicle_id = None;
                     game.player.jump_riding_ticks = 0;
                     game.player.jump_riding_scale = 0.0;
 
@@ -582,14 +583,20 @@ impl AppCore {
                     passengers,
                 } => {
                     let me = game.player.entity_id;
-                    if passengers.first() == Some(&me) {
-                        game.controlled_vehicle_id = Some(vehicle);
-                    } else if passengers.contains(&me)
-                        || game.controlled_vehicle_id == Some(vehicle)
-                    {
-                        // Riding but not controlling, or removed from this
-                        // vehicle (vanilla getControlledVehicle -> null).
-                        game.controlled_vehicle_id = None;
+                    if passengers.contains(&me) {
+                        game.riding_vehicle_id = Some(vehicle);
+                        // Only the first passenger controls (vanilla
+                        // getControlledVehicle -> null otherwise).
+                        game.controlled_vehicle_id =
+                            (passengers.first() == Some(&me)).then_some(vehicle);
+                    } else {
+                        // Removed from this vehicle.
+                        if game.riding_vehicle_id == Some(vehicle) {
+                            game.riding_vehicle_id = None;
+                        }
+                        if game.controlled_vehicle_id == Some(vehicle) {
+                            game.controlled_vehicle_id = None;
+                        }
                     }
                 }
                 NetworkEvent::EntitySaddle { entity_id, saddled } => {
@@ -644,6 +651,9 @@ impl AppCore {
                 } => {
                     if entity_id == game.player.entity_id {
                         game.player.max_health = max_health;
+                    }
+                    if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
+                        e.max_health = max_health;
                     }
                 }
                 NetworkEvent::ContainerContent {
@@ -1197,6 +1207,9 @@ impl AppCore {
                     game.item_entity_store.remove(&ids);
                     if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
                         game.controlled_vehicle_id = None;
+                    }
+                    if game.riding_vehicle_id.is_some_and(|v| ids.contains(&v)) {
+                        game.riding_vehicle_id = None;
                     }
                 }
                 NetworkEvent::EntityHeadRotation {
