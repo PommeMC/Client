@@ -69,6 +69,7 @@ const useAppState = () => {
   const [versions, setVersions] = useState<GameVersion[]>([]);
   const [launchingStatus, setLaunchingStatus] = useState<LaunchingStatus>(null);
   const [authLoading, setAuthLoading] = useState(false);
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [news, setNews] = useState<PatchNote[]>([]);
   const [skinUrl, setSkinUrl] = useState<string | null>(null);
@@ -106,6 +107,8 @@ const useAppState = () => {
     setLaunchingStatus,
     authLoading,
     setAuthLoading,
+    authUrl,
+    setAuthUrl,
     status,
     setStatus,
     news,

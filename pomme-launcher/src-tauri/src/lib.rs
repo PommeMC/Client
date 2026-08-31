@@ -78,6 +78,7 @@ pub fn get_builder() -> tauri_specta::Builder {
             commands::update_friend_settings,
         ])
         .events(tauri_specta::collect_events![
+            auth::AuthUrlEvent,
             commands::ConsoleMessageEvent,
             commands::GameExitedEvent,
             downloader::DownloadProgressEvent,

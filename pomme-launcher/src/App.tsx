@@ -37,6 +37,7 @@ function App() {
     downloadedVersions,
     setLaunchingStatus,
     setAuthLoading,
+    setAuthUrl,
     setStatus,
     setNews,
     setSkinUrl,
@@ -115,6 +116,15 @@ function App() {
     };
   }, [setDownloadProgress]);
 
+  useEffect(() => {
+    const unlisten = events.authUrlEvent.listen((event) => {
+      setAuthUrl(event.payload.url);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [setAuthUrl]);
+
   const startAddAccount = useCallback(async () => {
     setAccountDropdownOpen(false);
     setAuthLoading(true);
@@ -133,6 +143,7 @@ function App() {
       setStatus(`Auth failed: ${res.error}`);
     }
     setAuthLoading(false);
+    setAuthUrl(null);
   }, [
     accounts,
     loadSkin,
@@ -140,6 +151,7 @@ function App() {
     setAccounts,
     setActiveIndex,
     setAuthLoading,
+    setAuthUrl,
     setStatus,
   ]);
 
