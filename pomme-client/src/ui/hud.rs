@@ -13,13 +13,17 @@ use crate::ui::text::TextSpan;
 use crate::world::waypoints::{LocatorDot, PitchDirection, WaypointStyleId};
 
 /// Which bar occupies the slot above the hotbar (vanilla `ContextualInfo`).
-// TODO: JumpableVehicle bar.
 pub enum ContextualBarKind<'a> {
     Empty,
     Experience,
     Locator {
         dots: &'a [LocatorDot],
         arrow_frame_1: bool,
+    },
+    /// Ride-jump charge meter (vanilla `JumpableVehicleBar`).
+    // TODO: cooldown overlay when camel/nautilus dash mounts land.
+    JumpableVehicle {
+        charge: f32,
     },
 }
 
@@ -615,6 +619,7 @@ pub fn build_hud(
     let bar_background = match bar {
         ContextualBarKind::Experience => Some(SpriteId::ExperienceBarBackground),
         ContextualBarKind::Locator { .. } => Some(SpriteId::LocatorBarBackground),
+        ContextualBarKind::JumpableVehicle { .. } => Some(SpriteId::JumpBarBackground),
         ContextualBarKind::Empty => None,
     };
     if let Some(sprite) = bar_background {
@@ -628,27 +633,39 @@ pub fn build_hud(
         });
     }
 
-    if matches!(bar, ContextualBarKind::Experience) {
+    // Left-clipped progress fill; the scissored full-width draw is pixel-
+    // equivalent to vanilla's UV sub-rect blit at identical scale.
+    let bar_fill = match bar {
         // Vanilla ExperienceBar: (int)(experienceProgress * 183).
-        let fill_px = (experience_progress.clamp(0.0, 1.0) * 183.0) as i32;
-        if fill_px > 0 {
-            let fill_w = (fill_px as f32 * gs).round();
-            elements.push(MenuElement::ScissorPush {
-                x: bar_x,
-                y: bar_y,
-                w: fill_w,
-                h: bar_h,
-            });
-            elements.push(MenuElement::Image {
-                x: bar_x,
-                y: bar_y,
-                w: bar_w,
-                h: bar_h,
-                sprite: SpriteId::ExperienceBarProgress,
-                tint: WHITE,
-            });
-            elements.push(MenuElement::ScissorPop);
-        }
+        ContextualBarKind::Experience => Some((
+            (experience_progress.clamp(0.0, 1.0) * 183.0) as i32,
+            SpriteId::ExperienceBarProgress,
+        )),
+        // Vanilla JumpableVehicleBar: Mth.lerpDiscrete(scale, 0, 182).
+        ContextualBarKind::JumpableVehicle { charge } => Some((
+            (charge.clamp(0.0, 1.0) * 181.0).floor() as i32 + i32::from(charge > 0.0),
+            SpriteId::JumpBarProgress,
+        )),
+        _ => None,
+    };
+    if let Some((fill_px, sprite)) = bar_fill
+        && fill_px > 0
+    {
+        elements.push(MenuElement::ScissorPush {
+            x: bar_x,
+            y: bar_y,
+            w: (fill_px as f32 * gs).round(),
+            h: bar_h,
+        });
+        elements.push(MenuElement::Image {
+            x: bar_x,
+            y: bar_y,
+            w: bar_w,
+            h: bar_h,
+            sprite,
+            tint: WHITE,
+        });
+        elements.push(MenuElement::ScissorPop);
     }
 
     // Vanilla draws the level number over whichever bar is showing, between

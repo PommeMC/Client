@@ -666,6 +666,23 @@ pub fn handle_game_packet(
             let ids: Vec<i32> = p.entity_ids.iter().map(|id| id.0).collect();
             let _ = event_tx.try_send(NetworkEvent::EntitiesRemoved { ids });
         }
+        ClientboundGamePacket::SetPassengers(p) => {
+            let _ = event_tx.try_send(NetworkEvent::SetPassengers {
+                vehicle: p.vehicle.0,
+                passengers: p.passengers.iter().map(|id| id.0).collect(),
+            });
+        }
+        ClientboundGamePacket::SetEquipment(p) => {
+            // Only the saddle slot is tracked; equipment rendering is a TODO.
+            for (slot, item) in &p.slots.slots {
+                if *slot == azalea_inventory::components::EquipmentSlot::Saddle {
+                    let _ = event_tx.try_send(NetworkEvent::EntitySaddle {
+                        entity_id: p.entity_id.0,
+                        saddled: item.is_present(),
+                    });
+                }
+            }
+        }
         ClientboundGamePacket::SetEntityData(p) => {
             for item in p.packed_items.iter() {
                 // index 8 = item stack data for item entities

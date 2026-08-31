@@ -101,6 +101,14 @@ pub enum NetworkEvent {
         effect_id: u32,
     },
     ClearMobEffects,
+    SetPassengers {
+        vehicle: i32,
+        passengers: Vec<i32>,
+    },
+    EntitySaddle {
+        entity_id: i32,
+        saddled: bool,
+    },
     Waypoint {
         operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
         waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,
