@@ -153,6 +153,7 @@ pub struct GameState {
     pub action_bar: Option<(Vec<crate::ui::text::TextSpan>, u64)>,
     pub scoreboard: crate::ui::hud::Scoreboard,
     pub boss_bars: crate::ui::boss_bar::BossBarState,
+    pub toasts: crate::ui::toast::ToastState,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
     /// Tick of the last XP progress change; the XP bar outprioritizes the
@@ -335,6 +336,7 @@ impl GameState {
             action_bar: None,
             scoreboard: crate::ui::hud::Scoreboard::default(),
             boss_bars: crate::ui::boss_bar::BossBarState::default(),
+            toasts: crate::ui::toast::ToastState::default(),
             tick_count: 0,
             xp_display_start_tick: i64::MIN,
             interaction: InteractionState::new(),
@@ -2298,6 +2300,17 @@ pub fn update_game(
     // regardless (vanilla Hud.extractChat vs ChatScreen).
     if !game.hide_gui || game.chat.is_open() {
         game.chat.build(&mut elements, sw, sh, gs, &|t, s| {
+            gfx.renderer.menu_text_width(t, s)
+        });
+    }
+
+    // Vanilla Gui.update() runs the toast manager every frame regardless of
+    // screens or F1; only rendering is gated (ToastManager.extractRenderState).
+    for event in game.toasts.update() {
+        core.audio.play_ui_sound(event, 1.0, 1.0);
+    }
+    if !benchmark_running && !game.hide_gui {
+        game.toasts.build(&mut elements, sw, gs, &|t, s| {
             gfx.renderer.menu_text_width(t, s)
         });
     }

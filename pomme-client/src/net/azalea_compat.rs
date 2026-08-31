@@ -61,6 +61,31 @@ fn packet_ids_match_azalea() {
         boss_event.id(),
         table_id(Direction::Clientbound, "boss_event")
     );
+
+    let advancements = ClientboundGamePacket::UpdateAdvancements(
+        azalea_protocol::packets::game::c_update_advancements::ClientboundUpdateAdvancements {
+            reset: false,
+            added: Vec::new(),
+            removed: Vec::new(),
+            progress: Default::default(),
+            show_advancements: true,
+        },
+    );
+    assert_eq!(
+        advancements.id(),
+        table_id(Direction::Clientbound, "update_advancements")
+    );
+
+    let recipes = ClientboundGamePacket::RecipeBookAdd(
+        azalea_protocol::packets::game::c_recipe_book_add::ClientboundRecipeBookAdd {
+            entries: Vec::new(),
+            replace: false,
+        },
+    );
+    assert_eq!(
+        recipes.id(),
+        table_id(Direction::Clientbound, "recipe_book_add")
+    );
 }
 
 /// Round-trip through azalea's `LpVec3` decoder to cross-check the port.

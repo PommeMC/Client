@@ -357,6 +357,7 @@ impl AppCore {
         game.scoreboard.clear();
         game.player.effects.clear();
         game.boss_bars.clear();
+        game.toasts.clear();
         self.requested_player_skins.clear();
         renderer.clear_player_entity_skins();
     }
@@ -764,6 +765,12 @@ impl AppCore {
                 }
                 NetworkEvent::BossBarUpdate { id, op } => {
                     game.boss_bars.apply(id, op);
+                }
+                NetworkEvent::AdvancementsUpdate(update) => {
+                    game.toasts.apply_advancements(*update);
+                }
+                NetworkEvent::RecipeToastAdd { entries } => {
+                    game.toasts.add_recipes(entries);
                 }
                 NetworkEvent::ScoreboardObjective {
                     name,

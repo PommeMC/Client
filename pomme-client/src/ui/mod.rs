@@ -22,3 +22,4 @@ pub mod player_tab;
 pub mod server_list;
 pub mod text;
 pub mod text_edit;
+pub mod toast;

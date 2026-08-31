@@ -11,6 +11,7 @@ use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
+use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
@@ -332,6 +333,74 @@ pub fn handle_game_packet(
                 },
             };
             let _ = event_tx.try_send(NetworkEvent::BossBarUpdate { id: p.id, op });
+        }
+        ClientboundGamePacket::UpdateAdvancements(p) => {
+            use azalea_protocol::packets::game::c_update_advancements::FrameType;
+
+            use crate::ui::toast;
+            let added = p
+                .added
+                .iter()
+                .map(|holder| {
+                    (
+                        holder.id.to_string(),
+                        toast::AdvancementData {
+                            display: holder.value.display.as_deref().map(|d| {
+                                toast::AdvancementDisplay {
+                                    title: format_text_spans(&d.title, [1.0; 4]),
+                                    frame: match d.frame {
+                                        FrameType::Task => toast::AdvancementFrame::Task,
+                                        FrameType::Challenge => toast::AdvancementFrame::Challenge,
+                                        FrameType::Goal => toast::AdvancementFrame::Goal,
+                                    },
+                                    show_toast: d.show_toast,
+                                    icon_item: match &d.icon {
+                                        azalea_inventory::ItemStack::Present(data) => {
+                                            Some(item_resource_name(data.kind))
+                                        }
+                                        azalea_inventory::ItemStack::Empty => None,
+                                    },
+                                }
+                            }),
+                            requirements: holder.value.requirements.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let progress = p
+                .progress
+                .iter()
+                .map(|(id, criteria)| {
+                    (
+                        id.to_string(),
+                        criteria
+                            .iter()
+                            .map(|(name, c)| (name.clone(), c.date.is_some()))
+                            .collect(),
+                    )
+                })
+                .collect();
+            let _ = event_tx.try_send(NetworkEvent::AdvancementsUpdate(Box::new(
+                toast::AdvancementsUpdate {
+                    reset: p.reset,
+                    added,
+                    removed: p.removed.iter().map(|id| id.to_string()).collect(),
+                    progress,
+                    show_advancements: p.show_advancements,
+                },
+            )));
+        }
+        ClientboundGamePacket::RecipeBookAdd(p) => {
+            // Entry.FLAG_NOTIFICATION = 1 (ClientboundRecipeBookAddPacket).
+            let entries: Vec<_> = p
+                .entries
+                .iter()
+                .filter(|e| e.flags & 1 != 0)
+                .map(|e| recipe_toast_entry(&e.contents.display))
+                .collect();
+            if !entries.is_empty() {
+                let _ = event_tx.try_send(NetworkEvent::RecipeToastAdd { entries });
+            }
         }
         ClientboundGamePacket::SetObjective(p) => {
             use azalea_protocol::packets::game::c_set_objective::Method;
@@ -1135,4 +1204,51 @@ fn level_particles_packet_id() -> u32 {
             .id(Phase::Game, Direction::Clientbound, "level_particles")
             .expect("level_particles in packet table")
     })
+}
+
+/// Icon items for a recipe toast entry (vanilla `RecipeToast.addOrUpdate`:
+/// `craftingStation()` and `result()` resolved for their first stack).
+fn recipe_toast_entry(
+    display: &azalea_protocol::common::recipe::RecipeDisplayData,
+) -> crate::ui::toast::RecipeToastEntry {
+    use azalea_protocol::common::recipe::RecipeDisplayData;
+
+    let (station, result) = match display {
+        RecipeDisplayData::Shapeless(d) => (&d.crafting_station, &d.result),
+        RecipeDisplayData::Shaped(d) => (&d.crafting_station, &d.result),
+        RecipeDisplayData::Furnace(d) => (&d.crafting_station, &d.result),
+        RecipeDisplayData::Stonecutter(d) => (&d.crafting_station, &d.result),
+        RecipeDisplayData::Smithing(d) => (&d.crafting_station, &d.result),
+    };
+    crate::ui::toast::RecipeToastEntry {
+        category_item: slot_display_first_item(station),
+        unlocked_item: slot_display_first_item(result),
+    }
+}
+
+/// First-stack resolution of a slot display, mirroring vanilla
+/// `SlotDisplay.resolveForFirstStack` for the context-free variants.
+/// Component-modified displays fall back to the bare base item (pomme's icon
+/// atlas keys on item name only); `Tag`/`AnyFuel` need registries pomme
+/// doesn't track client-side and vanilla never uses them for station/result.
+fn slot_display_first_item(
+    slot: &azalea_protocol::common::recipe::SlotDisplayData,
+) -> Option<String> {
+    use azalea_inventory::ItemStack;
+    use azalea_protocol::common::recipe::SlotDisplayData;
+
+    match slot {
+        SlotDisplayData::Empty | SlotDisplayData::AnyFuel | SlotDisplayData::Tag(_) => None,
+        SlotDisplayData::Item(d) => Some(item_resource_name(d.item)),
+        SlotDisplayData::ItemStack(d) => match &d.stack {
+            ItemStack::Present(data) => Some(item_resource_name(data.kind)),
+            ItemStack::Empty => None,
+        },
+        SlotDisplayData::WithAnyPotion(d) => slot_display_first_item(&d.contents),
+        SlotDisplayData::OnlyWithComponent(d) => slot_display_first_item(&d.contents),
+        SlotDisplayData::Dyed(d) => slot_display_first_item(&d.target),
+        SlotDisplayData::SmithingTrim(d) => slot_display_first_item(&d.base),
+        SlotDisplayData::WithRemainder(d) => slot_display_first_item(&d.input),
+        SlotDisplayData::Composite(d) => d.contents.iter().find_map(slot_display_first_item),
+    }
 }

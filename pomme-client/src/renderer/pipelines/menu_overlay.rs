@@ -1715,6 +1715,16 @@ pub enum SpriteId {
     BossBarProgress(u8),
     BossBarNotchedBackground(u8),
     BossBarNotchedProgress(u8),
+    ToastAdvancement,
+    ToastRecipe,
+    ToastTutorial,
+    ToastMovementKeys,
+    ToastMouse,
+    ToastTree,
+    ToastRecipeBook,
+    ToastWoodenPlanks,
+    ToastSocialInteractions,
+    ToastRightClick,
     LocatorBarBackground,
     LocatorDotDefault0,
     LocatorDotDefault1,
@@ -2461,6 +2471,56 @@ fn build_sprite_atlas(
         (
             SpriteId::CreativeScrollerDisabled,
             "minecraft/textures/gui/sprites/container/creative_inventory/scroller_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::ToastAdvancement,
+            "minecraft/textures/gui/sprites/toast/advancement.png",
+            0.0,
+        ),
+        (
+            SpriteId::ToastRecipe,
+            "minecraft/textures/gui/sprites/toast/recipe.png",
+            0.0,
+        ),
+        (
+            SpriteId::ToastTutorial,
+            "minecraft/textures/gui/sprites/toast/tutorial.png",
+            3.0,
+        ),
+        (
+            SpriteId::ToastMovementKeys,
+            "minecraft/textures/gui/sprites/toast/movement_keys.png",
+            0.0,
+        ),
+        (
+            SpriteId::ToastMouse,
+            "minecraft/textures/gui/sprites/toast/mouse.png",
+            0.0,
+        ),
+        (
+            SpriteId::ToastTree,
+            "minecraft/textures/gui/sprites/toast/tree.png",
+            0.0,
+        ),
+        (
+            SpriteId::ToastRecipeBook,
+            "minecraft/textures/gui/sprites/toast/recipe_book.png",
+            0.0,
+        ),
+        (
+            SpriteId::ToastWoodenPlanks,
+            "minecraft/textures/gui/sprites/toast/wooden_planks.png",
+            0.0,
+        ),
+        (
+            SpriteId::ToastSocialInteractions,
+            "minecraft/textures/gui/sprites/toast/social_interactions.png",
+            0.0,
+        ),
+        (
+            SpriteId::ToastRightClick,
+            "minecraft/textures/gui/sprites/toast/right_click.png",
             0.0,
         ),
     ];

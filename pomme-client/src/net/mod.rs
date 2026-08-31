@@ -150,6 +150,10 @@ pub enum NetworkEvent {
         id: uuid::Uuid,
         op: crate::ui::boss_bar::BossBarOp,
     },
+    AdvancementsUpdate(Box<crate::ui::toast::AdvancementsUpdate>),
+    RecipeToastAdd {
+        entries: Vec<crate::ui::toast::RecipeToastEntry>,
+    },
     ScoreboardObjective {
         name: String,
         display: Option<Vec<crate::ui::text::TextSpan>>,
