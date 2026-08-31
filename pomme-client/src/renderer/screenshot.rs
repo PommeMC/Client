@@ -26,6 +26,8 @@ struct PendingCapture {
 pub struct ScreenshotCapture {
     armed: bool,
     pending: Vec<PendingCapture>,
+    /// Encodes spawned but not yet drained from `result_rx`.
+    in_flight: u32,
     game_dir: PathBuf,
     result_tx: Sender<Result<String, String>>,
     result_rx: Receiver<Result<String, String>>,
@@ -37,6 +39,7 @@ impl ScreenshotCapture {
         Self {
             armed: false,
             pending: Vec::new(),
+            in_flight: 0,
             game_dir,
             result_tx,
             result_rx,
@@ -48,9 +51,17 @@ impl ScreenshotCapture {
         self.armed = true;
     }
 
+    /// A capture is somewhere between armed and written to disk; drives the
+    /// HUD saving indicator.
+    pub fn saving(&self) -> bool {
+        self.armed || !self.pending.is_empty() || self.in_flight > 0
+    }
+
     /// Drain completed captures: `Ok(bare filename)` or `Err(message)`.
     pub fn drain_results(&mut self) -> Vec<Result<String, String>> {
-        self.result_rx.try_iter().collect()
+        let results: Vec<_> = self.result_rx.try_iter().collect();
+        self.in_flight = self.in_flight.saturating_sub(results.len() as u32);
+        results
     }
 
     /// If armed, record the image->buffer copy into `cmd` after the final
@@ -182,11 +193,12 @@ impl ScreenshotCapture {
     }
 
     fn read_and_spawn(
-        &self,
+        &mut self,
         cap: PendingCapture,
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
     ) {
+        self.in_flight += 1;
         let px_bytes = cap.width as usize * cap.height as usize * 4;
         let pixels = cap
             .allocation
