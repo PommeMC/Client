@@ -109,6 +109,10 @@ pub enum NetworkEvent {
         entity_id: i32,
         armor: u32,
     },
+    EntityMaxHealthUpdate {
+        entity_id: i32,
+        max_health: f32,
+    },
     ContainerContent {
         container_id: i32,
         items: Vec<ItemStack>,
@@ -410,6 +414,16 @@ pub enum NetworkEvent {
     PlayerScore {
         entity_id: i32,
         score: i32,
+    },
+    PlayerAbsorption {
+        entity_id: i32,
+        absorption: f32,
+    },
+    /// Vanilla `handleRespawn`: a fresh `LocalPlayer` is built, restoring old
+    /// entity data / attribute modifiers only per the packet's keep flags.
+    PlayerRespawned {
+        keep_entity_data: bool,
+        keep_attribute_modifiers: bool,
     },
     PlayerDied {
         message: String,

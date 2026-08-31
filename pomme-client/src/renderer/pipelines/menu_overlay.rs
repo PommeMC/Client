@@ -1686,6 +1686,8 @@ pub enum SpriteId {
     HeartContainer,
     HeartFull,
     HeartHalf,
+    HeartAbsorbingFull,
+    HeartAbsorbingHalf,
     FoodEmpty,
     FoodFull,
     FoodHalf,
@@ -1969,6 +1971,16 @@ fn build_sprite_atlas(
         (
             SpriteId::HeartHalf,
             "minecraft/textures/gui/sprites/hud/heart/half.png",
+            0.0,
+        ),
+        (
+            SpriteId::HeartAbsorbingFull,
+            "minecraft/textures/gui/sprites/hud/heart/absorbing_full.png",
+            0.0,
+        ),
+        (
+            SpriteId::HeartAbsorbingHalf,
+            "minecraft/textures/gui/sprites/hud/heart/absorbing_half.png",
             0.0,
         ),
         (

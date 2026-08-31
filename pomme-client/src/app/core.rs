@@ -611,6 +611,14 @@ impl AppCore {
                 NetworkEvent::ClearMobEffects => {
                     game.player.effects.clear();
                 }
+                NetworkEvent::EntityMaxHealthUpdate {
+                    entity_id,
+                    max_health,
+                } => {
+                    if entity_id == game.player.entity_id {
+                        game.player.max_health = max_health;
+                    }
+                }
                 NetworkEvent::ContainerContent {
                     container_id,
                     items,
@@ -1260,6 +1268,28 @@ impl AppCore {
                 NetworkEvent::PlayerScore { entity_id, score } => {
                     if entity_id == game.player.entity_id {
                         game.player.score = score;
+                    }
+                }
+                NetworkEvent::PlayerAbsorption {
+                    entity_id,
+                    absorption,
+                } => {
+                    if entity_id == game.player.entity_id {
+                        game.player.absorption = absorption;
+                    }
+                }
+                NetworkEvent::PlayerRespawned {
+                    keep_entity_data,
+                    keep_attribute_modifiers,
+                } => {
+                    if !keep_entity_data {
+                        game.player.absorption = 0.0;
+                    }
+                    // Approximation: vanilla keeps attribute base values and
+                    // drops modifiers; the server re-sends UpdateAttributes
+                    // after a death respawn, correcting any non-default base.
+                    if !keep_attribute_modifiers {
+                        game.player.max_health = 20.0;
                     }
                 }
                 NetworkEvent::PlayerDied { message } => {
