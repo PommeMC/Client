@@ -199,10 +199,15 @@ impl AudioEngine {
     /// Plays the vanilla button click: MASTER category at the fixed `forUI`
     /// volume.
     pub fn play_ui_click(&self) {
-        if let Some((sink, entry_volume)) = self.make_sink(UI_CLICK_EVENT) {
-            sink.set_volume(
-                self.category_gain(SoundCategory::Master) * UI_CLICK_VOLUME * entry_volume,
-            );
+        self.play_ui_sound(UI_CLICK_EVENT, UI_CLICK_VOLUME, 1.0);
+    }
+
+    /// Plays a non-positional UI sound event (vanilla
+    /// `SimpleSoundInstance.forUI`): MASTER category.
+    pub fn play_ui_sound(&self, event: &str, volume: f32, pitch: f32) {
+        if let Some((sink, entry_volume)) = self.make_sink(event) {
+            sink.set_speed(pitch.max(0.01));
+            sink.set_volume(self.category_gain(SoundCategory::Master) * volume * entry_volume);
             sink.detach();
         }
     }

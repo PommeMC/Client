@@ -189,6 +189,14 @@ mod tests {
             Some(9)
         );
         assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "recipe_book_add"),
+            Some(74)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "update_advancements"),
+            Some(130)
+        );
+        assert_eq!(
             t.name_of(Phase::Game, Direction::Clientbound, 0),
             Some("bundle_delimiter")
         );

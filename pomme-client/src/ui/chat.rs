@@ -614,7 +614,11 @@ fn styled_text(chars: &[(char, CharStyle)]) -> String {
 /// line. Returns one `Vec<TextSpan>` per display line. Mirrors vanilla
 /// `Font.split` over a `FormattedText`. `width0` measures text width at
 /// gui-scale 1.
-fn wrap_spans(spans: &[TextSpan], max_w: f32, width0: &dyn Fn(&str) -> f32) -> Vec<Vec<TextSpan>> {
+pub(crate) fn wrap_spans(
+    spans: &[TextSpan],
+    max_w: f32,
+    width0: &dyn Fn(&str) -> f32,
+) -> Vec<Vec<TextSpan>> {
     // Split into whitespace-delimited words, keeping each character's style.
     let mut words: Vec<StyledLine> = Vec::new();
     let mut word: StyledLine = Vec::new();
