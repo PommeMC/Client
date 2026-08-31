@@ -197,9 +197,11 @@ pub enum NetworkEvent {
     },
     ScoreboardTeam {
         name: String,
+        display_name: Vec<crate::ui::text::TextSpan>,
         prefix: Vec<crate::ui::text::TextSpan>,
         suffix: Vec<crate::ui::text::TextSpan>,
         color: [f32; 4],
+        fill_color: Option<[f32; 4]>,
         members: Option<Vec<String>>,
     },
     ScoreboardTeamMembers {

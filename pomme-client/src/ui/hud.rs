@@ -67,11 +67,15 @@ pub struct Scoreboard {
     teams: HashMap<String, ScoreboardTeam>,
 }
 
-struct ScoreboardTeam {
+pub(crate) struct ScoreboardTeam {
+    pub(crate) display_name: Vec<TextSpan>,
     prefix: Vec<TextSpan>,
     suffix: Vec<TextSpan>,
     color: [f32; 4],
-    members: HashSet<String>,
+    /// None for RESET / non-color formatting (no icon fill in the spectator
+    /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
+    pub(crate) fill_color: Option<[f32; 4]>,
+    pub(crate) members: HashSet<String>,
 }
 
 impl Scoreboard {
@@ -139,12 +143,15 @@ impl Scoreboard {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn set_team(
         &mut self,
         name: String,
+        display_name: Vec<TextSpan>,
         prefix: Vec<TextSpan>,
         suffix: Vec<TextSpan>,
         color: [f32; 4],
+        fill_color: Option<[f32; 4]>,
         members: Option<Vec<String>>,
     ) {
         // Vanilla ignores a parameter change for a team it doesn't know;
@@ -156,14 +163,18 @@ impl Scoreboard {
             self.strip_members(members);
         }
         let team = self.teams.entry(name).or_insert_with(|| ScoreboardTeam {
+            display_name: Vec::new(),
             prefix: Vec::new(),
             suffix: Vec::new(),
             color,
+            fill_color: None,
             members: HashSet::new(),
         });
+        team.display_name = display_name;
         team.prefix = prefix;
         team.suffix = suffix;
         team.color = color;
+        team.fill_color = fill_color;
         // ADD unions its player list onto an existing team, like vanilla's
         // addPlayerTeam + per-player addPlayerToTeam.
         if let Some(members) = members {
@@ -193,6 +204,10 @@ impl Scoreboard {
 
     pub fn remove_team(&mut self, name: &str) {
         self.teams.remove(name);
+    }
+
+    pub(crate) fn teams(&self) -> impl Iterator<Item = (&String, &ScoreboardTeam)> {
+        self.teams.iter()
     }
 
     /// Team membership is exclusive: joining players leave their old team.
@@ -495,48 +510,53 @@ pub fn build_hud(
         build_debug_overlay(elements, info, gs, text_width_fn);
     }
 
+    // The bar geometry also anchors the status rows and XP bar below.
     let hotbar_w = HOTBAR_W * gs;
     let hotbar_h = HOTBAR_H * gs;
     let hotbar_x = (cx - hotbar_w / 2.0).round();
     let hotbar_y = (screen_h - hotbar_h).round();
 
-    elements.push(MenuElement::Image {
-        x: hotbar_x,
-        y: hotbar_y,
-        w: hotbar_w,
-        h: hotbar_h,
-        sprite: SpriteId::Hotbar,
-        tint: WHITE,
-    });
+    // Vanilla `Hud.extractHotbarAndDecorations`: spectators get the spectator
+    // command bar (pushed by the caller) instead of the item hotbar.
+    if game_mode != 3 {
+        elements.push(MenuElement::Image {
+            x: hotbar_x,
+            y: hotbar_y,
+            w: hotbar_w,
+            h: hotbar_h,
+            sprite: SpriteId::Hotbar,
+            tint: WHITE,
+        });
 
-    let sel_w = SELECTION_W * gs;
-    let sel_h = SELECTION_H * gs;
-    let sel_x = (hotbar_x - 1.0 * gs + selected_slot as f32 * SLOT_STRIDE * gs).round();
-    let sel_y = (hotbar_y - 1.0 * gs).round();
-    elements.push(MenuElement::Image {
-        x: sel_x,
-        y: sel_y,
-        w: sel_w,
-        h: sel_h,
-        sprite: SpriteId::HotbarSelection,
-        tint: WHITE,
-    });
+        let sel_w = SELECTION_W * gs;
+        let sel_h = SELECTION_H * gs;
+        let sel_x = (hotbar_x - 1.0 * gs + selected_slot as f32 * SLOT_STRIDE * gs).round();
+        let sel_y = (hotbar_y - 1.0 * gs).round();
+        elements.push(MenuElement::Image {
+            x: sel_x,
+            y: sel_y,
+            w: sel_w,
+            h: sel_h,
+            sprite: SpriteId::HotbarSelection,
+            tint: WHITE,
+        });
 
-    let item_size = 16.0 * gs;
-    for (i, item) in hotbar.iter().enumerate().take(9) {
-        if let ItemStack::Present(data) = item {
-            let ix = (hotbar_x + 3.0 * gs + i as f32 * SLOT_STRIDE * gs).round();
-            let iy = (hotbar_y + 3.0 * gs).round();
-            elements.push(MenuElement::ItemIcon {
-                x: ix,
-                y: iy,
-                w: item_size,
-                h: item_size,
-                item_name: item_resource_name(data.kind),
-                tint: WHITE,
-            });
-            if data.count > 1 {
-                push_item_count(elements, ix, iy, item_size, gs, data.count);
+        let item_size = 16.0 * gs;
+        for (i, item) in hotbar.iter().enumerate().take(9) {
+            if let ItemStack::Present(data) = item {
+                let ix = (hotbar_x + 3.0 * gs + i as f32 * SLOT_STRIDE * gs).round();
+                let iy = (hotbar_y + 3.0 * gs).round();
+                elements.push(MenuElement::ItemIcon {
+                    x: ix,
+                    y: iy,
+                    w: item_size,
+                    h: item_size,
+                    item_name: item_resource_name(data.kind),
+                    tint: WHITE,
+                });
+                if data.count > 1 {
+                    push_item_count(elements, ix, iy, item_size, gs, data.count);
+                }
             }
         }
     }

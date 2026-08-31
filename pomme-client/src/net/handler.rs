@@ -1037,9 +1037,11 @@ fn send_scoreboard_team(
     let color = team_color(parameters.color);
     let _ = event_tx.try_send(NetworkEvent::ScoreboardTeam {
         name: name.into(),
+        display_name: format_text_spans(&parameters.display_name, [1.0; 4]),
         prefix: format_text_spans(&parameters.player_prefix, color),
         suffix: format_text_spans(&parameters.player_suffix, color),
         color,
+        fill_color: parameters.color.color().map(crate::ui::common::rgb),
         members,
     });
 }
