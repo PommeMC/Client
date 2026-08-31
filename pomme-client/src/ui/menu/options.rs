@@ -139,6 +139,11 @@ impl MainMenu {
         };
         let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
         let attack_label = format!("Attack Indicator: {}", self.attack_indicator.label());
+        let vignette_label = if self.vignette {
+            "Vignette: ON"
+        } else {
+            "Vignette: OFF"
+        };
         let rows: Vec<OptRow> = vec![
             OptRow::Header("Display"),
             OptRow::Big("Fullscreen Resolution: Current"),
@@ -160,7 +165,7 @@ impl MainMenu {
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
             OptRow::PairLeft("Weather Radius: 10"),
             OptRow::Header("Preferences"),
-            OptRow::Pair("Show Autosave Indicator: ON", "Vignette: ON"),
+            OptRow::Pair("Show Autosave Indicator: ON", vignette_label),
             OptRow::Pair(&attack_label, "Chunk Fade-in: 1.0s"),
         ];
         let rd_frac = ((self.render_distance as f32 - 2.0) / (rd_max as f32 - 2.0)).clamp(0.0, 1.0);
@@ -750,6 +755,10 @@ impl MainMenu {
                     }
                     if label.starts_with("Show Subtitles:") {
                         self.show_subtitles = !self.show_subtitles;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Vignette:") {
+                        self.vignette = !self.vignette;
                         self.save_settings();
                     }
                     if label.starts_with("Show Online Status:") {

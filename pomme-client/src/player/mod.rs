@@ -30,6 +30,11 @@ pub fn is_creative(game_mode: u8) -> bool {
     game_mode == 1
 }
 
+/// Spectator (3).
+pub fn is_spectator(game_mode: u8) -> bool {
+    game_mode == 3
+}
+
 fn is_water_block(state: azalea_block::BlockState) -> bool {
     fluid(state).kind == FluidKind::Water
 }
@@ -81,6 +86,10 @@ pub struct LocalPlayer {
     pub eyes_in_water: bool,
     pub swimming: bool,
     pub air_supply: i32,
+    /// Vanilla LocalPlayer.portalEffectIntensity: drives the full-screen
+    /// portal overlay while standing in a nether portal.
+    pub portal_effect_intensity: f32,
+    pub prev_portal_effect_intensity: f32,
     pub game_mode: u8,
     pub score: i32,
     pub entity_id: i32,
@@ -131,6 +140,8 @@ impl LocalPlayer {
             eyes_in_water: false,
             swimming: false,
             air_supply: MAX_AIR_SUPPLY,
+            portal_effect_intensity: 0.0,
+            prev_portal_effect_intensity: 0.0,
             game_mode: 0,
             score: 0,
             entity_id: -1,
@@ -247,5 +258,49 @@ impl LocalPlayer {
         self.in_water = fluid_height > 0.0;
         self.eyes_in_water = is_water_block(chunks.get_block_state(eye_x, eye_y, eye_z));
         self.swimming = self.sprinting && self.in_water && self.eyes_in_water;
+    }
+
+    /// Vanilla Entity.checkInsideBlocks: a nether portal counts as entered when
+    /// the bounding box deflated by 1.0E-5 overlaps its (full) block cell.
+    pub fn is_inside_nether_portal(&self, chunks: &crate::world::chunk::ChunkStore) -> bool {
+        const MARGIN: f64 = 1.0e-5;
+        let half_w = 0.3;
+        let x0 = (self.position.x - half_w + MARGIN).floor() as i32;
+        let x1 = (self.position.x + half_w - MARGIN).ceil() as i32 - 1;
+        let y0 = (self.position.y + MARGIN).floor() as i32;
+        let y1 = (self.position.y + self.height() - MARGIN).ceil() as i32 - 1;
+        let z0 = (self.position.z - half_w + MARGIN).floor() as i32;
+        let z1 = (self.position.z + half_w - MARGIN).ceil() as i32 - 1;
+
+        for bx in x0..=x1 {
+            for by in y0..=y1 {
+                for bz in z0..=z1 {
+                    if crate::world::block::block_id(chunks.get_block_state(bx, by, bz))
+                        == "nether_portal"
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Vanilla LocalPlayer.handlePortalTransitionEffect: the overlay ramps up
+    /// over 80 ticks inside a portal and decays 4x as fast outside. Returns
+    /// true when the rise starts from zero (vanilla plays PORTAL_TRIGGER).
+    /// TODO: vanilla also force-closes portal-disallowed screens while rising.
+    pub fn tick_portal_effect(&mut self, inside_portal: bool) -> bool {
+        self.prev_portal_effect_intensity = self.portal_effect_intensity;
+        let mut step = 0.0;
+        let mut triggered = false;
+        if inside_portal {
+            triggered = self.portal_effect_intensity == 0.0;
+            step = 0.0125;
+        } else if self.portal_effect_intensity > 0.0 {
+            step = -0.05;
+        }
+        self.portal_effect_intensity = (self.portal_effect_intensity + step).clamp(0.0, 1.0);
+        triggered
     }
 }

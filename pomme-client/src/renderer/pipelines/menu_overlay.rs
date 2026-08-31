@@ -233,6 +233,16 @@ pub struct MenuOverlayPipeline {
     favicon_allocation: Option<Allocation>,
     favicon_regions: std::collections::HashMap<String, [f32; 4]>,
     favicon_atlas_size: u32,
+    overlay_image: vk::Image,
+    overlay_view: vk::ImageView,
+    overlay_sampler: vk::Sampler,
+    overlay_allocation: Option<Allocation>,
+    overlay_vignette_uv: [f32; 4],
+    overlay_pumpkin_uv: [f32; 4],
+    underwater_image: vk::Image,
+    underwater_view: vk::ImageView,
+    underwater_sampler: vk::Sampler,
+    underwater_allocation: Option<Allocation>,
 }
 
 impl MenuOverlayPipeline {
@@ -253,50 +263,15 @@ impl MenuOverlayPipeline {
             vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
         );
 
-        let tex_bindings = [
-            vk::DescriptorSetLayoutBinding {
-                binding: 0,
+        // One combined image sampler per menu_overlay.frag binding.
+        let tex_bindings: [vk::DescriptorSetLayoutBinding; 8] =
+            std::array::from_fn(|binding| vk::DescriptorSetLayoutBinding {
+                binding: binding as u32,
                 descriptor_type: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
                 stage_flags: vk::ShaderStageFlags::Fragment,
                 ..Default::default()
-            },
-            vk::DescriptorSetLayoutBinding {
-                binding: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::Fragment,
-                ..Default::default()
-            },
-            vk::DescriptorSetLayoutBinding {
-                binding: 2,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::Fragment,
-                ..Default::default()
-            },
-            vk::DescriptorSetLayoutBinding {
-                binding: 3,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::Fragment,
-                ..Default::default()
-            },
-            vk::DescriptorSetLayoutBinding {
-                binding: 4,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::Fragment,
-                ..Default::default()
-            },
-            vk::DescriptorSetLayoutBinding {
-                binding: 5,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::Fragment,
-                ..Default::default()
-            },
-        ];
+            });
         let tex_layout_info = vk::DescriptorSetLayoutCreateInfo {
             binding_count: tex_bindings.len() as u32,
             bindings: tex_bindings.as_ptr(),
@@ -326,7 +301,7 @@ impl MenuOverlayPipeline {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 6,
+                descriptor_count: tex_bindings.len() as u32,
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
@@ -529,56 +504,66 @@ impl MenuOverlayPipeline {
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
         };
 
-        let writes = [
-            vk::WriteDescriptorSet {
-                dst_set: tex_set,
-                dst_binding: 0,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: &font_img_info,
-                ..Default::default()
-            },
-            vk::WriteDescriptorSet {
-                dst_set: tex_set,
-                dst_binding: 1,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: &sprite_img_info,
-                ..Default::default()
-            },
-            vk::WriteDescriptorSet {
-                dst_set: tex_set,
-                dst_binding: 2,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: &item_img_info,
-                ..Default::default()
-            },
-            vk::WriteDescriptorSet {
-                dst_set: tex_set,
-                dst_binding: 3,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: &mc_font_img_info,
-                ..Default::default()
-            },
-            vk::WriteDescriptorSet {
-                dst_set: tex_set,
-                dst_binding: 4,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: &font_img_info,
-                ..Default::default()
-            },
-            vk::WriteDescriptorSet {
-                dst_set: tex_set,
-                dst_binding: 5,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: &favicon_img_info,
-                ..Default::default()
-            },
+        let (overlay_image, overlay_view, overlay_alloc, overlay_vignette_uv, overlay_pumpkin_uv) =
+            build_camera_overlay_texture(
+                device,
+                queue,
+                command_pool,
+                allocator,
+                jar_assets_dir,
+                asset_index,
+            );
+        // Both source textures ship mcmeta `blur: true`.
+        let overlay_sampler = unsafe { util::create_linear_sampler(device) };
+
+        let (underwater_image, underwater_view, underwater_alloc) = load_single_texture(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            jar_assets_dir,
+            asset_index,
+            "minecraft/textures/misc/underwater.png",
+            "underwater_overlay",
+        );
+        // Repeat wrapping: the overlay tiles 4x and scrolls with the look direction.
+        let underwater_sampler = unsafe { util::create_nearest_repeat_sampler(device) };
+
+        let overlay_img_info = vk::DescriptorImageInfo {
+            sampler: overlay_sampler,
+            image_view: overlay_view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let underwater_img_info = vk::DescriptorImageInfo {
+            sampler: underwater_sampler,
+            image_view: underwater_view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+
+        // In menu_overlay.frag binding order; blur (4) starts as a font-atlas
+        // placeholder until set_blur_texture.
+        let tex_image_infos = [
+            &font_img_info,
+            &sprite_img_info,
+            &item_img_info,
+            &mc_font_img_info,
+            &font_img_info,
+            &favicon_img_info,
+            &overlay_img_info,
+            &underwater_img_info,
         ];
+        let writes: Vec<_> = tex_image_infos
+            .iter()
+            .enumerate()
+            .map(|(binding, info)| vk::WriteDescriptorSet {
+                dst_set: tex_set,
+                dst_binding: binding as u32,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: *info,
+                ..Default::default()
+            })
+            .collect();
         device.update_descriptor_sets(&writes, &[]);
 
         let (vertex_buffer, vertex_allocation) = util::create_host_buffer(
@@ -630,6 +615,16 @@ impl MenuOverlayPipeline {
             favicon_allocation: Some(favicon_alloc),
             favicon_regions: std::collections::HashMap::new(),
             favicon_atlas_size: 1,
+            overlay_image,
+            overlay_view,
+            overlay_sampler,
+            overlay_allocation: Some(overlay_alloc),
+            overlay_vignette_uv,
+            overlay_pumpkin_uv,
+            underwater_image,
+            underwater_view,
+            underwater_sampler,
+            underwater_allocation: Some(underwater_alloc),
         }
     }
 
@@ -982,6 +977,46 @@ impl MenuOverlayPipeline {
                         *x,
                         *y,
                         *size,
+                    );
+                }
+                MenuElement::Vignette { w, h, brightness } => {
+                    // Clamp mirrors vanilla Hud.extractVignette.
+                    let b = brightness.clamp(0.0, 1.0);
+                    push_fullscreen_quad(
+                        &mut vertices,
+                        *w,
+                        *h,
+                        self.overlay_vignette_uv,
+                        [b, b, b, 1.0],
+                        8.0,
+                    );
+                }
+                MenuElement::PumpkinOverlay { w, h } => {
+                    push_fullscreen_quad(
+                        &mut vertices,
+                        *w,
+                        *h,
+                        self.overlay_pumpkin_uv,
+                        [1.0; 4],
+                        7.0,
+                    );
+                }
+                MenuElement::UnderwaterOverlay {
+                    w,
+                    h,
+                    u0,
+                    v0,
+                    brightness,
+                } => {
+                    // Vanilla submitWater UVs: U decreases rightward, V
+                    // increases downward.
+                    push_fullscreen_quad(
+                        &mut vertices,
+                        *w,
+                        *h,
+                        [*u0 + 4.0, *v0, *u0, *v0 + 4.0],
+                        [*brightness, *brightness, *brightness, 0.1],
+                        9.0,
                     );
                 }
                 _ => {}
@@ -1494,6 +1529,20 @@ impl MenuOverlayPipeline {
             alloc.free(a).ok();
         }
 
+        device.destroy_sampler(self.overlay_sampler, None);
+        device.destroy_image_view(self.overlay_view, None);
+        device.destroy_image(self.overlay_image, None);
+        if let Some(a) = self.overlay_allocation.take() {
+            alloc.free(a).ok();
+        }
+
+        device.destroy_sampler(self.underwater_sampler, None);
+        device.destroy_image_view(self.underwater_view, None);
+        device.destroy_image(self.underwater_image, None);
+        if let Some(a) = self.underwater_allocation.take() {
+            alloc.free(a).ok();
+        }
+
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
@@ -1677,6 +1726,25 @@ pub enum MenuElement {
     /// scene so the blur pass captures them; elements after are drawn sharp on
     /// top. Used to render the title screen blurred behind the Friends dialog.
     BlurBackdrop,
+    /// Full-screen vignette, multiplying the framebuffer down by `brightness`.
+    Vignette {
+        w: f32,
+        h: f32,
+        brightness: f32,
+    },
+    /// Full-screen pumpkin-blur camera overlay.
+    PumpkinOverlay {
+        w: f32,
+        h: f32,
+    },
+    /// Full-screen underwater tint, its 4x-tiled UVs scrolled to `(u0, v0)`.
+    UnderwaterOverlay {
+        w: f32,
+        h: f32,
+        u0: f32,
+        v0: f32,
+        brightness: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1860,6 +1928,7 @@ pub enum SpriteId {
     FriendsAccept,
     FriendsReject,
     FriendsCancel,
+    NetherPortal,
 }
 
 pub const CREATIVE_TAB_SPRITES: [[[SpriteId; 7]; 2]; 2] = [
@@ -2830,6 +2899,15 @@ fn build_sprite_atlas(
             195,
             136,
         ),
+        // Frame 0 of the animated portal strip, stretched full-screen by the
+        // portal camera overlay. TODO: animate.
+        (
+            SpriteId::NetherPortal,
+            "minecraft/textures/block/nether_portal.png",
+            0,
+            16,
+            16,
+        ),
     ] {
         let path = resolve_asset_path(jar_assets_dir, asset_index, path);
         match crate::assets::load_image(&path) {
@@ -2849,7 +2927,7 @@ fn build_sprite_atlas(
                 images.push((id, cropped, crop_w, crop_h, 0.0));
             }
             Err(e) => {
-                tracing::warn!("Failed to load container background {id:?}: {e}");
+                tracing::warn!("Failed to load sprite {id:?}: {e}");
                 images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
             }
         }
@@ -2948,6 +3026,129 @@ fn build_sprite_atlas(
         staging_buffer,
         Some(staging_allocation),
     )
+}
+
+fn load_overlay_rgba(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    asset_key: &str,
+) -> (Vec<u8>, u32, u32) {
+    let path = resolve_asset_path(jar_assets_dir, asset_index, asset_key);
+    match crate::assets::load_image(&path) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            (rgba.into_raw(), w, h)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load overlay texture {asset_key}: {e}");
+            (vec![255, 0, 255, 255], 1, 1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upload_and_free_staging(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    pixels: &[u8],
+    image: vk::Image,
+    w: u32,
+    h: u32,
+    name: &str,
+) {
+    let (staging, staging_alloc) = util::create_staging_buffer(device, allocator, pixels, name);
+    util::upload_image(device, queue, command_pool, staging, image, w, h);
+    // upload_image waits for the copy, so the staging buffer can go right away.
+    device.destroy_buffer(staging, None);
+    allocator.lock().unwrap().free(staging_alloc).ok();
+}
+
+/// Compose the full-screen camera overlay textures (vignette + pumpkin blur)
+/// side by side into one linear-sampled image. Returns the image and each
+/// half's UV rect, inset half a texel so filtering never crosses the seam.
+fn build_camera_overlay_texture(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+) -> (vk::Image, vk::ImageView, Allocation, [f32; 4], [f32; 4]) {
+    let (vig, vw, vh) = load_overlay_rgba(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/textures/misc/vignette.png",
+    );
+    let (pump, pw, ph) = load_overlay_rgba(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/textures/misc/pumpkinblur.png",
+    );
+
+    let w = vw + pw;
+    let h = vh.max(ph);
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    blit_image(&mut pixels, w, &vig, vw, 0, 0, vw, vh);
+    blit_image(&mut pixels, w, &pump, pw, vw, 0, pw, ph);
+
+    let (image, view, allocation) =
+        util::create_gpu_image(device, allocator, w, h, "camera_overlay");
+    upload_and_free_staging(
+        device,
+        queue,
+        command_pool,
+        allocator,
+        &pixels,
+        image,
+        w,
+        h,
+        "camera_overlay_staging",
+    );
+
+    let (iw, ih) = (w as f32, h as f32);
+    let vignette_uv = [
+        0.5 / iw,
+        0.5 / ih,
+        (vw as f32 - 0.5) / iw,
+        (vh as f32 - 0.5) / ih,
+    ];
+    let pumpkin_uv = [
+        (vw as f32 + 0.5) / iw,
+        0.5 / ih,
+        (iw - 0.5) / iw,
+        (ph as f32 - 0.5) / ih,
+    ];
+    (image, view, allocation, vignette_uv, pumpkin_uv)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_single_texture(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    asset_key: &str,
+    name: &str,
+) -> (vk::Image, vk::ImageView, Allocation) {
+    let (pixels, w, h) = load_overlay_rgba(jar_assets_dir, asset_index, asset_key);
+    let (image, view, allocation) = util::create_gpu_image(device, allocator, w, h, name);
+    upload_and_free_staging(
+        device,
+        queue,
+        command_pool,
+        allocator,
+        &pixels,
+        image,
+        w,
+        h,
+        name,
+    );
+    (image, view, allocation)
 }
 
 struct TextureResources {
@@ -3083,6 +3284,31 @@ fn push_quad(
             corner_radius,
         });
     }
+}
+
+fn push_fullscreen_quad(
+    verts: &mut Vec<Vertex>,
+    w: f32,
+    h: f32,
+    [u0, v0, u1, v1]: [f32; 4],
+    color: [f32; 4],
+    mode: f32,
+) {
+    push_quad(
+        verts,
+        0.0,
+        0.0,
+        w,
+        h,
+        u0,
+        v0,
+        u1,
+        v1,
+        color,
+        mode,
+        [0.0, 0.0],
+        0.0,
+    );
 }
 
 fn push_rect(
