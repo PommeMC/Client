@@ -151,6 +151,7 @@ pub struct GameState {
     pub tool_highlight_timer: u32,
     pub last_tool_highlight: azalea_inventory::ItemStack,
     pub action_bar: Option<(Vec<crate::ui::text::TextSpan>, u64)>,
+    pub title: crate::ui::title::TitleState,
     pub scoreboard: crate::ui::hud::Scoreboard,
     pub boss_bars: crate::ui::boss_bar::BossBarState,
     pub toasts: crate::ui::toast::ToastState,
@@ -334,6 +335,7 @@ impl GameState {
             tool_highlight_timer: 0,
             last_tool_highlight: azalea_inventory::ItemStack::Empty,
             action_bar: None,
+            title: crate::ui::title::TitleState::default(),
             scoreboard: crate::ui::hud::Scoreboard::default(),
             boss_bars: crate::ui::boss_bar::BossBarState::default(),
             toasts: crate::ui::toast::ToastState::default(),
@@ -1383,6 +1385,7 @@ pub fn update_game(
         game.item_entity_store.tick(&game.chunk_store);
         game.particle_store.tick(&game.chunk_store);
         game.block_entity_anim.tick();
+        game.title.tick();
         tick_tool_highlight(core, game);
         if let Some(c) = &mut game.open_container
             && let Some(state) = &mut c.enchant
@@ -2294,6 +2297,11 @@ pub fn update_game(
             crate::ui::creative_inventory::CreativeAction::None => {}
         }
         core.input.clear_just_pressed_actions();
+    }
+
+    // Before chat so chat draws over it (vanilla extract order).
+    if !benchmark_running && !game.hide_gui {
+        game.title.build(&mut elements, sw, sh, gs, partial_tick);
     }
 
     // F1 hides the closed-chat overlay; an open chat is a screen and renders

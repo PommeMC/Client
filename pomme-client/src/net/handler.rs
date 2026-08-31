@@ -402,6 +402,30 @@ pub fn handle_game_packet(
                 let _ = event_tx.try_send(NetworkEvent::RecipeToastAdd { entries });
             }
         }
+        ClientboundGamePacket::SetTitleText(p) => {
+            let _ = event_tx.try_send(NetworkEvent::TitleText {
+                spans: format_text_spans(&p.text, [1.0; 4]),
+            });
+        }
+        ClientboundGamePacket::SetSubtitleText(p) => {
+            let _ = event_tx.try_send(NetworkEvent::SubtitleText {
+                spans: format_text_spans(&p.text, [1.0; 4]),
+            });
+        }
+        ClientboundGamePacket::SetTitlesAnimation(p) => {
+            // azalea decodes the fields as u32; vanilla reads signed ints and
+            // ignores negatives, so restore the sign before forwarding.
+            let _ = event_tx.try_send(NetworkEvent::TitlesAnimation {
+                fade_in: p.fade_in as i32,
+                stay: p.stay as i32,
+                fade_out: p.fade_out as i32,
+            });
+        }
+        ClientboundGamePacket::ClearTitles(p) => {
+            let _ = event_tx.try_send(NetworkEvent::ClearTitles {
+                reset_times: p.reset_times,
+            });
+        }
         ClientboundGamePacket::SetObjective(p) => {
             use azalea_protocol::packets::game::c_set_objective::Method;
             let (display, number_format) = match &p.method {

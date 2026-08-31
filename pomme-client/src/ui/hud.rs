@@ -531,10 +531,7 @@ pub fn build_hud(
         && ticks < 60
     {
         let alpha = ((60 - ticks).min(20) as f32) / 20.0;
-        let mut spans = spans.to_vec();
-        for span in &mut spans {
-            span.color[3] *= alpha;
-        }
+        let spans = crate::ui::text::with_alpha(spans, alpha);
         elements.push(MenuElement::McText {
             x: cx,
             // Vanilla translates to height - 68 and draws at local y -4.

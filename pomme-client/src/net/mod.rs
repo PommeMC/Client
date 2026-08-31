@@ -154,6 +154,20 @@ pub enum NetworkEvent {
     RecipeToastAdd {
         entries: Vec<crate::ui::toast::RecipeToastEntry>,
     },
+    TitleText {
+        spans: Vec<crate::ui::text::TextSpan>,
+    },
+    SubtitleText {
+        spans: Vec<crate::ui::text::TextSpan>,
+    },
+    TitlesAnimation {
+        fade_in: i32,
+        stay: i32,
+        fade_out: i32,
+    },
+    ClearTitles {
+        reset_times: bool,
+    },
     ScoreboardObjective {
         name: String,
         display: Option<Vec<crate::ui::text::TextSpan>>,

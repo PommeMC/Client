@@ -201,6 +201,22 @@ mod tests {
             Some("bundle_delimiter")
         );
         assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "clear_titles"),
+            Some(14)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_subtitle_text"),
+            Some(112)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_title_text"),
+            Some(114)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_titles_animation"),
+            Some(115)
+        );
+        assert_eq!(
             t.id(Phase::Handshake, Direction::Serverbound, "intention"),
             Some(0)
         );
