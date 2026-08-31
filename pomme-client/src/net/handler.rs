@@ -296,6 +296,37 @@ pub fn handle_game_packet(
         ClientboundGamePacket::SetActionBarText(p) => {
             send_action_bar(event_tx, &p.text);
         }
+        ClientboundGamePacket::BossEvent(p) => {
+            use azalea_protocol::packets::game::c_boss_event::Operation;
+
+            use crate::ui::boss_bar::BossBarOp;
+            let op = match &p.operation {
+                Operation::Add(add) => BossBarOp::Add {
+                    name: format_text_spans(&add.name, [1.0; 4]),
+                    progress: add.progress,
+                    color: add.style.color as u8,
+                    overlay: add.style.overlay as u8,
+                    darken_screen: add.properties.darken_screen,
+                    play_music: add.properties.play_music,
+                    create_world_fog: add.properties.create_world_fog,
+                },
+                Operation::Remove => BossBarOp::Remove,
+                Operation::UpdateProgress(progress) => BossBarOp::UpdateProgress(*progress),
+                Operation::UpdateName(name) => {
+                    BossBarOp::UpdateName(format_text_spans(name, [1.0; 4]))
+                }
+                Operation::UpdateStyle(style) => BossBarOp::UpdateStyle {
+                    color: style.color as u8,
+                    overlay: style.overlay as u8,
+                },
+                Operation::UpdateProperties(props) => BossBarOp::UpdateProperties {
+                    darken_screen: props.darken_screen,
+                    play_music: props.play_music,
+                    create_world_fog: props.create_world_fog,
+                },
+            };
+            let _ = event_tx.try_send(NetworkEvent::BossBarUpdate { id: p.id, op });
+        }
         ClientboundGamePacket::SetObjective(p) => {
             use azalea_protocol::packets::game::c_set_objective::Method;
             let (display, number_format) = match &p.method {
