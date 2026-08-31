@@ -172,7 +172,7 @@ fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
 /// Protocols outside `TRANSLATED` never build a translation.
 #[test]
 fn no_translation_without_coverage() {
-    assert!(crate::net::translate::Translation::for_protocol(771).is_none());
+    assert!(crate::net::translate::Translation::for_protocol(770).is_none());
 }
 
 /// 26.2 appended a trailing session-id UUID to login_finished
@@ -638,7 +638,7 @@ fn translate_set_time_774() {
 /// action bodies in the references), through each version's id table.
 #[test]
 fn translate_attack_old_versions() {
-    for protocol in [774, 773, 772] {
+    for protocol in [774, 773, 772, 771] {
         let frames =
             translation_for(protocol).translate_outbound_game_frame(wire::encode_attack(42));
         let interact = old_id(protocol, Direction::Serverbound, "interact");
@@ -870,31 +870,38 @@ fn assert_velocity(v: azalea_core::position::Vec3) {
 
 /// The velocity move: three trailing shorts (1/8000 block) on 1.21.8, an
 /// `LpVec3` between position and rotations on 26.2
-/// (`ClientboundAddEntityPacket` read bodies in both references).
+/// (`ClientboundAddEntityPacket` read bodies in both references). 1.21.6
+/// shares the layout; running it too pins that the 772-era rewrites and
+/// serializer map are wired up for protocol 771.
 #[test]
 fn translate_add_entity_772() {
-    let mut old = Vec::new();
-    wire::write_varint(&mut old, old_id(772, Direction::Clientbound, "add_entity"));
-    wire::write_varint(&mut old, 7); // entity id
-    old.extend_from_slice(&[0; 16]); // uuid
-    wire::write_varint(&mut old, 20); // entity type (remapped after decode)
-    for c in [100.5f64, 64.0, -20.25] {
-        old.extend_from_slice(&c.to_be_bytes());
-    }
-    old.extend_from_slice(&[10, 20, 30]); // x/y/head rotation
-    wire::write_varint(&mut old, 0); // data
-    write_velocity_shorts(&mut old);
+    for protocol in [772, 771] {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(protocol, Direction::Clientbound, "add_entity"),
+        );
+        wire::write_varint(&mut old, 7); // entity id
+        old.extend_from_slice(&[0; 16]); // uuid
+        wire::write_varint(&mut old, 20); // entity type (remapped after decode)
+        for c in [100.5f64, 64.0, -20.25] {
+            old.extend_from_slice(&c.to_be_bytes());
+        }
+        old.extend_from_slice(&[10, 20, 30]); // x/y/head rotation
+        wire::write_varint(&mut old, 0); // data
+        write_velocity_shorts(&mut old);
 
-    let ClientboundGamePacket::AddEntity(p) = translate_and_decode(772, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.id, MinecraftEntityId(7));
-    assert_eq!(
-        (p.position.x, p.position.y, p.position.z),
-        (100.5, 64.0, -20.25)
-    );
-    assert_velocity(azalea_core::position::Vec3::from(p.movement));
-    assert_eq!((p.x_rot, p.y_rot, p.y_head_rot), (10, 20, 30));
+        let ClientboundGamePacket::AddEntity(p) = translate_and_decode(protocol, old) else {
+            panic!("wrong packet");
+        };
+        assert_eq!(p.id, MinecraftEntityId(7));
+        assert_eq!(
+            (p.position.x, p.position.y, p.position.z),
+            (100.5, 64.0, -20.25)
+        );
+        assert_velocity(azalea_core::position::Vec3::from(p.movement));
+        assert_eq!((p.x_rot, p.y_rot, p.y_head_rot), (10, 20, 30));
+    }
 }
 
 /// The same shorts -> `LpVec3` switch on `set_entity_motion`.
