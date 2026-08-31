@@ -358,6 +358,8 @@ impl AppCore {
         game.player.effects.clear();
         game.boss_bars.clear();
         game.toasts.clear();
+        // Vanilla Hud.onDisconnected: clearTitles + resetTitleTimes.
+        game.title.clear(true);
         self.requested_player_skins.clear();
         renderer.clear_player_entity_skins();
     }
@@ -771,6 +773,22 @@ impl AppCore {
                 }
                 NetworkEvent::RecipeToastAdd { entries } => {
                     game.toasts.add_recipes(entries);
+                }
+                NetworkEvent::TitleText { spans } => {
+                    game.title.set_title(spans);
+                }
+                NetworkEvent::SubtitleText { spans } => {
+                    game.title.set_subtitle(spans);
+                }
+                NetworkEvent::TitlesAnimation {
+                    fade_in,
+                    stay,
+                    fade_out,
+                } => {
+                    game.title.set_times(fade_in, stay, fade_out);
+                }
+                NetworkEvent::ClearTitles { reset_times } => {
+                    game.title.clear(reset_times);
                 }
                 NetworkEvent::ScoreboardObjective {
                     name,

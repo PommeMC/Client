@@ -86,6 +86,44 @@ fn packet_ids_match_azalea() {
         recipes.id(),
         table_id(Direction::Clientbound, "recipe_book_add")
     );
+
+    use azalea_protocol::packets::game::{
+        c_clear_titles, c_set_subtitle_text, c_set_title_text, c_set_titles_animation,
+    };
+
+    let title = ClientboundGamePacket::SetTitleText(c_set_title_text::ClientboundSetTitleText {
+        text: azalea_chat::FormattedText::default(),
+    });
+    assert_eq!(
+        title.id(),
+        table_id(Direction::Clientbound, "set_title_text")
+    );
+
+    let subtitle =
+        ClientboundGamePacket::SetSubtitleText(c_set_subtitle_text::ClientboundSetSubtitleText {
+            text: azalea_chat::FormattedText::default(),
+        });
+    assert_eq!(
+        subtitle.id(),
+        table_id(Direction::Clientbound, "set_subtitle_text")
+    );
+
+    let animation = ClientboundGamePacket::SetTitlesAnimation(
+        c_set_titles_animation::ClientboundSetTitlesAnimation {
+            fade_in: 10,
+            stay: 70,
+            fade_out: 20,
+        },
+    );
+    assert_eq!(
+        animation.id(),
+        table_id(Direction::Clientbound, "set_titles_animation")
+    );
+
+    let clear = ClientboundGamePacket::ClearTitles(c_clear_titles::ClientboundClearTitles {
+        reset_times: true,
+    });
+    assert_eq!(clear.id(), table_id(Direction::Clientbound, "clear_titles"));
 }
 
 /// Round-trip through azalea's `LpVec3` decoder to cross-check the port.

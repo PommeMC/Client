@@ -33,6 +33,15 @@ impl TextSpan {
     }
 }
 
+/// The spans with every alpha multiplied by `alpha` (for fade effects).
+pub fn with_alpha(spans: &[TextSpan], alpha: f32) -> Vec<TextSpan> {
+    let mut spans = spans.to_vec();
+    for span in &mut spans {
+        span.color[3] *= alpha;
+    }
+    spans
+}
+
 /// Flatten a `FormattedText` component into styled spans for rendering.
 ///
 /// `base_color` applies wherever the component carries no explicit color,
