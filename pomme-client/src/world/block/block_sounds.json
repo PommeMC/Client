@@ -165,6 +165,7 @@
   "cauldron": ["block.stone.hit", "block.stone.break", 1.0, 1.0],
   "cave_air": ["block.stone.hit", "block.stone.break", 1.0, 1.0],
   "cave_vines_plant": ["block.cave_vines.hit", "block.cave_vines.break", 1.0, 1.0],
+  "chain": ["block.chain.hit", "block.chain.break", 1.0, 1.0],
   "chain_command_block": ["block.stone.hit", "block.stone.break", 1.0, 1.0],
   "cherry_button": ["block.cherry_wood.hit", "block.cherry_wood.break", 1.0, 1.0],
   "cherry_door": ["block.cherry_wood.hit", "block.cherry_wood.break", 1.0, 1.0],

@@ -214,14 +214,15 @@ mod tests {
         )
     }
 
+    /// An entry the latest version removed or renamed has no remap.
+    fn assert_unmapped(r: &RegistryRemaps, from: &RegistryTable, reg: ClientRegistry, name: &str) {
+        let id = from.names(reg).iter().position(|n| n == name).unwrap() as u32;
+        assert_eq!(r.remap(reg, id), None);
+    }
+
     /// The bed block entity was removed in 26.2; its id has no remap.
     fn assert_bed_unmapped(r: &RegistryRemaps, from: &RegistryTable) {
-        let bed = from
-            .names(ClientRegistry::BlockEntityType)
-            .iter()
-            .position(|n| n == "bed")
-            .unwrap() as u32;
-        assert_eq!(r.remap(ClientRegistry::BlockEntityType, bed), None);
+        assert_unmapped(r, from, ClientRegistry::BlockEntityType, "bed");
     }
 
     /// Every remapped id resolves to the same entry name in the target table.
@@ -336,6 +337,45 @@ mod tests {
         // far earlier than 1.21.11's divergence at 41, so the raw item-stack
         // limitation (see translate.rs) covers common components like
         // custom_name and enchantments on this version.
+        assert_eq!(
+            from.name_of(ClientRegistry::DataComponentType, 5),
+            Some("custom_name")
+        );
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 4), Some(4));
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 5), Some(6));
+
+        assert_round_trips(r, from, to);
+    }
+
+    /// Anchor checks against the 1.21.8 -> 26.2 registry diff (spot-checked
+    /// by hand against the two data-generator reports). Divergence points
+    /// match 1.21.10's (entity 20, component 5, particle 4); tadpole sits
+    /// two lower than on 1.21.10 because 1.21.9 added copper_golem and
+    /// mannequin, and the `chain` item was renamed by 26.x.
+    #[test]
+    fn remap_1_21_8_anchors() {
+        let (r, from, to) = setup(772);
+
+        // 26.x inserted air_drag_modifier at attribute id 0.
+        assert_eq!(from.name_of(ClientRegistry::Attribute, 0), Some("armor"));
+        assert_eq!(r.remap(ClientRegistry::Attribute, 0), Some(1));
+
+        // Entity ids diverge at 20, where 1.21.11 inserted camel_husk.
+        assert_eq!(from.name_of(ClientRegistry::EntityType, 20), Some("cat"));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 19), Some(19));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 20), Some(21));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 125), Some(131)); // tadpole
+
+        assert_bed_unmapped(r, from);
+
+        // The chain item was renamed (chain -> iron_chain); no remap.
+        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+
+        // Particle ids diverge right after bubble (id 3 in both).
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 3), Some(3));
+        assert_ne!(r.remap(ClientRegistry::ParticleType, 4), Some(4));
+
+        // Component ids diverge at 5 (custom_name), like 1.21.10.
         assert_eq!(
             from.name_of(ClientRegistry::DataComponentType, 5),
             Some("custom_name")

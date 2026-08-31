@@ -226,6 +226,7 @@ mod tests {
         // The self-reported name wins when it names the same protocol.
         assert_eq!(resolve_version_name(Some(773), Some("1.21.9")), "1.21.9");
         assert_eq!(resolve_version_name(Some(773), Some("1.21.10")), "1.21.10");
+        assert_eq!(resolve_version_name(Some(772), Some("1.21.7")), "1.21.7");
         assert_eq!(resolve_version_name(Some(775), Some("26.1.1")), "26.1.1");
         // Junk or protocol-mismatched names fall back to the newest name.
         assert_eq!(
@@ -233,6 +234,11 @@ mod tests {
             "1.21.10"
         );
         assert_eq!(resolve_version_name(Some(773), None), "1.21.10");
+        assert_eq!(
+            resolve_version_name(Some(772), Some("Paper 1.21.8")),
+            "1.21.8"
+        );
+        assert_eq!(resolve_version_name(Some(772), None), "1.21.8");
         assert_eq!(resolve_version_name(Some(776), Some("1.21.10")), "26.2");
         // Unsupported protocols show the raw reported string.
         assert_eq!(resolve_version_name(Some(1), Some("1.8.9")), "1.8.9");
