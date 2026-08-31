@@ -437,13 +437,41 @@ mod tests {
         );
     }
 
+    /// 1.21.6's packet tables match 1.21.8's in every phase and direction
+    /// (1.21.7 only added registry content — the lava_chicken music disc and
+    /// its sound), verified by diffing the two `generated/reports/
+    /// packets.json`; asserted in full here.
+    #[test]
+    fn anchors_1_21_6() {
+        let t = PacketTable::for_protocol(771).unwrap();
+        assert_eq!(t.version().protocol, 771);
+        assert_eq!(t.version().name, "1.21.6");
+        let t772 = PacketTable::for_protocol(772).unwrap();
+        for phase in [
+            Phase::Handshake,
+            Phase::Status,
+            Phase::Login,
+            Phase::Configuration,
+            Phase::Game,
+        ] {
+            for dir in [Direction::Serverbound, Direction::Clientbound] {
+                for id in 0.. {
+                    match (t.name_of(phase, dir, id), t772.name_of(phase, dir, id)) {
+                        (None, None) => break,
+                        (a, b) => assert_eq!(a, b, "{phase:?} {dir:?} {id}"),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn for_protocol_lookups() {
         assert!(std::ptr::eq(
             PacketTable::for_protocol(776).unwrap(),
             PacketTable::latest()
         ));
-        assert!(PacketTable::for_protocol(771).is_none());
+        assert!(PacketTable::for_protocol(770).is_none());
     }
 
     /// Per-phase counts from the 26.2 registration lists; a regenerated table

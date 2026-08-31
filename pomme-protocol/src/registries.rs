@@ -429,6 +429,39 @@ mod tests {
         assert_round_trips(r, from, to);
     }
 
+    /// 1.21.6's registries match 1.21.8's (whose 26.2 anchors are pinned
+    /// above) except the lava_chicken music disc and sound 1.21.7 inserted
+    /// at item 1256 / sound 939, sitting the later ids one lower; asserted
+    /// in full against the 1.21.8 table.
+    #[test]
+    fn remap_1_21_6_anchors() {
+        let (r, from, to) = setup(771);
+        let from_772 = RegistryTable::for_protocol(772).unwrap();
+
+        for reg in ClientRegistry::ALL {
+            let (a, b) = (from.names(reg), from_772.names(reg));
+            let insert = match reg {
+                ClientRegistry::Item => 1256,
+                ClientRegistry::SoundEvent => 939,
+                _ => {
+                    assert_eq!(a, b, "{reg:?}");
+                    continue;
+                }
+            };
+            assert_eq!(a[..insert], b[..insert], "{reg:?}");
+            assert_eq!(a[insert..], b[insert + 1..], "{reg:?}");
+        }
+
+        // The disc slot lava_chicken later takes.
+        assert_eq!(
+            from.name_of(ClientRegistry::Item, 1256),
+            Some("music_disc_mall")
+        );
+        assert_eq!(r.remap(ClientRegistry::Item, 1256), Some(1348));
+
+        assert_round_trips(r, from, to);
+    }
+
     #[test]
     fn latest_identity() {
         let r = RegistryRemaps::to_latest(LATEST.protocol).unwrap();
