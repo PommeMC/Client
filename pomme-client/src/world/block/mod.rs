@@ -201,7 +201,7 @@ impl ScalarOrPerState {
 
 /// Per-protocol block-state data, latest first; unknown protocols fall back
 /// to the latest (slot 0).
-const BLOCK_DATA: [(i32, &str); 5] = [
+const BLOCK_DATA: [(i32, &str); 6] = [
     (
         pomme_protocol::version::LATEST.protocol,
         include_str!("data/blocks-26.2.json"),
@@ -210,6 +210,9 @@ const BLOCK_DATA: [(i32, &str); 5] = [
     (774, include_str!("data/blocks-1.21.11.json")),
     (773, include_str!("data/blocks-1.21.10.json")),
     (772, include_str!("data/blocks-1.21.8.json")),
+    // 1.21.6's block set is identical to 1.21.8's (1.21.7 added no blocks);
+    // the 771 slot shares its tables.
+    (771, include_str!("data/blocks-1.21.8.json")),
 ];
 
 /// Per-state property tables (`just stategen`), index-aligned with
@@ -221,6 +224,7 @@ const STATE_DATA: [&str; BLOCK_DATA.len()] = [
     include_str!("data/state-26.1.json"),
     include_str!("data/state-1.21.11.json"),
     include_str!("data/state-1.21.10.json"),
+    include_str!("data/state-1.21.8.json"),
     include_str!("data/state-1.21.8.json"),
 ];
 
