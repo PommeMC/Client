@@ -7,8 +7,8 @@ use azalea_core::position::BlockPos;
 use azalea_entity::dimensions::EntityDimensions;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    AttributeModifiers, Consumable, EquipmentSlotGroup, Food, ItemUseAnimation, Tool, ToolRule,
-    UseEffects,
+    AttributeModifiers, Consumable, EquipmentSlotGroup, Food, ItemUseAnimation,
+    MinimumAttackCharge, Tool, ToolRule, UseEffects,
 };
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
@@ -495,6 +495,16 @@ impl InteractionState {
         (self.attack_strength_ticker as f32 / delay).clamp(0.0, 1.0)
     }
 
+    /// Vanilla `Player.cannotAttackWithItem(stack, 0)` (the one call site
+    /// passes no tolerance); the ratio is unclamped, unlike the scale.
+    fn cannot_attack_with_item(&self, held: Option<&ItemStackData>) -> bool {
+        let required = held
+            .and_then(stack_component::<MinimumAttackCharge>)
+            .map_or(0.0, |c| c.value);
+        required > 0.0
+            && (self.attack_strength_ticker as f32 / attack_strength_delay(held)) < required
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn start_attack(
         &mut self,
@@ -513,8 +523,11 @@ impl InteractionState {
             return;
         }
 
-        // TODO: vanilla gates the swing on `cannotAttackWithItem`
-        // (`MINIMUM_ATTACK_CHARGE`: spears below full charge don't swing).
+        // TODO: full-charge spears take vanilla's PIERCING_WEAPON branch
+        // instead of the plain entity/block dispatch.
+        if self.cannot_attack_with_item(held_stack) {
+            return;
+        }
 
         let hit = match self.target {
             None => {

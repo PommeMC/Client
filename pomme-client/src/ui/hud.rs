@@ -443,9 +443,10 @@ pub fn build_hud(
 
     // Vanilla `Hud.extractItemHotbar`: 18x18 indicator on the main-hand side
     // of the hotbar, bottom-up fill, plain alpha (no invert, no full-charge
-    // sprite). TODO: `skin_main_hand_right` isn't sent in ClientInformation
-    // yet (hardcoded Right in net/connection.rs).
-    if attack.mode == AttackIndicatorMode::Hotbar && attack.scale < 1.0 {
+    // sprite). Spectators get the SpectatorGui hotbar instead
+    // (`extractHotbarAndDecorations`). TODO: `skin_main_hand_right` isn't
+    // sent in ClientInformation yet (hardcoded Right in net/connection.rs).
+    if game_mode != 3 && attack.mode == AttackIndicatorMode::Hotbar && attack.scale < 1.0 {
         let y = (screen_h - 20.0 * gs).round();
         let x = if attack.main_hand_right {
             (cx + (91.0 + 6.0) * gs).round()
