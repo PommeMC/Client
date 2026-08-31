@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
 use azalea_block::BlockState;
+use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
 use azalea_core::direction::Direction;
 use azalea_core::position::BlockPos;
 use azalea_entity::dimensions::EntityDimensions;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    Consumable, Food, ItemUseAnimation, Tool, ToolRule, UseEffects,
+    AttributeModifiers, Consumable, EquipmentSlotGroup, Food, ItemUseAnimation,
+    MinimumAttackCharge, Tool, ToolRule, UseEffects,
 };
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
@@ -15,7 +17,7 @@ use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerA
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use azalea_registry::builtin::{BlockKind, EntityKind, ItemKind};
+use azalea_registry::builtin::{Attribute, BlockKind, EntityKind, ItemKind};
 use glam::{DVec3, Vec3, dvec3};
 use pomme_protocol::wire;
 
@@ -121,6 +123,11 @@ pub struct InteractionState {
     swing_time: i32,
     attack_anim: f32,
     o_attack_anim: f32,
+    /// Vanilla `Player.attackStrengthTicker`. The companion `itemSwapTicker`
+    /// (hand-raise animation) is not tracked.
+    attack_strength_ticker: u32,
+    /// Vanilla `Player.lastItemInMainHand`; `None` is the empty hand.
+    last_item_in_main_hand: Option<ItemStackData>,
 }
 
 impl InteractionState {
@@ -152,6 +159,8 @@ impl InteractionState {
             swing_time: 0,
             attack_anim: 0.0,
             o_attack_anim: 0.0,
+            attack_strength_ticker: 0,
+            last_item_in_main_hand: None,
         }
     }
 
@@ -365,6 +374,7 @@ impl InteractionState {
             self.update_using_item(
                 held_stack, audio, chunks, player_pos, eye_pos, look, effects,
             );
+            self.tick_attack_cooldown(held_stack);
             self.update_swing();
             return dirty_chunks;
         }
@@ -452,9 +462,47 @@ impl InteractionState {
         self.update_using_item(
             held_stack, audio, chunks, player_pos, eye_pos, look, effects,
         );
+        self.tick_attack_cooldown(held_stack);
         self.update_swing();
 
         dirty_chunks
+    }
+
+    /// Vanilla `Player.tick`: advance the attack cooldown, and reset it when
+    /// the main-hand item *type* changes; component or count changes only
+    /// refresh the cache.
+    fn tick_attack_cooldown(&mut self, held_stack: Option<&ItemStackData>) {
+        self.attack_strength_ticker = self.attack_strength_ticker.saturating_add(1);
+        // Vanilla `ItemStack.matches`: same item, components, and count.
+        let matches = same_item_same_components(held_stack, self.last_item_in_main_hand.as_ref())
+            && held_stack.map(|s| s.count) == self.last_item_in_main_hand.as_ref().map(|s| s.count);
+        if !matches {
+            let same_type = match (held_stack, &self.last_item_in_main_hand) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.kind == b.kind,
+                _ => false,
+            };
+            if !same_type {
+                self.attack_strength_ticker = 0;
+            }
+            self.last_item_in_main_hand = held_stack.cloned();
+        }
+    }
+
+    /// Vanilla `Player.getAttackStrengthScale(0.0)` (the HUD passes no
+    /// partial tick).
+    pub fn attack_strength_scale(&self, delay: f32) -> f32 {
+        (self.attack_strength_ticker as f32 / delay).clamp(0.0, 1.0)
+    }
+
+    /// Vanilla `Player.cannotAttackWithItem(stack, 0)` (the one call site
+    /// passes no tolerance); the ratio is unclamped, unlike the scale.
+    fn cannot_attack_with_item(&self, held: Option<&ItemStackData>) -> bool {
+        let required = held
+            .and_then(stack_component::<MinimumAttackCharge>)
+            .map_or(0.0, |c| c.value);
+        required > 0.0
+            && (self.attack_strength_ticker as f32 / attack_strength_delay(held)) < required
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -475,14 +523,23 @@ impl InteractionState {
             return;
         }
 
+        // TODO: full-charge spears take vanilla's PIERCING_WEAPON branch
+        // instead of the plain entity/block dispatch.
+        if self.cannot_attack_with_item(held_stack) {
+            return;
+        }
+
         let hit = match self.target {
             None => {
+                // Vanilla `Minecraft.startAttack` MISS branch.
                 self.miss_time = MISS_COOLDOWN;
+                self.attack_strength_ticker = 0;
                 self.swing(sender);
                 return;
             }
             Some(HitResult::Entity(hit)) => {
                 sender.send_raw(wire::encode_attack(hit.entity_id));
+                self.attack_strength_ticker = 0;
                 self.swing(sender);
                 let _ = input.weak_rumble_for_instant();
                 return;
@@ -493,6 +550,7 @@ impl InteractionState {
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
         if is_air(state) {
             self.miss_time = MISS_COOLDOWN;
+            self.attack_strength_ticker = 0;
             self.swing(sender);
             return;
         }
@@ -1045,7 +1103,57 @@ impl InteractionState {
             );
             self.is_destroying = false;
             self.destroy_progress = 0.0;
+            // Vanilla `MultiPlayerGameMode.stopDestroyBlock`.
+            self.attack_strength_ticker = 0;
         }
+    }
+}
+
+/// The player's attack speed with the given main-hand item: base 4.0 plus the
+/// item's `AttributeModifiers` component, folded like vanilla
+/// `AttributeInstance.calculateValue`. Computed locally like vanilla's client;
+/// the server's `UpdateAttributes` snapshot is deliberately not used (it
+/// already bakes in the held item's modifier and lags item switches).
+/// TODO: haste / mining fatigue modifiers once mob effects are tracked.
+pub fn attack_speed(held: Option<&ItemStackData>) -> f64 {
+    let base = 4.0f64;
+    let mut add = 0.0f64;
+    let mut mul_base = 0.0f64;
+    let mut mul_total = 1.0f64;
+    if let Some(stack) = held
+        && let Some(mods) = stack_component::<AttributeModifiers>(stack)
+    {
+        for entry in &mods.modifiers {
+            if entry.kind != Attribute::AttackSpeed
+                || !matches!(
+                    entry.slot,
+                    EquipmentSlotGroup::Mainhand
+                        | EquipmentSlotGroup::Hand
+                        | EquipmentSlotGroup::Any
+                )
+            {
+                continue;
+            }
+            match entry.modifier.operation {
+                AttributeModifierOperation::AddValue => add += entry.modifier.amount,
+                AttributeModifierOperation::AddMultipliedBase => mul_base += entry.modifier.amount,
+                AttributeModifierOperation::AddMultipliedTotal => {
+                    mul_total *= 1.0 + entry.modifier.amount
+                }
+            }
+        }
+    }
+    // Vanilla `RangedAttribute` ATTACK_SPEED bounds.
+    ((base + add) * (1.0 + mul_base) * mul_total).clamp(0.0, 1024.0)
+}
+
+/// Vanilla `Player.getCurrentItemAttackStrengthDelay`, in ticks.
+pub fn attack_strength_delay(held: Option<&ItemStackData>) -> f32 {
+    let speed = attack_speed(held);
+    if speed <= 0.0 {
+        f32::INFINITY
+    } else {
+        (1.0 / speed * 20.0) as f32
     }
 }
 

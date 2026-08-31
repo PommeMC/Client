@@ -1492,15 +1492,7 @@ impl AppCore {
             crate::player::is_creative(game.player.game_mode),
         );
 
-        let held_stack = match game
-            .player
-            .inventory
-            .hotbar_slots()
-            .get(input.selected_slot() as usize)
-        {
-            Some(azalea_inventory::ItemStack::Present(data)) if data.count > 0 => Some(data),
-            _ => None,
-        };
+        let held_stack = game.player.inventory.held_stack(input.selected_slot());
         let place_block = held_stack.and_then(|data| {
             let name = crate::player::inventory::item_resource_name(data.kind);
             renderer.registry().placeable_block_for_item(&name)

@@ -81,6 +81,8 @@ struct Settings {
     ui_volume: f32,
     #[serde(default = "default_cloud_mode")]
     cloud_mode: u8,
+    #[serde(default = "default_attack_indicator")]
+    attack_indicator: u8,
 }
 
 fn default_fov() -> u32 {
@@ -101,6 +103,10 @@ fn default_fov_effect_scale() -> f32 {
 
 fn default_cloud_mode() -> u8 {
     2
+}
+
+fn default_attack_indicator() -> u8 {
+    1
 }
 
 fn default_true() -> bool {
@@ -149,6 +155,7 @@ impl Default for Settings {
             voice_volume: 1.0,
             ui_volume: 1.0,
             cloud_mode: 2,
+            attack_indicator: 1,
         }
     }
 }
@@ -432,6 +439,7 @@ pub struct MainMenu {
     skin_main_hand_right: bool,
     pub display_mode: DisplayMode,
     pub cloud_mode: CloudMode,
+    pub attack_indicator: crate::ui::hud::AttackIndicatorMode,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
     menu_open_time: Option<Instant>,
@@ -536,6 +544,9 @@ impl MainMenu {
             skin_main_hand_right: settings.skin_main_hand_right,
             display_mode: DisplayMode::Windowed,
             cloud_mode: CloudMode::from_u8(settings.cloud_mode),
+            attack_indicator: crate::ui::hud::AttackIndicatorMode::from_u8(
+                settings.attack_indicator,
+            ),
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             menu_open_time: None,
@@ -626,8 +637,13 @@ impl MainMenu {
                 skin_hat: self.skin_hat,
                 skin_main_hand_right: self.skin_main_hand_right,
                 cloud_mode: self.cloud_mode.to_u8(),
+                attack_indicator: self.attack_indicator.to_u8(),
             },
         );
+    }
+
+    pub fn main_hand_right(&self) -> bool {
+        self.skin_main_hand_right
     }
 
     pub fn open_options(&mut self) {

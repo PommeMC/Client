@@ -1,4 +1,4 @@
-use azalea_inventory::ItemStack;
+use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::builtin::ItemKind;
 
 pub const PLAYER_SLOTS: usize = 46;
@@ -60,6 +60,14 @@ impl Inventory {
 
     pub fn offhand(&self) -> &ItemStack {
         self.slot(OFFHAND)
+    }
+
+    /// The non-empty stack in the selected hotbar slot.
+    pub fn held_stack(&self, selected: u8) -> Option<&ItemStackData> {
+        match self.hotbar_slots().get(selected as usize) {
+            Some(ItemStack::Present(data)) if data.count > 0 => Some(data),
+            _ => None,
+        }
     }
 
     /// Remove one item (or the whole stack) from the selected hotbar slot,

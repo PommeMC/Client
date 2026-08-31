@@ -270,8 +270,60 @@ pub struct DebugInfo<'a> {
     pub timings: Option<FrameTimings>,
 }
 
-const CROSSHAIR_SIZE: f32 = 10.0;
-const CROSSHAIR_THICKNESS: f32 = 2.0;
+/// Vanilla `AttackIndicatorStatus`; the u8 values are its ordinals.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AttackIndicatorMode {
+    Off,
+    #[default]
+    Crosshair,
+    Hotbar,
+}
+
+impl AttackIndicatorMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Crosshair,
+            Self::Crosshair => Self::Hotbar,
+            Self::Hotbar => Self::Off,
+        }
+    }
+
+    /// Short label for the options row (the menu prefixes "Attack Indicator:
+    /// ").
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "OFF",
+            Self::Crosshair => "Crosshair",
+            Self::Hotbar => "Hotbar",
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Crosshair => 1,
+            Self::Hotbar => 2,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Off,
+            2 => Self::Hotbar,
+            _ => Self::Crosshair,
+        }
+    }
+}
+
+/// Per-frame attack-indicator inputs; the caller computes scale and the
+/// full-charge state (vanilla `renderMaxAttackIndicator`).
+pub struct AttackIndicatorState {
+    pub mode: AttackIndicatorMode,
+    /// Vanilla `getAttackStrengthScale(0.0)`.
+    pub scale: f32,
+    pub show_full: bool,
+    pub main_hand_right: bool,
+}
 
 const HOTBAR_W: f32 = 182.0;
 const HOTBAR_H: f32 = 22.0;
@@ -325,14 +377,18 @@ pub fn build_hud(
     first_person: bool,
     debug: Option<&DebugInfo<'_>>,
     gui_scale_setting: u32,
+    attack: &AttackIndicatorState,
     text_width_fn: TextWidthFn,
 ) {
     let gs = gui_scale(screen_w, screen_h, gui_scale_setting);
     let cx = screen_w / 2.0;
     let cy = screen_h / 2.0;
 
-    if first_person {
-        build_crosshair(elements, cx, cy);
+    // Vanilla also shows the crosshair in spectator when looking at a menu
+    // provider, and hides it for the F3 3D-crosshair entry; neither concept
+    // exists here yet.
+    if first_person && game_mode != 3 {
+        build_crosshair(elements, cx, cy, gs, attack);
     }
 
     if let Some(info) = debug {
@@ -382,6 +438,48 @@ pub fn build_hud(
             if data.count > 1 {
                 push_item_count(elements, ix, iy, item_size, gs, data.count);
             }
+        }
+    }
+
+    // Vanilla `Hud.extractItemHotbar`: 18x18 indicator on the main-hand side
+    // of the hotbar, bottom-up fill, plain alpha (no invert, no full-charge
+    // sprite). Spectators get the SpectatorGui hotbar instead
+    // (`extractHotbarAndDecorations`). TODO: `skin_main_hand_right` isn't
+    // sent in ClientInformation yet (hardcoded Right in net/connection.rs).
+    if game_mode != 3 && attack.mode == AttackIndicatorMode::Hotbar && attack.scale < 1.0 {
+        let y = (screen_h - 20.0 * gs).round();
+        let x = if attack.main_hand_right {
+            (cx + (91.0 + 6.0) * gs).round()
+        } else {
+            (cx - (91.0 + 22.0) * gs).round()
+        };
+        let progress = (attack.scale * 19.0) as i32;
+        elements.push(MenuElement::Image {
+            x,
+            y,
+            w: 18.0 * gs,
+            h: 18.0 * gs,
+            sprite: SpriteId::HotbarAttackIndicatorBackground,
+            tint: WHITE,
+        });
+        if progress > 0 {
+            // Vanilla blits the (0, 18-progress, 18, progress) sub-rect at
+            // (x, y + 18 - progress): the bottom rows of a full-size draw.
+            elements.push(MenuElement::ScissorPush {
+                x,
+                y: (y + (18 - progress) as f32 * gs).round(),
+                w: 18.0 * gs,
+                h: (progress as f32 * gs).round(),
+            });
+            elements.push(MenuElement::Image {
+                x,
+                y,
+                w: 18.0 * gs,
+                h: 18.0 * gs,
+                sprite: SpriteId::HotbarAttackIndicatorProgress,
+                tint: WHITE,
+            });
+            elements.push(MenuElement::ScissorPop);
         }
     }
 
@@ -839,23 +937,70 @@ fn build_locator_dots(
     }
 }
 
-fn build_crosshair(elements: &mut Vec<MenuElement>, cx: f32, cy: f32) {
-    elements.push(MenuElement::Rect {
-        x: cx - CROSSHAIR_SIZE,
-        y: cy - CROSSHAIR_THICKNESS / 2.0,
-        w: CROSSHAIR_SIZE * 2.0,
-        h: CROSSHAIR_THICKNESS,
-        corner_radius: 0.0,
-        color: WHITE,
+/// Vanilla `Hud.extractCrosshair`: the 15x15 crosshair and, in Crosshair
+/// mode, the attack indicator below it, all INVERT-blended
+/// (`RenderPipelines.CROSSHAIR`).
+fn build_crosshair(
+    elements: &mut Vec<MenuElement>,
+    cx: f32,
+    cy: f32,
+    gs: f32,
+    attack: &AttackIndicatorState,
+) {
+    elements.push(MenuElement::ImageInvert {
+        x: (cx - 15.0 * gs / 2.0).round(),
+        y: (cy - 15.0 * gs / 2.0).round(),
+        w: 15.0 * gs,
+        h: 15.0 * gs,
+        sprite: SpriteId::Crosshair,
+        tint: WHITE,
     });
-    elements.push(MenuElement::Rect {
-        x: cx - CROSSHAIR_THICKNESS / 2.0,
-        y: cy - CROSSHAIR_SIZE,
-        w: CROSSHAIR_THICKNESS,
-        h: CROSSHAIR_SIZE * 2.0,
-        corner_radius: 0.0,
-        color: WHITE,
-    });
+
+    if attack.mode != AttackIndicatorMode::Crosshair {
+        return;
+    }
+    // Vanilla: x = w/2 - 8, y = h/2 - 7 + 16.
+    let ix = (cx - 8.0 * gs).round();
+    let iy = (cy + 9.0 * gs).round();
+    if attack.show_full {
+        elements.push(MenuElement::ImageInvert {
+            x: ix,
+            y: iy,
+            w: 16.0 * gs,
+            h: 16.0 * gs,
+            sprite: SpriteId::CrosshairAttackIndicatorFull,
+            tint: WHITE,
+        });
+    } else if attack.scale < 1.0 {
+        let progress = (attack.scale * 17.0) as i32;
+        elements.push(MenuElement::ImageInvert {
+            x: ix,
+            y: iy,
+            w: 16.0 * gs,
+            h: 4.0 * gs,
+            sprite: SpriteId::CrosshairAttackIndicatorBackground,
+            tint: WHITE,
+        });
+        if progress > 0 {
+            // Vanilla blits the (0, 0, progress, 4) sub-rect; scissoring the
+            // full-size draw to `progress` px is identical.
+            elements.push(MenuElement::ScissorPush {
+                x: ix,
+                y: iy,
+                w: (progress as f32 * gs).round(),
+                h: 4.0 * gs,
+            });
+            elements.push(MenuElement::ImageInvert {
+                x: ix,
+                y: iy,
+                w: 16.0 * gs,
+                h: 4.0 * gs,
+                sprite: SpriteId::CrosshairAttackIndicatorProgress,
+                tint: WHITE,
+            });
+            elements.push(MenuElement::ScissorPop);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

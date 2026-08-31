@@ -1685,6 +1685,28 @@ pub fn update_game(
         } else {
             hud::ContextualBarKind::Empty
         };
+        // Vanilla `renderMaxAttackIndicator`: the picked entity is living
+        // (implicit: pomme entity hits only come from `living`), alive, at
+        // full charge, and the weapon is slow enough to matter (delay > 5).
+        // TODO: vanilla also skips it when the active item's ATTACK_RANGE
+        // component says the hit is out of range (spears).
+        let held = game.player.inventory.held_stack(core.input.selected_slot());
+        let delay = crate::player::interaction::attack_strength_delay(held);
+        let scale = game.interaction.attack_strength_scale(delay);
+        let show_full = scale >= 1.0
+            && delay > 5.0
+            && matches!(game.interaction.target, Some(HitResult::Entity(hit))
+                if game
+                    .entity_store
+                    .living
+                    .get(&hit.entity_id)
+                    .is_some_and(|e| e.health > 0.0));
+        let attack = hud::AttackIndicatorState {
+            mode: core.menu.attack_indicator,
+            scale,
+            show_full,
+            main_hand_right: core.menu.main_hand_right(),
+        };
         hud::build_hud(
             &mut elements,
             sw,
@@ -1710,6 +1732,7 @@ pub fn update_game(
             gfx.renderer.is_first_person(),
             debug.as_ref(),
             core.menu.gui_scale_setting,
+            &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
     }
