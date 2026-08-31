@@ -708,6 +708,15 @@ pub fn handle_game_packet(
                         is_crouching: matches!(pose, azalea_entity::Pose::Crouching),
                     });
                 }
+                // Index 14 = LivingEntity SLEEPING_POS (OptionalBlockPos).
+                if item.index == 14
+                    && let azalea_entity::EntityDataValue::OptionalBlockPos(pos) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::EntitySleepingPos {
+                        id: p.id.0,
+                        pos: *pos,
+                    });
+                }
                 // Scalar values are forwarded raw; the store resolves their
                 // meaning per (kind, index) like vanilla `onSyncedDataUpdated`
                 // (`EntityStore::apply_entity_data`).
@@ -869,6 +878,15 @@ pub fn handle_game_packet(
             ) =>
         {
             let _ = event_tx.try_send(NetworkEvent::EntitySwing { id: p.id.0 });
+        }
+        // Vanilla handleAnimate action 2 -> stopSleepInBed(false, false).
+        ClientboundGamePacket::Animate(p)
+            if matches!(
+                p.action,
+                azalea_protocol::packets::game::c_animate::AnimationAction::WakeUp
+            ) =>
+        {
+            let _ = event_tx.try_send(NetworkEvent::EntityWakeUp { id: p.id.0 });
         }
         ClientboundGamePacket::TakeItemEntity(p) => {
             let _ = event_tx.try_send(NetworkEvent::ItemPickedUp {

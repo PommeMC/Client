@@ -1461,6 +1461,7 @@ pub fn update_game(
         game.block_entity_anim.tick();
         game.title.tick();
         tick_tool_highlight(core, game);
+        game.player.tick_sleep();
         // Vanilla LocalPlayer.handlePortalTransitionEffect.
         // TODO: canUsePortal(false) also requires not riding (no passenger
         // tracking yet).
@@ -1499,6 +1500,14 @@ pub fn update_game(
     // F1 (vanilla keyToggleGui); only while no screen or chat is open.
     if core.input.key_just_pressed(winit::keyboard::KeyCode::F1) && game.input_live() {
         game.hide_gui = !game.hide_gui;
+    }
+    // Vanilla leaves bed via InBedChatScreen's ESC / "Leave bed" button; no
+    // bed screen yet, so the jump key wakes. TODO: InBedChatScreen.
+    if game.input_live()
+        && game.player.is_sleeping()
+        && core.input.action_just_pressed(input::Action::Jump)
+    {
+        core.send_stop_sleeping(connection);
     }
     // TODO: remaining vanilla keybinds with no backing feature yet:
     // L advancements, P social interactions, O friends overlay (in-game),
@@ -1707,11 +1716,12 @@ pub fn update_game(
     // the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
     // Underwater overlay (vanilla ScreenEffectRenderer.submitWater): part of
-    // the 3D pass in vanilla, so it shows even with the GUI hidden.
-    // TODO: vanilla also skips it while sleeping.
+    // the 3D pass in vanilla, so it shows even with the GUI hidden, but not
+    // while sleeping.
     if !benchmark_running
         && gfx.renderer.is_first_person()
         && !crate::player::is_spectator(game.player.game_mode)
+        && !game.player.is_sleeping()
         && game.player.eyes_in_water
     {
         hud::build_underwater_overlay(
@@ -1899,6 +1909,14 @@ pub fn update_game(
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+    }
+
+    // Vanilla Hud.extractSleepOverlay sits outside the isHidden gate: above
+    // the hotbar/effects/boss bar, below chat and the tab list.
+    // TODO: vanilla draws the scoreboard sidebar, action bar, and nameplates
+    // above the fade; here they dim under it (build_hud bundles the first two).
+    if !benchmark_running {
+        hud::build_sleep_overlay(&mut elements, sw, sh, game.player.sleep_counter);
     }
 
     if core.input.performing_action(input::Action::ViewPlayerList)

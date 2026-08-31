@@ -90,6 +90,10 @@ pub struct LocalPlayer {
     /// portal overlay while standing in a nether portal.
     pub portal_effect_intensity: f32,
     pub prev_portal_effect_intensity: f32,
+    /// Vanilla LivingEntity SLEEPING_POS metadata: Some while in a bed.
+    pub sleeping_pos: Option<azalea_core::position::BlockPos>,
+    /// Vanilla Player.sleepCounter: drives the sleep overlay fade.
+    pub sleep_counter: u32,
     pub game_mode: u8,
     pub score: i32,
     pub entity_id: i32,
@@ -142,6 +146,8 @@ impl LocalPlayer {
             air_supply: MAX_AIR_SUPPLY,
             portal_effect_intensity: 0.0,
             prev_portal_effect_intensity: 0.0,
+            sleeping_pos: None,
+            sleep_counter: 0,
             game_mode: 0,
             score: 0,
             entity_id: -1,
@@ -302,5 +308,30 @@ impl LocalPlayer {
         }
         self.portal_effect_intensity = (self.portal_effect_intensity + step).clamp(0.0, 1.0);
         triggered
+    }
+
+    /// Vanilla LivingEntity.isSleeping: getSleepingPos().isPresent().
+    pub fn is_sleeping(&self) -> bool {
+        self.sleeping_pos.is_some()
+    }
+
+    /// Vanilla Player.tick sleep-counter branch: ramps to 100 while sleeping,
+    /// then runs 100..110 after waking and resets to 0.
+    pub fn tick_sleep(&mut self) {
+        if self.is_sleeping() {
+            self.sleep_counter = (self.sleep_counter + 1).min(100);
+        } else if self.sleep_counter > 0 {
+            self.sleep_counter += 1;
+            if self.sleep_counter >= 110 {
+                self.sleep_counter = 0;
+            }
+        }
+    }
+
+    /// Vanilla client stopSleepInBed(false, _): the counter jumps to 100 so
+    /// the fade-out runs from full even on an early wake-up.
+    pub fn wake_up(&mut self) {
+        self.sleeping_pos = None;
+        self.sleep_counter = 100;
     }
 }
