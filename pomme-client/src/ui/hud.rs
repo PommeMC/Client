@@ -361,6 +361,8 @@ pub fn build_hud(
     screen_h: f32,
     selected_slot: u8,
     health: f32,
+    absorption: f32,
+    max_health: f32,
     food: u32,
     armor: u32,
     // Gated to survival by the caller.
@@ -559,19 +561,25 @@ pub fn build_hud(
     );
 
     let status_bar_y = (hotbar_y - (XP_BAR_H + 1.0 + 2.0) * gs).round();
+    // Vanilla Hud shares one Random across heart jitter, food shake and bubble
+    // wobble, seeded once per frame; `tickCount * 312871` wraps at 32 bits.
+    let mut hud_rng = crate::util::JavaRandom::new((tick as i32).wrapping_mul(312871) as i64);
     let is_survival = crate::player::is_survival(game_mode);
     if is_survival {
-        build_status_bar(
+        let absorption_halves = absorption.ceil().max(0.0) as i32;
+        let layout = heart_layout(max_health, health, absorption_halves);
+        build_hearts(
             elements,
             hotbar_x,
             status_bar_y,
+            &layout,
             health,
-            false,
-            SpriteId::HeartContainer,
-            SpriteId::HeartFull,
-            SpriteId::HeartHalf,
+            absorption_halves,
+            &mut hud_rng,
             gs,
         );
+        // TODO: food shake consumes from hud_rng between hearts and bubbles in
+        // vanilla.
         build_status_bar(
             elements,
             hotbar_x + hotbar_w,
@@ -585,7 +593,9 @@ pub fn build_hud(
         );
 
         if armor > 0 {
-            let armor_y = (status_bar_y - (ICON_SIZE + 1.0) * gs).round();
+            // Vanilla `yLineBase - (rows - 1) * rowHeight - 10`.
+            let armor_y =
+                (status_bar_y - ((layout.rows - 1) * layout.row_height + 10) as f32 * gs).round();
             build_status_bar(
                 elements,
                 hotbar_x,
@@ -683,7 +693,6 @@ pub fn build_hud(
     if let Some(bubbles) = air_bubbles {
         let bubble_y = (status_bar_y - (ICON_SIZE * 2.0 + 1.0) * gs).round();
         let icon_size = ICON_SIZE * gs;
-        let mut rng = crate::util::JavaRandom::new((tick as i64).wrapping_mul(312871));
         let wobbling = bubbles.empty == 10 && tick.is_multiple_of(2);
         for b in 1..=10i32 {
             let mut y = bubble_y;
@@ -695,7 +704,7 @@ pub fn build_hud(
                 continue;
             } else {
                 if wobbling {
-                    y += rng.next_int(2) as f32 * gs;
+                    y += hud_rng.next_int(2) as f32 * gs;
                 }
                 SpriteId::AirEmpty
             };
@@ -1138,6 +1147,93 @@ fn build_crosshair(
                 tint: WHITE,
             });
             elements.push(MenuElement::ScissorPop);
+        }
+    }
+}
+
+struct HeartLayout {
+    health_containers: i32,
+    absorption_containers: i32,
+    rows: i32,
+    row_height: i32,
+}
+
+/// Vanilla `Hud.extractPlayerHealth` layout math.
+fn heart_layout(max_health: f32, health: f32, absorption_halves: i32) -> HeartLayout {
+    // TODO: also max with displayHealth once the damage-flash blink exists.
+    let max_health = max_health.max(health.ceil());
+    let health_containers = (max_health as f64 / 2.0).ceil() as i32;
+    let rows = ((max_health + absorption_halves as f32) / 2.0 / 10.0).ceil() as i32;
+    HeartLayout {
+        health_containers,
+        absorption_containers: (absorption_halves as f64 / 2.0).ceil() as i32,
+        rows,
+        row_height: (10 - (rows - 2)).max(3),
+    }
+}
+
+/// Vanilla `Hud.extractHearts`: health and absorption hearts share one
+/// 10-per-row grid, absorption occupying the container indices past the
+/// health containers and wrapping upward into new rows.
+///
+/// `y_row_bottom` is the BOTTOM of the bottom row; vanilla's `yLineBase` is
+/// its top, so `y_row_bottom - icon_size` ≡ `yLineBase * gs` and vanilla's
+/// downward-growing y offsets map unchanged.
+#[allow(clippy::too_many_arguments)]
+fn build_hearts(
+    elements: &mut Vec<MenuElement>,
+    x_left: f32,
+    y_row_bottom: f32,
+    layout: &HeartLayout,
+    health: f32,
+    absorption_halves: i32,
+    rng: &mut crate::util::JavaRandom,
+    gs: f32,
+) {
+    let icon_size = ICON_SIZE * gs;
+    let current_health = health.ceil().max(0.0) as i32;
+    let max_health_halves = layout.health_containers * 2;
+    for i in (0..layout.health_containers + layout.absorption_containers).rev() {
+        let x = (x_left + (i % 10 * 8) as f32 * gs).round();
+        let mut y_off = -(i / 10 * layout.row_height);
+        if current_health + absorption_halves <= 4 {
+            y_off += rng.next_int(2);
+        }
+        // TODO: regen wave (i < health_containers && i == heart_offset_index
+        // => y_off -= 2) once mob effects are tracked.
+        let y = (y_row_bottom - icon_size + y_off as f32 * gs).round();
+        let mut push = |sprite| {
+            elements.push(MenuElement::Image {
+                x,
+                y,
+                w: icon_size,
+                h: icon_size,
+                sprite,
+                tint: WHITE,
+            });
+        };
+        // TODO: blinking container / hardcore variants.
+        push(SpriteId::HeartContainer);
+        let halves = i * 2;
+        if i >= layout.health_containers {
+            // TODO: WITHERED replaces ABSORBING under the wither effect.
+            let ah = halves - max_health_halves;
+            if ah < absorption_halves {
+                push(if ah + 1 == absorption_halves {
+                    SpriteId::HeartAbsorbingHalf
+                } else {
+                    SpriteId::HeartAbsorbingFull
+                });
+            }
+        }
+        // TODO: blinking old-health overlay; poisoned/withered/frozen/hardcore
+        // heart types.
+        if halves < current_health {
+            push(if halves + 1 == current_health {
+                SpriteId::HeartHalf
+            } else {
+                SpriteId::HeartFull
+            });
         }
     }
 }

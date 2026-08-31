@@ -254,27 +254,33 @@ pub fn handle_game_packet(
             use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
             use azalea_registry::builtin::Attribute;
             for snapshot in &p.values {
-                if snapshot.attribute != Attribute::Armor {
-                    continue;
-                }
                 let base = snapshot.base;
                 let mut add = 0.0f64;
                 let mut mul_base = 0.0f64;
-                let mut mul_total = 0.0f64;
+                let mut mul_total = 1.0f64;
                 for m in &snapshot.modifiers {
                     match m.operation {
                         AttributeModifierOperation::AddValue => add += m.amount,
                         AttributeModifierOperation::AddMultipliedBase => mul_base += m.amount,
-                        AttributeModifierOperation::AddMultipliedTotal => mul_total += m.amount,
+                        AttributeModifierOperation::AddMultipliedTotal => {
+                            mul_total *= 1.0 + m.amount
+                        }
                     }
                 }
-                let value = (base + add) * (1.0 + mul_base) * (1.0 + mul_total);
-                let armor = value.clamp(0.0, 30.0).round() as u32;
-                let _ = event_tx.try_send(NetworkEvent::EntityArmorUpdate {
-                    entity_id: p.entity_id.0,
-                    armor,
-                });
-                break;
+                let value = (base + add) * (1.0 + mul_base) * mul_total;
+                let event = match snapshot.attribute {
+                    Attribute::Armor => NetworkEvent::EntityArmorUpdate {
+                        entity_id: p.entity_id.0,
+                        armor: value.clamp(0.0, 30.0).round() as u32,
+                    },
+                    // Vanilla RangedAttribute MAX_HEALTH clamps to 1..1024.
+                    Attribute::MaxHealth => NetworkEvent::EntityMaxHealthUpdate {
+                        entity_id: p.entity_id.0,
+                        max_health: value.clamp(1.0, 1024.0) as f32,
+                    },
+                    _ => continue,
+                };
+                let _ = event_tx.try_send(event);
             }
         }
         ClientboundGamePacket::PlayerAbilities(p) => {
@@ -621,6 +627,17 @@ pub fn handle_game_packet(
                         score: *score,
                     });
                 }
+                // Index 17 (Float) on players = absorption
+                // (Player.DATA_PLAYER_ABSORPTION_ID). Kind-blind; the consumer
+                // applies it only to the local player.
+                if item.index == 17
+                    && let azalea_entity::EntityDataValue::Float(absorption) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::PlayerAbsorption {
+                        entity_id: p.id.0,
+                        absorption: *absorption,
+                    });
+                }
                 // Index 2 = custom name (Optional<Component>); needed for jeb_ sheep detection.
                 if item.index == 2
                     && let azalea_entity::EntityDataValue::OptionalFormattedText(opt) = &item.value
@@ -751,6 +768,10 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::Respawn(p) => {
+            let _ = event_tx.try_send(NetworkEvent::PlayerRespawned {
+                keep_entity_data: p.data_to_keep & 2 != 0,
+                keep_attribute_modifiers: p.data_to_keep & 1 != 0,
+            });
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
                 let _ = event_tx.try_send(dimension_info(dim));
             }

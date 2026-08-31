@@ -1716,6 +1716,8 @@ pub fn update_game(
             sh,
             core.input.selected_slot(),
             game.player.health,
+            game.player.absorption,
+            game.player.max_health,
             game.player.food,
             game.player.armor,
             air_bubbles,
