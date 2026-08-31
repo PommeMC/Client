@@ -172,7 +172,7 @@ fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
 /// Protocols outside `TRANSLATED` never build a translation.
 #[test]
 fn no_translation_without_coverage() {
-    assert!(crate::net::translate::Translation::for_protocol(769).is_none());
+    assert!(crate::net::translate::Translation::for_protocol(768).is_none());
 }
 
 /// 26.2 appended a trailing session-id UUID to login_finished
@@ -638,7 +638,7 @@ fn translate_set_time_774() {
 /// action bodies in the references), through each version's id table.
 #[test]
 fn translate_attack_old_versions() {
-    for protocol in [774, 773, 772, 771, 770] {
+    for protocol in [774, 773, 772, 771, 770, 769] {
         let frames =
             translation_for(protocol).translate_outbound_game_frame(wire::encode_attack(42));
         let interact = old_id(protocol, Direction::Serverbound, "interact");
@@ -875,7 +875,7 @@ fn assert_velocity(v: azalea_core::position::Vec3) {
 /// rewrites and serializer map are wired up for protocols 770/771.
 #[test]
 fn translate_add_entity_772() {
-    for protocol in [772, 771, 770] {
+    for protocol in [772, 771, 770, 769] {
         let mut old = Vec::new();
         wire::write_varint(
             &mut old,
@@ -1015,6 +1015,187 @@ fn translate_player_command_770() {
     let frames = translation_for(770).translate_outbound_game_frame(frame);
     let old = old_id(770, Direction::Serverbound, "player_command") as u8;
     assert_eq!(frames, [[old, 9, 3, 0]]);
+}
+
+/// The 1.21.4 serializer interleave: `sniffer_state` is 27 there, 35 on
+/// 26.2, past the four variant serializers 1.21.5 added.
+#[test]
+fn translate_entity_data_769() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(769, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    old.extend_from_slice(&[17, 27, 2]); // index 17, sniffer_state, ordinal 2
+    old.push(0xFF);
+
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(769, old) else {
+        panic!("wrong packet");
+    };
+    assert!(matches!(
+        p.packed_items.0[0].value,
+        azalea_entity::EntityDataValue::SnifferState(_)
+    ));
+}
+
+/// 1.21.4 team `Parameters` carry nametag visibility and collision rule as
+/// strings (`ClientboundSetPlayerTeamPacket` read body); the shim maps
+/// them to the enum ids 1.21.5 introduced.
+#[test]
+fn translate_set_player_team_769() {
+    let nbt_str = |s: &str| {
+        let mut v = vec![8u8, 0, s.len() as u8];
+        v.extend_from_slice(s.as_bytes());
+        v
+    };
+    let utf = |s: &str| {
+        let mut v = vec![s.len() as u8];
+        v.extend_from_slice(s.as_bytes());
+        v
+    };
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(769, Direction::Clientbound, "set_player_team"),
+    );
+    old.extend_from_slice(&utf("crew")); // team name
+    old.push(2); // method: change
+    old.extend_from_slice(&nbt_str("c")); // display name
+    old.push(3); // options
+    old.extend_from_slice(&utf("hideForOtherTeams")); // visibility
+    old.extend_from_slice(&utf("pushOwnTeam")); // collision
+    old.push(5); // color
+    old.extend_from_slice(&nbt_str("p")); // prefix
+    old.extend_from_slice(&nbt_str("s")); // suffix
+
+    let ClientboundGamePacket::SetPlayerTeam(p) = translate_and_decode(769, old) else {
+        panic!("wrong packet");
+    };
+    use azalea_protocol::packets::game::c_set_player_team::{
+        CollisionRule, Method, NameTagVisibility,
+    };
+    let Method::Change(params) = p.method else {
+        panic!("wrong method");
+    };
+    assert!(matches!(
+        params.nametag_visibility,
+        NameTagVisibility::HideForOtherTeams
+    ));
+    assert!(matches!(params.collision_rule, CollisionRule::PushOwnTeam));
+}
+
+/// The pre-1.21.5 NBT heightmap compound becomes the packed list, on top
+/// of the shared per-section `fluidCount` insertion.
+#[test]
+fn translate_chunk_769() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(769, Direction::Clientbound, "level_chunk_with_light"),
+    );
+    old.extend_from_slice(&3i32.to_be_bytes()); // chunk x
+    old.extend_from_slice(&(-2i32).to_be_bytes()); // chunk z
+    // NBT compound { MOTION_BLOCKING: [long; 1] }.
+    old.push(10);
+    old.push(12); // long-array tag
+    old.extend_from_slice(&15u16.to_be_bytes());
+    old.extend_from_slice(b"MOTION_BLOCKING");
+    old.extend_from_slice(&1i32.to_be_bytes());
+    old.extend_from_slice(&7u64.to_be_bytes());
+    old.push(0); // compound end
+    let section = [0u8, 1, 0, 5, 0, 0];
+    wire::write_varint(&mut old, section.len() as u32);
+    old.extend_from_slice(&section);
+    old.push(0); // no block entities
+    old.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // empty light masks + lists
+
+    let ClientboundGamePacket::LevelChunkWithLight(p) = translate_and_decode(769, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.x, 3);
+    assert_eq!(p.z, -2);
+    assert_eq!(p.chunk_data.heightmaps.len(), 1);
+    assert_eq!(&*p.chunk_data.heightmaps[0].1, &[7u64]);
+    assert_eq!(p.chunk_data.data[..], [0, 1, 0, 0, 0, 5, 0, 0]);
+}
+
+/// 1.21.5 prepended `globalIndex` to `player_chat`; the shim synthesizes
+/// zero ahead of an otherwise identical body.
+#[test]
+fn translate_player_chat_769() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(769, Direction::Clientbound, "player_chat"));
+    old.extend_from_slice(&[7; 16]); // sender uuid
+    wire::write_varint(&mut old, 3); // index
+    old.push(0); // no signature
+    old.extend_from_slice(&[2, b'h', b'i']); // content
+    old.extend_from_slice(&11u64.to_be_bytes()); // timestamp
+    old.extend_from_slice(&13u64.to_be_bytes()); // salt
+    old.push(0); // no last-seen entries
+    old.push(0); // no unsigned content
+    old.push(0); // filter: pass-through
+    wire::write_varint(&mut old, 1); // chat type holder: registry id 0
+    old.extend_from_slice(&[8, 0, 1, b'n']); // name: NBT string
+    old.push(0); // no target
+
+    let ClientboundGamePacket::PlayerChat(p) = translate_and_decode(769, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.global_index, 0);
+    assert_eq!(p.index, 3);
+    assert_eq!(p.body.content, "hi");
+}
+
+/// 1.21.5 appended `showAdvancements` to `update_advancements`; the shim
+/// synthesizes true.
+#[test]
+fn translate_update_advancements_769() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(769, Direction::Clientbound, "update_advancements"),
+    );
+    old.push(1); // reset
+    old.extend_from_slice(&[0, 0, 0]); // no added/removed/progress
+
+    let ClientboundGamePacket::UpdateAdvancements(p) = translate_and_decode(769, old) else {
+        panic!("wrong packet");
+    };
+    assert!(p.reset);
+    assert!(p.show_advancements);
+}
+
+/// A 26.2 `container_click` carries hashed stacks; 1.21.4 wants full item
+/// stacks, reconstructed bare (`ServerboundContainerClickPacket` in both
+/// references).
+#[test]
+fn translate_container_click_769() {
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        table_id(Direction::Serverbound, "container_click"),
+    );
+    wire::write_varint(&mut frame, 1); // container id
+    wire::write_varint(&mut frame, 2); // state id
+    frame.extend_from_slice(&5i16.to_be_bytes()); // slot
+    frame.push(0); // button
+    wire::write_varint(&mut frame, 0); // click type: pickup
+    wire::write_varint(&mut frame, 1); // one changed slot
+    frame.extend_from_slice(&5i16.to_be_bytes());
+    frame.push(1); // hashed stack present
+    wire::write_varint(&mut frame, 4); // item
+    wire::write_varint(&mut frame, 2); // count
+    wire::write_varint(&mut frame, 1); // one hashed component
+    wire::write_varint(&mut frame, 3); // component id
+    frame.extend_from_slice(&0x1234i32.to_be_bytes()); // hash
+    wire::write_varint(&mut frame, 0); // no removed components
+    frame.push(0); // carried: empty
+
+    let frames = translation_for(769).translate_outbound_game_frame(frame);
+    let old = old_id(769, Direction::Serverbound, "container_click") as u8;
+    assert_eq!(frames, [[old, 1, 2, 0, 5, 0, 0, 1, 0, 5, 2, 4, 0, 0, 0]]);
 }
 
 #[test]

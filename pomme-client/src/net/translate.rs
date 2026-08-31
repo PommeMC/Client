@@ -77,6 +77,26 @@
 //!   difficulty ids fit a single byte either way, so the wire bytes are
 //!   identical
 //!
+//! 1.21.4 -> 26.2 wire changes (all of 1.21.5's plus):
+//! - chunk heightmaps were a network-NBT compound of named long arrays; 1.21.5
+//!   packed them into a (type id, long array) list
+//! - `player_chat` gained a leading `globalIndex` varint; zero is synthesized
+//! - `update_advancements` gained a trailing `showAdvancements` bool; true is
+//!   synthesized
+//! - team `Parameters` carried nametag visibility and collision rule as
+//!   strings, turned into enum ids by 1.21.5
+//! - serverbound `container_click` carried full item stacks for the changed
+//!   slots and carried item where 1.21.5 hashes them; the hashes can't be
+//!   reversed, so bare component-less stacks are reconstructed (the server
+//!   reconciles any mismatch by resyncing the slots)
+//! - `EntityDataSerializers` had no cow/pig/chicken/wolf-sound variants and
+//!   `optional_uuid` where 1.21.5 has `optional_living_entity_reference`
+//!   (wire-identical); `compound_tag` sits at 16 like 1.21.8, stripped the same
+//!   way
+//! - `add_experience_orb` has no newer equivalent and pomme renders no XP orbs;
+//!   the frame is dropped, like `add_entity` for the thrown `potion` entity
+//!   1.21.5 split into splash/lingering
+//!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
 //! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
@@ -139,6 +159,29 @@ struct GameIds {
     v772: Option<Ids772>,
     /// The rewrites 1.21.6 introduced, for wire versions below it.
     v770: Option<Ids770>,
+    /// The rewrites 1.21.5 introduced, for wire versions below it. Its
+    /// presence also flags the NBT chunk heightmaps and string team scopes.
+    v769: Option<Ids769>,
+}
+
+/// Latest-space dispatch ids for the frame rewrites protocol 769 needs.
+struct Ids769 {
+    player_chat_id: u32,
+    update_advancements_id: u32,
+    /// Latest-space serverbound `container_click` id and the wire
+    /// version's, for the hashed-stack rewrite.
+    container_click_id: u32,
+    container_click_old_id: u32,
+}
+
+impl Ids769 {
+    fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
+        Some(match id {
+            i if i == self.player_chat_id => translate_player_chat,
+            i if i == self.update_advancements_id => translate_update_advancements,
+            _ => return None,
+        })
+    }
 }
 
 /// Dispatch ids for the one outbound rewrite protocol 770 needs (see
@@ -184,7 +227,7 @@ impl Ids772 {
 /// Protocols the wire translation fully covers. A version with embedded
 /// tables but no entry here (the staging state while its translation is
 /// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770];
+const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770, 769];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -275,19 +318,22 @@ impl Translation {
             None => wire_id,
         };
 
+        let v769 = self.game_ids.as_ref().is_some_and(|g| g.v769.is_some());
         let payload = &raw[id_end..];
         let rewritten = if id == self.game_login_id {
             translate_game_login(id, payload)
         } else if id == self.set_player_team_id {
-            translate_team(id, payload)
+            translate_team(id, payload, v769)
         } else if let Some(ids) = &self.game_ids {
             if id == ids.set_entity_data_id {
                 translate_entity_data(id, payload, ids, self.to_latest)
             } else if id == ids.level_chunk_id {
-                translate_chunk(id, payload)
+                translate_chunk(id, payload, v769)
             } else if id == ids.set_time_id {
                 translate_set_time(id, payload)
             } else if let Some(rewrite) = ids.v772.as_ref().and_then(|v| v.rewrite(id)) {
+                rewrite(id, payload)
+            } else if let Some(rewrite) = ids.v769.as_ref().and_then(|v| v.rewrite(id)) {
                 rewrite(id, payload)
             } else if id == wire_id {
                 return Some(raw);
@@ -337,6 +383,11 @@ impl Translation {
             && id == v770.player_command_id
         {
             return translate_player_command(v770.player_command_old_id, &frame[pos..]);
+        }
+        if let Some(v769) = &ids.v769
+            && id == v769.container_click_id
+        {
+            return translate_container_click(v769.container_click_old_id, &frame[pos..]);
         }
         match ids.outbound.get(id as usize).copied().flatten() {
             Some(old) if old == id => vec![frame],
@@ -512,6 +563,7 @@ impl GameIds {
                 773 => remap_serializer_773,
                 // 1.21.5 through 1.21.8 register identical serializer sets.
                 770..=772 => remap_serializer_772,
+                769 => remap_serializer_769,
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
@@ -535,6 +587,17 @@ impl GameIds {
                     Phase::Game,
                     Serverbound,
                     "player_command",
+                ),
+            }),
+            v769: (protocol <= 769).then(|| Ids769 {
+                player_chat_id: id(Clientbound, "player_chat"),
+                update_advancements_id: id(Clientbound, "update_advancements"),
+                container_click_id: id(Serverbound, "container_click"),
+                container_click_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "container_click",
                 ),
             }),
         })
@@ -584,6 +647,97 @@ fn translate_player_command(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     wire::write_varint(&mut out, action + 2);
     out.extend_from_slice(&payload[data_at..]);
     vec![out]
+}
+
+/// Rewrites a latest `container_click` payload for 1.21.4, which carries
+/// full item stacks where 1.21.5 hashes them (`ServerboundContainerClick-
+/// Packet` in both references). A hash can't be reversed, so each stack is
+/// reconstructed bare (item + count, no components); the server reconciles
+/// any component mismatch by resyncing the slot. Item ids are already in
+/// the wire version's space (`remap_hashed` runs before encoding).
+fn translate_container_click(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let rewrite = || {
+        let mut cur = Cursor::new(payload);
+        // containerId, stateId varints; slot short, button byte, clickType
+        // varint: identical on both sides.
+        varint_span(&mut cur)?;
+        varint_span(&mut cur)?;
+        advance(&mut cur, 3)?;
+        varint_span(&mut cur)?;
+
+        let mut out = Vec::with_capacity(payload.len() + 8);
+        wire::write_varint(&mut out, old_id);
+        out.extend_from_slice(&payload[..cur.position() as usize]);
+
+        let changed = u32::azalea_read_var(&mut cur).ok()?;
+        wire::write_varint(&mut out, changed);
+        for _ in 0..changed {
+            let slot_at = cur.position() as usize;
+            advance(&mut cur, 2)?; // slot short
+            out.extend_from_slice(&payload[slot_at..cur.position() as usize]);
+            write_bare_stack(&mut out, read_hashed_stack(&mut cur)?);
+        }
+        write_bare_stack(&mut out, read_hashed_stack(&mut cur)?);
+        Some(out)
+    };
+    match rewrite() {
+        Some(out) => vec![out],
+        None => Vec::new(),
+    }
+}
+
+/// Reads a `HashedStack` (present bool, item id, count, hashed added map,
+/// removed set), returning `Some((item, count))` for a present stack.
+fn read_hashed_stack(cur: &mut Cursor<&[u8]>) -> Option<Option<(u32, u32)>> {
+    if read_u8(cur)? == 0 {
+        return Some(None);
+    }
+    let item = u32::azalea_read_var(cur).ok()?;
+    let count = u32::azalea_read_var(cur).ok()?;
+    let added = u32::azalea_read_var(cur).ok()?;
+    for _ in 0..added {
+        varint_span(cur)?; // component id
+        advance(cur, 4)?; // hash
+    }
+    let removed = u32::azalea_read_var(cur).ok()?;
+    for _ in 0..removed {
+        varint_span(cur)?;
+    }
+    Some(Some((item, count)))
+}
+
+/// Writes a pre-1.21.5 optional item stack with no components: count, item,
+/// empty added/removed patch (or the zero count marking empty).
+fn write_bare_stack(out: &mut Vec<u8>, stack: Option<(u32, u32)>) {
+    match stack {
+        Some((item, count)) => {
+            wire::write_varint(out, count);
+            wire::write_varint(out, item);
+            wire::write_varint(out, 0);
+            wire::write_varint(out, 0);
+        }
+        None => wire::write_varint(out, 0),
+    }
+}
+
+/// Rewrites `player_chat`: 1.21.5 prepended a `globalIndex` varint; zero
+/// keeps azalea's ordering checks happy.
+fn translate_player_chat(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, 0);
+    out.extend_from_slice(payload);
+    Some(out)
+}
+
+/// Rewrites `update_advancements`: 1.21.5 appended a `showAdvancements`
+/// bool, true in every vanilla send path.
+fn translate_update_advancements(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(payload);
+    out.push(1);
+    Some(out)
 }
 
 /// Rewrites a latest `attack` payload (`entityId`) into an old-layout
@@ -675,6 +829,21 @@ fn remap_serializer_772(old: u32) -> Option<u32> {
         16 => None, // compound_tag
         17..=32 => remap_serializer_773(old - 1),
         33..=34 => remap_serializer_773(old + 1),
+        _ => None,
+    }
+}
+
+/// The latest serializer id for a 1.21.4 `EntityDataSerializers` id: 1.21.5
+/// interleaved the cow/pig/chicken/wolf-sound variant serializers (and
+/// renamed `optional_uuid` to the wire-identical
+/// `optional_living_entity_reference`); mapping through the 1.21.8 ids
+/// covers the rest, `compound_tag` (16) included.
+fn remap_serializer_769(old: u32) -> Option<u32> {
+    match old {
+        0..=22 => remap_serializer_772(old),
+        23 => remap_serializer_772(24), // wolf_variant
+        24 => remap_serializer_772(26), // frog_variant
+        25..=30 => remap_serializer_772(old + 4),
         _ => None,
     }
 }
@@ -925,18 +1094,28 @@ fn skip_optional(
 /// Rewrites `level_chunk_with_light` by inserting the `fluidCount` short
 /// 26.2 added after each section's `nonEmptyBlockCount` (zero: pomme
 /// doesn't consume it and the client recounts on block changes). The
-/// heightmaps before the section buffer and the block entities / light data
-/// after it are copied verbatim.
-fn translate_chunk(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+/// heightmaps before the section buffer are copied verbatim — or, with
+/// `nbt_heightmaps` (pre-1.21.5), converted from the network-NBT compound
+/// to the packed list — and the block entities / light data after it are
+/// copied verbatim.
+fn translate_chunk(id: u32, payload: &[u8], nbt_heightmaps: bool) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 8)?; // chunk x/z ints
-    let heightmaps = u32::azalea_read_var(&mut cur).ok()?;
-    for _ in 0..heightmaps {
-        varint_span(&mut cur)?; // heightmap type
-        let longs = u32::azalea_read_var(&mut cur).ok()?;
-        advance(&mut cur, (longs as usize).checked_mul(8)?)?;
+
+    let mut head = Vec::with_capacity(64);
+    head.extend_from_slice(&payload[..8]);
+    if nbt_heightmaps {
+        convert_nbt_heightmaps(&mut cur, &mut head)?;
+    } else {
+        let maps_at = cur.position() as usize;
+        let heightmaps = u32::azalea_read_var(&mut cur).ok()?;
+        for _ in 0..heightmaps {
+            varint_span(&mut cur)?; // heightmap type
+            let longs = u32::azalea_read_var(&mut cur).ok()?;
+            advance(&mut cur, (longs as usize).checked_mul(8)?)?;
+        }
+        head.extend_from_slice(&payload[maps_at..cur.position() as usize]);
     }
-    let len_at = cur.position() as usize;
     let buffer_len = u32::azalea_read_var(&mut cur).ok()? as usize;
     let buffer_at = cur.position() as usize;
     let buffer_end = buffer_at.checked_add(buffer_len)?;
@@ -958,13 +1137,63 @@ fn translate_chunk(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
         buffer.extend_from_slice(&payload[rest_at..bcur.position() as usize]);
     }
 
-    let mut out = Vec::with_capacity(payload.len() + buffer.len() - buffer_len + 3);
+    let mut out = Vec::with_capacity(head.len() + buffer.len() + payload.len() - buffer_end + 8);
     wire::write_varint(&mut out, id);
-    out.extend_from_slice(&payload[..len_at]);
+    out.extend_from_slice(&head);
     wire::write_varint(&mut out, buffer.len() as u32);
     out.extend_from_slice(&buffer);
     out.extend_from_slice(&payload[buffer_end..]);
     Some(out)
+}
+
+/// Converts a pre-1.21.5 network-NBT heightmap compound (named long-array
+/// tags) into the packed `(type id, long array)` list, advancing past the
+/// NBT. Type ids from `Heightmap.Types` in the 1.21.5 reference; entries
+/// under other names or tags are dropped (vanilla only sends the three
+/// client-usage types, all mapped).
+fn convert_nbt_heightmaps(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let mut entries: Vec<(u32, u32, std::ops::Range<usize>)> = Vec::new();
+    let root = read_u8(cur)?;
+    if root == 10 {
+        loop {
+            let tag = read_u8(cur)?;
+            if tag == 0 {
+                break;
+            }
+            let name_len = read_u16(cur)? as usize;
+            let name_at = cur.position() as usize;
+            advance(cur, name_len)?;
+            let type_id = match &cur.get_ref()[name_at..name_at + name_len] {
+                b"WORLD_SURFACE_WG" => Some(0),
+                b"WORLD_SURFACE" => Some(1),
+                b"OCEAN_FLOOR_WG" => Some(2),
+                b"OCEAN_FLOOR" => Some(3),
+                b"MOTION_BLOCKING" => Some(4),
+                b"MOTION_BLOCKING_NO_LEAVES" => Some(5),
+                _ => None,
+            };
+            if tag != 12 {
+                skip_nbt_payload(cur, tag, 0)?;
+                continue;
+            }
+            let longs = u32::try_from(read_i32(cur)?).ok()?;
+            let data_at = cur.position() as usize;
+            advance(cur, (longs as usize).checked_mul(8)?)?;
+            if let Some(type_id) = type_id {
+                entries.push((type_id, longs, data_at..cur.position() as usize));
+            }
+        }
+    } else if root != 0 {
+        skip_nbt_payload(cur, root, 0)?;
+    }
+
+    wire::write_varint(out, entries.len() as u32);
+    for (type_id, longs, range) in entries {
+        wire::write_varint(out, type_id);
+        wire::write_varint(out, longs);
+        out.extend_from_slice(&cur.get_ref()[range]);
+    }
+    Some(())
 }
 
 /// Advances past one `PalettedContainer`: bits-per-entry byte, palette
@@ -1161,8 +1390,10 @@ fn remap_stack(remaps: &RegistryRemaps, stack: &mut ItemStack) {
 /// with color as a `ChatFormatting` ordinal) to the 26.2 one
 /// (`displayName, prefix, suffix, visibility, collision, color, options`
 /// with color as `Optional<TeamColor>`); the surrounding name/method/
-/// player-list fields are copied verbatim.
-fn translate_team(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+/// player-list fields are copied verbatim. `string_scopes` marks the
+/// pre-1.21.5 layout where nametag visibility and collision rule are
+/// strings rather than enum ids.
+fn translate_team(id: u32, payload: &[u8], string_scopes: bool) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     skip_utf(&mut cur)?; // team name
     let method_at = cur.position() as usize;
@@ -1179,8 +1410,8 @@ fn translate_team(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
         let options_at = cur.position() as usize;
         let options = *payload.get(options_at)?;
         advance(&mut cur, 1)?;
-        let visibility = varint_span(&mut cur)?;
-        let collision = varint_span(&mut cur)?;
+        let visibility = read_scope(&mut cur, string_scopes)?;
+        let collision = read_scope(&mut cur, string_scopes)?;
         let color = u32::azalea_read_var(&mut cur).ok()?;
         let prefix = nbt_span(&mut cur)?;
         let suffix = nbt_span(&mut cur)?;
@@ -1188,8 +1419,8 @@ fn translate_team(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(&payload[display]);
         out.extend_from_slice(&payload[prefix]);
         out.extend_from_slice(&payload[suffix]);
-        out.extend_from_slice(&payload[visibility]);
-        out.extend_from_slice(&payload[collision]);
+        out.push(visibility);
+        out.push(collision);
         // Vanilla 26.2 changed color from a ChatFormatting ordinal to
         // Optional<TeamColor>, but azalea still decodes the plain ordinal,
         // and these frames feed azalea — copy it through unchanged (all
@@ -1202,6 +1433,27 @@ fn translate_team(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     // Player list (methods 0/3/4) and anything after: verbatim.
     out.extend_from_slice(&payload[cur.position() as usize..]);
     Some(out)
+}
+
+/// One team scope (nametag visibility / collision rule) as its enum id:
+/// read directly, or mapped from the pre-1.21.5 name (`Team.Visibility`/
+/// `CollisionRule` in the 1.21.5 reference; unknown names fall back to
+/// ALWAYS like vanilla's byName).
+fn read_scope(cur: &mut Cursor<&[u8]>, string_scopes: bool) -> Option<u8> {
+    if !string_scopes {
+        return Some(u32::azalea_read_var(cur).ok()? as u8);
+    }
+    let len = u32::azalea_read_var(cur).ok()? as usize;
+    let start = cur.position() as usize;
+    advance(cur, len)?;
+    Some(
+        match std::str::from_utf8(&cur.get_ref()[start..start + len]).ok()? {
+            "never" => 1,
+            "hideForOtherTeams" | "pushOtherTeams" => 2,
+            "hideForOwnTeam" | "pushOwnTeam" => 3,
+            _ => 0,
+        },
+    )
 }
 
 fn advance(cur: &mut Cursor<&[u8]>, n: usize) -> Option<()> {
