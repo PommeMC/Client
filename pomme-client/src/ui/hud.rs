@@ -424,6 +424,28 @@ pub fn build_camera_overlays(
     }
 }
 
+/// Vanilla `Hud.extractSleepOverlay`: full-screen 0x101020 fill fading in over
+/// counter 0..100 and out over 100..110.
+pub fn build_sleep_overlay(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    sleep_timer: u32,
+) {
+    if sleep_timer == 0 {
+        return;
+    }
+    let mut amount = sleep_timer as f32 / 100.0;
+    if amount > 1.0 {
+        amount = 1.0 - (sleep_timer as f32 - 100.0) / 10.0;
+    }
+    elements.push(MenuElement::SleepOverlay {
+        w: screen_w,
+        h: screen_h,
+        amount,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_hud(
     elements: &mut Vec<MenuElement>,

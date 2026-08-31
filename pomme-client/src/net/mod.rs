@@ -380,6 +380,17 @@ pub enum NetworkEvent {
         id: i32,
         is_crouching: bool,
     },
+    /// LivingEntity metadata index 14 (SLEEPING_POS): Some while in a bed.
+    /// Vanilla `isSleeping()` is `getSleepingPos().isPresent()`.
+    EntitySleepingPos {
+        id: i32,
+        pos: Option<BlockPos>,
+    },
+    /// `ClientboundAnimate` action 2: vanilla `handleAnimate` calls
+    /// `stopSleepInBed(false, false)`, forcing the sleep counter to 100.
+    EntityWakeUp {
+        id: i32,
+    },
     SheepEatStart {
         id: i32,
     },

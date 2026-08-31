@@ -1019,6 +1019,24 @@ impl MenuOverlayPipeline {
                         9.0,
                     );
                 }
+                MenuElement::SleepOverlay { w, h, amount } => {
+                    // Vanilla fills 0x101020 at (int)(220 * amount) alpha,
+                    // blended in the gamma-space GL framebuffer. Our blend is
+                    // premultiplied One / OneMinusSrcAlpha in linear on an sRGB
+                    // target, so (as with the vignette) the gamma-space dst
+                    // factor 1 - a becomes 1 - (1 - a)^2.2 and the premultiplied
+                    // src term c * a is linearized as (c * a)^2.2.
+                    let a = (220.0 * amount).floor() / 255.0;
+                    let [r, g, b] = [16.0f32, 16.0, 32.0].map(|c| (c / 255.0 * a).powf(2.2));
+                    push_fullscreen_quad(
+                        &mut vertices,
+                        *w,
+                        *h,
+                        [0.0; 4],
+                        [r, g, b, 1.0 - (1.0 - a).powf(2.2)],
+                        10.0,
+                    );
+                }
                 _ => {}
             }
         }
@@ -1744,6 +1762,13 @@ pub enum MenuElement {
         u0: f32,
         v0: f32,
         brightness: f32,
+    },
+    /// Full-screen sleep fade (vanilla Hud.extractSleepOverlay): 0x101020
+    /// filled at alpha (int)(220 * amount) / 255.
+    SleepOverlay {
+        w: f32,
+        h: f32,
+        amount: f32,
     },
 }
 

@@ -28,6 +28,12 @@ float sdf_rounded_rect(vec2 p, vec2 half_size, float radius) {
 }
 
 void main() {
+    if (v_mode > 9.5) {
+        // Plain premultiplied fill; color pre-converted CPU-side (sleep fade).
+        out_color = v_color;
+        return;
+    }
+
     if (v_mode > 8.5) {
         // Underwater tint: standard alpha blend over the scene.
         vec4 tex = texture(underwater_tex, v_uv);

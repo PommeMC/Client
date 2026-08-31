@@ -1242,6 +1242,17 @@ impl AppCore {
                 NetworkEvent::EntityPose { id, is_crouching } => {
                     game.entity_store.set_crouching(id, is_crouching);
                 }
+                // TODO: remote players' sleeping pose rendering.
+                NetworkEvent::EntitySleepingPos { id, pos } => {
+                    if id == game.player.entity_id {
+                        game.player.sleeping_pos = pos;
+                    }
+                }
+                NetworkEvent::EntityWakeUp { id } => {
+                    if id == game.player.entity_id {
+                        game.player.wake_up();
+                    }
+                }
                 NetworkEvent::SheepEatStart { id } => {
                     game.entity_store.start_sheep_eat(id);
                 }
@@ -1772,24 +1783,41 @@ impl AppCore {
         }
     }
 
-    pub fn send_sprint_command(&self, connection: &ConnectionHandle, game: &mut GameState) {
-        let sprinting = game.player.sprinting;
-        if sprinting != game.was_sprinting {
-            let sender = &connection.packet_tx;
-            let action = if sprinting {
-                azalea_protocol::packets::game::s_player_command::Action::StartSprinting
-            } else {
-                azalea_protocol::packets::game::s_player_command::Action::StopSprinting
-            };
-            sender.send(ServerboundGamePacket::PlayerCommand(
+    fn send_player_command(
+        &self,
+        connection: &ConnectionHandle,
+        action: azalea_protocol::packets::game::s_player_command::Action,
+    ) {
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::PlayerCommand(
                 azalea_protocol::packets::game::s_player_command::ServerboundPlayerCommand {
                     id: azalea_core::entity_id::MinecraftEntityId(0),
                     action,
                     data: 0,
                 },
             ));
+    }
+
+    pub fn send_sprint_command(&self, connection: &ConnectionHandle, game: &mut GameState) {
+        let sprinting = game.player.sprinting;
+        if sprinting != game.was_sprinting {
+            let action = if sprinting {
+                azalea_protocol::packets::game::s_player_command::Action::StartSprinting
+            } else {
+                azalea_protocol::packets::game::s_player_command::Action::StopSprinting
+            };
+            self.send_player_command(connection, action);
             game.was_sprinting = sprinting;
         }
+    }
+
+    /// Vanilla InBedChatScreen: leaving bed sends PlayerCommand STOP_SLEEPING.
+    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle) {
+        self.send_player_command(
+            connection,
+            azalea_protocol::packets::game::s_player_command::Action::StopSleeping,
+        );
     }
 
     pub fn send_position_packet(&self, connection: &ConnectionHandle, game: &mut GameState) {
