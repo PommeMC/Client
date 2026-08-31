@@ -66,6 +66,17 @@
 //! trees and `EntityDataSerializers` are byte-identical); it only added the
 //! lava_chicken music disc item and sound, absorbed by the registry remap.
 //!
+//! 1.21.5 -> 26.2 wire changes (all of 1.21.8's — the pre-1.21.9 rewrites
+//! and serializer set carry over unchanged — plus):
+//! - 1.21.6 appended its dialog/waypoint clientbound packets and inserted
+//!   `change_game_mode`/`custom_click_action` serverbound; the id remap absorbs
+//!   the shifts and `change_game_mode` (which doesn't exist yet) is suppressed
+//! - serverbound `player_command` still opens its action enum with
+//!   PRESS/RELEASE_SHIFT_KEY, so newer action ordinals sit two higher
+//! - `change_difficulty` read an unsigned byte where 1.21.6 reads a varint;
+//!   difficulty ids fit a single byte either way, so the wire bytes are
+//!   identical
+//!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
 //! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
@@ -126,6 +137,17 @@ struct GameIds {
     interact_old_id: u32,
     /// The rewrites 1.21.9 introduced, for wire versions below it.
     v772: Option<Ids772>,
+    /// The rewrites 1.21.6 introduced, for wire versions below it.
+    v770: Option<Ids770>,
+}
+
+/// Dispatch ids for the one outbound rewrite protocol 770 needs (see
+/// [`translate_player_command`]).
+struct Ids770 {
+    /// Latest-space serverbound `player_command` id.
+    player_command_id: u32,
+    /// The wire version's id for the rewritten frame.
+    player_command_old_id: u32,
 }
 
 /// Latest-space dispatch ids for the frame rewrites protocols at or below
@@ -162,7 +184,7 @@ impl Ids772 {
 /// Protocols the wire translation fully covers. A version with embedded
 /// tables but no entry here (the staging state while its translation is
 /// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771];
+const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -310,6 +332,11 @@ impl Translation {
         }
         if id == ids.interact_id {
             return translate_interact(ids.interact_old_id, &frame[pos..]);
+        }
+        if let Some(v770) = &ids.v770
+            && id == v770.player_command_id
+        {
+            return translate_player_command(v770.player_command_old_id, &frame[pos..]);
         }
         match ids.outbound.get(id as usize).copied().flatten() {
             Some(old) if old == id => vec![frame],
@@ -483,8 +510,8 @@ impl GameIds {
             serializer_map: match protocol {
                 774 => remap_serializer_774,
                 773 => remap_serializer_773,
-                // 1.21.6 and 1.21.8 register identical serializer sets.
-                771 | 772 => remap_serializer_772,
+                // 1.21.5 through 1.21.8 register identical serializer sets.
+                770..=772 => remap_serializer_772,
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
@@ -500,6 +527,15 @@ impl GameIds {
                 set_default_spawn_id: id(Clientbound, "set_default_spawn_position"),
                 explode_id: id(Clientbound, "explode"),
                 compound_tag_serializer: 16,
+            }),
+            v770: (protocol <= 770).then(|| Ids770 {
+                player_command_id: id(Serverbound, "player_command"),
+                player_command_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "player_command",
+                ),
             }),
         })
     }
@@ -527,6 +563,27 @@ fn interact_frame(interact_old_id: u32, entity_id: u32, action: u32) -> Vec<u8> 
     wire::write_varint(&mut out, entity_id);
     wire::write_varint(&mut out, action);
     out
+}
+
+/// Rewrites a latest `player_command` payload (`entityId, action, data`
+/// varints) for pre-1.21.6 wires, where PRESS/RELEASE_SHIFT_KEY still head
+/// the action enum: every newer ordinal shifts up two.
+fn translate_player_command(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let parse = || {
+        let mut pos = 0;
+        let entity_id = wire::read_varint(payload, &mut pos)?;
+        let action = wire::read_varint(payload, &mut pos)?;
+        Some((entity_id, action, pos))
+    };
+    let Some((entity_id, action, data_at)) = parse() else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(payload.len() + 3);
+    wire::write_varint(&mut out, old_id);
+    wire::write_varint(&mut out, entity_id);
+    wire::write_varint(&mut out, action + 2);
+    out.extend_from_slice(&payload[data_at..]);
+    vec![out]
 }
 
 /// Rewrites a latest `attack` payload (`entityId`) into an old-layout
