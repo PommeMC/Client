@@ -358,6 +358,72 @@ pub fn gui_scale(screen_w: f32, screen_h: f32, setting: u32) -> f32 {
     }
 }
 
+/// Vanilla `ScreenEffectRenderer.submitWater`: underwater.png tiled 4x and
+/// scrolled by the look direction, alpha 0.1, tinted by the local lightmap
+/// brightness.
+pub fn build_underwater_overlay(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    brightness: f32,
+    yaw_deg: f32,
+    pitch_deg: f32,
+) {
+    elements.push(MenuElement::UnderwaterOverlay {
+        w: screen_w,
+        h: screen_h,
+        u0: -yaw_deg / 64.0,
+        v0: pitch_deg / 64.0,
+        brightness,
+    });
+}
+
+/// Vanilla `Hud.extractCameraOverlays`: vignette, equippable camera overlay
+/// (pumpkin), and nether-portal overlay, drawn under the rest of the HUD.
+/// TODO: powder snow, spyglass, nausea overlays; the portal/nausea projection
+/// spin warp lives in GameRenderer and is also unimplemented.
+pub fn build_camera_overlays(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    vignette_brightness: Option<f32>,
+    pumpkin: bool,
+    portal_intensity: f32,
+) {
+    if let Some(brightness) = vignette_brightness {
+        // TODO: nearing the world border tints the vignette cyan (no border
+        // tracking yet).
+        elements.push(MenuElement::Vignette {
+            w: screen_w,
+            h: screen_h,
+            brightness,
+        });
+    }
+    if pumpkin {
+        elements.push(MenuElement::PumpkinOverlay {
+            w: screen_w,
+            h: screen_h,
+        });
+    }
+    if portal_intensity > 0.0 {
+        // Vanilla Hud.extractPortalOverlay's alpha curve (0.2 floor).
+        let mut a = portal_intensity;
+        if a < 1.0 {
+            a *= a;
+            a *= a;
+            a = a * 0.8 + 0.2;
+        }
+        elements.push(MenuElement::Image {
+            x: 0.0,
+            y: 0.0,
+            w: screen_w,
+            h: screen_h,
+            sprite: SpriteId::NetherPortal,
+            tint: [1.0, 1.0, 1.0, a],
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_hud(
     elements: &mut Vec<MenuElement>,

@@ -12,7 +12,7 @@ use glam::FloatExt as _;
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::phases::Gfx;
 use crate::app::{TICK_RATE, input};
-use crate::audio::{CATEGORY_PLAYERS, SoundRef};
+use crate::audio::{CATEGORY_AMBIENT, CATEGORY_PLAYERS, SoundRef};
 use crate::benchmark::{
     Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep, UploadHandle,
     UploadStatus, upload_result,
@@ -168,6 +168,8 @@ pub struct GameState {
     pub controlled_vehicle_id: Option<i32>,
     /// Vehicle we are any passenger of (vanilla `getVehicle`).
     pub riding_vehicle_id: Option<i32>,
+    /// Smoothed vignette darkness (vanilla `Hud.vignetteBrightness`).
+    pub vignette_brightness: f32,
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
@@ -350,6 +352,7 @@ impl GameState {
             xp_display_start_tick: i64::MIN,
             controlled_vehicle_id: None,
             riding_vehicle_id: None,
+            vignette_brightness: 1.0,
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
             show_debug: false,
@@ -1278,6 +1281,49 @@ fn send_container_clicks(
     }
 }
 
+/// Vanilla `Lightmap.getBrightness` at a block position, with
+/// `getMaxLocalRawBrightness` = max(skyLight - skyDarken, blockLight).
+/// TODO: skyDarken (26.2: 15 - the SKY_LIGHT_LEVEL environment attribute) is
+/// untracked; 0 assumed, so the outdoor night-time vignette stays weak.
+fn lightmap_brightness(chunks: &ChunkStore, dimension: &str, x: i32, y: i32, z: i32) -> f32 {
+    let level = chunks
+        .get_sky_light(x, y, z)
+        .max(chunks.get_block_light(x, y, z)) as f32;
+    // Dimension-type ambient light, matched by id since the dimension-type
+    // registry isn't tracked; custom dimensions fall back to 0.
+    let ambient = if dimension == "minecraft:the_nether" {
+        0.1
+    } else {
+        0.0
+    };
+    let v = level / 15.0;
+    let curved = v / (4.0 - 3.0 * v);
+    // Mth.lerp(ambientLight, curved, 1.0)
+    curved + (1.0 - curved) * ambient
+}
+
+fn eye_lightmap_brightness(game: &GameState) -> f32 {
+    let eye = game.player.eye_pos();
+    lightmap_brightness(
+        &game.chunk_store,
+        &game.dimension,
+        eye.x.floor() as i32,
+        eye.y.floor() as i32,
+        eye.z.floor() as i32,
+    )
+}
+
+/// Approximates vanilla's data-driven `equippable.camera_overlay` component
+/// check (item components aren't tracked): a carved pumpkin in the head slot.
+fn head_is_carved_pumpkin(player: &LocalPlayer) -> bool {
+    match player.inventory.slot(crate::player::inventory::ARMOR_START) {
+        azalea_inventory::ItemStack::Present(d) => {
+            crate::player::inventory::item_resource_name(d.kind) == "carved_pumpkin"
+        }
+        _ => false,
+    }
+}
+
 /// Vanilla `Hud.tick`: the held-item tooltip timer resets to 40 when the
 /// selected item's type or hover name changes, clears when the slot empties,
 /// and otherwise counts down.
@@ -1415,6 +1461,26 @@ pub fn update_game(
         game.block_entity_anim.tick();
         game.title.tick();
         tick_tool_highlight(core, game);
+        // Vanilla LocalPlayer.handlePortalTransitionEffect.
+        // TODO: canUsePortal(false) also requires not riding (no passenger
+        // tracking yet).
+        let inside_portal = game.player.is_inside_nether_portal(&game.chunk_store);
+        if game.player.tick_portal_effect(inside_portal) {
+            // Vanilla forLocalAmbience: AMBIENT category at the listener,
+            // volume 0.25, pitch 0.8..1.2.
+            core.audio.play_world_sound(
+                &SoundRef::Event("block.portal.trigger".into()),
+                CATEGORY_AMBIENT,
+                game.player.position,
+                0.25,
+                fastrand::f32() * 0.4 + 0.8,
+                fastrand::u64(..),
+            );
+        }
+        // Vanilla Hud.updateVignetteBrightness: 1%-per-tick smoothing toward
+        // the darkness of the eye block's light level.
+        let target = (1.0 - eye_lightmap_brightness(game)).clamp(0.0, 1.0);
+        game.vignette_brightness += (target - game.vignette_brightness) * 0.01;
         if let Some(c) = &mut game.open_container
             && let Some(state) = &mut c.enchant
         {
@@ -1640,6 +1706,23 @@ pub fn update_game(
     // entities/player, held item, clouds, or weather — and skipping them also keeps
     // the measured frame times honest.
     let benchmark_running = game.chunk_load_bench.is_some();
+    // Underwater overlay (vanilla ScreenEffectRenderer.submitWater): part of
+    // the 3D pass in vanilla, so it shows even with the GUI hidden.
+    // TODO: vanilla also skips it while sleeping.
+    if !benchmark_running
+        && gfx.renderer.is_first_person()
+        && !crate::player::is_spectator(game.player.game_mode)
+        && game.player.eyes_in_water
+    {
+        hud::build_underwater_overlay(
+            &mut elements,
+            sw,
+            sh,
+            eye_lightmap_brightness(game),
+            game.player.look_dir.y_rot_deg(),
+            game.player.look_dir.x_rot_deg(),
+        );
+    }
     if !benchmark_running && game.hide_gui {
         // F1: vanilla still renders the debug overlay with the GUI hidden.
         if let Some(info) = debug.as_ref() {
@@ -1648,6 +1731,20 @@ pub fn update_game(
             });
         }
     } else if !benchmark_running {
+        // Vanilla Hud.extractCameraOverlays: vignette, pumpkin, and portal
+        // draw under everything else in the HUD.
+        let portal_intensity = game
+            .player
+            .prev_portal_effect_intensity
+            .lerp(game.player.portal_effect_intensity, partial_tick);
+        hud::build_camera_overlays(
+            &mut elements,
+            sw,
+            sh,
+            core.menu.vignette.then_some(game.vignette_brightness),
+            gfx.renderer.is_first_person() && head_is_carved_pumpkin(&game.player),
+            portal_intensity,
+        );
         let is_survival = crate::player::is_survival(game.player.game_mode);
         let air_bubbles = hud::air_bubbles(game.player.air_supply, game.player.eyes_in_water)
             .filter(|_| is_survival);

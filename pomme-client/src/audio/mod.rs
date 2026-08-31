@@ -53,6 +53,9 @@ pub const CATEGORY_BLOCKS: u8 = SoundCategory::Blocks as u8;
 /// pickup).
 pub const CATEGORY_PLAYERS: u8 = SoundCategory::Players as u8;
 
+/// `SoundSource::AMBIENT` index, for local ambience (e.g. the portal trigger).
+pub const CATEGORY_AMBIENT: u8 = SoundCategory::Ambient as u8;
+
 impl SoundCategory {
     fn from_index(index: u8) -> Self {
         match index {
