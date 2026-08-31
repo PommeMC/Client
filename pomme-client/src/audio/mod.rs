@@ -104,6 +104,17 @@ impl SoundRef {
     }
 }
 
+/// A played sound recorded for the subtitle overlay (vanilla
+/// `SoundEventListener.onPlaySound`).
+pub struct QueuedSubtitle {
+    /// Subtitle translation key, e.g. `subtitles.block.anvil.land`.
+    pub key: String,
+    pub pos: Position,
+    /// Audible range in blocks (vanilla `max(volume, 1.0) *
+    /// attenuationDistance`).
+    pub range: f32,
+}
+
 /// The rodio output device. The `MixerDeviceSink` must be kept alive for the
 /// whole program; sounds play by connecting `Player`s to its mixer.
 struct Output {
@@ -122,6 +133,12 @@ pub struct AudioEngine {
     volumes: [f32; 10],
     listener_left: [f32; 3],
     listener_right: [f32; 3],
+    /// Mirrors the Show Subtitles option; while off, sounds are never
+    /// recorded (vanilla removes the overlay listener entirely).
+    subtitles_enabled: bool,
+    /// Sounds recorded since the last [`Self::take_subtitle_events`] drain.
+    /// A Mutex only because `play_world_sound` takes `&self`.
+    subtitle_events: std::sync::Mutex<Vec<QueuedSubtitle>>,
     music_sink: Option<Player>,
     /// Per-entry `sounds.json` volume of the track currently in `music_sink`,
     /// reapplied each frame so live volume changes keep its relative loudness.
@@ -152,6 +169,8 @@ impl AudioEngine {
             volumes,
             listener_left: [-LISTENER_EAR_OFFSET, 0.0, 0.0],
             listener_right: [LISTENER_EAR_OFFSET, 0.0, 0.0],
+            subtitles_enabled: false,
+            subtitle_events: std::sync::Mutex::new(Vec::new()),
             music_sink: None,
             music_track_volume: 1.0,
             menu_music_active: false,
@@ -196,6 +215,22 @@ impl AudioEngine {
         self.listener_right = [pos.x as f32 + rx, pos.y as f32, pos.z as f32 + rz];
     }
 
+    /// Enables or disables subtitle recording. Cheap; callers can invoke it
+    /// every frame.
+    pub fn set_subtitles_enabled(&mut self, enabled: bool) {
+        self.subtitles_enabled = enabled;
+    }
+
+    /// Drains the sounds recorded for the subtitle overlay since the last
+    /// call.
+    pub fn take_subtitle_events(&mut self) -> Vec<QueuedSubtitle> {
+        std::mem::take(
+            self.subtitle_events
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
     /// Plays the vanilla button click: MASTER category at the fixed `forUI`
     /// volume.
     pub fn play_ui_click(&self) {
@@ -226,6 +261,19 @@ impl AudioEngine {
         let Some(output) = self.output.as_ref() else {
             return;
         };
+        // Vanilla notifies subtitle listeners before the volume and distance
+        // checks; the overlay applies its own range test.
+        if self.subtitles_enabled
+            && let SoundRef::Event(name) = sound
+            && let Some(key) = self.sounds.subtitle(name)
+            && let Ok(mut queue) = self.subtitle_events.lock()
+        {
+            queue.push(QueuedSubtitle {
+                key: key.to_string(),
+                pos,
+                range: volume.max(1.0) * SOUND_ATTENUATION_BLOCKS,
+            });
+        }
         let Some((source, entry_volume)) = self.decode_sound(sound, seed) else {
             return;
         };

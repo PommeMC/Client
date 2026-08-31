@@ -360,6 +360,7 @@ impl AppCore {
         game.toasts.clear();
         // Vanilla Hud.onDisconnected: clearTitles + resetTitleTimes.
         game.title.clear(true);
+        game.subtitles.clear();
         self.requested_player_skins.clear();
         renderer.clear_player_entity_skins();
     }

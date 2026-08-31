@@ -85,6 +85,14 @@ impl MainMenu {
         }
     }
 
+    fn show_subtitles_label(&self) -> &'static str {
+        if self.show_subtitles {
+            "Show Subtitles: ON"
+        } else {
+            "Show Subtitles: OFF"
+        }
+    }
+
     /// Upper bound of the render distance slider: the server-announced view
     /// distance while connected (can exceed 32), 32 otherwise.
     fn render_distance_max(&self) -> u32 {
@@ -255,7 +263,7 @@ impl MainMenu {
             format!("FOV Effects: {}%", (self.fov_effect() * 100.0).round())
         };
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair("Narrator: OFF", "Show Subtitles: OFF"),
+            OptRow::Pair("Narrator: OFF", self.show_subtitles_label()),
             OptRow::Pair("High Contrast: OFF", "Menu Background Blur: 50%"),
             OptRow::Pair(
                 "Text Background Opacity: 50%",
@@ -322,7 +330,7 @@ impl MainMenu {
             OptRow::Pair(&players, &ambient),
             OptRow::Pair(&voice, &ui),
             OptRow::Big("Device: Default"),
-            OptRow::Pair("Show Subtitles: OFF", "Directional Audio: OFF"),
+            OptRow::Pair(self.show_subtitles_label(), "Directional Audio: OFF"),
             OptRow::Pair("Music Frequency: Normal", "Music Toast: ON"),
         ];
         let sliders: &[(&str, f32)] = &[
@@ -738,6 +746,10 @@ impl MainMenu {
                     }
                     if label.starts_with("VSync:") {
                         self.vsync = !self.vsync;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Show Subtitles:") {
+                        self.show_subtitles = !self.show_subtitles;
                         self.save_settings();
                     }
                     if label.starts_with("Show Online Status:") {
