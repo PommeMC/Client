@@ -58,6 +58,11 @@ pub struct LocalPlayer {
     pub jump_trigger_time: u32,
     pub no_jump_delay: u32,
     pub was_jump_pressed: bool,
+    /// Vanilla `jumpRidingTicks`: ride-jump charge ticks; negative counts up
+    /// through the post-jump refractory window.
+    pub jump_riding_ticks: i32,
+    /// Vanilla `jumpRidingScale`: jump-bar fill, 0..=1.
+    pub jump_riding_scale: f32,
     /// Vanilla `onUpdateAbilities`: a locally toggled `flying` still has to be
     /// reported to the server via `ServerboundPlayerAbilities`.
     pub abilities_dirty: bool,
@@ -109,6 +114,8 @@ impl LocalPlayer {
             jump_trigger_time: 0,
             no_jump_delay: 0,
             was_jump_pressed: false,
+            jump_riding_ticks: 0,
+            jump_riding_scale: 0.0,
             abilities_dirty: false,
             eye_height: STANDING_EYE_HEIGHT,
             prev_eye_height: STANDING_EYE_HEIGHT,

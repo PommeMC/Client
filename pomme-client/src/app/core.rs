@@ -422,6 +422,9 @@ impl AppCore {
                     // Login/respawn recreate vanilla's LocalPlayer, resetting
                     // the XP display sentinel; waypoints persist.
                     game.xp_display_start_tick = i64::MIN;
+                    game.controlled_vehicle_id = None;
+                    game.player.jump_riding_ticks = 0;
+                    game.player.jump_riding_scale = 0.0;
 
                     renderer.clear_chunk_meshes();
                     game.mesh_dispatcher =
@@ -572,6 +575,26 @@ impl AppCore {
 
                         let _ = window.set_cursor_grab(CursorGrabMode::None);
                         window.set_cursor_visible(true);
+                    }
+                }
+                NetworkEvent::SetPassengers {
+                    vehicle,
+                    passengers,
+                } => {
+                    let me = game.player.entity_id;
+                    if passengers.first() == Some(&me) {
+                        game.controlled_vehicle_id = Some(vehicle);
+                    } else if passengers.contains(&me)
+                        || game.controlled_vehicle_id == Some(vehicle)
+                    {
+                        // Riding but not controlling, or removed from this
+                        // vehicle (vanilla getControlledVehicle -> null).
+                        game.controlled_vehicle_id = None;
+                    }
+                }
+                NetworkEvent::EntitySaddle { entity_id, saddled } => {
+                    if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
+                        e.saddled = saddled;
                     }
                 }
                 NetworkEvent::PlayerExperience { progress, level } => {
@@ -1172,6 +1195,9 @@ impl AppCore {
                         }
                     }
                     game.item_entity_store.remove(&ids);
+                    if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
+                        game.controlled_vehicle_id = None;
+                    }
                 }
                 NetworkEvent::EntityHeadRotation {
                     id,
@@ -1516,6 +1542,50 @@ impl AppCore {
 
         let neutral = InputState::released();
         let input = if input_live { &self.input } else { &neutral };
+
+        // Vanilla LocalPlayer.aiStep ride-jump charge. `was_jump_pressed`
+        // still holds last tick's key here (movement::tick overwrites it
+        // below), matching vanilla's wasJumping sampled before input.tick().
+        // Equine jump cooldown is always 0, so the cooldown gate collapses
+        // into the vehicle check.
+        let jump_held = input.performing_action(Action::Jump);
+        if game.riding_jumpable_vehicle() {
+            let p = &mut game.player;
+            if p.jump_riding_ticks < 0 {
+                p.jump_riding_ticks += 1;
+                if p.jump_riding_ticks == 0 {
+                    p.jump_riding_scale = 0.0;
+                }
+            }
+            if p.was_jump_pressed && !jump_held {
+                p.jump_riding_ticks = -10;
+                // Vanilla also calls vehicle.onPlayerJump() for client horse
+                // physics; pomme has no vehicle physics, the server moves us.
+                use azalea_protocol::packets::game::s_player_command as cmd;
+                connection
+                    .packet_tx
+                    .send(ServerboundGamePacket::PlayerCommand(
+                        cmd::ServerboundPlayerCommand {
+                            id: azalea_core::entity_id::MinecraftEntityId(p.entity_id),
+                            action: cmd::Action::StartRidingJump,
+                            data: (p.jump_riding_scale * 100.0).floor() as u32,
+                        },
+                    ));
+            } else if !p.was_jump_pressed && jump_held {
+                p.jump_riding_ticks = 0;
+                p.jump_riding_scale = 0.0;
+            } else if p.was_jump_pressed {
+                p.jump_riding_ticks += 1;
+                p.jump_riding_scale = if p.jump_riding_ticks < 10 {
+                    p.jump_riding_ticks as f32 * 0.1
+                } else {
+                    0.8 + 2.0 / (p.jump_riding_ticks - 9) as f32 * 0.1
+                };
+            }
+        } else {
+            // Vanilla keeps jumpRidingTicks; only the scale resets.
+            game.player.jump_riding_scale = 0.0;
+        }
 
         game.player.prev_look_dir = game.player.look_dir;
         game.player.look_dir = renderer.camera_look_dir();

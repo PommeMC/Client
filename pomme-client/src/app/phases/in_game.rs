@@ -163,6 +163,9 @@ pub struct GameState {
     /// `experienceDisplayStartTick`; `i64::MIN` = untouched since (re)spawn,
     /// so the first change after joining never takes priority).
     pub xp_display_start_tick: i64,
+    /// Vehicle we are the controlling (first) passenger of, from
+    /// `SetPassengers` (vanilla `getControlledVehicle`).
+    pub controlled_vehicle_id: Option<i32>,
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
     pub show_debug: bool,
@@ -343,6 +346,7 @@ impl GameState {
             subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
             tick_count: 0,
             xp_display_start_tick: i64::MIN,
+            controlled_vehicle_id: None,
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
             show_debug: false,
@@ -384,6 +388,15 @@ impl GameState {
             vis_task: None,
             chunk_occlusion_enabled: true,
         }
+    }
+
+    /// Vanilla `LocalPlayer.jumpableVehicle() != null`: controlling a saddled
+    /// equine. Equine `getJumpCooldown()` is always 0; camels/nautilus (dash
+    /// cooldown) aren't tracked by the entity store yet.
+    pub fn riding_jumpable_vehicle(&self) -> bool {
+        self.controlled_vehicle_id
+            .and_then(|id| self.entity_store.living.get(&id))
+            .is_some_and(|e| crate::entity::is_equine(&e.entity_type) && e.saddled)
     }
 
     pub fn gui_open(&self) -> bool {
@@ -1646,10 +1659,35 @@ pub fn update_game(
             }
         }
         // Contextual bar choice (vanilla Hud.nextContextualInfoState): the
-        // locator bar takes the XP bar's slot while waypoints are tracked,
-        // except for 100 ticks after an XP change.
-        let show_locator = game.waypoints.has_waypoints()
-            && !(is_survival && game.xp_display_start_tick + 100 > game.tick_count as i64);
+        // jump bar takes the slot while controlling a saddled mount, the
+        // locator bar while waypoints are tracked; an active jump charge or
+        // an XP change within 100 ticks outprioritizes the locator.
+        enum BarChoice {
+            Jump,
+            Xp,
+            Locator,
+            Empty,
+        }
+        let can_jump_bar = game.riding_jumpable_vehicle();
+        let jump_charge = game.player.jump_riding_scale;
+        let xp_prioritized =
+            is_survival && game.xp_display_start_tick + 100 > game.tick_count as i64;
+        let bar_choice = if game.waypoints.has_waypoints() {
+            if can_jump_bar && jump_charge > 0.0 {
+                BarChoice::Jump
+            } else if xp_prioritized {
+                BarChoice::Xp
+            } else {
+                BarChoice::Locator
+            }
+        } else if can_jump_bar {
+            BarChoice::Jump
+        } else if is_survival {
+            BarChoice::Xp
+        } else {
+            BarChoice::Empty
+        };
+        let show_locator = matches!(bar_choice, BarChoice::Locator);
         let locator_dots = if show_locator {
             let (yaw_deg, pitch_deg) = gfx.renderer.camera_effective_look_deg();
             let cam = crate::world::waypoints::WaypointCamera {
@@ -1686,15 +1724,16 @@ pub fn update_game(
         } else {
             Vec::new()
         };
-        let bar = if show_locator {
-            hud::ContextualBarKind::Locator {
+        let bar = match bar_choice {
+            BarChoice::Jump => hud::ContextualBarKind::JumpableVehicle {
+                charge: jump_charge,
+            },
+            BarChoice::Xp => hud::ContextualBarKind::Experience,
+            BarChoice::Locator => hud::ContextualBarKind::Locator {
                 dots: &locator_dots,
                 arrow_frame_1: game.tick_count % 14 >= 10,
-            }
-        } else if is_survival {
-            hud::ContextualBarKind::Experience
-        } else {
-            hud::ContextualBarKind::Empty
+            },
+            BarChoice::Empty => hud::ContextualBarKind::Empty,
         };
         // Vanilla `renderMaxAttackIndicator`: the picked entity is living
         // (implicit: pomme entity hits only come from `living`), alive, at

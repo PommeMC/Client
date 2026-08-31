@@ -1725,6 +1725,8 @@ pub enum SpriteId {
     ToastWoodenPlanks,
     ToastSocialInteractions,
     ToastRightClick,
+    JumpBarBackground,
+    JumpBarProgress,
     LocatorBarBackground,
     LocatorDotDefault0,
     LocatorDotDefault1,
@@ -2076,6 +2078,16 @@ fn build_sprite_atlas(
         (
             SpriteId::HotbarAttackIndicatorProgress,
             "minecraft/textures/gui/sprites/hud/hotbar_attack_indicator_progress.png",
+            0.0,
+        ),
+        (
+            SpriteId::JumpBarBackground,
+            "minecraft/textures/gui/sprites/hud/jump_bar_background.png",
+            0.0,
+        ),
+        (
+            SpriteId::JumpBarProgress,
+            "minecraft/textures/gui/sprites/hud/jump_bar_progress.png",
             0.0,
         ),
         (

@@ -156,6 +156,8 @@ pub struct LivingEntity {
     pub mouth_anim: f32,
     pub prev_mouth_anim: f32,
     pub has_chest: bool,
+    /// Saddle equipment slot occupied (`SetEquipment`); gates the jump bar.
+    pub saddled: bool,
     /// Packet-driven velocity (vanilla remote entities never integrate their
     /// own); feeds the squid body-rotation sim.
     pub velocity: DVec3,
@@ -298,6 +300,7 @@ impl LivingEntity {
             mouth_anim: 0.0,
             prev_mouth_anim: 0.0,
             has_chest: false,
+            saddled: false,
             velocity: DVec3::ZERO,
             is_in_water: false,
             x_body_rot: 0.0,
