@@ -828,6 +828,7 @@ fn push_face_name(
         y: ey + (row_h - face) / 2.0,
         size: face,
         uuid: uuid.into(),
+        tint: [1.0, 1.0, 1.0, 1.0],
     });
     let text_x = content_x + face + 4.0 * gs;
     match status {

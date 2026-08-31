@@ -474,6 +474,28 @@ impl ApplicationHandler for App {
                     AppPhase::InGame { game, .. } if game.chat.is_open() => {
                         game.chat.scroll_chat(scroll.signum() as i32);
                     }
+                    // Vanilla MouseHandler: a spectator's wheel moves the menu
+                    // selection (sign-inverted) while it is open, and adjusts
+                    // flying speed (local-only) otherwise.
+                    AppPhase::InGame {
+                        game, connection, ..
+                    } if game.input_live()
+                        && crate::player::is_spectator(game.player.game_mode) =>
+                    {
+                        if game.spectator.is_menu_active() {
+                            // f32::signum maps 0.0 to 1.0; skip empty deltas.
+                            if scroll != 0.0 {
+                                game.spectator.on_mouse_scrolled(
+                                    -(scroll.signum() as i32),
+                                    &game.tab_list,
+                                    &connection.packet_tx,
+                                );
+                            }
+                        } else {
+                            game.player.fly_speed =
+                                (game.player.fly_speed + scroll * 0.005).clamp(0.0, 0.2);
+                        }
+                    }
                     AppPhase::InGame { game, .. } if game.input_live() => {
                         self.core.input.on_scroll(scroll)
                     }

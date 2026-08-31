@@ -220,6 +220,10 @@ mod tests {
             t.id(Phase::Handshake, Direction::Serverbound, "intention"),
             Some(0)
         );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "teleport_to_entity"),
+            Some(0x40)
+        );
         assert_eq!(t.id(Phase::Game, Direction::Serverbound, "no_such"), None);
     }
 

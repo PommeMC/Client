@@ -965,9 +965,16 @@ impl MenuOverlayPipeline {
                         *x,
                         *y,
                         *size,
+                        [1.0, 1.0, 1.0, 1.0],
                     );
                 }
-                MenuElement::SkinFace { x, y, size, uuid } => {
+                MenuElement::SkinFace {
+                    x,
+                    y,
+                    size,
+                    uuid,
+                    tint,
+                } => {
                     push_atlas_image(
                         &mut vertices,
                         &self.favicon_regions,
@@ -977,6 +984,7 @@ impl MenuOverlayPipeline {
                         *x,
                         *y,
                         *size,
+                        *tint,
                     );
                 }
                 MenuElement::Vignette { w, h, brightness } => {
@@ -1739,6 +1747,7 @@ pub enum MenuElement {
         y: f32,
         size: f32,
         uuid: String,
+        tint: [f32; 4],
     },
     /// Split marker for the menu draw: elements before it are rendered into the
     /// scene so the blur pass captures them; elements after are drawn sharp on
@@ -1954,6 +1963,11 @@ pub enum SpriteId {
     FriendsReject,
     FriendsCancel,
     NetherPortal,
+    SpectatorClose,
+    SpectatorScrollLeft,
+    SpectatorScrollRight,
+    SpectatorTeleportToPlayer,
+    SpectatorTeleportToTeam,
 }
 
 pub const CREATIVE_TAB_SPRITES: [[[SpriteId; 7]; 2]; 2] = [
@@ -2065,6 +2079,31 @@ fn build_sprite_atlas(
         (
             SpriteId::EffectBackgroundAmbient,
             "minecraft/textures/gui/sprites/hud/effect_background_ambient.png",
+            0.0,
+        ),
+        (
+            SpriteId::SpectatorClose,
+            "minecraft/textures/gui/sprites/spectator/close.png",
+            0.0,
+        ),
+        (
+            SpriteId::SpectatorScrollLeft,
+            "minecraft/textures/gui/sprites/spectator/scroll_left.png",
+            0.0,
+        ),
+        (
+            SpriteId::SpectatorScrollRight,
+            "minecraft/textures/gui/sprites/spectator/scroll_right.png",
+            0.0,
+        ),
+        (
+            SpriteId::SpectatorTeleportToPlayer,
+            "minecraft/textures/gui/sprites/spectator/teleport_to_player.png",
+            0.0,
+        ),
+        (
+            SpriteId::SpectatorTeleportToTeam,
+            "minecraft/textures/gui/sprites/spectator/teleport_to_team.png",
             0.0,
         ),
         (
@@ -3237,8 +3276,8 @@ fn push_atlas_image(
     x: f32,
     y: f32,
     size: f32,
+    tint: [f32; 4],
 ) {
-    let white = [1.0, 1.0, 1.0, 1.0];
     if let Some([u0, v0, u1, v1]) = atlas_regions.get(key) {
         push_quad(
             verts,
@@ -3250,7 +3289,7 @@ fn push_atlas_image(
             *v0,
             *u1,
             *v1,
-            white,
+            tint,
             6.0,
             [size, size],
             0.0,
@@ -3266,7 +3305,7 @@ fn push_atlas_image(
             r.v0,
             r.u1,
             r.v1,
-            white,
+            tint,
             2.0,
             [size, size],
             0.0,

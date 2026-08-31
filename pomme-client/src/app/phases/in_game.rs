@@ -189,6 +189,9 @@ pub struct GameState {
     pub dimension: String,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
+    /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
+    /// cursor stays grabbed and mouse look stays live while it is open.
+    pub spectator: crate::ui::spectator_menu::SpectatorGuiState,
     /// Last frame's switcher presence, to re-apply the cursor grab on change.
     switcher_was_open: bool,
     pub last_sent_input: PlayerInputState,
@@ -364,6 +367,7 @@ impl GameState {
             previous_game_mode: None,
             dimension: String::new(),
             game_mode_switcher: None,
+            spectator: Default::default(),
             switcher_was_open: false,
             last_sent_input: PlayerInputState::default(),
             last_sent_pos: Position::default(),
@@ -1597,6 +1601,10 @@ pub fn update_game(
     // as game keys (vanilla suppresses KeyMappings while any screen is open).
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
     core.input.menu_capture = game.gui_open();
+    core.input.spectator = crate::player::is_spectator(game.player.game_mode);
+    if core.input.spectator && game.spectator.is_menu_active() {
+        core.ensure_player_face_atlas(&mut gfx.renderer);
+    }
 
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();
@@ -1876,6 +1884,17 @@ pub fn update_game(
             show_full,
             main_hand_right: core.menu.main_hand_right(),
         };
+        if crate::player::is_spectator(game.player.game_mode) {
+            crate::ui::spectator_menu::build_spectator_menu(
+                &mut elements,
+                &mut game.spectator,
+                &game.tab_list,
+                sw,
+                sh,
+                gs,
+                &|t, s| gfx.renderer.menu_text_width(t, s),
+            );
+        }
         hud::build_hud(
             &mut elements,
             sw,

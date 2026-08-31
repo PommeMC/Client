@@ -33,6 +33,16 @@ fn packet_ids_match_azalea() {
     });
     assert_eq!(attack.id(), table_id(Direction::Serverbound, "attack"));
 
+    let teleport = ServerboundGamePacket::TeleportToEntity(
+        azalea_protocol::packets::game::s_teleport_to_entity::ServerboundTeleportToEntity {
+            uuid: uuid::Uuid::nil(),
+        },
+    );
+    assert_eq!(
+        teleport.id(),
+        table_id(Direction::Serverbound, "teleport_to_entity")
+    );
+
     let particles = ClientboundGamePacket::LevelParticles(
         azalea_protocol::packets::game::c_level_particles::ClientboundLevelParticles {
             override_limiter: false,

@@ -180,6 +180,10 @@ pub struct AppCore {
     player_skin_tx: crossbeam_channel::Sender<PlayerSkinResult>,
     player_skin_rx: crossbeam_channel::Receiver<PlayerSkinResult>,
     requested_player_skins: HashMap<uuid::Uuid, Option<String>>,
+    /// 8x8 RGBA faces of fetched player skins, for the spectator menu's
+    /// face atlas (the GPU-side skins keep no CPU pixels).
+    player_faces: HashMap<uuid::Uuid, Vec<u8>>,
+    player_faces_dirty: bool,
 }
 
 impl AppCore {
@@ -228,6 +232,8 @@ impl AppCore {
             player_skin_tx,
             player_skin_rx,
             requested_player_skins: HashMap::new(),
+            player_faces: HashMap::new(),
+            player_faces_dirty: false,
         }
     }
 
@@ -338,6 +344,14 @@ impl AppCore {
             }
             match skin.result {
                 Ok(data) => {
+                    if let Some(face) = crate::renderer::pipelines::menu_overlay::extract_face_8x8(
+                        &data.pixels,
+                        data.width,
+                        data.height,
+                    ) {
+                        self.player_faces.insert(skin.uuid, face);
+                        self.player_faces_dirty = true;
+                    }
                     renderer.update_player_entity_skin(&skin.uuid, &data);
                 }
                 Err(e) => {
@@ -347,8 +361,25 @@ impl AppCore {
         }
     }
 
+    /// Flush cached faces into the shared face/favicon atlas. Called only
+    /// while the spectator menu is open: the rebuild waits on the GPU queue,
+    /// so it must stay off the common frame path.
+    pub fn ensure_player_face_atlas(&mut self, renderer: &mut Renderer) {
+        if !self.player_faces_dirty || self.player_faces.is_empty() {
+            return;
+        }
+        self.player_faces_dirty = false;
+        let faces: Vec<(String, Vec<u8>, u32)> = self
+            .player_faces
+            .iter()
+            .map(|(uuid, face)| (uuid.to_string(), face.clone(), 8))
+            .collect();
+        renderer.update_face_atlas(&faces);
+    }
+
     fn remove_player_skin(&mut self, renderer: &mut Renderer, uuid: &uuid::Uuid) {
         self.requested_player_skins.remove(uuid);
+        self.player_faces.remove(uuid);
         renderer.remove_player_entity_skin(uuid);
     }
 
@@ -362,6 +393,8 @@ impl AppCore {
         game.title.clear(true);
         game.subtitles.clear();
         self.requested_player_skins.clear();
+        self.player_faces.clear();
+        self.player_faces_dirty = false;
         renderer.clear_player_entity_skins();
     }
 
@@ -849,13 +882,22 @@ impl AppCore {
                 }
                 NetworkEvent::ScoreboardTeam {
                     name,
+                    display_name,
                     prefix,
                     suffix,
                     color,
+                    fill_color,
                     members,
                 } => {
-                    game.scoreboard
-                        .set_team(name, prefix, suffix, color, members);
+                    game.scoreboard.set_team(
+                        name,
+                        display_name,
+                        prefix,
+                        suffix,
+                        color,
+                        fill_color,
+                        members,
+                    );
                 }
                 NetworkEvent::ScoreboardTeamMembers {
                     name,
@@ -1558,6 +1600,25 @@ impl AppCore {
             while self.input.consume_click(Action::SwapOffhand) {
                 if !spectator {
                     crate::player::interaction::send_swap_offhand(&connection.packet_tx);
+                }
+            }
+            for slot in self.input.take_spectator_slot_presses() {
+                if spectator {
+                    game.spectator.on_hotbar_selected(
+                        slot,
+                        &game.tab_list,
+                        &game.scoreboard,
+                        &connection.packet_tx,
+                    );
+                }
+            }
+            while self.input.consume_click(Action::SpectatorHotbar) {
+                if spectator {
+                    game.spectator.on_hotbar_action_key(
+                        &game.tab_list,
+                        &game.scoreboard,
+                        &connection.packet_tx,
+                    );
                 }
             }
         }

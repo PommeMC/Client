@@ -32,6 +32,7 @@ pub enum Action {
     Close,
     DropItem,
     SwapOffhand,
+    SpectatorHotbar,
 }
 
 pub struct InputState {
@@ -52,6 +53,12 @@ pub struct InputState {
     /// A container screen (inventory, chest, creative) is open: it consumes
     /// hotbar digits and the drop/swap keys, like vanilla screens do.
     pub menu_capture: bool,
+    /// The player is a spectator: digits drive the spectator menu instead of
+    /// the carried slot, and middle click is `key.spectatorHotbar`.
+    pub spectator: bool,
+    /// Digit presses queued for the spectator menu, drained per tick like the
+    /// click counts (vanilla routes them in `handleKeybinds`).
+    spectator_slot_presses: Vec<u8>,
     /// Keys pressed since the last `end_frame`, including OS key repeats:
     /// vanilla dispatches GLFW repeats to screens and debug chords.
     just_pressed: HashSet<KeyCode>,
@@ -138,6 +145,8 @@ impl InputState {
             menu_scroll: 0.0,
             text_capture: false,
             menu_capture: false,
+            spectator: false,
+            spectator_slot_presses: Vec::new(),
             just_pressed: HashSet::new(),
             click_counts: HashMap::new(),
             text_events: Vec::new(),
@@ -302,13 +311,14 @@ impl InputState {
                 Button::RightTrigger2 => {
                     self.recent_actions.insert(Action::Destroy, true);
                 }
-                Button::RightTrigger => {
+                // TODO: gamepad spectator-menu support (vanilla has none).
+                Button::RightTrigger if !self.spectator => {
                     self.selected_slot = (self.selected_slot + 1) % 9;
                 }
                 Button::LeftTrigger2 => {
                     self.recent_actions.insert(Action::Use, true);
                 }
-                Button::LeftTrigger => {
+                Button::LeftTrigger if !self.spectator => {
                     self.selected_slot = (self.selected_slot + 8) % 9;
                 }
                 Button::North => {
@@ -402,6 +412,8 @@ impl InputState {
             // Click-count driven (`consume_click`); held state only.
             Action::DropItem => self.key_pressed(KeyCode::KeyQ),
             Action::SwapOffhand => self.key_pressed(KeyCode::KeyF),
+            // Vanilla `key.spectatorHotbar` default: middle mouse.
+            Action::SpectatorHotbar => self.middle_click.held,
         }
     }
 
@@ -476,6 +488,12 @@ impl InputState {
 
     pub fn clear_click_counts(&mut self) {
         self.click_counts.clear();
+        self.spectator_slot_presses.clear();
+    }
+
+    /// Digit presses queued for the spectator menu since the last tick.
+    pub fn take_spectator_slot_presses(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.spectator_slot_presses)
     }
 
     /// Frame-scoped input state; called once at the end of each redraw so a
@@ -511,7 +529,13 @@ impl InputState {
                         && !self.menu_capture
                         && let Some(slot) = hotbar_slot(code)
                     {
-                        self.selected_slot = slot;
+                        // Vanilla handleKeybinds: spectator digits drive the
+                        // spectator menu and never touch the carried slot.
+                        if self.spectator {
+                            self.spectator_slot_presses.push(slot);
+                        } else {
+                            self.selected_slot = slot;
+                        }
                     }
                     match code {
                         KeyCode::KeyE if !self.text_capture => {
@@ -713,6 +737,12 @@ impl InputState {
                 self.middle_click.held = was_pressed;
                 if was_pressed {
                     self.middle_click.just_pressed = true;
+                    if self.spectator && !self.menu_capture {
+                        *self
+                            .click_counts
+                            .entry(Action::SpectatorHotbar)
+                            .or_insert(0) += 1;
+                    }
                 } else {
                     self.middle_click.just_released = true;
                 }
