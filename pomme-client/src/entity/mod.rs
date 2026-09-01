@@ -71,6 +71,28 @@ fn normalize_ageable_index(kind: EntityKind, index: u8) -> u8 {
     }
 }
 
+/// 1.21.9 (protocol 773) reordered `Avatar`'s synched data: main hand moved
+/// 18 -> 15, pushing absorption to 17, score to 18, and mode customisation
+/// to 16 (the shoulder compounds at 19/20 were dropped; the frame
+/// translator strips them). Older wire versions are lifted to the 26.x
+/// numbering so `apply_entity_data` matches one index per field.
+fn normalize_player_index(kind: EntityKind, index: u8) -> u8 {
+    normalize_player_index_at(kind, index, crate::version::session_protocol())
+}
+
+fn normalize_player_index_at(kind: EntityKind, index: u8, protocol: i32) -> u8 {
+    if kind != EntityKind::Player || protocol > 772 {
+        return index;
+    }
+    match index {
+        15 => 17, // absorption
+        16 => 18, // score
+        17 => 16, // mode customisation
+        18 => 15, // main hand
+        i => i,
+    }
+}
+
 const INTERPOLATION_STEPS: i32 = 3;
 const HURT_DURATION: u8 = 10;
 /// Vanilla default arm-swing duration in ticks
@@ -1052,7 +1074,8 @@ impl EntityStore {
             return;
         };
         let kind = entity.entity_type;
-        match (kind, normalize_ageable_index(kind, index), value) {
+        let index = normalize_player_index(kind, normalize_ageable_index(kind, index));
+        match (kind, index, value) {
             // Shared entity flags byte: bit 0x08 = sprinting.
             (_, 0, Byte(f)) => entity.is_sprinting = f & 0x08 != 0,
             (_, 9, Float(h)) => entity.health = h,
@@ -1426,4 +1449,27 @@ fn probes_water(kind: &EntityKind) -> bool {
             | EntityKind::TropicalFish
             | EntityKind::Pufferfish
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_index_normalization() {
+        let at = |index, protocol| normalize_player_index_at(EntityKind::Player, index, protocol);
+        // <= 772 permutes the four Avatar/Player fields into 26.x order.
+        assert_eq!(at(15, 772), 17); // absorption
+        assert_eq!(at(16, 772), 18); // score
+        assert_eq!(at(17, 772), 16); // mode customisation
+        assert_eq!(at(18, 772), 15); // main hand
+        let mut mapped: Vec<u8> = (15..=18).map(|i| at(i, 764)).collect();
+        mapped.sort_unstable();
+        assert_eq!(mapped, [15, 16, 17, 18]);
+        // 1.21.10 and newer already use the 26.x order; other kinds keep
+        // their own subclass indices.
+        assert_eq!(at(15, 773), 15);
+        assert_eq!(at(17, 776), 17);
+        assert_eq!(normalize_player_index_at(EntityKind::Zombie, 15, 772), 15);
+    }
 }
