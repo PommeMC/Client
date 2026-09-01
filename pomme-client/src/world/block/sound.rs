@@ -46,13 +46,8 @@ pub fn block_sounds(state: BlockState) -> BlockSounds {
         None => {
             // Coverage is test-enforced, so a miss means table drift. Once
             // per key: this path runs every hit/break tick.
-            static WARNED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-            if WARNED
-                .lock()
-                .unwrap()
-                .get_or_insert_with(HashSet::new)
-                .insert(key.to_string())
-            {
+            static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+            if WARNED.lock().unwrap().insert(key.to_string()) {
                 tracing::warn!("no sound entry for block '{key}', using stone");
             }
             ("block.stone.hit", "block.stone.break", 1.0, 1.0)
