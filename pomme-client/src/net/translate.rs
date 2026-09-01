@@ -695,10 +695,6 @@ fn translate_entity_data(
             out.extend_from_slice(&payload[value_at..]);
             return Some(out);
         }
-        // Particle values carry registry ids in the wire version's space; a
-        // verbatim copy would also leave any following entries' shifted
-        // serializer ids behind, so an untranslatable particle fails the
-        // packet instead.
         if new == 16 || new == 17 {
             let mut particles = Vec::new();
             translate_particles(&mut cur, &mut particles, ids, remaps, new == 17)?;
@@ -890,7 +886,8 @@ const PAYLOAD_PARTICLES: &[&str] = &[
 /// (`entity_effect`/`tinted_leaves`, an ARGB int on wire versions that have
 /// it) is copied through, and payload-less particles pass bare. `None` (a
 /// particle 26.2 dropped, or a payload the walker can't rewrite) fails the
-/// packet.
+/// packet — a verbatim fallback would leave wire-space ids and, in entity
+/// data, any following entries' shifted serializer ids in place.
 /// TODO: rewrite the remaining `PAYLOAD_PARTICLES` payloads (block states,
 /// dust colors, items) so entities and explosions using them translate.
 fn translate_particles(
