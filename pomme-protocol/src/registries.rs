@@ -135,6 +135,10 @@ pub struct RegistryRemaps {
     maps: [Vec<Option<u32>>; ClientRegistry::ALL.len()],
 }
 
+/// Entry renames name-matching can't bridge, applied both directions
+/// (26.x renamed the chain item to iron_chain).
+const RENAMED: &[(ClientRegistry, &str, &str)] = &[(ClientRegistry::Item, "chain", "iron_chain")];
+
 impl RegistryRemaps {
     /// Remaps from `protocol`'s id space to the latest version's (for
     /// inbound packets), or `None` for versions without an embedded registry
@@ -182,7 +186,22 @@ impl RegistryRemaps {
                 .collect();
             from.names(reg)
                 .iter()
-                .map(|name| to_ids.get(name.as_str()).copied())
+                .map(|name| {
+                    to_ids.get(name.as_str()).copied().or_else(|| {
+                        let alias = RENAMED.iter().find_map(|&(r, a, b)| {
+                            if r != reg {
+                                None
+                            } else if name == a {
+                                Some(b)
+                            } else if name == b {
+                                Some(a)
+                            } else {
+                                None
+                            }
+                        })?;
+                        to_ids.get(alias).copied()
+                    })
+                })
                 .collect()
         });
         Self { maps }
@@ -214,22 +233,48 @@ mod tests {
         )
     }
 
-    /// The bed block entity was removed in 26.2; its id has no remap.
-    fn assert_bed_unmapped(r: &RegistryRemaps, from: &RegistryTable) {
-        let bed = from
-            .names(ClientRegistry::BlockEntityType)
-            .iter()
-            .position(|n| n == "bed")
-            .unwrap() as u32;
-        assert_eq!(r.remap(ClientRegistry::BlockEntityType, bed), None);
+    /// An entry the latest version removed or renamed has no remap.
+    fn assert_unmapped(r: &RegistryRemaps, from: &RegistryTable, reg: ClientRegistry, name: &str) {
+        let id = from.names(reg).iter().position(|n| n == name).unwrap() as u32;
+        assert_eq!(r.remap(reg, id), None);
     }
 
-    /// Every remapped id resolves to the same entry name in the target table.
+    /// The bed block entity was removed in 26.2; its id has no remap.
+    fn assert_bed_unmapped(r: &RegistryRemaps, from: &RegistryTable) {
+        assert_unmapped(r, from, ClientRegistry::BlockEntityType, "bed");
+    }
+
+    /// 26.x renamed the chain item to iron_chain; `RENAMED` bridges it in
+    /// both directions.
+    fn assert_chain_remapped(r: &RegistryRemaps, from: &RegistryTable) {
+        let items = |t: &RegistryTable, name| {
+            t.names(ClientRegistry::Item)
+                .iter()
+                .position(|n| n == name)
+                .unwrap() as u32
+        };
+        let (id, target) = (
+            items(from, "chain"),
+            items(RegistryTable::latest(), "iron_chain"),
+        );
+        assert_eq!(r.remap(ClientRegistry::Item, id), Some(target));
+        let rev = RegistryRemaps::from_latest(from.version().protocol).unwrap();
+        assert_eq!(rev.remap(ClientRegistry::Item, target), Some(id));
+    }
+
+    /// Every remapped id resolves to the same entry name in the target table
+    /// (modulo the `RENAMED` bridges).
     fn assert_round_trips(r: &RegistryRemaps, from: &RegistryTable, to: &RegistryTable) {
         for reg in ClientRegistry::ALL {
             for (id, name) in from.names(reg).iter().enumerate() {
                 if let Some(new_id) = r.remap(reg, id as u32) {
-                    assert_eq!(to.name_of(reg, new_id), Some(name.as_str()), "{reg:?} {id}");
+                    let target = to.name_of(reg, new_id);
+                    let renamed = RENAMED.iter().any(|&(rr, a, b)| {
+                        rr == reg
+                            && ((name == a && target == Some(b))
+                                || (name == b && target == Some(a)))
+                    });
+                    assert!(target == Some(name.as_str()) || renamed, "{reg:?} {id}");
                 }
             }
         }
@@ -336,6 +381,44 @@ mod tests {
         // far earlier than 1.21.11's divergence at 41, so the raw item-stack
         // limitation (see translate.rs) covers common components like
         // custom_name and enchantments on this version.
+        assert_eq!(
+            from.name_of(ClientRegistry::DataComponentType, 5),
+            Some("custom_name")
+        );
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 4), Some(4));
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 5), Some(6));
+
+        assert_round_trips(r, from, to);
+    }
+
+    /// Anchor checks against the 1.21.8 -> 26.2 registry diff (spot-checked
+    /// by hand against the two data-generator reports). Divergence points
+    /// match 1.21.10's (entity 20, component 5, particle 4); tadpole sits
+    /// two lower than on 1.21.10 because 1.21.9 added copper_golem and
+    /// mannequin, and the `chain` item was renamed by 26.x.
+    #[test]
+    fn remap_1_21_8_anchors() {
+        let (r, from, to) = setup(772);
+
+        // 26.x inserted air_drag_modifier at attribute id 0.
+        assert_eq!(from.name_of(ClientRegistry::Attribute, 0), Some("armor"));
+        assert_eq!(r.remap(ClientRegistry::Attribute, 0), Some(1));
+
+        // Entity ids diverge at 20, where 1.21.11 inserted camel_husk.
+        assert_eq!(from.name_of(ClientRegistry::EntityType, 20), Some("cat"));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 19), Some(19));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 20), Some(21));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 125), Some(131)); // tadpole
+
+        assert_bed_unmapped(r, from);
+
+        assert_chain_remapped(r, from);
+
+        // Particle ids diverge right after bubble (id 3 in both).
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 3), Some(3));
+        assert_ne!(r.remap(ClientRegistry::ParticleType, 4), Some(4));
+
+        // Component ids diverge at 5 (custom_name), like 1.21.10.
         assert_eq!(
             from.name_of(ClientRegistry::DataComponentType, 5),
             Some("custom_name")
