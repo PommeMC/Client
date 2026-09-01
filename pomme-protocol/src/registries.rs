@@ -136,6 +136,10 @@ pub struct RegistryRemaps {
     maps: [Vec<Option<u32>>; ClientRegistry::ALL.len()],
 }
 
+/// Entry renames name-matching can't bridge, applied both directions
+/// (1.20.3 renamed the grass block/item to short_grass).
+const RENAMED: &[(ClientRegistry, &str, &str)] = &[(ClientRegistry::Item, "grass", "short_grass")];
+
 impl RegistryRemaps {
     /// Remaps from `protocol`'s id space to the latest version's (for
     /// inbound packets), or `None` for versions without an embedded registry
@@ -185,6 +189,20 @@ impl RegistryRemaps {
                 .iter()
                 .map(|name| {
                     to_ids.get(name.as_str()).copied().or_else(|| {
+                        let alias = RENAMED.iter().find_map(|&(r, a, b)| {
+                            if r != reg {
+                                None
+                            } else if name == a {
+                                Some(b)
+                            } else if name == b {
+                                Some(a)
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(alias) = alias {
+                            return to_ids.get(alias).copied();
+                        }
                         // 1.21.2 renamed every attribute by dropping its
                         // category prefix (generic.armor -> armor); match on
                         // the last dot segment for that registry only (sound
@@ -267,8 +285,14 @@ mod tests {
             for (id, name) in from.names(reg).iter().enumerate() {
                 if let Some(new_id) = r.remap(reg, id as u32) {
                     let target = to.name_of(reg, new_id);
+                    let renamed = RENAMED.iter().any(|&(rr, a, b)| {
+                        rr == reg
+                            && ((name == a && target == Some(b))
+                                || (name == b && target == Some(a)))
+                    });
                     assert!(
                         target == Some(name.as_str())
+                            || renamed
                             || (reg == ClientRegistry::Attribute
                                 && target == name.rsplit('.').next()),
                         "{reg:?} {id}"
@@ -532,6 +556,39 @@ mod tests {
     fn remap_1_20_6_anchors() {
         let (r, from, to) = setup(766);
         assert_pre_1_21_2_anchors(r, from, 16);
+        assert_round_trips(r, from, to);
+    }
+
+    /// Anchor checks against the 1.20.2 -> 26.2 registry diff. Attributes
+    /// are in pre-1.20.3 registration order (max_health first), and 1.20.3
+    /// renamed the grass item to short_grass — the one `RENAMED` bridge.
+    #[test]
+    fn remap_1_20_2_anchors() {
+        let (r, from, to) = setup(764);
+
+        assert_eq!(
+            from.name_of(ClientRegistry::Attribute, 0),
+            Some("generic.max_health")
+        );
+        assert_eq!(r.remap(ClientRegistry::Attribute, 0), Some(23));
+
+        assert_eq!(from.name_of(ClientRegistry::Item, 173), Some("grass"));
+        assert_eq!(to.name_of(ClientRegistry::Item, 229), Some("short_grass"));
+        assert_eq!(r.remap(ClientRegistry::Item, 173), Some(229));
+        assert_eq!(r.remap(ClientRegistry::Item, 1), Some(1)); // stone
+
+        assert_eq!(from.name_of(ClientRegistry::EntityType, 11), Some("cat"));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 11), Some(21));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 99), Some(131)); // tadpole
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 48), Some(66)); // poof
+
+        assert_bed_unmapped(r, from);
+        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_unmapped(r, from, ClientRegistry::EntityType, "boat");
+
+        // No component registry exists at 764.
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 0), None);
+
         assert_round_trips(r, from, to);
     }
 

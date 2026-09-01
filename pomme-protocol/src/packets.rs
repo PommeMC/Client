@@ -708,6 +708,79 @@ mod tests {
         );
     }
 
+    /// Registration-order anchors for 1.20.2, spot-checked by hand against
+    /// the decompiled `ConnectionProtocol.java` registrations (the last
+    /// version before 1.20.3 split resource_pack into pop/push and added
+    /// reset_score/ticking packets and the crafter serverbound).
+    #[test]
+    fn anchors_1_20_2() {
+        let t = PacketTable::for_protocol(764).unwrap();
+        assert_eq!(t.version().protocol, 764);
+        assert_eq!(t.version().name, "1.20.2");
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "interact"),
+            Some(18)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "container_click"),
+            Some(13)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "resource_pack"),
+            Some(39)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "resource_pack"),
+            Some(66)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_score"),
+            Some(93)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "system_chat"),
+            Some(103)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "player_info_update"),
+            Some(60)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "reset_score"),
+            None
+        );
+        assert_eq!(
+            t.id(Phase::Login, Direction::Clientbound, "game_profile"),
+            Some(2)
+        );
+        assert_eq!(
+            t.id(
+                Phase::Configuration,
+                Direction::Clientbound,
+                "resource_pack"
+            ),
+            Some(6)
+        );
+        assert_eq!(
+            t.id(
+                Phase::Configuration,
+                Direction::Clientbound,
+                "registry_data"
+            ),
+            Some(5)
+        );
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 53).is_some());
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 54).is_none());
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 112)
+                .is_some()
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 113)
+                .is_none()
+        );
+    }
+
     /// Registration-order anchors for 1.20.4, spot-checked by hand against
     /// the decompiled `ConnectionProtocol.java` registrations (this version
     /// predates packet resource names and the per-phase Protocols files;
@@ -780,7 +853,7 @@ mod tests {
             PacketTable::for_protocol(776).unwrap(),
             PacketTable::latest()
         ));
-        assert!(PacketTable::for_protocol(764).is_none());
+        assert!(PacketTable::for_protocol(763).is_none());
     }
 
     /// Per-phase counts from the 26.2 registration lists; a regenerated table
