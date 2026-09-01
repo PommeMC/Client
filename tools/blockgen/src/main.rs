@@ -16,7 +16,8 @@
 //! `behavior` seeds the name-keyed destroy-time table from an azalea
 //! `generated.rs` (e.g. `~/.cargo/git/checkouts/azalea-*/<rev>/azalea-block/
 //! src/generated.rs`); new blocks the seed doesn't know must be appended by
-//! hand from the decompiled `Blocks.java`.
+//! hand from the decompiled `Blocks.java`. Hand-added entries survive a
+//! regen: existing keys the seed doesn't produce are carried over.
 //!
 //! `state` compacts the raw per-state property dump produced by running
 //! vanilla (`tools/stategen/StateDump.java`, see `just stategen`) into the
@@ -297,6 +298,17 @@ fn gen_behavior(generated_path: &str, out_path: &str) -> Result<(), Error> {
         return Err("no block behavior entries found — wrong input file?".into());
     }
 
+    // Keep existing keys the seed doesn't produce, so hand-appended entries
+    // (old-version block names) aren't erased by a regen.
+    if let Ok(existing) = std::fs::read_to_string(out_path) {
+        let existing: BTreeMap<String, BehaviorJson> = serde_json::from_str(&existing)?;
+        for (name, b) in existing {
+            entries
+                .entry(name)
+                .or_insert((b.destroy_time, b.requires_correct_tool));
+        }
+    }
+
     let mut out = String::new();
     writeln!(out, "{{")?;
     let len = entries.len();
@@ -313,6 +325,13 @@ fn gen_behavior(generated_path: &str, out_path: &str) -> Result<(), Error> {
     std::fs::write(out_path, &out)?;
     println!("wrote {len} behavior entries to {out_path}");
     Ok(())
+}
+
+/// An entry of the emitted `block_behavior.json`, read back on regen.
+#[derive(serde::Deserialize)]
+struct BehaviorJson {
+    destroy_time: f32,
+    requires_correct_tool: bool,
 }
 
 fn extract_float_arg(text: &str, method: &str) -> Option<f32> {

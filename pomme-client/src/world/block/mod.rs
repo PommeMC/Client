@@ -784,4 +784,30 @@ mod tests {
             build_table(data, STATE_DATA[slot]);
         }
     }
+
+    /// Every block name in every embedded version table has an entry in the
+    /// shared behavior and sound tables; a missing one would silently fall
+    /// back to instant-break defaults and stone sounds.
+    #[test]
+    fn shared_tables_cover_all_versions() {
+        let behaviors: HashMap<String, BehaviorEntry> =
+            serde_json::from_str(include_str!("data/block_behavior.json")).unwrap();
+        let sounds: HashMap<String, (String, String, f32, f32)> =
+            serde_json::from_str(include_str!("block_sounds.json")).unwrap();
+        for (protocol, data) in BLOCK_DATA {
+            let file: BlockFile = serde_json::from_str(data).unwrap();
+            for block in &file.blocks {
+                assert!(
+                    behaviors.contains_key(&block.name),
+                    "no behavior entry for '{}' (protocol {protocol})",
+                    block.name
+                );
+                assert!(
+                    sounds.contains_key(&block.name),
+                    "no sound entry for '{}' (protocol {protocol})",
+                    block.name
+                );
+            }
+        }
+    }
 }
