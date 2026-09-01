@@ -298,8 +298,7 @@ fn gen_behavior(generated_path: &str, out_path: &str) -> Result<(), Error> {
         return Err("no block behavior entries found — wrong input file?".into());
     }
 
-    // Keep existing keys the seed doesn't produce, so hand-appended entries
-    // (old-version block names) aren't erased by a regen.
+    // Carry over hand-appended keys the seed doesn't know.
     if let Ok(existing) = std::fs::read_to_string(out_path) {
         let existing: BTreeMap<String, BehaviorJson> = serde_json::from_str(&existing)?;
         for (name, b) in existing {

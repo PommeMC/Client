@@ -24,10 +24,11 @@ pub struct BlockSounds {
 }
 
 /// block id (no namespace) -> (hit event, break event, volume, pitch).
-static BLOCK_SOUNDS: LazyLock<HashMap<String, (String, String, f32, f32)>> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("block_sounds.json"))
-        .expect("embedded block_sounds.json must be valid")
-});
+pub(super) static BLOCK_SOUNDS: LazyLock<HashMap<String, (String, String, f32, f32)>> =
+    LazyLock::new(|| {
+        serde_json::from_str(include_str!("block_sounds.json"))
+            .expect("embedded block_sounds.json must be valid")
+    });
 
 /// The vanilla `SoundType` sounds for `state`. Unknown ids fall back to the
 /// vanilla `SoundType.STONE` default. An empty event field means that action is
