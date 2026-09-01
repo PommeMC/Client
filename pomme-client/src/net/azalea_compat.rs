@@ -160,6 +160,20 @@ fn old_id(protocol: i32, dir: Direction, name: &str) -> u32 {
         .unwrap()
 }
 
+fn config_id(protocol: i32, dir: Direction, name: &str) -> u32 {
+    PacketTable::for_protocol(protocol)
+        .unwrap()
+        .id(Phase::Configuration, dir, name)
+        .unwrap()
+}
+
+fn login_id(protocol: i32, name: &str) -> u32 {
+    PacketTable::for_protocol(protocol)
+        .unwrap()
+        .id(Phase::Login, Direction::Clientbound, name)
+        .unwrap()
+}
+
 /// Translates a hand-built old-version game frame and decodes the result
 /// with azalea's 26.2 codecs.
 fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
@@ -172,7 +186,7 @@ fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
 /// Protocols outside `TRANSLATED` never build a translation.
 #[test]
 fn no_translation_without_coverage() {
-    assert!(crate::net::translate::Translation::for_protocol(764).is_none());
+    assert!(crate::net::translate::Translation::for_protocol(763).is_none());
 }
 
 /// 26.2 appended a trailing session-id UUID to login_finished
@@ -638,7 +652,7 @@ fn translate_set_time_774() {
 /// action bodies in the references), through each version's id table.
 #[test]
 fn translate_attack_old_versions() {
-    for protocol in [774, 773, 772, 771, 770, 769, 768, 767, 766, 765] {
+    for protocol in [774, 773, 772, 771, 770, 769, 768, 767, 766, 765, 764] {
         let frames =
             translation_for(protocol).translate_outbound_game_frame(wire::encode_attack(42));
         let interact = old_id(protocol, Direction::Serverbound, "interact");
@@ -875,7 +889,7 @@ fn assert_velocity(v: azalea_core::position::Vec3) {
 /// rewrites and serializer map are wired up for protocols 770/771.
 #[test]
 fn translate_add_entity_772() {
-    for protocol in [772, 771, 770, 769, 768, 767, 766, 765] {
+    for protocol in [772, 771, 770, 769, 768, 767, 766, 765, 764] {
         let mut old = Vec::new();
         wire::write_varint(
             &mut old,
@@ -1776,14 +1790,7 @@ fn translate_config_registry_data_765() {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
-        PacketTable::for_protocol(765)
-            .unwrap()
-            .id(
-                Phase::Configuration,
-                Direction::Clientbound,
-                "registry_data",
-            )
-            .unwrap(),
+        config_id(765, Direction::Clientbound, "registry_data"),
     );
     NbtTag::Compound(root).azalea_write(&mut old).unwrap();
 
@@ -1864,11 +1871,6 @@ fn translate_game_login_765() {
 /// (`select_known_packs` predates the known-packs handshake).
 #[test]
 fn translate_config_ids_765() {
-    let config_id = |protocol: i32, dir, name| {
-        PacketTable::for_protocol(protocol)
-            .unwrap()
-            .id(Phase::Configuration, dir, name)
-    };
     let t = translation_for(765);
     assert!(t.translates_config());
     assert!(!translation_for(766).translates_config());
@@ -1877,13 +1879,13 @@ fn translate_config_ids_765() {
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
-        config_id(765, Direction::Clientbound, "finish_configuration").unwrap(),
+        config_id(765, Direction::Clientbound, "finish_configuration"),
     );
     let frames = t.translate_config_frame(old.into_boxed_slice());
     let mut expected = Vec::new();
     wire::write_varint(
         &mut expected,
-        config_id(776, Direction::Clientbound, "finish_configuration").unwrap(),
+        config_id(776, Direction::Clientbound, "finish_configuration"),
     );
     assert_eq!(frames, [expected.into_boxed_slice()]);
 
@@ -1891,9 +1893,9 @@ fn translate_config_ids_765() {
     let mut frame = Vec::new();
     wire::write_varint(
         &mut frame,
-        config_id(776, Direction::Serverbound, "finish_configuration").unwrap(),
+        config_id(776, Direction::Serverbound, "finish_configuration"),
     );
-    let old = config_id(765, Direction::Serverbound, "finish_configuration").unwrap();
+    let old = config_id(765, Direction::Serverbound, "finish_configuration");
     assert_eq!(
         t.translate_outbound_config_frame(frame),
         Some(vec![old as u8])
@@ -1901,7 +1903,7 @@ fn translate_config_ids_765() {
     let mut frame = Vec::new();
     wire::write_varint(
         &mut frame,
-        config_id(776, Direction::Serverbound, "select_known_packs").unwrap(),
+        config_id(776, Direction::Serverbound, "select_known_packs"),
     );
     wire::write_varint(&mut frame, 0);
     assert_eq!(t.translate_outbound_config_frame(frame), None);
@@ -1911,12 +1913,6 @@ fn translate_config_ids_765() {
 /// bool where 1.21.2 put the session UUID; it pops before the zero pad.
 #[test]
 fn translate_login_finished_766() {
-    let login_id = |protocol, name| {
-        PacketTable::for_protocol(protocol)
-            .unwrap()
-            .id(Phase::Login, Direction::Clientbound, name)
-            .unwrap()
-    };
     let mut old = Vec::new();
     wire::write_varint(&mut old, login_id(766, "game_profile"));
     old.extend_from_slice(&[9; 16]); // uuid
@@ -1943,13 +1939,7 @@ fn translate_login_finished_766() {
 #[test]
 fn translate_login_hello_765() {
     let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        PacketTable::for_protocol(765)
-            .unwrap()
-            .id(Phase::Login, Direction::Clientbound, "hello")
-            .unwrap(),
-    );
+    wire::write_varint(&mut old, login_id(765, "hello"));
     old.push(0); // server id (empty string)
     wire::write_varint(&mut old, 1); // public key
     old.push(0xAA);
@@ -2026,6 +2016,458 @@ fn translate_chat_command_765() {
     expected.extend_from_slice(&[0, 0]); // no signatures, last-seen offset
     expected.extend_from_slice(&[0; 3]); // acknowledged bit set
     assert_eq!(frames, [expected]);
+}
+
+/// Appends a 1.20.2 length-prefixed JSON component.
+fn write_json(out: &mut Vec<u8>, json: &str) {
+    wire::write_varint(out, json.len() as u32);
+    out.extend_from_slice(json.as_bytes());
+}
+
+/// The expected 26.2-side component for a JSON literal, parsed with
+/// azalea's own JSON path.
+fn expect_text(json: &str) -> azalea_chat::FormattedText {
+    use serde::de::Deserialize;
+    azalea_chat::FormattedText::deserialize(
+        &serde_json::from_str::<serde_json::Value>(json).unwrap(),
+    )
+    .unwrap()
+}
+
+/// The 1.20.2 JSON -> NBT component transcode, end to end through
+/// `system_chat` (leading component) — nested styling and a mixed `extra`
+/// array (bare string beside a compound) normalize into azalea's shape.
+#[test]
+fn translate_system_chat_764() {
+    let json = r#"{"text":"a","color":"red","extra":["b",{"text":"c","bold":true}]}"#;
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(764, Direction::Clientbound, "system_chat"));
+    write_json(&mut old, json);
+    old.push(0); // not an action bar
+
+    let ClientboundGamePacket::SystemChat(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    assert!(!p.overlay);
+    assert_eq!(p.content.to_string(), expect_text(json).to_string());
+}
+
+/// `tab_list` carries two back-to-back components.
+#[test]
+fn translate_tab_list_764() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(764, Direction::Clientbound, "tab_list"));
+    write_json(&mut old, r#"{"text":"head"}"#);
+    write_json(&mut old, r#""foot""#); // bare JSON literal
+
+    let ClientboundGamePacket::TabList(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.header.to_string(), "head");
+    assert_eq!(p.footer.to_string(), "foot");
+}
+
+/// `player_combat_kill`'s trailing component.
+#[test]
+fn translate_combat_kill_764() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(764, Direction::Clientbound, "player_combat_kill"),
+    );
+    wire::write_varint(&mut old, 9); // player id
+    write_json(&mut old, r#"{"text":"died"}"#);
+
+    let ClientboundGamePacket::PlayerCombatKill(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.player_id, MinecraftEntityId(9));
+    assert_eq!(p.message.to_string(), "died");
+}
+
+/// `boss_event`'s name sits inside the Add op body.
+#[test]
+fn translate_boss_event_764() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(764, Direction::Clientbound, "boss_event"));
+    old.extend_from_slice(&[3; 16]); // bar uuid
+    wire::write_varint(&mut old, 0); // add
+    write_json(&mut old, r#"{"text":"boss"}"#);
+    old.extend_from_slice(&0.5f32.to_be_bytes()); // progress
+    wire::write_varint(&mut old, 2); // color
+    wire::write_varint(&mut old, 0); // overlay
+    old.push(0); // flags
+
+    let ClientboundGamePacket::BossEvent(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_protocol::packets::game::c_boss_event::Operation::Add(add) = p.operation else {
+        panic!("wrong operation");
+    };
+    assert_eq!(add.name.to_string(), "boss");
+    assert_eq!(add.progress, 0.5);
+}
+
+/// The 764 team parameters (JSON components in the 767-era order) convert,
+/// then the shared `translate_team` reorder runs on the result.
+#[test]
+fn translate_set_player_team_764() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(764, Direction::Clientbound, "set_player_team"),
+    );
+    old.extend_from_slice(&[3, b'r', b'e', b'd']); // team name
+    old.push(0); // method: add
+    write_json(&mut old, r#"{"text":"Reds"}"#);
+    old.push(1); // options
+    old.extend_from_slice(&[6, b'a', b'l', b'w', b'a', b'y', b's']); // visibility
+    old.extend_from_slice(&[6, b'a', b'l', b'w', b'a', b'y', b's']); // collision
+    wire::write_varint(&mut old, 12); // color
+    write_json(&mut old, r#"{"text":"[R] "}"#);
+    write_json(&mut old, r#"{"text":""}"#);
+    wire::write_varint(&mut old, 1); // one player
+    old.extend_from_slice(&[3, b'b', b'o', b'b']);
+
+    let ClientboundGamePacket::SetPlayerTeam(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_protocol::packets::game::c_set_player_team::Method::Add((parameters, players)) =
+        p.method
+    else {
+        panic!("wrong method");
+    };
+    assert_eq!(parameters.display_name.to_string(), "Reds");
+    assert_eq!(parameters.player_prefix.to_string(), "[R] ");
+    assert_eq!(players, vec!["bob".to_string()]);
+}
+
+/// The full `player_chat` walk: nullable unsigned content transcodes and
+/// the direct chat-type id becomes 26.2's holder (with the globalIndex
+/// prepend); the last-seen full-signature arm exercises the walk.
+#[test]
+fn translate_player_chat_764() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(764, Direction::Clientbound, "player_chat"));
+    old.extend_from_slice(&[7; 16]); // sender uuid
+    wire::write_varint(&mut old, 3); // index
+    old.push(0); // no signature
+    old.extend_from_slice(&[2, b'h', b'i']); // content
+    old.extend_from_slice(&11u64.to_be_bytes()); // timestamp
+    old.extend_from_slice(&13u64.to_be_bytes()); // salt
+    wire::write_varint(&mut old, 1); // one last-seen entry
+    wire::write_varint(&mut old, 0); // carrying a full signature
+    old.extend_from_slice(&[0xCD; 256]);
+    old.push(1); // unsigned content present
+    write_json(&mut old, r#"{"text":"hey"}"#);
+    old.push(0); // filter: pass-through
+    wire::write_varint(&mut old, 4); // chat type: direct registry id
+    write_json(&mut old, r#"{"text":"n"}"#);
+    old.push(0); // no target
+
+    let ClientboundGamePacket::PlayerChat(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.global_index, 0);
+    assert_eq!(p.index, 3);
+    assert_eq!(p.body.content, "hi");
+    assert_eq!(p.unsigned_content.as_ref().unwrap().to_string(), "hey");
+}
+
+/// `disguised_chat`: message transcode plus the chat-type holder bump.
+#[test]
+fn translate_disguised_chat_764() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(764, Direction::Clientbound, "disguised_chat"),
+    );
+    write_json(&mut old, r#"{"text":"psst"}"#);
+    wire::write_varint(&mut old, 2); // chat type: direct registry id
+    write_json(&mut old, r#"{"text":"n"}"#);
+    old.push(0); // no target
+
+    let ClientboundGamePacket::DisguisedChat(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.message.to_string(), "psst");
+}
+
+/// `player_info_update`: the display name (last action) transcodes after
+/// the per-entry action payload walk.
+#[test]
+fn translate_player_info_764() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(764, Direction::Clientbound, "player_info_update"),
+    );
+    old.push(0x21); // add_player | update_display_name
+    wire::write_varint(&mut old, 1); // one entry
+    old.extend_from_slice(&[9; 16]); // uuid
+    old.extend_from_slice(&[3, b'b', b'o', b'b']); // name
+    wire::write_varint(&mut old, 0); // no properties
+    old.push(1); // display name present
+    write_json(&mut old, r#"{"text":"Bob"}"#);
+
+    let ClientboundGamePacket::PlayerInfoUpdate(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    assert!(p.actions.add_player);
+    assert!(p.actions.update_display_name);
+    let entry = &p.entries[0];
+    assert_eq!(entry.profile.name, "bob");
+    assert_eq!(entry.display_name.as_ref().unwrap().to_string(), "Bob");
+}
+
+/// `command_suggestions`: nullable tooltips inside the suggestion list.
+#[test]
+fn translate_command_suggestions_764() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(764, Direction::Clientbound, "command_suggestions"),
+    );
+    wire::write_varint(&mut old, 5); // transaction id
+    wire::write_varint(&mut old, 1); // range start
+    wire::write_varint(&mut old, 4); // range length
+    wire::write_varint(&mut old, 1); // one suggestion
+    old.extend_from_slice(&[4, b'/', b'h', b'e', b'y']);
+    old.push(1); // tooltip present
+    write_json(&mut old, r#"{"text":"tip"}"#);
+
+    let ClientboundGamePacket::CommandSuggestions(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.id, 5);
+    assert_eq!(p.suggestions.list()[0].text(), "/hey");
+}
+
+/// The 1.20.2 `set_score` split: CHANGE gains absent display/numberFormat,
+/// REMOVE re-emits as the `reset_score` packet 1.20.3 added (with an empty
+/// objective meaning every objective).
+#[test]
+fn translate_set_score_764() {
+    let build = |method: u32, objective: &[u8], score: bool| {
+        let mut old = Vec::new();
+        wire::write_varint(&mut old, old_id(764, Direction::Clientbound, "set_score"));
+        old.extend_from_slice(&[3, b'b', b'o', b'b']); // owner
+        wire::write_varint(&mut old, method);
+        old.push(objective.len() as u8);
+        old.extend_from_slice(objective);
+        if score {
+            wire::write_varint(&mut old, 42);
+        }
+        old
+    };
+
+    let ClientboundGamePacket::SetScore(p) = translate_and_decode(764, build(0, b"obj", true))
+    else {
+        panic!("wrong packet for change");
+    };
+    assert_eq!(p.owner, "bob");
+    assert_eq!(p.objective_name, "obj");
+    assert_eq!(p.score, 42);
+    assert!(p.display.is_none());
+    assert!(p.number_format.is_none());
+
+    let ClientboundGamePacket::ResetScore(p) = translate_and_decode(764, build(1, b"obj", false))
+    else {
+        panic!("wrong packet for remove");
+    };
+    assert_eq!(p.owner, "bob");
+    assert_eq!(p.objective_name.as_deref(), Some("obj"));
+
+    let ClientboundGamePacket::ResetScore(p) = translate_and_decode(764, build(1, b"", false))
+    else {
+        panic!("wrong packet for remove-all");
+    };
+    assert!(p.objective_name.is_none());
+}
+
+/// The 1.20.2 `set_objective` ends at the render type; the display
+/// transcodes and the numberFormat synthesizes absent.
+#[test]
+fn translate_set_objective_764() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(764, Direction::Clientbound, "set_objective"),
+    );
+    old.extend_from_slice(&[3, b'o', b'b', b'j']);
+    old.push(0); // method: add
+    write_json(&mut old, r#"{"text":"Deaths"}"#);
+    wire::write_varint(&mut old, 1); // render type: hearts
+
+    let ClientboundGamePacket::SetObjective(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_protocol::packets::game::c_set_objective::Method::Add {
+        display_name,
+        number_format,
+        ..
+    } = p.method
+    else {
+        panic!("wrong method");
+    };
+    assert_eq!(display_name.to_string(), "Deaths");
+    assert_eq!(number_format, azalea_chat::numbers::NumberFormat::Blank);
+}
+
+/// The unsplit 1.20.2 `resource_pack` maps to `resource_pack_push` with a
+/// synthesized zero UUID and a transcoded prompt.
+#[test]
+fn translate_resource_pack_764() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(764, Direction::Clientbound, "resource_pack"),
+    );
+    old.extend_from_slice(&[4, b'h', b't', b't', b'p']); // url
+    old.extend_from_slice(&[2, b'a', b'b']); // hash
+    old.push(1); // required
+    old.push(1); // prompt present
+    write_json(&mut old, r#"{"text":"pls"}"#);
+
+    let ClientboundGamePacket::ResourcePackPush(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.id, uuid::Uuid::nil());
+    assert_eq!(p.url, "http");
+    assert!(p.required);
+    assert_eq!(p.prompt.as_ref().unwrap().to_string(), "pls");
+}
+
+/// The serverbound `resource_pack` reply loses its UUID at 764 and the
+/// post-1.20.2 action values clamp.
+#[test]
+fn translate_resource_pack_response_764() {
+    let build = |action: u32| {
+        let mut frame = Vec::new();
+        wire::write_varint(
+            &mut frame,
+            table_id(Direction::Serverbound, "resource_pack"),
+        );
+        frame.extend_from_slice(&[9; 16]); // pack uuid
+        wire::write_varint(&mut frame, action);
+        frame
+    };
+    let old = old_id(764, Direction::Serverbound, "resource_pack") as u8;
+    let t = translation_for(764);
+    assert_eq!(t.translate_outbound_game_frame(build(3)), [[old, 3]]);
+    assert_eq!(t.translate_outbound_game_frame(build(4)), [[old, 3]]); // downloaded
+    assert_eq!(t.translate_outbound_game_frame(build(5)), [[old, 2]]); // invalid url
+    assert_eq!(t.translate_outbound_game_frame(build(7)), [[old, 1]]); // discarded
+}
+
+/// The 764 config phase: disconnect's JSON component transcodes and the
+/// unsplit resource_pack becomes push, both after the id remap; the
+/// serverbound reply strips its UUID.
+#[test]
+fn translate_config_764() {
+    use azalea_protocol::packets::config::ClientboundConfigPacket;
+
+    let t = translation_for(764);
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        config_id(764, Direction::Clientbound, "disconnect"),
+    );
+    write_json(&mut old, r#"{"text":"bye"}"#);
+    let frames = t.translate_config_frame(old.into_boxed_slice());
+    assert_eq!(frames.len(), 1);
+    let packet: ClientboundConfigPacket =
+        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frames[0])).unwrap();
+    let ClientboundConfigPacket::Disconnect(p) = packet else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.reason.to_string(), "bye");
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        config_id(764, Direction::Clientbound, "resource_pack"),
+    );
+    old.extend_from_slice(&[1, b'u']); // url
+    old.extend_from_slice(&[1, b'h']); // hash
+    old.extend_from_slice(&[0, 0]); // not required, no prompt
+    let frames = t.translate_config_frame(old.into_boxed_slice());
+    let packet: ClientboundConfigPacket =
+        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frames[0])).unwrap();
+    let ClientboundConfigPacket::ResourcePackPush(p) = packet else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.url, "u");
+    assert!(p.prompt.is_none());
+
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        config_id(776, Direction::Serverbound, "resource_pack"),
+    );
+    frame.extend_from_slice(&[9; 16]);
+    wire::write_varint(&mut frame, 4); // downloaded
+    let old = config_id(764, Direction::Serverbound, "resource_pack");
+    assert_eq!(
+        t.translate_outbound_config_frame(frame),
+        Some(vec![old as u8, 3])
+    );
+}
+
+/// Entity-data component serializers (5/6) carry JSON at 764; a skip would
+/// desync the list, so they transcode in place.
+#[test]
+fn translate_entity_data_764() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(764, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    old.extend_from_slice(&[2, 6, 1]); // index 2, optional_component, present
+    write_json(&mut old, r#"{"text":"Named"}"#);
+    old.extend_from_slice(&[3, 0, 1]); // index 3, byte serializer
+    old.push(0xFF);
+
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_entity::EntityDataValue::OptionalFormattedText(name) = &p.packed_items.0[0].value
+    else {
+        panic!("wrong serializer");
+    };
+    assert_eq!(name.as_ref().unwrap().to_string(), "Named");
+    assert!(matches!(
+        p.packed_items.0[1].value,
+        azalea_entity::EntityDataValue::Byte(1)
+    ));
+}
+
+/// The 765 chat-type holder bump alone (NBT components already): a direct
+/// registry id decodes as the 26.2 holder form.
+#[test]
+fn translate_player_chat_765() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(765, Direction::Clientbound, "player_chat"));
+    old.extend_from_slice(&[7; 16]); // sender uuid
+    wire::write_varint(&mut old, 3); // index
+    old.push(0); // no signature
+    old.extend_from_slice(&[2, b'h', b'i']); // content
+    old.extend_from_slice(&11u64.to_be_bytes()); // timestamp
+    old.extend_from_slice(&13u64.to_be_bytes()); // salt
+    old.push(0); // no last-seen entries
+    old.push(0); // no unsigned content
+    old.push(0); // filter: pass-through
+    wire::write_varint(&mut old, 0); // chat type: direct registry id
+    old.extend_from_slice(&[8, 0, 1, b'n']); // name: NBT string
+    old.push(0); // no target
+
+    let ClientboundGamePacket::PlayerChat(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.global_index, 0);
+    assert_eq!(p.body.content, "hi");
 }
 
 #[test]
