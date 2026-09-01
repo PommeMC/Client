@@ -97,6 +97,47 @@
 //!   the frame is dropped, like `add_entity` for the thrown `potion` entity
 //!   1.21.5 split into splash/lingering
 //!
+//! 1.21.3 -> 26.2 wire changes (all of 1.21.4's plus):
+//! - `level_particles` lacks the `alwaysShow` bool 1.21.4 inserted after
+//!   `overrideLimiter`; false is synthesized
+//! - `player_info_update`'s UPDATE_LIST_ORDER action sits at bit 6, where
+//!   1.21.4 inserted UPDATE_HAT — but azalea (ffedf17) still decodes the 1.21.3
+//!   bit order, so the mask passes through unchanged (native 26.2 servers hit
+//!   the same azalea lag; see the team-color note)
+//! - serverbound `move_vehicle` lacks the trailing onGround bool and 1.21.4
+//!   split `pick_item` into the from_block/from_entity pair; pomme sends
+//!   neither
+//! - clientbound `set_held_slot` reads a byte where 26.2 reads a varint; hotbar
+//!   slots encode identically
+//!
+//! 1.21.1 -> 26.2 wire changes (the 1.21.2 rework; all of 1.21.3's plus):
+//! - `player_position` and `teleport_entity` predate PositionMoveRotation:
+//!   positions reorder, rotations un-pack (teleport carried packed-degree
+//!   bytes), a zero delta and widened relative bits are synthesized
+//! - `set_time` is two longs with a negated dayTime marking a frozen clock
+//! - CommonPlayerSpawnInfo lacks the trailing `seaLevel` varint, inserted
+//!   before the final byte of `login` and `respawn`
+//! - `container_set_slot` reads a signed-byte container id whose -1/-2
+//!   sentinels became `set_cursor_item`/`set_player_inventory`
+//! - `cooldown` carries an item registry id where 26.2 names a cooldown group
+//! - clientbound `set_carried_item` was renamed `set_held_slot` (identical byte
+//!   layout); login `game_profile` -> `login_finished` needs no alias (login
+//!   rewrites dispatch by id)
+//! - `explode`, `update_recipes` and `place_ghost_recipe` have untranslatable
+//!   layouts and are dropped: pomme renders no explosions and the recipe
+//!   book/stonecutter UIs stay empty on 1.21.1 servers (the 1.21.1-only
+//!   `recipe` packet drops via the id map)
+//! - every attribute was renamed by dropping its category prefix
+//!   (`generic.armor` -> `armor`), handled by the registry-remap alias;
+//!   `boat`/`chest_boat` entities split per wood type and have no 26.2 ids, so
+//!   boats aren't rendered
+//! - serverbound `player_input` was the vehicle-steering packet (two axis
+//!   floats + jump/shift flags) rather than the key bitfield, and the
+//!   move_player flags byte was a plain onGround bool, so the
+//!   horizontal-collision bit 1.21.2 added must be dropped
+//! - `client_tick_end` doesn't exist; its suppression is expected and logged
+//!   quietly
+//!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
 //! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
@@ -162,6 +203,55 @@ struct GameIds {
     /// The rewrites 1.21.5 introduced, for wire versions below it. Its
     /// presence also flags the NBT chunk heightmaps and string team scopes.
     v769: Option<Ids769>,
+    /// The rewrites 1.21.4 introduced, for wire versions below it.
+    v768: Option<Ids768>,
+    /// The rewrites 1.21.2 introduced, for wire version 767.
+    v767: Option<Ids767>,
+    /// Latest serverbound ids whose packet is knowingly absent on this wire
+    /// version (`client_tick_end`, `player_loaded`); suppressed quietly.
+    quiet_suppressed: Box<[u32]>,
+}
+
+/// Latest-space dispatch ids for the frame rewrites protocols at or below
+/// 768 need.
+struct Ids768 {
+    level_particles_id: u32,
+}
+
+impl Ids768 {
+    fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
+        (id == self.level_particles_id).then_some(translate_level_particles_768 as FrameRewrite)
+    }
+}
+
+/// Dispatch ids and synthesis targets for the 1.21.2 rework (protocol 767).
+struct Ids767 {
+    player_position_id: u32,
+    teleport_entity_id: u32,
+    respawn_id: u32,
+    container_set_slot_id: u32,
+    cooldown_id: u32,
+    /// The ids the -1/-2 `container_set_slot` sentinels map onto.
+    set_cursor_item_id: u32,
+    set_player_inventory_id: u32,
+    /// Inbound packets with no translatable 26.2 layout, dropped quietly
+    /// (`explode`, `update_recipes`, `place_ghost_recipe`).
+    drops: [u32; 3],
+    player_input_id: u32,
+    player_input_old_id: u32,
+    /// The four `move_player_*` ids whose flags byte must drop to onGround.
+    move_player_ids: [u32; 4],
+}
+
+impl Ids767 {
+    fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
+        Some(match id {
+            i if i == self.player_position_id => translate_player_position_767,
+            i if i == self.teleport_entity_id => translate_teleport_entity_767,
+            i if i == self.respawn_id => translate_respawn_767,
+            _ => return None,
+        })
+    }
 }
 
 /// Latest-space dispatch ids for the frame rewrites protocol 769 needs.
@@ -227,7 +317,7 @@ impl Ids772 {
 /// Protocols the wire translation fully covers. A version with embedded
 /// tables but no entry here (the staging state while its translation is
 /// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770, 769];
+const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770, 769, 768, 767];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -319,9 +409,20 @@ impl Translation {
         };
 
         let v769 = self.game_ids.as_ref().is_some_and(|g| g.v769.is_some());
+        let v767 = self.game_ids.as_ref().is_some_and(|g| g.v767.is_some());
+        if let Some(v) = self.game_ids.as_ref().and_then(|g| g.v767.as_ref())
+            && v.drops.contains(&id)
+        {
+            tracing::debug!("Dropping game packet {id} with no 1.21.1 equivalent layout");
+            return None;
+        }
         let payload = &raw[id_end..];
         let rewritten = if id == self.game_login_id {
-            translate_game_login(id, payload)
+            if v767 {
+                insert_sea_level(payload).and_then(|p| translate_game_login(id, &p))
+            } else {
+                translate_game_login(id, payload)
+            }
         } else if id == self.set_player_team_id {
             translate_team(id, payload, v769)
         } else if let Some(ids) = &self.game_ids {
@@ -330,11 +431,17 @@ impl Translation {
             } else if id == ids.level_chunk_id {
                 translate_chunk(id, payload, v769)
             } else if id == ids.set_time_id {
-                translate_set_time(id, payload)
-            } else if let Some(rewrite) = ids.v772.as_ref().and_then(|v| v.rewrite(id)) {
+                if v767 {
+                    translate_set_time_767(id, payload)
+                } else {
+                    translate_set_time(id, payload)
+                }
+            } else if let Some(rewrite) = ids.version_rewrite(id) {
                 rewrite(id, payload)
-            } else if let Some(rewrite) = ids.v769.as_ref().and_then(|v| v.rewrite(id)) {
-                rewrite(id, payload)
+            } else if let Some(v) = ids.v767.as_ref().filter(|v| id == v.container_set_slot_id) {
+                translate_container_set_slot_767(v, payload)
+            } else if ids.v767.as_ref().is_some_and(|v| id == v.cooldown_id) {
+                translate_cooldown_767(self.to_latest, id, payload)
             } else if id == wire_id {
                 return Some(raw);
             } else {
@@ -369,6 +476,7 @@ impl Translation {
         let Some(ids) = &self.game_ids else {
             return vec![frame];
         };
+        let mut frame = frame;
         let mut pos = 0;
         let Some(id) = wire::read_varint(&frame, &mut pos) else {
             return Vec::new();
@@ -389,6 +497,19 @@ impl Translation {
         {
             return translate_container_click(v769.container_click_old_id, &frame[pos..]);
         }
+        if let Some(v767) = &ids.v767 {
+            if id == v767.player_input_id {
+                return translate_player_input(v767.player_input_old_id, &frame[pos..]);
+            }
+            if v767.move_player_ids.contains(&id)
+                && let Some(flags) = frame.last_mut()
+            {
+                // 1.21.2 turned the trailing onGround bool into a flag
+                // bitfield; a 1.21.1 server reads any nonzero byte as
+                // onGround, so the horizontal-collision bit must go.
+                *flags &= 1;
+            }
+        }
         match ids.outbound.get(id as usize).copied().flatten() {
             Some(old) if old == id => vec![frame],
             Some(old) => {
@@ -398,7 +519,11 @@ impl Translation {
                 vec![out]
             }
             None => {
-                tracing::warn!("Suppressing outbound game packet {id} the wire version lacks");
+                if ids.quiet_suppressed.contains(&id) {
+                    tracing::debug!("Suppressing outbound game packet {id} the wire version lacks");
+                } else {
+                    tracing::warn!("Suppressing outbound game packet {id} the wire version lacks");
+                }
                 Vec::new()
             }
         }
@@ -512,9 +637,21 @@ const RENAMED: &[(&str, &str)] = &[
     // `ClientboundHorseScreenOpenPacket` vs `ClientboundMountScreenOpenPacket`
     // in the references, byte-identical write() bodies.
     ("horse_screen_open", "mount_screen_open"),
+    // Renamed by 1.21.2, byte-identical single-slot bodies.
+    ("set_carried_item", "set_held_slot"),
 ];
 
 impl GameIds {
+    /// The version-gated frame rewrite dispatching on `id`, if any.
+    fn version_rewrite(&self, id: u32) -> Option<FrameRewrite> {
+        self.v772
+            .as_ref()
+            .and_then(|v| v.rewrite(id))
+            .or_else(|| self.v769.as_ref().and_then(|v| v.rewrite(id)))
+            .or_else(|| self.v768.as_ref().and_then(|v| v.rewrite(id)))
+            .or_else(|| self.v767.as_ref().and_then(|v| v.rewrite(id)))
+    }
+
     /// Name-matched game-phase id tables between one wire version and the
     /// latest. `None` when translation-by-id is a no-op: every inbound id
     /// maps to itself and every outbound id maps to itself or to nothing
@@ -561,9 +698,10 @@ impl GameIds {
             serializer_map: match protocol {
                 774 => remap_serializer_774,
                 773 => remap_serializer_773,
-                // 1.21.5 through 1.21.8 register identical serializer sets.
+                // 1.21.5 through 1.21.8 register identical serializer sets,
+                // as do 1.21.1 through 1.21.4.
                 770..=772 => remap_serializer_772,
-                769 => remap_serializer_769,
+                767..=769 => remap_serializer_769,
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
@@ -600,6 +738,37 @@ impl GameIds {
                     "container_click",
                 ),
             }),
+            v768: (protocol <= 768).then(|| Ids768 {
+                level_particles_id: id(Clientbound, "level_particles"),
+            }),
+            v767: (protocol <= 767).then(|| Ids767 {
+                player_position_id: id(Clientbound, "player_position"),
+                teleport_entity_id: id(Clientbound, "teleport_entity"),
+                respawn_id: id(Clientbound, "respawn"),
+                container_set_slot_id: id(Clientbound, "container_set_slot"),
+                cooldown_id: id(Clientbound, "cooldown"),
+                set_cursor_item_id: id(Clientbound, "set_cursor_item"),
+                set_player_inventory_id: id(Clientbound, "set_player_inventory"),
+                drops: [
+                    id(Clientbound, "explode"),
+                    id(Clientbound, "update_recipes"),
+                    id(Clientbound, "place_ghost_recipe"),
+                ],
+                player_input_id: id(Serverbound, "player_input"),
+                player_input_old_id: required_id(table, Phase::Game, Serverbound, "player_input"),
+                move_player_ids: [
+                    "move_player_pos",
+                    "move_player_pos_rot",
+                    "move_player_rot",
+                    "move_player_status_only",
+                ]
+                .map(|n| id(Serverbound, n)),
+            }),
+            quiet_suppressed: ["client_tick_end", "player_loaded"]
+                .iter()
+                .filter(|n| table.id(Phase::Game, Serverbound, n).is_none())
+                .map(|n| required_id(latest, Phase::Game, Serverbound, n))
+                .collect(),
         })
     }
 }
@@ -646,6 +815,185 @@ fn translate_player_command(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     wire::write_varint(&mut out, entity_id);
     wire::write_varint(&mut out, action + 2);
     out.extend_from_slice(&payload[data_at..]);
+    vec![out]
+}
+
+/// Rewrites `level_particles`: 1.21.4 inserted the `alwaysShow` bool after
+/// `overrideLimiter`; false matches the older client's behavior.
+fn translate_level_particles_768(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let first = *payload.first()?;
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, id);
+    out.push(first);
+    out.push(0);
+    out.extend_from_slice(&payload[1..]);
+    Some(out)
+}
+
+/// Rewrites `player_position` from the 1.21.1 layout (`x/y/z, yRot, xRot,
+/// u8 relative bits, teleport id`) to 26.2's (`id first, then
+/// PositionMoveRotation with a zero delta, i32 relative bits`); the five
+/// old bits keep their positions.
+fn translate_player_position_767(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let pos = payload.get(..24)?;
+    let y_rot = f32::from_be_bytes(payload.get(24..28)?.try_into().ok()?);
+    let x_rot = f32::from_be_bytes(payload.get(28..32)?.try_into().ok()?);
+    let relatives = *payload.get(32)?;
+    let mut p = 33;
+    let teleport_id = wire::read_varint(payload, &mut p)?;
+
+    let mut out = Vec::with_capacity(64);
+    wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, teleport_id);
+    write_position_move_rotation(&mut out, pos, y_rot, x_rot, i32::from(relatives));
+    Some(out)
+}
+
+/// Rewrites `teleport_entity` from the 1.21.1 layout (`id, x/y/z,
+/// packed-degree rotation bytes, onGround`) to 26.2's PositionMoveRotation
+/// form: float degrees, zero delta, absolute (no relative bits).
+fn translate_teleport_entity_767(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut p = 0;
+    let entity = wire::read_varint(payload, &mut p)?;
+    let pos = payload.get(p..p + 24)?;
+    let y_rot = *payload.get(p + 24)? as i8;
+    let x_rot = *payload.get(p + 25)? as i8;
+    let on_ground = *payload.get(p + 26)?;
+
+    let mut out = Vec::with_capacity(72);
+    wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, entity);
+    write_position_move_rotation(
+        &mut out,
+        pos,
+        unpack_degrees(y_rot),
+        unpack_degrees(x_rot),
+        0, // absolute
+    );
+    out.push(on_ground);
+    Some(out)
+}
+
+/// Writes a 26.2 `PositionMoveRotation` (position, zero delta, rotation)
+/// followed by the i32 relative-bit set.
+fn write_position_move_rotation(
+    out: &mut Vec<u8>,
+    pos: &[u8],
+    y_rot: f32,
+    x_rot: f32,
+    relatives: i32,
+) {
+    out.extend_from_slice(pos);
+    out.extend_from_slice(&[0; 24]); // zero delta movement
+    out.extend_from_slice(&y_rot.to_be_bytes());
+    out.extend_from_slice(&x_rot.to_be_bytes());
+    out.extend_from_slice(&relatives.to_be_bytes());
+}
+
+/// Vanilla `Mth.unpackDegrees`: a packed rotation byte to float degrees.
+fn unpack_degrees(b: i8) -> f32 {
+    f32::from(b) * 360.0 / 256.0
+}
+
+/// Inserts the `seaLevel` varint 1.21.2 appended to CommonPlayerSpawnInfo,
+/// which sits immediately before the final byte of both `login`
+/// (enforcesSecureChat) and `respawn` (dataToKeep); vanilla's overworld
+/// value is synthesized.
+fn insert_sea_level(payload: &[u8]) -> Option<Vec<u8>> {
+    let (last, body) = payload.split_last()?;
+    let mut out = Vec::with_capacity(payload.len() + 1);
+    out.extend_from_slice(body);
+    wire::write_varint(&mut out, 63);
+    out.push(*last);
+    Some(out)
+}
+
+fn translate_respawn_767(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&insert_sea_level(payload)?);
+    Some(out)
+}
+
+/// Rewrites 1.21.1's two-field `set_time` (`gameTime, dayTime` with a
+/// negated dayTime marking a frozen clock, -1 for frozen zero) into the
+/// triple the shared rewrite consumes.
+fn translate_set_time_767(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let game_time = payload.get(..8)?;
+    let day_time = i64::from_be_bytes(payload.get(8..16)?.try_into().ok()?);
+    let (day_time, tick) = if day_time < 0 {
+        (if day_time == -1 { 0 } else { -day_time }, 0)
+    } else {
+        (day_time, 1)
+    };
+    let mut tmp = Vec::with_capacity(17);
+    tmp.extend_from_slice(game_time);
+    tmp.extend_from_slice(&day_time.to_be_bytes());
+    tmp.push(tick);
+    translate_set_time(id, &tmp)
+}
+
+/// Rewrites `container_set_slot`: 1.21.2 widened the container id from a
+/// signed byte to a varint and split its -1 (cursor) and -2 (player
+/// inventory) sentinels into `set_cursor_item`/`set_player_inventory`,
+/// which drop the state id.
+fn translate_container_set_slot_767(v: &Ids767, payload: &[u8]) -> Option<Vec<u8>> {
+    let container = *payload.first()? as i8;
+    let mut p = 1;
+    wire::read_varint(payload, &mut p)?; // state id
+    let slot = i16::from_be_bytes(payload.get(p..p + 2)?.try_into().ok()?);
+    let stack = payload.get(p + 2..)?;
+
+    let mut out = Vec::with_capacity(payload.len() + 4);
+    match container {
+        -1 => {
+            wire::write_varint(&mut out, v.set_cursor_item_id);
+            out.extend_from_slice(stack);
+        }
+        -2 => {
+            wire::write_varint(&mut out, v.set_player_inventory_id);
+            wire::write_varint(&mut out, slot as u32);
+            out.extend_from_slice(stack);
+        }
+        _ => {
+            wire::write_varint(&mut out, v.container_set_slot_id);
+            wire::write_varint(&mut out, container as u32);
+            out.extend_from_slice(&payload[1..]);
+        }
+    }
+    Some(out)
+}
+
+/// Rewrites `cooldown`'s item id into the latest registry space. Vanilla
+/// 26.2 names a cooldown group instead, but azalea still decodes the item
+/// registry id and these frames feed azalea (like the team-color ordinal).
+fn translate_cooldown_767(remaps: &RegistryRemaps, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut p = 0;
+    let item = wire::read_varint(payload, &mut p)?;
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, item)?);
+    out.extend_from_slice(&payload[p..]);
+    Some(out)
+}
+
+/// Rewrites serverbound `player_input` for 1.21.1, where it was the vehicle
+/// steering packet (`xxa, zza floats + jump/shift flags`) rather than the
+/// key bitfield 1.21.2 introduced; axes are synthesized at full strength.
+fn translate_player_input(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let Some(&bits) = payload.first() else {
+        return Vec::new();
+    };
+    let axis = |pos, neg| match (bits & pos != 0, bits & neg != 0) {
+        (true, false) => 1.0f32,
+        (false, true) => -1.0f32,
+        _ => 0.0f32,
+    };
+    let mut out = Vec::with_capacity(12);
+    wire::write_varint(&mut out, old_id);
+    out.extend_from_slice(&axis(4, 8).to_be_bytes()); // left / right -> xxa
+    out.extend_from_slice(&axis(1, 2).to_be_bytes()); // forward / backward -> zza
+    out.push((bits >> 4) & 3); // jump, shift
     vec![out]
 }
 
