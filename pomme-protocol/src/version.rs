@@ -30,6 +30,8 @@ pub const VERSIONS: &[ProtocolVersion] = &[
     v("1.21", 767),
     v("1.20.6", 766),
     v("1.20.5", 766),
+    v("1.20.4", 765),
+    v("1.20.3", 765),
 ];
 
 /// The version the client speaks internally.
@@ -45,7 +47,7 @@ pub(crate) struct EmbeddedVersion {
     pub registries: &'static str,
 }
 
-pub(crate) const EMBEDDED: [EmbeddedVersion; 10] = [
+pub(crate) const EMBEDDED: [EmbeddedVersion; 11] = [
     EmbeddedVersion {
         version: v("26.1", 775),
         packets: include_str!("data/protocol-26.1.json"),
@@ -95,6 +97,11 @@ pub(crate) const EMBEDDED: [EmbeddedVersion; 10] = [
         version: v("1.20.6", 766),
         packets: include_str!("data/protocol-1.20.6.json"),
         registries: include_str!("data/registries-1.20.6.json"),
+    },
+    EmbeddedVersion {
+        version: v("1.20.4", 765),
+        packets: include_str!("data/protocol-1.20.4.json"),
+        registries: include_str!("data/registries-1.20.4.json"),
     },
 ];
 
@@ -160,6 +167,9 @@ mod tests {
         assert_eq!(ProtocolVersion::from_name("1.20.6").unwrap().protocol, 766);
         assert_eq!(ProtocolVersion::from_name("1.20.5").unwrap().protocol, 766);
         assert_eq!(ProtocolVersion::from_protocol(766).unwrap().name, "1.20.6");
+        assert_eq!(ProtocolVersion::from_name("1.20.4").unwrap().protocol, 765);
+        assert_eq!(ProtocolVersion::from_name("1.20.3").unwrap().protocol, 765);
+        assert_eq!(ProtocolVersion::from_protocol(765).unwrap().name, "1.20.4");
         assert!(ProtocolVersion::from_name("26.1.1-rc-1").is_none());
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
     }
@@ -176,7 +186,8 @@ mod tests {
         assert_eq!(embedded_index(768), Some(7));
         assert_eq!(embedded_index(767), Some(8));
         assert_eq!(embedded_index(766), Some(9));
+        assert_eq!(embedded_index(765), Some(10));
         assert_eq!(embedded_index(LATEST.protocol), None);
-        assert_eq!(embedded_index(765), None);
+        assert_eq!(embedded_index(764), None);
     }
 }

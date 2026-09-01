@@ -248,6 +248,8 @@ mod tests {
         assert_eq!(resolve_version_name(Some(767), None), "1.21.1");
         assert_eq!(resolve_version_name(Some(766), Some("1.20.5")), "1.20.5");
         assert_eq!(resolve_version_name(Some(766), None), "1.20.6");
+        assert_eq!(resolve_version_name(Some(765), Some("1.20.3")), "1.20.3");
+        assert_eq!(resolve_version_name(Some(765), None), "1.20.4");
         assert_eq!(resolve_version_name(Some(776), Some("1.21.10")), "26.2");
         // Unsupported protocols show the raw reported string.
         assert_eq!(resolve_version_name(Some(1), Some("1.8.9")), "1.8.9");

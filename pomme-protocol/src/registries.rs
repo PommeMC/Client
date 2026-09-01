@@ -100,10 +100,11 @@ impl RegistryTable {
         }
         let mut registries: [Vec<String>; ClientRegistry::ALL.len()] = Default::default();
         for reg in ClientRegistry::ALL {
-            let names = file
-                .registries
-                .remove(reg.key())
-                .ok_or_else(|| format!("missing registry {}", reg.key()))?;
+            // A registry absent from the file didn't exist at that version
+            // (data_component_type before 1.20.5); its remaps are all None.
+            let Some(names) = file.registries.remove(reg.key()) else {
+                continue;
+            };
             if names.is_empty() {
                 return Err(format!("empty registry {}", reg.key()));
             }
@@ -531,6 +532,39 @@ mod tests {
     fn remap_1_20_6_anchors() {
         let (r, from, to) = setup(766);
         assert_pre_1_21_2_anchors(r, from, 16);
+        assert_round_trips(r, from, to);
+    }
+
+    /// Anchor checks against the 1.20.4 -> 26.2 registry diff. This version
+    /// predates data components (that registry is absent — every component
+    /// remap is None) and 1.20.5/26.2 renamed or reshuffled heavily: the
+    /// particle registry diverges at id 0.
+    #[test]
+    fn remap_1_20_4_anchors() {
+        let (r, from, to) = setup(765);
+
+        assert_eq!(
+            from.name_of(ClientRegistry::Attribute, 11),
+            Some("generic.max_health")
+        );
+        assert_eq!(r.remap(ClientRegistry::Attribute, 11), Some(23));
+
+        assert_eq!(from.name_of(ClientRegistry::EntityType, 12), Some("cat"));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 12), Some(21));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 100), Some(131)); // tadpole
+
+        assert_bed_unmapped(r, from);
+        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_unmapped(r, from, ClientRegistry::EntityType, "boat");
+        assert_unmapped(r, from, ClientRegistry::SoundEvent, "item.goat_horn.play");
+
+        // No component registry exists at 765.
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 0), None);
+
+        // The particle registry reordered at 1.20.5; nothing below the
+        // divergence to anchor on.
+        assert_ne!(r.remap(ClientRegistry::ParticleType, 0), Some(0));
+
         assert_round_trips(r, from, to);
     }
 
