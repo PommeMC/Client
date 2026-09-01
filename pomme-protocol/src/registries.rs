@@ -595,7 +595,7 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::EntityType, 100), Some(131)); // tadpole
 
         assert_bed_unmapped(r, from);
-        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_chain_remapped(r, from);
         assert_unmapped(r, from, ClientRegistry::EntityType, "boat");
         assert_unmapped(r, from, ClientRegistry::SoundEvent, "item.goat_horn.play");
 
