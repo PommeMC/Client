@@ -175,11 +175,10 @@ pub async fn connect_to_server(
 /// Adopts the server's protocol as the wire version when translation data
 /// for it exists, so one client joins any supported server version;
 /// otherwise the launched version is kept (and the server shows its own
-/// mismatch message, as before). The exception is a server speaking the
-/// selected protocol itself while that protocol has no translation data (a
-/// version listed for pings but not yet joinable): the handshake would
-/// succeed and untranslated packets would break mid-connect, so the join is
-/// refused with a clean error instead. The protocol comes from `known` (a
+/// mismatch message, as before). A server speaking the selected protocol
+/// while it has no translation data (listed for pings, not yet joinable) is
+/// refused instead: the handshake would succeed and untranslated packets
+/// break mid-connect. The protocol comes from `known` (a
 /// server-list ping; a stale one just means the server rejects the handshake
 /// with its mismatch message, same as before) or a status probe. Sets the
 /// session protocol and the matching block-state table, so it must run
