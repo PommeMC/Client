@@ -160,6 +160,15 @@ fn old_id(protocol: i32, dir: Direction, name: &str) -> u32 {
         .unwrap()
 }
 
+/// A registry entry's id in the given version's table.
+fn registry_id(
+    table: &pomme_protocol::RegistryTable,
+    reg: pomme_protocol::ClientRegistry,
+    name: &str,
+) -> u32 {
+    table.names(reg).iter().position(|n| n == name).unwrap() as u32
+}
+
 /// Translates a hand-built old-version game frame and decodes the result
 /// with azalea's 26.2 codecs.
 fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
@@ -833,13 +842,10 @@ fn translate_entity_data_compound_tag_772() {
 /// layout: azalea's out-of-sync `Particle` ordinals can't decode it.
 #[test]
 fn translate_entity_data_particles_772() {
-    let entity_effect = |table: &pomme_protocol::RegistryTable| {
-        table
-            .names(pomme_protocol::ClientRegistry::ParticleType)
-            .iter()
-            .position(|n| n == "entity_effect")
-            .unwrap() as u32
-    };
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let entity_effect =
+        |table: &RegistryTable| registry_id(table, ClientRegistry::ParticleType, "entity_effect");
     let mut old = Vec::new();
     wire::write_varint(
         &mut old,
@@ -849,7 +855,7 @@ fn translate_entity_data_particles_772() {
     old.extend_from_slice(&[10, 18, 1]); // index 10, particles, one particle
     wire::write_varint(
         &mut old,
-        entity_effect(pomme_protocol::RegistryTable::for_protocol(772).unwrap()),
+        entity_effect(RegistryTable::for_protocol(772).unwrap()),
     );
     old.extend_from_slice(&0x11223344u32.to_be_bytes()); // ARGB color
     old.extend_from_slice(&[19, 19, 1, 2, 3]); // index 19, villager_data, 3 varints
@@ -866,10 +872,7 @@ fn translate_entity_data_particles_772() {
     );
     wire::write_varint(&mut expected, 9);
     expected.extend_from_slice(&[10, 17, 1]); // 26.2 particles serializer
-    wire::write_varint(
-        &mut expected,
-        entity_effect(pomme_protocol::RegistryTable::latest()),
-    );
+    wire::write_varint(&mut expected, entity_effect(RegistryTable::latest()));
     expected.extend_from_slice(&0x11223344u32.to_be_bytes());
     expected.extend_from_slice(&[19, 18, 1, 2, 3]); // 26.2 villager_data serializer
     expected.push(0xFF);
@@ -1032,22 +1035,12 @@ fn translate_set_default_spawn_772() {
 /// quirks can't mask an id drift.
 #[test]
 fn translate_explode_772() {
-    let particle_id = |table: &pomme_protocol::RegistryTable, name: &str| {
-        table
-            .names(pomme_protocol::ClientRegistry::ParticleType)
-            .iter()
-            .position(|n| n == name)
-            .unwrap() as u32
-    };
-    let sound_id = |table: &pomme_protocol::RegistryTable, name: &str| {
-        table
-            .names(pomme_protocol::ClientRegistry::SoundEvent)
-            .iter()
-            .position(|n| n == name)
-            .unwrap() as u32
-    };
-    let old_table = pomme_protocol::RegistryTable::for_protocol(772).unwrap();
-    let latest_table = pomme_protocol::RegistryTable::latest();
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let particle_id = |table, name| registry_id(table, ClientRegistry::ParticleType, name);
+    let sound_id = |table, name| registry_id(table, ClientRegistry::SoundEvent, name);
+    let old_table = RegistryTable::for_protocol(772).unwrap();
+    let latest_table = RegistryTable::latest();
 
     let mut old = Vec::new();
     wire::write_varint(&mut old, old_id(772, Direction::Clientbound, "explode"));
