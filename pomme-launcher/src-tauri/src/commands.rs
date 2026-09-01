@@ -452,6 +452,11 @@ pub async fn launch_game(
     #[cfg(unix)]
     cmd.process_group(0);
 
+    // The client is a console-subsystem binary; without this, Windows pops a
+    // terminal window for it alongside the game.
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let stdout = child.stdout.take().expect("couldn't take stdout");
