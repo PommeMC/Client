@@ -17,7 +17,9 @@
 //! `generated.rs` (e.g. `~/.cargo/git/checkouts/azalea-*/<rev>/azalea-block/
 //! src/generated.rs`); new blocks the seed doesn't know must be appended by
 //! hand from the decompiled `Blocks.java`. Hand-added entries survive a
-//! regen: existing keys the seed doesn't produce are carried over.
+//! regen (existing keys the seed doesn't produce are carried over and
+//! listed), but the seed wins for keys it does produce — a hand-correction
+//! to a seeded value does not survive.
 //!
 //! `state` compacts the raw per-state property dump produced by running
 //! vanilla (`tools/stategen/StateDump.java`, see `just stategen`) into the
@@ -299,13 +301,20 @@ fn gen_behavior(generated_path: &str, out_path: &str) -> Result<(), Error> {
     }
 
     // Carry over hand-appended keys the seed doesn't know.
-    if let Ok(existing) = std::fs::read_to_string(out_path) {
-        let existing: BTreeMap<String, BehaviorJson> = serde_json::from_str(&existing)?;
-        for (name, b) in existing {
-            entries
-                .entry(name)
-                .or_insert((b.destroy_time, b.requires_correct_tool));
+    let mut carried: Vec<String> = Vec::new();
+    match std::fs::read_to_string(out_path) {
+        Ok(existing) => {
+            let existing: BTreeMap<String, BehaviorJson> =
+                serde_json::from_str(&existing).map_err(|e| format!("{out_path}: {e}"))?;
+            for (name, b) in existing {
+                if !entries.contains_key(&name) {
+                    entries.insert(name.clone(), (b.destroy_time, b.requires_correct_tool));
+                    carried.push(name);
+                }
+            }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{out_path}: {e}").into()),
     }
 
     let mut out = String::new();
@@ -323,6 +332,13 @@ fn gen_behavior(generated_path: &str, out_path: &str) -> Result<(), Error> {
 
     std::fs::write(out_path, &out)?;
     println!("wrote {len} behavior entries to {out_path}");
+    if !carried.is_empty() {
+        println!(
+            "carried over {} hand-added entries: {}",
+            carried.len(),
+            carried.join(", ")
+        );
+    }
     Ok(())
 }
 

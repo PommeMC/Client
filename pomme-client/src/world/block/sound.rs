@@ -6,9 +6,13 @@
 //! type, so the block id -> sounds table was extracted from the decompiled
 //! vanilla `Blocks.java` / `SoundType.java` and is embedded here as
 //! `block_sounds.json`.
+//!
+//! TODO: generate `block_sounds.json` with a blockgen subcommand parsing
+//! `.sound(SoundType.X)` from the decompiled `Blocks.java` (like the
+//! behavior seed) instead of hand transcription, so values can't drift.
 
-use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex};
 
 use azalea_block::BlockState;
 
@@ -37,10 +41,23 @@ pub fn block_sounds(state: BlockState) -> BlockSounds {
     let id = super::block_id(state);
     let key = id.strip_prefix("minecraft:").unwrap_or(id);
 
-    let (hit, brk, volume, pitch) = BLOCK_SOUNDS
-        .get(key)
-        .map(|(h, b, v, p)| (h.as_str(), b.as_str(), *v, *p))
-        .unwrap_or(("block.stone.hit", "block.stone.break", 1.0, 1.0));
+    let (hit, brk, volume, pitch) = match BLOCK_SOUNDS.get(key) {
+        Some((h, b, v, p)) => (h.as_str(), b.as_str(), *v, *p),
+        None => {
+            // Coverage is test-enforced, so a miss means table drift. Once
+            // per key: this path runs every hit/break tick.
+            static WARNED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+            if WARNED
+                .lock()
+                .unwrap()
+                .get_or_insert_with(HashSet::new)
+                .insert(key.to_string())
+            {
+                tracing::warn!("no sound entry for block '{key}', using stone");
+            }
+            ("block.stone.hit", "block.stone.break", 1.0, 1.0)
+        }
+    };
 
     BlockSounds {
         hit_event: hit.to_string(),

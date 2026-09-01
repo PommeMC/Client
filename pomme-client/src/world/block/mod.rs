@@ -269,11 +269,14 @@ pub fn prewarm_protocol(protocol: i32) -> usize {
     slot
 }
 
+fn load_behaviors() -> HashMap<String, BehaviorEntry> {
+    serde_json::from_str(include_str!("data/block_behavior.json"))
+        .expect("invalid block-behavior data")
+}
+
 fn build_table(data: &str, state_data: &str) -> Vec<BlockData> {
     let file: BlockFile = serde_json::from_str(data).expect("invalid block-state data");
-    let behaviors: HashMap<String, BehaviorEntry> =
-        serde_json::from_str(include_str!("data/block_behavior.json"))
-            .expect("invalid block-behavior data");
+    let behaviors = load_behaviors();
     let state_file: StateFile = serde_json::from_str(state_data).expect("invalid state data");
     assert_eq!(
         state_file.version, file.version,
@@ -788,12 +791,14 @@ mod tests {
     }
 
     /// Every block name in every embedded version table has an entry in the
-    /// shared behavior and sound tables; a missing one would silently fall
-    /// back to instant-break defaults and stone sounds.
+    /// shared behavior and sound tables (a missing one would silently fall
+    /// back to instant-break defaults and stone sounds), and every table key
+    /// names a block in some embedded version (an orphan is a typo'd or
+    /// stale entry — the defect class the legacy crop sound keys were).
     #[test]
     fn shared_tables_cover_all_versions() {
-        let behaviors: HashMap<String, BehaviorEntry> =
-            serde_json::from_str(include_str!("data/block_behavior.json")).unwrap();
+        let behaviors = load_behaviors();
+        let mut known = HashSet::new();
         for (protocol, data) in BLOCK_DATA {
             let file: BlockFile = serde_json::from_str(data).unwrap();
             for block in &file.blocks {
@@ -807,7 +812,14 @@ mod tests {
                     "no sound entry for '{}' (protocol {protocol})",
                     block.name
                 );
+                known.insert(block.name.clone());
             }
+        }
+        for key in behaviors.keys() {
+            assert!(known.contains(key), "orphaned behavior entry '{key}'");
+        }
+        for key in sound::BLOCK_SOUNDS.keys() {
+            assert!(known.contains(key), "orphaned sound entry '{key}'");
         }
     }
 }
