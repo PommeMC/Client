@@ -521,6 +521,10 @@ impl ApplicationHandler for App {
                 self.occluded = occluded;
             }
 
+            WindowEvent::Focused(focused) => {
+                self.core.unfocused_since = (!focused).then(Instant::now);
+            }
+
             WindowEvent::RedrawRequested => {
                 if matches!(self.phase.get(), AppPhase::Setup { .. }) {
                     return;
