@@ -169,10 +169,23 @@ fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
     azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap()
 }
 
-/// Protocols outside `TRANSLATED` never build a translation.
+/// Exactly the joinable non-native protocols build a translation: a version
+/// with embedded tables but no `TRANSLATED` entry (the staging state while
+/// its translation is built) must stay un-joinable, and a protocol without
+/// tables at all never translates.
 #[test]
 fn no_translation_without_coverage() {
-    assert!(crate::net::translate::Translation::for_protocol(770).is_none());
+    use pomme_protocol::version::{LATEST, VERSIONS};
+    for v in VERSIONS {
+        assert_eq!(
+            crate::net::translate::Translation::for_protocol(v.protocol).is_some(),
+            crate::net::translate::joinable(v.protocol) && v.protocol != LATEST.protocol,
+            "{}",
+            v.name
+        );
+    }
+    assert!(PacketTable::for_protocol(763).is_none());
+    assert!(crate::net::translate::Translation::for_protocol(763).is_none());
 }
 
 /// 26.2 appended a trailing session-id UUID to login_finished
@@ -813,6 +826,56 @@ fn translate_entity_data_compound_tag_772() {
     ));
 }
 
+/// A 772 particle-list value (`LivingEntity.EFFECT_PARTICLES`, serializer 18
+/// there) has its particle type ids remapped and the `entity_effect` color
+/// copied, so entries after it keep translating (a verbatim tail would leave
+/// their shifted serializer ids in place). Byte-exact against the native
+/// layout: azalea's out-of-sync `Particle` ordinals can't decode it.
+#[test]
+fn translate_entity_data_particles_772() {
+    let entity_effect = |table: &pomme_protocol::RegistryTable| {
+        table
+            .names(pomme_protocol::ClientRegistry::ParticleType)
+            .iter()
+            .position(|n| n == "entity_effect")
+            .unwrap() as u32
+    };
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(772, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    old.extend_from_slice(&[10, 18, 1]); // index 10, particles, one particle
+    wire::write_varint(
+        &mut old,
+        entity_effect(pomme_protocol::RegistryTable::for_protocol(772).unwrap()),
+    );
+    old.extend_from_slice(&0x11223344u32.to_be_bytes()); // ARGB color
+    old.extend_from_slice(&[19, 19, 1, 2, 3]); // index 19, villager_data, 3 varints
+    old.push(0xFF);
+
+    let translated = translation_for(772)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+
+    let mut expected = Vec::new();
+    wire::write_varint(
+        &mut expected,
+        table_id(Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut expected, 9);
+    expected.extend_from_slice(&[10, 17, 1]); // 26.2 particles serializer
+    wire::write_varint(
+        &mut expected,
+        entity_effect(pomme_protocol::RegistryTable::latest()),
+    );
+    expected.extend_from_slice(&0x11223344u32.to_be_bytes());
+    expected.extend_from_slice(&[19, 18, 1, 2, 3]); // 26.2 villager_data serializer
+    expected.push(0xFF);
+    assert_eq!(&translated[..], &expected[..]);
+}
+
 /// A 1.21.8 `profile` item component (61 there; bare optional name/uuid +
 /// properties) is rewrapped into 26.2's `ResolvableProfile` partial arm
 /// with an empty skin patch (see `translate_old_profile`).
@@ -969,12 +1032,30 @@ fn translate_set_default_spawn_772() {
 }
 
 /// 1.21.9 inserted `radius`/`blockCount` after the explosion center and
-/// appended a block-particle list; the knockback/particle/sound between
-/// them pass through verbatim (particle and sound ids stay in the wire
-/// version's space, like on 1.21.10 — the frame here uses 26.2's ids so
-/// azalea can decode it).
+/// appended a block-particle list; the particle and sound ids between them
+/// are remapped into 26.2's space (a 1.21.8 server sends `explosion` 22 and
+/// the `entity.generic.explode` holder 615 + 1; 26.2 numbers them 30 and
+/// 699). Byte-exact against a hand-built native frame so azalea's decode
+/// quirks can't mask an id drift.
 #[test]
 fn translate_explode_772() {
+    let particle_id = |table: &pomme_protocol::RegistryTable, name: &str| {
+        table
+            .names(pomme_protocol::ClientRegistry::ParticleType)
+            .iter()
+            .position(|n| n == name)
+            .unwrap() as u32
+    };
+    let sound_id = |table: &pomme_protocol::RegistryTable, name: &str| {
+        table
+            .names(pomme_protocol::ClientRegistry::SoundEvent)
+            .iter()
+            .position(|n| n == name)
+            .unwrap() as u32
+    };
+    let old_table = pomme_protocol::RegistryTable::for_protocol(772).unwrap();
+    let latest_table = pomme_protocol::RegistryTable::latest();
+
     let mut old = Vec::new();
     wire::write_varint(&mut old, old_id(772, Direction::Clientbound, "explode"));
     for c in [1.0f64, 65.0, -2.0] {
@@ -984,10 +1065,35 @@ fn translate_explode_772() {
     for c in [0.1f64, 0.2, 0.3] {
         old.extend_from_slice(&c.to_be_bytes());
     }
-    wire::write_varint(&mut old, 30); // explosion particle (26.2 id)
-    wire::write_varint(&mut old, 100); // sound
+    wire::write_varint(&mut old, particle_id(old_table, "explosion"));
+    wire::write_varint(&mut old, sound_id(old_table, "entity.generic.explode") + 1);
 
-    let ClientboundGamePacket::Explode(p) = translate_and_decode(772, old) else {
+    let translated = translation_for(772)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+
+    let mut expected = Vec::new();
+    wire::write_varint(&mut expected, table_id(Direction::Clientbound, "explode"));
+    for c in [1.0f64, 65.0, -2.0] {
+        expected.extend_from_slice(&c.to_be_bytes());
+    }
+    expected.extend_from_slice(&0f32.to_be_bytes()); // radius
+    expected.extend_from_slice(&0i32.to_be_bytes()); // block count
+    expected.push(1); // knockback present
+    for c in [0.1f64, 0.2, 0.3] {
+        expected.extend_from_slice(&c.to_be_bytes());
+    }
+    wire::write_varint(&mut expected, particle_id(latest_table, "explosion"));
+    wire::write_varint(
+        &mut expected,
+        sound_id(latest_table, "entity.generic.explode") + 1,
+    );
+    expected.push(0); // no block particles
+    assert_eq!(&translated[..], &expected[..]);
+
+    let packet =
+        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap();
+    let ClientboundGamePacket::Explode(p) = packet else {
         panic!("wrong packet");
     };
     assert_eq!((p.center.x, p.center.y, p.center.z), (1.0, 65.0, -2.0));

@@ -684,6 +684,14 @@ pub fn handle_game_packet(
             }
         }
         ClientboundGamePacket::SetEntityData(p) => {
+            // Avatar's absorption/score sit at 17/18 since 1.21.9 (773);
+            // 15/16 on older wire versions (main hand moved to 15, pushing
+            // them up).
+            let (absorption_idx, score_idx) = if crate::version::session_protocol() <= 772 {
+                (15, 16)
+            } else {
+                (17, 18)
+            };
             for item in p.packed_items.iter() {
                 // index 8 = item stack data for item entities
                 if item.index == 8
@@ -735,10 +743,10 @@ pub fn handle_game_packet(
                         value,
                     });
                 }
-                // Index 18 (Int) on players = score (Avatar holds 15/16 on
-                // every supported version). Kind-blind; the consumer applies
-                // it only to the local player.
-                if item.index == 18
+                // Player score (Int; index gated per wire version above).
+                // Kind-blind; the consumer applies it only to the local
+                // player.
+                if item.index == score_idx
                     && let azalea_entity::EntityDataValue::Int(score) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::PlayerScore {
@@ -746,10 +754,10 @@ pub fn handle_game_packet(
                         score: *score,
                     });
                 }
-                // Index 17 (Float) on players = absorption
-                // (Player.DATA_PLAYER_ABSORPTION_ID). Kind-blind; the consumer
-                // applies it only to the local player.
-                if item.index == 17
+                // Player absorption (Float, Player.DATA_PLAYER_ABSORPTION_ID;
+                // index gated per wire version above). Kind-blind; the
+                // consumer applies it only to the local player.
+                if item.index == absorption_idx
                     && let azalea_entity::EntityDataValue::Float(absorption) = &item.value
                 {
                     let _ = event_tx.try_send(NetworkEvent::PlayerAbsorption {
