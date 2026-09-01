@@ -166,6 +166,7 @@
   "cave_air": {"destroy_time": 0, "requires_correct_tool": false},
   "cave_vines": {"destroy_time": 0, "requires_correct_tool": false},
   "cave_vines_plant": {"destroy_time": 0, "requires_correct_tool": false},
+  "chain": {"destroy_time": 5, "requires_correct_tool": true},
   "chain_command_block": {"destroy_time": -1, "requires_correct_tool": true},
   "cherry_button": {"destroy_time": 0.5, "requires_correct_tool": false},
   "cherry_door": {"destroy_time": 3, "requires_correct_tool": false},

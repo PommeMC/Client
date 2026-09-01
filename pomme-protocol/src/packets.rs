@@ -361,13 +361,69 @@ mod tests {
         );
     }
 
+    /// Registration-order anchors for 1.21.8, cross-checked in full against
+    /// Mojang's `generated/reports/packets.json`. 1.21.9 inserted the
+    /// clientbound debug/game-test packets (shifting everything from
+    /// `debug_sample` up) and renamed serverbound 22
+    /// (`debug_sample_subscription` -> `debug_subscription_request`);
+    /// serverbound ids are otherwise identical to 1.21.10.
+    #[test]
+    fn anchors_1_21_8() {
+        let t = PacketTable::for_protocol(772).unwrap();
+        assert_eq!(t.version().protocol, 772);
+        assert_eq!(t.version().name, "1.21.8");
+        assert_eq!(t.id(Phase::Game, Direction::Serverbound, "attack"), None);
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "interact"),
+            Some(25)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "container_click"),
+            Some(17)
+        );
+        assert_eq!(
+            t.name_of(Phase::Game, Direction::Serverbound, 22),
+            Some("debug_sample_subscription")
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "level_particles"),
+            Some(41)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_entity_data"),
+            Some(92)
+        );
+        assert_eq!(
+            t.name_of(Phase::Game, Direction::Clientbound, 35),
+            Some("horse_screen_open")
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "explode"),
+            Some(32)
+        );
+        assert_eq!(
+            t.id(Phase::Login, Direction::Clientbound, "login_finished"),
+            Some(2)
+        );
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 65).is_some());
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 66).is_none());
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 133)
+                .is_some()
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 134)
+                .is_none()
+        );
+    }
+
     #[test]
     fn for_protocol_lookups() {
         assert!(std::ptr::eq(
             PacketTable::for_protocol(776).unwrap(),
             PacketTable::latest()
         ));
-        assert!(PacketTable::for_protocol(772).is_none());
+        assert!(PacketTable::for_protocol(771).is_none());
     }
 
     /// Per-phase counts from the 26.2 registration lists; a regenerated table
