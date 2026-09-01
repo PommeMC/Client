@@ -172,7 +172,7 @@ fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
 /// Protocols outside `TRANSLATED` never build a translation.
 #[test]
 fn no_translation_without_coverage() {
-    assert!(crate::net::translate::Translation::for_protocol(765).is_none());
+    assert!(crate::net::translate::Translation::for_protocol(764).is_none());
 }
 
 /// 26.2 appended a trailing session-id UUID to login_finished
@@ -638,7 +638,7 @@ fn translate_set_time_774() {
 /// action bodies in the references), through each version's id table.
 #[test]
 fn translate_attack_old_versions() {
-    for protocol in [774, 773, 772, 771, 770, 769, 768, 767, 766] {
+    for protocol in [774, 773, 772, 771, 770, 769, 768, 767, 766, 765] {
         let frames =
             translation_for(protocol).translate_outbound_game_frame(wire::encode_attack(42));
         let interact = old_id(protocol, Direction::Serverbound, "interact");
@@ -875,7 +875,7 @@ fn assert_velocity(v: azalea_core::position::Vec3) {
 /// rewrites and serializer map are wired up for protocols 770/771.
 #[test]
 fn translate_add_entity_772() {
-    for protocol in [772, 771, 770, 769, 768, 767, 766] {
+    for protocol in [772, 771, 770, 769, 768, 767, 766, 765] {
         let mut old = Vec::new();
         wire::write_varint(
             &mut old,
@@ -1502,6 +1502,530 @@ fn translate_use_item_766() {
         frames,
         [[old_id(766, Direction::Serverbound, "use_item") as u8, 0, 7]]
     );
+}
+
+/// A 1.20.4 optional item (`bool + item + i8 count + NBT`) translates bare
+/// through `container_set_content` (whose trailing carried stack survives);
+/// the NBT drops.
+#[test]
+fn translate_container_set_content_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "container_set_content"),
+    );
+    old.push(1); // container id
+    wire::write_varint(&mut old, 2); // state id
+    wire::write_varint(&mut old, 1); // one slot
+    old.push(1); // present
+    wire::write_varint(&mut old, 1); // stone
+    old.push(3); // count
+    old.extend_from_slice(&[10, 1, 0, 1, b'd', 5, 0]); // NBT {d: 5b}
+    old.push(0); // carried: empty
+
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.container_id, 1);
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    assert_eq!(data.kind, azalea_registry::builtin::ItemKind::Stone);
+    assert_eq!(data.count, 3);
+    assert_eq!(data.component_patch.iter().count(), 0);
+    assert!(matches!(p.carried_item, azalea_inventory::ItemStack::Empty));
+}
+
+/// `set_equipment` slot/item pairs, high slot bit continuing the list.
+#[test]
+fn translate_set_equipment_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "set_equipment"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    old.push(0x85); // offhand, more follow
+    old.extend_from_slice(&[1, 4, 1, 0]); // bare item, empty NBT
+    old.push(0); // head
+    old.push(0); // empty stack
+
+    let ClientboundGamePacket::SetEquipment(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.entity_id, MinecraftEntityId(9));
+    assert_eq!(p.slots.slots.len(), 2);
+    let azalea_inventory::ItemStack::Present(data) = &p.slots.slots[0].1 else {
+        panic!("empty stack");
+    };
+    assert_eq!(data.count, 1);
+}
+
+/// `merchant_offers` costs were plain stacks before 1.20.5's `ItemCost`
+/// (with its explicit optional second cost).
+#[test]
+fn translate_merchant_offers_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "merchant_offers"),
+    );
+    wire::write_varint(&mut old, 1); // container id
+    wire::write_varint(&mut old, 1); // one offer
+    old.extend_from_slice(&[1, 1, 3, 0]); // costA: 3 stone
+    old.extend_from_slice(&[1, 4, 1, 0]); // result
+    old.push(0); // costB: empty
+    old.push(0); // out of stock
+    for n in [5i32, 12, 2, 0] {
+        old.extend_from_slice(&n.to_be_bytes()); // uses, maxUses, xp, special
+    }
+    old.extend_from_slice(&0.05f32.to_be_bytes()); // price multiplier
+    old.extend_from_slice(&1i32.to_be_bytes()); // demand
+    wire::write_varint(&mut old, 2); // villager level
+    wire::write_varint(&mut old, 30); // villager xp
+    old.extend_from_slice(&[1, 1]); // show progress, can restock
+
+    let ClientboundGamePacket::MerchantOffers(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.container_id, 1);
+    let offer = &p.offers[0];
+    assert_eq!(offer.base_cost_a.count, 3);
+    assert!(offer.cost_b.is_none());
+    assert_eq!(offer.uses, 5);
+    assert_eq!(offer.max_uses, 12);
+    assert_eq!(p.villager_level, 2);
+    assert!(p.can_restock);
+}
+
+/// 1.20.5 widened `update_mob_effect`'s amplifier from a byte to a varint
+/// and dropped the trailing factor-data NBT.
+#[test]
+fn translate_update_mob_effect_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "update_mob_effect"),
+    );
+    wire::write_varint(&mut old, 7); // entity id
+    wire::write_varint(&mut old, 1); // effect
+    old.push(2); // amplifier
+    wire::write_varint(&mut old, 600); // duration
+    old.push(0); // flags
+    old.push(0); // factor data: absent
+
+    let ClientboundGamePacket::UpdateMobEffect(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.entity_id, MinecraftEntityId(7));
+    assert_eq!(p.data.amplifier, 2);
+    assert_eq!(p.data.duration, 600);
+}
+
+/// 1.20.4 `update_attributes` keys attributes by resource location (mapped
+/// through the 765 registry) and modifiers by UUID (hex name synthesized).
+#[test]
+fn translate_update_attributes_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "update_attributes"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    wire::write_varint(&mut old, 1); // one attribute
+    let key = "minecraft:generic.max_health";
+    wire::write_varint(&mut old, key.len() as u32);
+    old.extend_from_slice(key.as_bytes());
+    old.extend_from_slice(&20.0f64.to_be_bytes()); // base
+    wire::write_varint(&mut old, 1); // one modifier
+    old.extend_from_slice(&[0xAB; 16]); // uuid
+    old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
+    old.push(0); // operation
+
+    let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.values.len(), 1);
+    assert_eq!(p.values[0].base, 20.0);
+    let modifier = &p.values[0].modifiers[0];
+    assert_eq!(modifier.amount, 4.0);
+    assert_eq!(
+        modifier.id.to_string(),
+        format!("minecraft:{}", "ab".repeat(16))
+    );
+}
+
+/// 1.20.4 `level_particles` led with the particle type id; it moves to
+/// just before the payload and `alwaysShow` is synthesized.
+#[test]
+fn translate_level_particles_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "level_particles"),
+    );
+    wire::write_varint(&mut old, 30); // particle (26.2 id space)
+    old.push(1); // override limiter
+    for c in [1.0f64, 65.0, -2.0] {
+        old.extend_from_slice(&c.to_be_bytes());
+    }
+    for d in [0.5f32, 0.5, 0.5, 0.1] {
+        old.extend_from_slice(&d.to_be_bytes());
+    }
+    old.extend_from_slice(&7i32.to_be_bytes()); // count
+
+    let ClientboundGamePacket::LevelParticles(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert!(p.override_limiter);
+    assert!(!p.always_show);
+    assert_eq!(p.count, 7);
+}
+
+/// The serializer-id walker at 765: 1.20.5 inserted `particles` (18),
+/// `wolf_variant` (23) and `armadillo_state` (28), so 765's
+/// `sniffer_state` sits at 25 (26.2's is 27).
+#[test]
+fn translate_entity_data_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "set_entity_data"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    old.extend_from_slice(&[17, 25, 2]); // index 17, sniffer_state, ordinal 2
+    old.push(0xFF);
+
+    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert!(matches!(
+        p.packed_items.0[0].value,
+        azalea_entity::EntityDataValue::SnifferState(_)
+    ));
+}
+
+/// `container_set_slot`'s -1/-2 sentinels split like 767's, but with the
+/// old-form item body.
+#[test]
+fn translate_container_set_slot_765() {
+    let build = |container: i8, slot: i16| {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(765, Direction::Clientbound, "container_set_slot"),
+        );
+        old.push(container as u8);
+        wire::write_varint(&mut old, 2); // state id
+        old.extend_from_slice(&slot.to_be_bytes());
+        old.extend_from_slice(&[1, 1, 2, 0]); // 2 stone, empty NBT
+        old
+    };
+
+    let ClientboundGamePacket::SetCursorItem(_) = translate_and_decode(765, build(-1, 0)) else {
+        panic!("wrong packet for -1");
+    };
+    let ClientboundGamePacket::SetPlayerInventory(p) = translate_and_decode(765, build(-2, 7))
+    else {
+        panic!("wrong packet for -2");
+    };
+    assert_eq!(p.slot, 7);
+    let ClientboundGamePacket::ContainerSetSlot(p) = translate_and_decode(765, build(3, 1)) else {
+        panic!("wrong packet for plain");
+    };
+    assert_eq!(p.container_id, 3);
+    assert_eq!(p.slot, 1);
+    let azalea_inventory::ItemStack::Present(data) = &p.item_stack else {
+        panic!("empty stack");
+    };
+    assert_eq!(data.count, 2);
+}
+
+/// 765's single-NBT `registry_data` splits into per-registry frames whose
+/// entries reorder by their explicit ids (wire order is the id space); the
+/// captured dimension-type order then keys the 765 spawn-info rewrites,
+/// whose dimension type is a resource key string.
+#[test]
+fn translate_config_registry_data_765() {
+    use azalea_buf::AzBuf;
+    use azalea_protocol::packets::config::ClientboundConfigPacket;
+    use azalea_registry::DataRegistry;
+    use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
+
+    let entry = |name: &str, id: i32| {
+        let mut element = NbtCompound::new();
+        element.insert("height", NbtTag::Int(384));
+        let mut e = NbtCompound::new();
+        e.insert("name", NbtTag::String(name.into()));
+        e.insert("id", NbtTag::Int(id));
+        e.insert("element", NbtTag::Compound(element));
+        e
+    };
+    let mut registry = NbtCompound::new();
+    registry.insert("type", NbtTag::String("minecraft:dimension_type".into()));
+    registry.insert(
+        "value",
+        NbtTag::List(NbtList::from(vec![
+            entry("minecraft:custom_end", 1),
+            entry("minecraft:custom_overworld", 0),
+        ])),
+    );
+    let mut root = NbtCompound::new();
+    root.insert("minecraft:dimension_type", NbtTag::Compound(registry));
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        PacketTable::for_protocol(765)
+            .unwrap()
+            .id(
+                Phase::Configuration,
+                Direction::Clientbound,
+                "registry_data",
+            )
+            .unwrap(),
+    );
+    NbtTag::Compound(root).azalea_write(&mut old).unwrap();
+
+    let frames = translation_for(765).translate_config_frame(old.into_boxed_slice());
+    assert_eq!(frames.len(), 1);
+    let packet: ClientboundConfigPacket =
+        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&frames[0])).unwrap();
+    let ClientboundConfigPacket::RegistryData(p) = packet else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.registry_id.to_string(), "minecraft:dimension_type");
+    let names: Vec<String> = p.entries.iter().map(|(n, _)| n.to_string()).collect();
+    assert_eq!(
+        names,
+        ["minecraft:custom_overworld", "minecraft:custom_end"]
+    );
+    assert!(p.entries[0].1.is_some());
+
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(765, Direction::Clientbound, "respawn"));
+    write_spawn_info_765(&mut old, "minecraft:custom_end", "minecraft:overworld");
+    old.push(3); // keep-data flags
+
+    let ClientboundGamePacket::Respawn(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.common.dimension_type.protocol_id(), 1);
+    assert_eq!(p.common.dimension.to_string(), "minecraft:overworld");
+    assert_eq!(p.common.seed, 42);
+    assert_eq!(p.data_to_keep, 3);
+}
+
+/// A 765 `CommonPlayerSpawnInfo`: dimension-type key, dimension name, then
+/// the shared tail (seed 42, survival, no previous type, no death location).
+fn write_spawn_info_765(old: &mut Vec<u8>, dimension_type: &str, dimension: &str) {
+    for key in [dimension_type, dimension] {
+        wire::write_varint(old, key.len() as u32);
+        old.extend_from_slice(key.as_bytes());
+    }
+    old.extend_from_slice(&42u64.to_be_bytes()); // hashed seed
+    old.push(0); // game type
+    old.push(0xFF); // previous game type: none
+    old.extend_from_slice(&[0, 0, 0]); // debug, flat, no death location
+    wire::write_varint(old, 0); // portal cooldown
+}
+
+/// The 1.20.4 game `login`: the fixed prefix copies, the spawn info's
+/// dimension key becomes a registry index (0 when unseeded), and
+/// enforcesSecureChat plus the newer seaLevel/onlineMode synthesize.
+#[test]
+fn translate_game_login_765() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(765, Direction::Clientbound, "login"));
+    old.extend_from_slice(&7i32.to_be_bytes()); // player id
+    old.push(0); // hardcore
+    wire::write_varint(&mut old, 1); // one level
+    let level = "minecraft:the_nether";
+    wire::write_varint(&mut old, level.len() as u32);
+    old.extend_from_slice(level.as_bytes());
+    wire::write_varint(&mut old, 20); // max players
+    wire::write_varint(&mut old, 12); // chunk radius
+    wire::write_varint(&mut old, 10); // simulation distance
+    old.extend_from_slice(&[0, 1, 0]); // reducedDebug, deathScreen, crafting
+    write_spawn_info_765(&mut old, "minecraft:the_nether", "minecraft:the_nether");
+
+    let ClientboundGamePacket::Login(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.player_id, MinecraftEntityId(7));
+    assert_eq!(p.levels, vec!["minecraft:the_nether".into()]);
+    assert_eq!(p.max_players, 20);
+    assert!(p.show_death_screen);
+    assert_eq!(p.common.dimension.to_string(), "minecraft:the_nether");
+    assert!(!p.enforces_secure_chat);
+}
+
+/// Config ids remap by name at 765 and 26.2-only packets suppress
+/// (`select_known_packs` predates the known-packs handshake).
+#[test]
+fn translate_config_ids_765() {
+    let config_id = |protocol: i32, dir, name| {
+        PacketTable::for_protocol(protocol)
+            .unwrap()
+            .id(Phase::Configuration, dir, name)
+    };
+    let t = translation_for(765);
+    assert!(t.translates_config());
+    assert!(!translation_for(766).translates_config());
+
+    // Inbound finish_configuration lands on its 26.2 id.
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        config_id(765, Direction::Clientbound, "finish_configuration").unwrap(),
+    );
+    let frames = t.translate_config_frame(old.into_boxed_slice());
+    let mut expected = Vec::new();
+    wire::write_varint(
+        &mut expected,
+        config_id(776, Direction::Clientbound, "finish_configuration").unwrap(),
+    );
+    assert_eq!(frames, [expected.into_boxed_slice()]);
+
+    // Outbound finish_configuration remaps back; select_known_packs drops.
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        config_id(776, Direction::Serverbound, "finish_configuration").unwrap(),
+    );
+    let old = config_id(765, Direction::Serverbound, "finish_configuration").unwrap();
+    assert_eq!(
+        t.translate_outbound_config_frame(frame),
+        Some(vec![old as u8])
+    );
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        config_id(776, Direction::Serverbound, "select_known_packs").unwrap(),
+    );
+    wire::write_varint(&mut frame, 0);
+    assert_eq!(t.translate_outbound_config_frame(frame), None);
+}
+
+/// 1.20.5/1.21-era `game_profile` carried a trailing strictErrorHandling
+/// bool where 1.21.2 put the session UUID; it pops before the zero pad.
+#[test]
+fn translate_login_finished_766() {
+    let login_id = |protocol, name| {
+        PacketTable::for_protocol(protocol)
+            .unwrap()
+            .id(Phase::Login, Direction::Clientbound, name)
+            .unwrap()
+    };
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, login_id(766, "game_profile"));
+    old.extend_from_slice(&[9; 16]); // uuid
+    old.extend_from_slice(&[4, b'p', b'o', b'm', b'e']); // name
+    wire::write_varint(&mut old, 0); // no properties
+    old.push(1); // strictErrorHandling
+
+    for protocol in [766, 767] {
+        let translated = translation_for(protocol).translate_login_frame(old.clone().into());
+        let mut expected = old[..old.len() - 1].to_vec();
+        expected.extend_from_slice(&[0; 16]);
+        assert_eq!(&translated[..], expected);
+    }
+    // 765 has no trailing bool: nothing pops.
+    let mut bare = old.clone();
+    bare.pop();
+    let translated = translation_for(765).translate_login_frame(bare.clone().into());
+    bare.extend_from_slice(&[0; 16]);
+    assert_eq!(&translated[..], bare);
+}
+
+/// 1.20.5 appended shouldAuthenticate to login `hello`; 765 frames gain a
+/// synthesized true.
+#[test]
+fn translate_login_hello_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        PacketTable::for_protocol(765)
+            .unwrap()
+            .id(Phase::Login, Direction::Clientbound, "hello")
+            .unwrap(),
+    );
+    old.push(0); // server id (empty string)
+    wire::write_varint(&mut old, 1); // public key
+    old.push(0xAA);
+    wire::write_varint(&mut old, 1); // challenge
+    old.push(0xBB);
+
+    let translated = translation_for(765).translate_login_frame(old.clone().into());
+    old.push(1);
+    assert_eq!(&translated[..], old);
+}
+
+/// A 26.2 `container_click`'s hashed stacks become bare old-form items
+/// (`bool + item + i8 count + empty NBT`).
+#[test]
+fn translate_container_click_765() {
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        table_id(Direction::Serverbound, "container_click"),
+    );
+    wire::write_varint(&mut frame, 1); // container id
+    wire::write_varint(&mut frame, 2); // state id
+    frame.extend_from_slice(&5i16.to_be_bytes()); // slot
+    frame.push(0); // button
+    wire::write_varint(&mut frame, 0); // click type: pickup
+    wire::write_varint(&mut frame, 1); // one changed slot
+    frame.extend_from_slice(&5i16.to_be_bytes());
+    frame.push(1); // hashed stack present
+    wire::write_varint(&mut frame, 4); // item
+    wire::write_varint(&mut frame, 2); // count
+    wire::write_varint(&mut frame, 1); // one hashed component
+    wire::write_varint(&mut frame, 3); // component id
+    frame.extend_from_slice(&0x1234i32.to_be_bytes()); // hash
+    wire::write_varint(&mut frame, 0); // no removed components
+    frame.push(0); // carried: empty
+
+    let frames = translation_for(765).translate_outbound_game_frame(frame);
+    let old = old_id(765, Direction::Serverbound, "container_click") as u8;
+    assert_eq!(frames, [[old, 1, 2, 0, 5, 0, 0, 1, 0, 5, 1, 4, 2, 0, 0]]);
+}
+
+/// A 26.2 `set_creative_mode_slot` component stack becomes a bare old-form
+/// item.
+#[test]
+fn translate_creative_slot_765() {
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        table_id(Direction::Serverbound, "set_creative_mode_slot"),
+    );
+    frame.extend_from_slice(&36i16.to_be_bytes()); // slot
+    wire::write_varint(&mut frame, 2); // count
+    wire::write_varint(&mut frame, 4); // item
+    wire::write_varint(&mut frame, 0); // no added components
+    wire::write_varint(&mut frame, 0); // no removed components
+
+    let frames = translation_for(765).translate_outbound_game_frame(frame);
+    let old = old_id(765, Direction::Serverbound, "set_creative_mode_slot") as u8;
+    assert_eq!(frames, [[old, 0, 36, 1, 4, 2, 0]]);
+}
+
+/// 1.20.4 `chat_command` is always the signed form; empty timestamp, salt,
+/// signatures and last-seen update append.
+#[test]
+fn translate_chat_command_765() {
+    let mut frame = Vec::new();
+    wire::write_varint(&mut frame, table_id(Direction::Serverbound, "chat_command"));
+    frame.extend_from_slice(&[3, b's', b'a', b'y']);
+
+    let frames = translation_for(765).translate_outbound_game_frame(frame);
+    let mut expected = vec![old_id(765, Direction::Serverbound, "chat_command") as u8];
+    expected.extend_from_slice(&[3, b's', b'a', b'y']);
+    expected.extend_from_slice(&[0; 16]); // timestamp, salt
+    expected.extend_from_slice(&[0, 0]); // no signatures, last-seen offset
+    expected.extend_from_slice(&[0; 3]); // acknowledged bit set
+    assert_eq!(frames, [expected]);
 }
 
 #[test]

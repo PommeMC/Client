@@ -150,6 +150,28 @@
 //! - the variant/effect/dimension holder codecs merely moved into their types
 //!   (wire-identical), and the block set matches 1.21.1's
 //!
+//! 1.20.4 -> 26.2 wire changes (the 1.20.5 item-component rework; all of
+//! 1.20.6's plus):
+//! - items are `bool + id + byte count + NBT`; they translate bare (type and
+//!   count survive, the NBT is dropped) in `container_set_content`,
+//!   `container_set_slot`, `set_equipment`, `merchant_offers` (whose costs
+//!   became `ItemCost`s), entity-data item values, and outbound
+//!   `container_click`/`set_creative_mode_slot` — enchant glints, custom names
+//!   and damage bars render plain on 765 servers
+//! - the configuration phase diverges for the first time: ids remap, and the
+//!   single whole-holder NBT `registry_data` packet fans out into the
+//!   per-registry form (entries reordered by their explicit ids, which the
+//!   client equates with wire order); the dimension-type order is kept for the
+//!   spawn-info rewrites, whose dimension type is a resource key string at 765
+//! - login-phase `hello` lacks the shouldAuthenticate bool (synthesized true)
+//!   and game `login` lacks enforcesSecureChat
+//! - `update_attributes` keys attributes by resource location and
+//!   `update_mob_effect` has a byte amplifier plus trailing factor NBT
+//! - `level_particles` leads with the particle type id; `chat_command` is
+//!   always the signed form (empty signatures appended)
+//! - `update_advancements` drops (old-form icons nested in display data);
+//!   serializer ids from `particles` (18) up shift
+//!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
 //! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
@@ -175,18 +197,38 @@ use azalea_registry::builtin::{DataComponentKind, SoundEvent};
 use azalea_registry::{Holder, Registry};
 use glam::DVec3;
 use pomme_protocol::version::LATEST;
-use pomme_protocol::{ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, wire};
+use pomme_protocol::{
+    ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
+};
 
 pub struct Translation {
     to_latest: &'static RegistryRemaps,
     from_latest: &'static RegistryRemaps,
     login_finished_id: u32,
+    login_hello_id: u32,
+    login_profile_strict: bool,
+    login_hello_bare: bool,
     /// Latest-space; game-frame rewrites dispatch after the id remap.
     game_login_id: u32,
     set_player_team_id: u32,
     /// Game-phase packet-id translation and the rewrites tied to it; `None`
     /// when the wire version's ids match the latest (26.1).
     game_ids: Option<GameIds>,
+    /// Configuration-phase translation; `None` when the wire version's
+    /// config ids match the latest (766 up: additions were appended).
+    config_ids: Option<ConfigIds>,
+}
+
+/// Configuration-phase id tables and the registry-data rewrite for wire
+/// versions whose config protocol diverged (765 and older).
+struct ConfigIds {
+    /// Wire-version clientbound id -> latest id; `None` drops the frame.
+    inbound: Box<[Option<u32>]>,
+    /// Latest serverbound id -> wire-version id; `None` suppresses.
+    outbound: Box<[Option<u32>]>,
+    /// Latest-space `registry_data`, whose 765 form is one packet holding
+    /// every registry as a single NBT map.
+    registry_data_id: u32,
 }
 
 /// Game-phase id tables for a wire version whose ids diverged from the
@@ -219,8 +261,12 @@ struct GameIds {
     v768: Option<Ids768>,
     /// The rewrites 1.21.2 introduced, for wire versions below it.
     v767: Option<Ids767>,
-    /// The rewrites 1.21 introduced, for wire version 766.
+    /// The rewrites 1.21 introduced, for wire versions below it.
     v766: Option<Ids766>,
+    /// The rewrites 1.20.5 introduced (the item-component era), for wire
+    /// version 765; old-form items translate bare (type + count, NBT
+    /// dropped).
+    v765: Option<Ids765>,
     /// Latest serverbound ids whose packet is knowingly absent on this wire
     /// version (`client_tick_end`, `player_loaded`); suppressed quietly.
     quiet_suppressed: Box<[u32]>,
@@ -282,6 +328,45 @@ impl Ids766 {
         Some(match id {
             i if i == self.update_attributes_id => translate_update_attributes_766,
             i if i == self.projectile_power_id => translate_projectile_power_766,
+            _ => return None,
+        })
+    }
+}
+
+/// Latest-space dispatch ids for the frame rewrites protocol 765 needs.
+struct Ids765 {
+    container_set_content_id: u32,
+    set_equipment_id: u32,
+    merchant_offers_id: u32,
+    update_mob_effect_id: u32,
+    update_attributes_id: u32,
+    level_particles_id: u32,
+    container_set_slot_id: u32,
+    respawn_id: u32,
+    /// Dropped quietly: the advancement icons are old-form items nested in
+    /// display NBT the walker can't rewrite.
+    /// TODO: rewrite the icons bare so 765 advancement toasts show.
+    update_advancements_id: u32,
+    /// The wire version's registry names, for the attribute-key lookup.
+    registry: &'static RegistryTable,
+    /// Serverbound: latest + wire ids for the item-form rewrites.
+    container_click_id: u32,
+    container_click_old_id: u32,
+    creative_slot_id: u32,
+    creative_slot_old_id: u32,
+    chat_command_id: u32,
+    chat_command_old_id: u32,
+}
+
+impl Ids765 {
+    fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
+        Some(match id {
+            i if i == self.container_set_content_id => translate_container_set_content_765,
+            i if i == self.set_equipment_id => translate_set_equipment_765,
+            i if i == self.merchant_offers_id => translate_merchant_offers_765,
+            i if i == self.update_mob_effect_id => translate_update_mob_effect_765,
+            i if i == self.level_particles_id => translate_level_particles_765,
+            i if i == self.respawn_id => translate_respawn_765,
             _ => return None,
         })
     }
@@ -350,7 +435,7 @@ impl Ids772 {
 /// Protocols the wire translation fully covers. A version with embedded
 /// tables but no entry here (the staging state while its translation is
 /// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770, 769, 768, 767, 766];
+const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770, 769, 768, 767, 766, 765];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -406,23 +491,100 @@ impl Translation {
             from_latest: RegistryRemaps::from_latest(protocol)?,
             // Login-phase ids are identical across all supported versions.
             login_finished_id: id(Phase::Login, "login_finished"),
+            login_hello_id: id(Phase::Login, "hello"),
+            // 1.20.5 appended strictErrorHandling to game_profile; 1.21.2
+            // replaced it with the session-id UUID 26.2 still carries.
+            login_profile_strict: matches!(protocol, 766 | 767),
+            login_hello_bare: protocol <= 765,
             game_login_id: id(Phase::Game, "login"),
             set_player_team_id: id(Phase::Game, "set_player_team"),
             game_ids: GameIds::build(protocol, table, latest),
+            config_ids: ConfigIds::build(table, latest),
         })
     }
 
     /// Rewrites a raw login-phase frame into the latest layout.
     pub fn translate_login_frame(&self, raw: Box<[u8]>) -> Box<[u8]> {
         let mut cur = Cursor::new(&raw[..]);
-        if u32::azalea_read_var(&mut cur).ok() == Some(self.login_finished_id) {
+        let id = u32::azalea_read_var(&mut cur).ok();
+        if id == Some(self.login_finished_id) {
             // 26.2 appended a session-id UUID; zero is fine, pomme only
-            // reads the game profile.
+            // reads the game profile. The 1.20.5/1.21-era trailing
+            // strictErrorHandling bool goes first (the UUID took its place).
             let mut out = raw.into_vec();
+            if self.login_profile_strict {
+                out.pop();
+            }
             out.extend_from_slice(&[0; 16]);
             return out.into_boxed_slice();
         }
+        if self.login_hello_bare && id == Some(self.login_hello_id) {
+            // 1.20.5 appended shouldAuthenticate; an encrypting server on
+            // the older wire always authenticates.
+            let mut out = raw.into_vec();
+            out.push(1);
+            return out.into_boxed_slice();
+        }
         raw
+    }
+
+    /// Whether configuration frames need translation (765 and older).
+    pub fn translates_config(&self) -> bool {
+        self.config_ids.is_some()
+    }
+
+    /// Rewrites a raw configuration-phase frame into latest-layout frames;
+    /// empty = dropped. 765's single registry_data packet fans out into one
+    /// frame per registry.
+    pub fn translate_config_frame(&self, raw: Box<[u8]>) -> Vec<Box<[u8]>> {
+        let Some(ids) = &self.config_ids else {
+            return vec![raw];
+        };
+        let mut pos = 0;
+        let Some(wire_id) = wire::read_varint(&raw, &mut pos) else {
+            return Vec::new();
+        };
+        let Some(id) = ids.inbound.get(wire_id as usize).copied().flatten() else {
+            tracing::debug!("Dropping inbound config packet {wire_id} with no latest id");
+            return Vec::new();
+        };
+        if id == ids.registry_data_id {
+            return match split_registry_data(id, &raw[pos..]) {
+                Some(frames) => frames,
+                None => {
+                    tracing::warn!("Dropping unparsable registry data");
+                    Vec::new()
+                }
+            };
+        }
+        let mut out = Vec::with_capacity(raw.len() + 1);
+        wire::write_varint(&mut out, id);
+        out.extend_from_slice(&raw[pos..]);
+        vec![out.into_boxed_slice()]
+    }
+
+    /// Translates a latest-layout serverbound configuration frame into the
+    /// wire version's; `None` suppresses it (config layouts are identical,
+    /// only ids and the packet set differ).
+    pub fn translate_outbound_config_frame(&self, frame: Vec<u8>) -> Option<Vec<u8>> {
+        let Some(ids) = &self.config_ids else {
+            return Some(frame);
+        };
+        let mut pos = 0;
+        let id = wire::read_varint(&frame, &mut pos)?;
+        match ids.outbound.get(id as usize).copied().flatten() {
+            Some(old) if old == id => Some(frame),
+            Some(old) => {
+                let mut out = Vec::with_capacity(frame.len() + 1);
+                wire::write_varint(&mut out, old);
+                out.extend_from_slice(&frame[pos..]);
+                Some(out)
+            }
+            None => {
+                tracing::debug!("Suppressing outbound config packet {id} the wire version lacks");
+                None
+            }
+        }
     }
 
     /// Rewrites a raw game-phase frame into the latest layout; `None` drops
@@ -443,19 +605,31 @@ impl Translation {
 
         let v769 = self.game_ids.as_ref().is_some_and(|g| g.v769.is_some());
         let v767 = self.game_ids.as_ref().is_some_and(|g| g.v767.is_some());
+        let v765 = self.game_ids.as_ref().and_then(|g| g.v765.as_ref());
         if let Some(v) = self.game_ids.as_ref().and_then(|g| g.v767.as_ref())
             && v.drops.contains(&id)
         {
             tracing::debug!("Dropping game packet {id} with no 1.21.1 equivalent layout");
             return None;
         }
+        if v765.is_some_and(|v| id == v.update_advancements_id) {
+            tracing::debug!("Dropping update_advancements with old-form icons");
+            return None;
+        }
         let payload = &raw[id_end..];
         let rewritten = if id == self.game_login_id {
-            if v767 {
-                insert_sea_level(payload).and_then(|p| translate_game_login(id, &p))
+            let old = if v765.is_some() {
+                translate_game_login_765(payload)
             } else {
-                translate_game_login(id, payload)
-            }
+                Some(payload.to_vec())
+            };
+            old.and_then(|p| {
+                if v767 {
+                    insert_sea_level(&p).and_then(|p| translate_game_login(id, &p))
+                } else {
+                    translate_game_login(id, &p)
+                }
+            })
         } else if id == self.set_player_team_id {
             translate_team(id, payload, v769)
         } else if let Some(ids) = &self.game_ids {
@@ -469,6 +643,12 @@ impl Translation {
                 } else {
                     translate_set_time(id, payload)
                 }
+            } else if let Some(v) = v765.filter(|v| id == v.update_attributes_id) {
+                translate_update_attributes_765(v, id, payload)
+            } else if v765.is_some_and(|v| id == v.container_set_slot_id) {
+                ids.v767
+                    .as_ref()
+                    .and_then(|v| translate_container_set_slot_765(v, payload))
             } else if let Some(rewrite) = ids.version_rewrite(id) {
                 rewrite(id, payload)
             } else if let Some(v) = ids.v767.as_ref().filter(|v| id == v.container_set_slot_id) {
@@ -524,6 +704,19 @@ impl Translation {
             && id == v770.player_command_id
         {
             return translate_player_command(v770.player_command_old_id, &frame[pos..]);
+        }
+        // The 765 arms precede 769's: both rewrite container_click, and the
+        // older item form wins on the older wire.
+        if let Some(v765) = &ids.v765 {
+            if id == v765.container_click_id {
+                return translate_container_click_765(v765.container_click_old_id, &frame[pos..]);
+            }
+            if id == v765.creative_slot_id {
+                return translate_creative_slot_765(v765.creative_slot_old_id, &frame[pos..]);
+            }
+            if id == v765.chat_command_id {
+                return translate_chat_command_765(v765.chat_command_old_id, &frame[pos..]);
+            }
         }
         if let Some(v769) = &ids.v769
             && id == v769.container_click_id
@@ -681,14 +874,17 @@ const RENAMED: &[(&str, &str)] = &[
 
 impl GameIds {
     /// The version-gated frame rewrite dispatching on `id`, if any.
+    /// Oldest gate first, so a version-specific rewrite shadows a newer
+    /// gate's for the same packet (765's respawn over 767's, say).
     fn version_rewrite(&self, id: u32) -> Option<FrameRewrite> {
-        self.v772
+        self.v765
             .as_ref()
             .and_then(|v| v.rewrite(id))
-            .or_else(|| self.v769.as_ref().and_then(|v| v.rewrite(id)))
-            .or_else(|| self.v768.as_ref().and_then(|v| v.rewrite(id)))
-            .or_else(|| self.v767.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v766.as_ref().and_then(|v| v.rewrite(id)))
+            .or_else(|| self.v767.as_ref().and_then(|v| v.rewrite(id)))
+            .or_else(|| self.v768.as_ref().and_then(|v| v.rewrite(id)))
+            .or_else(|| self.v769.as_ref().and_then(|v| v.rewrite(id)))
+            .or_else(|| self.v772.as_ref().and_then(|v| v.rewrite(id)))
     }
 
     /// Name-matched game-phase id tables between one wire version and the
@@ -698,36 +894,9 @@ impl GameIds {
     /// `spectator_action` rename, which pomme never sends).
     fn build(protocol: i32, table: &PacketTable, latest: &PacketTable) -> Option<GameIds> {
         use Direction::{Clientbound, Serverbound};
-        let map = |from: &PacketTable, to: &PacketTable, dir| -> Box<[Option<u32>]> {
-            (0..)
-                .map_while(|i| from.name_of(Phase::Game, dir, i))
-                .map(|name| {
-                    to.id(Phase::Game, dir, name).or_else(|| {
-                        let alias = RENAMED.iter().find_map(|&(a, b)| {
-                            if name == a {
-                                Some(b)
-                            } else if name == b {
-                                Some(a)
-                            } else {
-                                None
-                            }
-                        })?;
-                        to.id(Phase::Game, dir, alias)
-                    })
-                })
-                .collect()
-        };
-        let inbound = map(table, latest, Clientbound);
-        let outbound = map(latest, table, Serverbound);
-        let same_ids = inbound
-            .iter()
-            .enumerate()
-            .all(|(i, v)| *v == Some(i as u32))
-            && outbound
-                .iter()
-                .enumerate()
-                .all(|(i, v)| v.is_none() || *v == Some(i as u32));
-        if same_ids {
+        let inbound = id_map(table, latest, Phase::Game, Clientbound);
+        let outbound = id_map(latest, table, Phase::Game, Serverbound);
+        if identity_maps(&inbound, &outbound) {
             return None;
         }
         let id = |dir, name| required_id(latest, Phase::Game, dir, name);
@@ -741,6 +910,7 @@ impl GameIds {
                 // as do 1.20.5 through 1.21.4.
                 770..=772 => remap_serializer_772,
                 766..=769 => remap_serializer_769,
+                765 => remap_serializer_765,
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
@@ -809,6 +979,34 @@ impl GameIds {
                 use_item_id: id(Serverbound, "use_item"),
                 use_item_old_id: required_id(table, Phase::Game, Serverbound, "use_item"),
             }),
+            v765: (protocol <= 765).then(|| Ids765 {
+                container_set_content_id: id(Clientbound, "container_set_content"),
+                set_equipment_id: id(Clientbound, "set_equipment"),
+                merchant_offers_id: id(Clientbound, "merchant_offers"),
+                update_mob_effect_id: id(Clientbound, "update_mob_effect"),
+                update_attributes_id: id(Clientbound, "update_attributes"),
+                level_particles_id: id(Clientbound, "level_particles"),
+                container_set_slot_id: id(Clientbound, "container_set_slot"),
+                respawn_id: id(Clientbound, "respawn"),
+                update_advancements_id: id(Clientbound, "update_advancements"),
+                registry: RegistryTable::for_protocol(protocol).expect("embedded registry table"),
+                container_click_id: id(Serverbound, "container_click"),
+                container_click_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "container_click",
+                ),
+                creative_slot_id: id(Serverbound, "set_creative_mode_slot"),
+                creative_slot_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "set_creative_mode_slot",
+                ),
+                chat_command_id: id(Serverbound, "chat_command"),
+                chat_command_old_id: required_id(table, Phase::Game, Serverbound, "chat_command"),
+            }),
             quiet_suppressed: ["client_tick_end", "player_loaded"]
                 .iter()
                 .filter(|n| table.id(Phase::Game, Serverbound, n).is_none())
@@ -816,6 +1014,130 @@ impl GameIds {
                 .collect(),
         })
     }
+}
+
+/// The wire version's dimension-type names in synced-registry order,
+/// captured while splitting registry data: the pre-1.20.5 spawn-info
+/// rewrites turn a dimension-type key string into this index. Session
+/// state, reset by each registry-data packet (config precedes every join).
+static DIMENSION_TYPES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Splits 765's single-NBT registry_data — a map of
+/// `{registry: {type, value: [{name, id, element}]}}` — into the
+/// per-registry packets 26.2 uses. Entries are ordered by their explicit
+/// ids (the client derives protocol ids from wire order, which is
+/// load-bearing for biome colors and dimension types).
+fn split_registry_data(id: u32, payload: &[u8]) -> Option<Vec<Box<[u8]>>> {
+    use simdnbt::owned::NbtTag;
+
+    let mut cur = Cursor::new(payload);
+    let NbtTag::Compound(root) = NbtTag::azalea_read(&mut cur).ok()? else {
+        return None;
+    };
+
+    let mut frames = Vec::new();
+    for (registry, value) in root.iter() {
+        let registry = registry.to_str();
+        let entries = value.compound()?.list("value")?.compounds()?;
+        let mut ordered: Vec<(i32, String, &simdnbt::owned::NbtCompound)> = entries
+            .iter()
+            .map(|e| Some((e.int("id")?, e.string("name")?.to_string(), e)))
+            .collect::<Option<_>>()?;
+        ordered.sort_unstable_by_key(|&(entry_id, ..)| entry_id);
+
+        if registry.ends_with("dimension_type") {
+            *DIMENSION_TYPES.lock().unwrap() =
+                ordered.iter().map(|(_, name, _)| name.clone()).collect();
+        }
+
+        let mut out = Vec::new();
+        wire::write_varint(&mut out, id);
+        wire::write_varint(&mut out, registry.len() as u32);
+        out.extend_from_slice(registry.as_bytes());
+        wire::write_varint(&mut out, ordered.len() as u32);
+        for (_, name, element) in ordered {
+            wire::write_varint(&mut out, name.len() as u32);
+            out.extend_from_slice(name.as_bytes());
+            out.push(1);
+            element.azalea_write(&mut out).ok()?;
+        }
+        frames.push(out.into_boxed_slice());
+    }
+    Some(frames)
+}
+
+/// The synced-registry index for a dimension-type key, for the pre-1.20.5
+/// spawn-info rewrites.
+fn dimension_type_index(name: &str) -> Option<u32> {
+    DIMENSION_TYPES
+        .lock()
+        .unwrap()
+        .iter()
+        .position(|n| n == name)
+        .map(|i| i as u32)
+}
+
+/// Name-matched id table from one version's phase/direction to another's,
+/// with the `RENAMED` aliases; wire id == index, `None` = no equivalent.
+fn id_map(
+    from: &PacketTable,
+    to: &PacketTable,
+    phase: Phase,
+    dir: Direction,
+) -> Box<[Option<u32>]> {
+    (0..)
+        .map_while(|i| from.name_of(phase, dir, i))
+        .map(|name| {
+            to.id(phase, dir, name).or_else(|| {
+                let alias = RENAMED.iter().find_map(|&(a, b)| {
+                    if name == a {
+                        Some(b)
+                    } else if name == b {
+                        Some(a)
+                    } else {
+                        None
+                    }
+                })?;
+                to.id(phase, dir, alias)
+            })
+        })
+        .collect()
+}
+
+impl ConfigIds {
+    /// Name-matched configuration id tables; `None` when every id maps to
+    /// itself or nothing (766 up: later versions only appended).
+    fn build(table: &PacketTable, latest: &PacketTable) -> Option<ConfigIds> {
+        use Direction::{Clientbound, Serverbound};
+        let inbound = id_map(table, latest, Phase::Configuration, Clientbound);
+        let outbound = id_map(latest, table, Phase::Configuration, Serverbound);
+        if identity_maps(&inbound, &outbound) {
+            return None;
+        }
+        Some(ConfigIds {
+            inbound,
+            outbound,
+            registry_data_id: required_id(
+                latest,
+                Phase::Configuration,
+                Direction::Clientbound,
+                "registry_data",
+            ),
+        })
+    }
+}
+
+/// Whether translation-by-id would be a no-op: every inbound id maps to
+/// itself and every outbound id maps to itself or to nothing.
+fn identity_maps(inbound: &[Option<u32>], outbound: &[Option<u32>]) -> bool {
+    inbound
+        .iter()
+        .enumerate()
+        .all(|(i, v)| *v == Some(i as u32))
+        && outbound
+            .iter()
+            .enumerate()
+            .all(|(i, v)| v.is_none() || *v == Some(i as u32))
 }
 
 /// A packet id that must exist in the given table.
@@ -1009,6 +1331,34 @@ fn translate_container_set_slot_767(v: &Ids767, payload: &[u8]) -> Option<Vec<u8
     Some(out)
 }
 
+/// The 1.20.4 `container_set_slot`: 767's sentinel handling plus the
+/// old-form item translation.
+fn translate_container_set_slot_765(v: &Ids767, payload: &[u8]) -> Option<Vec<u8>> {
+    let container = *payload.first()? as i8;
+    let mut cur = Cursor::new(payload);
+    advance(&mut cur, 1)?;
+    let state = varint_span(&mut cur)?;
+    let slot_at = cur.position() as usize;
+    let slot = i16::from_be_bytes(payload.get(slot_at..slot_at + 2)?.try_into().ok()?);
+    advance(&mut cur, 2)?;
+
+    let mut out = Vec::with_capacity(payload.len() + 4);
+    match container {
+        -1 => wire::write_varint(&mut out, v.set_cursor_item_id),
+        -2 => {
+            wire::write_varint(&mut out, v.set_player_inventory_id);
+            wire::write_varint(&mut out, slot as u32);
+        }
+        _ => {
+            wire::write_varint(&mut out, v.container_set_slot_id);
+            wire::write_varint(&mut out, container as u32);
+            out.extend_from_slice(&payload[state.start..slot_at + 2]);
+        }
+    }
+    translate_item_765(&mut cur, &mut out)?;
+    Some(out)
+}
+
 /// Rewrites `cooldown`'s item id into the latest registry space. Vanilla
 /// 26.2 names a cooldown group instead, but azalea still decodes the item
 /// registry id and these frames feed azalea (like the team-color ordinal).
@@ -1020,6 +1370,93 @@ fn translate_cooldown_767(remaps: &RegistryRemaps, id: u32, payload: &[u8]) -> O
     wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, item)?);
     out.extend_from_slice(&payload[p..]);
     Some(out)
+}
+
+/// Writes a 26.2 hashed or component stack as a bare 1.20.4 item
+/// (`bool + item + i8 count + empty NBT`); components were already
+/// stripped by `remap_outbound` (no 765 component registry exists), so
+/// only the presence, item and count survive.
+fn write_old_item(out: &mut Vec<u8>, stack: Option<(u32, u32)>) {
+    match stack {
+        Some((item, count)) => {
+            out.push(1);
+            wire::write_varint(out, item);
+            out.push(count.min(127) as u8);
+            out.push(0); // no NBT
+        }
+        None => out.push(0),
+    }
+}
+
+/// The 1.20.4 `container_click`: hashed stacks become bare old-form items
+/// (the shared head copies; byte and varint container ids agree for
+/// vanilla's small ids).
+fn translate_container_click_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let rewrite = || {
+        let mut cur = Cursor::new(payload);
+        varint_span(&mut cur)?; // container id
+        varint_span(&mut cur)?; // state id
+        advance(&mut cur, 3)?; // slot, button
+        varint_span(&mut cur)?; // click type
+
+        let mut out = Vec::with_capacity(payload.len() + 8);
+        wire::write_varint(&mut out, old_id);
+        out.extend_from_slice(&payload[..cur.position() as usize]);
+
+        let changed = u32::azalea_read_var(&mut cur).ok()?;
+        wire::write_varint(&mut out, changed);
+        for _ in 0..changed {
+            let slot_at = cur.position() as usize;
+            advance(&mut cur, 2)?;
+            out.extend_from_slice(&payload[slot_at..cur.position() as usize]);
+            write_old_item(&mut out, read_hashed_stack(&mut cur)?);
+        }
+        write_old_item(&mut out, read_hashed_stack(&mut cur)?);
+        Some(out)
+    };
+    match rewrite() {
+        Some(out) => vec![out],
+        None => Vec::new(),
+    }
+}
+
+/// The 1.20.4 `set_creative_mode_slot`: the component stack (whose patch
+/// `remap_outbound` already cleared) becomes a bare old-form item.
+fn translate_creative_slot_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let rewrite = || {
+        let mut cur = Cursor::new(payload);
+        advance(&mut cur, 2)?; // slot short
+        let count = u32::azalea_read_var(&mut cur).ok()?;
+
+        let mut out = Vec::with_capacity(payload.len() + 4);
+        wire::write_varint(&mut out, old_id);
+        out.extend_from_slice(&payload[..2]);
+        if count == 0 {
+            out.push(0);
+            return Some(out);
+        }
+        let item = u32::azalea_read_var(&mut cur).ok()?;
+        write_old_item(&mut out, Some((item, count)));
+        Some(out)
+    };
+    match rewrite() {
+        Some(out) => vec![out],
+        None => Vec::new(),
+    }
+}
+
+/// The 1.20.4 `chat_command`, which is always the signed form: empty
+/// timestamp, salt, signatures and last-seen update are appended (offline
+/// servers accept unsigned commands).
+fn translate_chat_command_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::with_capacity(payload.len() + 24);
+    wire::write_varint(&mut out, old_id);
+    out.extend_from_slice(payload);
+    out.extend_from_slice(&[0; 16]); // timestamp, salt
+    wire::write_varint(&mut out, 0); // no argument signatures
+    wire::write_varint(&mut out, 0); // last-seen offset
+    out.extend_from_slice(&[0; 3]); // last-seen acknowledged bit set
+    vec![out]
 }
 
 /// Rewrites serverbound `use_item` for 1.20.6, dropping the rotation
@@ -1051,6 +1488,286 @@ fn translate_player_input(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     vec![out]
 }
 
+/// Reads one 1.20.4 optional item stack (`bool present + item id +
+/// i8 count + NBT`), skipping the NBT per the bare-items decision; `None`
+/// is a malformed stack, `Some(None)` an absent one.
+/// TODO: translate the legacy NBT (enchantments, custom names, damage)
+/// into 26.2 data components instead of dropping it.
+fn read_old_item(cur: &mut Cursor<&[u8]>) -> Option<Option<(u32, u8)>> {
+    if read_u8(cur)? == 0 {
+        return Some(None);
+    }
+    let item = u32::azalea_read_var(cur).ok()?;
+    let count = read_u8(cur)?;
+    skip_nbt(cur)?;
+    Some(Some((item, count)))
+}
+
+/// Translates one 1.20.4 optional item stack into a bare 26.2 stack
+/// (count + item + empty patch). Item ids stay in the wire version's
+/// space for `remap_inbound`/`remap_stack`.
+fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let Some((item, count)) = read_old_item(cur)? else {
+        wire::write_varint(out, 0);
+        return Some(());
+    };
+    wire::write_varint(out, u32::from(count));
+    wire::write_varint(out, item);
+    wire::write_varint(out, 0);
+    wire::write_varint(out, 0);
+    Some(())
+}
+
+/// Rewrites `container_set_content`: the head (byte container id == varint
+/// for vanilla's small ids, state id, count) copies; each item translates
+/// bare.
+fn translate_container_set_content_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    advance(&mut cur, 1)?; // container id
+    varint_span(&mut cur)?; // state id
+    let count = u32::azalea_read_var(&mut cur).ok()?;
+
+    let mut out = Vec::with_capacity(payload.len());
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..cur.position() as usize]);
+    for _ in 0..=count {
+        // The trailing iteration is the carried item.
+        translate_item_765(&mut cur, &mut out)?;
+    }
+    Some(out)
+}
+
+/// Rewrites `set_equipment`'s slot/item pairs (the slot byte's high bit
+/// continues the list).
+fn translate_set_equipment_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    varint_span(&mut cur)?; // entity id
+
+    let mut out = Vec::with_capacity(payload.len());
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..cur.position() as usize]);
+    loop {
+        let slot = read_u8(&mut cur)?;
+        out.push(slot);
+        translate_item_765(&mut cur, &mut out)?;
+        if slot & 0x80 == 0 {
+            return Some(out);
+        }
+    }
+}
+
+/// Rewrites `merchant_offers`: 1.20.5 turned the cost stacks into
+/// `ItemCost` (item + count + component predicate, no NBT) with an explicit
+/// optional second cost; the result stays a plain (bare) stack and the
+/// per-offer numeric tail copies verbatim.
+fn translate_merchant_offers_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    varint_span(&mut cur)?; // container id
+    let offers = u32::azalea_read_var(&mut cur).ok()?;
+
+    let mut out = Vec::with_capacity(payload.len());
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..cur.position() as usize]);
+    for _ in 0..offers {
+        translate_item_cost_765(&mut cur, &mut out, false)?;
+        // Result: non-optional stack, bare.
+        translate_item_765(&mut cur, &mut out)?;
+        translate_item_cost_765(&mut cur, &mut out, true)?;
+        let tail_at = cur.position() as usize;
+        advance(&mut cur, 25)?; // outOfStock, 4 ints, multiplier, demand
+        out.extend_from_slice(&payload[tail_at..cur.position() as usize]);
+    }
+    out.extend_from_slice(&payload[cur.position() as usize..]);
+    Some(out)
+}
+
+/// One 765 cost stack to a 26.2 `ItemCost` (`optional` wraps it in the
+/// presence bool the second cost gained); an empty stack becomes an absent
+/// cost, which only vanilla's costB ever is.
+fn translate_item_cost_765(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    optional: bool,
+) -> Option<()> {
+    let Some((item, count)) = read_old_item(cur)? else {
+        out.push(0);
+        return optional.then_some(());
+    };
+    if optional {
+        out.push(1);
+    }
+    wire::write_varint(out, item);
+    wire::write_varint(out, u32::from(count));
+    wire::write_varint(out, 0); // empty component predicate
+    Some(())
+}
+
+/// Rewrites `update_mob_effect`: 1.20.5 widened the amplifier from a byte
+/// to a varint and dropped the trailing factor-data NBT.
+fn translate_update_mob_effect_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let head = varint_span(&mut cur)?; // entity id
+    let effect = varint_span(&mut cur)?;
+    let amplifier = read_u8(&mut cur)? as i8;
+    let duration = varint_span(&mut cur)?;
+    let flags = read_u8(&mut cur)?;
+
+    let mut out = Vec::with_capacity(payload.len());
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[head.start..effect.end]);
+    wire::write_varint(&mut out, amplifier.max(0) as u32);
+    out.extend_from_slice(&payload[duration]);
+    out.push(flags);
+    Some(out)
+}
+
+/// Rewrites `update_attributes` for 1.20.4, where the attribute is keyed
+/// by resource location instead of registry id (looked up in the wire
+/// version's table; `remap_inbound` maps it onward) and modifiers carry
+/// the pre-1.21 UUID ids.
+fn translate_update_attributes_765(v: &Ids765, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    varint_span(&mut cur)?; // entity id
+    let entries = u32::azalea_read_var(&mut cur).ok()?;
+
+    let mut out = Vec::with_capacity(payload.len() + 64);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..cur.position() as usize]);
+    for _ in 0..entries {
+        let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+        let key_at = cur.position() as usize;
+        advance(&mut cur, len)?;
+        let key = std::str::from_utf8(&payload[key_at..key_at + len]).ok()?;
+        let key = key.strip_prefix("minecraft:").unwrap_or(key);
+        let attribute = v
+            .registry
+            .names(ClientRegistry::Attribute)
+            .iter()
+            .position(|n| n == key)? as u32;
+        wire::write_varint(&mut out, attribute);
+
+        let base_at = cur.position() as usize;
+        advance(&mut cur, 8)?;
+        let modifiers = u32::azalea_read_var(&mut cur).ok()?;
+        out.extend_from_slice(&payload[base_at..cur.position() as usize]);
+        for _ in 0..modifiers {
+            translate_modifier_uuid(&mut cur, &mut out, payload)?;
+        }
+    }
+    Some(out)
+}
+
+/// One pre-1.21 attribute modifier: the 16-byte UUID id becomes a hex
+/// resource location; the amount and operation (a 0-2 byte at 765, so its
+/// own varint encoding) copy verbatim.
+fn translate_modifier_uuid(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    payload: &[u8],
+) -> Option<()> {
+    let uuid_at = cur.position() as usize;
+    advance(cur, 16)?;
+    let name: String = payload[uuid_at..uuid_at + 16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let rl = format!("minecraft:{name}");
+    wire::write_varint(out, rl.len() as u32);
+    out.extend_from_slice(rl.as_bytes());
+    let tail_at = cur.position() as usize;
+    advance(cur, 8)?; // amount
+    varint_span(cur)?; // operation
+    out.extend_from_slice(&payload[tail_at..cur.position() as usize]);
+    Some(())
+}
+
+/// Rewrites `level_particles` for 1.20.4, where the particle type id led
+/// the packet; it moves to just before the payload, and the `alwaysShow`
+/// bool later versions gained is synthesized.
+fn translate_level_particles_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let particle = varint_span(&mut cur)?;
+    let limiter_at = cur.position() as usize;
+    advance(&mut cur, 1 + 24 + 16 + 4)?; // limiter, pos, dists, speed, count
+
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, id);
+    out.push(payload[limiter_at]);
+    out.push(0); // alwaysShow
+    out.extend_from_slice(&payload[limiter_at + 1..cur.position() as usize]);
+    out.extend_from_slice(&payload[particle]);
+    out.extend_from_slice(&payload[cur.position() as usize..]);
+    Some(out)
+}
+
+/// Rewrites `respawn` for 1.20.4: the spawn info's dimension type is a
+/// resource key string, turned into the synced-registry index captured
+/// from registry data; the seaLevel insert then applies like 767's.
+fn translate_respawn_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let converted = convert_spawn_info_dimension(payload, 0)?;
+    let mut out = Vec::with_capacity(converted.len() + 2);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&insert_sea_level(&converted)?);
+    Some(out)
+}
+
+/// Rewrites the 1.20.4 game `login` payload up to the 766 form (dimension
+/// key string -> registry index, trailing enforcesSecureChat synthesized);
+/// the shared seaLevel/onlineMode chain runs after.
+fn translate_game_login_765(payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    advance(&mut cur, 5)?; // player id, hardcore
+    let levels = u32::azalea_read_var(&mut cur).ok()?;
+    for _ in 0..levels {
+        skip_utf(&mut cur)?;
+    }
+    varint_span(&mut cur)?; // max players
+    varint_span(&mut cur)?; // chunk radius
+    varint_span(&mut cur)?; // simulation distance
+    advance(&mut cur, 3)?; // reducedDebug, showDeathScreen, doLimitedCrafting
+
+    let mut converted = convert_spawn_info_dimension(payload, cur.position() as usize)?;
+    converted.push(0); // enforcesSecureChat, absent at 765
+    Some(converted)
+}
+
+/// Replaces the dimension-type resource key at `spawn_at` (the start of a
+/// 765 CommonPlayerSpawnInfo) with its synced-registry index, copying
+/// everything else verbatim.
+fn convert_spawn_info_dimension(payload: &[u8], spawn_at: usize) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    cur.set_position(spawn_at as u64);
+    let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+    let key_at = cur.position() as usize;
+    advance(&mut cur, len)?;
+    let key = std::str::from_utf8(&payload[key_at..key_at + len]).ok()?;
+    let index = dimension_type_index(key).unwrap_or_else(|| {
+        tracing::warn!("Unknown dimension type {key}; defaulting to 0");
+        0
+    });
+
+    let mut out = Vec::with_capacity(payload.len());
+    out.extend_from_slice(&payload[..spawn_at]);
+    wire::write_varint(&mut out, index);
+    out.extend_from_slice(&payload[cur.position() as usize..]);
+    Some(out)
+}
+
+/// The latest serializer id for a 1.20.4 `EntityDataSerializers` id:
+/// 1.20.5 inserted `particles` (18), `wolf_variant` (23) and
+/// `armadillo_state` (28), whose set then held through 1.21.4; mapping
+/// through the 766-era ids covers the rest.
+fn remap_serializer_765(old: u32) -> Option<u32> {
+    match old {
+        0..=17 => remap_serializer_769(old),
+        18..=21 => remap_serializer_769(old + 1),
+        22 => remap_serializer_769(24),
+        23..=25 => remap_serializer_769(old + 2),
+        26..=27 => remap_serializer_769(old + 3),
+        _ => None,
+    }
+}
+
 /// Rewrites `update_attributes`: 1.21 turned each modifier's UUID id into a
 /// resource location; a hex name is synthesized (pomme reads only the
 /// attribute values, and vanilla's own 1.21 migration renamed them too).
@@ -1069,19 +1786,7 @@ fn translate_update_attributes_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
         let modifiers = u32::azalea_read_var(&mut cur).ok()?;
         out.extend_from_slice(&payload[head_at..cur.position() as usize]);
         for _ in 0..modifiers {
-            let uuid_at = cur.position() as usize;
-            advance(&mut cur, 16)?;
-            let name: String = payload[uuid_at..uuid_at + 16]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
-            let rl = format!("minecraft:{name}");
-            wire::write_varint(&mut out, rl.len() as u32);
-            out.extend_from_slice(rl.as_bytes());
-            let tail_at = cur.position() as usize;
-            advance(&mut cur, 8)?; // amount
-            varint_span(&mut cur)?; // operation
-            out.extend_from_slice(&payload[tail_at..cur.position() as usize]);
+            translate_modifier_uuid(&mut cur, &mut out, payload)?;
         }
     }
     Some(out)
@@ -1363,7 +2068,12 @@ fn translate_entity_data(
         let value_at = cur.position() as usize;
         if new == 7 {
             let mut stack = Vec::new();
-            if translate_item_stack(&mut cur, &mut stack, remaps, ids.v772.is_some()).is_some() {
+            let translated = if ids.v765.is_some() {
+                translate_item_765(&mut cur, &mut stack)
+            } else {
+                translate_item_stack(&mut cur, &mut stack, remaps, ids.v772.is_some())
+            };
+            if translated.is_some() {
                 out.extend_from_slice(&stack);
                 continue;
             }

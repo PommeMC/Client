@@ -325,68 +325,100 @@ async fn config_sequence(
         String::from("pomme")
             .azalea_write(&mut brand_payload)
             .unwrap();
-        conn.write(ServerboundConfigPacket::CustomPayload(
-            s_custom_payload::ServerboundCustomPayload {
+        write_config_packet(
+            conn,
+            ServerboundConfigPacket::CustomPayload(s_custom_payload::ServerboundCustomPayload {
                 identifier: "minecraft:brand".into(),
                 data: brand_payload.into(),
-            },
-        ))
+            }),
+        )
         .await?;
 
-        conn.write(ServerboundConfigPacket::ClientInformation(
-            s_client_information::ServerboundClientInformation {
-                information: ClientInformation {
-                    language: "en_us".into(),
-                    view_distance,
-                    chat_visibility: ChatVisibility::Full,
-                    chat_colors: true,
-                    model_customization: ModelCustomization {
-                        cape: true,
-                        jacket: true,
-                        left_sleeve: true,
-                        right_sleeve: true,
-                        left_pants: true,
-                        right_pants: true,
-                        hat: true,
+        write_config_packet(
+            conn,
+            ServerboundConfigPacket::ClientInformation(
+                s_client_information::ServerboundClientInformation {
+                    information: ClientInformation {
+                        language: "en_us".into(),
+                        view_distance,
+                        chat_visibility: ChatVisibility::Full,
+                        chat_colors: true,
+                        model_customization: ModelCustomization {
+                            cape: true,
+                            jacket: true,
+                            left_sleeve: true,
+                            right_sleeve: true,
+                            left_pants: true,
+                            right_pants: true,
+                            hat: true,
+                        },
+                        main_hand: HumanoidArm::Right,
+                        text_filtering_enabled: false,
+                        allows_listing: true,
+                        particle_status: ParticleStatus::All,
                     },
-                    main_hand: HumanoidArm::Right,
-                    text_filtering_enabled: false,
-                    allows_listing: true,
-                    particle_status: ParticleStatus::All,
                 },
-            },
-        ))
+            ),
+        )
         .await?;
     }
 
+    // Config frames are read raw so older wire versions translate (765's
+    // registry_data fans out into several frames, hence the queue).
+    let mut pending = std::collections::VecDeque::new();
     loop {
-        let packet = tokio::select! {
-            packet = conn.read() => packet?,
-            // `Some(..)` disables the branch when the channel closes instead
-            // of busy-looping on a closed receiver.
-            Some(outbound) = outbound_rx.recv() => {
-                if let Outbound::Packet(packet) = outbound
-                    && let ServerboundGamePacket::ResourcePack(p) = *packet
-                {
-                    use azalea_protocol::packets::config::s_resource_pack as config_pack;
-                    use azalea_protocol::packets::game::s_resource_pack as game_pack;
-                    let action = match p.action {
-                        game_pack::Action::SuccessfullyLoaded => config_pack::Action::SuccessfullyLoaded,
-                        game_pack::Action::Declined => config_pack::Action::Declined,
-                        game_pack::Action::FailedDownload => config_pack::Action::FailedDownload,
-                        game_pack::Action::Accepted => config_pack::Action::Accepted,
-                        game_pack::Action::InvalidUrl => config_pack::Action::InvalidUrl,
-                        game_pack::Action::FailedReload => config_pack::Action::FailedReload,
-                        game_pack::Action::Discarded => config_pack::Action::Discarded,
+        let packet = if let Some(packet) = pending.pop_front() {
+            packet
+        } else {
+            tokio::select! {
+                raw = conn.reader.raw.read() => {
+                    let raw = match raw {
+                        Ok(raw) => raw,
+                        Err(e) => {
+                            skip_malformed_packet(e)?;
+                            continue;
+                        }
                     };
-                    conn.write(ServerboundConfigPacket::ResourcePack(
-                        config_pack::ServerboundResourcePack { id: p.id, action },
-                    )).await?;
+                    let frames = match super::translate::active() {
+                        Some(t) => t.translate_config_frame(raw),
+                        None => vec![raw],
+                    };
+                    for frame in frames {
+                        match deserialize_packet::<ClientboundConfigPacket>(
+                            &mut std::io::Cursor::new(&frame),
+                        ) {
+                            Ok(packet) => pending.push_back(packet),
+                            Err(e) => skip_malformed_packet(e)?,
+                        }
+                    }
+                    continue;
                 }
-                // Anything else is discarded: vanilla defers its outbound
-                // queue, but pomme's game keeps ticking through a
-                // reconfiguration, so stale movement/actions are best dropped.
-                continue;
+                // `Some(..)` disables the branch when the channel closes instead
+                // of busy-looping on a closed receiver.
+                Some(outbound) = outbound_rx.recv() => {
+                    if let Outbound::Packet(packet) = outbound
+                        && let ServerboundGamePacket::ResourcePack(p) = *packet
+                    {
+                        use azalea_protocol::packets::config::s_resource_pack as config_pack;
+                        use azalea_protocol::packets::game::s_resource_pack as game_pack;
+                        let action = match p.action {
+                            game_pack::Action::SuccessfullyLoaded => config_pack::Action::SuccessfullyLoaded,
+                            game_pack::Action::Declined => config_pack::Action::Declined,
+                            game_pack::Action::FailedDownload => config_pack::Action::FailedDownload,
+                            game_pack::Action::Accepted => config_pack::Action::Accepted,
+                            game_pack::Action::InvalidUrl => config_pack::Action::InvalidUrl,
+                            game_pack::Action::FailedReload => config_pack::Action::FailedReload,
+                            game_pack::Action::Discarded => config_pack::Action::Discarded,
+                        };
+                        write_config_packet(conn, ServerboundConfigPacket::ResourcePack(
+                            config_pack::ServerboundResourcePack { id: p.id, action },
+                        )).await?;
+                    }
+                    // Anything else is discarded: vanilla defers its outbound
+                    // queue, but pomme's game keeps ticking through a
+                    // reconfiguration, so stale movement/actions are best dropped.
+                    continue;
+                }
             }
         };
         match packet {
@@ -401,23 +433,32 @@ async fn config_sequence(
                 // Claiming no known packs forces the server to send NBT for
                 // every registry entry; `variant_index` (handler.rs) relies on
                 // that to equate registry-map position with protocol id.
-                conn.write(ServerboundConfigPacket::SelectKnownPacks(
-                    s_select_known_packs::ServerboundSelectKnownPacks {
-                        known_packs: vec![],
-                    },
-                ))
+                write_config_packet(
+                    conn,
+                    ServerboundConfigPacket::SelectKnownPacks(
+                        s_select_known_packs::ServerboundSelectKnownPacks {
+                            known_packs: vec![],
+                        },
+                    ),
+                )
                 .await?;
             }
             ClientboundConfigPacket::KeepAlive(p) => {
-                conn.write(ServerboundConfigPacket::KeepAlive(
-                    s_keep_alive::ServerboundKeepAlive { id: p.id },
-                ))
+                write_config_packet(
+                    conn,
+                    ServerboundConfigPacket::KeepAlive(s_keep_alive::ServerboundKeepAlive {
+                        id: p.id,
+                    }),
+                )
                 .await?;
             }
             ClientboundConfigPacket::FinishConfiguration(_) => {
-                conn.write(ServerboundConfigPacket::FinishConfiguration(
-                    s_finish_configuration::ServerboundFinishConfiguration {},
-                ))
+                write_config_packet(
+                    conn,
+                    ServerboundConfigPacket::FinishConfiguration(
+                        s_finish_configuration::ServerboundFinishConfiguration {},
+                    ),
+                )
                 .await?;
                 return Ok(match previous_registries {
                     Some(previous) if !received_registry_data => previous.clone(),
@@ -428,12 +469,15 @@ async fn config_sequence(
                 return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
             }
             ClientboundConfigPacket::CookieRequest(p) => {
-                conn.write(ServerboundConfigPacket::CookieResponse(
-                    s_cookie_response::ServerboundCookieResponse {
-                        key: p.key,
-                        payload: None,
-                    },
-                ))
+                write_config_packet(
+                    conn,
+                    ServerboundConfigPacket::CookieResponse(
+                        s_cookie_response::ServerboundCookieResponse {
+                            key: p.key,
+                            payload: None,
+                        },
+                    ),
+                )
                 .await?;
             }
             ClientboundConfigPacket::ResourcePackPush(p) => {
@@ -448,12 +492,15 @@ async fn config_sequence(
                     hash: p.hash.clone(),
                     required: p.required,
                 });
-                conn.write(ServerboundConfigPacket::ResourcePack(
-                    s_resource_pack::ServerboundResourcePack {
-                        id: p.id,
-                        action: s_resource_pack::Action::Accepted,
-                    },
-                ))
+                write_config_packet(
+                    conn,
+                    ServerboundConfigPacket::ResourcePack(
+                        s_resource_pack::ServerboundResourcePack {
+                            id: p.id,
+                            action: s_resource_pack::Action::Accepted,
+                        },
+                    ),
+                )
                 .await?;
             }
             ClientboundConfigPacket::ResourcePackPop(p) => {
@@ -628,7 +675,7 @@ async fn game_loop(
                         if let Some(t) = translation {
                             t.remap_outbound(&mut packet);
                         }
-                        serialize_game_packet(&packet)?
+                        serialize_frame(&*packet)?
                     }
                     Outbound::Raw(bytes) => bytes,
                 };
@@ -664,8 +711,7 @@ async fn game_loop(
                     let ack = ServerboundGamePacket::ConfigurationAcknowledged(
                         azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
                     );
-                    write_game_frame(&mut conn.writer, translation, serialize_game_packet(&ack)?)
-                        .await?;
+                    write_game_frame(&mut conn.writer, translation, serialize_frame(&ack)?).await?;
                     let mut config = conn.config();
                     let holder = config_sequence(
                         &mut config,
@@ -698,7 +744,9 @@ async fn game_loop(
     }
 }
 
-fn serialize_game_packet(packet: &ServerboundGamePacket) -> Result<Vec<u8>, ConnectionError> {
+fn serialize_frame<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
+    packet: &P,
+) -> Result<Vec<u8>, ConnectionError> {
     azalea_protocol::write::serialize_packet(packet)
         .map(Vec::from)
         .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))
@@ -716,6 +764,22 @@ async fn write_game_frame(
     };
     for frame in frames {
         writer.raw.write(&frame).await?;
+    }
+    Ok(())
+}
+
+/// Writes one latest-layout configuration packet, translating it for older
+/// wire versions (765 down: id remap plus suppression of packets the wire
+/// version lacks).
+async fn write_config_packet(
+    conn: &mut Connection<ClientboundConfigPacket, ServerboundConfigPacket>,
+    packet: ServerboundConfigPacket,
+) -> Result<(), ConnectionError> {
+    let Some(t) = super::translate::active().filter(|t| t.translates_config()) else {
+        return Ok(conn.write(packet).await?);
+    };
+    if let Some(frame) = t.translate_outbound_config_frame(serialize_frame(&packet)?) {
+        conn.writer.raw.write(&frame).await?;
     }
     Ok(())
 }
