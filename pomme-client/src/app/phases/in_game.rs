@@ -1152,7 +1152,7 @@ fn apply_result_action(
     kind: ResultKind,
     status: Option<UploadStatus>,
     json: String,
-    core: &AppCore,
+    core: &mut AppCore,
     gfx: &Gfx,
     game: &mut GameState,
 ) {
@@ -1382,6 +1382,21 @@ pub fn update_game(
     core.audio.set_subtitles_enabled(core.menu.show_subtitles);
 
     gfx.renderer.set_vsync(core.menu.vsync);
+
+    // Vanilla pauseIfInactive: losing OS focus for more than half a second
+    // with no screen open pauses the game, which also releases the cursor
+    // (otherwise a system overlay like Win-key search opens over a still
+    // captured cursor). TODO: F3+P toggle (options.pauseOnLostFocus).
+    if core
+        .unfocused_since
+        .is_some_and(|t| t.elapsed().as_millis() > 500)
+        && game.input_live()
+        && !game.dead
+    {
+        game.paused = true;
+        game.pause_screen = PauseScreen::Main;
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
 
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
