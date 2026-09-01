@@ -177,6 +177,9 @@ pub struct AppCore {
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
+    /// When the window lost OS focus, for pause-on-lost-focus (vanilla
+    /// `pauseIfInactive`); `None` while focused.
+    pub unfocused_since: Option<Instant>,
     player_skin_tx: crossbeam_channel::Sender<PlayerSkinResult>,
     player_skin_rx: crossbeam_channel::Receiver<PlayerSkinResult>,
     requested_player_skins: HashMap<uuid::Uuid, Option<String>>,
@@ -229,6 +232,7 @@ impl AppCore {
             audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
+            unfocused_since: None,
             player_skin_tx,
             player_skin_rx,
             requested_player_skins: HashMap::new(),
@@ -277,18 +281,36 @@ impl AppCore {
         }
     }
 
-    pub fn apply_cursor_grab(&self, window: &Window, game: Option<&mut GameState>) {
+    pub fn apply_cursor_grab(&mut self, window: &Window, game: Option<&mut GameState>) {
         let captured =
             game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
         if captured {
+            // Vanilla centers on grab too; warp before locking, which
+            // freezes the position on some platforms.
+            self.center_cursor(window);
             let _ = window
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
             window.set_cursor_visible(false);
         } else {
-            let _ = window.set_cursor_grab(CursorGrabMode::None);
-            window.set_cursor_visible(true);
+            self.release_cursor(window);
         }
+    }
+
+    /// Releases the cursor and warps it to the window center, like vanilla
+    /// `MouseHandler.releaseMouse` (every screen opens with a centered
+    /// cursor instead of wherever the last one closed).
+    fn release_cursor(&mut self, window: &Window) {
+        let _ = window.set_cursor_grab(CursorGrabMode::None);
+        window.set_cursor_visible(true);
+        self.center_cursor(window);
+    }
+
+    fn center_cursor(&mut self, window: &Window) {
+        let size = window.inner_size();
+        let (x, y) = (size.width as f32 / 2.0, size.height as f32 / 2.0);
+        let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
+        self.input.on_cursor_moved(x, y);
     }
 
     pub fn send_respawn(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
@@ -607,8 +629,7 @@ impl AppCore {
                         game.death_confirm = false;
                         game.respawn_sent = false;
 
-                        let _ = window.set_cursor_grab(CursorGrabMode::None);
-                        window.set_cursor_visible(true);
+                        self.release_cursor(window);
                     }
                 }
                 NetworkEvent::SetPassengers {
@@ -1417,8 +1438,7 @@ impl AppCore {
                     game.death_confirm = false;
                     game.respawn_sent = false;
 
-                    let _ = window.set_cursor_grab(CursorGrabMode::None);
-                    window.set_cursor_visible(true);
+                    self.release_cursor(window);
                 }
                 NetworkEvent::ResourcePackPush {
                     id,
