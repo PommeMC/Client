@@ -237,6 +237,7 @@ const DRY_FOLIAGE_TINTED: &[&str] = &["leaf_litter"];
 
 const GRASS_TINTED: &[&str] = &[
     "grass_block",
+    "grass",
     "short_grass",
     "tall_grass",
     "fern",
