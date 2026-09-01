@@ -135,6 +135,10 @@ pub struct RegistryRemaps {
     maps: [Vec<Option<u32>>; ClientRegistry::ALL.len()],
 }
 
+/// Entry renames name-matching can't bridge, applied both directions
+/// (26.x renamed the chain item to iron_chain).
+const RENAMED: &[(ClientRegistry, &str, &str)] = &[(ClientRegistry::Item, "chain", "iron_chain")];
+
 impl RegistryRemaps {
     /// Remaps from `protocol`'s id space to the latest version's (for
     /// inbound packets), or `None` for versions without an embedded registry
@@ -184,6 +188,20 @@ impl RegistryRemaps {
                 .iter()
                 .map(|name| {
                     to_ids.get(name.as_str()).copied().or_else(|| {
+                        let alias = RENAMED.iter().find_map(|&(r, a, b)| {
+                            if r != reg {
+                                None
+                            } else if name == a {
+                                Some(b)
+                            } else if name == b {
+                                Some(a)
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(alias) = alias {
+                            return to_ids.get(alias).copied();
+                        }
                         // 1.21.2 renamed every attribute by dropping its
                         // category prefix (generic.armor -> armor); match on
                         // the last dot segment for that registry only (sound
@@ -259,6 +277,24 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 5), Some(6));
     }
 
+    /// 26.x renamed the chain item to iron_chain; `RENAMED` bridges it in
+    /// both directions.
+    fn assert_chain_remapped(r: &RegistryRemaps, from: &RegistryTable) {
+        let items = |t: &RegistryTable, name| {
+            t.names(ClientRegistry::Item)
+                .iter()
+                .position(|n| n == name)
+                .unwrap() as u32
+        };
+        let (id, target) = (
+            items(from, "chain"),
+            items(RegistryTable::latest(), "iron_chain"),
+        );
+        assert_eq!(r.remap(ClientRegistry::Item, id), Some(target));
+        let rev = RegistryRemaps::from_latest(from.version().protocol).unwrap();
+        assert_eq!(rev.remap(ClientRegistry::Item, target), Some(id));
+    }
+
     /// Every remapped id resolves to the same entry name in the target table
     /// (modulo the attribute prefix-strip alias).
     fn assert_round_trips(r: &RegistryRemaps, from: &RegistryTable, to: &RegistryTable) {
@@ -266,8 +302,14 @@ mod tests {
             for (id, name) in from.names(reg).iter().enumerate() {
                 if let Some(new_id) = r.remap(reg, id as u32) {
                     let target = to.name_of(reg, new_id);
+                    let renamed = RENAMED.iter().any(|&(rr, a, b)| {
+                        rr == reg
+                            && ((name == a && target == Some(b))
+                                || (name == b && target == Some(a)))
+                    });
                     assert!(
                         target == Some(name.as_str())
+                            || renamed
                             || (reg == ClientRegistry::Attribute
                                 && target == name.rsplit('.').next()),
                         "{reg:?} {id}"
@@ -378,8 +420,7 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::EntityType, 125), Some(131)); // tadpole
         assert_bed_unmapped(r, from);
 
-        // The chain item was renamed (chain -> iron_chain); no remap.
-        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_chain_remapped(r, from);
 
         assert_round_trips(r, from, to);
     }
@@ -429,7 +470,7 @@ mod tests {
         assert_pre_1_21_11_anchors(r, from);
         assert_eq!(r.remap(ClientRegistry::EntityType, 124), Some(131)); // tadpole
         assert_bed_unmapped(r, from);
-        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_chain_remapped(r, from);
         assert_unmapped(r, from, ClientRegistry::SoundEvent, "block.sand.wind");
         assert_unmapped(
             r,
@@ -453,7 +494,7 @@ mod tests {
         assert_pre_1_21_11_anchors(r, from);
         assert_eq!(r.remap(ClientRegistry::EntityType, 123), Some(131)); // tadpole
         assert_bed_unmapped(r, from);
-        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_chain_remapped(r, from);
         assert_unmapped(r, from, ClientRegistry::EntityType, "potion");
         assert_unmapped(r, from, ClientRegistry::DataComponentType, "hide_tooltip");
         assert_unmapped(
@@ -478,7 +519,7 @@ mod tests {
         assert_pre_1_21_11_anchors(r, from);
         assert_eq!(r.remap(ClientRegistry::EntityType, 124), Some(131)); // tadpole
         assert_bed_unmapped(r, from);
-        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_chain_remapped(r, from);
         assert_unmapped(r, from, ClientRegistry::EntityType, "potion");
         assert_unmapped(r, from, ClientRegistry::EntityType, "creaking_transient");
         assert_unmapped(r, from, ClientRegistry::SoundEvent, "entity.wolf.howl");
@@ -505,7 +546,7 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::EntityType, 104), Some(131)); // tadpole
 
         assert_bed_unmapped(r, from);
-        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_chain_remapped(r, from);
         assert_unmapped(r, from, ClientRegistry::EntityType, "boat");
         assert_unmapped(r, from, ClientRegistry::EntityType, "chest_boat");
         assert_unmapped(r, from, ClientRegistry::EntityType, "potion");
