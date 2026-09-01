@@ -402,6 +402,26 @@ mod tests {
             Some(32)
         );
         assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "add_entity"),
+            Some(1)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_entity_motion"),
+            Some(94)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "player_rotation"),
+            Some(66)
+        );
+        assert_eq!(
+            t.id(
+                Phase::Game,
+                Direction::Clientbound,
+                "set_default_spawn_position"
+            ),
+            Some(90)
+        );
+        assert_eq!(
             t.id(Phase::Login, Direction::Clientbound, "login_finished"),
             Some(2)
         );
