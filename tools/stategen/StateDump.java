@@ -14,9 +14,11 @@ import java.util.Map;
  * running vanilla's own code: bootstraps the block registry from the server jar
  * on the classpath, then iterates Block.BLOCK_STATE_REGISTRY in state-id order.
  *
- * Everything is reflection so one binary covers both the 26.x API
- * (getLightDampening) and the 1.21.x API (getLightBlock); it also means the
- * tool compiles against nothing but the JDK.
+ * Everything is reflection so one binary covers the 26.x API
+ * (getLightDampening), the 1.21.2+ API (getLightBlock), and the older
+ * world-context API (getLightBlock(BlockGetter, BlockPos), fed the empty
+ * getter exactly like vanilla's own state cache); it also means the tool
+ * compiles against nothing but the JDK.
  *
  * Face-occlusion shapes are emitted as 16x16 bitmasks over the face plane.
  * Vanilla's faceShapeOccludes(a, b) tests whether the union of two face
@@ -68,15 +70,15 @@ public final class StateDump {
             boolean occludes = (Boolean) m.canOcclude.invoke(state);
             boolean shaped = (Boolean) m.useShapeForLightOcclusion.invoke(state);
             emission.add((Integer) m.getLightEmission.invoke(state));
-            dampening.add((Integer) m.getLightDampening.invoke(state));
-            propagates.add(((Boolean) m.propagatesSkylightDown.invoke(state)) ? 1 : 0);
+            dampening.add((Integer) m.invokeWorld(m.getLightDampening, state));
+            propagates.add(((Boolean) m.invokeWorld(m.propagatesSkylightDown, state)) ? 1 : 0);
             canOcclude.add(occludes ? 1 : 0);
             useShape.add(shaped ? 1 : 0);
             hasCollision.add(m.hasCollision.getBoolean(m.getBlock.invoke(state)) ? 1 : 0);
             if (occludes && shaped) {
                 String[] masks = new String[6];
                 for (int d = 0; d < 6; d++) {
-                    Object shape = m.getFaceOcclusionShape.invoke(state, directions[d]);
+                    Object shape = m.invokeWorld(m.getFaceOcclusionShape, state, directions[d]);
                     masks[d] = maskHex(projectFace(shape, m, AXIS_BY_ORDINAL[d], id, d));
                 }
                 faceMasks.put(id, masks);
@@ -200,14 +202,41 @@ public final class StateDump {
         private final Class<?> aabbClass;
         private final Map<String, Field> aabbFields = new LinkedHashMap<>();
 
+        final Object[] worldArgs;
+
         Methods(Class<?> stateClass) throws Exception {
+            Class<?> direction = Class.forName("net.minecraft.core.Direction");
             getLightEmission = stateClass.getMethod("getLightEmission");
-            getLightDampening = firstMethod(stateClass, "getLightDampening", "getLightBlock");
-            propagatesSkylightDown = stateClass.getMethod("propagatesSkylightDown");
             canOcclude = stateClass.getMethod("canOcclude");
             useShapeForLightOcclusion = stateClass.getMethod("useShapeForLightOcclusion");
-            getFaceOcclusionShape = stateClass.getMethod("getFaceOcclusionShape",
-                    Class.forName("net.minecraft.core.Direction"));
+
+            Method dampening;
+            Object[] wa;
+            Class<?>[] worldTypes;
+            try {
+                dampening = firstMethod(stateClass, "getLightDampening", "getLightBlock");
+                wa = new Object[0];
+                worldTypes = new Class<?>[0];
+            } catch (NoSuchMethodException e) {
+                // Pre-1.21.2: the light/shape getters take a world context,
+                // which vanilla's own state cache fed with the empty getter.
+                Class<?> getter = Class.forName("net.minecraft.world.level.BlockGetter");
+                Class<?> pos = Class.forName("net.minecraft.core.BlockPos");
+                wa = new Object[] {
+                    Class.forName("net.minecraft.world.level.EmptyBlockGetter")
+                            .getEnumConstants()[0],
+                    pos.getField("ZERO").get(null),
+                };
+                worldTypes = new Class<?>[] { getter, pos };
+                dampening = stateClass.getMethod("getLightBlock", getter, pos);
+            }
+            worldArgs = wa;
+            getLightDampening = dampening;
+            propagatesSkylightDown = stateClass.getMethod("propagatesSkylightDown", worldTypes);
+            Class<?>[] faceTypes = new Class<?>[worldTypes.length + 1];
+            System.arraycopy(worldTypes, 0, faceTypes, 0, worldTypes.length);
+            faceTypes[worldTypes.length] = direction;
+            getFaceOcclusionShape = stateClass.getMethod("getFaceOcclusionShape", faceTypes);
             Class<?> voxelShape = Class.forName("net.minecraft.world.phys.shapes.VoxelShape");
             shapeIsEmpty = voxelShape.getMethod("isEmpty");
             toAabbs = voxelShape.getMethod("toAabbs");
@@ -225,6 +254,13 @@ public final class StateDump {
                 aabbFields.put(name, f);
             }
             return f;
+        }
+
+        Object invokeWorld(Method method, Object state, Object... extra) throws Exception {
+            Object[] args = new Object[worldArgs.length + extra.length];
+            System.arraycopy(worldArgs, 0, args, 0, worldArgs.length);
+            System.arraycopy(extra, 0, args, worldArgs.length, extra.length);
+            return method.invoke(state, args);
         }
 
         private static Method firstMethod(Class<?> cls, String... names) throws NoSuchMethodException {

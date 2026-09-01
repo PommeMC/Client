@@ -182,7 +182,19 @@ impl RegistryRemaps {
                 .collect();
             from.names(reg)
                 .iter()
-                .map(|name| to_ids.get(name.as_str()).copied())
+                .map(|name| {
+                    to_ids.get(name.as_str()).copied().or_else(|| {
+                        // 1.21.2 renamed every attribute by dropping its
+                        // category prefix (generic.armor -> armor); match on
+                        // the last dot segment for that registry only (sound
+                        // names contain legitimate dots).
+                        if reg != ClientRegistry::Attribute {
+                            return None;
+                        }
+                        let stripped = name.rsplit('.').next()?;
+                        (stripped != name).then(|| to_ids.get(stripped).copied())?
+                    })
+                })
                 .collect()
         });
         Self { maps }
@@ -247,12 +259,19 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 5), Some(6));
     }
 
-    /// Every remapped id resolves to the same entry name in the target table.
+    /// Every remapped id resolves to the same entry name in the target table
+    /// (modulo the attribute prefix-strip alias).
     fn assert_round_trips(r: &RegistryRemaps, from: &RegistryTable, to: &RegistryTable) {
         for reg in ClientRegistry::ALL {
             for (id, name) in from.names(reg).iter().enumerate() {
                 if let Some(new_id) = r.remap(reg, id as u32) {
-                    assert_eq!(to.name_of(reg, new_id), Some(name.as_str()), "{reg:?} {id}");
+                    let target = to.name_of(reg, new_id);
+                    assert!(
+                        target == Some(name.as_str())
+                            || (reg == ClientRegistry::Attribute
+                                && target == name.rsplit('.').next()),
+                        "{reg:?} {id}"
+                    );
                 }
             }
         }
@@ -444,6 +463,67 @@ mod tests {
             "hide_additional_tooltip",
         );
         assert_unmapped(r, from, ClientRegistry::SoundEvent, "entity.wolf.howl");
+
+        assert_round_trips(r, from, to);
+    }
+
+    /// Anchor checks against the 1.21.3 -> 26.2 registry diff. Nearly
+    /// 1.21.4's registries: 1.21.4 only removed `creaking_transient`
+    /// (entity 30 here), shifting the later entity ids one higher than
+    /// 1.21.4's.
+    #[test]
+    fn remap_1_21_3_anchors() {
+        let (r, from, to) = setup(768);
+
+        assert_pre_1_21_11_anchors(r, from);
+        assert_eq!(r.remap(ClientRegistry::EntityType, 124), Some(131)); // tadpole
+        assert_bed_unmapped(r, from);
+        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_unmapped(r, from, ClientRegistry::EntityType, "potion");
+        assert_unmapped(r, from, ClientRegistry::EntityType, "creaking_transient");
+        assert_unmapped(r, from, ClientRegistry::SoundEvent, "entity.wolf.howl");
+
+        assert_round_trips(r, from, to);
+    }
+
+    /// Anchor checks against the 1.21.1 -> 26.2 registry diff. 1.21.2
+    /// renamed every attribute by dropping its category prefix (covered by
+    /// the build-time alias), split `boat`/`chest_boat` per wood type
+    /// (shifting entity ids from 0, where the boats sort alphabetically),
+    /// and renamed `fire_resistant`/`item.goat_horn.play`.
+    #[test]
+    fn remap_1_21_1_anchors() {
+        let (r, from, to) = setup(767);
+
+        // The prefix-strip alias: generic.max_health matches max_health.
+        assert_eq!(
+            from.name_of(ClientRegistry::Attribute, 18),
+            Some("generic.max_health")
+        );
+        assert_eq!(
+            to.name_of(ClientRegistry::Attribute, 23),
+            Some("max_health")
+        );
+        assert_eq!(r.remap(ClientRegistry::Attribute, 18), Some(23));
+
+        assert_eq!(from.name_of(ClientRegistry::EntityType, 15), Some("cat"));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 15), Some(21));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 104), Some(131)); // tadpole
+
+        assert_bed_unmapped(r, from);
+        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_unmapped(r, from, ClientRegistry::EntityType, "boat");
+        assert_unmapped(r, from, ClientRegistry::EntityType, "chest_boat");
+        assert_unmapped(r, from, ClientRegistry::EntityType, "potion");
+        assert_unmapped(r, from, ClientRegistry::DataComponentType, "fire_resistant");
+        assert_unmapped(r, from, ClientRegistry::SoundEvent, "item.goat_horn.play");
+
+        // Particle and component divergence points match the later 1.21.x
+        // versions (bubble at 3, custom_name at 5).
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 3), Some(3));
+        assert_ne!(r.remap(ClientRegistry::ParticleType, 4), Some(4));
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 4), Some(4));
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 5), Some(6));
 
         assert_round_trips(r, from, to);
     }
