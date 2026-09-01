@@ -172,7 +172,7 @@ fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
 /// Protocols outside `TRANSLATED` never build a translation.
 #[test]
 fn no_translation_without_coverage() {
-    assert!(crate::net::translate::Translation::for_protocol(766).is_none());
+    assert!(crate::net::translate::Translation::for_protocol(765).is_none());
 }
 
 /// 26.2 appended a trailing session-id UUID to login_finished
@@ -638,7 +638,7 @@ fn translate_set_time_774() {
 /// action bodies in the references), through each version's id table.
 #[test]
 fn translate_attack_old_versions() {
-    for protocol in [774, 773, 772, 771, 770, 769, 768, 767] {
+    for protocol in [774, 773, 772, 771, 770, 769, 768, 767, 766] {
         let frames =
             translation_for(protocol).translate_outbound_game_frame(wire::encode_attack(42));
         let interact = old_id(protocol, Direction::Serverbound, "interact");
@@ -875,7 +875,7 @@ fn assert_velocity(v: azalea_core::position::Vec3) {
 /// rewrites and serializer map are wired up for protocols 770/771.
 #[test]
 fn translate_add_entity_772() {
-    for protocol in [772, 771, 770, 769, 768, 767] {
+    for protocol in [772, 771, 770, 769, 768, 767, 766] {
         let mut old = Vec::new();
         wire::write_varint(
             &mut old,
@@ -1432,6 +1432,75 @@ fn translate_move_player_flags_767() {
             old_id(767, Direction::Serverbound, "move_player_status_only") as u8,
             0
         ]]
+    );
+}
+
+/// 1.21 turned `update_attributes` modifier UUIDs into resource locations;
+/// the shim synthesizes a hex name.
+#[test]
+fn translate_update_attributes_766() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(766, Direction::Clientbound, "update_attributes"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    wire::write_varint(&mut old, 1); // one attribute
+    wire::write_varint(&mut old, 16); // generic.max_health (766 space)
+    old.extend_from_slice(&20.0f64.to_be_bytes()); // base
+    wire::write_varint(&mut old, 1); // one modifier
+    old.extend_from_slice(&[0xAB; 16]); // uuid
+    old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
+    wire::write_varint(&mut old, 0); // operation
+
+    let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(766, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.values.len(), 1);
+    assert_eq!(p.values[0].base, 20.0);
+    let modifier = &p.values[0].modifiers[0];
+    assert_eq!(modifier.amount, 4.0);
+    assert_eq!(
+        modifier.id.to_string(),
+        format!("minecraft:{}", "ab".repeat(16))
+    );
+}
+
+/// 1.21 collapsed `projectile_power`'s acceleration vector into its
+/// magnitude.
+#[test]
+fn translate_projectile_power_766() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(766, Direction::Clientbound, "projectile_power"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    for c in [0.0f64, 3.0, 4.0] {
+        old.extend_from_slice(&c.to_be_bytes());
+    }
+
+    let ClientboundGamePacket::ProjectilePower(p) = translate_and_decode(766, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.id, MinecraftEntityId(9));
+    assert_eq!(p.acceleration_power, 5.0);
+}
+
+/// Outbound `use_item` drops the rotation floats 1.21 appended.
+#[test]
+fn translate_use_item_766() {
+    let mut frame = Vec::new();
+    wire::write_varint(&mut frame, table_id(Direction::Serverbound, "use_item"));
+    frame.push(0); // main hand
+    wire::write_varint(&mut frame, 7); // sequence
+    frame.extend_from_slice(&90.0f32.to_be_bytes());
+    frame.extend_from_slice(&(-10.0f32).to_be_bytes());
+
+    let frames = translation_for(766).translate_outbound_game_frame(frame);
+    assert_eq!(
+        frames,
+        [[old_id(766, Direction::Serverbound, "use_item") as u8, 0, 7]]
     );
 }
 

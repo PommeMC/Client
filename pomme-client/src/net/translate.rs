@@ -138,6 +138,18 @@
 //! - `client_tick_end` doesn't exist; its suppression is expected and logged
 //!   quietly
 //!
+//! 1.20.6 -> 26.2 wire changes (all of 1.21.1's — 1.21 only appended
+//! `custom_report_details`/`server_links`, so the tables are a strict
+//! prefix and every pre-1.21.2 rewrite carries over — plus):
+//! - `update_attributes` modifier ids were UUIDs, turned into resource
+//!   locations by 1.21; a hex name is synthesized (pomme reads only the
+//!   attribute values)
+//! - `projectile_power` carried a per-axis acceleration vector, collapsed to
+//!   its magnitude
+//! - serverbound `use_item` lacks the rotation floats 1.21 appended
+//! - the variant/effect/dimension holder codecs merely moved into their types
+//!   (wire-identical), and the block set matches 1.21.1's
+//!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
 //! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
@@ -205,8 +217,10 @@ struct GameIds {
     v769: Option<Ids769>,
     /// The rewrites 1.21.4 introduced, for wire versions below it.
     v768: Option<Ids768>,
-    /// The rewrites 1.21.2 introduced, for wire version 767.
+    /// The rewrites 1.21.2 introduced, for wire versions below it.
     v767: Option<Ids767>,
+    /// The rewrites 1.21 introduced, for wire version 766.
+    v766: Option<Ids766>,
     /// Latest serverbound ids whose packet is knowingly absent on this wire
     /// version (`client_tick_end`, `player_loaded`); suppressed quietly.
     quiet_suppressed: Box<[u32]>,
@@ -249,6 +263,25 @@ impl Ids767 {
             i if i == self.player_position_id => translate_player_position_767,
             i if i == self.teleport_entity_id => translate_teleport_entity_767,
             i if i == self.respawn_id => translate_respawn_767,
+            _ => return None,
+        })
+    }
+}
+
+/// Latest-space dispatch ids for the frame rewrites protocol 766 needs.
+struct Ids766 {
+    update_attributes_id: u32,
+    projectile_power_id: u32,
+    /// Serverbound `use_item`: latest + wire ids for the rotation strip.
+    use_item_id: u32,
+    use_item_old_id: u32,
+}
+
+impl Ids766 {
+    fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
+        Some(match id {
+            i if i == self.update_attributes_id => translate_update_attributes_766,
+            i if i == self.projectile_power_id => translate_projectile_power_766,
             _ => return None,
         })
     }
@@ -317,7 +350,7 @@ impl Ids772 {
 /// Protocols the wire translation fully covers. A version with embedded
 /// tables but no entry here (the staging state while its translation is
 /// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770, 769, 768, 767];
+const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770, 769, 768, 767, 766];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -497,6 +530,11 @@ impl Translation {
         {
             return translate_container_click(v769.container_click_old_id, &frame[pos..]);
         }
+        if let Some(v766) = &ids.v766
+            && id == v766.use_item_id
+        {
+            return translate_use_item(v766.use_item_old_id, &frame[pos..]);
+        }
         if let Some(v767) = &ids.v767 {
             if id == v767.player_input_id {
                 return translate_player_input(v767.player_input_old_id, &frame[pos..]);
@@ -650,6 +688,7 @@ impl GameIds {
             .or_else(|| self.v769.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v768.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v767.as_ref().and_then(|v| v.rewrite(id)))
+            .or_else(|| self.v766.as_ref().and_then(|v| v.rewrite(id)))
     }
 
     /// Name-matched game-phase id tables between one wire version and the
@@ -699,9 +738,9 @@ impl GameIds {
                 774 => remap_serializer_774,
                 773 => remap_serializer_773,
                 // 1.21.5 through 1.21.8 register identical serializer sets,
-                // as do 1.21.1 through 1.21.4.
+                // as do 1.20.5 through 1.21.4.
                 770..=772 => remap_serializer_772,
-                767..=769 => remap_serializer_769,
+                766..=769 => remap_serializer_769,
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
@@ -763,6 +802,12 @@ impl GameIds {
                     "move_player_status_only",
                 ]
                 .map(|n| id(Serverbound, n)),
+            }),
+            v766: (protocol <= 766).then(|| Ids766 {
+                update_attributes_id: id(Clientbound, "update_attributes"),
+                projectile_power_id: id(Clientbound, "projectile_power"),
+                use_item_id: id(Serverbound, "use_item"),
+                use_item_old_id: required_id(table, Phase::Game, Serverbound, "use_item"),
             }),
             quiet_suppressed: ["client_tick_end", "player_loaded"]
                 .iter()
@@ -977,6 +1022,15 @@ fn translate_cooldown_767(remaps: &RegistryRemaps, id: u32, payload: &[u8]) -> O
     Some(out)
 }
 
+/// Rewrites serverbound `use_item` for 1.20.6, dropping the rotation
+/// floats 1.21 appended.
+fn translate_use_item(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::with_capacity(payload.len());
+    wire::write_varint(&mut out, old_id);
+    out.extend_from_slice(&payload[..payload.len().saturating_sub(8)]);
+    vec![out]
+}
+
 /// Rewrites serverbound `player_input` for 1.21.1, where it was the vehicle
 /// steering packet (`xxa, zza floats + jump/shift flags`) rather than the
 /// key bitfield 1.21.2 introduced; axes are synthesized at full strength.
@@ -995,6 +1049,61 @@ fn translate_player_input(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     out.extend_from_slice(&axis(1, 2).to_be_bytes()); // forward / backward -> zza
     out.push((bits >> 4) & 3); // jump, shift
     vec![out]
+}
+
+/// Rewrites `update_attributes`: 1.21 turned each modifier's UUID id into a
+/// resource location; a hex name is synthesized (pomme reads only the
+/// attribute values, and vanilla's own 1.21 migration renamed them too).
+fn translate_update_attributes_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    varint_span(&mut cur)?; // entity id
+    let entries = u32::azalea_read_var(&mut cur).ok()?;
+
+    let mut out = Vec::with_capacity(payload.len() + 64);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..cur.position() as usize]);
+    for _ in 0..entries {
+        let head_at = cur.position() as usize;
+        varint_span(&mut cur)?; // attribute
+        advance(&mut cur, 8)?; // base
+        let modifiers = u32::azalea_read_var(&mut cur).ok()?;
+        out.extend_from_slice(&payload[head_at..cur.position() as usize]);
+        for _ in 0..modifiers {
+            let uuid_at = cur.position() as usize;
+            advance(&mut cur, 16)?;
+            let name: String = payload[uuid_at..uuid_at + 16]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let rl = format!("minecraft:{name}");
+            wire::write_varint(&mut out, rl.len() as u32);
+            out.extend_from_slice(rl.as_bytes());
+            let tail_at = cur.position() as usize;
+            advance(&mut cur, 8)?; // amount
+            varint_span(&mut cur)?; // operation
+            out.extend_from_slice(&payload[tail_at..cur.position() as usize]);
+        }
+    }
+    Some(out)
+}
+
+/// Rewrites `projectile_power`: 1.21 collapsed the per-axis acceleration
+/// vector into its magnitude.
+fn translate_projectile_power_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let entity = varint_span(&mut cur)?;
+    let at = cur.position() as usize;
+    let mut sq = 0.0f64;
+    for i in 0..3 {
+        let c = f64::from_be_bytes(payload.get(at + i * 8..at + i * 8 + 8)?.try_into().ok()?);
+        sq += c * c;
+    }
+
+    let mut out = Vec::with_capacity(16);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[entity]);
+    out.extend_from_slice(&sq.sqrt().to_be_bytes());
+    Some(out)
 }
 
 /// Rewrites a latest `container_click` payload for 1.21.4, which carries
