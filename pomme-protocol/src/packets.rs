@@ -161,6 +161,34 @@ impl DirectionTable {
 mod tests {
     use super::*;
 
+    /// Asserts every id `t` has in the phase/direction resolves to the same
+    /// name in `other` (a prefix check; pass `equal` to also require `other`
+    /// to end at the same id).
+    fn assert_prefix(
+        t: &PacketTable,
+        other: &PacketTable,
+        phase: Phase,
+        dir: Direction,
+        equal: bool,
+    ) {
+        let mut id = 0;
+        while let Some(name) = t.name_of(phase, dir, id) {
+            assert_eq!(
+                Some(name),
+                other.name_of(phase, dir, id),
+                "{phase:?} {dir:?} {id}"
+            );
+            id += 1;
+        }
+        if equal {
+            assert_eq!(
+                other.name_of(phase, dir, id),
+                None,
+                "{phase:?} {dir:?} {id}"
+            );
+        }
+    }
+
     /// Registration-order anchors, spot-checked by hand against
     /// `reference/26.2/decompiled/.../GameProtocols.java`.
     #[test]
@@ -435,12 +463,7 @@ mod tests {
             Phase::Game,
         ] {
             for dir in [Direction::Serverbound, Direction::Clientbound] {
-                for id in 0.. {
-                    match (t.name_of(phase, dir, id), t772.name_of(phase, dir, id)) {
-                        (None, None) => break,
-                        (a, b) => assert_eq!(a, b, "{phase:?} {dir:?} {id}"),
-                    }
-                }
+                assert_prefix(t, t772, phase, dir, true);
             }
         }
     }
@@ -562,15 +585,7 @@ mod tests {
         assert_eq!(t.version().protocol, 768);
         assert_eq!(t.version().name, "1.21.3");
         let t769 = PacketTable::for_protocol(769).unwrap();
-        for id in 0.. {
-            match (
-                t.name_of(Phase::Game, Direction::Clientbound, id),
-                t769.name_of(Phase::Game, Direction::Clientbound, id),
-            ) {
-                (None, None) => break,
-                (a, b) => assert_eq!(a, b, "clientbound {id}"),
-            }
-        }
+        assert_prefix(t, t769, Phase::Game, Direction::Clientbound, true);
         assert_eq!(
             t.id(Phase::Game, Direction::Serverbound, "interact"),
             Some(24)
@@ -658,13 +673,48 @@ mod tests {
         );
     }
 
+    /// 1.20.6's tables are a strict prefix of 1.21.1's in every phase and
+    /// direction — 1.21 only appended `custom_report_details` and
+    /// `server_links` (config + game clientbound) — verified against the
+    /// decompiled `<Phase>Protocols.java` registrations and asserted here.
+    #[test]
+    fn anchors_1_20_6() {
+        let t = PacketTable::for_protocol(766).unwrap();
+        assert_eq!(t.version().protocol, 766);
+        assert_eq!(t.version().name, "1.20.6");
+        let t767 = PacketTable::for_protocol(767).unwrap();
+        for phase in [
+            Phase::Handshake,
+            Phase::Status,
+            Phase::Login,
+            Phase::Configuration,
+            Phase::Game,
+        ] {
+            for dir in [Direction::Serverbound, Direction::Clientbound] {
+                assert_prefix(t, t767, phase, dir, false);
+            }
+        }
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "server_links"),
+            None
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 121)
+                .is_some()
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 122)
+                .is_none()
+        );
+    }
+
     #[test]
     fn for_protocol_lookups() {
         assert!(std::ptr::eq(
             PacketTable::for_protocol(776).unwrap(),
             PacketTable::latest()
         ));
-        assert!(PacketTable::for_protocol(766).is_none());
+        assert!(PacketTable::for_protocol(765).is_none());
     }
 
     /// Per-phase counts from the 26.2 registration lists; a regenerated table

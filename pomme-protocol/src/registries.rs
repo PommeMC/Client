@@ -486,25 +486,19 @@ mod tests {
         assert_round_trips(r, from, to);
     }
 
-    /// Anchor checks against the 1.21.1 -> 26.2 registry diff. 1.21.2
-    /// renamed every attribute by dropping its category prefix (covered by
-    /// the build-time alias), split `boat`/`chest_boat` per wood type
-    /// (shifting entity ids from 0, where the boats sort alphabetically),
-    /// and renamed `fire_resistant`/`item.goat_horn.play`.
-    #[test]
-    fn remap_1_21_1_anchors() {
-        let (r, from, to) = setup(767);
-
-        // The prefix-strip alias: generic.max_health matches max_health.
+    /// The anchors 1.20.5 through 1.21.1 share: 1.21.2 renamed every
+    /// attribute by dropping its category prefix (covered by the alias,
+    /// pinned per version at its `generic.max_health` index), split
+    /// `boat`/`chest_boat` per wood type (shifting entity ids from 0, where
+    /// the boats sort alphabetically), and renamed
+    /// `fire_resistant`/`item.goat_horn.play`; particle and component
+    /// divergence points match the later 1.21.x versions.
+    fn assert_pre_1_21_2_anchors(r: &RegistryRemaps, from: &RegistryTable, max_health: u32) {
         assert_eq!(
-            from.name_of(ClientRegistry::Attribute, 18),
+            from.name_of(ClientRegistry::Attribute, max_health),
             Some("generic.max_health")
         );
-        assert_eq!(
-            to.name_of(ClientRegistry::Attribute, 23),
-            Some("max_health")
-        );
-        assert_eq!(r.remap(ClientRegistry::Attribute, 18), Some(23));
+        assert_eq!(r.remap(ClientRegistry::Attribute, max_health), Some(23));
 
         assert_eq!(from.name_of(ClientRegistry::EntityType, 15), Some("cat"));
         assert_eq!(r.remap(ClientRegistry::EntityType, 15), Some(21));
@@ -518,13 +512,25 @@ mod tests {
         assert_unmapped(r, from, ClientRegistry::DataComponentType, "fire_resistant");
         assert_unmapped(r, from, ClientRegistry::SoundEvent, "item.goat_horn.play");
 
-        // Particle and component divergence points match the later 1.21.x
-        // versions (bubble at 3, custom_name at 5).
         assert_eq!(r.remap(ClientRegistry::ParticleType, 3), Some(3));
         assert_ne!(r.remap(ClientRegistry::ParticleType, 4), Some(4));
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 4), Some(4));
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 5), Some(6));
+    }
 
+    #[test]
+    fn remap_1_21_1_anchors() {
+        let (r, from, to) = setup(767);
+        assert_pre_1_21_2_anchors(r, from, 18);
+        assert_round_trips(r, from, to);
+    }
+
+    /// 1.20.6 matches 1.21.1's registry shape; 1.21 added five attributes
+    /// ahead of `generic.max_health`.
+    #[test]
+    fn remap_1_20_6_anchors() {
+        let (r, from, to) = setup(766);
+        assert_pre_1_21_2_anchors(r, from, 16);
         assert_round_trips(r, from, to);
     }
 
