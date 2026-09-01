@@ -477,7 +477,7 @@ mod tests {
         assert_pre_1_21_11_anchors(r, from);
         assert_eq!(r.remap(ClientRegistry::EntityType, 123), Some(131)); // tadpole
         assert_bed_unmapped(r, from);
-        assert_unmapped(r, from, ClientRegistry::Item, "chain");
+        assert_chain_remapped(r, from);
         assert_unmapped(r, from, ClientRegistry::EntityType, "potion");
         assert_unmapped(r, from, ClientRegistry::DataComponentType, "hide_tooltip");
         assert_unmapped(
