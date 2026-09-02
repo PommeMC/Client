@@ -201,7 +201,7 @@ impl ScalarOrPerState {
 
 /// Per-protocol block-state data, latest first; unknown protocols fall back
 /// to the latest (slot 0).
-const BLOCK_DATA: [(i32, &str); 11] = [
+const BLOCK_DATA: [(i32, &str); 9] = [
     (
         pomme_protocol::version::LATEST.protocol,
         include_str!("data/blocks-26.2.json"),
@@ -210,16 +210,20 @@ const BLOCK_DATA: [(i32, &str); 11] = [
     (774, include_str!("data/blocks-1.21.11.json")),
     (773, include_str!("data/blocks-1.21.10.json")),
     (772, include_str!("data/blocks-1.21.8.json")),
-    // 1.21.6's block set is identical to 1.21.8's (1.21.7 added no blocks);
-    // the 771 slot shares its tables.
-    (771, include_str!("data/blocks-1.21.8.json")),
     (770, include_str!("data/blocks-1.21.5.json")),
     (769, include_str!("data/blocks-1.21.4.json")),
     (768, include_str!("data/blocks-1.21.3.json")),
     (767, include_str!("data/blocks-1.21.1.json")),
-    // 1.20.6's block set is identical to 1.21.1's (1.21's trial-chamber
-    // blocks already existed); the 766 slot shares its tables.
-    (766, include_str!("data/blocks-1.21.1.json")),
+];
+
+/// Protocols whose block set is identical to a newer embedded version's (no
+/// blocks added between them); they share that version's slot instead of
+/// building a second copy of the same table.
+const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
+    // 1.21.7 added no blocks.
+    (771, 772),
+    // 1.21's trial-chamber blocks already existed in 1.20.6.
+    (766, 767),
 ];
 
 /// Per-state property tables (`just stategen`), index-aligned with
@@ -232,11 +236,9 @@ const STATE_DATA: [&str; BLOCK_DATA.len()] = [
     include_str!("data/state-1.21.11.json"),
     include_str!("data/state-1.21.10.json"),
     include_str!("data/state-1.21.8.json"),
-    include_str!("data/state-1.21.8.json"),
     include_str!("data/state-1.21.5.json"),
     include_str!("data/state-1.21.4.json"),
     include_str!("data/state-1.21.3.json"),
-    include_str!("data/state-1.21.1.json"),
     include_str!("data/state-1.21.1.json"),
 ];
 
@@ -277,12 +279,18 @@ pub fn set_active_protocol(protocol: i32) {
 /// Builds the given protocol's table if it isn't already, without switching
 /// to it; safe at any time (e.g. from a server-list ping, ahead of the join).
 pub fn prewarm_protocol(protocol: i32) -> usize {
-    let slot = BLOCK_DATA
-        .iter()
-        .position(|&(p, _)| p == protocol)
-        .unwrap_or(0);
+    let slot = block_data_slot(protocol).unwrap_or(0);
     BLOCK_TABLES[slot].get_or_init(|| build_table(BLOCK_DATA[slot].1, STATE_DATA[slot]));
     slot
+}
+
+/// The `BLOCK_DATA` slot serving a protocol, through `SHARED_BLOCK_DATA`.
+fn block_data_slot(protocol: i32) -> Option<usize> {
+    let protocol = SHARED_BLOCK_DATA
+        .iter()
+        .find(|&&(p, _)| p == protocol)
+        .map_or(protocol, |&(_, shared)| shared);
+    BLOCK_DATA.iter().position(|&(p, _)| p == protocol)
 }
 
 fn load_behaviors() -> HashMap<String, BehaviorEntry> {
@@ -836,6 +844,18 @@ mod tests {
         }
         for key in sound::BLOCK_SOUNDS.keys() {
             assert!(known.contains(key), "orphaned sound entry '{key}'");
+        }
+    }
+
+    /// Every launchable version with embedded protocol tables has a block
+    /// table (its own or a shared one); `prewarm_protocol` would otherwise
+    /// fall back to 26.2's silently.
+    #[test]
+    fn block_data_covers_versions() {
+        for v in pomme_protocol::version::VERSIONS {
+            if pomme_protocol::PacketTable::for_protocol(v.protocol).is_some() {
+                assert!(block_data_slot(v.protocol).is_some(), "{}", v.name);
+            }
         }
     }
 }
