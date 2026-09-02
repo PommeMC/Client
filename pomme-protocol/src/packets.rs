@@ -867,13 +867,24 @@ mod tests {
         );
     }
 
+    /// Every listed version resolves to a table exactly when it is the latest
+    /// or has embedded data; nothing else does.
     #[test]
     fn for_protocol_lookups() {
+        use crate::version::{LATEST, VERSIONS, embedded_index};
         assert!(std::ptr::eq(
-            PacketTable::for_protocol(776).unwrap(),
+            PacketTable::for_protocol(LATEST.protocol).unwrap(),
             PacketTable::latest()
         ));
-        assert!(PacketTable::for_protocol(763).is_none());
+        for v in VERSIONS {
+            assert_eq!(
+                PacketTable::for_protocol(v.protocol).is_some(),
+                v.protocol == LATEST.protocol || embedded_index(v.protocol).is_some(),
+                "{}",
+                v.name
+            );
+        }
+        assert!(PacketTable::for_protocol(0).is_none());
     }
 
     /// Per-phase counts from the 26.2 registration lists; a regenerated table
