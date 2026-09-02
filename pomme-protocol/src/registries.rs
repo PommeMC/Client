@@ -480,9 +480,11 @@ mod tests {
 
     /// Anchor checks against the 1.21.4 -> 26.2 registry diff (spot-checked
     /// by hand against the two data-generator reports). 1.21.5 was a content
-    /// release (29 data components, the spring-drop entities/items/sounds),
-    /// and 26.2 additionally dropped the thrown `potion` entity split into
-    /// splash/lingering, two tooltip components, and four sounds.
+    /// release (31 data components, the spring-drop entities/items/sounds)
+    /// that itself dropped the thrown `potion` entity for the splash and
+    /// lingering split, both tooltip components and `entity.wolf.howl`;
+    /// 26.2 dropped three further sounds, along with the usual bed/chain
+    /// renames.
     #[test]
     fn remap_1_21_4_anchors() {
         let (r, from, to) = setup(769);
