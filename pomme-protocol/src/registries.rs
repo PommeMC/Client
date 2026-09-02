@@ -472,13 +472,9 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::EntityType, 124), Some(131)); // tadpole
         assert_bed_unmapped(r, from);
         assert_chain_remapped(r, from);
-        assert_unmapped(r, from, ClientRegistry::SoundEvent, "block.sand.wind");
-        assert_unmapped(
-            r,
-            from,
-            ClientRegistry::SoundEvent,
-            "entity.leash_knot.break",
-        );
+        for sound in ["block.sand.wind", "entity.leash_knot.break"] {
+            assert_unmapped(r, from, ClientRegistry::SoundEvent, sound);
+        }
 
         assert_round_trips(r, from, to);
     }
