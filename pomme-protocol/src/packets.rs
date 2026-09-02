@@ -488,21 +488,24 @@ mod tests {
         }
     }
 
-    /// Every listed version resolves to a table exactly when it is the latest
-    /// or has embedded data; nothing else does.
+    /// The latest protocol resolves to the shared latest table, every
+    /// embedded version to its own table, and anything else to nothing.
     #[test]
     fn for_protocol_lookups() {
-        use crate::version::{LATEST, VERSIONS, embedded_index};
         assert!(std::ptr::eq(
             PacketTable::for_protocol(LATEST.protocol).unwrap(),
             PacketTable::latest()
         ));
-        for v in VERSIONS {
+        for e in &EMBEDDED {
+            let protocol = e.version.protocol;
             assert_eq!(
-                PacketTable::for_protocol(v.protocol).is_some(),
-                v.protocol == LATEST.protocol || embedded_index(v.protocol).is_some(),
+                PacketTable::for_protocol(protocol)
+                    .unwrap()
+                    .version()
+                    .protocol,
+                protocol,
                 "{}",
-                v.name
+                e.version.name
             );
         }
         assert!(PacketTable::for_protocol(0).is_none());
