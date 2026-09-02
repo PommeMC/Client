@@ -864,5 +864,26 @@ mod tests {
         assert_eq!(resolve_wire(None, 763), Err(763));
         assert_eq!(resolve_wire(Some(763), 763), Err(763));
         assert_eq!(resolve_wire(Some(latest), 763), Ok(latest));
+        // A staged version (tables embedded, not yet in TRANSLATED) is
+        // refused when launched and adopted around when the server is
+        // joinable.
+        for v in pomme_protocol::version::VERSIONS {
+            if pomme_protocol::PacketTable::for_protocol(v.protocol).is_some()
+                && !crate::net::translate::joinable(v.protocol)
+            {
+                assert_eq!(
+                    resolve_wire(Some(v.protocol), latest),
+                    Ok(latest),
+                    "{}",
+                    v.name
+                );
+                assert_eq!(
+                    resolve_wire(None, v.protocol),
+                    Err(v.protocol),
+                    "{}",
+                    v.name
+                );
+            }
+        }
     }
 }
