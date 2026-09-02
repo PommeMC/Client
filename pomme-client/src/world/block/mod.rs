@@ -212,6 +212,16 @@ const BLOCK_DATA: [(i32, &str); 5] = [
     (772, include_str!("data/blocks-1.21.8.json")),
 ];
 
+/// Protocols whose block set is identical to a newer embedded version's (no
+/// blocks added between them); they share that version's slot instead of
+/// building a second copy of the same table. The slot also serves
+/// `STATE_DATA`, so an alias requires the two versions' `generated/state.json`
+/// dumps to be identical as well, not just the block list.
+const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
+    // 1.21.7 added no blocks.
+    (771, 772),
+];
+
 /// Per-state property tables (`just stategen`), index-aligned with
 /// [`BLOCK_DATA`]. `blocks-<v>.json` is the state layout (ids and properties
 /// from the data-generator report); `state-<v>.json` holds the per-state
@@ -261,12 +271,18 @@ pub fn set_active_protocol(protocol: i32) {
 /// Builds the given protocol's table if it isn't already, without switching
 /// to it; safe at any time (e.g. from a server-list ping, ahead of the join).
 pub fn prewarm_protocol(protocol: i32) -> usize {
-    let slot = BLOCK_DATA
-        .iter()
-        .position(|&(p, _)| p == protocol)
-        .unwrap_or(0);
+    let slot = block_data_slot(protocol).unwrap_or(0);
     BLOCK_TABLES[slot].get_or_init(|| build_table(BLOCK_DATA[slot].1, STATE_DATA[slot]));
     slot
+}
+
+/// The `BLOCK_DATA` slot serving a protocol, through `SHARED_BLOCK_DATA`.
+fn block_data_slot(protocol: i32) -> Option<usize> {
+    let protocol = SHARED_BLOCK_DATA
+        .iter()
+        .find(|&&(p, _)| p == protocol)
+        .map_or(protocol, |&(_, shared)| shared);
+    BLOCK_DATA.iter().position(|&(p, _)| p == protocol)
 }
 
 fn load_behaviors() -> HashMap<String, BehaviorEntry> {
@@ -820,6 +836,15 @@ mod tests {
         }
         for key in sound::BLOCK_SOUNDS.keys() {
             assert!(known.contains(key), "orphaned sound entry '{key}'");
+        }
+    }
+
+    /// Every launchable version has a block table (its own or a shared one);
+    /// `prewarm_protocol` would otherwise fall back to 26.2's silently.
+    #[test]
+    fn block_data_covers_versions() {
+        for v in pomme_protocol::version::VERSIONS {
+            assert!(block_data_slot(v.protocol).is_some(), "{}", v.name);
         }
     }
 }
