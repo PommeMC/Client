@@ -851,17 +851,18 @@ mod tests {
 
     use super::resolve_wire;
 
-    /// 764 (1.20.2) has no wire translation on this branch; 775 does.
+    /// 763 (1.20.1) is not a supported version at all, so it never gains a
+    /// wire translation; 775 has one.
     #[test]
     fn resolve_wire_gates_unjoinable_versions() {
         let latest = LATEST.protocol;
         assert_eq!(resolve_wire(Some(775), latest), Ok(775));
-        assert_eq!(resolve_wire(Some(764), latest), Ok(latest));
+        assert_eq!(resolve_wire(Some(763), latest), Ok(latest));
         assert_eq!(resolve_wire(None, latest), Ok(latest));
         // An untranslated launched version is refused whatever the probe
         // yielded, unless the server itself speaks a joinable protocol.
-        assert_eq!(resolve_wire(None, 764), Err(764));
-        assert_eq!(resolve_wire(Some(764), 764), Err(764));
-        assert_eq!(resolve_wire(Some(latest), 764), Ok(latest));
+        assert_eq!(resolve_wire(None, 763), Err(763));
+        assert_eq!(resolve_wire(Some(763), 763), Err(763));
+        assert_eq!(resolve_wire(Some(latest), 763), Ok(latest));
     }
 }
