@@ -39,6 +39,9 @@ pub enum ConnectionError {
 
     #[error("encryption failed: {0}")]
     Encryption(String),
+
+    #[error("joining {0} servers is not supported yet")]
+    Unjoinable(String),
 }
 
 impl From<super::resolve::ConnectError> for ConnectionError {
@@ -115,7 +118,7 @@ pub async fn connect_to_server(
         .as_str()
         .try_into()
         .map_err(|_| ConnectionError::InvalidAddress(args.server.clone()))?;
-    negotiate_wire_version(&server_addr, args.protocol).await;
+    negotiate_wire_version(&server_addr, args.protocol).await?;
     let conn = super::resolve::connect(&server_addr, ClientIntention::Login).await?;
     let mut conn = conn.login();
 
@@ -172,12 +175,19 @@ pub async fn connect_to_server(
 /// Adopts the server's protocol as the wire version when translation data
 /// for it exists, so one client joins any supported server version;
 /// otherwise the launched version is kept (and the server shows its own
-/// mismatch message, as before). The protocol comes from `known` (a
-/// server-list ping; a stale one just means the server rejects the handshake
-/// with its mismatch message, same as before) or a status probe. Sets the
-/// session protocol and the matching block-state table, so it must run
-/// before the login handshake and before any world state loads.
-async fn negotiate_wire_version(server_addr: &ServerAddr, known: Option<i32>) {
+/// mismatch message, as before). A launched version without translation
+/// data (listed for pings, not yet joinable) can never complete a join —
+/// the handshake either gets the server's mismatch rejection or succeeds
+/// and breaks mid-connect on untranslated packets — so it is refused up
+/// front on every path, a failed probe or a stale server-list `known`
+/// protocol included. The protocol comes from `known` (a server-list ping)
+/// or a status probe. Sets the session protocol and the matching
+/// block-state table, so it must run before the login handshake and before
+/// any world state loads.
+async fn negotiate_wire_version(
+    server_addr: &ServerAddr,
+    known: Option<i32>,
+) -> Result<(), ConnectionError> {
     let selected = crate::version::selected_protocol();
     let probed = match known {
         Some(p) => Some(p),
@@ -192,20 +202,39 @@ async fn negotiate_wire_version(server_addr: &ServerAddr, known: Option<i32>) {
                 .flatten()
         }
     };
-    let wire = match probed {
-        Some(p) if super::translate::joinable(p) => p,
-        Some(p) => {
-            tracing::warn!("Server speaks unsupported protocol {p}; connecting as {selected}");
-            selected
-        }
-        None => {
-            tracing::warn!("Server protocol probe failed; connecting as {selected}");
-            selected
-        }
-    };
+    let wire = resolve_wire(probed, selected).map_err(|p| {
+        let name = pomme_protocol::ProtocolVersion::from_protocol(p)
+            .map(|v| v.name.to_string())
+            .unwrap_or_else(|| format!("protocol {p}"));
+        ConnectionError::Unjoinable(name)
+    })?;
     tracing::info!("Negotiated wire protocol {wire}");
     crate::version::set_session_protocol(wire);
     crate::world::block::set_active_protocol(wire);
+    Ok(())
+}
+
+/// The wire protocol to speak given the probed server protocol and the
+/// launched (`selected`) one; `Err` carries an unjoinable outcome (see
+/// [`negotiate_wire_version`]). Inert while `selected` is joinable — every
+/// arm then yields a joinable wire.
+fn resolve_wire(probed: Option<i32>, selected: i32) -> Result<i32, i32> {
+    let wire = match probed {
+        Some(p) if super::translate::joinable(p) => p,
+        Some(p) => {
+            tracing::warn!("Server speaks unsupported protocol {p}; falling back to {selected}");
+            selected
+        }
+        None => {
+            tracing::warn!("Server protocol probe failed; falling back to {selected}");
+            selected
+        }
+    };
+    if super::translate::joinable(wire) {
+        Ok(wire)
+    } else {
+        Err(wire)
+    }
 }
 
 async fn login_sequence(
@@ -749,5 +778,26 @@ fn friendly_error_reason(err: &ConnectionError) -> String {
         "Unknown host".to_string()
     } else {
         msg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pomme_protocol::version::LATEST;
+
+    use super::resolve_wire;
+
+    /// 764 (1.20.2) has no wire translation on this branch; 775 does.
+    #[test]
+    fn resolve_wire_gates_unjoinable_versions() {
+        let latest = LATEST.protocol;
+        assert_eq!(resolve_wire(Some(775), latest), Ok(775));
+        assert_eq!(resolve_wire(Some(764), latest), Ok(latest));
+        assert_eq!(resolve_wire(None, latest), Ok(latest));
+        // An untranslated launched version is refused whatever the probe
+        // yielded, unless the server itself speaks a joinable protocol.
+        assert_eq!(resolve_wire(None, 764), Err(764));
+        assert_eq!(resolve_wire(Some(764), 764), Err(764));
+        assert_eq!(resolve_wire(Some(latest), 764), Ok(latest));
     }
 }
