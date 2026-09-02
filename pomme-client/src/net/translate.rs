@@ -163,12 +163,17 @@
 //! Depends on azalea diverging from 26.2: these translations are correct only
 //! because azalea encodes or decodes something differently from the reference,
 //! so fixing azalea — or replacing it with pomme's own codec — breaks the older
-//! versions unless the matching rewrite lands at the same time. Each site
-//! carries a `TODO` pointing here.
+//! versions unless the matching rewrite lands at the same time. Where a
+//! rewriter exists it carries a `TODO` pointing here; `player_info_update`
+//! has none, since its mask is passed through rather than rewritten.
 //! - inbound `set_player_team` copies the color through as a plain
 //!   `ChatFormatting` ordinal, where 26.2 writes an `Optional<TeamColor>`
 //! - outbound `set_creative_mode_slot` leaves component values undelimited,
 //!   which is 1.21.4's layout rather than 26.2's
+//! - inbound `cooldown` carries an item registry id, where 26.2 names a
+//!   cooldown group
+//! - `player_info_update`'s action mask passes through unremapped, because
+//!   azalea reads the bit order from before 1.21.4 inserted UPDATE_HAT
 
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -990,6 +995,8 @@ fn translate_container_set_slot_767(v: &Ids767, payload: &[u8]) -> Option<Vec<u8
 /// Rewrites `cooldown`'s item id into the latest registry space. Vanilla
 /// 26.2 names a cooldown group instead, but azalea still decodes the item
 /// registry id and these frames feed azalea (like the team-color ordinal).
+/// TODO: write the cooldown group once pomme owns the decoder (see the
+/// azalea-divergence list).
 fn translate_cooldown_767(remaps: &RegistryRemaps, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut p = 0;
     let item = wire::read_varint(payload, &mut p)?;
