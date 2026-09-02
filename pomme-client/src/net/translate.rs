@@ -155,9 +155,7 @@ struct GameIds {
 /// Dispatch ids for the one outbound rewrite protocol 770 needs (see
 /// [`translate_player_command`]).
 struct Ids770 {
-    /// Latest-space serverbound `player_command` id.
     player_command_id: u32,
-    /// The wire version's id for the rewritten frame.
     player_command_old_id: u32,
 }
 
