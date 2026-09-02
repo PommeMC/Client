@@ -219,7 +219,10 @@ const BLOCK_DATA: [(i32, &str); 10] = [
 
 /// Protocols whose block set is identical to a newer embedded version's (no
 /// blocks added between them); they share that version's slot instead of
-/// building a second copy of the same table.
+/// building a second copy of the same table. The slot also serves
+/// `STATE_DATA`, so an alias requires the two versions' `generated/state.json`
+/// dumps to be identical as well, not just the block list (both entries were
+/// checked that way).
 const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
     // 1.21.7 added no blocks.
     (771, 772),
@@ -849,15 +852,12 @@ mod tests {
         }
     }
 
-    /// Every launchable version with embedded protocol tables has a block
-    /// table (its own or a shared one); `prewarm_protocol` would otherwise
-    /// fall back to 26.2's silently.
+    /// Every launchable version has a block table (its own or a shared one);
+    /// `prewarm_protocol` would otherwise fall back to 26.2's silently.
     #[test]
     fn block_data_covers_versions() {
         for v in pomme_protocol::version::VERSIONS {
-            if pomme_protocol::PacketTable::for_protocol(v.protocol).is_some() {
-                assert!(block_data_slot(v.protocol).is_some(), "{}", v.name);
-            }
+            assert!(block_data_slot(v.protocol).is_some(), "{}", v.name);
         }
     }
 }
