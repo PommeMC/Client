@@ -540,6 +540,62 @@ mod tests {
         );
     }
 
+    /// Registration-order anchors for 1.21.4, cross-checked in full against
+    /// Mojang's `generated/reports/packets.json`. 1.21.5 removed
+    /// `add_experience_orb` (clientbound 2) and inserted
+    /// `test_instance_block_status` at 119, so only the clientbound ids
+    /// between them shift down one, and inserted `set_test_block` (57) and
+    /// `test_instance_block_action` (61) serverbound.
+    #[test]
+    fn anchors_1_21_4() {
+        let t = PacketTable::for_protocol(769).unwrap();
+        assert_eq!(t.version().protocol, 769);
+        assert_eq!(t.version().name, "1.21.4");
+        assert_eq!(t.id(Phase::Game, Direction::Serverbound, "attack"), None);
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "interact"),
+            Some(24)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "container_click"),
+            Some(16)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "player_command"),
+            Some(40)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "add_experience_orb"),
+            Some(2)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "player_chat"),
+            Some(59)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "level_particles"),
+            Some(42)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_entity_data"),
+            Some(93)
+        );
+        assert_eq!(
+            t.id(Phase::Login, Direction::Clientbound, "login_finished"),
+            Some(2)
+        );
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 61).is_some());
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 62).is_none());
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 130)
+                .is_some()
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 131)
+                .is_none()
+        );
+    }
+
     /// The latest protocol resolves to the shared latest table, every
     /// embedded version to its own table, and anything else to nothing.
     #[test]

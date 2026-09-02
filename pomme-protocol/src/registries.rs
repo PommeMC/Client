@@ -461,6 +461,30 @@ mod tests {
         assert_round_trips(r, from, to);
     }
 
+    /// Anchor checks against the 1.21.4 -> 26.2 registry diff (spot-checked
+    /// by hand against the two data-generator reports). 1.21.5 was a content
+    /// release (31 data components, the spring-drop entities/items/sounds)
+    /// that itself dropped the thrown `potion` entity for the splash and
+    /// lingering split, both tooltip components and `entity.wolf.howl`;
+    /// 26.2 dropped three further sounds, along with the usual bed/chain
+    /// renames.
+    #[test]
+    fn remap_1_21_4_anchors() {
+        let (r, from, to) = setup(769);
+
+        assert_pre_1_21_11_anchors(r, from);
+        assert_eq!(r.remap(ClientRegistry::EntityType, 123), Some(131)); // tadpole
+        assert_bed_unmapped(r, from);
+        assert_chain_remapped(r, from);
+        assert_unmapped(r, from, ClientRegistry::EntityType, "potion");
+        for component in ["hide_tooltip", "hide_additional_tooltip"] {
+            assert_unmapped(r, from, ClientRegistry::DataComponentType, component);
+        }
+        assert_unmapped(r, from, ClientRegistry::SoundEvent, "entity.wolf.howl");
+
+        assert_round_trips(r, from, to);
+    }
+
     #[test]
     fn latest_identity() {
         let r = RegistryRemaps::to_latest(LATEST.protocol).unwrap();
