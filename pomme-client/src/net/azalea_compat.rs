@@ -660,7 +660,7 @@ fn translate_set_time_774() {
 /// action bodies in the references), through each version's id table.
 #[test]
 fn translate_attack_old_versions() {
-    for protocol in [774, 773, 772] {
+    for protocol in [774, 773, 772, 771] {
         let frames =
             translation_for(protocol).translate_outbound_game_frame(wire::encode_attack(42));
         let interact = old_id(protocol, Direction::Serverbound, "interact");
@@ -782,57 +782,68 @@ fn translate_horse_screen_open_773() {
 
 /// The id remap through the 1.21.9 debug-packet insertions (`set_health`
 /// shifted) plus the 1.21.8 serializer interleave: `sniffer_state` is 31
-/// there (`compound_tag` still sits at 16), 35 on 26.2.
+/// there (`compound_tag` still sits at 16), 35 on 26.2. 1.21.6 shares the
+/// serializer set, so it runs at 771 too.
 #[test]
-fn translate_entity_data_772() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(772, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9); // entity id
-    old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
-    old.extend_from_slice(&[17, 31, 2]); // index 17, sniffer_state, ordinal 2
-    old.push(0xFF);
+fn translate_entity_data_old_versions() {
+    for protocol in [772, 771] {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(protocol, Direction::Clientbound, "set_entity_data"),
+        );
+        wire::write_varint(&mut old, 9); // entity id
+        old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
+        old.extend_from_slice(&[17, 31, 2]); // index 17, sniffer_state, ordinal 2
+        old.push(0xFF);
 
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(772, old) else {
-        panic!("wrong packet");
-    };
-    let items = &p.packed_items.0;
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[1].index, 17);
-    assert!(matches!(
-        items[1].value,
-        azalea_entity::EntityDataValue::SnifferState(_)
-    ));
+        let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(protocol, old) else {
+            panic!("wrong packet");
+        };
+        let items = &p.packed_items.0;
+        assert_eq!(items.len(), 2, "{protocol}");
+        assert_eq!(items[1].index, 17, "{protocol}");
+        assert!(
+            matches!(
+                items[1].value,
+                azalea_entity::EntityDataValue::SnifferState(_)
+            ),
+            "{protocol}"
+        );
+    }
 }
 
 /// A `compound_tag` entry (16, removed in 1.21.9) is stripped — an empty
 /// NBT compound between two live entries — instead of failing the packet.
 #[test]
-fn translate_entity_data_compound_tag_772() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(772, Direction::Clientbound, "set_entity_data"),
-    );
-    wire::write_varint(&mut old, 9); // entity id
-    old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
-    old.extend_from_slice(&[19, 16, 0x0A, 0x00]); // shoulder parrot compound
-    old.extend_from_slice(&[8, 8, 1]); // index 8, boolean, true
-    old.push(0xFF);
+fn translate_entity_data_compound_tag_old_versions() {
+    for protocol in [772, 771] {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(protocol, Direction::Clientbound, "set_entity_data"),
+        );
+        wire::write_varint(&mut old, 9); // entity id
+        old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
+        old.extend_from_slice(&[19, 16, 0x0A, 0x00]); // shoulder parrot compound
+        old.extend_from_slice(&[8, 8, 1]); // index 8, boolean, true
+        old.push(0xFF);
 
-    let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(772, old) else {
-        panic!("wrong packet");
-    };
-    let items = &p.packed_items.0;
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0].index, 0);
-    assert_eq!(items[1].index, 8);
-    assert!(matches!(
-        items[1].value,
-        azalea_entity::EntityDataValue::Boolean(true)
-    ));
+        let ClientboundGamePacket::SetEntityData(p) = translate_and_decode(protocol, old) else {
+            panic!("wrong packet");
+        };
+        let items = &p.packed_items.0;
+        assert_eq!(items.len(), 2, "{protocol}");
+        assert_eq!(items[0].index, 0, "{protocol}");
+        assert_eq!(items[1].index, 8, "{protocol}");
+        assert!(
+            matches!(
+                items[1].value,
+                azalea_entity::EntityDataValue::Boolean(true)
+            ),
+            "{protocol}"
+        );
+    }
 }
 
 /// A 772 particle-list value (`LivingEntity.EFFECT_PARTICLES`, serializer 18
@@ -936,31 +947,39 @@ fn assert_velocity(v: azalea_core::position::Vec3) {
 
 /// The velocity move: three trailing shorts (1/8000 block) on 1.21.8, an
 /// `LpVec3` between position and rotations on 26.2
-/// (`ClientboundAddEntityPacket` read bodies in both references).
+/// (`ClientboundAddEntityPacket` read bodies in both references). 1.21.6
+/// shares the layout; running it too pins that the 1.21.9-era rewrites apply
+/// to protocol 771.
 #[test]
-fn translate_add_entity_772() {
-    let mut old = Vec::new();
-    wire::write_varint(&mut old, old_id(772, Direction::Clientbound, "add_entity"));
-    wire::write_varint(&mut old, 7); // entity id
-    old.extend_from_slice(&[0; 16]); // uuid
-    wire::write_varint(&mut old, 20); // entity type (remapped after decode)
-    for c in [100.5f64, 64.0, -20.25] {
-        old.extend_from_slice(&c.to_be_bytes());
-    }
-    old.extend_from_slice(&[10, 20, 30]); // x/y/head rotation
-    wire::write_varint(&mut old, 0); // data
-    write_velocity_shorts(&mut old);
+fn translate_add_entity_old_versions() {
+    for protocol in [772, 771] {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(protocol, Direction::Clientbound, "add_entity"),
+        );
+        wire::write_varint(&mut old, 7); // entity id
+        old.extend_from_slice(&[0; 16]); // uuid
+        wire::write_varint(&mut old, 20); // entity type (remapped after decode)
+        for c in [100.5f64, 64.0, -20.25] {
+            old.extend_from_slice(&c.to_be_bytes());
+        }
+        old.extend_from_slice(&[10, 20, 30]); // x/y/head rotation
+        wire::write_varint(&mut old, 0); // data
+        write_velocity_shorts(&mut old);
 
-    let ClientboundGamePacket::AddEntity(p) = translate_and_decode(772, old) else {
-        panic!("wrong packet");
-    };
-    assert_eq!(p.id, MinecraftEntityId(7));
-    assert_eq!(
-        (p.position.x, p.position.y, p.position.z),
-        (100.5, 64.0, -20.25)
-    );
-    assert_velocity(azalea_core::position::Vec3::from(p.movement));
-    assert_eq!((p.x_rot, p.y_rot, p.y_head_rot), (10, 20, 30));
+        let ClientboundGamePacket::AddEntity(p) = translate_and_decode(protocol, old) else {
+            panic!("wrong packet");
+        };
+        assert_eq!(p.id, MinecraftEntityId(7), "{protocol}");
+        assert_eq!(
+            (p.position.x, p.position.y, p.position.z),
+            (100.5, 64.0, -20.25),
+            "{protocol}"
+        );
+        assert_velocity(azalea_core::position::Vec3::from(p.movement));
+        assert_eq!((p.x_rot, p.y_rot, p.y_head_rot), (10, 20, 30), "{protocol}");
+    }
 }
 
 /// The same shorts -> `LpVec3` switch on `set_entity_motion`.

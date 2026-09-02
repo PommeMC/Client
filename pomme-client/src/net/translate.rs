@@ -63,6 +63,11 @@
 //!   (`debug_sample_subscription` -> `debug_subscription_request`), which pomme
 //!   never sends
 //!
+//! 1.21.6 -> 26.2: identical to 1.21.8's translation. 1.21.7 changed no
+//! packet layout, id, or serializer (the decompiled `network/protocol`
+//! trees and `EntityDataSerializers` are byte-identical); it only added the
+//! lava_chicken music disc item and sound, absorbed by the registry remap.
+//!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
 //! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
@@ -160,7 +165,7 @@ impl Ids772 {
 /// Protocols the wire translation fully covers. A version with embedded
 /// tables but no entry here (the staging state while its translation is
 /// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[775, 774, 773, 772];
+const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -483,7 +488,8 @@ impl GameIds {
             serializer_map: match protocol {
                 774 => remap_serializer_774,
                 773 => remap_serializer_773,
-                772 => remap_serializer_772,
+                // 1.21.6 and 1.21.8 register identical serializer sets.
+                771 | 772 => remap_serializer_772,
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
