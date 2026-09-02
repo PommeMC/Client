@@ -221,8 +221,7 @@ const BLOCK_DATA: [(i32, &str); 10] = [
 /// blocks added between them); they share that version's slot instead of
 /// building a second copy of the same table. The slot also serves
 /// `STATE_DATA`, so an alias requires the two versions' `generated/state.json`
-/// dumps to be identical as well, not just the block list (both entries were
-/// checked that way).
+/// dumps to be identical as well, not just the block list.
 const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
     // 1.21.7 added no blocks.
     (771, 772),
