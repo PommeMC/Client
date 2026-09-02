@@ -102,6 +102,10 @@
 //! - `add_experience_orb` has no newer equivalent and pomme renders no XP orbs;
 //!   the frame is dropped, like `add_entity` for the thrown `potion` entity
 //!   1.21.5 split into splash/lingering
+//! - serverbound `set_creative_mode_slot` wrote item component values bare,
+//!   where 1.21.5 length-prefixes each one
+//!   (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`); untranslated — see the
+//!   azalea-divergence list
 //!
 //! 1.21.3 -> 26.2 wire changes (all of 1.21.4's plus):
 //! - `level_particles` lacks the `alwaysShow` bool 1.21.4 inserted after
@@ -155,6 +159,16 @@
 //! silently wrong component. Common survival items only use earlier, unshifted
 //! components. Items nested inside component values (bundles, containers) also
 //! keep their source-version ids.
+//!
+//! Depends on azalea diverging from 26.2: these translations are correct only
+//! because azalea encodes or decodes something differently from the reference,
+//! so fixing azalea — or replacing it with pomme's own codec — breaks the older
+//! versions unless the matching rewrite lands at the same time. Each site
+//! carries a `TODO` pointing here.
+//! - inbound `set_player_team` copies the color through as a plain
+//!   `ChatFormatting` ordinal, where 26.2 writes an `Optional<TeamColor>`
+//! - outbound `set_creative_mode_slot` leaves component values undelimited,
+//!   which is 1.21.4's layout rather than 26.2's
 
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -597,6 +611,8 @@ impl Translation {
     /// Remaps an outbound packet's static-registry ids into the launched
     /// version's id space. Never drops the packet; entries the older version
     /// lacks degrade to empty (the server resyncs the slot).
+    /// TODO: delimit `set_creative_mode_slot` component values for 1.21.5 and
+    /// up once pomme owns the encoder (see the azalea-divergence list).
     pub fn remap_outbound(&self, packet: &mut ServerboundGamePacket) {
         match packet {
             ServerboundGamePacket::ContainerClick(p) => {
@@ -1896,6 +1912,8 @@ fn translate_team(id: u32, payload: &[u8], string_scopes: bool) -> Option<Vec<u8
         // and these frames feed azalea — copy it through unchanged (all
         // ordinals fit one varint byte). See the team tests in
         // azalea_compat.
+        // TODO: write the Optional<TeamColor> form once pomme owns the
+        // decoder (see the azalea-divergence list).
         out.push(color as u8);
         out.push(options);
     }
