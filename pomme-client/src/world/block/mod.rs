@@ -201,7 +201,7 @@ impl ScalarOrPerState {
 
 /// Per-protocol block-state data, latest first; unknown protocols fall back
 /// to the latest (slot 0).
-const BLOCK_DATA: [(i32, &str); 5] = [
+const BLOCK_DATA: [(i32, &str); 6] = [
     (
         pomme_protocol::version::LATEST.protocol,
         include_str!("data/blocks-26.2.json"),
@@ -210,6 +210,7 @@ const BLOCK_DATA: [(i32, &str); 5] = [
     (774, include_str!("data/blocks-1.21.11.json")),
     (773, include_str!("data/blocks-1.21.10.json")),
     (772, include_str!("data/blocks-1.21.8.json")),
+    (770, include_str!("data/blocks-1.21.5.json")),
 ];
 
 /// Protocols whose block set is identical to a newer embedded version's (no
@@ -232,6 +233,7 @@ const STATE_DATA: [&str; BLOCK_DATA.len()] = [
     include_str!("data/state-1.21.11.json"),
     include_str!("data/state-1.21.10.json"),
     include_str!("data/state-1.21.8.json"),
+    include_str!("data/state-1.21.5.json"),
 ];
 
 /// One lazily-built table per embedded data file; `ACTIVE_TABLE` indexes the

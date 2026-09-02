@@ -488,6 +488,58 @@ mod tests {
         }
     }
 
+    /// Registration-order anchors for 1.21.5, cross-checked in full against
+    /// Mojang's `generated/reports/packets.json`. 1.21.6 appended its
+    /// dialog/waypoint clientbound packets (the 1.21.5 clientbound list is a
+    /// strict prefix of 1.21.6's) but inserted `change_game_mode` and
+    /// `custom_click_action` serverbound, shifting most serverbound ids.
+    #[test]
+    fn anchors_1_21_5() {
+        let t = PacketTable::for_protocol(770).unwrap();
+        assert_eq!(t.version().protocol, 770);
+        assert_eq!(t.version().name, "1.21.5");
+        assert_eq!(t.id(Phase::Game, Direction::Serverbound, "attack"), None);
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "change_game_mode"),
+            None
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "interact"),
+            Some(24)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "container_click"),
+            Some(16)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "player_command"),
+            Some(40)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "level_particles"),
+            Some(41)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_entity_data"),
+            Some(92)
+        );
+        assert_eq!(t.id(Phase::Game, Direction::Clientbound, "waypoint"), None);
+        assert_eq!(
+            t.id(Phase::Login, Direction::Clientbound, "login_finished"),
+            Some(2)
+        );
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 63).is_some());
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 64).is_none());
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 130)
+                .is_some()
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 131)
+                .is_none()
+        );
+    }
+
     /// The latest protocol resolves to the shared latest table, every
     /// embedded version to its own table, and anything else to nothing.
     #[test]
