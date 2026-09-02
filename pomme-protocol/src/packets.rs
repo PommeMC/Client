@@ -542,8 +542,10 @@ mod tests {
 
     /// Registration-order anchors for 1.21.4, cross-checked in full against
     /// Mojang's `generated/reports/packets.json`. 1.21.5 removed
-    /// `add_experience_orb` (clientbound 2), added the test-block packets,
-    /// and shifted most clientbound ids.
+    /// `add_experience_orb` (clientbound 2) and inserted
+    /// `test_instance_block_status` at 119, so only the clientbound ids
+    /// between them shift down one, and inserted `set_test_block` (57) and
+    /// `test_instance_block_action` (61) serverbound.
     #[test]
     fn anchors_1_21_4() {
         let t = PacketTable::for_protocol(769).unwrap();
