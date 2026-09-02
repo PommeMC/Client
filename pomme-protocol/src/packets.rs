@@ -161,6 +161,34 @@ impl DirectionTable {
 mod tests {
     use super::*;
 
+    /// Asserts every id `t` has in the phase/direction resolves to the same
+    /// name in `other` (a prefix check; pass `equal` to also require `other`
+    /// to end at the same id).
+    fn assert_prefix(
+        t: &PacketTable,
+        other: &PacketTable,
+        phase: Phase,
+        dir: Direction,
+        equal: bool,
+    ) {
+        let mut id = 0;
+        while let Some(name) = t.name_of(phase, dir, id) {
+            assert_eq!(
+                Some(name),
+                other.name_of(phase, dir, id),
+                "{phase:?} {dir:?} {id}"
+            );
+            id += 1;
+        }
+        if equal {
+            assert_eq!(
+                other.name_of(phase, dir, id),
+                None,
+                "{phase:?} {dir:?} {id}"
+            );
+        }
+    }
+
     /// Registration-order anchors, spot-checked by hand against
     /// `reference/26.2/decompiled/.../GameProtocols.java`.
     #[test]
@@ -455,12 +483,7 @@ mod tests {
             Phase::Game,
         ] {
             for dir in [Direction::Serverbound, Direction::Clientbound] {
-                for id in 0.. {
-                    match (t.name_of(phase, dir, id), t772.name_of(phase, dir, id)) {
-                        (None, None) => break,
-                        (a, b) => assert_eq!(a, b, "{phase:?} {dir:?} {id}"),
-                    }
-                }
+                assert_prefix(t, t772, phase, dir, true);
             }
         }
     }
@@ -678,13 +701,24 @@ mod tests {
         );
     }
 
+    /// Every listed version resolves to a table exactly when it is the latest
+    /// or has embedded data; nothing else does.
     #[test]
     fn for_protocol_lookups() {
+        use crate::version::{LATEST, VERSIONS, embedded_index};
         assert!(std::ptr::eq(
-            PacketTable::for_protocol(776).unwrap(),
+            PacketTable::for_protocol(LATEST.protocol).unwrap(),
             PacketTable::latest()
         ));
-        assert!(PacketTable::for_protocol(766).is_none());
+        for v in VERSIONS {
+            assert_eq!(
+                PacketTable::for_protocol(v.protocol).is_some(),
+                v.protocol == LATEST.protocol || embedded_index(v.protocol).is_some(),
+                "{}",
+                v.name
+            );
+        }
+        assert!(PacketTable::for_protocol(0).is_none());
     }
 
     /// Per-phase counts from the 26.2 registration lists; a regenerated table
