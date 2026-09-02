@@ -24,7 +24,9 @@
 //!   the edge; every 1.21.11 packet still exists in 26.2 under the same name,
 //!   and no other clientbound layout changed
 //! - `set_entity_data` serializer ids shifted (26.x interleaved four
-//!   `*_sound_variant` serializers into `EntityDataSerializers`)
+//!   `*_sound_variant` serializers into `EntityDataSerializers`), and particle
+//!   values carry type ids in the wire version's registry space, remapped in
+//!   place
 //! - each chunk section in `level_chunk_with_light` gained a `fluidCount` short
 //!   after `nonEmptyBlockCount`
 //! - `set_time` replaced `dayTime`/`tickDayTime` with a world-clock map
@@ -38,6 +40,28 @@
 //!   `mount_screen_open` with identical fields; the id match aliases the pair
 //! - `EntityDataSerializers` lacks 1.21.11's `zombie_nautilus_variant` (28) and
 //!   trailing `humanoid_arm`, so the serializer remap differs
+//!
+//! 1.21.8 -> 26.2 wire changes (all of 1.21.10's plus 1.21.9's, which the id
+//! remap and the rewrites below absorb):
+//! - `add_entity` carried the velocity as three trailing shorts (1/8000 block
+//!   per tick); 1.21.9 moved it to an `LpVec3` after the position.
+//!   `set_entity_motion` made the same shorts -> `LpVec3` switch
+//! - `player_rotation` gained a relative-rotation bool after each angle
+//! - `set_default_spawn_position` went from `BlockPos + angle` to `RespawnData`
+//!   (`GlobalPos`, yaw, pitch); the old packet has no dimension, so the
+//!   overworld is synthesized
+//! - `explode` gained `radius` and `blockCount` after the center and a trailing
+//!   weighted block-particle list, and its particle and sound ids are remapped
+//! - `EntityDataSerializers` still had `compound_tag` (16), which 1.21.9
+//!   removed; entries using it (player shoulder parrots) are stripped, and
+//!   every id from `particle` up shifts
+//! - the `profile` item component was a bare name/uuid/properties triple, which
+//!   1.21.9 wrapped in `ResolvableProfile` (full/partial profile either plus a
+//!   skin patch)
+//! - the clientbound `debug_*`/`game_test_highlight_pos` packets don't exist
+//!   yet (pure id shifts); serverbound 22 was renamed
+//!   (`debug_sample_subscription` -> `debug_subscription_request`), which pomme
+//!   never sends
 //!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
@@ -62,8 +86,11 @@ use azalea_protocol::packets::game::s_container_click::HashedStack;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use azalea_registry::builtin::{DataComponentKind, SoundEvent};
 use azalea_registry::{Holder, Registry};
+use glam::DVec3;
 use pomme_protocol::version::LATEST;
-use pomme_protocol::{ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, wire};
+use pomme_protocol::{
+    ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
+};
 
 pub struct Translation {
     to_latest: &'static RegistryRemaps,
@@ -96,12 +123,44 @@ struct GameIds {
     attack_id: u32,
     interact_id: u32,
     interact_old_id: u32,
+    /// Whether the wire version's `entity_effect`/`tinted_leaves` particles
+    /// carry a color int (1.20.5 added it); see [`translate_particles`].
+    color_particles: bool,
+    /// The rewrites 1.21.9 introduced, for wire versions at or below it.
+    v772: Option<Ids772>,
+}
+
+/// Latest-space dispatch ids for the frame rewrites only protocols at or
+/// below 772 need (the layouts 1.21.9 changed). Its presence also flags the
+/// pre-1.21.9 entity-data serializer set and `profile` component layout.
+struct Ids772 {
+    add_entity_id: u32,
+    set_entity_motion_id: u32,
+    player_rotation_id: u32,
+    set_default_spawn_id: u32,
+    explode_id: u32,
+}
+
+/// A version-specific frame rewriter: latest-space id + payload to the
+/// rewritten frame, `None` when malformed.
+type FrameRewrite = fn(u32, &[u8]) -> Option<Vec<u8>>;
+
+impl Ids772 {
+    fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
+        Some(match id {
+            i if i == self.add_entity_id => translate_add_entity,
+            i if i == self.set_entity_motion_id => translate_set_entity_motion,
+            i if i == self.player_rotation_id => translate_player_rotation,
+            i if i == self.set_default_spawn_id => translate_set_default_spawn,
+            _ => return None,
+        })
+    }
 }
 
 /// Protocols the wire translation fully covers. A version with embedded
 /// tables but no entry here (the staging state while its translation is
 /// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[775, 774, 773];
+const TRANSLATED: &[i32] = &[775, 774, 773, 772];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -199,11 +258,15 @@ impl Translation {
             translate_team(id, payload)
         } else if let Some(ids) = &self.game_ids {
             if id == ids.set_entity_data_id {
-                translate_entity_data(id, payload, ids.serializer_map, self.to_latest)
+                translate_entity_data(id, payload, ids, self.to_latest)
             } else if id == ids.level_chunk_id {
                 translate_chunk(id, payload)
             } else if id == ids.set_time_id {
                 translate_set_time(id, payload)
+            } else if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
+                translate_explode(id, payload, ids, self.to_latest)
+            } else if let Some(rewrite) = ids.v772.as_ref().and_then(|v| v.rewrite(id)) {
+                rewrite(id, payload)
             } else if id == wire_id {
                 return Some(raw);
             } else {
@@ -420,6 +483,7 @@ impl GameIds {
             serializer_map: match protocol {
                 774 => remap_serializer_774,
                 773 => remap_serializer_773,
+                772 => remap_serializer_772,
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
@@ -428,6 +492,14 @@ impl GameIds {
             attack_id: id(Serverbound, "attack"),
             interact_id: id(Serverbound, "interact"),
             interact_old_id: required_id(table, Phase::Game, Serverbound, "interact"),
+            color_particles: protocol >= 766,
+            v772: (protocol <= 772).then(|| Ids772 {
+                add_entity_id: id(Clientbound, "add_entity"),
+                set_entity_motion_id: id(Clientbound, "set_entity_motion"),
+                player_rotation_id: id(Clientbound, "player_rotation"),
+                set_default_spawn_id: id(Clientbound, "set_default_spawn_position"),
+                explode_id: id(Clientbound, "explode"),
+            }),
         })
     }
 }
@@ -533,6 +605,25 @@ fn remap_serializer_773(old: u32) -> Option<u32> {
     }
 }
 
+/// The pre-1.21.9 wire id of the `compound_tag` entity-data serializer,
+/// which 1.21.9 removed; `remap_serializer_772` maps it to `None` and
+/// `translate_entity_data` strips entries using it.
+const COMPOUND_TAG_SERIALIZER: u32 = 16;
+
+/// The latest serializer id for a 1.21.8 `EntityDataSerializers` id: 1.21.9
+/// removed `compound_tag` (16), shifting everything above it down one, and
+/// inserted `copper_golem_state`/`weathering_copper_state` right below
+/// `vector3`; on either side the 1.21.10 interleave applies unchanged.
+fn remap_serializer_772(old: u32) -> Option<u32> {
+    match old {
+        0..=15 => Some(old),
+        COMPOUND_TAG_SERIALIZER => None,
+        17..=32 => remap_serializer_773(old - 1),
+        33..=34 => remap_serializer_773(old + 1),
+        _ => None,
+    }
+}
+
 /// Rewrites the game `login` payload: 26.2 added `onlineMode` before the
 /// trailing `enforcesSecureChat` bool.
 fn translate_game_login(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
@@ -549,14 +640,19 @@ fn translate_game_login(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// serializer, value)` entries terminated by `0xFF`) by remapping each
 /// entry's serializer id through the wire version's `serializer_map`. Value
 /// layouts are identical between the versions (verified serializer by
-/// serializer); they're skipped, not decoded. An item-stack or particle
-/// value can't be skipped without full component / particle codecs — the
-/// remainder is copied verbatim, which is correct unless a shifted
-/// serializer follows one (no vanilla entity does that).
+/// serializer); they're skipped, not decoded, except particle values, whose
+/// type ids are remapped in place ([`translate_particles`]). An entry using
+/// a serializer the latest version dropped (1.21.8's `compound_tag`) is
+/// stripped rather than failing the packet. An item-stack value can't
+/// always be walked without full component codecs — the remainder is copied
+/// verbatim, which is correct unless a shifted serializer follows one (no
+/// vanilla entity sends one after an untranslatable stack).
+/// TODO: translate shoulder-parrot NBT to 26.2's OptionalInt variant
+/// instead of stripping it, so shoulder parrots show on old servers.
 fn translate_entity_data(
     id: u32,
     payload: &[u8],
-    serializer_map: fn(u32) -> Option<u32>,
+    ids: &GameIds,
     remaps: &RegistryRemaps,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
@@ -567,23 +663,37 @@ fn translate_entity_data(
     out.extend_from_slice(&payload[..cur.position() as usize]);
     loop {
         let index = read_u8(&mut cur)?;
-        out.push(index);
         if index == 0xFF {
+            out.push(index);
             break;
         }
         let old = u32::azalea_read_var(&mut cur).ok()?;
-        let new = serializer_map(old)?;
+        let Some(new) = (ids.serializer_map)(old) else {
+            if ids.v772.is_some() && old == COMPOUND_TAG_SERIALIZER {
+                // compound_tag values are network NBT; drop the entry.
+                skip_nbt(&mut cur)?;
+                continue;
+            }
+            return None;
+        };
+        out.push(index);
         wire::write_varint(&mut out, new);
         let value_at = cur.position() as usize;
         if new == 7 {
             let mut stack = Vec::new();
-            if translate_item_stack(&mut cur, &mut stack, remaps).is_some() {
+            if translate_item_stack(&mut cur, &mut stack, remaps, ids.v772.is_some()).is_some() {
                 out.extend_from_slice(&stack);
                 continue;
             }
             tracing::debug!("Copying entity data tail verbatim past an item stack");
             out.extend_from_slice(&payload[value_at..]);
             return Some(out);
+        }
+        if new == 16 || new == 17 {
+            let mut particles = Vec::new();
+            translate_particles(&mut cur, &mut particles, ids, remaps, new == 17)?;
+            out.extend_from_slice(&particles);
+            continue;
         }
         if !skip_metadata_value(&mut cur, new)? {
             tracing::debug!("Copying entity data tail verbatim past serializer {old}");
@@ -604,13 +714,15 @@ pub(crate) const COMPONENT_MAP_ID: u32 = 46;
 pub(crate) const COMPONENT_PROFILE: u32 = 70;
 
 /// Remaps one entity-data item stack (count, item id, component patch) into
-/// the latest registry space. `None` means a component payload the walker
-/// doesn't know (or a malformed stack); the caller falls back to the
-/// verbatim-tail copy.
+/// the latest registry space. `old_profile` marks the pre-1.21.9 `profile`
+/// component layout (see [`translate_old_profile`]). `None` means a
+/// component payload the walker doesn't know (or a malformed stack); the
+/// caller falls back to the verbatim-tail copy.
 fn translate_item_stack(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     remaps: &RegistryRemaps,
+    old_profile: bool,
 ) -> Option<()> {
     let count_at = cur.position() as usize;
     let count = i32::azalea_read_var(cur).ok()?;
@@ -635,6 +747,10 @@ fn translate_item_stack(
             COMPONENT_MAP_ID => {
                 varint_span(cur)?;
             }
+            COMPONENT_PROFILE if old_profile => {
+                translate_old_profile(cur, out)?;
+                continue;
+            }
             COMPONENT_PROFILE => {
                 Profile::azalea_read(cur).ok()?;
             }
@@ -652,6 +768,26 @@ fn translate_item_stack(
     Some(())
 }
 
+/// Rewrites a pre-1.21.9 `profile` component value (optional name, optional
+/// uuid, property map) into 26.2's `ResolvableProfile`: an either bool
+/// picking full/partial profile — the old triple matches the partial arm
+/// byte for byte — plus a skin patch, empty here (four absent optionals).
+fn translate_old_profile(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let value_at = cur.position() as usize;
+    skip_optional(cur, skip_utf)?; // name
+    skip_optional(cur, |c| advance(c, 16))?; // uuid
+    let properties = u32::azalea_read_var(cur).ok()?;
+    for _ in 0..properties {
+        skip_utf(cur)?; // property name
+        skip_utf(cur)?; // value
+        skip_optional(cur, skip_utf)?; // signature
+    }
+    out.push(0); // either: the partial-profile arm
+    out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
+    out.extend_from_slice(&[0; 4]); // empty PlayerSkin.Patch
+    Some(())
+}
+
 /// Advances past one entity-data value of the given latest-version
 /// serializer (the caller remaps first). `Some(false)` means the value (and
 /// thus anything after it) can't be walked; `None` means the data is
@@ -666,11 +802,6 @@ fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool>
         40 => advance(cur, 16)?,   // quaternion
         41 => {
             Profile::azalea_read(cur).ok()?;
-        }
-        17 => {
-            if u32::azalea_read_var(cur).ok()? != 0 {
-                return Some(false);
-            }
         }
         // varint-shaped: int, enums, registry/holder ids, optional ints
         1 | 12 | 14 | 15 | 19 | 20 | 21 | 22..=32 | 35..=38 | 42 => {
@@ -708,11 +839,106 @@ fn skip_metadata_value(cur: &mut Cursor<&[u8]>, serializer: u32) -> Option<bool>
                 skip_optional(cur, skip_nbt)?;
             }
         }
-        // item stacks (7), particles (16/17) and resolvable profiles (41)
-        // need full value codecs to walk past
+        // item stacks (7) and particles (16/17) have their own translation
+        // paths in `translate_entity_data`; anything else can't be walked
+        // without its full value codec
         _ => return Some(false),
     }
     Some(true)
+}
+
+/// 26.2 particle names whose options carry a payload after the type id;
+/// every older supported version's payload set is a strict subset of this
+/// one, so a name outside it is a bare type id on both sides.
+const PAYLOAD_PARTICLES: &[&str] = &[
+    "block",
+    "block_crumble",
+    "block_marker",
+    "dragon_breath",
+    "dust",
+    "dust_color_transition",
+    "dust_pillar",
+    "effect",
+    "entity_effect",
+    "falling_dust",
+    "flash",
+    "geyser",
+    "geyser_base",
+    "geyser_plume",
+    "geyser_poof",
+    "instant_effect",
+    "item",
+    "sculk_charge",
+    "shriek",
+    "tinted_leaves",
+    "trail",
+    "vibration",
+];
+
+/// Rewrites one particle (or, with `list`, a counted particle list):
+/// each type id is remapped into 26.2's space, a color payload
+/// (`entity_effect`/`tinted_leaves`, an ARGB int on wire versions that have
+/// it) is copied through, and payload-less particles pass bare. `None` (a
+/// particle 26.2 dropped, or a payload the walker can't rewrite) fails the
+/// packet — a verbatim fallback would leave wire-space ids and, in entity
+/// data, any following entries' shifted serializer ids in place.
+/// TODO: rewrite the remaining `PAYLOAD_PARTICLES` payloads (block states,
+/// dust colors, items) so entities and explosions using them translate.
+fn translate_particles(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    ids: &GameIds,
+    remaps: &RegistryRemaps,
+    list: bool,
+) -> Option<()> {
+    let count = if list {
+        let count = u32::azalea_read_var(cur).ok()?;
+        wire::write_varint(out, count);
+        count
+    } else {
+        1
+    };
+    for _ in 0..count {
+        let old = u32::azalea_read_var(cur).ok()?;
+        let new = remaps.remap(ClientRegistry::ParticleType, old)?;
+        wire::write_varint(out, new);
+        let name = RegistryTable::latest().name_of(ClientRegistry::ParticleType, new)?;
+        match name {
+            "entity_effect" | "tinted_leaves" if ids.color_particles => {
+                let color_at = cur.position() as usize;
+                advance(cur, 4)?;
+                out.extend_from_slice(&cur.get_ref()[color_at..cur.position() as usize]);
+            }
+            n if PAYLOAD_PARTICLES.contains(&n) => {
+                tracing::debug!("Dropping a packet with an untranslatable {n} particle");
+                return None;
+            }
+            _ => {}
+        }
+    }
+    Some(())
+}
+
+/// Copies one `Holder<SoundEvent>` (varint id + 1, or 0 followed by the
+/// inline definition: location string plus an optional fixed range),
+/// remapping a referenced id into 26.2's space.
+fn translate_sound_holder(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let holder = u32::azalea_read_var(cur).ok()?;
+    if holder == 0 {
+        let inline_at = cur.position() as usize;
+        skip_utf(cur)?;
+        skip_optional(cur, |c| advance(c, 4))?;
+        out.push(0);
+        out.extend_from_slice(&cur.get_ref()[inline_at..cur.position() as usize]);
+        return Some(());
+    }
+    let new = remaps.remap(ClientRegistry::SoundEvent, holder - 1)?;
+    wire::write_varint(out, new + 1);
+    Some(())
 }
 
 fn skip_utf(cur: &mut Cursor<&[u8]>) -> Option<()> {
@@ -829,6 +1055,118 @@ fn translate_set_time(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(&0f32.to_be_bytes()); // partial tick
     let rate: f32 = if tick_day_time != 0 { 1.0 } else { 0.0 };
     out.extend_from_slice(&rate.to_be_bytes());
+    Some(out)
+}
+
+/// An `add_entity`/`set_entity_motion` velocity: three shorts in 1/8000ths
+/// of a block per tick.
+fn read_velocity(cur: &mut Cursor<&[u8]>) -> Option<DVec3> {
+    let mut v = [0.0; 3];
+    for c in &mut v {
+        *c = f64::from(read_u16(cur)? as i16) / 8000.0;
+    }
+    Some(DVec3::from_array(v))
+}
+
+/// Rewrites `add_entity`: 1.21.9 moved the velocity from three trailing
+/// shorts to an `LpVec3` between the position and the rotation bytes
+/// (`ClientboundAddEntityPacket` read/write in both references). The entity
+/// type id stays in the wire version's space; `remap_inbound` remaps it on
+/// the decoded packet.
+fn translate_add_entity(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    varint_span(&mut cur)?; // entity id
+    advance(&mut cur, 16)?; // uuid
+    varint_span(&mut cur)?; // entity type
+    advance(&mut cur, 24)?; // position doubles
+    let rot_at = cur.position() as usize;
+    advance(&mut cur, 3)?; // x/y/head rotation bytes
+    varint_span(&mut cur)?; // data
+    let rot_end = cur.position() as usize;
+    let velocity = read_velocity(&mut cur)?;
+
+    let mut out = Vec::with_capacity(payload.len() + 4);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..rot_at]);
+    wire::write_lp_vec3(&mut out, velocity);
+    out.extend_from_slice(&payload[rot_at..rot_end]);
+    Some(out)
+}
+
+/// Rewrites `set_entity_motion` from `entityId` + three velocity shorts to
+/// `entityId` + `LpVec3`.
+fn translate_set_entity_motion(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let entity = varint_span(&mut cur)?;
+    let velocity = read_velocity(&mut cur)?;
+
+    let mut out = Vec::with_capacity(payload.len() + 4);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[entity]);
+    wire::write_lp_vec3(&mut out, velocity);
+    Some(out)
+}
+
+/// Rewrites `player_rotation`: 1.21.9 added a relative-rotation bool after
+/// each angle, absolute here matching the old packet's semantics.
+fn translate_player_rotation(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let y_rot = payload.get(..4)?;
+    let x_rot = payload.get(4..8)?;
+    let mut out = Vec::with_capacity(12);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(y_rot);
+    out.push(0);
+    out.extend_from_slice(x_rot);
+    out.push(0);
+    Some(out)
+}
+
+/// Rewrites `set_default_spawn_position` from `BlockPos + angle` to 26.2's
+/// `RespawnData` (`GlobalPos`, yaw, pitch). The old packet carries no
+/// dimension or pitch: the overworld and zero are synthesized, and the
+/// angle becomes the yaw.
+/// TODO: carry the login/respawn dimension instead of synthesizing the
+/// overworld, so compasses point right in other dimensions.
+fn translate_set_default_spawn(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let pos = payload.get(..8)?;
+    let angle = payload.get(8..12)?;
+    const DIMENSION: &str = "minecraft:overworld";
+    let mut out = Vec::with_capacity(40);
+    wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, DIMENSION.len() as u32);
+    out.extend_from_slice(DIMENSION.as_bytes());
+    out.extend_from_slice(pos);
+    out.extend_from_slice(angle); // yaw
+    out.extend_from_slice(&0f32.to_be_bytes()); // pitch
+    Some(out)
+}
+
+/// Rewrites `explode`: 1.21.9 inserted `radius` and `blockCount` after the
+/// center and appended a weighted block-particle list (zero/empty here),
+/// and the particle and sound registry ids between the knockback and the
+/// end are remapped into 26.2's space (vanilla sends
+/// `explosion`/`explosion_emitter` and `entity.generic.explode`, all of
+/// which shift).
+fn translate_explode(
+    id: u32,
+    payload: &[u8],
+    ids: &GameIds,
+    remaps: &RegistryRemaps,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    advance(&mut cur, 24)?; // center doubles
+    skip_optional(&mut cur, |c| advance(c, 24))?; // player knockback
+    let knockback_end = cur.position() as usize;
+
+    let mut out = Vec::with_capacity(payload.len() + 10);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..24]);
+    out.extend_from_slice(&0f32.to_be_bytes()); // radius
+    out.extend_from_slice(&0i32.to_be_bytes()); // block count
+    out.extend_from_slice(&payload[24..knockback_end]);
+    translate_particles(&mut cur, &mut out, ids, remaps, false)?;
+    translate_sound_holder(&mut cur, &mut out, remaps)?;
+    out.push(0); // no block particles
     Some(out)
 }
 
