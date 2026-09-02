@@ -153,6 +153,13 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].version.protocol > w[1].version.protocol)
         );
+        for v in VERSIONS {
+            assert!(
+                v.protocol == LATEST.protocol || embedded_index(v.protocol).is_some(),
+                "{} has no embedded tables",
+                v.name
+            );
+        }
         assert_eq!(embedded_index(LATEST.protocol), None);
         assert_eq!(embedded_index(0), None);
     }
