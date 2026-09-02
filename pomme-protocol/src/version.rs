@@ -174,20 +174,26 @@ mod tests {
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
     }
 
+    /// `EMBEDDED` holds the launchable non-latest versions, newest first
+    /// with one entry per protocol, and `embedded_index` is its slot lookup.
     #[test]
     fn embedded_lookup() {
-        assert_eq!(embedded_index(775), Some(0));
-        assert_eq!(embedded_index(774), Some(1));
-        assert_eq!(embedded_index(773), Some(2));
-        assert_eq!(embedded_index(772), Some(3));
-        assert_eq!(embedded_index(771), Some(4));
-        assert_eq!(embedded_index(770), Some(5));
-        assert_eq!(embedded_index(769), Some(6));
-        assert_eq!(embedded_index(768), Some(7));
-        assert_eq!(embedded_index(767), Some(8));
-        assert_eq!(embedded_index(766), Some(9));
-        assert_eq!(embedded_index(765), Some(10));
+        for (i, e) in EMBEDDED.iter().enumerate() {
+            let protocol = e.version.protocol;
+            assert_eq!(embedded_index(protocol), Some(i), "{}", e.version.name);
+            assert_ne!(protocol, LATEST.protocol, "{}", e.version.name);
+            assert!(
+                VERSIONS.iter().any(|v| v.protocol == protocol),
+                "{} missing from VERSIONS",
+                e.version.name
+            );
+        }
+        assert!(
+            EMBEDDED
+                .windows(2)
+                .all(|w| w[0].version.protocol > w[1].version.protocol)
+        );
         assert_eq!(embedded_index(LATEST.protocol), None);
-        assert_eq!(embedded_index(764), None);
+        assert_eq!(embedded_index(0), None);
     }
 }
