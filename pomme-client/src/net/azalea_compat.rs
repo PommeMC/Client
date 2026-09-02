@@ -660,7 +660,7 @@ fn translate_set_time_774() {
 /// action bodies in the references), through each version's id table.
 #[test]
 fn translate_attack_old_versions() {
-    for protocol in [774, 773, 772, 771] {
+    for protocol in [774, 773, 772, 771, 770] {
         let frames =
             translation_for(protocol).translate_outbound_game_frame(wire::encode_attack(42));
         let interact = old_id(protocol, Direction::Serverbound, "interact");
@@ -782,11 +782,11 @@ fn translate_horse_screen_open_773() {
 
 /// The id remap through the 1.21.9 debug-packet insertions (`set_health`
 /// shifted) plus the 1.21.8 serializer interleave: `sniffer_state` is 31
-/// there (`compound_tag` still sits at 16), 35 on 26.2. 1.21.6 shares the
-/// serializer set, so it runs at 771 too.
+/// there (`compound_tag` still sits at 16), 35 on 26.2. The older versions
+/// sharing the serializer set run through it too.
 #[test]
 fn translate_entity_data_old_versions() {
-    for protocol in [772, 771] {
+    for protocol in [772, 771, 770] {
         let mut old = Vec::new();
         wire::write_varint(
             &mut old,
@@ -817,7 +817,7 @@ fn translate_entity_data_old_versions() {
 /// NBT compound between two live entries — instead of failing the packet.
 #[test]
 fn translate_entity_data_compound_tag_old_versions() {
-    for protocol in [772, 771] {
+    for protocol in [772, 771, 770] {
         let mut old = Vec::new();
         wire::write_varint(
             &mut old,
@@ -947,12 +947,12 @@ fn assert_velocity(v: azalea_core::position::Vec3) {
 
 /// The velocity move: three trailing shorts (1/8000 block) on 1.21.8, an
 /// `LpVec3` between position and rotations on 26.2
-/// (`ClientboundAddEntityPacket` read bodies in both references). 1.21.6
-/// shares the layout; running it too pins that the 1.21.9-era rewrites apply
-/// to protocol 771.
+/// (`ClientboundAddEntityPacket` read bodies in both references). The older
+/// versions sharing the layout run through it too, pinning that the
+/// 1.21.9-era rewrites apply to them.
 #[test]
 fn translate_add_entity_old_versions() {
-    for protocol in [772, 771] {
+    for protocol in [772, 771, 770] {
         let mut old = Vec::new();
         wire::write_varint(
             &mut old,
@@ -1107,6 +1107,25 @@ fn translate_explode_772() {
     let knockback = p.player_knockback.expect("knockback");
     assert_eq!((knockback.x, knockback.y, knockback.z), (0.1, 0.2, 0.3));
     assert!(p.block_particles.is_empty());
+}
+
+/// 1.21.5's `player_command` action enum still opens with PRESS/RELEASE_
+/// SHIFT_KEY (`ServerboundPlayerCommandPacket.Action` in both references),
+/// so a 26.2 action ordinal gains two on the old wire.
+#[test]
+fn translate_player_command_770() {
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        table_id(Direction::Serverbound, "player_command"),
+    );
+    wire::write_varint(&mut frame, 9); // entity id
+    wire::write_varint(&mut frame, 1); // action: START_SPRINTING
+    wire::write_varint(&mut frame, 0); // data
+
+    let frames = translation_for(770).translate_outbound_game_frame(frame);
+    let old = old_id(770, Direction::Serverbound, "player_command") as u8;
+    assert_eq!(frames, [[old, 9, 3, 0]]);
 }
 
 #[test]

@@ -68,17 +68,32 @@
 //! trees and `EntityDataSerializers` are byte-identical); it only added the
 //! lava_chicken music disc item and sound, absorbed by the registry remap.
 //!
+//! 1.21.5 -> 26.2 wire changes (all of 1.21.8's — the pre-1.21.9 rewrites
+//! and serializer set carry over unchanged — plus):
+//! - 1.21.6 appended its dialog/waypoint clientbound packets and inserted
+//!   `change_game_mode`/`custom_click_action` serverbound; the id remap absorbs
+//!   the shifts and `change_game_mode` (which doesn't exist yet) is suppressed
+//! - serverbound `player_command` still opens its action enum with
+//!   PRESS/RELEASE_SHIFT_KEY, so newer action ordinals sit two higher
+//! - `change_difficulty` read an unsigned byte where 1.21.6 reads a varint;
+//!   difficulty ids fit a single byte either way, so the wire bytes are
+//!   identical
+//! - 1.21.6 gave `HangingEntity` a synched `direction` at index 8, so an item
+//!   frame's item/rotation sit at 8/9 here and a painting's variant at 8 (9/10
+//!   and 9 on 26.2); the walker passes index bytes through unremapped and pomme
+//!   renders neither entity, so the shift is left in place
+//!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
 //! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
-//! inserted `additional_trade_cost`; 1.21.10: 5, where 1.21.11 inserted
-//! `use_effects` — so even `custom_name` and `enchantments` are affected
-//! there) decodes under the wrong 26.2 codec —
-//! usually a misparse that skips the packet via `skip_malformed_packet`,
-//! though a coincidentally parsable layout yields a silently wrong
-//! component. Common survival items only use earlier, unshifted components.
-//! Items nested inside component values (bundles, containers) also keep
-//! their source-version ids.
+//! inserted `additional_trade_cost`; 1.21.10 and every older version with a
+//! component registry: 5, where 1.21.11 inserted `use_effects` — so even
+//! `custom_name` and `enchantments` are affected on all of them) decodes under
+//! the wrong 26.2 codec — usually a misparse that skips the packet via
+//! `skip_malformed_packet`, though a coincidentally parsable layout yields a
+//! silently wrong component. Common survival items only use earlier, unshifted
+//! components. Items nested inside component values (bundles, containers) also
+//! keep their source-version ids.
 
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -133,6 +148,15 @@ struct GameIds {
     color_particles: bool,
     /// The rewrites 1.21.9 introduced, for wire versions at or below it.
     v772: Option<Ids772>,
+    /// The rewrites 1.21.6 introduced, for wire versions below it.
+    v770: Option<Ids770>,
+}
+
+/// Dispatch ids for the one outbound rewrite protocol 770 needs (see
+/// [`translate_player_command`]).
+struct Ids770 {
+    player_command_id: u32,
+    player_command_old_id: u32,
 }
 
 /// Latest-space dispatch ids for the frame rewrites only protocols at or
@@ -165,7 +189,7 @@ impl Ids772 {
 /// Protocols the wire translation fully covers. A version with embedded
 /// tables but no entry here (the staging state while its translation is
 /// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771];
+const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -315,6 +339,11 @@ impl Translation {
         }
         if id == ids.interact_id {
             return translate_interact(ids.interact_old_id, &frame[pos..]);
+        }
+        if let Some(v770) = &ids.v770
+            && id == v770.player_command_id
+        {
+            return translate_player_command(v770.player_command_old_id, &frame[pos..]);
         }
         match ids.outbound.get(id as usize).copied().flatten() {
             Some(old) if old == id => vec![frame],
@@ -488,8 +517,8 @@ impl GameIds {
             serializer_map: match protocol {
                 774 => remap_serializer_774,
                 773 => remap_serializer_773,
-                // 1.21.6 and 1.21.8 register identical serializer sets.
-                771 | 772 => remap_serializer_772,
+                // 1.21.5 through 1.21.8 register identical serializer sets.
+                770..=772 => remap_serializer_772,
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
@@ -505,6 +534,15 @@ impl GameIds {
                 player_rotation_id: id(Clientbound, "player_rotation"),
                 set_default_spawn_id: id(Clientbound, "set_default_spawn_position"),
                 explode_id: id(Clientbound, "explode"),
+            }),
+            v770: (protocol <= 770).then(|| Ids770 {
+                player_command_id: id(Serverbound, "player_command"),
+                player_command_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "player_command",
+                ),
             }),
         })
     }
@@ -532,6 +570,27 @@ fn interact_frame(interact_old_id: u32, entity_id: u32, action: u32) -> Vec<u8> 
     wire::write_varint(&mut out, entity_id);
     wire::write_varint(&mut out, action);
     out
+}
+
+/// Rewrites a latest `player_command` payload (`entityId, action, data`
+/// varints) for pre-1.21.6 wires, where PRESS/RELEASE_SHIFT_KEY still head
+/// the action enum: every newer ordinal shifts up two.
+fn translate_player_command(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let parse = || {
+        let mut pos = 0;
+        let entity_id = wire::read_varint(payload, &mut pos)?;
+        let action = wire::read_varint(payload, &mut pos)?;
+        Some((entity_id, action, pos))
+    };
+    let Some((entity_id, action, data_at)) = parse() else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(payload.len() + 3);
+    wire::write_varint(&mut out, old_id);
+    wire::write_varint(&mut out, entity_id);
+    wire::write_varint(&mut out, action + 2);
+    out.extend_from_slice(&payload[data_at..]);
+    vec![out]
 }
 
 /// Rewrites a latest `attack` payload (`entityId`) into an old-layout
@@ -655,6 +714,9 @@ fn translate_game_login(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// vanilla entity sends one after an untranslatable stack).
 /// TODO: translate shoulder-parrot NBT to 26.2's OptionalInt variant
 /// instead of stripping it, so shoulder parrots show on old servers.
+/// TODO: lift pre-1.21.6 hanging-entity indices (an item frame's item/rotation
+/// at 8/9, a painting's variant at 8) into 26.2's numbering instead of passing
+/// the index byte through, so those entities can render on those wires.
 fn translate_entity_data(
     id: u32,
     payload: &[u8],
