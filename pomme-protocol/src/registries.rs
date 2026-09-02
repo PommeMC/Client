@@ -477,13 +477,9 @@ mod tests {
         assert_bed_unmapped(r, from);
         assert_chain_remapped(r, from);
         assert_unmapped(r, from, ClientRegistry::EntityType, "potion");
-        assert_unmapped(r, from, ClientRegistry::DataComponentType, "hide_tooltip");
-        assert_unmapped(
-            r,
-            from,
-            ClientRegistry::DataComponentType,
-            "hide_additional_tooltip",
-        );
+        for component in ["hide_tooltip", "hide_additional_tooltip"] {
+            assert_unmapped(r, from, ClientRegistry::DataComponentType, component);
+        }
         assert_unmapped(r, from, ClientRegistry::SoundEvent, "entity.wolf.howl");
 
         assert_round_trips(r, from, to);
