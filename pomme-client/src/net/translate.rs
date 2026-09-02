@@ -78,6 +78,10 @@
 //! - `change_difficulty` read an unsigned byte where 1.21.6 reads a varint;
 //!   difficulty ids fit a single byte either way, so the wire bytes are
 //!   identical
+//! - 1.21.6 gave `HangingEntity` a synched `direction` at index 8, so an item
+//!   frame's item/rotation sit at 8/9 here and a painting's variant at 8 (9/10
+//!   and 9 on 26.2); the walker passes index bytes through unremapped and pomme
+//!   renders neither entity, so the shift is left in place
 //!
 //! 1.21.4 -> 26.2 wire changes (all of 1.21.5's plus):
 //! - chunk heightmaps were a network-NBT compound of named long arrays; 1.21.5
@@ -143,14 +147,14 @@
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
 //! 78, where 26.2 inserted `sulfur_cube_content`; 1.21.11: 41, where 26.x
-//! inserted `additional_trade_cost`; 1.21.10: 5, where 1.21.11 inserted
-//! `use_effects` — so even `custom_name` and `enchantments` are affected
-//! there) decodes under the wrong 26.2 codec —
-//! usually a misparse that skips the packet via `skip_malformed_packet`,
-//! though a coincidentally parsable layout yields a silently wrong
-//! component. Common survival items only use earlier, unshifted components.
-//! Items nested inside component values (bundles, containers) also keep
-//! their source-version ids.
+//! inserted `additional_trade_cost`; 1.21.10 and every older version with a
+//! component registry: 5, where 1.21.11 inserted `use_effects` — so even
+//! `custom_name` and `enchantments` are affected on all of them) decodes under
+//! the wrong 26.2 codec — usually a misparse that skips the packet via
+//! `skip_malformed_packet`, though a coincidentally parsable layout yields a
+//! silently wrong component. Common survival items only use earlier, unshifted
+//! components. Items nested inside component values (bundles, containers) also
+//! keep their source-version ids.
 
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -1229,6 +1233,9 @@ fn translate_game_login(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// vanilla entity sends one after an untranslatable stack).
 /// TODO: translate shoulder-parrot NBT to 26.2's OptionalInt variant
 /// instead of stripping it, so shoulder parrots show on old servers.
+/// TODO: lift pre-1.21.6 hanging-entity indices (an item frame's item/rotation
+/// at 8/9, a painting's variant at 8) into 26.2's numbering instead of passing
+/// the index byte through, so those entities can render on those wires.
 fn translate_entity_data(
     id: u32,
     payload: &[u8],
