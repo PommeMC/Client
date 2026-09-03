@@ -110,10 +110,10 @@
 //! 1.21.3 -> 26.2 wire changes (all of 1.21.4's plus):
 //! - `level_particles` lacks the `alwaysShow` bool 1.21.4 inserted after
 //!   `overrideLimiter`; false is synthesized
-//! - `player_info_update`'s UPDATE_LIST_ORDER action sits at bit 6, where
-//!   1.21.4 inserted UPDATE_HAT — but azalea (ffedf17) still decodes the 1.21.3
-//!   bit order, so the mask passes through unchanged (native 26.2 servers hit
-//!   the same azalea lag; see the team-color note)
+//! - `player_info_update`'s action mask passes through unchanged: 1.21.4
+//!   appended UPDATE_HAT after UPDATE_LIST_ORDER rather than inserting it, so
+//!   every older mask is a prefix of 26.2's, and `writeFixedBitSet` is one byte
+//!   at 6, 7 and 8 actions alike
 //! - serverbound `move_vehicle` lacks the trailing onGround bool and 1.21.4
 //!   split `pick_item` into the from_block/from_entity pair; pomme sends
 //!   neither
@@ -123,7 +123,11 @@
 //! 1.21.1 -> 26.2 wire changes (the 1.21.2 rework; all of 1.21.3's plus):
 //! - `player_position` and `teleport_entity` predate PositionMoveRotation:
 //!   positions reorder, rotations un-pack (teleport carried packed-degree
-//!   bytes), a zero delta and widened relative bits are synthesized
+//!   bytes), and a zero delta is synthesized. Both versions resolve that delta
+//!   against the relative bits, so `player_position` mirrors each position bit
+//!   into its `DELTA_*` bit and `teleport_entity` rewrites onto
+//!   `entity_position_sync`, whose handler leaves velocity alone as 1.21.1's
+//!   did — without either, an old server's syncs zero the velocity
 //! - `set_time` is two longs with a negated dayTime marking a frozen clock
 //! - CommonPlayerSpawnInfo lacks the trailing `seaLevel` varint, inserted
 //!   before the final byte of `login` and `respawn`
@@ -133,10 +137,11 @@
 //! - clientbound `set_carried_item` was renamed `set_held_slot` (identical byte
 //!   layout); login `game_profile` -> `login_finished` needs no alias (login
 //!   rewrites dispatch by id)
-//! - `explode`, `update_recipes` and `place_ghost_recipe` have untranslatable
-//!   layouts and are dropped: pomme renders no explosions and the recipe
-//!   book/stonecutter UIs stay empty on 1.21.1 servers (the 1.21.1-only
-//!   `recipe` packet drops via the id map)
+//! - `update_recipes` and `place_ghost_recipe` restructured into 26.2's
+//!   `RecipeDisplay` trees with no mechanical mapping, so they're dropped and
+//!   the recipe book/stonecutter UIs stay empty on 1.21.1 servers (the
+//!   1.21.1-only `recipe` packet drops via the id map); `explode` is dropped
+//!   too, but only for want of a rewriter, so no explosions render either
 //! - every attribute was renamed by dropping its category prefix
 //!   (`generic.armor` -> `armor`), handled by the registry-remap alias;
 //!   `boat`/`chest_boat` entities split per wood type and have no 26.2 ids, so
@@ -144,7 +149,11 @@
 //! - serverbound `player_input` was the vehicle-steering packet (two axis
 //!   floats + jump/shift flags) rather than the key bitfield, and the
 //!   move_player flags byte was a plain onGround bool, so the
-//!   horizontal-collision bit 1.21.2 added must be dropped
+//!   horizontal-collision bit 1.21.2 added must be dropped. Accepted
+//!   divergence: 1.21.1 sent `player_input` only while riding but handles it
+//!   unguarded, so pomme drives the server's `xxa`/`zza`/`jumping`/
+//!   `shiftKeyDown` when unmounted too — harmless, since position is
+//!   client-authoritative and the server's copy is corrected every tick
 //! - `client_tick_end` doesn't exist; its suppression is expected and logged
 //!   quietly
 //!
@@ -163,17 +172,14 @@
 //! Depends on azalea diverging from 26.2: these translations are correct only
 //! because azalea encodes or decodes something differently from the reference,
 //! so fixing azalea — or replacing it with pomme's own codec — breaks the older
-//! versions unless the matching rewrite lands at the same time. Where a
-//! rewriter exists it carries a `TODO` pointing here; `player_info_update`
-//! has none, since its mask is passed through rather than rewritten.
+//! versions unless the matching rewrite lands at the same time. Each site
+//! carries a `TODO` pointing here.
 //! - inbound `set_player_team` copies the color through as a plain
 //!   `ChatFormatting` ordinal, where 26.2 writes an `Optional<TeamColor>`
 //! - outbound `set_creative_mode_slot` leaves component values undelimited,
 //!   which is 1.21.4's layout rather than 26.2's
 //! - inbound `cooldown` carries an item registry id, where 26.2 names a
 //!   cooldown group
-//! - `player_info_update`'s action mask passes through unremapped, because
-//!   azalea reads the bit order from before 1.21.4 inserted UPDATE_HAT
 
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -258,14 +264,19 @@ impl Ids768 {
 struct Ids767 {
     player_position_id: u32,
     teleport_entity_id: u32,
+    /// The id `teleport_entity` rewrites onto; see
+    /// [`translate_teleport_entity_767`].
+    entity_position_sync_id: u32,
     respawn_id: u32,
     container_set_slot_id: u32,
     cooldown_id: u32,
     /// The ids the -1/-2 `container_set_slot` sentinels map onto.
     set_cursor_item_id: u32,
     set_player_inventory_id: u32,
-    /// Inbound packets with no translatable 26.2 layout, dropped quietly
-    /// (`explode`, `update_recipes`, `place_ghost_recipe`).
+    /// Inbound packets dropped quietly (`explode`, `update_recipes`,
+    /// `place_ghost_recipe`).
+    /// TODO: translate `explode` — 1.21.1 carries every field 26.2 needs, with
+    /// an empty block-particle list like [`translate_explode`].
     drops: [u32; 3],
     player_input_id: u32,
     player_input_old_id: u32,
@@ -277,7 +288,6 @@ impl Ids767 {
     fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
         Some(match id {
             i if i == self.player_position_id => translate_player_position_767,
-            i if i == self.teleport_entity_id => translate_teleport_entity_767,
             i if i == self.respawn_id => translate_respawn_767,
             _ => return None,
         })
@@ -464,6 +474,8 @@ impl Translation {
                 translate_explode(id, payload, ids, self.to_latest)
             } else if let Some(rewrite) = ids.version_rewrite(id) {
                 rewrite(id, payload)
+            } else if let Some(v) = ids.v767.as_ref().filter(|v| id == v.teleport_entity_id) {
+                translate_teleport_entity_767(v, payload)
             } else if let Some(v) = ids.v767.as_ref().filter(|v| id == v.container_set_slot_id) {
                 translate_container_set_slot_767(v, payload)
             } else if ids.v767.as_ref().is_some_and(|v| id == v.cooldown_id) {
@@ -670,14 +682,16 @@ const RENAMED: &[(&str, &str)] = &[
 ];
 
 impl GameIds {
-    /// The version-gated frame rewrite dispatching on `id`, if any.
+    /// The version-gated frame rewrite dispatching on `id`, if any. Chained
+    /// oldest-first: every rewriter targets 26.2 directly, so where two gates
+    /// claim a packet the older one subsumes the newer and must win.
     fn version_rewrite(&self, id: u32) -> Option<FrameRewrite> {
-        self.v772
+        self.v767
             .as_ref()
             .and_then(|v| v.rewrite(id))
-            .or_else(|| self.v769.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v768.as_ref().and_then(|v| v.rewrite(id)))
-            .or_else(|| self.v767.as_ref().and_then(|v| v.rewrite(id)))
+            .or_else(|| self.v769.as_ref().and_then(|v| v.rewrite(id)))
+            .or_else(|| self.v772.as_ref().and_then(|v| v.rewrite(id)))
     }
 
     /// Name-matched game-phase id tables between one wire version and the
@@ -772,6 +786,7 @@ impl GameIds {
             v767: (protocol <= 767).then(|| Ids767 {
                 player_position_id: id(Clientbound, "player_position"),
                 teleport_entity_id: id(Clientbound, "teleport_entity"),
+                entity_position_sync_id: id(Clientbound, "entity_position_sync"),
                 respawn_id: id(Clientbound, "respawn"),
                 container_set_slot_id: id(Clientbound, "container_set_slot"),
                 cooldown_id: id(Clientbound, "cooldown"),
@@ -861,26 +876,34 @@ fn translate_level_particles_768(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// Rewrites `player_position` from the 1.21.1 layout (`x/y/z, yRot, xRot,
 /// u8 relative bits, teleport id`) to 26.2's (`id first, then
 /// PositionMoveRotation with a zero delta, i32 relative bits`); the five
-/// old bits keep their positions.
+/// old bits keep their positions, and each position bit is mirrored into its
+/// `DELTA_*` bit so 1.21.1's "keep the current velocity on a relative axis"
+/// survives 26.2's `calculateDelta`.
 fn translate_player_position_767(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let pos = payload.get(..24)?;
     let y_rot = f32::from_be_bytes(payload.get(24..28)?.try_into().ok()?);
     let x_rot = f32::from_be_bytes(payload.get(28..32)?.try_into().ok()?);
-    let relatives = *payload.get(32)?;
+    let relatives = i32::from(*payload.get(32)?);
     let mut p = 33;
     let teleport_id = wire::read_varint(payload, &mut p)?;
+    // X/Y/Z (0-2) -> DELTA_X/Y/Z (5-7); ROTATE_DELTA (8) stays clear.
+    let relatives = relatives | ((relatives & 0b111) << 5);
 
     let mut out = Vec::with_capacity(64);
     wire::write_varint(&mut out, id);
     wire::write_varint(&mut out, teleport_id);
-    write_position_move_rotation(&mut out, pos, y_rot, x_rot, i32::from(relatives));
+    write_position_move_rotation(&mut out, pos, y_rot, x_rot);
+    out.extend_from_slice(&relatives.to_be_bytes());
     Some(out)
 }
 
-/// Rewrites `teleport_entity` from the 1.21.1 layout (`id, x/y/z,
-/// packed-degree rotation bytes, onGround`) to 26.2's PositionMoveRotation
-/// form: float degrees, zero delta, absolute (no relative bits).
-fn translate_teleport_entity_767(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+/// Rewrites 1.21.1's `teleport_entity` (`id, x/y/z, packed-degree rotation
+/// bytes, onGround`) into 26.2's `entity_position_sync` — the packet whose
+/// handler, like 1.21.1's, syncs position and rotation without touching the
+/// entity's velocity. 26.2's own `teleport_entity` resolves the delta through
+/// `calculateAbsolute`, so the synthesized zero would zero the velocity on
+/// every sync. Same layout minus the relative-bit set.
+fn translate_teleport_entity_767(v: &Ids767, payload: &[u8]) -> Option<Vec<u8>> {
     let mut p = 0;
     let entity = wire::read_varint(payload, &mut p)?;
     let pos = payload.get(p..p + 24)?;
@@ -889,33 +912,19 @@ fn translate_teleport_entity_767(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let on_ground = *payload.get(p + 26)?;
 
     let mut out = Vec::with_capacity(72);
-    wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, v.entity_position_sync_id);
     wire::write_varint(&mut out, entity);
-    write_position_move_rotation(
-        &mut out,
-        pos,
-        unpack_degrees(y_rot),
-        unpack_degrees(x_rot),
-        0, // absolute
-    );
+    write_position_move_rotation(&mut out, pos, unpack_degrees(y_rot), unpack_degrees(x_rot));
     out.push(on_ground);
     Some(out)
 }
 
-/// Writes a 26.2 `PositionMoveRotation` (position, zero delta, rotation)
-/// followed by the i32 relative-bit set.
-fn write_position_move_rotation(
-    out: &mut Vec<u8>,
-    pos: &[u8],
-    y_rot: f32,
-    x_rot: f32,
-    relatives: i32,
-) {
+/// Writes a 26.2 `PositionMoveRotation`: position, zero delta, rotation.
+fn write_position_move_rotation(out: &mut Vec<u8>, pos: &[u8], y_rot: f32, x_rot: f32) {
     out.extend_from_slice(pos);
     out.extend_from_slice(&[0; 24]); // zero delta movement
     out.extend_from_slice(&y_rot.to_be_bytes());
     out.extend_from_slice(&x_rot.to_be_bytes());
-    out.extend_from_slice(&relatives.to_be_bytes());
 }
 
 /// Vanilla `Mth.unpackDegrees`: a packed rotation byte to float degrees.
@@ -1010,6 +1019,8 @@ fn translate_cooldown_767(remaps: &RegistryRemaps, id: u32, payload: &[u8]) -> O
 /// Rewrites serverbound `player_input` for 1.21.1, where it was the vehicle
 /// steering packet (`xxa, zza floats + jump/shift flags`) rather than the
 /// key bitfield 1.21.2 introduced; axes are synthesized at full strength.
+/// TODO: suppress this while the player isn't riding, as the 1.21.1 client did
+/// (see the module docs); needs ride state this layer doesn't have.
 fn translate_player_input(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     let Some(&bits) = payload.first() else {
         return Vec::new();
