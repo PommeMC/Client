@@ -24,6 +24,10 @@ pub const VERSIONS: &[ProtocolVersion] = &[
     v("1.21.6", 771),
     v("1.21.5", 770),
     v("1.21.4", 769),
+    v("1.21.3", 768),
+    v("1.21.2", 768),
+    v("1.21.1", 767),
+    v("1.21", 767),
 ];
 
 /// The version the client speaks internally.
@@ -39,7 +43,7 @@ pub(crate) struct EmbeddedVersion {
     pub registries: &'static str,
 }
 
-pub(crate) const EMBEDDED: [EmbeddedVersion; 7] = [
+pub(crate) const EMBEDDED: [EmbeddedVersion; 9] = [
     EmbeddedVersion {
         version: v("26.1", 775),
         packets: include_str!("data/protocol-26.1.json"),
@@ -74,6 +78,16 @@ pub(crate) const EMBEDDED: [EmbeddedVersion; 7] = [
         version: v("1.21.4", 769),
         packets: include_str!("data/protocol-1.21.4.json"),
         registries: include_str!("data/registries-1.21.4.json"),
+    },
+    EmbeddedVersion {
+        version: v("1.21.3", 768),
+        packets: include_str!("data/protocol-1.21.3.json"),
+        registries: include_str!("data/registries-1.21.3.json"),
+    },
+    EmbeddedVersion {
+        version: v("1.21.1", 767),
+        packets: include_str!("data/protocol-1.21.1.json"),
+        registries: include_str!("data/registries-1.21.1.json"),
     },
 ];
 
@@ -130,6 +144,12 @@ mod tests {
         assert_eq!(ProtocolVersion::from_protocol(770).unwrap().name, "1.21.5");
         assert_eq!(ProtocolVersion::from_name("1.21.4").unwrap().protocol, 769);
         assert_eq!(ProtocolVersion::from_protocol(769).unwrap().name, "1.21.4");
+        assert_eq!(ProtocolVersion::from_name("1.21.3").unwrap().protocol, 768);
+        assert_eq!(ProtocolVersion::from_name("1.21.2").unwrap().protocol, 768);
+        assert_eq!(ProtocolVersion::from_protocol(768).unwrap().name, "1.21.3");
+        assert_eq!(ProtocolVersion::from_name("1.21.1").unwrap().protocol, 767);
+        assert_eq!(ProtocolVersion::from_name("1.21").unwrap().protocol, 767);
+        assert_eq!(ProtocolVersion::from_protocol(767).unwrap().name, "1.21.1");
         assert!(ProtocolVersion::from_name("26.1.1-rc-1").is_none());
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
     }

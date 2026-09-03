@@ -596,6 +596,113 @@ mod tests {
         );
     }
 
+    /// Registration-order anchors for 1.21.3, cross-checked in full against
+    /// Mojang's `generated/reports/packets.json`. Clientbound tables match
+    /// 1.21.4's exactly (asserted in full); serverbound, 1.21.4 replaced
+    /// `pick_item` with the from_block/from_entity split and added
+    /// `player_loaded`, shifting later ids.
+    #[test]
+    fn anchors_1_21_3() {
+        let t = PacketTable::for_protocol(768).unwrap();
+        assert_eq!(t.version().protocol, 768);
+        assert_eq!(t.version().name, "1.21.3");
+        let t769 = PacketTable::for_protocol(769).unwrap();
+        for id in 0.. {
+            match (
+                t.name_of(Phase::Game, Direction::Clientbound, id),
+                t769.name_of(Phase::Game, Direction::Clientbound, id),
+            ) {
+                (None, None) => break,
+                (a, b) => assert_eq!(a, b, "clientbound {id}"),
+            }
+        }
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "interact"),
+            Some(24)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "container_click"),
+            Some(16)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "player_command"),
+            Some(39)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "pick_item"),
+            Some(34)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "move_vehicle"),
+            Some(32)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "player_loaded"),
+            None
+        );
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 59).is_some());
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 60).is_none());
+    }
+
+    /// Registration-order anchors for 1.21.1, cross-checked in full against
+    /// Mojang's `generated/reports/packets.json`. 1.21.2 rebuilt the recipe
+    /// book (dropping `recipe`), renamed clientbound `set_carried_item` to
+    /// `set_held_slot` and login `game_profile` to `login_finished`, and
+    /// added the position-sync/minecart/inventory packets, shifting most
+    /// ids.
+    #[test]
+    fn anchors_1_21_1() {
+        let t = PacketTable::for_protocol(767).unwrap();
+        assert_eq!(t.version().protocol, 767);
+        assert_eq!(t.version().name, "1.21.1");
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "interact"),
+            Some(22)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "container_click"),
+            Some(14)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "player_input"),
+            Some(38)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "client_tick_end"),
+            None
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "player_position"),
+            Some(64)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "teleport_entity"),
+            Some(112)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_carried_item"),
+            Some(83)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "recipe"),
+            Some(65)
+        );
+        assert_eq!(
+            t.id(Phase::Login, Direction::Clientbound, "game_profile"),
+            Some(2)
+        );
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 57).is_some());
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 58).is_none());
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 123)
+                .is_some()
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 124)
+                .is_none()
+        );
+    }
+
     /// The latest protocol resolves to the shared latest table, every
     /// embedded version to its own table, and anything else to nothing.
     #[test]
