@@ -230,6 +230,39 @@ fn translate_login_finished_26_1() {
     assert_eq!(decoded.session_id, uuid::Uuid::nil());
 }
 
+/// 1.21.1's `game_profile` ends in a `strictErrorHandling` bool 1.21.2 dropped
+/// (`ClientboundGameProfilePacket.STREAM_CODEC`), so it must go before the
+/// session UUID is appended. azalea ignores trailing bytes, so only the frame
+/// length catches a stray one.
+#[test]
+fn translate_login_finished_767() {
+    use azalea_protocol::packets::login::ClientboundLoginPacket;
+    use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
+
+    let packet = ClientboundLoginPacket::LoginFinished(ClientboundLoginFinished {
+        game_profile: azalea_auth::game_profile::GameProfile {
+            uuid: uuid::Uuid::from_u128(0xfeed_beef),
+            name: "Purdze".into(),
+            properties: Default::default(),
+        },
+        session_id: uuid::Uuid::from_u128(0xdead),
+    });
+    let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
+    // A 767 frame drops the UUID and ends in strictErrorHandling instead.
+    let mut old = frame[..frame.len() - 16].to_vec();
+    old.push(1);
+
+    let translated = translation_for(767).translate_login_frame(old.into_boxed_slice());
+    assert_eq!(translated.len(), frame.len());
+    let decoded: ClientboundLoginPacket =
+        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap();
+    let ClientboundLoginPacket::LoginFinished(decoded) = decoded else {
+        panic!("wrong packet: {decoded:?}");
+    };
+    assert_eq!(decoded.game_profile.name, "Purdze");
+    assert_eq!(decoded.session_id, uuid::Uuid::nil());
+}
+
 /// 26.2 added `onlineMode` before the trailing `enforcesSecureChat` bool
 /// (`ClientboundLoginPacket.write`); the shim inserts `false`.
 #[test]
@@ -1336,9 +1369,8 @@ fn translate_level_particles_768() {
     assert_eq!(p.count, 7);
 }
 
-/// 1.21.4 moved UPDATE_LIST_ORDER from action bit 6 to 7 (inserting
-/// UPDATE_HAT), but azalea still decodes the 1.21.3 order, so a 768 mask
-/// passes through untouched and decodes correctly.
+/// 1.21.4 appended UPDATE_HAT after UPDATE_LIST_ORDER rather than inserting
+/// it, so a 768 mask is a prefix of 26.2's and passes through untouched.
 #[test]
 fn player_info_passthrough_768() {
     let mut old = Vec::new();
@@ -1360,23 +1392,29 @@ fn player_info_passthrough_768() {
 
 /// The 1.21.2 `player_position` rework (`PositionMoveRotation`): the 767
 /// layout's trailing teleport id moves to the front and a zero delta plus
-/// widened relative bits are synthesized.
+/// widened relative bits are synthesized. Each position bit is mirrored into
+/// its `DELTA_*` bit, so 1.21.1's "keep the current velocity on a relative
+/// axis" survives 26.2's `calculateDelta`.
 #[test]
 fn translate_player_position_767() {
-    let mut old = Vec::new();
-    wire::write_varint(
-        &mut old,
-        old_id(767, Direction::Clientbound, "player_position"),
-    );
-    for c in [100.5f64, 64.0, -20.25] {
-        old.extend_from_slice(&c.to_be_bytes());
-    }
-    old.extend_from_slice(&90.0f32.to_be_bytes()); // y rot
-    old.extend_from_slice(&(-10.0f32).to_be_bytes()); // x rot
-    old.push(0b0001_1000); // relative: Y_ROT | X_ROT
-    wire::write_varint(&mut old, 42); // teleport id
+    let build = |relatives: u8| {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(767, Direction::Clientbound, "player_position"),
+        );
+        for c in [100.5f64, 64.0, -20.25] {
+            old.extend_from_slice(&c.to_be_bytes());
+        }
+        old.extend_from_slice(&90.0f32.to_be_bytes()); // y rot
+        old.extend_from_slice(&(-10.0f32).to_be_bytes()); // x rot
+        old.push(relatives);
+        wire::write_varint(&mut old, 42); // teleport id
+        old
+    };
 
-    let ClientboundGamePacket::PlayerPosition(p) = translate_and_decode(767, old) else {
+    let absolute = build(0b0001_1000); // relative: Y_ROT | X_ROT
+    let ClientboundGamePacket::PlayerPosition(p) = translate_and_decode(767, absolute) else {
         panic!("wrong packet");
     };
     assert_eq!(p.id, 42);
@@ -1392,9 +1430,21 @@ fn translate_player_position_767() {
     assert_eq!(p.change.look_direction.x_rot(), -10.0);
     assert!(p.relative.y_rot && p.relative.x_rot);
     assert!(!p.relative.x && !p.relative.y && !p.relative.z);
+    // Absolute on every position axis, so the velocity zeroes as 1.21.1's did.
+    assert!(!p.relative.delta_x && !p.relative.delta_y && !p.relative.delta_z);
+
+    let relative_xz = build(0b0000_0101); // relative: X | Z
+    let ClientboundGamePacket::PlayerPosition(p) = translate_and_decode(767, relative_xz) else {
+        panic!("wrong packet");
+    };
+    assert!(p.relative.x && p.relative.z && !p.relative.y);
+    assert!(p.relative.delta_x && p.relative.delta_z && !p.relative.delta_y);
+    assert!(!p.relative.rotate_delta);
 }
 
-/// The same rework on `teleport_entity`, whose 767 rotations are
+/// 1.21.1's `teleport_entity` only synced position and rotation, so it becomes
+/// 26.2's `entity_position_sync` (which leaves velocity alone) rather than its
+/// `teleport_entity` (whose zero delta would zero it). Rotations are
 /// packed-degree bytes.
 #[test]
 fn translate_teleport_entity_767() {
@@ -1411,15 +1461,16 @@ fn translate_teleport_entity_767() {
     old.push(0); // x rot
     old.push(1); // on ground
 
-    let ClientboundGamePacket::TeleportEntity(p) = translate_and_decode(767, old) else {
+    let ClientboundGamePacket::EntityPositionSync(p) = translate_and_decode(767, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.id, MinecraftEntityId(9));
     assert_eq!(
-        (p.change.pos.x, p.change.pos.y, p.change.pos.z),
+        (p.values.pos.x, p.values.pos.y, p.values.pos.z),
         (1.0, 70.0, 2.0)
     );
-    assert_eq!(p.change.look_direction.y_rot(), 90.0);
+    assert_eq!(p.values.look_direction.y_rot(), 90.0);
+    assert_eq!(p.values.look_direction.x_rot(), 0.0);
     assert!(p.on_ground);
 }
 
