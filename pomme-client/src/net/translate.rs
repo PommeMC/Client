@@ -651,7 +651,6 @@ impl Translation {
             tracing::debug!("Dropping update_advancements with old-form icons");
             return None;
         }
-        let v767 = v767.is_some();
         let payload = &raw[id_end..];
         let rewritten = if id == self.game_login_id {
             let old = if v765.is_some() {
@@ -660,7 +659,7 @@ impl Translation {
                 Some(payload.to_vec())
             };
             old.and_then(|p| {
-                if v767 {
+                if v767.is_some() {
                     insert_sea_level(&p).and_then(|p| translate_game_login(id, &p))
                 } else {
                     translate_game_login(id, &p)
@@ -674,7 +673,7 @@ impl Translation {
             } else if id == ids.level_chunk_id {
                 translate_chunk(id, payload, v769)
             } else if id == ids.set_time_id {
-                if v767 {
+                if v767.is_some() {
                     translate_set_time_767(id, payload)
                 } else {
                     translate_set_time(id, payload)
@@ -682,18 +681,16 @@ impl Translation {
             } else if let Some(v) = v765.filter(|v| id == v.update_attributes_id) {
                 translate_update_attributes_765(v, id, payload)
             } else if v765.is_some_and(|v| id == v.container_set_slot_id) {
-                ids.v767
-                    .as_ref()
-                    .and_then(|v| translate_container_set_slot_765(v, payload))
+                v767.and_then(|v| translate_container_set_slot_765(v, payload))
             } else if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
                 translate_explode(id, payload, ids, self.to_latest)
             } else if let Some(rewrite) = ids.version_rewrite(id) {
                 rewrite(id, payload)
-            } else if let Some(v) = ids.v767.as_ref().filter(|v| id == v.teleport_entity_id) {
+            } else if let Some(v) = v767.filter(|v| id == v.teleport_entity_id) {
                 translate_teleport_entity_767(v, payload)
-            } else if let Some(v) = ids.v767.as_ref().filter(|v| id == v.container_set_slot_id) {
+            } else if let Some(v) = v767.filter(|v| id == v.container_set_slot_id) {
                 translate_container_set_slot_767(v, payload)
-            } else if ids.v767.as_ref().is_some_and(|v| id == v.cooldown_id) {
+            } else if v767.is_some_and(|v| id == v.cooldown_id) {
                 translate_cooldown_767(self.to_latest, id, payload)
             } else if id == wire_id {
                 return Some(raw);
