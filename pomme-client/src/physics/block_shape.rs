@@ -6,9 +6,11 @@
 //! TODO: walls, fences, fence gates, panes, trapdoors, doors, beds, chests,
 //! cake, etc. still fall back to a full cube.
 
+use std::borrow::Cow;
+
 use azalea_block::BlockState;
 
-use crate::world::block::PropMap;
+use crate::world::block::{PropMap, block_id, block_properties};
 
 /// A block-local axis-aligned box: `[min_x, min_y, min_z, max_x, max_y,
 /// max_z]`.
@@ -18,6 +20,35 @@ pub type LocalBox = [f64; 6];
 /// no collision, `Some(boxes)` for a partial shape.
 pub fn partial_shape(state: BlockState) -> Option<&'static [LocalBox]> {
     crate::world::block::block_shape(state)
+}
+
+pub const FULL_CUBE: LocalBox = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+static FULL_CUBE_SHAPE: [LocalBox; 1] = [FULL_CUBE];
+
+const SNOW_BLOCK_ID: &str = "snow";
+const SNOW_LAYERS_PROPERTY: &str = "layers";
+const DEFAULT_SNOW_LAYERS: i32 = 1;
+const SNOW_LAYER_HEIGHT: f64 = 2.0 / 16.0;
+
+pub fn outline_shape(state: BlockState) -> Cow<'static, [LocalBox]> {
+    let is_snow = block_id(state) == SNOW_BLOCK_ID;
+    if is_snow {
+        let layers = get_snow_layers(block_properties(state));
+        let height = layers as f64 * SNOW_LAYER_HEIGHT;
+        return Cow::Owned(vec![[0.0, 0.0, 0.0, 1.0, height, 1.0]]);
+    }
+
+    match partial_shape(state) {
+        Some(boxes) if !boxes.is_empty() => Cow::Borrowed(boxes),
+        _ => Cow::Borrowed(&FULL_CUBE_SHAPE[..]),
+    }
+}
+
+fn get_snow_layers(props: &PropMap) -> i32 {
+    props
+        .get(SNOW_LAYERS_PROPERTY)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_SNOW_LAYERS)
 }
 
 /// Computes one state's shape. Takes id/props rather than a `BlockState` so
@@ -44,14 +75,12 @@ pub(crate) fn compute_shape(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> 
         _ if id.ends_with("_carpet") => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.0625, 1.0]]),
         // Snow's collision shape is one layer shorter than its outline; a single
         // layer has no collision at all.
-        "snow" => {
-            let layers: i32 = props
-                .get("layers")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1);
-            let h = (layers - 1) as f64 * 2.0 / 16.0;
-            Some(if h > 0.0 {
-                vec![[0.0, 0.0, 0.0, 1.0, h, 1.0]]
+        SNOW_BLOCK_ID => {
+            let layers = get_snow_layers(props);
+            let height = (layers - 1) as f64 * SNOW_LAYER_HEIGHT;
+            let has_collision = height > 0.0;
+            Some(if has_collision {
+                vec![[0.0, 0.0, 0.0, 1.0, height, 1.0]]
             } else {
                 vec![]
             })

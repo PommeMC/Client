@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use azalea_block::BlockState;
+use azalea_core::aabb::Aabb as AzaleaAabb;
 use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
 use azalea_core::direction::Direction;
 use azalea_core::position::BlockPos;
@@ -18,7 +19,7 @@ use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedIte
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
 use azalea_registry::builtin::{Attribute, BlockKind, EntityKind, ItemKind};
-use glam::{DVec3, Vec3, dvec3};
+use glam::{DVec3, Vec3};
 use pomme_protocol::wire;
 
 use crate::app::input::{self, InputState};
@@ -28,6 +29,7 @@ use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::Aabb;
+use crate::physics::block_shape::{self, LocalBox};
 use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::held_item::UseAnim;
@@ -1408,13 +1410,16 @@ pub fn raycast(
                 y: by,
                 z: bz,
             };
-            let hit_point = origin + dir * t;
-            let face = hit_face(origin, dir.as_vec3(), &block_pos);
-            return Some(BlockHitResult {
-                block_pos,
-                face,
-                hit_point,
-            });
+            let reach_end = origin + dir * max_dist as f64;
+            let outline = block_shape::outline_shape(state);
+            let hit = get_ray_hit_on_boxes(origin, reach_end, block_pos, &outline);
+            if let Some((hit_point, face)) = hit {
+                return Some(BlockHitResult {
+                    block_pos,
+                    face,
+                    hit_point,
+                });
+            }
         }
         if t_max_x < t_max_y && t_max_x < t_max_z {
             t = t_max_x;
@@ -1485,44 +1490,38 @@ fn azalea_vec3(v: DVec3) -> azalea_core::position::Vec3 {
     azalea_core::position::Vec3::new(v.x, v.y, v.z)
 }
 
-fn hit_face(origin: DVec3, dir: Vec3, pos: &BlockPos) -> Direction {
-    let dir = dir.as_dvec3();
-    let min = dvec3(pos.x as f64, pos.y as f64, pos.z as f64);
-    let max = min + DVec3::ONE;
+const INSIDE_PROBE_FRACTION: f64 = 0.001;
 
-    let mut best_t = f64::MAX;
-    let mut best_face = Direction::Up;
+fn get_ray_hit_on_boxes(
+    from: DVec3,
+    to: DVec3,
+    block_pos: BlockPos,
+    boxes: &[LocalBox],
+) -> Option<(DVec3, Direction)> {
+    let from_v = azalea_vec3(from);
+    let to_v = azalea_vec3(to);
+    let aabbs: Vec<AzaleaAabb> = boxes
+        .iter()
+        .map(|&[min_x, min_y, min_z, max_x, max_y, max_z]| AzaleaAabb {
+            min: azalea_core::position::Vec3::new(min_x, min_y, min_z),
+            max: azalea_core::position::Vec3::new(max_x, max_y, max_z),
+        })
+        .collect();
 
-    let faces = [
-        (min.x, dir.x, origin.x, Direction::West),
-        (max.x, dir.x, origin.x, Direction::East),
-        (min.y, dir.y, origin.y, Direction::Down),
-        (max.y, dir.y, origin.y, Direction::Up),
-        (min.z, dir.z, origin.z, Direction::North),
-        (max.z, dir.z, origin.z, Direction::South),
-    ];
-
-    for &(plane, d_comp, o_comp, face) in &faces {
-        if d_comp.abs() < 1e-8 {
-            continue;
-        }
-        let t = (plane - o_comp) / d_comp;
-        if t < 0.0 || t >= best_t {
-            continue;
-        }
-        let hit = origin + dir * t;
-        let (c1, c2, c1_min, c1_max, c2_min, c2_max) = match face {
-            Direction::West | Direction::East => (hit.y, hit.z, min.y, max.y, min.z, max.z),
-            Direction::Down | Direction::Up => (hit.x, hit.z, min.x, max.x, min.z, max.z),
-            Direction::North | Direction::South => (hit.x, hit.y, min.x, max.x, min.y, max.y),
-        };
-        if c1 >= c1_min && c1 <= c1_max && c2 >= c2_min && c2 <= c2_max {
-            best_t = t;
-            best_face = face;
-        }
+    let ray = to_v - from_v;
+    let probe = from_v + ray * INSIDE_PROBE_FRACTION;
+    let block_offset = block_pos.to_vec3_floored();
+    let starts_inside = aabbs
+        .iter()
+        .any(|aabb| aabb.move_relative(block_offset).contains(probe));
+    if starts_inside {
+        let looked_at_face = Direction::nearest(ray).opposite();
+        return Some((from, looked_at_face));
     }
 
-    best_face
+    let hit = AzaleaAabb::clip_iterable(&aabbs, from_v, to_v, block_pos)?;
+    let hit_point = DVec3::new(hit.location.x, hit.location.y, hit.location.z);
+    Some((hit_point, hit.direction))
 }
 
 fn send_action(
@@ -1574,6 +1573,7 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
 mod tests {
     use azalea_registry::HolderSet;
     use azalea_registry::identifier::Identifier;
+    use glam::dvec3;
 
     use super::*;
 
@@ -1592,6 +1592,40 @@ mod tests {
         ));
         assert!(!same_item_same_components(Some(&a), None));
         assert!(same_item_same_components(None, None));
+    }
+
+    #[test]
+    fn ray_over_partial_block_misses_but_ray_onto_it_hits() {
+        let slab_height = 0.5;
+        let block = BlockPos::new(0, 0, 0);
+        let bottom_slab: [LocalBox; 1] = [[0.0, 0.0, 0.0, 1.0, slab_height, 1.0]];
+        let origin = dvec3(-1.0, 1.5, 0.5);
+
+        let over_the_slab = origin + dvec3(4.0, -1.4, 0.0);
+        let slab_hit = get_ray_hit_on_boxes(origin, over_the_slab, block, &bottom_slab);
+        assert!(slab_hit.is_none());
+
+        let onto_the_slab = origin + dvec3(3.0, -2.75, 0.0);
+        let (hit_point, face) =
+            get_ray_hit_on_boxes(origin, onto_the_slab, block, &bottom_slab).unwrap();
+        let tolerance = 1e-9;
+        let is_on_slab_surface = (hit_point.y - slab_height).abs() < tolerance;
+        assert!(is_on_slab_surface, "hit {hit_point:?}");
+        assert_eq!(face, Direction::Up);
+    }
+
+    #[test]
+    fn ray_starting_inside_partial_block_hits_immediately() {
+        let slab_height = 0.5;
+        let block = BlockPos::new(0, 0, 0);
+        let bottom_slab: [LocalBox; 1] = [[0.0, 0.0, 0.0, 1.0, slab_height, 1.0]];
+        let inside_the_slab = dvec3(0.5, 0.25, 0.5);
+        let straight_down = inside_the_slab + dvec3(0.0, -4.0, 0.0);
+
+        let (hit_point, face) =
+            get_ray_hit_on_boxes(inside_the_slab, straight_down, block, &bottom_slab).unwrap();
+        assert_eq!(hit_point, inside_the_slab);
+        assert_eq!(face, Direction::Up);
     }
 
     fn rule(blocks: Vec<BlockKind>, speed: Option<f32>, correct: Option<bool>) -> ToolRule {
