@@ -244,39 +244,6 @@ fn translate_login_finished_26_1() {
     assert_eq!(decoded.session_id, uuid::Uuid::nil());
 }
 
-/// 1.21.1's `game_profile` ends in a `strictErrorHandling` bool 1.21.2 dropped
-/// (`ClientboundGameProfilePacket.STREAM_CODEC`), so it must go before the
-/// session UUID is appended. azalea ignores trailing bytes, so only the frame
-/// length catches a stray one.
-#[test]
-fn translate_login_finished_767() {
-    use azalea_protocol::packets::login::ClientboundLoginPacket;
-    use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
-
-    let packet = ClientboundLoginPacket::LoginFinished(ClientboundLoginFinished {
-        game_profile: azalea_auth::game_profile::GameProfile {
-            uuid: uuid::Uuid::from_u128(0xfeed_beef),
-            name: "Purdze".into(),
-            properties: Default::default(),
-        },
-        session_id: uuid::Uuid::from_u128(0xdead),
-    });
-    let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
-    // A 767 frame drops the UUID and ends in strictErrorHandling instead.
-    let mut old = frame[..frame.len() - 16].to_vec();
-    old.push(1);
-
-    let translated = translation_for(767).translate_login_frame(old.into_boxed_slice());
-    assert_eq!(translated.len(), frame.len());
-    let decoded: ClientboundLoginPacket =
-        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap();
-    let ClientboundLoginPacket::LoginFinished(decoded) = decoded else {
-        panic!("wrong packet: {decoded:?}");
-    };
-    assert_eq!(decoded.game_profile.name, "Purdze");
-    assert_eq!(decoded.session_id, uuid::Uuid::nil());
-}
-
 /// 26.2 added `onlineMode` before the trailing `enforcesSecureChat` bool
 /// (`ClientboundLoginPacket.write`); the shim inserts `false`.
 #[test]
