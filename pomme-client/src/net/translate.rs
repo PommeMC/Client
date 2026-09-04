@@ -682,7 +682,7 @@ impl Translation {
                     translate_set_time(id, payload)
                 }
             } else if let Some(v) = v765.filter(|v| id == v.update_attributes_id) {
-                translate_update_attributes_765(v, id, payload)
+                translate_update_attributes_765(v, self.to_latest, id, payload)
             } else if v765.is_some_and(|v| id == v.container_set_slot_id) {
                 v767.and_then(|v| translate_container_set_slot_765(v, payload))
             } else if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
@@ -1674,7 +1674,12 @@ fn translate_update_mob_effect_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// by resource location instead of registry id (looked up in the wire
 /// version's table; `remap_inbound` maps it onward) and modifiers carry
 /// the pre-1.21 UUID ids.
-fn translate_update_attributes_765(v: &Ids765, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+fn translate_update_attributes_765(
+    v: &Ids765,
+    remaps: &RegistryRemaps,
+    id: u32,
+    payload: &[u8],
+) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
     let entries = u32::azalea_read_var(&mut cur).ok()?;
@@ -1693,7 +1698,10 @@ fn translate_update_attributes_765(v: &Ids765, id: u32, payload: &[u8]) -> Optio
             .names(ClientRegistry::Attribute)
             .iter()
             .position(|n| n == key)? as u32;
-        wire::write_varint(&mut out, attribute);
+        wire::write_varint(
+            &mut out,
+            remaps.remap(ClientRegistry::Attribute, attribute)?,
+        );
 
         let base_at = cur.position() as usize;
         advance(&mut cur, 8)?;
