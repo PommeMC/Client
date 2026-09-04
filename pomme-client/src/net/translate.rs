@@ -156,12 +156,11 @@
 //!   unmounted frames are discarded server-side
 //! - `client_tick_end` doesn't exist; its suppression is expected and logged
 //!   quietly
-//! - `AbstractArrow` gained `in_ground` at index 10, so an arrow's effect color
-//!   sits at 10 where 26.2 reads 11, and a trident's loyalty/foil at 10/11
-//!   where 26.2 reads 11/12. The indices pass through unshifted, which costs
-//!   nothing today because pomme reads metadata only for living entities; a
-//!   lift belongs beside `normalize_player_index_at` in `entity/mod.rs`, not
-//!   here
+//! - `AbstractArrow` gained `in_ground` at index 10, so an arrow sends its
+//!   effect color at 10 and a trident its loyalty/foil at 10/11, where 26.2
+//!   reads 11 and 11/12. The indices pass through unshifted, which costs
+//!   nothing while pomme reads metadata only for living entities; a lift
+//!   belongs beside `normalize_player_index_at` in `entity/mod.rs`
 //!
 //! 1.20.6 -> 26.2 wire changes (all of 1.21.1's — 1.21 only appended
 //! `custom_report_details`/`server_links`, so the tables are a strict
@@ -220,9 +219,8 @@ pub struct Translation {
     to_latest: &'static RegistryRemaps,
     from_latest: &'static RegistryRemaps,
     login_finished_id: u32,
-    /// Whether the wire version's `login_finished` ends in the
-    /// `strictErrorHandling` bool 1.21.2 dropped; see
-    /// [`Translation::translate_login_frame`].
+    /// Whether `login_finished` ends in the strictErrorHandling bool 1.21.2
+    /// replaced with the session UUID.
     login_strict_error_handling: bool,
     /// Latest-space; game-frame rewrites dispatch after the id remap.
     game_login_id: u32,
