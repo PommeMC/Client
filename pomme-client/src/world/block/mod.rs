@@ -224,6 +224,8 @@ const BLOCK_DATA: [(i32, &str); 9] = [
 const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
     // 1.21.7 added no blocks.
     (771, 772),
+    // 1.21's trial-chamber blocks already existed in 1.20.6.
+    (766, 767),
 ];
 
 /// Per-state property tables (`just stategen`), index-aligned with

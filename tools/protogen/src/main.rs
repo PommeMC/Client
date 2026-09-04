@@ -323,11 +323,13 @@ fn parse_template(
     direction: Direction,
     maps: &TypeMaps,
 ) -> Result<Option<Vec<String>>, Error> {
-    let needle = match direction {
-        Direction::Serverbound => " SERVERBOUND_TEMPLATE = ",
-        Direction::Clientbound => " CLIENTBOUND_TEMPLATE = ",
+    // 1.21 split the registrations into `*_TEMPLATE` constants bound
+    // separately; before that the bound constant holds them directly.
+    let needles = match direction {
+        Direction::Serverbound => [" SERVERBOUND_TEMPLATE = ", " SERVERBOUND = "],
+        Direction::Clientbound => [" CLIENTBOUND_TEMPLATE = ", " CLIENTBOUND = "],
     };
-    let Some(start) = source.find(needle) else {
+    let Some(start) = needles.iter().find_map(|n| source.find(n)) else {
         return Ok(None);
     };
     let statement = &source[start..];

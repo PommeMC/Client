@@ -607,15 +607,7 @@ mod tests {
         assert_eq!(t.version().protocol, 768);
         assert_eq!(t.version().name, "1.21.3");
         let t769 = PacketTable::for_protocol(769).unwrap();
-        for id in 0.. {
-            match (
-                t.name_of(Phase::Game, Direction::Clientbound, id),
-                t769.name_of(Phase::Game, Direction::Clientbound, id),
-            ) {
-                (None, None) => break,
-                (a, b) => assert_eq!(a, b, "clientbound {id}"),
-            }
-        }
+        assert_prefix(t, t769, Phase::Game, Direction::Clientbound, true);
         assert_eq!(
             t.id(Phase::Game, Direction::Serverbound, "interact"),
             Some(24)
@@ -699,6 +691,41 @@ mod tests {
         );
         assert!(
             t.name_of(Phase::Game, Direction::Clientbound, 124)
+                .is_none()
+        );
+    }
+
+    /// 1.20.6's tables are a strict prefix of 1.21.1's in every phase and
+    /// direction — 1.21 only appended `custom_report_details` and
+    /// `server_links` (config + game clientbound) — verified against the
+    /// decompiled `<Phase>Protocols.java` registrations and asserted here.
+    #[test]
+    fn anchors_1_20_6() {
+        let t = PacketTable::for_protocol(766).unwrap();
+        assert_eq!(t.version().protocol, 766);
+        assert_eq!(t.version().name, "1.20.6");
+        let t767 = PacketTable::for_protocol(767).unwrap();
+        for phase in [
+            Phase::Handshake,
+            Phase::Status,
+            Phase::Login,
+            Phase::Configuration,
+            Phase::Game,
+        ] {
+            for dir in [Direction::Serverbound, Direction::Clientbound] {
+                assert_prefix(t, t767, phase, dir, false);
+            }
+        }
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "server_links"),
+            None
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 121)
+                .is_some()
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 122)
                 .is_none()
         );
     }
