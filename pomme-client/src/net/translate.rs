@@ -136,7 +136,8 @@
 //! - `cooldown` carries an item registry id where 26.2 names a cooldown group
 //! - clientbound `set_carried_item` was renamed `set_held_slot` (identical byte
 //!   layout); login `game_profile` -> `login_finished` needs no alias (login
-//!   rewrites dispatch by id)
+//!   rewrites dispatch by id) but ends in a `strictErrorHandling` bool 1.21.2
+//!   dropped, stripped before the session UUID is appended
 //! - `update_recipes` and `place_ghost_recipe` restructured into 26.2's
 //!   `RecipeDisplay` trees with no mechanical mapping, so they're dropped and
 //!   the recipe book/stonecutter UIs stay empty on 1.21.1 servers (the
@@ -149,13 +150,18 @@
 //! - serverbound `player_input` was the vehicle-steering packet (two axis
 //!   floats + jump/shift flags) rather than the key bitfield, and the
 //!   move_player flags byte was a plain onGround bool, so the
-//!   horizontal-collision bit 1.21.2 added must be dropped. Accepted
-//!   divergence: 1.21.1 sent `player_input` only while riding but handles it
-//!   unguarded, so pomme drives the server's `xxa`/`zza`/`jumping`/
-//!   `shiftKeyDown` when unmounted too — harmless, since position is
-//!   client-authoritative and the server's copy is corrected every tick
+//!   horizontal-collision bit 1.21.2 added must be dropped. 1.21.1 sent
+//!   `player_input` only while riding and pomme sends it every tick, but
+//!   `ServerPlayer.setPlayerInput` is guarded by `isPassenger()`, so the
+//!   unmounted frames are discarded server-side
 //! - `client_tick_end` doesn't exist; its suppression is expected and logged
 //!   quietly
+//! - `AbstractArrow` gained `in_ground` at index 10, so an arrow's effect color
+//!   sits at 10 where 26.2 reads 11, and a trident's loyalty/foil at 10/11
+//!   where 26.2 reads 11/12. The indices pass through unshifted, which costs
+//!   nothing today because pomme reads metadata only for living entities; a
+//!   lift belongs beside `normalize_player_index_at` in `entity/mod.rs`, not
+//!   here
 //!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
@@ -202,6 +208,10 @@ pub struct Translation {
     to_latest: &'static RegistryRemaps,
     from_latest: &'static RegistryRemaps,
     login_finished_id: u32,
+    /// Whether the wire version's `login_finished` ends in the
+    /// `strictErrorHandling` bool 1.21.2 dropped; see
+    /// [`Translation::translate_login_frame`].
+    login_strict_error_handling: bool,
     /// Latest-space; game-frame rewrites dispatch after the id remap.
     game_login_id: u32,
     set_player_team_id: u32,
@@ -407,6 +417,7 @@ impl Translation {
             from_latest: RegistryRemaps::from_latest(protocol)?,
             // Login-phase ids are identical across all supported versions.
             login_finished_id: id(Phase::Login, "login_finished"),
+            login_strict_error_handling: protocol <= 767,
             game_login_id: id(Phase::Game, "login"),
             set_player_team_id: id(Phase::Game, "set_player_team"),
             game_ids: GameIds::build(protocol, table, latest),
@@ -417,9 +428,13 @@ impl Translation {
     pub fn translate_login_frame(&self, raw: Box<[u8]>) -> Box<[u8]> {
         let mut cur = Cursor::new(&raw[..]);
         if u32::azalea_read_var(&mut cur).ok() == Some(self.login_finished_id) {
-            // 26.2 appended a session-id UUID; zero is fine, pomme only
-            // reads the game profile.
+            // 1.21.1 ends the packet in a `strictErrorHandling` bool 1.21.2
+            // dropped, and 26.2 appended a session-id UUID in its place; a
+            // zero UUID is fine, pomme only reads the game profile.
             let mut out = raw.into_vec();
+            if self.login_strict_error_handling {
+                out.pop();
+            }
             out.extend_from_slice(&[0; 16]);
             return out.into_boxed_slice();
         }
@@ -443,13 +458,12 @@ impl Translation {
         };
 
         let v769 = self.game_ids.as_ref().is_some_and(|g| g.v769.is_some());
-        let v767 = self.game_ids.as_ref().is_some_and(|g| g.v767.is_some());
-        if let Some(v) = self.game_ids.as_ref().and_then(|g| g.v767.as_ref())
-            && v.drops.contains(&id)
-        {
+        let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
+        if v767.is_some_and(|v| v.drops.contains(&id)) {
             tracing::debug!("Dropping game packet {id} with no 1.21.1 equivalent layout");
             return None;
         }
+        let v767 = v767.is_some();
         let payload = &raw[id_end..];
         let rewritten = if id == self.game_login_id {
             if v767 {
@@ -510,11 +524,10 @@ impl Translation {
     /// version's: id remap, `attack`/`interact` layout rewrites, and
     /// suppression of packets the older version lacks. Returns the frames to
     /// send (empty = suppressed, two for `interact`, one otherwise).
-    pub fn translate_outbound_game_frame(&self, frame: Vec<u8>) -> Vec<Vec<u8>> {
+    pub fn translate_outbound_game_frame(&self, mut frame: Vec<u8>) -> Vec<Vec<u8>> {
         let Some(ids) = &self.game_ids else {
             return vec![frame];
         };
-        let mut frame = frame;
         let mut pos = 0;
         let Some(id) = wire::read_varint(&frame, &mut pos) else {
             return Vec::new();
@@ -1019,8 +1032,8 @@ fn translate_cooldown_767(remaps: &RegistryRemaps, id: u32, payload: &[u8]) -> O
 /// Rewrites serverbound `player_input` for 1.21.1, where it was the vehicle
 /// steering packet (`xxa, zza floats + jump/shift flags`) rather than the
 /// key bitfield 1.21.2 introduced; axes are synthesized at full strength.
-/// TODO: suppress this while the player isn't riding, as the 1.21.1 client did
-/// (see the module docs); needs ride state this layer doesn't have.
+/// Unmounted frames need no suppression: the server's `setPlayerInput` only
+/// applies them to a passenger.
 fn translate_player_input(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     let Some(&bits) = payload.first() else {
         return Vec::new();
