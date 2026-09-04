@@ -230,37 +230,26 @@ fn translate_login_finished_26_1() {
     assert_eq!(decoded.session_id, uuid::Uuid::nil());
 }
 
-/// 1.21.1's `game_profile` ends in a `strictErrorHandling` bool 1.21.2 dropped
-/// (`ClientboundGameProfilePacket.STREAM_CODEC`), so it must go before the
-/// session UUID is appended. azalea ignores trailing bytes, so only the frame
-/// length catches a stray one.
+/// 1.21.1's `game_profile` ends in a trailing strictErrorHandling bool where
+/// 1.21.2 put the session UUID; it pops before the zero pad. azalea ignores
+/// leftover bytes, so only the byte-exact frame catches a stray one.
 #[test]
 fn translate_login_finished_767() {
-    use azalea_protocol::packets::login::ClientboundLoginPacket;
-    use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
+    let login_id = PacketTable::for_protocol(767)
+        .unwrap()
+        .id(Phase::Login, Direction::Clientbound, "game_profile")
+        .unwrap();
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, login_id);
+    old.extend_from_slice(&[9; 16]); // uuid
+    old.extend_from_slice(&[4, b'p', b'o', b'm', b'e']); // name
+    wire::write_varint(&mut old, 0); // no properties
+    old.push(1); // strictErrorHandling
 
-    let packet = ClientboundLoginPacket::LoginFinished(ClientboundLoginFinished {
-        game_profile: azalea_auth::game_profile::GameProfile {
-            uuid: uuid::Uuid::from_u128(0xfeed_beef),
-            name: "Purdze".into(),
-            properties: Default::default(),
-        },
-        session_id: uuid::Uuid::from_u128(0xdead),
-    });
-    let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
-    // A 767 frame drops the UUID and ends in strictErrorHandling instead.
-    let mut old = frame[..frame.len() - 16].to_vec();
-    old.push(1);
-
-    let translated = translation_for(767).translate_login_frame(old.into_boxed_slice());
-    assert_eq!(translated.len(), frame.len());
-    let decoded: ClientboundLoginPacket =
-        azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap();
-    let ClientboundLoginPacket::LoginFinished(decoded) = decoded else {
-        panic!("wrong packet: {decoded:?}");
-    };
-    assert_eq!(decoded.game_profile.name, "Purdze");
-    assert_eq!(decoded.session_id, uuid::Uuid::nil());
+    let translated = translation_for(767).translate_login_frame(old.clone().into());
+    let mut expected = old[..old.len() - 1].to_vec();
+    expected.extend_from_slice(&[0; 16]);
+    assert_eq!(&translated[..], expected);
 }
 
 /// 26.2 added `onlineMode` before the trailing `enforcesSecureChat` bool
