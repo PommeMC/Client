@@ -1600,6 +1600,10 @@ fn translate_update_attributes_766() {
         panic!("wrong packet");
     };
     assert_eq!(p.values.len(), 1);
+    assert_eq!(
+        p.values[0].attribute,
+        azalea_registry::builtin::Attribute::MaxHealth
+    );
     assert_eq!(p.values[0].base, 20.0);
     let modifier = &p.values[0].modifiers[0];
     assert_eq!(modifier.amount, 4.0);
@@ -1789,6 +1793,10 @@ fn translate_update_attributes_765() {
         panic!("wrong packet");
     };
     assert_eq!(p.values.len(), 1);
+    assert_eq!(
+        p.values[0].attribute,
+        azalea_registry::builtin::Attribute::MaxHealth
+    );
     assert_eq!(p.values[0].base, 20.0);
     let modifier = &p.values[0].modifiers[0];
     assert_eq!(modifier.amount, 4.0);

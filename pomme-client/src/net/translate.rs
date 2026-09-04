@@ -171,8 +171,13 @@
 //! - `projectile_power` carried a per-axis acceleration vector, collapsed to
 //!   its magnitude
 //! - serverbound `use_item` lacks the rotation floats 1.21 appended
-//! - the variant/effect/dimension holder codecs merely moved into their types
+//! - the damage/effect/dimension holder codecs merely moved into their types
 //!   (wire-identical), and the block set matches 1.21.1's
+//! - `horse_screen_open`'s middle varint changed meaning rather than layout:
+//!   1.20.6 sends the container's slot count where 1.21 sends the mount's
+//!   inventory column count (`columns = (size - 1) / 3` — 1 for a plain horse,
+//!   16 for a chested donkey, `1 + 3c` for a llama). Passed through untouched,
+//!   which costs nothing while pomme has no mount-inventory screen
 //!
 //! 1.20.4 -> 26.2 wire changes (the 1.20.5 item-component rework; all of
 //! 1.20.6's plus):
@@ -390,6 +395,8 @@ impl Ids767 {
 
 /// Latest-space dispatch ids for the frame rewrites protocol 766 needs.
 struct Ids766 {
+    /// Dispatched outside [`GameIds::version_rewrite`]: the modifier rewrite
+    /// needs the registry remaps a [`FrameRewrite`] can't take.
     update_attributes_id: u32,
     projectile_power_id: u32,
     /// Serverbound `use_item`: latest + wire ids for the rotation strip.
@@ -399,11 +406,7 @@ struct Ids766 {
 
 impl Ids766 {
     fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
-        Some(match id {
-            i if i == self.update_attributes_id => translate_update_attributes_766,
-            i if i == self.projectile_power_id => translate_projectile_power_766,
-            _ => return None,
-        })
+        (id == self.projectile_power_id).then_some(translate_projectile_power_766 as FrameRewrite)
     }
 }
 
@@ -835,7 +838,7 @@ impl Translation {
             } else if let Some(v) = v764.filter(|v| id == v.set_score_id) {
                 translate_set_score_764(v, payload)
             } else if let Some(v) = v765.filter(|v| id == v.update_attributes_id) {
-                translate_update_attributes_765(v, id, payload)
+                translate_update_attributes_765(v, self.to_latest, id, payload)
             } else if v765.is_some_and(|v| id == v.container_set_slot_id) {
                 v767.and_then(|v| translate_container_set_slot_765(v, payload))
             } else if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
@@ -848,6 +851,12 @@ impl Translation {
                 translate_container_set_slot_767(v, payload)
             } else if v767.is_some_and(|v| id == v.cooldown_id) {
                 translate_cooldown_767(self.to_latest, id, payload)
+            } else if ids
+                .v766
+                .as_ref()
+                .is_some_and(|v| id == v.update_attributes_id)
+            {
+                translate_update_attributes_766(self.to_latest, id, payload)
             } else if id == wire_id && converted.is_none() {
                 return Some(raw);
             } else {
@@ -1069,6 +1078,8 @@ impl Translation {
 const RENAMED: &[(&str, &str)] = &[
     // `ClientboundHorseScreenOpenPacket` vs `ClientboundMountScreenOpenPacket`
     // in the references, byte-identical write() bodies.
+    // TODO: convert 766's slot count to 1.21's column count once a mount
+    // inventory screen exists (see the 1.20.6 changelog above).
     ("horse_screen_open", "mount_screen_open"),
     // Renamed by 1.21.2, byte-identical single-slot bodies.
     ("set_carried_item", "set_held_slot"),
@@ -1876,7 +1887,12 @@ fn translate_update_mob_effect_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// by resource location instead of registry id (looked up in the wire
 /// version's table; `remap_inbound` maps it onward) and modifiers carry
 /// the pre-1.21 UUID ids.
-fn translate_update_attributes_765(v: &Ids765, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+fn translate_update_attributes_765(
+    v: &Ids765,
+    remaps: &RegistryRemaps,
+    id: u32,
+    payload: &[u8],
+) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
     let entries = u32::azalea_read_var(&mut cur).ok()?;
@@ -1895,7 +1911,10 @@ fn translate_update_attributes_765(v: &Ids765, id: u32, payload: &[u8]) -> Optio
             .names(ClientRegistry::Attribute)
             .iter()
             .position(|n| n == key)? as u32;
-        wire::write_varint(&mut out, attribute);
+        wire::write_varint(
+            &mut out,
+            remaps.remap(ClientRegistry::Attribute, attribute)?,
+        );
 
         let base_at = cur.position() as usize;
         advance(&mut cur, 8)?;
@@ -2383,7 +2402,11 @@ fn translate_resource_pack_response_764(old_id: u32, payload: &[u8]) -> Vec<Vec<
 /// Rewrites `update_attributes`: 1.21 turned each modifier's UUID id into a
 /// resource location; a hex name is synthesized (pomme reads only the
 /// attribute values, and vanilla's own 1.21 migration renamed them too).
-fn translate_update_attributes_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+fn translate_update_attributes_766(
+    remaps: &RegistryRemaps,
+    id: u32,
+    payload: &[u8],
+) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
     let entries = u32::azalea_read_var(&mut cur).ok()?;
@@ -2392,11 +2415,15 @@ fn translate_update_attributes_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..cur.position() as usize]);
     for _ in 0..entries {
-        let head_at = cur.position() as usize;
-        varint_span(&mut cur)?; // attribute
+        let attribute = u32::azalea_read_var(&mut cur).ok()?;
+        wire::write_varint(
+            &mut out,
+            remaps.remap(ClientRegistry::Attribute, attribute)?,
+        );
+        let body_at = cur.position() as usize;
         advance(&mut cur, 8)?; // base
         let modifiers = u32::azalea_read_var(&mut cur).ok()?;
-        out.extend_from_slice(&payload[head_at..cur.position() as usize]);
+        out.extend_from_slice(&payload[body_at..cur.position() as usize]);
         for _ in 0..modifiers {
             translate_modifier_uuid(&mut cur, &mut out, payload)?;
         }
