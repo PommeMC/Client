@@ -230,6 +230,28 @@ fn translate_login_finished_26_1() {
     assert_eq!(decoded.session_id, uuid::Uuid::nil());
 }
 
+/// 1.21.1's `game_profile` ends in a trailing strictErrorHandling bool where
+/// 1.21.2 put the session UUID; it pops before the zero pad. azalea ignores
+/// leftover bytes, so only the byte-exact frame catches a stray one.
+#[test]
+fn translate_login_finished_767() {
+    let login_id = PacketTable::for_protocol(767)
+        .unwrap()
+        .id(Phase::Login, Direction::Clientbound, "game_profile")
+        .unwrap();
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, login_id);
+    old.extend_from_slice(&[9; 16]); // uuid
+    old.extend_from_slice(&[4, b'p', b'o', b'm', b'e']); // name
+    wire::write_varint(&mut old, 0); // no properties
+    old.push(1); // strictErrorHandling
+
+    let translated = translation_for(767).translate_login_frame(old.clone().into());
+    let mut expected = old[..old.len() - 1].to_vec();
+    expected.extend_from_slice(&[0; 16]);
+    assert_eq!(&translated[..], expected);
+}
+
 /// 26.2 added `onlineMode` before the trailing `enforcesSecureChat` bool
 /// (`ClientboundLoginPacket.write`); the shim inserts `false`.
 #[test]
@@ -660,7 +682,7 @@ fn translate_set_time_774() {
 /// action bodies in the references), through each version's id table.
 #[test]
 fn translate_attack_old_versions() {
-    for protocol in [774, 773, 772, 771, 770, 769] {
+    for protocol in [774, 773, 772, 771, 770, 769, 768, 767] {
         let frames =
             translation_for(protocol).translate_outbound_game_frame(wire::encode_attack(42));
         let interact = old_id(protocol, Direction::Serverbound, "interact");
@@ -952,7 +974,7 @@ fn assert_velocity(v: azalea_core::position::Vec3) {
 /// 1.21.9-era rewrites apply to them.
 #[test]
 fn translate_add_entity_old_versions() {
-    for protocol in [772, 771, 770, 769] {
+    for protocol in [772, 771, 770, 769, 768, 767] {
         let mut old = Vec::new();
         wire::write_varint(
             &mut old,
@@ -1307,6 +1329,261 @@ fn translate_container_click_769() {
     let frames = translation_for(769).translate_outbound_game_frame(frame);
     let old = old_id(769, Direction::Serverbound, "container_click") as u8;
     assert_eq!(frames, [[old, 1, 2, 0, 5, 0, 0, 1, 0, 5, 2, 4, 0, 0, 0]]);
+}
+
+/// 1.21.4 inserted `alwaysShow` after `overrideLimiter`; the shim
+/// synthesizes false for 1.21.3-and-older frames.
+#[test]
+fn translate_level_particles_768() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(768, Direction::Clientbound, "level_particles"),
+    );
+    old.push(1); // override limiter
+    for c in [1.0f64, 65.0, -2.0] {
+        old.extend_from_slice(&c.to_be_bytes());
+    }
+    for d in [0.5f32, 0.5, 0.5, 0.1] {
+        old.extend_from_slice(&d.to_be_bytes());
+    }
+    old.extend_from_slice(&7i32.to_be_bytes()); // count
+    wire::write_varint(&mut old, 30); // particle (26.2 id space)
+
+    let ClientboundGamePacket::LevelParticles(p) = translate_and_decode(768, old) else {
+        panic!("wrong packet");
+    };
+    assert!(p.override_limiter);
+    assert!(!p.always_show);
+    assert_eq!(p.count, 7);
+}
+
+/// 1.21.4 appended UPDATE_HAT after UPDATE_LIST_ORDER rather than inserting
+/// it, so a 768 mask is a prefix of 26.2's and passes through untouched.
+#[test]
+fn player_info_passthrough_768() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(768, Direction::Clientbound, "player_info_update"),
+    );
+    old.push(0x40); // actions: UPDATE_LIST_ORDER (1.21.3 bit 6)
+    wire::write_varint(&mut old, 1); // one entry
+    old.extend_from_slice(&[9; 16]); // uuid
+    wire::write_varint(&mut old, 5); // list order
+
+    let ClientboundGamePacket::PlayerInfoUpdate(p) = translate_and_decode(768, old) else {
+        panic!("wrong packet");
+    };
+    assert!(p.actions.update_list_order);
+    assert_eq!(p.entries[0].list_order, 5);
+}
+
+/// The 1.21.2 `player_position` rework (`PositionMoveRotation`): the 767
+/// layout's trailing teleport id moves to the front and a zero delta plus
+/// widened relative bits are synthesized. Each position bit is mirrored into
+/// its `DELTA_*` bit, so 1.21.1's "keep the current velocity on a relative
+/// axis" survives 26.2's `calculateDelta`.
+#[test]
+fn translate_player_position_767() {
+    let build = |relatives: u8| {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(767, Direction::Clientbound, "player_position"),
+        );
+        for c in [100.5f64, 64.0, -20.25] {
+            old.extend_from_slice(&c.to_be_bytes());
+        }
+        old.extend_from_slice(&90.0f32.to_be_bytes()); // y rot
+        old.extend_from_slice(&(-10.0f32).to_be_bytes()); // x rot
+        old.push(relatives);
+        wire::write_varint(&mut old, 42); // teleport id
+        old
+    };
+
+    let absolute = build(0b0001_1000); // relative: Y_ROT | X_ROT
+    let ClientboundGamePacket::PlayerPosition(p) = translate_and_decode(767, absolute) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.id, 42);
+    assert_eq!(
+        (p.change.pos.x, p.change.pos.y, p.change.pos.z),
+        (100.5, 64.0, -20.25)
+    );
+    assert_eq!(
+        (p.change.delta.x, p.change.delta.y, p.change.delta.z),
+        (0.0, 0.0, 0.0)
+    );
+    assert_eq!(p.change.look_direction.y_rot(), 90.0);
+    assert_eq!(p.change.look_direction.x_rot(), -10.0);
+    assert!(p.relative.y_rot && p.relative.x_rot);
+    assert!(!p.relative.x && !p.relative.y && !p.relative.z);
+    // Absolute on every position axis, so the velocity zeroes as 1.21.1's did.
+    assert!(!p.relative.delta_x && !p.relative.delta_y && !p.relative.delta_z);
+
+    let relative_xz = build(0b0000_0101); // relative: X | Z
+    let ClientboundGamePacket::PlayerPosition(p) = translate_and_decode(767, relative_xz) else {
+        panic!("wrong packet");
+    };
+    assert!(p.relative.x && p.relative.z && !p.relative.y);
+    assert!(p.relative.delta_x && p.relative.delta_z && !p.relative.delta_y);
+    assert!(!p.relative.rotate_delta);
+}
+
+/// 1.21.1's `teleport_entity` only synced position and rotation, so it becomes
+/// 26.2's `entity_position_sync` (which leaves velocity alone) rather than its
+/// `teleport_entity` (whose zero delta would zero it). Rotations are
+/// packed-degree bytes.
+#[test]
+fn translate_teleport_entity_767() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(767, Direction::Clientbound, "teleport_entity"),
+    );
+    wire::write_varint(&mut old, 9); // entity id
+    for c in [1.0f64, 70.0, 2.0] {
+        old.extend_from_slice(&c.to_be_bytes());
+    }
+    old.push(64); // y rot: 90 degrees packed
+    old.push(0); // x rot
+    old.push(1); // on ground
+
+    let ClientboundGamePacket::EntityPositionSync(p) = translate_and_decode(767, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.id, MinecraftEntityId(9));
+    assert_eq!(
+        (p.values.pos.x, p.values.pos.y, p.values.pos.z),
+        (1.0, 70.0, 2.0)
+    );
+    assert_eq!(p.values.look_direction.y_rot(), 90.0);
+    assert_eq!(p.values.look_direction.x_rot(), 0.0);
+    assert!(p.on_ground);
+}
+
+/// 767's two-long `set_time` with a negated (frozen) dayTime feeds the
+/// shared world-clock synthesis.
+#[test]
+fn translate_set_time_767() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(767, Direction::Clientbound, "set_time"));
+    old.extend_from_slice(&12000u64.to_be_bytes()); // game time
+    old.extend_from_slice(&(-6000i64).to_be_bytes()); // frozen day time
+
+    let ClientboundGamePacket::SetTime(p) = translate_and_decode(767, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.game_time, 12000);
+    let clock = p.clock_updates.values().next().unwrap();
+    assert_eq!(clock.total_ticks, 6000);
+    assert_eq!(clock.rate, 0.0);
+}
+
+/// 767 `container_set_slot` sentinels: container -1 becomes
+/// `set_cursor_item`, -2 becomes `set_player_inventory`, and plain ids pass
+/// with the byte-to-varint widening.
+#[test]
+fn translate_container_set_slot_767() {
+    let build = |container: i8, slot: i16| {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(767, Direction::Clientbound, "container_set_slot"),
+        );
+        old.push(container as u8);
+        wire::write_varint(&mut old, 2); // state id
+        old.extend_from_slice(&slot.to_be_bytes());
+        wire::write_varint(&mut old, 0); // empty stack
+        old
+    };
+
+    let ClientboundGamePacket::SetCursorItem(_) = translate_and_decode(767, build(-1, 0)) else {
+        panic!("wrong packet for -1");
+    };
+    let ClientboundGamePacket::SetPlayerInventory(p) = translate_and_decode(767, build(-2, 7))
+    else {
+        panic!("wrong packet for -2");
+    };
+    assert_eq!(p.slot, 7);
+    let ClientboundGamePacket::ContainerSetSlot(p) = translate_and_decode(767, build(3, 1)) else {
+        panic!("wrong packet for plain");
+    };
+    assert_eq!(p.container_id, 3);
+    assert_eq!(p.slot, 1);
+}
+
+/// 767 `cooldown` item ids remap into the latest registry space (azalea
+/// still decodes the item id form).
+#[test]
+fn translate_cooldown_767() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(767, Direction::Clientbound, "cooldown"));
+    wire::write_varint(&mut old, 5); // item, unshifted below the divergence
+    wire::write_varint(&mut old, 100); // duration
+
+    let ClientboundGamePacket::Cooldown(p) = translate_and_decode(767, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.duration, 100);
+}
+
+/// The clientbound `set_carried_item` -> `set_held_slot` rename alias.
+#[test]
+fn translate_set_carried_item_767() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(767, Direction::Clientbound, "set_carried_item"),
+    );
+    old.push(3);
+
+    let ClientboundGamePacket::SetHeldSlot(p) = translate_and_decode(767, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.slot, 3);
+}
+
+/// Outbound `player_input` becomes 767's vehicle-steering layout (axis
+/// floats + jump/shift flags).
+#[test]
+fn translate_player_input_767() {
+    let mut frame = Vec::new();
+    wire::write_varint(&mut frame, table_id(Direction::Serverbound, "player_input"));
+    frame.push(0b0011_0101); // forward, left, jump, shift
+
+    let frames = translation_for(767).translate_outbound_game_frame(frame);
+    let mut expected = Vec::new();
+    wire::write_varint(
+        &mut expected,
+        old_id(767, Direction::Serverbound, "player_input"),
+    );
+    expected.extend_from_slice(&1.0f32.to_be_bytes()); // xxa: left
+    expected.extend_from_slice(&1.0f32.to_be_bytes()); // zza: forward
+    expected.push(3); // jump | shift
+    assert_eq!(frames, [expected]);
+}
+
+/// Outbound move_player flags drop 1.21.2's horizontal-collision bit,
+/// which a 767 server would read as onGround.
+#[test]
+fn translate_move_player_flags_767() {
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        table_id(Direction::Serverbound, "move_player_status_only"),
+    );
+    frame.push(2); // horizontal collision only, not on ground
+
+    let frames = translation_for(767).translate_outbound_game_frame(frame);
+    assert_eq!(
+        frames,
+        [[
+            old_id(767, Direction::Serverbound, "move_player_status_only") as u8,
+            0
+        ]]
+    );
 }
 
 #[test]
