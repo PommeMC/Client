@@ -682,7 +682,7 @@ impl Translation {
                     translate_set_time(id, payload)
                 }
             } else if let Some(v) = v765.filter(|v| id == v.update_attributes_id) {
-                translate_update_attributes_765(v, self.to_latest, id, payload)
+                translate_update_attributes_uuid(Some(v.registry), self.to_latest, id, payload)
             } else if v765.is_some_and(|v| id == v.container_set_slot_id) {
                 v767.and_then(|v| translate_container_set_slot_765(v, payload))
             } else if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
@@ -700,7 +700,7 @@ impl Translation {
                 .as_ref()
                 .is_some_and(|v| id == v.update_attributes_id)
             {
-                translate_update_attributes_766(self.to_latest, id, payload)
+                translate_update_attributes_uuid(None, self.to_latest, id, payload)
             } else if id == wire_id {
                 return Some(raw);
             } else {
@@ -1670,12 +1670,13 @@ fn translate_update_mob_effect_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Rewrites `update_attributes` for 1.20.4, where the attribute is keyed
-/// by resource location instead of registry id (looked up in the wire
-/// version's table; `remap_inbound` maps it onward) and modifiers carry
-/// the pre-1.21 UUID ids.
-fn translate_update_attributes_765(
-    v: &Ids765,
+/// Rewrites `update_attributes` for the pre-1.21 layouts: the attribute id
+/// is remapped into the latest registry space and each modifier's UUID id
+/// becomes a hex resource location. 1.20.4 keys the attribute by resource
+/// location rather than registry id, so it passes its own table as
+/// `key_table` to resolve the name first.
+fn translate_update_attributes_uuid(
+    key_table: Option<&RegistryTable>,
     remaps: &RegistryRemaps,
     id: u32,
     payload: &[u8],
@@ -1688,25 +1689,29 @@ fn translate_update_attributes_765(
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[..cur.position() as usize]);
     for _ in 0..entries {
-        let len = u32::azalea_read_var(&mut cur).ok()? as usize;
-        let key_at = cur.position() as usize;
-        advance(&mut cur, len)?;
-        let key = std::str::from_utf8(&payload[key_at..key_at + len]).ok()?;
-        let key = key.strip_prefix("minecraft:").unwrap_or(key);
-        let attribute = v
-            .registry
-            .names(ClientRegistry::Attribute)
-            .iter()
-            .position(|n| n == key)? as u32;
+        let attribute = match key_table {
+            Some(table) => {
+                let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+                let key_at = cur.position() as usize;
+                advance(&mut cur, len)?;
+                let key = std::str::from_utf8(&payload[key_at..key_at + len]).ok()?;
+                let key = key.strip_prefix("minecraft:").unwrap_or(key);
+                table
+                    .names(ClientRegistry::Attribute)
+                    .iter()
+                    .position(|n| n == key)? as u32
+            }
+            None => u32::azalea_read_var(&mut cur).ok()?,
+        };
         wire::write_varint(
             &mut out,
             remaps.remap(ClientRegistry::Attribute, attribute)?,
         );
 
-        let base_at = cur.position() as usize;
-        advance(&mut cur, 8)?;
+        let body_at = cur.position() as usize;
+        advance(&mut cur, 8)?; // base
         let modifiers = u32::azalea_read_var(&mut cur).ok()?;
-        out.extend_from_slice(&payload[base_at..cur.position() as usize]);
+        out.extend_from_slice(&payload[body_at..cur.position() as usize]);
         for _ in 0..modifiers {
             translate_modifier_uuid(&mut cur, &mut out, payload)?;
         }
@@ -1823,38 +1828,6 @@ fn remap_serializer_765(old: u32) -> Option<u32> {
         26..=27 => remap_serializer_769(old + 3),
         _ => None,
     }
-}
-
-/// Rewrites `update_attributes`: 1.21 turned each modifier's UUID id into a
-/// resource location; a hex name is synthesized (pomme reads only the
-/// attribute values, and vanilla's own 1.21 migration renamed them too).
-fn translate_update_attributes_766(
-    remaps: &RegistryRemaps,
-    id: u32,
-    payload: &[u8],
-) -> Option<Vec<u8>> {
-    let mut cur = Cursor::new(payload);
-    varint_span(&mut cur)?; // entity id
-    let entries = u32::azalea_read_var(&mut cur).ok()?;
-
-    let mut out = Vec::with_capacity(payload.len() + 64);
-    wire::write_varint(&mut out, id);
-    out.extend_from_slice(&payload[..cur.position() as usize]);
-    for _ in 0..entries {
-        let attribute = u32::azalea_read_var(&mut cur).ok()?;
-        wire::write_varint(
-            &mut out,
-            remaps.remap(ClientRegistry::Attribute, attribute)?,
-        );
-        let body_at = cur.position() as usize;
-        advance(&mut cur, 8)?; // base
-        let modifiers = u32::azalea_read_var(&mut cur).ok()?;
-        out.extend_from_slice(&payload[body_at..cur.position() as usize]);
-        for _ in 0..modifiers {
-            translate_modifier_uuid(&mut cur, &mut out, payload)?;
-        }
-    }
-    Some(out)
 }
 
 /// Rewrites `projectile_power`: 1.21 collapsed the per-axis acceleration
