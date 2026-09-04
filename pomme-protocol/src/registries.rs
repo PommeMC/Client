@@ -561,8 +561,9 @@ mod tests {
         assert_round_trips(r, from, to);
     }
 
-    /// 1.20.6 matches 1.21.1's registry shape; 1.21 added five attributes
-    /// ahead of `generic.max_health`.
+    /// 1.20.6 shares 1.21.1's anchors; of the nine attributes 1.21 added,
+    /// `generic.burning_time` and `generic.explosion_knockback_resistance`
+    /// come ahead of `generic.max_health` and shift it 16 -> 18.
     #[test]
     fn remap_1_20_6_anchors() {
         let (r, from, to) = setup(766);
