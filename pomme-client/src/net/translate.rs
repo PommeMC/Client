@@ -213,6 +213,9 @@ pub struct Translation {
     /// Latest-space; game-frame rewrites dispatch after the id remap.
     game_login_id: u32,
     set_player_team_id: u32,
+    /// Handled outside [`GameIds`]: the attribute ids need remapping even on
+    /// a version whose packet ids all match the latest (26.1).
+    update_attributes_id: u32,
     /// Game-phase packet-id translation and the rewrites tied to it; `None`
     /// when the wire version's ids match the latest (26.1).
     game_ids: Option<GameIds>,
@@ -418,6 +421,7 @@ impl Translation {
             login_strict_error_handling: protocol <= 767,
             game_login_id: id(Phase::Game, "login"),
             set_player_team_id: id(Phase::Game, "set_player_team"),
+            update_attributes_id: id(Phase::Game, "update_attributes"),
             game_ids: GameIds::build(protocol, table, latest),
         })
     }
@@ -468,6 +472,8 @@ impl Translation {
             } else {
                 translate_game_login(id, payload)
             }
+        } else if id == self.update_attributes_id {
+            translate_update_attributes(self.to_latest, id, payload)
         } else if id == self.set_player_team_id {
             translate_team(id, payload, v769)
         } else if let Some(ids) = &self.game_ids {
@@ -1023,6 +1029,46 @@ fn translate_cooldown_767(remaps: &RegistryRemaps, id: u32, payload: &[u8]) -> O
     wire::write_varint(&mut out, id);
     wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, item)?);
     out.extend_from_slice(&payload[p..]);
+    Some(out)
+}
+
+/// Rewrites `update_attributes`' attribute ids into the latest registry
+/// space. Each snapshot names its attribute by registry id
+/// (`Attribute.STREAM_CODEC` is a plain `holderRegistry` varint), and those
+/// ids shift between versions — 1.21.2 also dropped every category prefix, so
+/// `generic.max_health` and `max_health` are the same entry at different
+/// indices. Without the remap the client reads a different attribute
+/// entirely. Modifier bodies are already the latest layout on every version
+/// reaching here, so they copy verbatim.
+fn translate_update_attributes(
+    remaps: &RegistryRemaps,
+    id: u32,
+    payload: &[u8],
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    varint_span(&mut cur)?; // entity id
+    let entries = u32::azalea_read_var(&mut cur).ok()?;
+
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..cur.position() as usize]);
+    for _ in 0..entries {
+        let attribute = u32::azalea_read_var(&mut cur).ok()?;
+        wire::write_varint(
+            &mut out,
+            remaps.remap(ClientRegistry::Attribute, attribute)?,
+        );
+        let body_at = cur.position() as usize;
+        advance(&mut cur, 8)?; // base
+        let modifiers = u32::azalea_read_var(&mut cur).ok()?;
+        for _ in 0..modifiers {
+            let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+            advance(&mut cur, len)?; // modifier id
+            advance(&mut cur, 8)?; // amount
+            varint_span(&mut cur)?; // operation
+        }
+        out.extend_from_slice(&payload[body_at..cur.position() as usize]);
+    }
     Some(out)
 }
 
