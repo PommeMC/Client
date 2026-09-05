@@ -176,7 +176,11 @@ fn class_to_resource(class: &str, direction: Direction) -> String {
         Direction::Clientbound => "Clientbound",
     };
     let base = class.strip_prefix(prefix).unwrap_or(class);
-    let base = base.strip_suffix("Packet").unwrap_or(base);
+    // A nested registration (`MovePlayerPacket.Pos`) names the family on the
+    // outer class and the variant on the inner one; 1.20.5 joined the two.
+    let (outer, inner) = base.split_once('.').unwrap_or((base, ""));
+    let outer = outer.strip_suffix("Packet").unwrap_or(outer);
+    let base = format!("{outer}{inner}");
     if base == "ClientIntention" {
         return "intention".to_string();
     }
