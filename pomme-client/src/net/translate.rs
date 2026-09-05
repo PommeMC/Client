@@ -230,6 +230,9 @@ pub struct Translation {
     /// Latest-space; game-frame rewrites dispatch after the id remap.
     game_login_id: u32,
     set_player_team_id: u32,
+    /// Handled outside [`GameIds`]: the attribute ids need remapping even on
+    /// a version whose packet ids all match the latest (26.1).
+    update_attributes_id: u32,
     /// Game-phase packet-id translation and the rewrites tied to it; `None`
     /// when the wire version's ids match the latest (26.1).
     game_ids: Option<GameIds>,
@@ -323,9 +326,6 @@ impl Ids767 {
 
 /// Latest-space dispatch ids for the frame rewrites protocol 766 needs.
 struct Ids766 {
-    /// Dispatched outside [`GameIds::version_rewrite`]: the modifier rewrite
-    /// needs the registry remaps a [`FrameRewrite`] can't take.
-    update_attributes_id: u32,
     projectile_power_id: u32,
     /// Serverbound `use_item`: latest + wire ids for the rotation strip.
     use_item_id: u32,
@@ -454,6 +454,7 @@ impl Translation {
             login_strict_error_handling: protocol <= 767,
             game_login_id: id(Phase::Game, "login"),
             set_player_team_id: id(Phase::Game, "set_player_team"),
+            update_attributes_id: id(Phase::Game, "update_attributes"),
             game_ids: GameIds::build(protocol, table, latest),
         })
     }
@@ -493,6 +494,7 @@ impl Translation {
 
         let v769 = self.game_ids.as_ref().is_some_and(|g| g.v769.is_some());
         let v767 = self.game_ids.as_ref().and_then(|g| g.v767.as_ref());
+        let v766 = self.game_ids.as_ref().and_then(|g| g.v766.as_ref());
         if v767.is_some_and(|v| v.drops.contains(&id)) {
             tracing::debug!("Dropping game packet {id} with no 1.21.1 equivalent layout");
             return None;
@@ -503,6 +505,14 @@ impl Translation {
                 insert_sea_level(payload).and_then(|p| translate_game_login(id, &p))
             } else {
                 translate_game_login(id, payload)
+            }
+        } else if id == self.update_attributes_id {
+            // Oldest gate first: 766 and below carry UUID modifier ids the
+            // shared rewrite would copy through as a resource location.
+            if v766.is_some() {
+                translate_update_attributes_766(self.to_latest, id, payload)
+            } else {
+                translate_update_attributes(self.to_latest, id, payload)
             }
         } else if id == self.set_player_team_id {
             translate_team(id, payload, v769)
@@ -527,12 +537,6 @@ impl Translation {
                 translate_container_set_slot_767(v, payload)
             } else if v767.is_some_and(|v| id == v.cooldown_id) {
                 translate_cooldown_767(self.to_latest, id, payload)
-            } else if ids
-                .v766
-                .as_ref()
-                .is_some_and(|v| id == v.update_attributes_id)
-            {
-                translate_update_attributes_766(self.to_latest, id, payload)
             } else if id == wire_id {
                 return Some(raw);
             } else {
@@ -868,7 +872,6 @@ impl GameIds {
                 .map(|n| id(Serverbound, n)),
             }),
             v766: (protocol <= 766).then(|| Ids766 {
-                update_attributes_id: id(Clientbound, "update_attributes"),
                 projectile_power_id: id(Clientbound, "projectile_power"),
                 use_item_id: id(Serverbound, "use_item"),
                 use_item_old_id: required_id(table, Phase::Game, Serverbound, "use_item"),
@@ -1089,6 +1092,46 @@ fn translate_use_item(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     wire::write_varint(&mut out, old_id);
     out.extend_from_slice(&payload[..payload.len().saturating_sub(8)]);
     vec![out]
+}
+
+/// Rewrites `update_attributes`' attribute ids into the latest registry
+/// space. Each snapshot names its attribute by registry id
+/// (`Attribute.STREAM_CODEC` is a plain `holderRegistry` varint), and those
+/// ids shift between versions — 1.21.2 also dropped every category prefix, so
+/// `generic.max_health` and `max_health` are the same entry at different
+/// indices. Without the remap the client reads a different attribute
+/// entirely. Modifier bodies are already the latest layout on every version
+/// reaching here, so they copy verbatim.
+fn translate_update_attributes(
+    remaps: &RegistryRemaps,
+    id: u32,
+    payload: &[u8],
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    varint_span(&mut cur)?; // entity id
+    let entries = u32::azalea_read_var(&mut cur).ok()?;
+
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..cur.position() as usize]);
+    for _ in 0..entries {
+        let attribute = u32::azalea_read_var(&mut cur).ok()?;
+        wire::write_varint(
+            &mut out,
+            remaps.remap(ClientRegistry::Attribute, attribute)?,
+        );
+        let body_at = cur.position() as usize;
+        advance(&mut cur, 8)?; // base
+        let modifiers = u32::azalea_read_var(&mut cur).ok()?;
+        for _ in 0..modifiers {
+            let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+            advance(&mut cur, len)?; // modifier id
+            advance(&mut cur, 8)?; // amount
+            varint_span(&mut cur)?; // operation
+        }
+        out.extend_from_slice(&payload[body_at..cur.position() as usize]);
+    }
+    Some(out)
 }
 
 /// Rewrites serverbound `player_input` for 1.21.1, where it was the vehicle
