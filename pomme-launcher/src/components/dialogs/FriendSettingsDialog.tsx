@@ -1,83 +1,69 @@
+import { Dialog, Switch } from "radix-ui";
 import { useState } from "react";
-import { useAppStateContext } from "../../lib/state";
+import { useAppStore } from "../../lib/store";
+import SettingRow from "../SettingRow";
 
 export type FriendSettingsDialogProps = Record<string, never>;
 
+const DEFAULT_FRIEND_SETTINGS = { show_in_list: true, accept_invites: true };
+
 export function FriendSettingsDialog(_props: FriendSettingsDialogProps) {
-  const { friendsSettings, updateFriendSettings, setOpenedDialog } = useAppStateContext();
+  const friendsSettings = useAppStore((state) => state.friendsSettings);
+  const updateFriendSettings = useAppStore((state) => state.updateFriendSettings);
+  const setOpenedDialog = useAppStore((state) => state.setOpenedDialog);
   const [pending, setPending] = useState(false);
 
   const loading = friendsSettings === null;
-  const settings = friendsSettings ?? { show_in_list: true, accept_invites: true };
+  const settings = friendsSettings ?? DEFAULT_FRIEND_SETTINGS;
+  const disabled = loading || pending;
 
-  const apply = async (show: boolean, accept: boolean) => {
-    if (loading || pending) return;
+  const apply = async (showInList: boolean, acceptInvites: boolean) => {
+    if (disabled) {
+      return;
+    }
     setPending(true);
     try {
-      await updateFriendSettings(show, accept);
+      await updateFriendSettings(showInList, acceptInvites);
     } finally {
       setPending(false);
     }
   };
 
   return (
-    <div className="dialog" onClick={(e) => e.stopPropagation()}>
-      <h2 className="dialog-title">Friend Settings</h2>
+    <>
+      <Dialog.Title className="dialog-title">Friend Settings</Dialog.Title>
 
       <div className="dialog-fields">
         <SettingRow
           label="Show in Friends List"
           desc="Other players can see you in their friends lists"
-          value={settings.show_in_list}
-          disabled={loading || pending}
-          onToggle={() => apply(!settings.show_in_list, settings.accept_invites)}
-        />
-        <SettingRow
-          label="Allow Requests"
-          desc="Other players can send you friend requests"
-          value={settings.accept_invites}
-          disabled={loading || pending}
-          onToggle={() => apply(settings.show_in_list, !settings.accept_invites)}
-        />
+        >
+          <Switch.Root
+            className="switch"
+            checked={settings.show_in_list}
+            disabled={disabled}
+            onCheckedChange={(checked) => apply(checked, settings.accept_invites)}
+          >
+            <Switch.Thumb className="switch-thumb" />
+          </Switch.Root>
+        </SettingRow>
+        <SettingRow label="Allow Requests" desc="Other players can send you friend requests">
+          <Switch.Root
+            className="switch"
+            checked={settings.accept_invites}
+            disabled={disabled}
+            onCheckedChange={(checked) => apply(settings.show_in_list, checked)}
+          >
+            <Switch.Thumb className="switch-thumb" />
+          </Switch.Root>
+        </SettingRow>
       </div>
 
       <div className="dialog-actions">
-        <button className="dialog-confirm" onClick={() => setOpenedDialog(null)}>
+        <button className="button-primary" onClick={() => setOpenedDialog(null)}>
           Close
         </button>
       </div>
-    </div>
-  );
-}
-
-function SettingRow({
-  label,
-  desc,
-  value,
-  disabled,
-  onToggle,
-}: {
-  label: string;
-  desc: string;
-  value: boolean;
-  disabled: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <div className="settings-row">
-      <div className="settings-row-info">
-        <span className="settings-row-label">{label}</span>
-        <span className="settings-row-desc">{desc}</span>
-      </div>
-      <div className="settings-row-control">
-        <button
-          className={`settings-toggle ${value ? "on" : ""}`}
-          disabled={disabled}
-          onClick={onToggle}
-        >
-          <div className="settings-toggle-knob" />
-        </button>
-      </div>
-    </div>
+    </>
   );
 }
