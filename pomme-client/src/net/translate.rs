@@ -866,6 +866,28 @@ impl Translation {
                 }
                 true
             }
+            ClientboundGamePacket::SetEquipment(p) => {
+                for (_, stack) in &mut p.slots.slots {
+                    remap_stack(self.to_latest, stack);
+                }
+                true
+            }
+            ClientboundGamePacket::MerchantOffers(p) => {
+                // An `ItemCost` has no empty form, so an untranslatable base
+                // cost drops the offer rather than the whole trade list.
+                p.offers.retain_mut(|offer| {
+                    remap_stack(self.to_latest, &mut offer.result);
+                    if offer
+                        .cost_b
+                        .as_mut()
+                        .is_some_and(|c| !remap_with(self.to_latest, R::Item, &mut c.item))
+                    {
+                        offer.cost_b = None;
+                    }
+                    remap_with(self.to_latest, R::Item, &mut offer.base_cost_a.item)
+                });
+                true
+            }
             _ => true,
         }
     }
@@ -1074,8 +1096,15 @@ impl GameIds {
 
 /// The wire version's dimension-type names in synced-registry order,
 /// captured while splitting registry data: the pre-1.20.5 spawn-info
-/// rewrites turn a dimension-type key string into this index. Session
-/// state, reset by each registry-data packet (config precedes every join).
+/// rewrites turn a dimension-type key string into this index.
+///
+/// Global because the rewrites reach it through `FrameRewrite` fn pointers,
+/// and `Translation` is leaked per protocol rather than per connection, so a
+/// field there would scope it no better. One connection at a time is an
+/// assumption of this module.
+///
+/// TODO: a reconfiguration whose registry data omits dimension_type keeps the
+/// previous list (as `config_sequence` keeps the previous `RegistryHolder`).
 static DIMENSION_TYPES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Splits 765's single-NBT registry_data — a map of
@@ -1097,7 +1126,13 @@ fn split_registry_data(id: u32, payload: &[u8]) -> Option<Vec<Box<[u8]>>> {
         let entries = value.compound()?.list("value")?.compounds()?;
         let mut ordered: Vec<(i32, String, &simdnbt::owned::NbtCompound)> = entries
             .iter()
-            .map(|e| Some((e.int("id")?, e.string("name")?.to_string(), e)))
+            .map(|e| {
+                Some((
+                    e.int("id")?,
+                    e.string("name")?.to_string(),
+                    e.compound("element")?,
+                ))
+            })
             .collect::<Option<_>>()?;
         ordered.sort_unstable_by_key(|&(entry_id, ..)| entry_id);
 
@@ -1684,8 +1719,13 @@ fn translate_item_cost_765(
     optional: bool,
 ) -> Option<()> {
     let Some((item, count)) = read_old_item(cur)? else {
+        // Only the optional second cost can be absent; a missing base cost
+        // has no `ItemCost` form, so the frame is unrepresentable.
+        if !optional {
+            return None;
+        }
         out.push(0);
-        return optional.then_some(());
+        return Some(());
     };
     if optional {
         out.push(1);
@@ -1697,7 +1737,9 @@ fn translate_item_cost_765(
 }
 
 /// Rewrites `update_mob_effect`: 1.20.5 widened the amplifier from a byte
-/// to a varint and dropped the trailing factor-data NBT.
+/// to a varint and dropped the trailing factor-data NBT. Vanilla reads that
+/// byte signed, so an amplifier past 127 wraps negative on both sides; the
+/// varint carries the sign through rather than clamping it.
 fn translate_update_mob_effect_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let head = varint_span(&mut cur)?; // entity id
@@ -1709,7 +1751,7 @@ fn translate_update_mob_effect_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(payload.len());
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[head.start..effect.end]);
-    wire::write_varint(&mut out, amplifier.max(0) as u32);
+    wire::write_varint(&mut out, amplifier as i32 as u32);
     out.extend_from_slice(&payload[duration]);
     out.push(flags);
     Some(out)
