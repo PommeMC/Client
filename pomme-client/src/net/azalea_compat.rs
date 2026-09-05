@@ -2165,6 +2165,48 @@ fn translate_chat_command_765() {
     assert_eq!(frames, [expected]);
 }
 
+/// `update_attributes` names its attribute by registry id, and those shift
+/// between versions (1.21.2 also dropped the category prefixes), so each is
+/// remapped into the latest space. Unremapped, an old `max_health` decodes as
+/// whatever attribute holds that id in 26.2.
+#[test]
+fn translate_update_attributes_old_versions() {
+    use azalea_registry::builtin::Attribute;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    for protocol in [775, 774, 773, 772, 771, 770, 769, 768, 767] {
+        let table = RegistryTable::for_protocol(protocol).unwrap();
+        let max_health = table
+            .names(ClientRegistry::Attribute)
+            .iter()
+            .position(|n| n == "max_health" || n == "generic.max_health")
+            .unwrap() as u32;
+
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(protocol, Direction::Clientbound, "update_attributes"),
+        );
+        wire::write_varint(&mut old, 9); // entity id
+        wire::write_varint(&mut old, 1); // one attribute
+        wire::write_varint(&mut old, max_health);
+        old.extend_from_slice(&20.0f64.to_be_bytes()); // base
+        wire::write_varint(&mut old, 1); // one modifier
+        let name = "minecraft:test";
+        wire::write_varint(&mut old, name.len() as u32);
+        old.extend_from_slice(name.as_bytes());
+        old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
+        wire::write_varint(&mut old, 0); // operation
+
+        let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(protocol, old) else {
+            panic!("wrong packet for {protocol}");
+        };
+        assert_eq!(p.values[0].attribute, Attribute::MaxHealth, "{protocol}");
+        assert_eq!(p.values[0].base, 20.0, "{protocol}");
+        assert_eq!(p.values[0].modifiers[0].amount, 4.0, "{protocol}");
+    }
+}
+
 #[test]
 fn lp_vec3_roundtrip() {
     let cases = [
