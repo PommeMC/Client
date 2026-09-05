@@ -392,6 +392,10 @@ struct Ids765 {
     /// display NBT the walker can't rewrite.
     /// TODO: rewrite the icons bare so 765 advancement toasts show.
     update_advancements_id: u32,
+    /// Pre-1.20.5 chat packets carry a direct chat-type registry id where
+    /// 1.20.5 put a holder (id + 1).
+    player_chat_id: u32,
+    disguised_chat_id: u32,
     /// The wire version's registry names, for the attribute-key lookup.
     registry: &'static RegistryTable,
     /// Serverbound: latest + wire ids for the item-form rewrites.
@@ -406,6 +410,10 @@ struct Ids765 {
 impl Ids765 {
     fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
         Some(match id {
+            // These two shadow 769's player_chat arm; the globalIndex
+            // prepend is folded into the chat-type holder rewrite.
+            i if i == self.player_chat_id => translate_player_chat_765,
+            i if i == self.disguised_chat_id => translate_disguised_chat_765,
             i if i == self.container_set_content_id => translate_container_set_content_765,
             i if i == self.set_equipment_id => translate_set_equipment_765,
             i if i == self.merchant_offers_id => translate_merchant_offers_765,
@@ -1067,6 +1075,8 @@ impl GameIds {
                 container_set_slot_id: id(Clientbound, "container_set_slot"),
                 respawn_id: id(Clientbound, "respawn"),
                 update_advancements_id: id(Clientbound, "update_advancements"),
+                player_chat_id: id(Clientbound, "player_chat"),
+                disguised_chat_id: id(Clientbound, "disguised_chat"),
                 registry: RegistryTable::for_protocol(protocol).expect("embedded registry table"),
                 container_click_id: id(Serverbound, "container_click"),
                 container_click_old_id: required_id(
@@ -2471,6 +2481,101 @@ fn skip_utf(cur: &mut Cursor<&[u8]>) -> Option<()> {
 fn skip_nbt(cur: &mut Cursor<&[u8]>) -> Option<()> {
     let tag = read_u8(cur)?;
     skip_nbt_payload(cur, tag, 0)
+}
+
+/// Rewrites `player_chat` for 1.20.4, whose trailing `ChatType.Bound` needs
+/// the holder bump; the 1.21.5 globalIndex prepend folds in, since this arm
+/// shadows 769's.
+fn translate_player_chat_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 4);
+    wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, 0); // globalIndex, 1.21.5+
+    player_chat_head(&mut cur, &mut out)?;
+    chat_type_holder(&mut cur, &mut out, payload).map(|()| out)
+}
+
+/// Rewrites `disguised_chat` for 1.20.4: the same holder bump, after the
+/// message component rather than a signed body.
+fn translate_disguised_chat_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    skip_nbt(&mut cur)?; // message
+
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..cur.position() as usize]);
+    chat_type_holder(&mut cur, &mut out, payload).map(|()| out)
+}
+
+/// Writes the direct chat-type registry id as the holder 1.20.5 replaced it
+/// with (id + 1, 0 being reserved for an inline value), then the rest of the
+/// frame. The id is synced-registry order either way, so it needs no remap.
+fn chat_type_holder(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, payload: &[u8]) -> Option<()> {
+    let chat_type = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, chat_type + 1);
+    out.extend_from_slice(&payload[cur.position() as usize..]);
+    Some(())
+}
+
+/// Copies `player_chat`'s body up to the trailing `ChatType.Bound`.
+fn player_chat_head(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    copy_bytes(cur, out, 16)?; // sender uuid
+    copy_varint(cur, out)?; // index
+    copy_optional(cur, out, |c, o| copy_bytes(c, o, 256))?; // signature
+    copy_utf(cur, out)?; // content
+    copy_bytes(cur, out, 16)?; // timestamp, salt
+    let last_seen = copy_varint(cur, out)?;
+    for _ in 0..last_seen {
+        // A zero id carries a full signature instead of a cache reference.
+        if copy_varint(cur, out)? == 0 {
+            copy_bytes(cur, out, 256)?;
+        }
+    }
+    copy_optional(cur, out, copy_nbt)?; // unsigned content
+    if copy_varint(cur, out)? == 2 {
+        let longs = copy_varint(cur, out)?; // partially-filtered bit set
+        copy_bytes(cur, out, longs as usize * 8)?;
+    }
+    Some(())
+}
+
+fn copy_bytes(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: usize) -> Option<()> {
+    let at = cur.position() as usize;
+    advance(cur, n)?;
+    out.extend_from_slice(&cur.get_ref()[at..at + n]);
+    Some(())
+}
+
+fn copy_varint(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<u32> {
+    let at = cur.position() as usize;
+    let v = u32::azalea_read_var(cur).ok()?;
+    out.extend_from_slice(&cur.get_ref()[at..cur.position() as usize]);
+    Some(v)
+}
+
+fn copy_utf(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let len = copy_varint(cur, out)?;
+    copy_bytes(cur, out, len as usize)
+}
+
+fn copy_nbt(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let span = nbt_span(cur)?;
+    out.extend_from_slice(&cur.get_ref()[span]);
+    Some(())
+}
+
+fn copy_optional(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    inner: impl FnOnce(&mut Cursor<&[u8]>, &mut Vec<u8>) -> Option<()>,
+) -> Option<()> {
+    let present = read_u8(cur)?;
+    out.push(present);
+    if present != 0 {
+        inner(cur, out)
+    } else {
+        Some(())
+    }
 }
 
 fn skip_optional(
