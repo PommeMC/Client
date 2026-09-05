@@ -25,12 +25,8 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
                 }
                 match block_shape::partial_shape(state) {
                     Some(boxes) => {
-                        for &[lx0, ly0, lz0, lx1, ly1, lz1] in boxes {
-                            aabbs.push(Aabb::new(
-                                dvec3(bx as f64 + lx0, by as f64 + ly0, bz as f64 + lz0),
-                                dvec3(bx as f64 + lx1, by as f64 + ly1, bz as f64 + lz1),
-                            ));
-                        }
+                        let offset = dvec3(bx as f64, by as f64, bz as f64);
+                        aabbs.extend(boxes.iter().map(|&b| Aabb::from_local(b, offset)));
                     }
                     None => aabbs.push(Aabb::block(bx, by, bz)),
                 }

@@ -5,6 +5,10 @@
 //!
 //! TODO: walls, fences, fence gates, panes, trapdoors, doors, beds, chests,
 //! cake, etc. still fall back to a full cube.
+//!
+//! TODO: blocks with no collision but a small outline (torches, flowers,
+//! buttons, plants, redstone dust) fall back to a full cube too, so the
+//! crosshair still reaches them from a block away.
 
 use azalea_block::BlockState;
 
@@ -18,6 +22,15 @@ pub type LocalBox = [f64; 6];
 /// no collision, `Some(boxes)` for a partial shape.
 pub fn partial_shape(state: BlockState) -> Option<&'static [LocalBox]> {
     crate::world::block::block_shape(state)
+}
+
+const FULL_CUBE_SHAPE: &[LocalBox] = &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+
+/// Boxes the interaction raycast clips against (vanilla `getShape`). Unlike
+/// `partial_shape` the full-cube case is already resolved, so an empty slice
+/// means "not targetable" rather than "no collision".
+pub fn outline_shape(state: BlockState) -> &'static [LocalBox] {
+    crate::world::block::block_outline(state).unwrap_or(FULL_CUBE_SHAPE)
 }
 
 /// Computes one state's shape. Takes id/props rather than a `BlockState` so
@@ -42,22 +55,39 @@ pub(crate) fn compute_shape(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> 
     match id {
         "dirt_path" | "farmland" => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.9375, 1.0]]),
         _ if id.ends_with("_carpet") => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.0625, 1.0]]),
-        // Snow's collision shape is one layer shorter than its outline; a single
-        // layer has no collision at all.
-        "snow" => {
-            let layers: i32 = props
-                .get("layers")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1);
-            let h = (layers - 1) as f64 * 2.0 / 16.0;
-            Some(if h > 0.0 {
-                vec![[0.0, 0.0, 0.0, 1.0, h, 1.0]]
-            } else {
-                vec![]
-            })
-        }
+        // `SnowLayerBlock.getCollisionShape` is one layer shorter than its
+        // outline, so a single layer has no collision at all.
+        "snow" => Some(snow_shape(snow_layers(props) - 1)),
         _ => None,
     }
+}
+
+/// Vanilla `getShape` where it differs from `getCollisionShape`. `None` means
+/// the two agree, so `compute_shape`'s result doubles as the outline.
+pub(crate) fn compute_outline(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> {
+    match id {
+        "snow" => Some(snow_shape(snow_layers(props))),
+        // `LiquidBlock.getShape` and `BubbleColumnBlock.getShape` are
+        // `Shapes.empty()`: the pick ray clips straight through them.
+        "water" | "lava" | "bubble_column" => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+fn snow_layers(props: &PropMap) -> i32 {
+    props
+        .get("layers")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+}
+
+/// Vanilla `SnowLayerBlock.SHAPES[layers]`, two pixels per layer; index 0 is
+/// empty.
+fn snow_shape(layers: i32) -> Vec<LocalBox> {
+    if layers <= 0 {
+        return Vec::new();
+    }
+    vec![[0.0, 0.0, 0.0, 1.0, layers as f64 * 2.0 / 16.0, 1.0]]
 }
 
 /// Vanilla `StairBlock` shape: a half-slab plus 1–3 upper corner pillars,
