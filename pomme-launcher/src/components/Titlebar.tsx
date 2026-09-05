@@ -1,5 +1,10 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { HiMinus, HiSquare2Stack, HiXMark } from "react-icons/hi2";
+import { Minus, Square, X } from "lucide-react";
+
+const ICON_SIZE = 14;
+const MAXIMIZE_ICON_SIZE = 12;
+const controlButtonClass =
+  "flex h-7 w-9 items-center justify-center rounded-md text-muted transition-colors duration-150 hover:text-foreground";
 
 export default function Titlebar({ name }: { name?: string } = { name: "Pomme Launcher" }) {
   const appWindow = getCurrentWindow();
@@ -15,24 +20,23 @@ export default function Titlebar({ name }: { name?: string } = { name: "Pomme La
   };
 
   return (
-    <div className="titlebar" data-tauri-drag-region>
-      <div className="titlebar-left" data-tauri-drag-region>
-        <span className="titlebar-icon">
-          <img src="/pomme.png" alt="Pomme" className="titlebar-logo" />
-        </span>
-      </div>
-      <span className="titlebar-title" data-tauri-drag-region>
+    <div
+      className="flex h-9 shrink-0 items-center justify-between border-b border-white/[0.06] bg-panel/75 backdrop-blur-xl select-none"
+      data-tauri-drag-region
+    >
+      <div className="w-[108px]" data-tauri-drag-region />
+      <span className="text-xs text-muted" data-tauri-drag-region>
         {name}
       </span>
-      <div className="titlebar-controls">
-        <button className="tb-btn" onClick={minimize}>
-          <HiMinus />
+      <div className="flex w-[108px] items-center justify-end gap-0.5 pr-1.5">
+        <button className={`${controlButtonClass} hover:bg-white/[0.06]`} onClick={minimize}>
+          <Minus size={ICON_SIZE} />
         </button>
-        <button className="tb-btn" onClick={toggleMaximize}>
-          <HiSquare2Stack />
+        <button className={`${controlButtonClass} hover:bg-white/[0.06]`} onClick={toggleMaximize}>
+          <Square size={MAXIMIZE_ICON_SIZE} />
         </button>
-        <button className="tb-btn tb-close" onClick={close}>
-          <HiXMark />
+        <button className={`${controlButtonClass} hover:bg-red hover:text-white`} onClick={close}>
+          <X size={ICON_SIZE} />
         </button>
       </div>
     </div>
