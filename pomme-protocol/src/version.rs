@@ -32,6 +32,7 @@ pub const VERSIONS: &[ProtocolVersion] = &[
     v("1.20.5", 766),
     v("1.20.4", 765),
     v("1.20.3", 765),
+    v("1.20.2", 764),
 ];
 
 /// The version the client speaks internally.
@@ -47,7 +48,7 @@ pub(crate) struct EmbeddedVersion {
     pub registries: &'static str,
 }
 
-pub(crate) const EMBEDDED: [EmbeddedVersion; 11] = [
+pub(crate) const EMBEDDED: [EmbeddedVersion; 12] = [
     EmbeddedVersion {
         version: v("26.1", 775),
         packets: include_str!("data/protocol-26.1.json"),
@@ -102,6 +103,11 @@ pub(crate) const EMBEDDED: [EmbeddedVersion; 11] = [
         version: v("1.20.4", 765),
         packets: include_str!("data/protocol-1.20.4.json"),
         registries: include_str!("data/registries-1.20.4.json"),
+    },
+    EmbeddedVersion {
+        version: v("1.20.2", 764),
+        packets: include_str!("data/protocol-1.20.2.json"),
+        registries: include_str!("data/registries-1.20.2.json"),
     },
 ];
 
@@ -170,6 +176,8 @@ mod tests {
         assert_eq!(ProtocolVersion::from_name("1.20.4").unwrap().protocol, 765);
         assert_eq!(ProtocolVersion::from_name("1.20.3").unwrap().protocol, 765);
         assert_eq!(ProtocolVersion::from_protocol(765).unwrap().name, "1.20.4");
+        assert_eq!(ProtocolVersion::from_name("1.20.2").unwrap().protocol, 764);
+        assert_eq!(ProtocolVersion::from_protocol(764).unwrap().name, "1.20.2");
         assert!(ProtocolVersion::from_name("26.1.1-rc-1").is_none());
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
     }

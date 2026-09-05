@@ -149,8 +149,12 @@ pub struct RegistryRemaps {
 }
 
 /// Entry renames name-matching can't bridge, applied both directions
-/// (26.x renamed the chain item to iron_chain).
-const RENAMED: &[(ClientRegistry, &str, &str)] = &[(ClientRegistry::Item, "chain", "iron_chain")];
+/// (26.x renamed the chain item to iron_chain, 1.20.3 renamed the grass
+/// block/item to short_grass).
+const RENAMED: &[(ClientRegistry, &str, &str)] = &[
+    (ClientRegistry::Item, "chain", "iron_chain"),
+    (ClientRegistry::Item, "grass", "short_grass"),
+];
 
 impl RegistryRemaps {
     /// Remaps from `protocol`'s id space to the latest version's (for
@@ -588,6 +592,39 @@ mod tests {
     fn remap_1_20_6_anchors() {
         let (r, from, to) = setup(766);
         assert_pre_1_21_2_anchors(r, from, 16);
+        assert_round_trips(r, from, to);
+    }
+
+    /// Anchor checks against the 1.20.2 -> 26.2 registry diff. Attributes
+    /// are in pre-1.20.3 registration order (max_health first), and 1.20.3
+    /// renamed the grass item to short_grass, bridged by `RENAMED`.
+    #[test]
+    fn remap_1_20_2_anchors() {
+        let (r, from, to) = setup(764);
+
+        assert_eq!(
+            from.name_of(ClientRegistry::Attribute, 0),
+            Some("generic.max_health")
+        );
+        assert_eq!(r.remap(ClientRegistry::Attribute, 0), Some(23));
+
+        assert_eq!(from.name_of(ClientRegistry::Item, 173), Some("grass"));
+        assert_eq!(to.name_of(ClientRegistry::Item, 229), Some("short_grass"));
+        assert_eq!(r.remap(ClientRegistry::Item, 173), Some(229));
+        assert_eq!(r.remap(ClientRegistry::Item, 1), Some(1)); // stone
+
+        assert_eq!(from.name_of(ClientRegistry::EntityType, 11), Some("cat"));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 11), Some(21));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 99), Some(131)); // tadpole
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 48), Some(66)); // poof
+
+        assert_bed_unmapped(r, from);
+        assert_chain_remapped(r, from);
+        assert_unmapped(r, from, ClientRegistry::EntityType, "boat");
+
+        // No component registry exists at 764.
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 0), None);
+
         assert_round_trips(r, from, to);
     }
 

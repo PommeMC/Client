@@ -431,6 +431,7 @@
   "granite_slab": {"destroy_time": 1.5, "requires_correct_tool": true},
   "granite_stairs": {"destroy_time": 1.5, "requires_correct_tool": true},
   "granite_wall": {"destroy_time": 1.5, "requires_correct_tool": true},
+  "grass": {"destroy_time": 0, "requires_correct_tool": false},
   "grass_block": {"destroy_time": 0.6, "requires_correct_tool": false},
   "gravel": {"destroy_time": 0.6, "requires_correct_tool": false},
   "gray_banner": {"destroy_time": 1, "requires_correct_tool": false},
