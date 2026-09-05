@@ -161,6 +161,27 @@ impl DirectionTable {
 mod tests {
     use super::*;
 
+    const PHASES: [Phase; 5] = [
+        Phase::Handshake,
+        Phase::Status,
+        Phase::Login,
+        Phase::Configuration,
+        Phase::Game,
+    ];
+    const DIRECTIONS: [Direction; 2] = [Direction::Serverbound, Direction::Clientbound];
+
+    /// A packet resource name: `/`-separated lowercase segments, as in
+    /// `debug/block_value`.
+    fn is_resource_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.split('/').all(|seg| {
+                !seg.is_empty()
+                    && seg
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            })
+    }
+
     /// Asserts every id `t` has in the phase/direction resolves to the same
     /// name in `other` (a prefix check; pass `equal` to also require `other`
     /// to end at the same id).
@@ -475,14 +496,8 @@ mod tests {
         assert_eq!(t.version().protocol, 771);
         assert_eq!(t.version().name, "1.21.6");
         let t772 = PacketTable::for_protocol(772).unwrap();
-        for phase in [
-            Phase::Handshake,
-            Phase::Status,
-            Phase::Login,
-            Phase::Configuration,
-            Phase::Game,
-        ] {
-            for dir in [Direction::Serverbound, Direction::Clientbound] {
+        for phase in PHASES {
+            for dir in DIRECTIONS {
                 assert_prefix(t, t772, phase, dir, true);
             }
         }
@@ -705,14 +720,8 @@ mod tests {
         assert_eq!(t.version().protocol, 766);
         assert_eq!(t.version().name, "1.20.6");
         let t767 = PacketTable::for_protocol(767).unwrap();
-        for phase in [
-            Phase::Handshake,
-            Phase::Status,
-            Phase::Login,
-            Phase::Configuration,
-            Phase::Game,
-        ] {
-            for dir in [Direction::Serverbound, Direction::Clientbound] {
+        for phase in PHASES {
+            for dir in DIRECTIONS {
                 assert_prefix(t, t767, phase, dir, false);
             }
         }
@@ -796,35 +805,19 @@ mod tests {
         );
     }
 
-    /// Every embedded table's names are well-formed resource paths. A `.`
-    /// means a name was derived wrong (pre-1.20.5 tables come from packet
-    /// class names, where a nested `MovePlayerPacket.Pos` once produced
-    /// `move_player_packet._pos` and silently stopped matching by name).
-    /// The `/` segment is legitimate: `debug/block_value` and friends.
+    /// A malformed name silently stops matching across versions: the
+    /// pre-1.20.5 tables derive names from packet class names, where a nested
+    /// `MovePlayerPacket.Pos` once produced `move_player_packet._pos`.
     #[test]
     fn embedded_names_are_well_formed() {
         for embedded in &EMBEDDED {
             let t = PacketTable::for_protocol(embedded.version.protocol).unwrap();
-            for phase in [
-                Phase::Handshake,
-                Phase::Status,
-                Phase::Login,
-                Phase::Configuration,
-                Phase::Game,
-            ] {
-                for dir in [Direction::Serverbound, Direction::Clientbound] {
+            for phase in PHASES {
+                for dir in DIRECTIONS {
                     let mut id = 0;
                     while let Some(name) = t.name_of(phase, dir, id) {
                         assert!(
-                            !name.is_empty()
-                                && name.split('/').all(|seg| {
-                                    !seg.is_empty()
-                                        && seg.bytes().all(|b| {
-                                            b.is_ascii_lowercase()
-                                                || b.is_ascii_digit()
-                                                || b == b'_'
-                                        })
-                                }),
+                            is_resource_name(name),
                             "{} {phase:?} {dir:?} {id}: malformed name '{name}'",
                             embedded.version.name
                         );
