@@ -21,7 +21,7 @@ The goal is a lightweight, performant alternative to the official Java client.
 
 - **Vulkan rendering**: chunk meshing, GPU frustum and cave-occlusion culling, smooth lighting, water/lava, entities and mobs, block entities, weather, clouds, sky, block overlays, hand animation
 - **Vanilla-exact physics**: sprinting, swimming, drowning, collision, all matched against decompiled source
-- **Multi-version protocol support**: connects to vanilla servers from 1.20.3 through 26.2, with per-version packet-id and registry tables generated from the decompiled reference; handles chunk streaming, block updates, chat
+- **Multi-version protocol support**: connects to vanilla servers from 1.20.2 through 26.2, with per-version packet-id and registry tables generated from the decompiled reference; handles chunk streaming, block updates, chat
 - **Microsoft authentication**: sign in with your Microsoft account, tokens stored in the OS keyring
 - **HUD & menus**: health, hunger, air bubbles, hotbar, F3 debug, chat, pause menu, options, server list
 - **Launcher**: Tauri-based launcher with frosted glass UI, multi-account management, Mojang patch notes, installation manager

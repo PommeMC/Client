@@ -200,6 +200,24 @@
 //!   always the signed form (empty signatures appended)
 //! - `update_advancements` drops (old-form icons nested in display data);
 //!   serializer ids from `particles` (18) up shift
+//! - `player_chat`/`disguised_chat` carry a direct chat-type registry id where
+//!   1.20.5 put a holder (bumped by one on the way through)
+//!
+//! 1.20.2 -> 26.2 wire changes (all of 1.20.4's plus; the pre-1.20.3 era):
+//! - text components are length-prefixed JSON strings, not NBT
+//!   (`FriendlyByteBuf.writeComponent`); `component_pass` transcodes every
+//!   consumed component field via `json_to_nbt` (mixed arrays normalize to
+//!   compound lists) and the entity-data component serializers (5/6) transcode
+//!   in the metadata walk — `server_data` and `map_item_data` drop instead
+//!   (pomme never reads them)
+//! - `set_score` carries a method byte (its REMOVE arm becomes the
+//!   `reset_score` packet 1.20.3 added) and no display/numberFormat;
+//!   `set_objective` ends at the render type
+//! - one `resource_pack` packet serves both phases: it maps to
+//!   `resource_pack_push` with a synthesized zero UUID, and the serverbound
+//!   reply drops its UUID and clamps post-1.20.2 action values
+//! - everything else — items, registry_data, spawn info, login, chunks,
+//!   serializer order — matches 1.20.4 exactly (the diff is tiny)
 //!
 //! Known limitation (accepted): an inbound item stack carrying a data
 //! component at/after the first id the versions number differently (26.1:
@@ -273,6 +291,16 @@ struct ConfigIds {
     /// Latest-space `registry_data`, whose 765 form is one packet holding
     /// every registry as a single NBT map.
     registry_data_id: u32,
+    /// 764's config payload rewrites: disconnect's JSON component and the
+    /// unsplit resource_pack (both phases share the layouts).
+    v764: Option<ConfigIds764>,
+}
+
+/// Latest config-space ids for the 764 payload rewrites.
+struct ConfigIds764 {
+    disconnect_id: u32,
+    resource_pack_push_id: u32,
+    resource_pack_response_id: u32,
 }
 
 /// Game-phase id tables for a wire version whose ids diverged from the
@@ -314,6 +342,9 @@ struct GameIds {
     /// version 765; old-form items translate bare (type + count, NBT
     /// dropped).
     v765: Option<Ids765>,
+    /// The rewrites 1.20.3 introduced (NBT text components, the scoreboard
+    /// rework, the resource_pack split), for wire version 764.
+    v764: Option<Ids764>,
     /// Latest serverbound ids whose packet is knowingly absent on this wire
     /// version (`client_tick_end`, `player_loaded`); suppressed quietly.
     quiet_suppressed: Box<[u32]>,
@@ -392,6 +423,10 @@ struct Ids765 {
     /// display NBT the walker can't rewrite.
     /// TODO: rewrite the icons bare so 765 advancement toasts show.
     update_advancements_id: u32,
+    /// Pre-1.20.5 chat packets carry a direct chat-type registry id where
+    /// 1.20.5 put a holder (id + 1).
+    player_chat_id: u32,
+    disguised_chat_id: u32,
     /// The wire version's registry names, for the attribute-key lookup.
     registry: &'static RegistryTable,
     /// Serverbound: latest + wire ids for the item-form rewrites.
@@ -406,6 +441,10 @@ struct Ids765 {
 impl Ids765 {
     fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
         Some(match id {
+            // These two shadow 769's player_chat arm; the globalIndex
+            // prepend is folded into the chat-type holder rewrite.
+            i if i == self.player_chat_id => translate_player_chat_765,
+            i if i == self.disguised_chat_id => translate_disguised_chat_765,
             i if i == self.container_set_content_id => translate_container_set_content_765,
             i if i == self.set_equipment_id => translate_set_equipment_765,
             i if i == self.merchant_offers_id => translate_merchant_offers_765,
@@ -414,6 +453,82 @@ impl Ids765 {
             i if i == self.respawn_id => translate_respawn_765,
             _ => return None,
         })
+    }
+}
+
+/// Latest-space dispatch ids for the frame rewrites protocol 764 needs:
+/// the pre-1.20.3 JSON text components (`component_pass`), the scoreboard
+/// rework, and the unsplit resource_pack packet.
+struct Ids764 {
+    system_chat_id: u32,
+    set_action_bar_id: u32,
+    set_title_id: u32,
+    set_subtitle_id: u32,
+    tab_list_id: u32,
+    disconnect_id: u32,
+    open_screen_id: u32,
+    combat_kill_id: u32,
+    boss_event_id: u32,
+    set_player_team_id: u32,
+    player_chat_id: u32,
+    disguised_chat_id: u32,
+    player_info_id: u32,
+    command_suggestions_id: u32,
+    set_objective_id: u32,
+    set_score_id: u32,
+    reset_score_id: u32,
+    resource_pack_push_id: u32,
+    /// Dropped quietly: component-bearing packets pomme never consumes
+    /// (`server_data`, `map_item_data`).
+    drops: [u32; 2],
+    /// Serverbound: latest + wire ids for the resource_pack reply rewrite.
+    resource_pack_response_id: u32,
+    resource_pack_response_old_id: u32,
+}
+
+impl Ids764 {
+    fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
+        Some(match id {
+            i if i == self.set_objective_id => translate_set_objective_764,
+            i if i == self.resource_pack_push_id => translate_resource_pack_764,
+            _ => return None,
+        })
+    }
+
+    /// Rewrites the JSON components of a packet whose layout is otherwise
+    /// unchanged, leaving the rest of the translation chain to run on the
+    /// converted payload. Outer `None` = not a component packet;
+    /// `Some(None)` = unparsable, drop the frame.
+    #[allow(clippy::option_option)]
+    fn component_pass(&self, id: u32, payload: &[u8]) -> Option<Option<Vec<u8>>> {
+        let mut cur = Cursor::new(payload);
+        let mut out = Vec::with_capacity(payload.len() + 16);
+        let walked = match id {
+            i if i == self.system_chat_id
+                || i == self.set_action_bar_id
+                || i == self.set_title_id
+                || i == self.set_subtitle_id
+                || i == self.disconnect_id =>
+            {
+                transcode_component(&mut cur, &mut out)
+            }
+            i if i == self.tab_list_id => transcode_component(&mut cur, &mut out)
+                .and_then(|()| transcode_component(&mut cur, &mut out)),
+            i if i == self.open_screen_id => copy_then_transcode(&mut cur, &mut out, 2),
+            i if i == self.combat_kill_id => copy_then_transcode(&mut cur, &mut out, 1),
+            i if i == self.boss_event_id => transcode_boss_event(&mut cur, &mut out),
+            i if i == self.set_player_team_id => transcode_team(&mut cur, &mut out),
+            i if i == self.player_chat_id => transcode_player_chat(&mut cur, &mut out),
+            i if i == self.disguised_chat_id => transcode_component(&mut cur, &mut out)
+                .and_then(|()| transcode_chat_type(&mut cur, &mut out)),
+            i if i == self.player_info_id => transcode_player_info(&mut cur, &mut out),
+            i if i == self.command_suggestions_id => transcode_suggestions(&mut cur, &mut out),
+            _ => return None,
+        };
+        Some(walked.map(|()| {
+            out.extend_from_slice(&payload[cur.position() as usize..]);
+            out
+        }))
     }
 }
 
@@ -474,7 +589,7 @@ impl Ids772 {
 /// Protocols the wire translation fully covers. A version with embedded
 /// tables but no entry here (the staging state while its translation is
 /// built) pings with the right version but stays un-joinable.
-const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770, 769, 768, 767, 766, 765];
+const TRANSLATED: &[i32] = &[775, 774, 773, 772, 771, 770, 769, 768, 767, 766, 765, 764];
 
 /// Whether a server speaking `protocol` can be joined: the native latest
 /// version, or an older one with a complete wire translation. Gates both
@@ -539,7 +654,7 @@ impl Translation {
             set_player_team_id: id(Phase::Game, "set_player_team"),
             update_attributes_id: id(Phase::Game, "update_attributes"),
             game_ids: GameIds::build(protocol, table, latest),
-            config_ids: ConfigIds::build(table, latest),
+            config_ids: ConfigIds::build(protocol, table, latest),
         })
     }
 
@@ -597,21 +712,45 @@ impl Translation {
                 }
             };
         }
-        let mut out = Vec::with_capacity(raw.len() + 1);
-        wire::write_varint(&mut out, id);
-        out.extend_from_slice(&raw[pos..]);
-        vec![out.into_boxed_slice()]
+        if let Some(v) = &ids.v764 {
+            let rewritten = if id == v.disconnect_id {
+                let mut cur = Cursor::new(&raw[pos..]);
+                let mut out = Vec::with_capacity(raw.len() + 8);
+                wire::write_varint(&mut out, id);
+                transcode_component(&mut cur, &mut out).map(|()| out)
+            } else if id == v.resource_pack_push_id {
+                translate_resource_pack_764(id, &raw[pos..])
+            } else {
+                return plain_config_frame(id, &raw[pos..]);
+            };
+            return match rewritten {
+                Some(out) => vec![out.into_boxed_slice()],
+                None => {
+                    tracing::warn!("Dropping unparsable config packet {id}");
+                    Vec::new()
+                }
+            };
+        }
+        plain_config_frame(id, &raw[pos..])
     }
 
     /// Translates a latest-layout serverbound configuration frame into the
-    /// wire version's; `None` suppresses it (config layouts are identical,
-    /// only ids and the packet set differ).
+    /// wire version's; `None` suppresses it. Only 764's resource_pack reply
+    /// changes layout; everything else is an id remap.
     pub fn translate_outbound_config_frame(&self, frame: Vec<u8>) -> Option<Vec<u8>> {
         let Some(ids) = &self.config_ids else {
             return Some(frame);
         };
         let mut pos = 0;
         let id = wire::read_varint(&frame, &mut pos)?;
+        if ids
+            .v764
+            .as_ref()
+            .is_some_and(|v| id == v.resource_pack_response_id)
+        {
+            let old = ids.outbound.get(id as usize).copied().flatten()?;
+            return translate_resource_pack_response_764(old, &frame[pos..]).pop();
+        }
         match ids.outbound.get(id as usize).copied().flatten() {
             Some(old) if old == id => Some(frame),
             Some(old) => {
@@ -655,7 +794,22 @@ impl Translation {
             tracing::debug!("Dropping update_advancements with old-form icons");
             return None;
         }
-        let payload = &raw[id_end..];
+        let v764 = self.game_ids.as_ref().and_then(|g| g.v764.as_ref());
+        if v764.is_some_and(|v| v.drops.contains(&id)) {
+            tracing::debug!("Dropping unconsumed component packet {id}");
+            return None;
+        }
+        // The 764 JSON components convert first; the rest of the chain then
+        // runs on the (765-form) converted payload.
+        let converted = match v764.and_then(|v| v.component_pass(id, &raw[id_end..])) {
+            Some(Some(payload)) => Some(payload),
+            Some(None) => {
+                tracing::warn!("Dropping game packet {id} with an unparsable component");
+                return None;
+            }
+            None => None,
+        };
+        let payload: &[u8] = converted.as_deref().unwrap_or(&raw[id_end..]);
         let rewritten = if id == self.game_login_id {
             let old = if v765.is_some() {
                 translate_game_login_765(payload)
@@ -696,6 +850,8 @@ impl Translation {
                 } else {
                     translate_set_time(id, payload)
                 }
+            } else if let Some(v) = v764.filter(|v| id == v.set_score_id) {
+                translate_set_score_764(v, payload)
             } else if v765.is_some_and(|v| id == v.container_set_slot_id) {
                 v767.and_then(|v| translate_container_set_slot_765(v, payload))
             } else if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
@@ -708,7 +864,7 @@ impl Translation {
                 translate_container_set_slot_767(v, payload)
             } else if v767.is_some_and(|v| id == v.cooldown_id) {
                 translate_cooldown_767(self.to_latest, id, payload)
-            } else if id == wire_id {
+            } else if id == wire_id && converted.is_none() {
                 return Some(raw);
             } else {
                 let mut out = Vec::with_capacity(raw.len() + 1);
@@ -756,6 +912,14 @@ impl Translation {
             && id == v770.player_command_id
         {
             return translate_player_command(v770.player_command_old_id, &frame[pos..]);
+        }
+        if let Some(v764) = &ids.v764
+            && id == v764.resource_pack_response_id
+        {
+            return translate_resource_pack_response_764(
+                v764.resource_pack_response_old_id,
+                &frame[pos..],
+            );
         }
         // The 765 arms precede 769's: both rewrite container_click, and the
         // older item form wins on the older wire.
@@ -948,6 +1112,10 @@ const RENAMED: &[(&str, &str)] = &[
     ("horse_screen_open", "mount_screen_open"),
     // Renamed by 1.21.2, byte-identical single-slot bodies.
     ("set_carried_item", "set_held_slot"),
+    // 1.20.3 split the clientbound packet into push/pop; the unsplit 1.20.2
+    // form maps to push (`translate_resource_pack_764` synthesizes its
+    // UUID). The serverbound reply kept the name and matches directly.
+    ("resource_pack", "resource_pack_push"),
 ];
 
 impl GameIds {
@@ -956,9 +1124,10 @@ impl GameIds {
     /// claim a packet the older one subsumes the newer and must win (765's
     /// respawn over 767's, say).
     fn version_rewrite(&self, id: u32) -> Option<FrameRewrite> {
-        self.v765
+        self.v764
             .as_ref()
             .and_then(|v| v.rewrite(id))
+            .or_else(|| self.v765.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v766.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v767.as_ref().and_then(|v| v.rewrite(id)))
             .or_else(|| self.v768.as_ref().and_then(|v| v.rewrite(id)))
@@ -989,7 +1158,9 @@ impl GameIds {
                 // as do 1.20.5 through 1.21.4.
                 770..=772 => remap_serializer_772,
                 766..=769 => remap_serializer_769,
-                765 => remap_serializer_765,
+                // 1.20.2's serializer registrations are order-identical to
+                // 1.20.4's (only the component read side changed).
+                764..=765 => remap_serializer_765,
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
@@ -1067,6 +1238,8 @@ impl GameIds {
                 container_set_slot_id: id(Clientbound, "container_set_slot"),
                 respawn_id: id(Clientbound, "respawn"),
                 update_advancements_id: id(Clientbound, "update_advancements"),
+                player_chat_id: id(Clientbound, "player_chat"),
+                disguised_chat_id: id(Clientbound, "disguised_chat"),
                 registry: RegistryTable::for_protocol(protocol).expect("embedded registry table"),
                 container_click_id: id(Serverbound, "container_click"),
                 container_click_old_id: required_id(
@@ -1084,6 +1257,37 @@ impl GameIds {
                 ),
                 chat_command_id: id(Serverbound, "chat_command"),
                 chat_command_old_id: required_id(table, Phase::Game, Serverbound, "chat_command"),
+            }),
+            v764: (protocol <= 764).then(|| Ids764 {
+                system_chat_id: id(Clientbound, "system_chat"),
+                set_action_bar_id: id(Clientbound, "set_action_bar_text"),
+                set_title_id: id(Clientbound, "set_title_text"),
+                set_subtitle_id: id(Clientbound, "set_subtitle_text"),
+                tab_list_id: id(Clientbound, "tab_list"),
+                disconnect_id: id(Clientbound, "disconnect"),
+                open_screen_id: id(Clientbound, "open_screen"),
+                combat_kill_id: id(Clientbound, "player_combat_kill"),
+                boss_event_id: id(Clientbound, "boss_event"),
+                set_player_team_id: id(Clientbound, "set_player_team"),
+                player_chat_id: id(Clientbound, "player_chat"),
+                disguised_chat_id: id(Clientbound, "disguised_chat"),
+                player_info_id: id(Clientbound, "player_info_update"),
+                command_suggestions_id: id(Clientbound, "command_suggestions"),
+                set_objective_id: id(Clientbound, "set_objective"),
+                set_score_id: id(Clientbound, "set_score"),
+                reset_score_id: id(Clientbound, "reset_score"),
+                resource_pack_push_id: id(Clientbound, "resource_pack_push"),
+                drops: [
+                    id(Clientbound, "server_data"),
+                    id(Clientbound, "map_item_data"),
+                ],
+                resource_pack_response_id: id(Serverbound, "resource_pack"),
+                resource_pack_response_old_id: required_id(
+                    table,
+                    Phase::Game,
+                    Serverbound,
+                    "resource_pack",
+                ),
             }),
             quiet_suppressed: ["client_tick_end", "player_loaded"]
                 .iter()
@@ -1198,22 +1402,23 @@ fn id_map(
 impl ConfigIds {
     /// Name-matched configuration id tables; `None` when every id maps to
     /// itself or nothing (766 up: later versions only appended).
-    fn build(table: &PacketTable, latest: &PacketTable) -> Option<ConfigIds> {
+    fn build(protocol: i32, table: &PacketTable, latest: &PacketTable) -> Option<ConfigIds> {
         use Direction::{Clientbound, Serverbound};
         let inbound = id_map(table, latest, Phase::Configuration, Clientbound);
         let outbound = id_map(latest, table, Phase::Configuration, Serverbound);
         if identity_maps(&inbound, &outbound) {
             return None;
         }
+        let id = |dir, name| required_id(latest, Phase::Configuration, dir, name);
         Some(ConfigIds {
             inbound,
             outbound,
-            registry_data_id: required_id(
-                latest,
-                Phase::Configuration,
-                Direction::Clientbound,
-                "registry_data",
-            ),
+            registry_data_id: id(Clientbound, "registry_data"),
+            v764: (protocol <= 764).then(|| ConfigIds764 {
+                disconnect_id: id(Clientbound, "disconnect"),
+                resource_pack_push_id: id(Clientbound, "resource_pack_push"),
+                resource_pack_response_id: id(Serverbound, "resource_pack"),
+            }),
         })
     }
 }
@@ -1229,6 +1434,14 @@ fn identity_maps(inbound: &[Option<u32>], outbound: &[Option<u32>]) -> bool {
             .iter()
             .enumerate()
             .all(|(i, v)| v.is_none() || *v == Some(i as u32))
+}
+
+/// A latest-layout config frame with only its id rewritten.
+fn plain_config_frame(id: u32, payload: &[u8]) -> Vec<Box<[u8]>> {
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(payload);
+    vec![out.into_boxed_slice()]
 }
 
 /// A packet id that must exist in the given table.
@@ -1849,6 +2062,38 @@ fn translate_level_particles_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Rewrites `player_chat` for 1.20.4: the trailing `ChatType.Bound` starts
+/// with a direct chat-type registry id where 1.20.5 put a holder (id + 1;
+/// the id itself is synced-registry order, valid as-is), and the 1.21.5
+/// globalIndex prepend folds in (this arm shadows 769's).
+fn translate_player_chat_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 4);
+    wire::write_varint(&mut out, id);
+    wire::write_varint(&mut out, 0); // globalIndex, 1.21.5+
+    player_chat_head(&mut cur, &mut out, copy_nbt)?;
+    let chat_type = u32::azalea_read_var(&mut cur).ok()?;
+    wire::write_varint(&mut out, chat_type + 1);
+    out.extend_from_slice(&payload[cur.position() as usize..]);
+    Some(out)
+}
+
+/// Rewrites `disguised_chat` for 1.20.4: the same chat-type holder bump
+/// after the message component.
+fn translate_disguised_chat_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    skip_nbt(&mut cur)?; // message
+    let chat_type_at = cur.position() as usize;
+    let chat_type = u32::azalea_read_var(&mut cur).ok()?;
+
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[..chat_type_at]);
+    wire::write_varint(&mut out, chat_type + 1);
+    out.extend_from_slice(&payload[cur.position() as usize..]);
+    Some(out)
+}
+
 /// Rewrites `respawn` for 1.20.4: the spawn info's dimension type is a
 /// resource key string, turned into the synced-registry index captured
 /// from registry data; the seaLevel insert then applies like 767's.
@@ -1917,6 +2162,334 @@ fn remap_serializer_765(old: u32) -> Option<u32> {
     }
 }
 
+/// Copies `n` bytes from the cursor's payload to `out`.
+fn copy_bytes(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, n: usize) -> Option<()> {
+    let at = cur.position() as usize;
+    advance(cur, n)?;
+    out.extend_from_slice(&cur.get_ref()[at..at + n]);
+    Some(())
+}
+
+fn copy_varint(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<u32> {
+    let at = cur.position() as usize;
+    let v = u32::azalea_read_var(cur).ok()?;
+    out.extend_from_slice(&cur.get_ref()[at..cur.position() as usize]);
+    Some(v)
+}
+
+fn copy_utf(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let len = copy_varint(cur, out)?;
+    copy_bytes(cur, out, len as usize)
+}
+
+/// Copies a nullable field, running `inner` on a present value.
+fn copy_optional(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    inner: impl FnOnce(&mut Cursor<&[u8]>, &mut Vec<u8>) -> Option<()>,
+) -> Option<()> {
+    let present = read_u8(cur)?;
+    out.push(present);
+    if present != 0 {
+        inner(cur, out)
+    } else {
+        Some(())
+    }
+}
+
+/// Reads one pre-1.20.3 length-prefixed JSON component and writes it as the
+/// network-NBT form 1.20.3 introduced.
+fn transcode_component(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let len = u32::azalea_read_var(cur).ok()? as usize;
+    let at = cur.position() as usize;
+    advance(cur, len)?;
+    let json = std::str::from_utf8(&cur.get_ref()[at..at + len]).ok()?;
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    json_to_nbt(&value).azalea_write(out).ok()
+}
+
+/// A JSON chat-component value as an owned NBT tag: the codec shape is
+/// identical (vanilla runs the same component codec through JsonOps and
+/// NbtOps), except NBT lists are homogeneous — mixed arrays normalize to
+/// compound lists with primitives wrapped as `{text}`.
+fn json_to_nbt(value: &serde_json::Value) -> simdnbt::owned::NbtTag {
+    use simdnbt::owned::{NbtList, NbtTag};
+    match value {
+        serde_json::Value::Null => NbtTag::String("".into()),
+        serde_json::Value::Bool(b) => NbtTag::Byte(*b as i8),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => match i32::try_from(i) {
+                Ok(i) => NbtTag::Int(i),
+                Err(_) => NbtTag::Long(i),
+            },
+            None => NbtTag::Double(n.as_f64().unwrap_or(0.0)),
+        },
+        serde_json::Value::String(s) => NbtTag::String(s.as_str().into()),
+        serde_json::Value::Array(items) => NbtTag::List(NbtList::Compound(
+            items.iter().map(json_to_compound).collect(),
+        )),
+        serde_json::Value::Object(_) => NbtTag::Compound(json_to_compound(value)),
+    }
+}
+
+fn json_to_compound(value: &serde_json::Value) -> simdnbt::owned::NbtCompound {
+    let mut compound = simdnbt::owned::NbtCompound::new();
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, entry) in map {
+                compound.insert(key.as_str(), json_to_nbt(entry));
+            }
+        }
+        // A primitive inside a component list renders as its text form.
+        other => {
+            let text = match other {
+                serde_json::Value::String(s) => s.clone(),
+                v => v.to_string(),
+            };
+            compound.insert("text", simdnbt::owned::NbtTag::String(text.as_str().into()));
+        }
+    }
+    compound
+}
+
+/// Copies `varints` leading varints, then transcodes one trailing component.
+fn copy_then_transcode(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, varints: u32) -> Option<()> {
+    for _ in 0..varints {
+        copy_varint(cur, out)?;
+    }
+    transcode_component(cur, out)
+}
+
+/// `boss_event`'s name sits in the Add (0) and UpdateName (3) op bodies
+/// (`ClientboundBossEventPacket`, order unchanged since 1.20.2).
+fn transcode_boss_event(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    copy_bytes(cur, out, 16)?; // boss bar uuid
+    let op = copy_varint(cur, out)?;
+    if matches!(op, 0 | 3) {
+        transcode_component(cur, out)?;
+    }
+    Some(())
+}
+
+/// The 764 team `Parameters` (display, options, visibility, collision,
+/// color, prefix, suffix) precede the player list; the shared
+/// `translate_team` reorder runs on the converted payload afterwards.
+fn transcode_team(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    copy_utf(cur, out)?; // team name
+    let method = read_u8(cur)?;
+    out.push(method);
+    if matches!(method, 0 | 2) {
+        transcode_component(cur, out)?; // display name
+        copy_bytes(cur, out, 1)?; // options
+        copy_utf(cur, out)?; // nametag visibility
+        copy_utf(cur, out)?; // collision rule
+        copy_varint(cur, out)?; // color
+        transcode_component(cur, out)?; // prefix
+        transcode_component(cur, out)?; // suffix
+    }
+    Some(())
+}
+
+/// The shared `player_chat` walk up to the trailing chat type; `component`
+/// handles the nullable unsignedContent (a verbatim copy at 765, the
+/// JSON -> NBT transcode at 764).
+fn player_chat_head(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    component: impl FnOnce(&mut Cursor<&[u8]>, &mut Vec<u8>) -> Option<()>,
+) -> Option<()> {
+    copy_bytes(cur, out, 16)?; // sender uuid
+    copy_varint(cur, out)?; // index
+    copy_optional(cur, out, |c, o| copy_bytes(c, o, 256))?; // signature
+    copy_utf(cur, out)?; // content
+    copy_bytes(cur, out, 16)?; // timestamp, salt
+    let last_seen = copy_varint(cur, out)?;
+    for _ in 0..last_seen {
+        // A zero id carries a full signature instead of a cache reference.
+        if copy_varint(cur, out)? == 0 {
+            copy_bytes(cur, out, 256)?;
+        }
+    }
+    copy_optional(cur, out, component)?; // unsigned content
+    let filter = copy_varint(cur, out)?;
+    if filter == 2 {
+        let longs = copy_varint(cur, out)?; // partially-filtered bit set
+        copy_bytes(cur, out, longs as usize * 8)?;
+    }
+    Some(())
+}
+
+/// A component field copied verbatim (already network NBT at 765).
+fn copy_nbt(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let span = nbt_span(cur)?;
+    out.extend_from_slice(&cur.get_ref()[span]);
+    Some(())
+}
+
+/// The `player_chat` walk through its three component sites (nullable
+/// unsignedContent, then the chat-type name/target pair).
+fn transcode_player_chat(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    player_chat_head(cur, out, transcode_component)?;
+    transcode_chat_type(cur, out)
+}
+
+/// `ChatType.BoundNetwork`: chat-type id, name, nullable target name.
+fn transcode_chat_type(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    copy_varint(cur, out)?;
+    transcode_component(cur, out)?;
+    copy_optional(cur, out, transcode_component)
+}
+
+/// `player_info_update`: per entry, per action bit, the display name
+/// (bit 5, last) is the one component; every earlier action's payload
+/// copies (order per the 1.20.2 `ClientboundPlayerInfoUpdatePacket`, whose
+/// first six actions match azalea's).
+fn transcode_player_info(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let actions = read_u8(cur)?;
+    out.push(actions);
+    let entries = copy_varint(cur, out)?;
+    for _ in 0..entries {
+        copy_bytes(cur, out, 16)?; // uuid
+        if actions & 0x01 != 0 {
+            copy_utf(cur, out)?; // name
+            let properties = copy_varint(cur, out)?;
+            for _ in 0..properties {
+                copy_utf(cur, out)?;
+                copy_utf(cur, out)?;
+                copy_optional(cur, out, copy_utf)?; // signature
+            }
+        }
+        if actions & 0x02 != 0 {
+            // initialize chat: session uuid, expiry, public key, signature
+            copy_optional(cur, out, |c, o| {
+                copy_bytes(c, o, 24)?;
+                let key = copy_varint(c, o)?;
+                copy_bytes(c, o, key as usize)?;
+                let sig = copy_varint(c, o)?;
+                copy_bytes(c, o, sig as usize)
+            })?;
+        }
+        if actions & 0x04 != 0 {
+            copy_varint(cur, out)?; // game mode
+        }
+        if actions & 0x08 != 0 {
+            copy_bytes(cur, out, 1)?; // listed
+        }
+        if actions & 0x10 != 0 {
+            copy_varint(cur, out)?; // latency
+        }
+        if actions & 0x20 != 0 {
+            copy_optional(cur, out, transcode_component)?; // display name
+        }
+    }
+    Some(())
+}
+
+/// `command_suggestions`: nullable tooltip component per suggestion.
+fn transcode_suggestions(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    for _ in 0..3 {
+        copy_varint(cur, out)?; // id, range start, range length
+    }
+    let suggestions = copy_varint(cur, out)?;
+    for _ in 0..suggestions {
+        copy_utf(cur, out)?;
+        copy_optional(cur, out, transcode_component)?;
+    }
+    Some(())
+}
+
+/// Rewrites the 1.20.2 `set_score`: the method byte is gone (a REMOVE
+/// becomes the `reset_score` packet 1.20.3 added) and the trailing nullable
+/// display/numberFormat pair 1.20.3 added is synthesized absent.
+fn translate_set_score_764(v: &Ids764, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut owner = Vec::new();
+    copy_utf(&mut cur, &mut owner)?;
+    let method = u32::azalea_read_var(&mut cur).ok()?;
+    let mut objective = Vec::new();
+    copy_utf(&mut cur, &mut objective)?;
+
+    let mut out = Vec::with_capacity(payload.len() + 4);
+    if method == 1 {
+        // An empty objective resets the owner's scores in every objective.
+        wire::write_varint(&mut out, v.reset_score_id);
+        out.extend_from_slice(&owner);
+        if objective == [0] {
+            out.push(0);
+        } else {
+            out.push(1);
+            out.extend_from_slice(&objective);
+        }
+        return Some(out);
+    }
+    wire::write_varint(&mut out, v.set_score_id);
+    out.extend_from_slice(&owner);
+    out.extend_from_slice(&objective);
+    copy_varint(&mut cur, &mut out)?; // score
+    out.extend_from_slice(&[0, 0]); // no display, no number format
+    Some(out)
+}
+
+/// Rewrites the 1.20.2 `set_objective`, which ends at the render type; the
+/// nullable numberFormat 1.20.3 appended is synthesized absent and the
+/// display name transcodes.
+fn translate_set_objective_764(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+    copy_utf(&mut cur, &mut out)?; // objective name
+    let method = read_u8(&mut cur)?;
+    out.push(method);
+    if matches!(method, 0 | 2) {
+        transcode_component(&mut cur, &mut out)?;
+        copy_varint(&mut cur, &mut out)?; // render type
+        // Vanilla 26.2 wraps the numberFormat optional; azalea (ffedf17)
+        // reads a bare format kind. Zero decodes as absent/blank either way.
+        out.push(0);
+    }
+    Some(out)
+}
+
+/// Rewrites the unsplit 1.20.2 `resource_pack` into `resource_pack_push`:
+/// a zero pack UUID is synthesized (the serverbound reply strips it) and
+/// the nullable prompt transcodes. Shared by the game and config phases.
+fn translate_resource_pack_764(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 18);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&[0; 16]); // synthesized pack uuid
+    copy_utf(&mut cur, &mut out)?; // url
+    copy_utf(&mut cur, &mut out)?; // hash
+    copy_bytes(&mut cur, &mut out, 1)?; // required
+    copy_optional(&mut cur, &mut out, transcode_component)?; // prompt
+    Some(out)
+}
+
+/// Rewrites the serverbound `resource_pack` reply for 1.20.2: the pack
+/// UUID 1.20.3 prepended is stripped and the post-1.20.2 action values
+/// clamp to the original four (downloaded -> accepted, failures -> failed
+/// download, discarded -> declined).
+fn translate_resource_pack_response_764(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let rewrite = || {
+        let mut cur = Cursor::new(payload);
+        advance(&mut cur, 16)?; // pack uuid
+        let action = u32::azalea_read_var(&mut cur).ok()?;
+        let action = match action {
+            0..=3 => action,
+            4 => 3,
+            5 | 6 => 2,
+            _ => 1,
+        };
+        let mut out = Vec::with_capacity(4);
+        wire::write_varint(&mut out, old_id);
+        wire::write_varint(&mut out, action);
+        Some(out)
+    };
+    match rewrite() {
+        Some(out) => vec![out],
+        None => Vec::new(),
+    }
+}
 /// Rewrites `projectile_power`: 1.21 collapsed the per-axis acceleration
 /// vector into its magnitude.
 fn translate_projectile_power_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
@@ -2196,6 +2769,17 @@ fn translate_entity_data(
         out.push(index);
         wire::write_varint(&mut out, new);
         let value_at = cur.position() as usize;
+        if ids.v764.is_some() && matches!(new, 5 | 6) {
+            // 764 component values are JSON strings; a skip would desync
+            // the rest of the list, so a bad one drops the packet.
+            let done = if new == 6 {
+                copy_optional(&mut cur, &mut out, transcode_component)
+            } else {
+                transcode_component(&mut cur, &mut out)
+            };
+            done?;
+            continue;
+        }
         if new == 7 {
             let mut stack = Vec::new();
             let translated = if ids.v765.is_some() {
