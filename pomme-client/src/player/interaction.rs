@@ -27,7 +27,8 @@ use crate::entity::EntityStore;
 use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
-use crate::physics::aabb::Aabb;
+use crate::physics::aabb::{self, Aabb, Axis, Face};
+use crate::physics::block_shape::{self, LocalBox};
 use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::held_item::UseAnim;
@@ -1399,6 +1400,7 @@ pub fn raycast(
         (origin.z - bz as f64) * t_delta_z
     };
 
+    let reach_end = origin + dir * max_dist as f64;
     let mut t = 0.0_f64;
     while t <= max_dist as f64 {
         let state = chunks.get_block_state(bx, by, bz);
@@ -1408,13 +1410,14 @@ pub fn raycast(
                 y: by,
                 z: bz,
             };
-            let hit_point = origin + dir * t;
-            let face = hit_face(origin, dir.as_vec3(), &block_pos);
-            return Some(BlockHitResult {
-                block_pos,
-                face,
-                hit_point,
-            });
+            let outline = block_shape::outline_shape(state);
+            if let Some((hit_point, face)) = clip_shape(origin, reach_end, block_pos, outline) {
+                return Some(BlockHitResult {
+                    block_pos,
+                    face,
+                    hit_point,
+                });
+            }
         }
         if t_max_x < t_max_y && t_max_x < t_max_z {
             t = t_max_x;
@@ -1485,44 +1488,50 @@ fn azalea_vec3(v: DVec3) -> azalea_core::position::Vec3 {
     azalea_core::position::Vec3::new(v.x, v.y, v.z)
 }
 
-fn hit_face(origin: DVec3, dir: Vec3, pos: &BlockPos) -> Direction {
-    let dir = dir.as_dvec3();
-    let min = dvec3(pos.x as f64, pos.y as f64, pos.z as f64);
-    let max = min + DVec3::ONE;
+/// How far along the ray vanilla `VoxelShape.clip` probes to decide whether it
+/// started inside the shape.
+const INSIDE_PROBE_FRACTION: f64 = 0.001;
 
-    let mut best_t = f64::MAX;
-    let mut best_face = Direction::Up;
+/// Ports vanilla `VoxelShape.clip`: a ray starting inside the shape hits it at
+/// the probe point, otherwise the nearest box entry wins. An empty shape is
+/// never hit, so the caller walks on to the next block. Vanilla's
+/// degenerate-ray guard is dropped; `raycast` always passes a scaled unit
+/// direction.
+fn clip_shape(
+    from: DVec3,
+    to: DVec3,
+    block_pos: BlockPos,
+    boxes: &[LocalBox],
+) -> Option<(DVec3, Direction)> {
+    if boxes.is_empty() {
+        return None;
+    }
+    let offset = dvec3(block_pos.x as f64, block_pos.y as f64, block_pos.z as f64);
+    let ray = to - from;
+    let probe = from + ray * INSIDE_PROBE_FRACTION;
 
-    let faces = [
-        (min.x, dir.x, origin.x, Direction::West),
-        (max.x, dir.x, origin.x, Direction::East),
-        (min.y, dir.y, origin.y, Direction::Down),
-        (max.y, dir.y, origin.y, Direction::Up),
-        (min.z, dir.z, origin.z, Direction::North),
-        (max.z, dir.z, origin.z, Direction::South),
-    ];
-
-    for &(plane, d_comp, o_comp, face) in &faces {
-        if d_comp.abs() < 1e-8 {
-            continue;
-        }
-        let t = (plane - o_comp) / d_comp;
-        if t < 0.0 || t >= best_t {
-            continue;
-        }
-        let hit = origin + dir * t;
-        let (c1, c2, c1_min, c1_max, c2_min, c2_max) = match face {
-            Direction::West | Direction::East => (hit.y, hit.z, min.y, max.y, min.z, max.z),
-            Direction::Down | Direction::Up => (hit.x, hit.z, min.x, max.x, min.z, max.z),
-            Direction::North | Direction::South => (hit.x, hit.y, min.x, max.x, min.y, max.y),
-        };
-        if c1 >= c1_min && c1 <= c1_max && c2 >= c2_min && c2 <= c2_max {
-            best_t = t;
-            best_face = face;
-        }
+    let starts_inside = boxes
+        .iter()
+        .any(|&b| Aabb::from_local(b, offset).contains(probe));
+    if starts_inside {
+        return Some((probe, Direction::nearest(azalea_vec3(ray)).opposite()));
     }
 
-    best_face
+    let (t, face) = aabb::clip_boxes(boxes, offset, from, to)?;
+    Some((from + ray * t, face_direction(face)))
+}
+
+/// Vanilla `AABB.getDirection`: a ray entering a box's min face on an axis is
+/// travelling positive along it, so the face it hit points back the other way.
+fn face_direction(face: Face) -> Direction {
+    match (face.axis, face.max) {
+        (Axis::X, false) => Direction::West,
+        (Axis::X, true) => Direction::East,
+        (Axis::Y, false) => Direction::Down,
+        (Axis::Y, true) => Direction::Up,
+        (Axis::Z, false) => Direction::North,
+        (Axis::Z, true) => Direction::South,
+    }
 }
 
 fn send_action(
@@ -1592,6 +1601,49 @@ mod tests {
         ));
         assert!(!same_item_same_components(Some(&a), None));
         assert!(same_item_same_components(None, None));
+    }
+
+    #[test]
+    fn ray_over_partial_block_misses_but_ray_onto_it_hits() {
+        let slab_height = 0.5;
+        let block = BlockPos::new(0, 0, 0);
+        let bottom_slab: [LocalBox; 1] = [[0.0, 0.0, 0.0, 1.0, slab_height, 1.0]];
+        let origin = dvec3(-1.0, 1.5, 0.5);
+
+        let over_the_slab = origin + dvec3(4.0, -1.4, 0.0);
+        let slab_hit = clip_shape(origin, over_the_slab, block, &bottom_slab);
+        assert!(slab_hit.is_none());
+
+        let onto_the_slab = origin + dvec3(3.0, -2.75, 0.0);
+        let (hit_point, face) = clip_shape(origin, onto_the_slab, block, &bottom_slab).unwrap();
+        let tolerance = 1e-9;
+        let is_on_slab_surface = (hit_point.y - slab_height).abs() < tolerance;
+        assert!(is_on_slab_surface, "hit {hit_point:?}");
+        assert_eq!(face, Direction::Up);
+    }
+
+    /// Vanilla `VoxelShape.clip` reports the inside case at the probe point,
+    /// not at the ray's origin.
+    #[test]
+    fn ray_starting_inside_partial_block_hits_immediately() {
+        let block = BlockPos::new(0, 0, 0);
+        let bottom_slab: [LocalBox; 1] = [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]];
+        let inside_the_slab = dvec3(0.5, 0.25, 0.5);
+        let ray = dvec3(0.0, -4.0, 0.0);
+
+        let (hit_point, face) =
+            clip_shape(inside_the_slab, inside_the_slab + ray, block, &bottom_slab).unwrap();
+        assert_eq!(hit_point, inside_the_slab + ray * INSIDE_PROBE_FRACTION);
+        assert_eq!(face, Direction::Up);
+    }
+
+    /// Vanilla clips straight through an empty shape (`LiquidBlock.getShape`),
+    /// so the caller walks on to the block behind it.
+    #[test]
+    fn ray_passes_through_an_empty_shape() {
+        let block = BlockPos::new(0, 0, 0);
+        let from = dvec3(0.5, 2.0, 0.5);
+        assert!(clip_shape(from, from + dvec3(0.0, -4.0, 0.0), block, &[]).is_none());
     }
 
     fn rule(blocks: Vec<BlockKind>, speed: Option<f32>, correct: Option<bool>) -> ToolRule {

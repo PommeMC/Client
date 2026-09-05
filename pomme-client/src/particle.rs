@@ -359,14 +359,9 @@ impl ParticleStore {
         };
         let light = world_brightness(chunks, pos.x, pos.y, pos.z);
 
-        const FULL_CUBE: LocalBox = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-        let boxes: &[LocalBox] = match block_shape::partial_shape(state) {
-            Some(boxes) if !boxes.is_empty() => boxes,
-            // None = full cube. Some(&[]) = no collision (flowers, torches):
-            // vanilla scatters over the outline shape, which pomme doesn't
-            // have, so fall back to the full cube.
-            _ => &[FULL_CUBE],
-        };
+        // Vanilla `ParticleEngine.destroy` scatters over the outline shape's
+        // boxes, so a block with an empty outline emits nothing.
+        let boxes: &[LocalBox] = block_shape::outline_shape(state);
 
         for b in boxes {
             let width_x = (b[3] - b[0]).min(1.0);
