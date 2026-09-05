@@ -3,8 +3,11 @@
     "windows": [
       {
         "label": "main",
+        "title": "Pomme Launcher",
         "width": 1280,
         "height": 720,
+        "minWidth": 1080,
+        "minHeight": 680,
         "resizable": true,
         "decorations": false,
         "transparent": true,
