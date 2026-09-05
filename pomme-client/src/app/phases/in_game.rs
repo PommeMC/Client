@@ -2838,6 +2838,11 @@ pub fn update_game(
         player_preview,
         book_preview,
         game.player.eyes_in_water,
+        gfx.gui
+            .extract_render_state(pomme_gui::types::Position::new(
+                core.input.cursor_pos().0 as i32,
+                core.input.cursor_pos().1 as i32,
+            )),
     ) {
         tracing::error!("Render error: {e}");
     }

@@ -5171,6 +5171,7 @@ dependencies = [
  "parking_lot",
  "png 0.17.16",
  "pomme-gpu-allocator",
+ "pomme-gui",
  "pomme-protocol",
  "pyronyx",
  "raw-window-handle",
@@ -5204,6 +5205,14 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "pomme-gui"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "winit",
 ]
 
 [[package]]

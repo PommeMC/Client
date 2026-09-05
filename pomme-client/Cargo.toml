@@ -21,6 +21,7 @@ reqwest = { workspace = true, features = ["blocking"] }
 pyronyx = { workspace = true, features = ["rwh_06"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+pomme-gui.workspace = true
 
 tracing-appender = "0.2"
 # Per-thread-heap allocator: the chunk-mesh worker pool churns vertex/index Vecs
@@ -29,7 +30,7 @@ tracing-appender = "0.2"
 mimalloc = "0.1"
 pomme-gpu-allocator = { path = "../pomme-gpu-allocator" }
 pomme-protocol = { path = "../pomme-protocol" }
-winit = { version = "0.30", features = ["rwh_06"] }
+winit = { workspace = true, features = ["rwh_06"] }
 raw-window-handle = "0.6"
 glam = { workspace = true }
 clap = { version = "4", features = ["derive"] }

@@ -3,6 +3,7 @@ pub mod camera;
 pub mod chunk;
 mod context;
 pub mod entity_model;
+mod gui_renderer;
 pub mod pipelines;
 mod screenshot;
 pub(crate) mod shader;
@@ -39,6 +40,7 @@ pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
+use pomme_gui::graphics::state::GuiRenderState;
 use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
 use pyronyx::vk;
 use swapchain::Swapchain;
@@ -49,6 +51,7 @@ use winit::window::Window;
 use crate::app::input::InputState;
 use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
+use crate::renderer::gui_renderer::GuiRenderer;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::world::block::registry::BlockRegistry;
@@ -163,6 +166,8 @@ pub struct Renderer {
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
 
+    gui_renderer: GuiRenderer,
+
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
     block_entity_pipeline: BlockEntityPipeline,
@@ -207,6 +212,9 @@ impl Renderer {
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
+
+        let gui_renderer =
+            GuiRenderer::new(&ctx.device, &ctx.allocator, swapchain_state.render_pass);
 
         let mut menu_pipeline = MenuOverlayPipeline::new(
             &ctx.device,
@@ -477,6 +485,9 @@ impl Renderer {
             cloud_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
+
+            gui_renderer,
+
             chunk_buffers,
             render_finished_per_image,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
@@ -738,6 +749,8 @@ impl Renderer {
             self.blur_pipeline.blurred_view(),
             self.blur_pipeline.blurred_sampler(),
         );
+        self.gui_renderer
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
 
         let sem_info = vk::SemaphoreCreateInfo::default();
         self.render_finished_per_image = Vec::with_capacity(self.swapchain.images.len());
@@ -1067,6 +1080,7 @@ impl Renderer {
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
+        gui_render_state: &mut GuiRenderState,
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
@@ -1110,9 +1124,11 @@ impl Renderer {
                 book_preview,
                 eyes_in_water,
             },
+            gui_render_state,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render_menu(
         &mut self,
         window: &Window,
@@ -1121,6 +1137,7 @@ impl Renderer {
         elements: Vec<MenuElement>,
         cursor: (f32, f32),
         show_skin: bool,
+        gui_render_state: &mut GuiRenderState,
     ) -> Result<(), RendererError> {
         self.render_frame(
             window,
@@ -1133,6 +1150,7 @@ impl Renderer {
                 cursor,
                 show_skin,
             },
+            gui_render_state,
         )
     }
 
@@ -1333,6 +1351,7 @@ impl Renderer {
         hide_cursor: bool,
         clear_color: [f32; 4],
         mode: RenderMode<'_>,
+        gui_render_state: &mut GuiRenderState,
     ) -> Result<(), RendererError> {
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
@@ -1856,6 +1875,8 @@ impl Renderer {
             }
         }
 
+        self.gui_renderer.draw(cmd, sw, sh, gui_render_state);
+
         cmd.end_render_pass();
 
         // Image is now in PresentSrcKHR; grab it before present if F2 was pressed.
@@ -2239,6 +2260,8 @@ impl Drop for Renderer {
         self.gui_item_atlas
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
+        self.gui_renderer
+            .destroy(&self.ctx.device, &self.ctx.allocator);
 
         for sem in self.render_finished_per_image.drain(..) {
             self.ctx.device.destroy_semaphore(sem, None);

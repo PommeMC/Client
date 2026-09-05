@@ -7,6 +7,7 @@ use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use pomme_gui::Gui;
 use thiserror::Error;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
@@ -208,6 +209,19 @@ impl ApplicationHandler for App {
 
                 self.core.apply_cursor_grab(&window, None);
 
+                let init_gfx = |renderer| {
+                    let gui =
+                        Gui::new(window.inner_size(), self.core.menu.gui_scale_setting, false);
+
+                    Gfx {
+                        renderer: ManuallyDrop::new(renderer),
+                        window,
+                        gui,
+                        last_frame: Instant::now(),
+                        fps_counter: FpsCounter::new(),
+                    }
+                };
+
                 if let Some(server_ip) = quick_access_multiplayer {
                     let connection = spawn_connection(
                         &self.core.tokio_rt,
@@ -229,30 +243,16 @@ impl ApplicationHandler for App {
                         self.core.menu.render_distance,
                     );
 
-                    let gfx = Gfx {
-                        renderer: ManuallyDrop::new(renderer),
-                        window,
-                        last_frame: Instant::now(),
-                        fps_counter: FpsCounter::new(),
-                    };
-
                     AppPhase::Connecting {
-                        gfx,
+                        gfx: init_gfx(renderer),
                         panorama: Panorama::new(),
                         connect_phase: ConnectionPhase::Connecting,
                         connection,
                         game,
                     }
                 } else {
-                    let gfx = Gfx {
-                        renderer: ManuallyDrop::new(renderer),
-                        window,
-                        last_frame: Instant::now(),
-                        fps_counter: FpsCounter::new(),
-                    };
-
                     AppPhase::InMenu {
-                        gfx,
+                        gfx: init_gfx(renderer),
                         panorama: Panorama::new(),
                     }
                 }
@@ -272,8 +272,9 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(new_size) => {
-                if let Some(app_rt) = self.phase.gfx_mut() {
-                    app_rt.renderer.resize(new_size);
+                if let Some(gfx) = self.phase.gfx_mut() {
+                    gfx.renderer.resize(new_size);
+                    gfx.gui.resize(new_size);
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
