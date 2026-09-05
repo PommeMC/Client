@@ -103,6 +103,10 @@ struct TypeMaps {
 /// Resource names don't exist yet at these versions; they are derived from
 /// the class names, which is exactly how 1.20.5 named them. `None` for a
 /// direction with no registrations (handshake clientbound).
+///
+/// Assumes each enum constant is on one line, as CFR emits them; a decompile
+/// that wrapped them would yield a short table rather than an error, which the
+/// per-version anchor tests' id and count pins are what catch.
 fn parse_legacy(
     source: &str,
     phase_key: &str,
@@ -298,7 +302,7 @@ fn generate_registries(root: &Path, version: &str, out_path: &str) -> Result<(),
             .and_then(|r| r.get("entries"))
             .and_then(|e| e.as_object())
         else {
-            println!("{name}: absent from this version's report");
+            eprintln!("warning: {name} absent from this version's report, skipping");
             continue;
         };
         let mut ordered: Vec<(&str, u64)> = entries
