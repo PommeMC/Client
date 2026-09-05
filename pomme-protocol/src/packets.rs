@@ -908,21 +908,33 @@ mod tests {
         }
     }
 
-    /// 765's names are derived from class names; 766 is the first version that
-    /// names the same packets itself and renamed none of them, so every 765
-    /// name must appear in 766. Checks the derivation, not just its shape.
+    /// `(legacy, named, renames)`: a pre-1.20.5 table whose names protogen
+    /// derives from class names, the first version that names those packets
+    /// itself, and the names that version changed.
+    const LEGACY_NAMES: &[(i32, i32, &[&str])] = &[
+        (765, 766, &[]),
+        // 1.20.3 split resource_pack into resource_pack_push/_pop and added a
+        // UUID, so the join layer needs a rewrite here, not just a rename.
+        (764, 765, &["resource_pack"]),
+    ];
+
+    /// Every derived name must appear in the version that named the packets
+    /// itself, bar the renames, which is what checks the derivation itself;
+    /// `embedded_names_are_well_formed` only checks its shape.
     #[test]
     fn legacy_names_match_the_named_version() {
-        let named = PacketTable::for_protocol(766).unwrap();
-        for_each_name(
-            PacketTable::for_protocol(765).unwrap(),
-            |phase, dir, id, name| {
-                assert!(
-                    named.id(phase, dir, name).is_some(),
-                    "765 {phase:?} {dir:?} {id}: '{name}' has no 766 equivalent"
-                );
-            },
-        );
+        for &(legacy, named, renames) in LEGACY_NAMES {
+            let named_table = PacketTable::for_protocol(named).unwrap();
+            for_each_name(
+                PacketTable::for_protocol(legacy).unwrap(),
+                |phase, dir, id, name| {
+                    assert!(
+                        named_table.id(phase, dir, name).is_some() || renames.contains(&name),
+                        "{legacy} {phase:?} {dir:?} {id}: '{name}' has no {named} equivalent"
+                    );
+                },
+            );
+        }
     }
 
     /// The latest protocol resolves to the shared latest table, every
