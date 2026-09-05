@@ -161,6 +161,40 @@ impl DirectionTable {
 mod tests {
     use super::*;
 
+    const PHASES: [Phase; 5] = [
+        Phase::Handshake,
+        Phase::Status,
+        Phase::Login,
+        Phase::Configuration,
+        Phase::Game,
+    ];
+    const DIRECTIONS: [Direction; 2] = [Direction::Serverbound, Direction::Clientbound];
+
+    /// A packet resource name: `/`-separated lowercase segments, as in
+    /// `debug/block_value`.
+    fn is_resource_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.split('/').all(|seg| {
+                !seg.is_empty()
+                    && seg
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            })
+    }
+
+    /// Visits every `(phase, direction, id, name)` the table defines.
+    fn for_each_name(t: &PacketTable, mut f: impl FnMut(Phase, Direction, u32, &str)) {
+        for phase in PHASES {
+            for dir in DIRECTIONS {
+                let mut id = 0;
+                while let Some(name) = t.name_of(phase, dir, id) {
+                    f(phase, dir, id, name);
+                    id += 1;
+                }
+            }
+        }
+    }
+
     /// Asserts every id `t` has in the phase/direction resolves to the same
     /// name in `other` (a prefix check; pass `equal` to also require `other`
     /// to end at the same id).
@@ -475,14 +509,8 @@ mod tests {
         assert_eq!(t.version().protocol, 771);
         assert_eq!(t.version().name, "1.21.6");
         let t772 = PacketTable::for_protocol(772).unwrap();
-        for phase in [
-            Phase::Handshake,
-            Phase::Status,
-            Phase::Login,
-            Phase::Configuration,
-            Phase::Game,
-        ] {
-            for dir in [Direction::Serverbound, Direction::Clientbound] {
+        for phase in PHASES {
+            for dir in DIRECTIONS {
                 assert_prefix(t, t772, phase, dir, true);
             }
         }
@@ -705,14 +733,8 @@ mod tests {
         assert_eq!(t.version().protocol, 766);
         assert_eq!(t.version().name, "1.20.6");
         let t767 = PacketTable::for_protocol(767).unwrap();
-        for phase in [
-            Phase::Handshake,
-            Phase::Status,
-            Phase::Login,
-            Phase::Configuration,
-            Phase::Game,
-        ] {
-            for dir in [Direction::Serverbound, Direction::Clientbound] {
+        for phase in PHASES {
+            for dir in DIRECTIONS {
                 assert_prefix(t, t767, phase, dir, false);
             }
         }
@@ -727,6 +749,106 @@ mod tests {
         assert!(
             t.name_of(Phase::Game, Direction::Clientbound, 122)
                 .is_none()
+        );
+    }
+
+    /// Registration-order anchors for 1.20.4, spot-checked by hand against
+    /// the decompiled `ConnectionProtocol.java` registrations (this version
+    /// predates packet resource names and the per-phase Protocols files;
+    /// protogen derives the names from the packet class names, which is how
+    /// 1.20.5 named them).
+    #[test]
+    fn anchors_1_20_4() {
+        let t = PacketTable::for_protocol(765).unwrap();
+        assert_eq!(t.version().protocol, 765);
+        assert_eq!(t.version().name, "1.20.4");
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "interact"),
+            Some(19)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "container_click"),
+            Some(13)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "player_command"),
+            Some(34)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "player_position"),
+            Some(62)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "container_set_slot"),
+            Some(21)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "update_attributes"),
+            Some(113)
+        );
+        assert_eq!(
+            t.id(Phase::Login, Direction::Clientbound, "game_profile"),
+            Some(2)
+        );
+        assert_eq!(
+            t.id(
+                Phase::Configuration,
+                Direction::Clientbound,
+                "registry_data"
+            ),
+            Some(5)
+        );
+        assert_eq!(
+            t.id(
+                Phase::Configuration,
+                Direction::Serverbound,
+                "select_known_packs"
+            ),
+            None
+        );
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 54).is_some());
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 55).is_none());
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 116)
+                .is_some()
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 117)
+                .is_none()
+        );
+    }
+
+    /// A malformed name silently stops matching across versions: the
+    /// pre-1.20.5 tables derive names from packet class names, where a nested
+    /// `MovePlayerPacket.Pos` once produced `move_player_packet._pos`.
+    #[test]
+    fn embedded_names_are_well_formed() {
+        for embedded in &EMBEDDED {
+            let t = PacketTable::for_protocol(embedded.version.protocol).unwrap();
+            for_each_name(t, |phase, dir, id, name| {
+                assert!(
+                    is_resource_name(name),
+                    "{} {phase:?} {dir:?} {id}: malformed name '{name}'",
+                    embedded.version.name
+                );
+            });
+        }
+    }
+
+    /// 765's names are derived from class names; 766 is the first version that
+    /// names the same packets itself and renamed none of them, so every 765
+    /// name must appear in 766. Checks the derivation, not just its shape.
+    #[test]
+    fn legacy_names_match_the_named_version() {
+        let named = PacketTable::for_protocol(766).unwrap();
+        for_each_name(
+            PacketTable::for_protocol(765).unwrap(),
+            |phase, dir, id, name| {
+                assert!(
+                    named.id(phase, dir, name).is_some(),
+                    "765 {phase:?} {dir:?} {id}: '{name}' has no 766 equivalent"
+                );
+            },
         );
     }
 

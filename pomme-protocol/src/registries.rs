@@ -52,6 +52,15 @@ impl ClientRegistry {
             ClientRegistry::SoundEvent => "sound_event",
         }
     }
+
+    /// First protocol carrying this registry; older tables omit it.
+    fn since(self) -> i32 {
+        match self {
+            // Item components arrived in 1.20.5.
+            ClientRegistry::DataComponentType => 766,
+            _ => 0,
+        }
+    }
 }
 
 /// One version's ordered registry entry names (wire id == index).
@@ -100,10 +109,14 @@ impl RegistryTable {
         }
         let mut registries: [Vec<String>; ClientRegistry::ALL.len()] = Default::default();
         for reg in ClientRegistry::ALL {
-            let names = file
-                .registries
-                .remove(reg.key())
-                .ok_or_else(|| format!("missing registry {}", reg.key()))?;
+            // Absent below the registry's `since` is legitimate; anywhere else
+            // accepting it would silently remap every id in it to None.
+            let Some(names) = file.registries.remove(reg.key()) else {
+                if expected.protocol >= reg.since() {
+                    return Err(format!("missing registry {}", reg.key()));
+                }
+                continue;
+            };
             if names.is_empty() {
                 return Err(format!("empty registry {}", reg.key()));
             }
@@ -206,6 +219,14 @@ impl RegistryRemaps {
                         // category prefix (generic.armor -> armor); match on
                         // the last dot segment for that registry only (sound
                         // names contain legitimate dots).
+                        //
+                        // TODO: stripping bridges one way only, so every
+                        // attribute remap through `from_latest` to a pre-1.21.2
+                        // version is None (26.2 `max_health` misses 1.20.6's
+                        // `generic.max_health`). Dormant while only Item and
+                        // DataComponentType go outbound. Re-adding a prefix
+                        // needs the target's own category, so the fix is a
+                        // name-keyed lookup rather than a transform.
                         if reg != ClientRegistry::Attribute {
                             return None;
                         }
@@ -568,6 +589,69 @@ mod tests {
         let (r, from, to) = setup(766);
         assert_pre_1_21_2_anchors(r, from, 16);
         assert_round_trips(r, from, to);
+    }
+
+    /// Anchor checks against the 1.20.4 -> 26.2 registry diff. This version
+    /// predates data components (that registry is absent — every component
+    /// remap is None) and 1.20.5/26.2 renamed or reshuffled heavily: the
+    /// particle registry diverges at id 0.
+    #[test]
+    fn remap_1_20_4_anchors() {
+        let (r, from, to) = setup(765);
+
+        assert_eq!(
+            from.name_of(ClientRegistry::Attribute, 11),
+            Some("generic.max_health")
+        );
+        assert_eq!(r.remap(ClientRegistry::Attribute, 11), Some(23));
+
+        assert_eq!(from.name_of(ClientRegistry::EntityType, 12), Some("cat"));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 12), Some(21));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 100), Some(131)); // tadpole
+
+        assert_bed_unmapped(r, from);
+        assert_chain_remapped(r, from);
+        assert_unmapped(r, from, ClientRegistry::EntityType, "boat");
+        assert_unmapped(r, from, ClientRegistry::SoundEvent, "item.goat_horn.play");
+
+        // No component registry exists at 765.
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 0), None);
+
+        // 1.20.5 dropped ambient_entity_effect off the front of the particle
+        // registry, shifting everything after it down one.
+        assert_eq!(
+            from.name_of(ClientRegistry::ParticleType, 0),
+            Some("ambient_entity_effect")
+        );
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 0), None);
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 1), Some(0)); // angry_villager
+
+        assert_round_trips(r, from, to);
+    }
+
+    /// Every table parses and carries exactly the registries its version
+    /// should, so a generation slip fails here rather than silently remapping
+    /// a whole registry to None. Anchor tests only cover the versions someone
+    /// wrote one for.
+    #[test]
+    fn embedded_registry_tables_parse() {
+        let check = |version: ProtocolVersion, t: &RegistryTable| {
+            for reg in ClientRegistry::ALL {
+                assert_eq!(
+                    t.names(reg).is_empty(),
+                    version.protocol < reg.since(),
+                    "{} {reg:?}",
+                    version.name
+                );
+            }
+        };
+        for e in &EMBEDDED {
+            check(
+                e.version,
+                RegistryTable::for_protocol(e.version.protocol).unwrap(),
+            );
+        }
+        check(LATEST, RegistryTable::latest());
     }
 
     #[test]
