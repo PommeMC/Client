@@ -182,6 +182,19 @@ mod tests {
             })
     }
 
+    /// Visits every `(phase, direction, id, name)` the table defines.
+    fn for_each_name(t: &PacketTable, mut f: impl FnMut(Phase, Direction, u32, &str)) {
+        for phase in PHASES {
+            for dir in DIRECTIONS {
+                let mut id = 0;
+                while let Some(name) = t.name_of(phase, dir, id) {
+                    f(phase, dir, id, name);
+                    id += 1;
+                }
+            }
+        }
+    }
+
     /// Asserts every id `t` has in the phase/direction resolves to the same
     /// name in `other` (a prefix check; pass `equal` to also require `other`
     /// to end at the same id).
@@ -885,20 +898,31 @@ mod tests {
     fn embedded_names_are_well_formed() {
         for embedded in &EMBEDDED {
             let t = PacketTable::for_protocol(embedded.version.protocol).unwrap();
-            for phase in PHASES {
-                for dir in DIRECTIONS {
-                    let mut id = 0;
-                    while let Some(name) = t.name_of(phase, dir, id) {
-                        assert!(
-                            is_resource_name(name),
-                            "{} {phase:?} {dir:?} {id}: malformed name '{name}'",
-                            embedded.version.name
-                        );
-                        id += 1;
-                    }
-                }
-            }
+            for_each_name(t, |phase, dir, id, name| {
+                assert!(
+                    is_resource_name(name),
+                    "{} {phase:?} {dir:?} {id}: malformed name '{name}'",
+                    embedded.version.name
+                );
+            });
         }
+    }
+
+    /// 765's names are derived from class names; 766 is the first version that
+    /// names the same packets itself and renamed none of them, so every 765
+    /// name must appear in 766. Checks the derivation, not just its shape.
+    #[test]
+    fn legacy_names_match_the_named_version() {
+        let named = PacketTable::for_protocol(766).unwrap();
+        for_each_name(
+            PacketTable::for_protocol(765).unwrap(),
+            |phase, dir, id, name| {
+                assert!(
+                    named.id(phase, dir, name).is_some(),
+                    "765 {phase:?} {dir:?} {id}: '{name}' has no 766 equivalent"
+                );
+            },
+        );
     }
 
     /// The latest protocol resolves to the shared latest table, every

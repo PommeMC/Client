@@ -178,6 +178,21 @@ fn translate_and_decode(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
     azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&translated)).unwrap()
 }
 
+/// `translate_and_decode` plus the id remap the connection applies next, for
+/// packets whose frame rewrite leaves item ids in the wire version's space.
+fn translate_decode_and_remap(protocol: i32, old: Vec<u8>) -> ClientboundGamePacket {
+    let mut packet = translate_and_decode(protocol, old);
+    assert!(translation_for(protocol).remap_inbound(&mut packet));
+    packet
+}
+
+/// An item 765 and 26.2 number differently (27 against 54), so a stack that
+/// never gets remapped decodes as the wrong item rather than passing by
+/// identity.
+const SHIFTED_ITEM: u8 = 27;
+const SHIFTED_ITEM_KIND: azalea_registry::builtin::ItemKind =
+    azalea_registry::builtin::ItemKind::GrassBlock;
+
 /// Exactly the joinable non-native protocols build a translation: a version
 /// with embedded tables but no `TRANSLATED` entry (the staging state while
 /// its translation is built) must stay un-joinable, and a protocol without
@@ -1679,11 +1694,11 @@ fn translate_set_equipment_765() {
     );
     wire::write_varint(&mut old, 9); // entity id
     old.push(0x85); // offhand, more follow
-    old.extend_from_slice(&[1, 4, 1, 0]); // bare item, empty NBT
+    old.extend_from_slice(&[1, SHIFTED_ITEM, 1, 0]); // bare item, empty NBT
     old.push(0); // head
     old.push(0); // empty stack
 
-    let ClientboundGamePacket::SetEquipment(p) = translate_and_decode(765, old) else {
+    let ClientboundGamePacket::SetEquipment(p) = translate_decode_and_remap(765, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.entity_id, MinecraftEntityId(9));
@@ -1692,6 +1707,7 @@ fn translate_set_equipment_765() {
         panic!("empty stack");
     };
     assert_eq!(data.count, 1);
+    assert_eq!(data.kind, SHIFTED_ITEM_KIND);
 }
 
 /// `merchant_offers` costs were plain stacks before 1.20.5's `ItemCost`
@@ -1705,7 +1721,7 @@ fn translate_merchant_offers_765() {
     );
     wire::write_varint(&mut old, 1); // container id
     wire::write_varint(&mut old, 1); // one offer
-    old.extend_from_slice(&[1, 1, 3, 0]); // costA: 3 stone
+    old.extend_from_slice(&[1, SHIFTED_ITEM, 3, 0]); // costA: 3 of it
     old.extend_from_slice(&[1, 4, 1, 0]); // result
     old.push(0); // costB: empty
     old.push(0); // out of stock
@@ -1718,12 +1734,13 @@ fn translate_merchant_offers_765() {
     wire::write_varint(&mut old, 30); // villager xp
     old.extend_from_slice(&[1, 1]); // show progress, can restock
 
-    let ClientboundGamePacket::MerchantOffers(p) = translate_and_decode(765, old) else {
+    let ClientboundGamePacket::MerchantOffers(p) = translate_decode_and_remap(765, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.container_id, 1);
     let offer = &p.offers[0];
     assert_eq!(offer.base_cost_a.count, 3);
+    assert_eq!(offer.base_cost_a.item, SHIFTED_ITEM_KIND);
     assert!(offer.cost_b.is_none());
     assert_eq!(offer.uses, 5);
     assert_eq!(offer.max_uses, 12);
@@ -1937,7 +1954,10 @@ fn translate_config_registry_data_765() {
         names,
         ["minecraft:custom_overworld", "minecraft:custom_end"]
     );
-    assert!(p.entries[0].1.is_some());
+    // The element alone, not the {name, id, element} wrapper 765 nests it in.
+    let element = p.entries[0].1.as_ref().expect("entry NBT");
+    assert_eq!(element.int("height"), Some(384));
+    assert_eq!(element.string("name"), None);
 
     let mut old = Vec::new();
     wire::write_varint(&mut old, old_id(765, Direction::Clientbound, "respawn"));

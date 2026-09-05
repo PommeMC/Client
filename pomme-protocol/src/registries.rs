@@ -52,6 +52,15 @@ impl ClientRegistry {
             ClientRegistry::SoundEvent => "sound_event",
         }
     }
+
+    /// First protocol carrying this registry; older tables omit it.
+    fn since(self) -> i32 {
+        match self {
+            // Item components arrived in 1.20.5.
+            ClientRegistry::DataComponentType => 766,
+            _ => 0,
+        }
+    }
 }
 
 /// One version's ordered registry entry names (wire id == index).
@@ -100,9 +109,12 @@ impl RegistryTable {
         }
         let mut registries: [Vec<String>; ClientRegistry::ALL.len()] = Default::default();
         for reg in ClientRegistry::ALL {
-            // A registry absent from the file didn't exist at that version
-            // (data_component_type before 1.20.5); its remaps are all None.
+            // Absent below the registry's `since` is legitimate; anywhere else
+            // accepting it would silently remap every id in it to None.
             let Some(names) = file.registries.remove(reg.key()) else {
+                if expected.protocol >= reg.since() {
+                    return Err(format!("missing registry {}", reg.key()));
+                }
                 continue;
             };
             if names.is_empty() {
@@ -211,6 +223,14 @@ impl RegistryRemaps {
                         // category prefix (generic.armor -> armor); match on
                         // the last dot segment for that registry only (sound
                         // names contain legitimate dots).
+                        //
+                        // TODO: stripping bridges one way only, so every
+                        // attribute remap through `from_latest` to a pre-1.21.2
+                        // version is None (26.2 `max_health` misses 1.20.6's
+                        // `generic.max_health`). Dormant while only Item and
+                        // DataComponentType go outbound. Re-adding a prefix
+                        // needs the target's own category, so the fix is a
+                        // name-keyed lookup rather than a transform.
                         if reg != ClientRegistry::Attribute {
                             return None;
                         }
@@ -634,11 +654,41 @@ mod tests {
         // No component registry exists at 765.
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 0), None);
 
-        // The particle registry reordered at 1.20.5; nothing below the
-        // divergence to anchor on.
-        assert_ne!(r.remap(ClientRegistry::ParticleType, 0), Some(0));
+        // 1.20.5 dropped ambient_entity_effect off the front of the particle
+        // registry, shifting everything after it down one.
+        assert_eq!(
+            from.name_of(ClientRegistry::ParticleType, 0),
+            Some("ambient_entity_effect")
+        );
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 0), None);
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 1), Some(0)); // angry_villager
 
         assert_round_trips(r, from, to);
+    }
+
+    /// Every table parses and carries exactly the registries its version
+    /// should, so a generation slip fails here rather than silently remapping
+    /// a whole registry to None. Anchor tests only cover the versions someone
+    /// wrote one for.
+    #[test]
+    fn embedded_registry_tables_parse() {
+        let check = |version: ProtocolVersion, t: &RegistryTable| {
+            for reg in ClientRegistry::ALL {
+                assert_eq!(
+                    t.names(reg).is_empty(),
+                    version.protocol < reg.since(),
+                    "{} {reg:?}",
+                    version.name
+                );
+            }
+        };
+        for e in &EMBEDDED {
+            check(
+                e.version,
+                RegistryTable::for_protocol(e.version.protocol).unwrap(),
+            );
+        }
+        check(LATEST, RegistryTable::latest());
     }
 
     #[test]

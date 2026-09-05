@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use azalea_block::BlockState;
 
-use crate::physics::block_shape::{LocalBox, compute_shape};
+use crate::physics::block_shape::{LocalBox, compute_outline, compute_shape};
 
 /// Compact per-state property map: `(key, value)` pairs sorted by key. States
 /// have at most ~10 properties, so binary search on a boxed slice beats a
@@ -125,6 +125,9 @@ struct BlockData {
     behavior: BlockBehavior,
     /// Collision shape; see `block_shape::partial_shape` for the encoding.
     shape: Option<Box<[LocalBox]>>,
+    /// Outline shape (vanilla `getShape`) where it differs from `shape`; `None`
+    /// means the two agree and the collision shape doubles as the outline.
+    outline: Option<Box<[LocalBox]>>,
     is_air: bool,
     /// Vanilla `hasCollision` (`BlockBehaviour.Properties.noCollision()`).
     collides: bool,
@@ -393,6 +396,7 @@ fn build_table(data: &str, state_data: &str) -> Vec<BlockData> {
             let properties = PropMap::from_pairs(pairs);
             let fluid = state_fluid(name, &properties);
             let shape = compute_shape(name, &properties).map(Vec::into_boxed_slice);
+            let outline = compute_outline(name, &properties).map(Vec::into_boxed_slice);
             let light = LightProps {
                 emission: state_entry.e.get(offset as usize),
                 dampening: state_entry.d.get(offset as usize),
@@ -406,6 +410,7 @@ fn build_table(data: &str, state_data: &str) -> Vec<BlockData> {
                 properties,
                 behavior,
                 shape,
+                outline,
                 is_air,
                 collides,
                 fluid,
@@ -507,6 +512,7 @@ fn block_data(state: BlockState) -> &'static BlockData {
         properties: PropMap::from_pairs(Vec::new()),
         behavior: DEFAULT_BEHAVIOR,
         shape: None,
+        outline: None,
         is_air: false,
         collides: true,
         fluid: NO_FLUID,
@@ -585,6 +591,14 @@ pub fn fluid(state: BlockState) -> Fluid {
 
 pub(crate) fn block_shape(state: BlockState) -> Option<&'static [LocalBox]> {
     block_data(state).shape.as_deref()
+}
+
+/// Outline shape for interaction raycasts (vanilla `getShape`), falling back to
+/// the collision shape where the two agree. `None` is a full cube; an empty
+/// slice is a block the pick ray passes through.
+pub(crate) fn block_outline(state: BlockState) -> Option<&'static [LocalBox]> {
+    let data = block_data(state);
+    data.outline.as_deref().or(data.shape.as_deref())
 }
 
 /// Baked light properties for a state (vanilla `BlockStateBase` light cache).
@@ -809,6 +823,49 @@ mod tests {
         const NORTH: usize = 2;
         // Side faces of two aligned bottom slabs cover only the lower half.
         assert!(!shape_occludes(bottom, bottom, NORTH));
+    }
+
+    /// Oracles from reference/26.2/decompiled: `SnowLayerBlock` is the only
+    /// shape here whose `getShape` and `getCollisionShape` disagree, and
+    /// `LiquidBlock`/`BubbleColumnBlock` return `Shapes.empty()`.
+    #[test]
+    fn outline_shapes() {
+        setup();
+
+        // One snow layer is 2/16 tall to look at but has no collision at all.
+        let thin = find_state("snow", &[("layers", "1")]);
+        assert_eq!(block_shape(thin), Some(&[][..]));
+        assert_eq!(
+            block_outline(thin),
+            Some(&[[0.0, 0.0, 0.0, 1.0, 2.0 / 16.0, 1.0]][..])
+        );
+        // Eight layers fill the cell visually but collide one layer short.
+        let full = find_state("snow", &[("layers", "8")]);
+        assert_eq!(
+            block_shape(full),
+            Some(&[[0.0, 0.0, 0.0, 1.0, 14.0 / 16.0, 1.0]][..])
+        );
+        assert_eq!(
+            block_outline(full),
+            Some(&[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]][..])
+        );
+
+        // Fluids are clipped through, not targeted.
+        for id in ["water", "lava"] {
+            assert_eq!(
+                block_outline(find_state(id, &[("level", "0")])),
+                Some(&[][..])
+            );
+        }
+        assert_eq!(
+            block_outline(find_state("bubble_column", &[])),
+            Some(&[][..])
+        );
+
+        // Everywhere else the collision shape doubles as the outline.
+        let slab = find_state("oak_slab", &[("type", "bottom"), ("waterlogged", "false")]);
+        assert_eq!(block_outline(slab), block_shape(slab));
+        assert_eq!(block_outline(find_state("stone", &[])), None);
     }
 
     /// Builds every embedded table so the block/light cross-checks fire for
