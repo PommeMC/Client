@@ -869,6 +869,45 @@ mod tests {
         );
     }
 
+    /// Every embedded table's names are well-formed resource paths. A `.`
+    /// means a name was derived wrong (pre-1.20.5 tables come from packet
+    /// class names, where a nested `MovePlayerPacket.Pos` once produced
+    /// `move_player_packet._pos` and silently stopped matching by name).
+    /// The `/` segment is legitimate: `debug/block_value` and friends.
+    #[test]
+    fn embedded_names_are_well_formed() {
+        for embedded in &EMBEDDED {
+            let t = PacketTable::for_protocol(embedded.version.protocol).unwrap();
+            for phase in [
+                Phase::Handshake,
+                Phase::Status,
+                Phase::Login,
+                Phase::Configuration,
+                Phase::Game,
+            ] {
+                for dir in [Direction::Serverbound, Direction::Clientbound] {
+                    let mut id = 0;
+                    while let Some(name) = t.name_of(phase, dir, id) {
+                        assert!(
+                            !name.is_empty()
+                                && name.split('/').all(|seg| {
+                                    !seg.is_empty()
+                                        && seg.bytes().all(|b| {
+                                            b.is_ascii_lowercase()
+                                                || b.is_ascii_digit()
+                                                || b == b'_'
+                                        })
+                                }),
+                            "{} {phase:?} {dir:?} {id}: malformed name '{name}'",
+                            embedded.version.name
+                        );
+                        id += 1;
+                    }
+                }
+            }
+        }
+    }
+
     /// The latest protocol resolves to the shared latest table, every
     /// embedded version to its own table, and anything else to nothing.
     #[test]
