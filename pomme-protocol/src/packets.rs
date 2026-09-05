@@ -752,6 +752,79 @@ mod tests {
         );
     }
 
+    /// Registration-order anchors for 1.20.2, spot-checked by hand against
+    /// the decompiled `ConnectionProtocol.java` registrations (the last
+    /// version before 1.20.3 split resource_pack into pop/push and added
+    /// reset_score/ticking packets and the crafter serverbound).
+    #[test]
+    fn anchors_1_20_2() {
+        let t = PacketTable::for_protocol(764).unwrap();
+        assert_eq!(t.version().protocol, 764);
+        assert_eq!(t.version().name, "1.20.2");
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "interact"),
+            Some(18)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "container_click"),
+            Some(13)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Serverbound, "resource_pack"),
+            Some(39)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "resource_pack"),
+            Some(66)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "set_score"),
+            Some(93)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "system_chat"),
+            Some(103)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "player_info_update"),
+            Some(60)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "reset_score"),
+            None
+        );
+        assert_eq!(
+            t.id(Phase::Login, Direction::Clientbound, "game_profile"),
+            Some(2)
+        );
+        assert_eq!(
+            t.id(
+                Phase::Configuration,
+                Direction::Clientbound,
+                "resource_pack"
+            ),
+            Some(6)
+        );
+        assert_eq!(
+            t.id(
+                Phase::Configuration,
+                Direction::Clientbound,
+                "registry_data"
+            ),
+            Some(5)
+        );
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 53).is_some());
+        assert!(t.name_of(Phase::Game, Direction::Serverbound, 54).is_none());
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 112)
+                .is_some()
+        );
+        assert!(
+            t.name_of(Phase::Game, Direction::Clientbound, 113)
+                .is_none()
+        );
+    }
+
     /// Registration-order anchors for 1.20.4, spot-checked by hand against
     /// the decompiled `ConnectionProtocol.java` registrations (this version
     /// predates packet resource names and the per-phase Protocols files;
@@ -835,21 +908,33 @@ mod tests {
         }
     }
 
-    /// 765's names are derived from class names; 766 is the first version that
-    /// names the same packets itself and renamed none of them, so every 765
-    /// name must appear in 766. Checks the derivation, not just its shape.
+    /// `(legacy, named, renames)`: a pre-1.20.5 table whose names protogen
+    /// derives from class names, the first version that names those packets
+    /// itself, and the names that version changed.
+    const LEGACY_NAMES: &[(i32, i32, &[&str])] = &[
+        (765, 766, &[]),
+        // 1.20.3 split resource_pack into resource_pack_push/_pop and added a
+        // UUID, so the join layer needs a rewrite here, not just a rename.
+        (764, 765, &["resource_pack"]),
+    ];
+
+    /// Every derived name must appear in the version that named the packets
+    /// itself, bar the renames, which is what checks the derivation itself;
+    /// `embedded_names_are_well_formed` only checks its shape.
     #[test]
     fn legacy_names_match_the_named_version() {
-        let named = PacketTable::for_protocol(766).unwrap();
-        for_each_name(
-            PacketTable::for_protocol(765).unwrap(),
-            |phase, dir, id, name| {
-                assert!(
-                    named.id(phase, dir, name).is_some(),
-                    "765 {phase:?} {dir:?} {id}: '{name}' has no 766 equivalent"
-                );
-            },
-        );
+        for &(legacy, named, renames) in LEGACY_NAMES {
+            let named_table = PacketTable::for_protocol(named).unwrap();
+            for_each_name(
+                PacketTable::for_protocol(legacy).unwrap(),
+                |phase, dir, id, name| {
+                    assert!(
+                        named_table.id(phase, dir, name).is_some() || renames.contains(&name),
+                        "{legacy} {phase:?} {dir:?} {id}: '{name}' has no {named} equivalent"
+                    );
+                },
+            );
+        }
     }
 
     /// The latest protocol resolves to the shared latest table, every

@@ -431,6 +431,7 @@
   "granite_slab": ["block.stone.hit", "block.stone.break", 1.0, 1.0],
   "granite_stairs": ["block.stone.hit", "block.stone.break", 1.0, 1.0],
   "granite_wall": ["block.stone.hit", "block.stone.break", 1.0, 1.0],
+  "grass": ["block.grass.hit", "block.grass.break", 1.0, 1.0],
   "grass_block": ["block.grass.hit", "block.grass.break", 1.0, 1.0],
   "gravel": ["block.gravel.hit", "block.gravel.break", 1.0, 1.0],
   "gray_banner": ["block.wood.hit", "block.wood.break", 1.0, 1.0],
