@@ -5,12 +5,14 @@
 //!
 //! TODO: walls, fences, fence gates, panes, trapdoors, doors, beds, chests,
 //! cake, etc. still fall back to a full cube.
-
-use std::borrow::Cow;
+//!
+//! TODO: blocks with no collision but a small outline (torches, flowers,
+//! buttons, plants, redstone dust) fall back to a full cube too, so the
+//! crosshair still reaches them from a block away.
 
 use azalea_block::BlockState;
 
-use crate::world::block::{PropMap, block_id, block_properties};
+use crate::world::block::PropMap;
 
 /// A block-local axis-aligned box: `[min_x, min_y, min_z, max_x, max_y,
 /// max_z]`.
@@ -22,33 +24,13 @@ pub fn partial_shape(state: BlockState) -> Option<&'static [LocalBox]> {
     crate::world::block::block_shape(state)
 }
 
-pub const FULL_CUBE: LocalBox = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-static FULL_CUBE_SHAPE: [LocalBox; 1] = [FULL_CUBE];
+const FULL_CUBE_SHAPE: &[LocalBox] = &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
 
-const SNOW_BLOCK_ID: &str = "snow";
-const SNOW_LAYERS_PROPERTY: &str = "layers";
-const DEFAULT_SNOW_LAYERS: i32 = 1;
-const SNOW_LAYER_HEIGHT: f64 = 2.0 / 16.0;
-
-pub fn outline_shape(state: BlockState) -> Cow<'static, [LocalBox]> {
-    let is_snow = block_id(state) == SNOW_BLOCK_ID;
-    if is_snow {
-        let layers = get_snow_layers(block_properties(state));
-        let height = layers as f64 * SNOW_LAYER_HEIGHT;
-        return Cow::Owned(vec![[0.0, 0.0, 0.0, 1.0, height, 1.0]]);
-    }
-
-    match partial_shape(state) {
-        Some(boxes) if !boxes.is_empty() => Cow::Borrowed(boxes),
-        _ => Cow::Borrowed(&FULL_CUBE_SHAPE[..]),
-    }
-}
-
-fn get_snow_layers(props: &PropMap) -> i32 {
-    props
-        .get(SNOW_LAYERS_PROPERTY)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_SNOW_LAYERS)
+/// Boxes the interaction raycast clips against (vanilla `getShape`). Unlike
+/// `partial_shape` the full-cube case is already resolved, so an empty slice
+/// means "not targetable" rather than "no collision".
+pub fn outline_shape(state: BlockState) -> &'static [LocalBox] {
+    crate::world::block::block_outline(state).unwrap_or(FULL_CUBE_SHAPE)
 }
 
 /// Computes one state's shape. Takes id/props rather than a `BlockState` so
@@ -73,20 +55,39 @@ pub(crate) fn compute_shape(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> 
     match id {
         "dirt_path" | "farmland" => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.9375, 1.0]]),
         _ if id.ends_with("_carpet") => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.0625, 1.0]]),
-        // Snow's collision shape is one layer shorter than its outline; a single
-        // layer has no collision at all.
-        SNOW_BLOCK_ID => {
-            let layers = get_snow_layers(props);
-            let height = (layers - 1) as f64 * SNOW_LAYER_HEIGHT;
-            let has_collision = height > 0.0;
-            Some(if has_collision {
-                vec![[0.0, 0.0, 0.0, 1.0, height, 1.0]]
-            } else {
-                vec![]
-            })
-        }
+        // `SnowLayerBlock.getCollisionShape` is one layer shorter than its
+        // outline, so a single layer has no collision at all.
+        "snow" => Some(snow_shape(snow_layers(props) - 1)),
         _ => None,
     }
+}
+
+/// Vanilla `getShape` where it differs from `getCollisionShape`. `None` means
+/// the two agree, so `compute_shape`'s result doubles as the outline.
+pub(crate) fn compute_outline(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> {
+    match id {
+        "snow" => Some(snow_shape(snow_layers(props))),
+        // `LiquidBlock.getShape` and `BubbleColumnBlock.getShape` are
+        // `Shapes.empty()`: the pick ray clips straight through them.
+        "water" | "lava" | "bubble_column" => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+fn snow_layers(props: &PropMap) -> i32 {
+    props
+        .get("layers")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+}
+
+/// Vanilla `SnowLayerBlock.SHAPES[layers]`, two pixels per layer; index 0 is
+/// empty.
+fn snow_shape(layers: i32) -> Vec<LocalBox> {
+    if layers <= 0 {
+        return Vec::new();
+    }
+    vec![[0.0, 0.0, 0.0, 1.0, layers as f64 * 2.0 / 16.0, 1.0]]
 }
 
 /// Vanilla `StairBlock` shape: a half-slab plus 1–3 upper corner pillars,
