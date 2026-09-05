@@ -1247,12 +1247,14 @@ fn translate_chunk_769() {
     assert_eq!(p.chunk_data.data[..], [0, 1, 0, 0, 0, 5, 0, 0]);
 }
 
-/// 1.21.5 prepended `globalIndex` to `player_chat`; the shim synthesizes
-/// zero ahead of an otherwise identical body.
-#[test]
-fn translate_player_chat_769() {
+/// A `player_chat` frame with everything but the chat type fixed: 765 sends a
+/// direct registry id where 769 already sends a holder.
+fn player_chat_frame(protocol: i32, chat_type: u32) -> Vec<u8> {
     let mut old = Vec::new();
-    wire::write_varint(&mut old, old_id(769, Direction::Clientbound, "player_chat"));
+    wire::write_varint(
+        &mut old,
+        old_id(protocol, Direction::Clientbound, "player_chat"),
+    );
     old.extend_from_slice(&[7; 16]); // sender uuid
     wire::write_varint(&mut old, 3); // index
     old.push(0); // no signature
@@ -1262,11 +1264,63 @@ fn translate_player_chat_769() {
     old.push(0); // no last-seen entries
     old.push(0); // no unsigned content
     old.push(0); // filter: pass-through
-    wire::write_varint(&mut old, 1); // chat type holder: registry id 0
+    wire::write_varint(&mut old, chat_type);
+    old.extend_from_slice(&[8, 0, 1, b'n']); // name: NBT string
+    old.push(0); // no target
+    old
+}
+
+/// Pre-1.20.5 sends the chat type as a direct registry id where 26.2 wants a
+/// holder. Id 0 (`chat`, the ordinary message) is the holder's "inline value
+/// follows" sentinel, so leaving it alone makes normal chat undecodable.
+#[test]
+fn translate_player_chat_765() {
+    let ClientboundGamePacket::PlayerChat(p) = translate_and_decode(765, player_chat_frame(765, 0))
+    else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.global_index, 0);
+    assert_eq!(p.index, 3);
+    assert_eq!(p.body.content, "hi");
+    assert_eq!(chat_kind(&p.chat_type), 0);
+}
+
+/// `disguised_chat` carries the same `ChatType.Bound` tail, after the message
+/// component rather than a signed body.
+#[test]
+fn translate_disguised_chat_765() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "disguised_chat"),
+    );
+    old.extend_from_slice(&[8, 0, 2, b'h', b'i']); // message: NBT string
+    wire::write_varint(&mut old, 0); // chat type: direct registry id
     old.extend_from_slice(&[8, 0, 1, b'n']); // name: NBT string
     old.push(0); // no target
 
-    let ClientboundGamePacket::PlayerChat(p) = translate_and_decode(769, old) else {
+    let ClientboundGamePacket::DisguisedChat(p) = translate_and_decode(765, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(chat_kind(&p.chat_type), 0);
+}
+
+/// The registry id behind a decoded chat-type holder; a direct (inline) one
+/// means the holder bump was missed.
+fn chat_kind(bound: &azalea_protocol::packets::game::c_player_chat::ChatTypeBound) -> u32 {
+    use azalea_registry::{Holder, Registry};
+    match &bound.chat_type {
+        Holder::Reference(kind) => kind.to_u32(),
+        Holder::Direct(_) => panic!("chat type decoded as an inline value"),
+    }
+}
+
+/// 1.21.5 prepended `globalIndex` to `player_chat`; the shim synthesizes
+/// zero ahead of an otherwise identical body.
+#[test]
+fn translate_player_chat_769() {
+    let ClientboundGamePacket::PlayerChat(p) = translate_and_decode(769, player_chat_frame(769, 1))
+    else {
         panic!("wrong packet");
     };
     assert_eq!(p.global_index, 0);
