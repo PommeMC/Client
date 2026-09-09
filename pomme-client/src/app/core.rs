@@ -282,6 +282,7 @@ impl AppCore {
         let audio = crate::audio::AudioEngine::new(
             &data_dirs.jar_assets_dir,
             asset_index.clone(),
+            &resource_packs,
             menu.category_volumes(),
         );
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
@@ -481,6 +482,16 @@ impl AppCore {
         self.player_faces.clear();
         self.player_faces_dirty = false;
         renderer.clear_player_entity_skins();
+    }
+
+    pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
+        if !self.resource_packs.clear_server_packs() {
+            return;
+        }
+        self.menu.active_packs = self.resource_packs.active_pack_info();
+        renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
+        self.audio.reload_assets(&self.resource_packs);
+        self.menu.reload_assets = false;
     }
 
     pub fn drain_network_events(
@@ -1066,14 +1077,26 @@ impl AppCore {
                     pitch,
                     seed,
                 } => {
+                    if game.silent_entities.contains(&entity_id) {
+                        continue;
+                    }
                     let pos = (entity_id == game.player.entity_id)
-                        .then_some(game.player.position + dvec3(0.0, 1.0, 0.0))
-                        .or_else(|| game.entity_store.living.get(&entity_id).map(|e| e.position));
+                        .then_some(game.player.position)
+                        .or_else(|| game.entity_positions.get(&entity_id).copied());
 
                     if let Some(pos) = pos {
-                        self.audio
-                            .play_world_sound(&sound, category, pos, volume, pitch, seed);
+                        self.audio.play_entity_sound(
+                            &sound,
+                            category,
+                            crate::audio::EntitySoundTarget { id: entity_id, pos },
+                            volume,
+                            pitch,
+                            seed,
+                        );
                     }
+                }
+                NetworkEvent::StopSound { sound_id, category } => {
+                    self.audio.stop_sounds(sound_id.as_deref(), category);
                 }
                 NetworkEvent::GameModeChanged {
                     game_mode,
@@ -1197,6 +1220,8 @@ impl AppCore {
                     x_rot_deg,
                     head_y_rot_deg,
                 } => {
+                    game.entity_positions.insert(id, position);
+                    game.silent_entities.remove(&id);
                     if crate::entity::is_living_mob(&entity_type) {
                         let player_uuid = (entity_type
                             == azalea_registry::builtin::EntityKind::Player)
@@ -1232,6 +1257,10 @@ impl AppCore {
                     game.entity_store
                         .move_living_delta(id, dx, dy, dz, on_ground);
                     game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                    if let Some(pos) = game.entity_positions.get_mut(&id) {
+                        *pos += dvec3(dx, dy, dz);
+                        self.audio.update_entity_sound_position(id, *pos);
+                    }
                 }
                 NetworkEvent::EntityMovedRotated {
                     id,
@@ -1247,6 +1276,10 @@ impl AppCore {
                     game.entity_store
                         .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                     game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                    if let Some(pos) = game.entity_positions.get_mut(&id) {
+                        *pos += dvec3(dx, dy, dz);
+                        self.audio.update_entity_sound_position(id, *pos);
+                    }
                 }
                 NetworkEvent::EntityRotated {
                     id,
@@ -1277,6 +1310,8 @@ impl AppCore {
                     }
                     game.item_entity_store
                         .teleport(id, position, velocity, on_ground);
+                    game.entity_positions.insert(id, position);
+                    self.audio.update_entity_sound_position(id, position);
                 }
                 NetworkEvent::LevelEvent {
                     event_type,
@@ -1330,6 +1365,9 @@ impl AppCore {
                         {
                             self.remove_player_skin(renderer, &uuid);
                         }
+                        game.entity_positions.remove(id);
+                        game.silent_entities.remove(id);
+                        self.audio.stop_entity_sounds(*id);
                     }
                     game.item_entity_store.remove(&ids);
                     if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
@@ -1364,6 +1402,16 @@ impl AppCore {
                     );
                 }
                 NetworkEvent::EntityData { id, index, value } => {
+                    if index == 4
+                        && let crate::entity::MetaValue::Bool(silent) = &value
+                    {
+                        if *silent {
+                            game.silent_entities.insert(id);
+                            self.audio.stop_entity_sounds(id);
+                        } else {
+                            game.silent_entities.remove(&id);
+                        }
+                    }
                     game.entity_store.apply_entity_data(id, index, value);
                 }
                 NetworkEvent::EntityPose { id, is_crouching } => {
@@ -1455,7 +1503,7 @@ impl AppCore {
                     {
                         // Vanilla plays this client-side in handleTakeItemEntity.
                         self.audio.play_world_sound(
-                            &crate::audio::SoundRef::Event("entity.item.pickup".to_string()),
+                            &crate::audio::SoundRef::event("entity.item.pickup"),
                             crate::audio::CATEGORY_PLAYERS,
                             item_pos,
                             0.2,
@@ -1527,12 +1575,17 @@ impl AppCore {
                         self.resource_packs.clear_server_packs();
                     }
                     self.menu.active_packs = self.resource_packs.active_pack_info();
-                    self.menu.reload_assets = true;
+                    renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
+                    self.audio.reload_assets(&self.resource_packs);
+                    self.menu.reload_assets = false;
                 }
                 NetworkEvent::Reconfiguring => {
                     tracing::info!("Server re-entered configuration");
+                    self.audio.stop_all_sounds();
                     game.entity_store = crate::entity::EntityStore::new();
                     game.item_entity_store = crate::entity::ItemEntityStore::new();
+                    game.entity_positions.clear();
+                    game.silent_entities.clear();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
                     self.clear_server_ui(game, renderer);
@@ -1597,7 +1650,9 @@ impl AppCore {
                     self.resource_packs
                         .apply_server_pack(pending.id, &pending.hash);
                     tracing::info!("Resource pack {} loaded successfully", pending.id);
-                    self.menu.reload_assets = true;
+                    renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
+                    self.audio.reload_assets(&self.resource_packs);
+                    self.menu.reload_assets = false;
                     s_resource_pack::Action::SuccessfullyLoaded
                 }
             };

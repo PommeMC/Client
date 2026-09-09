@@ -1,9 +1,12 @@
 use azalea_buf::{AzBuf, AzBufVar};
+use azalea_core::bitset::FixedBitSet;
 use azalea_core::position::ChunkPos;
 use azalea_core::registry_holder::RegistryHolder;
+use azalea_core::sound::CustomSound;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_registry::Registry;
-use azalea_registry::builtin::EntityKind;
+use azalea_registry::builtin::{EntityKind, SoundEvent};
+use azalea_registry::identifier::Identifier;
+use azalea_registry::{Holder, Registry};
 use crossbeam_channel::Sender;
 
 use super::NetworkEvent;
@@ -107,9 +110,6 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::Sound(p) => {
             // Coordinates are fixed-point: block position times 8.
-            // TODO: azalea's `SoundSource` stops at `Voice = 9` and `AzBuf`
-            // decodes an unknown discriminant as the first variant, so
-            // `UI = 10` plays under `Master`. Only a plugin server sends it.
             let _ = event_tx.try_send(NetworkEvent::PlaySound {
                 sound: crate::audio::SoundRef::resolve(&p.sound),
                 category: p.source as u8,
@@ -127,6 +127,12 @@ pub fn handle_game_packet(
                 volume: p.volume,
                 pitch: p.pitch,
                 seed: p.seed,
+            });
+        }
+        ClientboundGamePacket::StopSound(p) => {
+            let _ = event_tx.try_send(NetworkEvent::StopSound {
+                sound_id: p.name.as_ref().map(ToString::to_string),
+                category: p.source.map(|source| source as u8),
             });
         }
         ClientboundGamePacket::BlockEntityData(p) => {
@@ -1207,15 +1213,35 @@ fn send_entity_moved(
     });
 }
 
-/// Consume `ClientboundLevelParticles` from the raw packet bytes, before
-/// azalea's typed decode. azalea 26.2's `Particle` wire enum is out of sync
-/// with the particle registry (the new 26.2 particles are appended at the end
-/// instead of inserted in registry order), misdecoding every type id past
-/// `bubble`; pomme reads the id itself and skips the type-specific payload,
-/// which is the packet's last field. Returns whether the packet was consumed.
+/// Consume packets that azalea's 26.2 codecs cannot represent correctly
+/// before the typed decode runs. Returns whether the packet was consumed.
 pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bool {
     let mut cur = std::io::Cursor::new(raw);
-    if u32::azalea_read_var(&mut cur).ok() != Some(level_particles_packet_id()) {
+    let Ok(packet_id) = u32::azalea_read_var(&mut cur) else {
+        return false;
+    };
+
+    let sound_ids = sound_packet_ids();
+    let sound_result = if packet_id == sound_ids.sound {
+        Some(handle_raw_ui_sound(&mut cur, event_tx))
+    } else if packet_id == sound_ids.sound_entity {
+        Some(handle_raw_ui_entity_sound(&mut cur, event_tx))
+    } else if packet_id == sound_ids.stop_sound {
+        Some(handle_raw_ui_stop_sound(&mut cur, event_tx))
+    } else {
+        None
+    };
+    if let Some(result) = sound_result {
+        return match result {
+            Ok(consumed) => consumed,
+            Err(e) => {
+                tracing::warn!("Skipping malformed sound packet: {e}");
+                true
+            }
+        };
+    }
+
+    if packet_id != level_particles_packet_id() {
         return false;
     }
     match parse_level_particles(&mut cur) {
@@ -1226,6 +1252,116 @@ pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bo
         Err(e) => tracing::warn!("Skipping malformed LevelParticles packet: {e}"),
     }
     true
+}
+
+/// Azalea's pinned 26.2 `SoundSource` omits Vanilla's ordinal-10 `UI` value
+/// and decodes unknown ordinals as `Master`. Read just that valid ordinal here;
+/// ordinals 0..=9 fall through to Azalea's normal typed decoder.
+fn handle_raw_ui_sound(
+    cur: &mut std::io::Cursor<&[u8]>,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<bool, azalea_buf::BufReadError> {
+    let mut sound = Holder::<SoundEvent, CustomSound>::azalea_read(cur)?;
+    if u32::azalea_read_var(cur)? != UI_SOUND_SOURCE {
+        return Ok(false);
+    }
+    if let Some(translation) = super::translate::active()
+        && !translation.remap_sound(&mut sound)
+    {
+        return Ok(true);
+    }
+    let x = i32::azalea_read(cur)?;
+    let y = i32::azalea_read(cur)?;
+    let z = i32::azalea_read(cur)?;
+    let volume = f32::azalea_read(cur)?;
+    let pitch = f32::azalea_read(cur)?;
+    let seed = u64::azalea_read(cur)?;
+    let _ = event_tx.try_send(NetworkEvent::PlaySound {
+        sound: crate::audio::SoundRef::resolve(&sound),
+        category: UI_SOUND_SOURCE as u8,
+        pos: Position::new(x as f64 / 8.0, y as f64 / 8.0, z as f64 / 8.0),
+        volume,
+        pitch,
+        seed,
+    });
+    Ok(true)
+}
+
+fn handle_raw_ui_entity_sound(
+    cur: &mut std::io::Cursor<&[u8]>,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<bool, azalea_buf::BufReadError> {
+    let mut sound = Holder::<SoundEvent, CustomSound>::azalea_read(cur)?;
+    if u32::azalea_read_var(cur)? != UI_SOUND_SOURCE {
+        return Ok(false);
+    }
+    if let Some(translation) = super::translate::active()
+        && !translation.remap_sound(&mut sound)
+    {
+        return Ok(true);
+    }
+    let entity_id = i32::azalea_read_var(cur)?;
+    let volume = f32::azalea_read(cur)?;
+    let pitch = f32::azalea_read(cur)?;
+    let seed = u64::azalea_read(cur)?;
+    let _ = event_tx.try_send(NetworkEvent::PlayEntitySound {
+        sound: crate::audio::SoundRef::resolve(&sound),
+        category: UI_SOUND_SOURCE as u8,
+        entity_id,
+        volume,
+        pitch,
+        seed,
+    });
+    Ok(true)
+}
+
+fn handle_raw_ui_stop_sound(
+    cur: &mut std::io::Cursor<&[u8]>,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<bool, azalea_buf::BufReadError> {
+    let set = FixedBitSet::<2>::azalea_read(cur)?;
+    if !set.index(0) || u32::azalea_read_var(cur)? != UI_SOUND_SOURCE {
+        return Ok(false);
+    }
+    let name = if set.index(1) {
+        Some(Identifier::azalea_read(cur)?.to_string())
+    } else {
+        None
+    };
+    let _ = event_tx.try_send(NetworkEvent::StopSound {
+        sound_id: name,
+        category: Some(UI_SOUND_SOURCE as u8),
+    });
+    Ok(true)
+}
+
+const UI_SOUND_SOURCE: u32 = 10;
+
+#[derive(Clone, Copy)]
+struct SoundPacketIds {
+    sound: u32,
+    sound_entity: u32,
+    stop_sound: u32,
+}
+
+fn sound_packet_ids() -> SoundPacketIds {
+    use pomme_protocol::{Direction, PacketTable, Phase};
+
+    static IDS: std::sync::OnceLock<SoundPacketIds> = std::sync::OnceLock::new();
+    *IDS.get_or_init(|| {
+        let table = PacketTable::latest();
+        SoundPacketIds {
+            sound: table
+                .id(Phase::Game, Direction::Clientbound, "sound")
+                .expect("sound in packet table"),
+            sound_entity: table
+                .id(Phase::Game, Direction::Clientbound, "sound_entity")
+                .expect("sound_entity in packet table"),
+            stop_sound: table
+                .id(Phase::Game, Direction::Clientbound, "stop_sound")
+                .expect("stop_sound in packet table"),
+        }
+    })
 }
 
 /// The wire layout of vanilla `ClientboundLevelParticlesPacket.write`, up to
@@ -1328,5 +1464,93 @@ fn slot_display_first_item(
         SlotDisplayData::SmithingTrim(d) => slot_display_first_item(&d.base),
         SlotDisplayData::WithRemainder(d) => slot_display_first_item(&d.input),
         SlotDisplayData::Composite(d) => d.contents.iter().find_map(slot_display_first_item),
+    }
+}
+
+#[cfg(test)]
+mod raw_sound_tests {
+    use pomme_protocol::wire;
+
+    use super::*;
+
+    fn direct_sound() -> Holder<SoundEvent, CustomSound> {
+        Holder::Direct(CustomSound {
+            sound_id: Identifier::new("minecraft:test.ui"),
+            range: None,
+        })
+    }
+
+    #[test]
+    fn raw_sound_preserves_ui_source_ordinal() {
+        let mut raw = Vec::new();
+        wire::write_varint(&mut raw, sound_packet_ids().sound);
+        direct_sound().azalea_write(&mut raw).unwrap();
+        wire::write_varint(&mut raw, UI_SOUND_SOURCE);
+        8_i32.azalea_write(&mut raw).unwrap();
+        16_i32.azalea_write(&mut raw).unwrap();
+        24_i32.azalea_write(&mut raw).unwrap();
+        0.75_f32.azalea_write(&mut raw).unwrap();
+        1.25_f32.azalea_write(&mut raw).unwrap();
+        7_u64.azalea_write(&mut raw).unwrap();
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        assert!(handle_raw_game_packet(&raw, &tx));
+        match rx.recv().unwrap() {
+            NetworkEvent::PlaySound { category, pos, .. } => {
+                assert_eq!(category, 10);
+                assert_eq!(pos, Position::new(1.0, 2.0, 3.0));
+            }
+            _ => panic!("expected PlaySound"),
+        }
+    }
+
+    #[test]
+    fn raw_entity_sound_preserves_ui_source_ordinal() {
+        let mut raw = Vec::new();
+        wire::write_varint(&mut raw, sound_packet_ids().sound_entity);
+        direct_sound().azalea_write(&mut raw).unwrap();
+        wire::write_varint(&mut raw, UI_SOUND_SOURCE);
+        42_i32.azalea_write_var(&mut raw).unwrap();
+        1.0_f32.azalea_write(&mut raw).unwrap();
+        0.5_f32.azalea_write(&mut raw).unwrap();
+        9_u64.azalea_write(&mut raw).unwrap();
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        assert!(handle_raw_game_packet(&raw, &tx));
+        match rx.recv().unwrap() {
+            NetworkEvent::PlayEntitySound {
+                category,
+                entity_id,
+                ..
+            } => {
+                assert_eq!(category, 10);
+                assert_eq!(entity_id, 42);
+            }
+            _ => panic!("expected PlayEntitySound"),
+        }
+    }
+
+    #[test]
+    fn raw_stop_sound_preserves_ui_source_ordinal() {
+        let mut raw = Vec::new();
+        wire::write_varint(&mut raw, sound_packet_ids().stop_sound);
+        let mut flags = FixedBitSet::<2>::new();
+        flags.set(0);
+        flags.set(1);
+        flags.azalea_write(&mut raw).unwrap();
+        wire::write_varint(&mut raw, UI_SOUND_SOURCE);
+        Identifier::new("minecraft:test.ui")
+            .azalea_write(&mut raw)
+            .unwrap();
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        assert!(handle_raw_game_packet(&raw, &tx));
+        match rx.recv().unwrap() {
+            NetworkEvent::StopSound { sound_id, category } => {
+                assert_eq!(category, Some(10));
+                assert_eq!(sound_id.as_deref(), Some("minecraft:test.ui"));
+            }
+            _ => panic!("expected StopSound"),
+        }
     }
 }

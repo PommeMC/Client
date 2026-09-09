@@ -64,6 +64,12 @@ impl ResourcePackManager {
         None
     }
 
+    /// Active pack roots in low-to-high priority order, matching the order in
+    /// which stacked resources are registered by Vanilla.
+    pub fn active_pack_dirs(&self) -> impl Iterator<Item = &Path> {
+        self.active_packs.iter().map(|pack| pack.dir.as_path())
+    }
+
     fn server_pack_dir(&self, hash: &str) -> PathBuf {
         self.server_cache_dir.join(hash)
     }
@@ -116,9 +122,14 @@ impl ResourcePackManager {
         removed
     }
 
-    pub fn clear_server_packs(&mut self) {
+    pub fn clear_server_packs(&mut self) -> bool {
+        let before = self.active_packs.len();
         self.active_packs.retain(|p| p.source != PackSource::Server);
-        tracing::info!("Cleared all server resource packs");
+        let removed = self.active_packs.len() != before;
+        if removed {
+            tracing::info!("Cleared all server resource packs");
+        }
+        removed
     }
 
     pub fn scan_local_packs(&mut self) {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -105,6 +105,12 @@ pub struct GameState {
     /// dirty; consumed by the visibility refresh as its new-loads signal.
     pub pending_load_rescan: bool,
     pub entity_store: EntityStore,
+    /// Last server position for every spawned entity, including entity kinds
+    /// Pomme does not otherwise render. Used by packet-driven entity-bound
+    /// sounds.
+    pub entity_positions: HashMap<i32, Position>,
+    /// Entity ids whose shared `DATA_SILENT` flag is currently true.
+    pub silent_entities: HashSet<i32>,
     pub position_set: bool,
     pub player_loaded_sent: bool,
     pub player: LocalPlayer,
@@ -302,6 +308,8 @@ impl GameState {
             pending_load_rescan: false,
             chunk_store,
             entity_store: EntityStore::new(),
+            entity_positions: HashMap::new(),
+            silent_entities: HashSet::new(),
             position_set: false,
             player_loaded_sent: false,
             options_from_game: false,
@@ -1356,8 +1364,13 @@ pub fn update_game(
     // Position the audio listener at the player's head and push current
     // volumes before draining sound packets this frame.
     let listener_pos = game.player.eye_pos();
+    core.audio.set_listener(
+        listener_pos,
+        game.player.look_dir.y_rot_deg(),
+        game.player.look_dir.x_rot_deg(),
+    );
     core.audio
-        .set_listener(listener_pos, game.player.look_dir.y_rot_deg());
+        .update_entity_sound_position(game.player.entity_id, game.player.position);
     core.audio.set_volumes(core.menu.category_volumes());
     core.audio.set_subtitles_enabled(core.menu.show_subtitles);
 
@@ -1477,7 +1490,7 @@ pub fn update_game(
             // Vanilla forLocalAmbience: AMBIENT category at the listener,
             // volume 0.25, pitch 0.8..1.2.
             core.audio.play_world_sound(
-                &SoundRef::Event("block.portal.trigger".into()),
+                &SoundRef::event("block.portal.trigger"),
                 CATEGORY_AMBIENT,
                 game.player.position,
                 0.25,
@@ -1791,7 +1804,7 @@ pub fn update_game(
                 let volume = 0.5 + 0.1 * (bubbles.empty - 3 + 1).max(0) as f32;
                 let pitch = 1.0 + 0.1 * (bubbles.empty - 5 + 1).max(0) as f32;
                 core.audio.play_world_sound(
-                    &SoundRef::Event("ui.hud.bubble_pop".into()),
+                    &SoundRef::event("ui.hud.bubble_pop"),
                     CATEGORY_PLAYERS,
                     game.player.position,
                     volume,
