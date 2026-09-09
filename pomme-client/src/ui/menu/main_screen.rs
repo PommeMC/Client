@@ -43,7 +43,7 @@ impl MainMenu {
             BtnDef {
                 label: "Singleplayer",
                 id: 0,
-                enabled: false,
+                enabled: true,
             },
             BtnDef {
                 label: "Multiplayer",
@@ -260,7 +260,9 @@ impl MainMenu {
                     action = MenuAction::Quit;
                 } else {
                     match def.id {
-                        0 => {}
+                        0 => {
+                            self.open_world_list();
+                        }
                         1 => {
                             self.set_screen(Screen::ServerList);
                             self.scroll_offset = 0.0;

@@ -1939,6 +1939,10 @@ pub enum SpriteId {
     PingUnknown,
     ServerJoin,
     ServerJoinHighlighted,
+    WorldJoin,
+    WorldJoinHighlighted,
+    WorldError,
+    WorldErrorHighlighted,
     ServerMoveUp,
     ServerMoveUpHighlighted,
     ServerMoveDown,
@@ -2611,6 +2615,26 @@ fn build_sprite_atlas(
         (
             SpriteId::ServerJoin,
             "minecraft/textures/gui/sprites/server_list/join.png",
+            0.0,
+        ),
+        (
+            SpriteId::WorldJoin,
+            "minecraft/textures/gui/sprites/world_list/join.png",
+            0.0,
+        ),
+        (
+            SpriteId::WorldJoinHighlighted,
+            "minecraft/textures/gui/sprites/world_list/join_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::WorldError,
+            "minecraft/textures/gui/sprites/world_list/error.png",
+            0.0,
+        ),
+        (
+            SpriteId::WorldErrorHighlighted,
+            "minecraft/textures/gui/sprites/world_list/error_highlighted.png",
             0.0,
         ),
         (
