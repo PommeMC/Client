@@ -1,10 +1,12 @@
 #[cfg(test)]
 mod azalea_compat;
 pub mod commands;
+pub mod conn;
 pub mod connection;
 pub mod handler;
 pub mod resolve;
 pub mod sender;
+pub mod stream;
 pub mod translate;
 
 use std::sync::Arc;
