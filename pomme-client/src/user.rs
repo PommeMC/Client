@@ -1,3 +1,5 @@
+use md5::Digest as _;
+
 pub struct UserData {
     pub username: String,
     pub uuid: uuid::Uuid,
@@ -27,10 +29,26 @@ impl UserData {
         }
     }
 
+    /// Vanilla `UUIDUtil.createOfflinePlayerUUID`: a bare MD5 of the prefixed
+    /// name, not a namespaced v3 UUID.
     fn offline_uuid(username: &str) -> uuid::Uuid {
-        uuid::Uuid::new_v3(
-            &uuid::Uuid::NAMESPACE_DNS,
-            format!("OfflinePlayer:{username}").as_bytes(),
-        )
+        let digest = md5::Md5::digest(format!("OfflinePlayer:{username}").as_bytes());
+        uuid::Builder::from_md5_bytes(digest.into()).into_uuid()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UserData;
+
+    #[test]
+    fn offline_uuid_matches_vanilla() {
+        for (name, expected) in [
+            ("Notch", "b50ad385-829d-3141-a216-7e7d7539ba7f"),
+            ("Steve", "5627dd98-e6be-3c21-b8a8-e92344183641"),
+            ("Alex", "36532b5e-c442-3dbb-a24c-c7e55d0f979a"),
+        ] {
+            assert_eq!(UserData::offline_uuid(name).to_string(), expected);
+        }
     }
 }
