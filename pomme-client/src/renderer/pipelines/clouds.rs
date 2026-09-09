@@ -321,9 +321,7 @@ impl CloudPipeline {
             self.prev_mode = mode;
             self.prev_rel = rel;
             self.have_mesh = true;
-            for d in &mut self.dirty {
-                *d = true;
-            }
+            self.dirty.fill(true);
         }
 
         if self.faces.is_empty() {

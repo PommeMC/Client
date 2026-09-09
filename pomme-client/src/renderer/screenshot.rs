@@ -246,7 +246,7 @@ fn encode_and_write(
 ) -> Result<String, String> {
     // Vanilla screenshots are opaque RGB; drop alpha and reorder BGRA if needed.
     let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
-    for px in pixels.chunks_exact(4) {
+    for px in pixels.as_chunks::<4>().0 {
         if bgra {
             rgb.extend_from_slice(&[px[2], px[1], px[0]]);
         } else {

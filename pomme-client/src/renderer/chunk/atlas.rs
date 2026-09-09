@@ -336,7 +336,7 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion 
 /// Conservative: any transparency (or unknown) routes the sprite to the cutout
 /// pass, so a hole never renders solid.
 fn sprite_is_opaque(data: &[u8]) -> bool {
-    data.chunks_exact(4).all(|px| px[3] == 255)
+    data.as_chunks::<4>().0.iter().all(|px| px[3] == 255)
 }
 
 type PackResult = (HashMap<String, Option<(u32, u32)>>, AtlasRegion);
