@@ -368,6 +368,8 @@ enum Screen {
     ServerList,
     WorldList,
     CreateWorld,
+    EditWorld(String),
+    ConfirmDeleteWorld(String),
     Friends,
     ConfirmDelete(usize),
     DirectConnect,
@@ -412,6 +414,8 @@ impl Screen {
             Self::ServerList => Self::ServerList,
             Self::WorldList => Self::WorldList,
             Self::CreateWorld => Self::CreateWorld,
+            Self::EditWorld(f) => Self::EditWorld(f.clone()),
+            Self::ConfirmDeleteWorld(f) => Self::ConfirmDeleteWorld(f.clone()),
             Self::DirectConnect => Self::DirectConnect,
             Self::AddServer => Self::AddServer,
             Self::ConfirmDelete(i) => Self::ConfirmDelete(*i),
@@ -933,6 +937,12 @@ impl MainMenu {
             Screen::WorldList => self.build_world_list(screen_w, screen_h, input, &text_width_fn),
             Screen::CreateWorld => {
                 self.build_create_world(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::EditWorld(_) => {
+                self.build_edit_world(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::ConfirmDeleteWorld(_) => {
+                self.build_confirm_delete_world(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::Friends => self.build_friends(screen_w, screen_h, input, &text_width_fn),
             Screen::ConfirmDelete(_) => {

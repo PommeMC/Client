@@ -67,6 +67,7 @@ impl Difficulty {
 /// Vanilla `WorldOptions.parseSeed`: a decimal long when the text parses as
 /// one, otherwise Java's string hash. `None` means the caller should pick a
 /// random seed.
+#[allow(dead_code, reason = "the launch path consumes this")]
 pub fn parse_seed(seed: &str) -> Option<i64> {
     let seed = seed.trim();
     if seed.is_empty() {
@@ -80,6 +81,7 @@ pub fn parse_seed(seed: &str) -> Option<i64> {
 
 /// Java's `String.hashCode`, which runs over UTF-16 code units, so a character
 /// outside the basic plane contributes two rounds rather than one.
+#[allow(dead_code, reason = "the launch path consumes this")]
 fn java_string_hash(s: &str) -> i32 {
     s.encode_utf16().fold(0i32, |h, unit| {
         h.wrapping_mul(31).wrapping_add(i32::from(unit))
@@ -197,6 +199,7 @@ impl WorldList {
         self.update(folder, |w| w.name = new_name.trim().to_owned())
     }
 
+    #[allow(dead_code, reason = "the launch path consumes this")]
     pub fn touch_last_played(&mut self, folder: &str) -> std::io::Result<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
