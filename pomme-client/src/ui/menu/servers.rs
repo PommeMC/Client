@@ -949,6 +949,7 @@ impl MainMenu {
             (Screen::Friends, 0) => Some(TextTarget::AddFriend),
             (Screen::WorldList, 0) => Some(TextTarget::WorldSearch),
             (Screen::CreateWorld, 0) => Some(self.create.field_target()?),
+            (Screen::EditWorld(_), 0) => Some(TextTarget::WorldName),
             _ => None,
         }
     }
