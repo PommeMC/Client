@@ -1,5 +1,4 @@
 use azalea_protocol::address::ServerAddr;
-use azalea_protocol::connect::{Connection, WriteConnection};
 use azalea_protocol::packets::ClientIntention;
 use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
@@ -14,6 +13,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 use super::NetworkEvent;
+use super::conn::{Conn, RawWriter};
 use super::handler::{handle_game_packet, handle_raw_game_packet};
 use super::sender::{Outbound, PacketSender};
 
@@ -23,7 +23,7 @@ pub enum ConnectionError {
     InvalidAddress(String),
 
     #[error("connection failed: {0}")]
-    Connect(#[from] azalea_protocol::connect::ConnectionError),
+    Connect(std::io::Error),
 
     #[error("packet read error: {0}")]
     Read(#[from] Box<ReadPacketError>),
@@ -49,8 +49,7 @@ impl From<super::resolve::ConnectError> for ConnectionError {
         use super::resolve::ConnectError;
         match e {
             ConnectError::Resolve(e) => Self::InvalidAddress(e.to_string()),
-            ConnectError::Unreachable(e) => Self::Connect(e.into()),
-            ConnectError::Handshake(e) => Self::Connect(e),
+            ConnectError::Io(e) => Self::Connect(e),
         }
     }
 }
@@ -119,8 +118,7 @@ pub async fn connect_to_server(
         .try_into()
         .map_err(|_| ConnectionError::InvalidAddress(args.server.clone()))?;
     negotiate_wire_version(&server_addr, args.protocol).await?;
-    let conn = super::resolve::connect(&server_addr, ClientIntention::Login).await?;
-    let mut conn = conn.login();
+    let mut conn = super::resolve::connect(&server_addr, ClientIntention::Login).await?;
 
     let hello = ServerboundLoginPacket::Hello(ServerboundHello {
         name: args.username.clone(),
@@ -131,7 +129,7 @@ pub async fn connect_to_server(
         Some(t) => t.translate_outbound_login_frame(frame),
         None => frame,
     };
-    conn.writer.raw.write(&frame).await?;
+    conn.writer.write(&frame).await?;
 
     tracing::info!("Sent login hello as {} ({})", args.username, args.uuid);
     if args.access_token.is_none() {
@@ -149,9 +147,11 @@ pub async fn connect_to_server(
     // login packet rather than in registry_data packets.
     let no_config = super::translate::active().is_some_and(|t| t.no_config_phase());
     if !no_config {
-        conn.write(ServerboundLoginAcknowledged {}).await?;
+        conn.write_packet(&ServerboundLoginPacket::LoginAcknowledged(
+            ServerboundLoginAcknowledged {},
+        ))
+        .await?;
     }
-    let mut conn = conn.config();
 
     let joined = if no_config {
         tracing::info!("Skipping configuration phase");
@@ -171,7 +171,6 @@ pub async fn connect_to_server(
         }
     };
 
-    let conn = conn.game();
     tracing::info!("Entering game state");
     let biome_colors = extract_biome_climate(&joined.registries);
     let _ = event_tx.try_send(NetworkEvent::BiomeColors {
@@ -204,12 +203,10 @@ struct Joined {
 /// `login` packet, returning them with the untranslated login frame for the
 /// game loop to replay. That frame is the first the server sends after the
 /// profile (`PlayerList.placeNewPlayer`), with no acknowledgement in between.
-async fn read_inline_registries(
-    conn: &mut Connection<ClientboundConfigPacket, ServerboundConfigPacket>,
-) -> Result<Joined, ConnectionError> {
+async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionError> {
     use azalea_core::registry_holder::RegistryHolder;
 
-    let login = conn.reader.raw.read().await?;
+    let login = conn.reader.read().await?;
     let translation = super::translate::active().expect("translation for a config-less version");
     let Some(frames) = translation.split_login_registries(&login) else {
         // A server that turns the join away here does it with a play-phase
@@ -306,15 +303,12 @@ fn resolve_wire(probed: Option<i32>, selected: i32) -> Result<i32, i32> {
     }
 }
 
-async fn login_sequence(
-    conn: &mut Connection<ClientboundLoginPacket, ServerboundLoginPacket>,
-    args: &ConnectArgs,
-) -> Result<(), ConnectionError> {
+async fn login_sequence(conn: &mut Conn, args: &ConnectArgs) -> Result<(), ConnectionError> {
     loop {
         // Read the raw frame ourselves so older-version layouts can be
         // rewritten before the typed decode (26.1's login_finished lacks the
         // trailing session id).
-        let raw = conn.reader.raw.read().await?;
+        let raw = conn.reader.read().await?;
         let raw = match super::translate::active() {
             Some(t) => t.translate_login_frame(raw),
             None => raw,
@@ -344,12 +338,12 @@ async fn login_sequence(
                 return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
             }
             ClientboundLoginPacket::CookieRequest(p) => {
-                conn.write(
+                conn.write_packet(&ServerboundLoginPacket::CookieResponse(
                     azalea_protocol::packets::login::s_cookie_response::ServerboundCookieResponse {
                         key: p.key,
                         payload: None,
                     },
-                )
+                ))
                 .await?;
             }
             _ => {
@@ -360,7 +354,7 @@ async fn login_sequence(
 }
 
 async fn handle_encryption(
-    conn: &mut Connection<ClientboundLoginPacket, ServerboundLoginPacket>,
+    conn: &mut Conn,
     hello: &ClientboundHello,
     args: &ConnectArgs,
 ) -> Result<(), ConnectionError> {
@@ -375,20 +369,18 @@ async fn handle_encryption(
         })?;
 
         tracing::info!("Authenticating with session server (uuid: {})", args.uuid);
-        conn.authenticate(access_token, &args.uuid, e.secret_key, hello, None)
+        join_session_server(access_token, &args.uuid, e.secret_key, hello)
             .await
-            .map_err(|e: azalea_auth::sessionserver::ClientSessionServerError| {
-                ConnectionError::Auth(e.to_string())
-            })?;
+            .map_err(|e| ConnectionError::Auth(e.to_string()))?;
         tracing::info!("Session server authentication successful");
     } else {
         tracing::info!("Server does not require authentication");
     }
 
-    conn.write(ServerboundKey {
+    conn.write_packet(&ServerboundLoginPacket::Key(ServerboundKey {
         key_bytes: e.encrypted_public_key,
         encrypted_challenge: e.encrypted_challenge,
-    })
+    }))
     .await?;
 
     conn.set_encryption_key(e.secret_key);
@@ -396,8 +388,28 @@ async fn handle_encryption(
     Ok(())
 }
 
+/// Proves ownership of the account to Mojang so the server can verify the join.
+/// Not a method on [`Conn`]: it is an HTTPS call and touches no connection
+/// state.
+async fn join_session_server(
+    access_token: &str,
+    uuid: &uuid::Uuid,
+    private_key: [u8; 16],
+    hello: &ClientboundHello,
+) -> Result<(), azalea_auth::sessionserver::ClientSessionServerError> {
+    azalea_auth::sessionserver::join(azalea_auth::sessionserver::SessionServerJoinOpts {
+        access_token,
+        public_key: &hello.public_key,
+        private_key: &private_key,
+        uuid,
+        server_id: &hello.server_id,
+        proxy: None,
+    })
+    .await
+}
+
 async fn config_sequence(
-    conn: &mut Connection<ClientboundConfigPacket, ServerboundConfigPacket>,
+    conn: &mut Conn,
     view_distance: u8,
     event_tx: &Sender<NetworkEvent>,
     outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
@@ -444,7 +456,7 @@ async fn config_sequence(
             packet
         } else {
             tokio::select! {
-                raw = conn.reader.raw.read() => {
+                raw = conn.reader.read() => {
                     let raw = match raw {
                         Ok(raw) => raw,
                         Err(e) => {
@@ -671,7 +683,7 @@ fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -
 }
 
 async fn game_loop(
-    mut conn: Connection<ClientboundGamePacket, ServerboundGamePacket>,
+    mut conn: Conn,
     event_tx: &Sender<NetworkEvent>,
     chat_rx: crossbeam_channel::Receiver<String>,
     outbound_tx: mpsc::UnboundedSender<Outbound>,
@@ -780,7 +792,7 @@ async fn game_loop(
                     write_game_frame(&mut conn.writer, translation, frame).await?;
                     continue;
                 }
-                raw = conn.reader.raw.read() => raw,
+                raw = conn.reader.read() => raw,
             }
         };
         let raw = match raw {
@@ -811,16 +823,14 @@ async fn game_loop(
                         azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
                     );
                     write_game_frame(&mut conn.writer, translation, serialize_frame(&ack)?).await?;
-                    let mut config = conn.config();
                     let holder = config_sequence(
-                        &mut config,
+                        &mut conn,
                         view_distance,
                         event_tx,
                         &mut outbound_rx,
                         Some(&registry_holder),
                     )
                     .await?;
-                    conn = config.game();
                     if !std::sync::Arc::ptr_eq(&holder, &registry_holder) {
                         registry_holder = holder;
                         let _ =
@@ -853,7 +863,7 @@ fn serialize_frame<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug
 
 /// Writes one latest-layout frame, translating it for older wire versions.
 async fn write_game_frame(
-    writer: &mut WriteConnection<ServerboundGamePacket>,
+    writer: &mut RawWriter,
     translation: Option<&super::translate::Translation>,
     frame: Vec<u8>,
 ) -> Result<(), ConnectionError> {
@@ -862,7 +872,7 @@ async fn write_game_frame(
         _ => vec![frame],
     };
     for frame in frames {
-        writer.raw.write(&frame).await?;
+        writer.write(&frame).await?;
     }
     Ok(())
 }
@@ -871,14 +881,14 @@ async fn write_game_frame(
 /// wire versions (765 down: id remap plus suppression of packets the wire
 /// version lacks).
 async fn write_config_packet(
-    conn: &mut Connection<ClientboundConfigPacket, ServerboundConfigPacket>,
+    conn: &mut Conn,
     packet: ServerboundConfigPacket,
 ) -> Result<(), ConnectionError> {
     let Some(t) = super::translate::active().filter(|t| t.translates_config()) else {
-        return Ok(conn.write(packet).await?);
+        return Ok(conn.write_packet(&packet).await?);
     };
     if let Some(frame) = t.translate_outbound_config_frame(serialize_frame(&packet)?) {
-        conn.writer.raw.write(&frame).await?;
+        conn.writer.write(&frame).await?;
     }
     Ok(())
 }
