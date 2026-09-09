@@ -204,13 +204,15 @@ impl FocusCtx {
     }
 
     /// Claim the next focus index (only enabled widgets join the ring, matching
-    /// vanilla Tab navigation) and report whether it is the focused one.
+    /// vanilla Tab navigation).
+    pub(super) fn claim(&mut self, enabled: bool) -> Option<usize> {
+        enabled.then(|| self.take_index())
+    }
+
+    /// Claim the next focus index and report whether it is the focused one.
     pub(super) fn focused(&mut self, enabled: bool) -> bool {
-        if !enabled {
-            return false;
-        }
-        let idx = self.take_index();
-        self.focus == Some(idx)
+        self.claim(enabled)
+            .is_some_and(|idx| self.focus == Some(idx))
     }
 }
 

@@ -792,6 +792,9 @@ impl MainMenu {
             }
         }
 
+        if input.tab {
+            self.focused_slider = None;
+        }
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
 
@@ -821,10 +824,12 @@ impl MainMenu {
             for (label, bx, bw) in widgets {
                 let enabled = option_enabled(label, disabled);
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
+                    let is_focused = self.focused_slider == Some(*prefix);
                     let is_active = self.active_slider == Some(*prefix);
                     let result = common::push_slider(
                         &mut elements,
                         cursor,
+                        input.clicked,
                         input.mouse_held,
                         bx,
                         by,
@@ -835,11 +840,17 @@ impl MainMenu {
                         label,
                         *value,
                         enabled,
+                        is_focused,
                         is_active,
                         &label_scroll,
                     );
                     any_hovered |= result.hovered;
                     if result.dragging {
+                        if !is_active {
+                            self.focused_slider = Some(*prefix);
+                            self.focus = None;
+                            ctx.focus = None;
+                        }
                         self.active_slider = Some(*prefix);
                     }
                     if let Some(v) = result.new_value {
@@ -851,9 +862,18 @@ impl MainMenu {
                     continue;
                 }
 
-                let focused = ctx.focused(enabled);
+                let focus_index = ctx.claim(enabled);
                 let hit = common::hit_test(cursor, [bx, by, bw, btn_h]);
                 let h = enabled && hit;
+                if clicked
+                    && h
+                    && let Some(idx) = focus_index
+                {
+                    self.focus = Some(idx);
+                    ctx.focus = Some(idx);
+                    self.focused_slider = None;
+                }
+                let focused = focus_index.is_some_and(|idx| ctx.focus == Some(idx));
                 let draw_cursor = helpers::focus_cursor(focused, h, bx, by, bw, btn_h, cursor);
                 common::push_button_scrolling(
                     &mut elements,
@@ -1441,35 +1461,168 @@ mod tests {
         assert!(option_enabled("Graphics Backend: Default", disabled));
     }
 
-    #[test]
-    fn disabled_slider_cannot_hover_or_drag() {
+    fn test_slider(
+        cursor: (f32, f32),
+        mouse_pressed: bool,
+        mouse_held: bool,
+        enabled: bool,
+        focused: bool,
+        dragging: bool,
+    ) -> (common::SliderResult, Vec<MenuElement>) {
         let mut elements = Vec::new();
         let text_width = |_: &str, _: f32| 0.0;
         let scroll = common::LabelScroll {
             text_width_fn: &text_width,
             time_secs: 0.0,
         };
-
         let result = common::push_slider(
             &mut elements,
-            (50.0, 10.0),
-            true,
+            cursor,
+            mouse_pressed,
+            mouse_held,
             0.0,
             0.0,
             100.0,
             20.0,
             1.0,
             common::FONT_SIZE,
-            "Simulation Distance: 12 chunks",
+            "FOV: 70",
             0.5,
-            false,
-            true,
+            enabled,
+            focused,
+            dragging,
             &scroll,
         );
+        (result, elements)
+    }
+
+    #[test]
+    fn disabled_slider_cannot_hover_or_drag() {
+        let (result, _) = test_slider((50.0, 10.0), true, true, false, true, true);
 
         assert!(!result.hovered);
         assert!(!result.dragging);
         assert_eq!(result.new_value, None);
+    }
+
+    #[test]
+    fn held_mouse_does_not_start_slider_without_press() {
+        let (result, _) = test_slider((75.0, 10.0), false, true, true, false, false);
+
+        assert!(result.hovered);
+        assert!(!result.dragging);
+        assert_eq!(result.new_value, None);
+    }
+
+    #[test]
+    fn focused_slider_keeps_only_its_handle_highlighted() {
+        let (result, elements) = test_slider((-10.0, -10.0), false, false, true, true, false);
+
+        assert!(!result.hovered);
+        assert!(matches!(
+            &elements[0],
+            MenuElement::NineSlice {
+                sprite: SpriteId::SliderTrack,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &elements[1],
+            MenuElement::Image {
+                sprite: SpriteId::SliderHandleHover,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn active_slider_keeps_drag_capture_outside_its_bounds() {
+        let (result, _) = test_slider((150.0, 10.0), false, true, true, true, true);
+
+        assert!(!result.hovered);
+        assert!(result.dragging);
+        assert_eq!(result.new_value, Some(1.0));
+    }
+
+    fn focus_test_menu() -> MainMenu {
+        let rt = std::sync::Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("current-thread runtime"),
+        );
+        let mut menu = MainMenu::new(
+            std::path::Path::new("pomme-options-focus-test"),
+            rt,
+            "tester".into(),
+            "26.2".into(),
+            None,
+        );
+        menu.gui_scale_setting = 1;
+        menu
+    }
+
+    fn build_focus_grid(
+        menu: &mut MainMenu,
+        input: &MenuInput,
+        disabled: &[&str],
+    ) -> MainMenuResult {
+        let rows = [OptRow::Pair("First", "Second")];
+        let text_width = |_: &str, _: f32| 0.0;
+        menu.build_options_grid(
+            800.0,
+            600.0,
+            input,
+            "Test",
+            Screen::Main,
+            &rows,
+            &[],
+            &[],
+            disabled,
+            false,
+            &[],
+            &text_width,
+        )
+    }
+
+    #[test]
+    fn mouse_focus_persists_until_another_enabled_option_is_clicked() {
+        let mut menu = focus_test_menu();
+        let click = |x| MenuInput {
+            cursor: (x, 300.0),
+            clicked: true,
+            mouse_held: true,
+            ..Default::default()
+        };
+
+        build_focus_grid(&mut menu, &click(300.0), &[]);
+        assert_eq!(menu.focus, Some(0));
+
+        let hover_second = MenuInput {
+            cursor: (450.0, 300.0),
+            ..Default::default()
+        };
+        let result = build_focus_grid(&mut menu, &hover_second, &[]);
+        assert_eq!(menu.focus, Some(0));
+        assert_eq!(
+            result
+                .elements
+                .iter()
+                .filter(|element| matches!(
+                    element,
+                    MenuElement::NineSlice {
+                        sprite: SpriteId::ButtonHover,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+
+        build_focus_grid(&mut menu, &click(450.0), &["Second"]);
+        assert_eq!(menu.focus, Some(0));
+
+        build_focus_grid(&mut menu, &click(450.0), &[]);
+        assert_eq!(menu.focus, Some(1));
     }
 
     /// Drives every options screen so `build_options_grid`'s debug assertion
