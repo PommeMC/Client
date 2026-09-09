@@ -1,6 +1,6 @@
 use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
-use crate::net::connection::ConnectArgs;
+use crate::net::connection::{ConnectArgs, Transport};
 use crate::ui::menu::{MenuAction, PanoramaTheme};
 
 pub enum MenuUpdateResult {
@@ -115,12 +115,11 @@ pub fn update_menu(
         } => {
             core.audio.stop_menu_music();
             let connect_args = ConnectArgs {
-                server,
+                transport: Transport::Remote { server, protocol },
                 username,
                 uuid: core.user.uuid,
                 access_token: core.user.access_token.clone(),
                 view_distance: core.menu.render_distance as u8,
-                protocol,
             };
 
             return MenuUpdateResult::Connect { connect_args };

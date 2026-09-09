@@ -21,7 +21,7 @@ use crate::app::phases::in_menu::{MenuUpdateResult, update_menu};
 use crate::app::phases::{AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
-use crate::net::connection::{ConnectArgs, spawn_connection};
+use crate::net::connection::{ConnectArgs, Transport, spawn_connection};
 use crate::renderer::{self, Renderer};
 use crate::user::UserData;
 
@@ -218,14 +218,16 @@ impl ApplicationHandler for App {
                     let connection = spawn_connection(
                         &self.core.tokio_rt,
                         ConnectArgs {
-                            server: server_ip,
+                            // TODO: read the saved server list's protocol for
+                            // this address to skip the join-time probe.
+                            transport: Transport::Remote {
+                                server: server_ip,
+                                protocol: None,
+                            },
                             username: self.core.user.username.clone(),
                             uuid: self.core.user.uuid,
                             access_token: self.core.user.access_token.clone(),
                             view_distance: self.core.menu.render_distance as u8,
-                            // TODO: read the saved server list's protocol for
-                            // this address to skip the join-time probe.
-                            protocol: None,
                         },
                     );
 

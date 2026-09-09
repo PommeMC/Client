@@ -72,15 +72,49 @@ impl RawWriter {
     }
 }
 
+/// One side of an in-process connection.
+pub struct MemoryEnd {
+    pub rx: ReadHalf<SimplexStream>,
+    pub tx: WriteHalf<SimplexStream>,
+}
+
+/// Pipes an integrated server and the client to each other, returning the
+/// client's end and the server's.
+///
+/// Two independent pipes rather than a duplex pair, so neither direction waits
+/// on a lock held by the other. The client-to-server pipe is sized far above
+/// what a tick sends because the game loop reads and writes from one task: a
+/// full outbound pipe would stop the client reading and deadlock both ends.
+#[allow(
+    dead_code,
+    reason = "the integrated server constructs these once it lands"
+)]
+pub fn memory_pipes() -> (MemoryEnd, MemoryEnd) {
+    const TO_CLIENT: usize = 1024 * 1024;
+    const TO_SERVER: usize = 256 * 1024;
+
+    let (client_rx, server_tx) = tokio::io::simplex(TO_CLIENT);
+    let (server_rx, client_tx) = tokio::io::simplex(TO_SERVER);
+    (
+        MemoryEnd {
+            rx: client_rx,
+            tx: client_tx,
+        },
+        MemoryEnd {
+            rx: server_rx,
+            tx: server_tx,
+        },
+    )
+}
+
 impl Conn {
     pub fn from_tcp(stream: TcpStream) -> Self {
         let (read, write) = stream.into_split();
         Self::new(NetReader::Tcp(read), NetWriter::Tcp(write))
     }
 
-    #[allow(dead_code)]
-    pub fn from_memory(rx: ReadHalf<SimplexStream>, tx: WriteHalf<SimplexStream>) -> Self {
-        Self::new(NetReader::Memory(rx), NetWriter::Memory(tx))
+    pub fn from_memory(end: MemoryEnd) -> Self {
+        Self::new(NetReader::Memory(end.rx), NetWriter::Memory(end.tx))
     }
 
     fn new(stream_in: NetReader, stream_out: NetWriter) -> Self {
@@ -136,20 +170,16 @@ mod tests {
 
     use super::*;
 
-    const CAP: usize = 64 * 1024;
-
     /// Two connections joined by a pipe in each direction.
     fn pipe_pair() -> (Conn, Conn) {
-        let (a_rx, b_tx) = tokio::io::simplex(CAP);
-        let (b_rx, a_tx) = tokio::io::simplex(CAP);
-        (Conn::from_memory(a_rx, a_tx), Conn::from_memory(b_rx, b_tx))
+        let (client, server) = memory_pipes();
+        (Conn::from_memory(client), Conn::from_memory(server))
     }
 
     /// A connection plus the peer's raw ends of its two pipes.
     fn conn_and_wire() -> (Conn, ReadHalf<SimplexStream>, WriteHalf<SimplexStream>) {
-        let (peer_rx, tx) = tokio::io::simplex(CAP);
-        let (rx, peer_tx) = tokio::io::simplex(CAP);
-        (Conn::from_memory(rx, tx), peer_rx, peer_tx)
+        let (client, server) = memory_pipes();
+        (Conn::from_memory(client), server.rx, server.tx)
     }
 
     fn ping(time: u64) -> ServerboundStatusPacket {

@@ -112,6 +112,25 @@ pub async fn request_status(
     }
 }
 
+/// Opens the handshake, naming the protocol this session speaks. Every
+/// connection sends this first, an integrated server's included.
+pub async fn send_intention(
+    conn: &mut Conn,
+    host: &str,
+    port: u16,
+    intention: ClientIntention,
+) -> std::io::Result<()> {
+    conn.write_packet(&ServerboundHandshakePacket::Intention(
+        ServerboundIntention {
+            protocol_version: crate::version::session_protocol(),
+            hostname: host.to_owned(),
+            port,
+            intention,
+        },
+    ))
+    .await
+}
+
 #[derive(Debug, Error)]
 pub enum ConnectError {
     #[error("{0}")]
@@ -139,16 +158,9 @@ pub async fn connect(
                 let _ = stream.set_nodelay(true);
                 tracing::info!("Connecting to {} (resolved: {addr})...", server.host);
                 let mut conn = Conn::from_tcp(stream);
-                conn.write_packet(&ServerboundHandshakePacket::Intention(
-                    ServerboundIntention {
-                        protocol_version: crate::version::session_protocol(),
-                        hostname: server.host.clone(),
-                        port: server.port,
-                        intention,
-                    },
-                ))
-                .await
-                .map_err(ConnectError::Io)?;
+                send_intention(&mut conn, &server.host, server.port, intention)
+                    .await
+                    .map_err(ConnectError::Io)?;
                 return Ok(conn);
             }
             Ok(Err(e)) => {
