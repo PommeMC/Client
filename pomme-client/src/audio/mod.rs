@@ -177,6 +177,10 @@ enum AudioCommand {
 #[derive(Debug)]
 enum AudioEvent {
     Finished(u64),
+    /// Balances one entity-bound play command, whether the sound ended, was
+    /// stopped, or was refused. The engine counts these rather than tracking
+    /// an idle flag, which would race a sound dispatched in between.
+    EntitySoundEnded(i32),
 }
 
 /// Plays menu and in-world sounds using a dedicated OpenAL worker thread.
@@ -193,6 +197,10 @@ pub struct AudioEngine {
     subtitles_enabled: bool,
     subtitle_events: std::sync::Mutex<Vec<QueuedSubtitle>>,
     next_id: AtomicU64,
+    /// Entity ids to the number of dispatched sounds the worker has not yet
+    /// reported ended. Only these entities get position updates. The worker
+    /// drives every decrement, so this is never cleared directly.
+    entity_sound_targets: HashMap<i32, u32>,
     music_id: Option<u64>,
     menu_music_active: bool,
     next_song_delay_ticks: i32,
@@ -208,7 +216,9 @@ impl AudioEngine {
     ) -> Self {
         let sounds = SoundsIndex::load(jar_assets_dir, &asset_index, packs);
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
-        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        // The worker reports with `try_send`, and a dropped `Finished` would
+        // park the menu-music delay at `i32::MAX` forever.
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (init_tx, init_rx) = crossbeam_channel::bounded(1);
 
         let worker = std::thread::Builder::new()
@@ -236,7 +246,11 @@ impl AudioEngine {
                     (Some(command_tx), Some(handle))
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!("audio disabled: failed to initialize OpenAL ({e})");
+                    tracing::warn!(
+                        "audio disabled: failed to initialize OpenAL ({e}). \
+                         Releases ship the library next to the binary; for a dev \
+                         build run `just openal` to stage it."
+                    );
                     let _ = handle.join();
                     (None, None)
                 }
@@ -252,22 +266,62 @@ impl AudioEngine {
             }
         };
 
+        Self::attached(
+            command_tx,
+            event_rx,
+            worker,
+            jar_assets_dir.to_path_buf(),
+            asset_index,
+            sounds,
+            volumes,
+        )
+    }
+
+    /// Wraps an already-running (or absent) worker.
+    fn attached(
+        command_tx: Option<Sender<AudioCommand>>,
+        event_rx: Receiver<AudioEvent>,
+        worker: Option<JoinHandle<()>>,
+        jar_assets_dir: PathBuf,
+        asset_index: Option<AssetIndex>,
+        sounds: SoundsIndex,
+        volumes: [f32; SoundCategory::COUNT],
+    ) -> Self {
         Self {
             command_tx,
             event_rx,
             worker,
-            jar_assets_dir: jar_assets_dir.to_path_buf(),
+            jar_assets_dir,
             asset_index,
             sounds,
             volumes,
             subtitles_enabled: false,
             subtitle_events: std::sync::Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
+            entity_sound_targets: HashMap::new(),
             music_id: None,
             menu_music_active: false,
             next_song_delay_ticks: MENU_MUSIC_STARTING_DELAY_TICKS,
             music_tick_accumulator: 0.0,
         }
+    }
+
+    /// An engine wired to plain channels instead of a worker thread, so a test
+    /// can feed it worker reports and read back the commands it emits.
+    #[cfg(test)]
+    fn for_test() -> (Self, Sender<AudioEvent>, Receiver<AudioCommand>) {
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let engine = Self::attached(
+            Some(command_tx),
+            event_rx,
+            None,
+            PathBuf::new(),
+            None,
+            SoundsIndex::default(),
+            [1.0; SoundCategory::COUNT],
+        );
+        (engine, event_tx, command_rx)
     }
 
     pub fn set_volumes(&mut self, volumes: [f32; SoundCategory::COUNT]) {
@@ -282,15 +336,28 @@ impl AudioEngine {
     /// stack and clears native sources/buffers that may reference old assets.
     pub fn reload_assets(&mut self, packs: &ResourcePackManager) {
         self.sounds = SoundsIndex::load(&self.jar_assets_dir, &self.asset_index, packs);
-        let had_music = self.music_id.take().is_some();
-        if had_music && self.menu_music_active {
-            self.next_song_delay_ticks = random_menu_delay_ticks();
-        }
+        self.forget_active_sounds();
         self.send(AudioCommand::ReloadAssets);
     }
 
+    /// Forgets the sounds the worker is about to drop without reporting
+    /// completion. `play_menu_track` parks the delay at `i32::MAX` and waits
+    /// for that report, so the delay has to be re-rolled here or menu music
+    /// never starts again. Vanilla's `SoundEngine.stopAll` and `reload` both
+    /// clear `soundDeleteTime` outright, so the 20-tick logical retention
+    /// does not apply on either path.
+    fn forget_active_sounds(&mut self) {
+        // `entity_sound_targets` is deliberately untouched; the worker reports
+        // the sounds it drops here too, and those reports balance the counts.
+        if self.music_id.take().is_some() && self.menu_music_active {
+            self.next_song_delay_ticks = random_menu_delay_ticks();
+        }
+    }
+
     /// Updates the listener using the camera's full yaw/pitch orientation.
+    /// Also the in-game per-frame entry point, so it drains worker reports.
     pub fn set_listener(&mut self, pos: Position, y_rot_deg: f32, x_rot_deg: f32) {
+        self.poll_events();
         let (forward, up) = listener_vectors(y_rot_deg, x_rot_deg);
         self.send(AudioCommand::SetListener {
             position: [pos.x as f32, pos.y as f32, pos.z as f32],
@@ -354,7 +421,7 @@ impl AudioEngine {
     }
 
     pub fn play_entity_sound(
-        &self,
+        &mut self,
         sound_ref: &SoundRef,
         category: u8,
         target: EntitySoundTarget,
@@ -362,7 +429,8 @@ impl AudioEngine {
         pitch: f32,
         seed: u64,
     ) {
-        self.play_positioned_sound(
+        // Only a dispatched sound gets an end report to balance the count.
+        if self.play_positioned_sound(
             sound_ref,
             category,
             target.pos,
@@ -370,9 +438,12 @@ impl AudioEngine {
             pitch,
             seed,
             Some(target.id),
-        );
+        ) {
+            *self.entity_sound_targets.entry(target.id).or_default() += 1;
+        }
     }
 
+    /// Returns whether the sound resolved and was handed to the worker.
     #[allow(clippy::too_many_arguments)]
     fn play_positioned_sound(
         &self,
@@ -383,9 +454,9 @@ impl AudioEngine {
         pitch: f32,
         seed: u64,
         entity_id: Option<i32>,
-    ) {
+    ) -> bool {
         let Some(sound) = self.resolve_sound(sound_ref, Some(seed)) else {
-            return;
+            return false;
         };
         let instance_volume = volume * sound.entry_volume;
 
@@ -418,16 +489,27 @@ impl AudioEngine {
             entity_id,
             report_completion: false,
         }));
+        self.command_tx.is_some()
     }
 
+    /// Every entity move packet reaches this, so entities with no sound of
+    /// their own are filtered out before the worker scans for a match.
     pub fn update_entity_sound_position(&self, entity_id: i32, pos: Position) {
+        if !self.entity_sound_targets.contains_key(&entity_id) {
+            return;
+        }
         self.send(AudioCommand::UpdateEntityPosition {
             entity_id,
             position: [pos.x as f32, pos.y as f32, pos.z as f32],
         });
     }
 
-    pub fn stop_entity_sounds(&self, entity_id: i32) {
+    pub fn stop_entity_sounds(&mut self, entity_id: i32) {
+        if !self.entity_sound_targets.contains_key(&entity_id) {
+            return;
+        }
+        // The count stays until the worker reports each stopped sound, so one
+        // dispatched before the worker drains this is still tracked.
         self.send(AudioCommand::StopEntity(entity_id));
     }
 
@@ -451,7 +533,7 @@ impl AudioEngine {
     /// Stops all currently active native sources. Static buffer cache remains
     /// valid and is released with the audio context at shutdown.
     pub fn stop_all_sounds(&mut self) {
-        self.music_id = None;
+        self.forget_active_sounds();
         self.send(AudioCommand::StopAll);
     }
 
@@ -467,15 +549,34 @@ impl AudioEngine {
         });
     }
 
+    /// Drains everything the worker has reported. Both phases call this every
+    /// frame, so it must stay independent of whether menu music is running.
+    pub fn poll_events(&mut self) {
+        while let Ok(event) = self.event_rx.try_recv() {
+            match event {
+                AudioEvent::Finished(id) => {
+                    if self.music_id == Some(id) {
+                        self.music_id = None;
+                        self.next_song_delay_ticks =
+                            menu_delay_after_finish(random_menu_delay_ticks());
+                    }
+                }
+                AudioEvent::EntitySoundEnded(entity_id) => {
+                    if let Some(count) = self.entity_sound_targets.get_mut(&entity_id) {
+                        *count -= 1;
+                        if *count == 0 {
+                            self.entity_sound_targets.remove(&entity_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn update_menu_music(&mut self, dt: f32) {
+        self.poll_events();
         if self.command_tx.is_none() || !self.menu_music_active {
             return;
-        }
-        while let Ok(AudioEvent::Finished(id)) = self.event_rx.try_recv() {
-            if self.music_id == Some(id) {
-                self.music_id = None;
-                self.next_song_delay_ticks = menu_delay_after_finish(random_menu_delay_ticks());
-            }
         }
 
         self.music_tick_accumulator += dt.max(0.0);
@@ -636,6 +737,8 @@ impl AudioWorker {
                 self.tick();
             }
         }
+        // The one removal that skips `report_entity_sound_ended`; nothing
+        // reads the counts after shutdown.
         self.active.clear();
         self.static_buffers.clear();
     }
@@ -645,8 +748,14 @@ impl AudioWorker {
             AudioCommand::Play(play) => {
                 let id = play.id;
                 let report_completion = play.report_completion;
-                if !self.play(play) && report_completion {
-                    let _ = self.events.try_send(AudioEvent::Finished(id));
+                let entity_id = play.entity_id;
+                // A refusal still reports, or the engine keeps counting an
+                // entity sound that never got a source.
+                if !self.play(play) {
+                    if report_completion {
+                        let _ = self.events.try_send(AudioEvent::Finished(id));
+                    }
+                    self.report_entity_sound_ended(entity_id);
                 }
             }
             AudioCommand::SetVolumes(volumes) => {
@@ -708,10 +817,10 @@ impl AudioWorker {
                 }
             }
             AudioCommand::StopAll => {
-                self.active.clear();
+                self.clear_active();
             }
             AudioCommand::ReloadAssets => {
-                self.active.clear();
+                self.clear_active();
                 self.static_buffers.clear();
             }
             AudioCommand::Shutdown => return true,
@@ -729,10 +838,25 @@ impl AudioWorker {
         if sound.report_completion {
             let _ = self.events.try_send(AudioEvent::Finished(id));
         }
+        self.report_entity_sound_ended(sound.entity_id);
+    }
+
+    /// Drops every active sound, reporting each so the engine's entity counts
+    /// stay balanced.
+    fn clear_active(&mut self) {
+        let entities: Vec<Option<i32>> = self
+            .active
+            .drain()
+            .map(|(_, sound)| sound.entity_id)
+            .collect();
+        for entity_id in entities {
+            self.report_entity_sound_ended(entity_id);
+        }
     }
 
     fn play(&mut self, play: PlayCommand) -> bool {
-        self.cleanup_finished();
+        // Frees the sources finished sounds still hold before the pool check.
+        self.tick();
         let base_gain = clamped_source_volume(play.volume);
         let gain = category_gain(&self.volumes, play.category) * base_gain;
         if gain == 0.0 && play.category != SoundCategory::Music {
@@ -915,18 +1039,24 @@ impl AudioWorker {
             }
         }
         for id in finished {
-            if self
-                .active
-                .remove(&id)
-                .is_some_and(|sound| sound.report_completion)
-            {
+            let Some(sound) = self.active.remove(&id) else {
+                continue;
+            };
+            if sound.report_completion {
                 let _ = self.events.try_send(AudioEvent::Finished(id));
             }
+            self.report_entity_sound_ended(sound.entity_id);
         }
     }
 
-    fn cleanup_finished(&mut self) {
-        self.tick();
+    /// Every path that removes a sound from `active`, or refuses to add one,
+    /// must call this exactly once or the engine's count never reaches zero.
+    fn report_entity_sound_ended(&self, entity_id: Option<i32>) {
+        if let Some(entity_id) = entity_id {
+            let _ = self
+                .events
+                .try_send(AudioEvent::EntitySoundEnded(entity_id));
+        }
     }
 }
 
@@ -1097,5 +1227,113 @@ mod tests {
     fn ui_matches_vanilla_sound_source_ordinal() {
         assert_eq!(SoundCategory::Ui as usize, 10);
         assert!(matches!(SoundCategory::from_index(10), SoundCategory::Ui));
+    }
+
+    /// Drains the worker's view of the command channel, reporting each
+    /// entity-bound play back the way `AudioWorker` does.
+    fn end_dispatched_sounds(events: &Sender<AudioEvent>, commands: &Receiver<AudioCommand>) {
+        while let Ok(command) = commands.try_recv() {
+            if let AudioCommand::Play(PlayCommand {
+                entity_id: Some(entity_id),
+                ..
+            }) = command
+            {
+                events
+                    .send(AudioEvent::EntitySoundEnded(entity_id))
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn entity_sound_end_report_stops_position_forwarding() {
+        let (mut engine, events, commands) = AudioEngine::for_test();
+        engine.entity_sound_targets.insert(7, 1);
+
+        engine.update_entity_sound_position(7, Position::new(1.0, 2.0, 3.0));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(AudioCommand::UpdateEntityPosition { entity_id: 7, .. })
+        ));
+
+        events.send(AudioEvent::EntitySoundEnded(7)).unwrap();
+        engine.poll_events();
+        assert!(!engine.entity_sound_targets.contains_key(&7));
+
+        engine.update_entity_sound_position(7, Position::new(4.0, 5.0, 6.0));
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn untracked_entity_never_reaches_the_worker() {
+        let (engine, _events, commands) = AudioEngine::for_test();
+        engine.update_entity_sound_position(7, Position::new(1.0, 2.0, 3.0));
+        assert!(commands.try_recv().is_err());
+    }
+
+    /// A second sound for the same entity must survive the first one's end
+    /// report, which an idle flag rather than a count would drop.
+    #[test]
+    fn overlapping_entity_sounds_keep_tracking_until_the_last_ends() {
+        let (mut engine, events, _commands) = AudioEngine::for_test();
+        engine.entity_sound_targets.insert(7, 2);
+
+        events.send(AudioEvent::EntitySoundEnded(7)).unwrap();
+        engine.poll_events();
+        assert_eq!(engine.entity_sound_targets.get(&7), Some(&1));
+
+        events.send(AudioEvent::EntitySoundEnded(7)).unwrap();
+        engine.poll_events();
+        assert!(!engine.entity_sound_targets.contains_key(&7));
+    }
+
+    /// Stop-all drops sounds the worker never reported finished, so the counts
+    /// must reach zero from its reports, not from the engine clearing them.
+    #[test]
+    fn stop_all_leaves_no_entity_counted() {
+        let (mut engine, events, commands) = AudioEngine::for_test();
+        engine.sounds = SoundsIndex::for_test_event("entity.test");
+
+        for _ in 0..3 {
+            engine.play_entity_sound(
+                &SoundRef::event("entity.test"),
+                CATEGORY_PLAYERS,
+                EntitySoundTarget {
+                    id: 7,
+                    pos: Position::new(0.0, 0.0, 0.0),
+                },
+                1.0,
+                1.0,
+                0,
+            );
+        }
+        assert_eq!(engine.entity_sound_targets.get(&7), Some(&3));
+
+        engine.stop_all_sounds();
+        end_dispatched_sounds(&events, &commands);
+        engine.poll_events();
+        assert!(engine.entity_sound_targets.is_empty());
+    }
+
+    /// Menu music parks the delay at `i32::MAX` until the worker reports the
+    /// track finished, so that report has to survive whatever else is queued.
+    #[test]
+    fn music_finish_report_survives_a_burst_of_entity_reports() {
+        let (mut engine, events, _commands) = AudioEngine::for_test();
+        engine.music_id = Some(42);
+        engine.next_song_delay_ticks = i32::MAX;
+
+        for entity_id in 0..64 {
+            events
+                .send(AudioEvent::EntitySoundEnded(entity_id))
+                .unwrap();
+        }
+        events.send(AudioEvent::Finished(42)).unwrap();
+        engine.poll_events();
+
+        assert_eq!(engine.music_id, None);
+        assert!(
+            engine.next_song_delay_ticks <= menu_delay_after_finish(MENU_MUSIC_MAX_DELAY_TICKS)
+        );
     }
 }

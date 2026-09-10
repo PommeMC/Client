@@ -64,7 +64,7 @@ jobs:
         # --release reuses the dependency artifacts the clippy step built.
         run: |
           cargo test -p pomme-protocol
-          cargo test -p pomme-client --release -- net::azalea_compat world::block renderer::camera:: ui::menu:: player::tests:: audio::
+          cargo test -p pomme-client --release -- net::azalea_compat world::block renderer::camera:: ui::menu:: player::tests:: audio:: net::handler::
 
   launcher-frontend:
     runs-on: ubuntu-latest

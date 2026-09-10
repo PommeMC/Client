@@ -5,6 +5,9 @@ use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::resource_pack::ResourcePackManager;
 use crate::util::JavaRandom;
 
+/// Vanilla `SoundEventRegistrationSerializer`'s `attenuation_distance` default.
+const DEFAULT_ATTENUATION_DISTANCE: i32 = 16;
+
 /// A single playable file variant from `sounds.json` after resolving any
 /// `type: "event"` indirection.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,6 +45,7 @@ struct SoundEvent {
 
 /// Parsed `sounds.json` registry across the built-in assets and active resource
 /// packs.
+#[derive(Default)]
 pub struct SoundsIndex {
     events: HashMap<String, SoundEvent>,
 }
@@ -103,6 +107,29 @@ impl SoundsIndex {
     pub fn choose(&self, event: &str, seed: Option<u64>) -> Option<SoundVariant> {
         let mut random = SoundRandom::new(seed);
         self.choose_inner(normalize_event_name(event), &mut random, &mut Vec::new())
+    }
+
+    /// A one-event index, so a test can dispatch a sound without a resource
+    /// pack on disk.
+    #[cfg(test)]
+    pub fn for_test_event(event: &str) -> Self {
+        let variant = SoundVariant {
+            path: PathBuf::from("test.ogg"),
+            weight: 1,
+            volume: 1.0,
+            pitch: 1.0,
+            stream: false,
+            attenuation_distance: DEFAULT_ATTENUATION_DISTANCE as f32,
+        };
+        Self {
+            events: HashMap::from([(
+                normalize_event_name(event).to_string(),
+                SoundEvent {
+                    entries: vec![SoundEntry::File(variant)],
+                    subtitle: None,
+                },
+            )]),
+        }
     }
 
     /// The subtitle translation key for an event, e.g.
@@ -225,7 +252,7 @@ impl SoundsIndex {
                     volume: 1.0,
                     pitch: 1.0,
                     stream: false,
-                    attenuation_distance: 16.0,
+                    attenuation_distance: DEFAULT_ATTENUATION_DISTANCE as f32,
                 })))
             }
             serde_json::Value::Object(map) => {
@@ -248,7 +275,8 @@ impl SoundsIndex {
                 }
                 let stream = json_bool(map, "stream", false)?;
                 let _preload = json_bool(map, "preload", false)?;
-                let attenuation_distance = json_i32(map, "attenuation_distance", 16)? as f32;
+                let attenuation_distance =
+                    json_i32(map, "attenuation_distance", DEFAULT_ATTENUATION_DISTANCE)? as f32;
                 let sound_type = match map.get("type") {
                     Some(value) => value
                         .as_str()
@@ -484,7 +512,7 @@ mod tests {
             volume: 1.0,
             pitch: 1.0,
             stream: false,
-            attenuation_distance: 16.0,
+            attenuation_distance: DEFAULT_ATTENUATION_DISTANCE as f32,
         })
     }
 

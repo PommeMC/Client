@@ -6,8 +6,12 @@
 //! "investigate which side is wrong", with in-game behavior as tiebreaker.
 
 use azalea_core::entity_id::MinecraftEntityId;
+use azalea_core::sound::CustomSound;
 use azalea_protocol::packets::ProtocolPacket;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
+use azalea_registry::Holder;
+use azalea_registry::builtin::SoundEvent;
+use azalea_registry::identifier::Identifier;
 use glam::DVec3;
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
 use pomme_protocol::wire;
@@ -145,6 +149,72 @@ fn packet_ids_match_azalea() {
     assert_eq!(
         hurt_animation.id(),
         table_id(Direction::Clientbound, "hurt_animation")
+    );
+
+    use azalea_protocol::packets::game::{c_sound, c_sound_entity, c_stop_sound};
+
+    let sound = ClientboundGamePacket::Sound(c_sound::ClientboundSound {
+        sound: sound_holder(),
+        source: c_sound::SoundSource::Master,
+        x: 0,
+        y: 0,
+        z: 0,
+        volume: 1.0,
+        pitch: 1.0,
+        seed: 0,
+    });
+    assert_eq!(sound.id(), table_id(Direction::Clientbound, "sound"));
+
+    let sound_entity = ClientboundGamePacket::SoundEntity(c_sound_entity::ClientboundSoundEntity {
+        sound: sound_holder(),
+        source: c_sound::SoundSource::Master,
+        id: MinecraftEntityId(0),
+        volume: 1.0,
+        pitch: 1.0,
+        seed: 0,
+    });
+    assert_eq!(
+        sound_entity.id(),
+        table_id(Direction::Clientbound, "sound_entity")
+    );
+
+    let stop_sound = ClientboundGamePacket::StopSound(c_stop_sound::ClientboundStopSound {
+        source: None,
+        name: None,
+    });
+    assert_eq!(
+        stop_sound.id(),
+        table_id(Direction::Clientbound, "stop_sound")
+    );
+}
+
+fn sound_holder() -> Holder<SoundEvent, CustomSound> {
+    Holder::Direct(CustomSound {
+        sound_id: Identifier::new("minecraft:test.sound"),
+        range: None,
+    })
+}
+
+/// Pins the azalea bug the raw sound path in `handler::handle_raw_game_packet`
+/// works around: azalea's `SoundSource` stops at `Voice = 9`, and the `AzBuf`
+/// derive decodes an unknown discriminant as the first variant rather than
+/// failing, so vanilla's `UI = 10` silently arrives as `Master`. When azalea
+/// gains the variant this fails, and the raw path can be deleted.
+#[test]
+fn azalea_sound_source_still_misdecodes_ui() {
+    use azalea_buf::AzBuf;
+    use azalea_protocol::packets::game::c_sound::SoundSource;
+
+    let mut ui = std::io::Cursor::new(&[10u8][..]);
+    assert_eq!(
+        SoundSource::azalea_read(&mut ui).unwrap(),
+        SoundSource::Master
+    );
+
+    let mut voice = std::io::Cursor::new(&[9u8][..]);
+    assert_eq!(
+        SoundSource::azalea_read(&mut voice).unwrap(),
+        SoundSource::Voice
     );
 }
 

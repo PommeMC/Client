@@ -15,7 +15,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   MC_VERSION: "26.2"
-  LWJGL_OPENAL_VERSION: "3.4.1"
 
 permissions:
   contents: write
@@ -58,25 +57,16 @@ jobs:
             artifact: pomme-client.exe
             name: pomme-client-windows-x64
             openal_classifier: natives-windows
-            openal_member: windows/x64/org/lwjgl/openal/OpenAL.dll
-            openal_name: OpenAL.dll
-            openal_sha256: 28d4065b9c6be68454eb4d7c0da665bd4bc7cc77d854c1f67afbd2f38ff730a3
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: pomme-client
             name: pomme-client-linux-x64-gnu
             openal_classifier: natives-linux
-            openal_member: linux/x64/org/lwjgl/openal/libopenal.so
-            openal_name: libopenal.so
-            openal_sha256: c3be36ffda26c46b77bfa359586424a95d7620be11427897c7a454abb16c0994
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: pomme-client
             name: pomme-client-macos-arm64
             openal_classifier: natives-macos-arm64
-            openal_member: macos/arm64/org/lwjgl/openal/libopenal.dylib
-            openal_name: libopenal.dylib
-            openal_sha256: 704365e5bfc028c006d2fe54862742d661295bd4b960824a0d2fbe5a9c7b8ffd
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -103,40 +93,21 @@ jobs:
       - name: Build
         run: cargo build -p pomme-client --release --target ${{ matrix.target }}
 
-      - name: Stage Minecraft OpenAL Soft 1.25.1
-        shell: bash
-        env:
-          OPENAL_CLASSIFIER: ${{ matrix.openal_classifier }}
-          OPENAL_MEMBER: ${{ matrix.openal_member }}
-          OPENAL_NAME: ${{ matrix.openal_name }}
-          OPENAL_SHA256: ${{ matrix.openal_sha256 }}
-        run: |
-          python - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-          import urllib.request
-          import zipfile
+      # The runner images disagree on whether `python` or `python3` is on PATH,
+      # and the `--require` staging below fails the release rather than degrade.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
 
-          version = os.environ["LWJGL_OPENAL_VERSION"]
-          classifier = os.environ["OPENAL_CLASSIFIER"]
-          member = os.environ["OPENAL_MEMBER"]
-          expected = os.environ["OPENAL_SHA256"]
-          url = (
-              "https://libraries.minecraft.net/org/lwjgl/lwjgl-openal/"
-              f"{version}/lwjgl-openal-{version}-{classifier}.jar"
-          )
-          jar = Path("openal-native.jar")
-          urllib.request.urlretrieve(url, jar)
-          actual = hashlib.sha256(jar.read_bytes()).hexdigest()
-          if actual != expected:
-              raise SystemExit(f"OpenAL native jar hash mismatch: {actual} != {expected}")
-          out = Path("openal-native") / os.environ["OPENAL_NAME"]
-          out.parent.mkdir(parents=True, exist_ok=True)
-          with zipfile.ZipFile(jar) as archive:
-              out.write_bytes(archive.read(member))
-          print(f"staged {out} from {url} ({actual})")
-          PY
+      # Version, jar member and checksum come from
+      # pomme-client/third-party/openal-natives.txt, which `just openal` also
+      # reads, so a release and a dev build never diverge.
+      - name: Stage Minecraft's OpenAL Soft native
+        shell: bash
+        run: |
+          mkdir -p bundle
+          python tools/fetch_openal.py bundle \
+            --classifier "${{ matrix.openal_classifier }}" --require
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
@@ -144,7 +115,6 @@ jobs:
         run: |
           mkdir -p dist bundle
           cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" bundle/
-          cp "openal-native/${{ matrix.openal_name }}" bundle/
           cp pomme-client/third-party/OpenAL-Soft-LICENSE.txt bundle/
           cp pomme-client/third-party/OpenAL-Soft-NOTICE.txt bundle/
 
@@ -172,7 +142,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist, bundle | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.artifact }}" bundle/
-          Copy-Item "openal-native/${{ matrix.openal_name }}" bundle/
           Copy-Item "pomme-client/third-party/OpenAL-Soft-LICENSE.txt" bundle/
           Copy-Item "pomme-client/third-party/OpenAL-Soft-NOTICE.txt" bundle/
           Compress-Archive -Path "bundle/*" -DestinationPath "dist/${{ matrix.name }}.zip"

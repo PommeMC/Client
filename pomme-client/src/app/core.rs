@@ -485,9 +485,17 @@ impl AppCore {
     }
 
     pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
-        if !self.resource_packs.clear_server_packs() {
-            return;
+        if self.resource_packs.clear_server_packs() {
+            self.reload_pack_assets(renderer);
         }
+    }
+
+    /// Rebuilds every asset a pack can override. Only call this once the
+    /// active stack has really changed: it waits for device idle, drops the
+    /// block cache and rebuilds the texture atlas. Clearing
+    /// `menu.reload_assets` is safe here because the pending local-pack toggle
+    /// it stands for is covered by the reload we just did.
+    fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
         self.menu.active_packs = self.resource_packs.active_pack_info();
         renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
         self.audio.reload_assets(&self.resource_packs);
@@ -1569,15 +1577,14 @@ impl AppCore {
                     });
                 }
                 NetworkEvent::ResourcePackPop { id } => {
-                    if let Some(id) = id {
-                        self.resource_packs.remove_server_pack(&id);
-                    } else {
-                        self.resource_packs.clear_server_packs();
+                    // A server may pop an id it already popped, or never pushed.
+                    let removed = match id {
+                        Some(id) => self.resource_packs.remove_server_pack(&id),
+                        None => self.resource_packs.clear_server_packs(),
+                    };
+                    if removed {
+                        self.reload_pack_assets(renderer);
                     }
-                    self.menu.active_packs = self.resource_packs.active_pack_info();
-                    renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
-                    self.audio.reload_assets(&self.resource_packs);
-                    self.menu.reload_assets = false;
                 }
                 NetworkEvent::Reconfiguring => {
                     tracing::info!("Server re-entered configuration");
@@ -1650,9 +1657,8 @@ impl AppCore {
                     self.resource_packs
                         .apply_server_pack(pending.id, &pending.hash);
                     tracing::info!("Resource pack {} loaded successfully", pending.id);
-                    renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
-                    self.audio.reload_assets(&self.resource_packs);
-                    self.menu.reload_assets = false;
+                    // `apply_server_pack` always changes the stack.
+                    self.reload_pack_assets(renderer);
                     s_resource_pack::Action::SuccessfullyLoaded
                 }
             };

@@ -122,8 +122,13 @@ impl Api {
                     continue;
                 }
             };
-            return Self::from_library(library)
-                .map_err(|e| format!("loaded {display}, but OpenAL symbols were incomplete: {e}"));
+            match Self::from_library(library) {
+                Ok(api) => return Ok(api),
+                // A stub system library must not shadow the staged one.
+                Err(e) => {
+                    errors.push(format!("{display}: OpenAL symbols were incomplete: {e}"));
+                }
+            }
         }
         Err(format!("failed to load OpenAL ({})", errors.join("; ")))
     }
@@ -632,9 +637,19 @@ impl Source {
         match attenuation_distance {
             Some(max_distance) => {
                 self.sourcei(AL_DISTANCE_MODEL, AL_LINEAR_DISTANCE)?;
-                self.sourcef(AL_MAX_DISTANCE, max_distance)?;
-                self.sourcef(AL_ROLLOFF_FACTOR, 1.0)?;
-                self.sourcef(AL_REFERENCE_DISTANCE, 0.0)?;
+                // Vanilla's Channel.linearAttenuation issues these without
+                // checking alGetError, and accepts the negative
+                // attenuation_distance that OpenAL rejects, so a pack setting
+                // one must not lose the sound here.
+                for (param, value) in [
+                    (AL_MAX_DISTANCE, max_distance),
+                    (AL_ROLLOFF_FACTOR, 1.0),
+                    (AL_REFERENCE_DISTANCE, 0.0),
+                ] {
+                    if let Err(e) = self.sourcef(param, value) {
+                        tracing::debug!("ignoring OpenAL attenuation rejection: {e}");
+                    }
+                }
             }
             None => self.sourcei(AL_DISTANCE_MODEL, 0)?,
         }
