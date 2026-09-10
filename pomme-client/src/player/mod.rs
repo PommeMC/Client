@@ -8,13 +8,19 @@ use inventory::Inventory;
 
 use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position, Velocity};
+use crate::physics::aabb::Aabb;
 use crate::world::block::{FluidKind, fluid};
 
 pub const MAX_AIR_SUPPLY: i32 = 300;
-pub const STANDING_HEIGHT: f64 = 1.8;
-pub const CROUCH_HEIGHT: f64 = 1.5;
-pub const STANDING_EYE_HEIGHT: f64 = 1.62;
-pub const CROUCH_EYE_HEIGHT: f64 = 1.27;
+// Vanilla stores player dimensions/eye heights as floats and only widens them
+// when combining them with double-precision positions and AABBs.
+pub const PLAYER_HALF_WIDTH: f64 = (0.6_f32 / 2.0_f32) as f64;
+pub const STANDING_HEIGHT: f64 = 1.8_f32 as f64;
+pub const CROUCH_HEIGHT: f64 = 1.5_f32 as f64;
+pub const STANDING_EYE_HEIGHT: f32 = 1.62;
+pub const CROUCH_EYE_HEIGHT: f32 = 1.27;
+// Entity.checkInsideBlocks passes the float literal through AABB's double API.
+const INSIDE_BLOCK_MARGIN: f64 = 1.0e-5_f32 as f64;
 const DROWN_DAMAGE_THRESHOLD: i32 = -20;
 const DROWN_DAMAGE: f32 = 2.0;
 const AIR_RECOVERY_RATE: i32 = 4;
@@ -75,8 +81,8 @@ pub struct LocalPlayer {
     /// Vanilla `onUpdateAbilities`: a locally toggled `flying` still has to be
     /// reported to the server via `ServerboundPlayerAbilities`.
     pub abilities_dirty: bool,
-    pub eye_height: f64,
-    pub prev_eye_height: f64,
+    pub eye_height: f32,
+    pub prev_eye_height: f32,
     pub walk_dist: f32,
     pub prev_walk_dist: f32,
     pub bob: f32,
@@ -203,7 +209,11 @@ impl LocalPlayer {
         }
     }
 
-    pub fn target_eye_height(&self) -> f64 {
+    pub fn bounding_box(&self) -> Aabb {
+        Aabb::from_center(self.position.into(), PLAYER_HALF_WIDTH, self.height() / 2.0)
+    }
+
+    pub fn target_eye_height(&self) -> f32 {
         if self.crouching {
             CROUCH_EYE_HEIGHT
         } else {
@@ -234,11 +244,11 @@ impl LocalPlayer {
     }
 
     pub fn prev_eye_pos(&self) -> Position {
-        self.prev_position + dvec3(0.0, self.prev_eye_height, 0.0)
+        self.prev_position + dvec3(0.0, f64::from(self.prev_eye_height), 0.0)
     }
 
     pub fn eye_pos(&self) -> Position {
-        self.position + dvec3(0.0, self.eye_height, 0.0)
+        self.position + dvec3(0.0, f64::from(self.eye_height), 0.0)
     }
 
     // TODO: OXYGEN_BONUS attribute - chance to skip air loss per tick
@@ -255,9 +265,9 @@ impl LocalPlayer {
     }
 
     pub fn update_water_state(&mut self, chunks: &crate::world::chunk::ChunkStore) {
-        let half_w = 0.3;
+        let half_w = PLAYER_HALF_WIDTH;
         let height = self.height();
-        let eye_height = self.target_eye_height();
+        let eye_height = f64::from(self.target_eye_height());
 
         // Vanilla `EntityFluidInteraction.update`: scan the bounding box
         // deflated by 0.001; a block's fluid column is `amount / 9` of a
@@ -305,16 +315,16 @@ impl LocalPlayer {
     }
 
     /// Vanilla Entity.checkInsideBlocks: a nether portal counts as entered when
-    /// the bounding box deflated by 1.0E-5 overlaps its (full) block cell.
+    /// the bounding box deflated by the widened float `1.0E-5f` overlaps its
+    /// (full) block cell.
     pub fn is_inside_nether_portal(&self, chunks: &crate::world::chunk::ChunkStore) -> bool {
-        const MARGIN: f64 = 1.0e-5;
-        let half_w = 0.3;
-        let x0 = (self.position.x - half_w + MARGIN).floor() as i32;
-        let x1 = (self.position.x + half_w - MARGIN).ceil() as i32 - 1;
-        let y0 = (self.position.y + MARGIN).floor() as i32;
-        let y1 = (self.position.y + self.height() - MARGIN).ceil() as i32 - 1;
-        let z0 = (self.position.z - half_w + MARGIN).floor() as i32;
-        let z1 = (self.position.z + half_w - MARGIN).ceil() as i32 - 1;
+        let half_w = PLAYER_HALF_WIDTH;
+        let x0 = (self.position.x - half_w + INSIDE_BLOCK_MARGIN).floor() as i32;
+        let x1 = (self.position.x + half_w - INSIDE_BLOCK_MARGIN).ceil() as i32 - 1;
+        let y0 = (self.position.y + INSIDE_BLOCK_MARGIN).floor() as i32;
+        let y1 = (self.position.y + self.height() - INSIDE_BLOCK_MARGIN).ceil() as i32 - 1;
+        let z0 = (self.position.z - half_w + INSIDE_BLOCK_MARGIN).floor() as i32;
+        let z1 = (self.position.z + half_w - INSIDE_BLOCK_MARGIN).ceil() as i32 - 1;
 
         for bx in x0..=x1 {
             for by in y0..=y1 {
@@ -377,6 +387,20 @@ impl LocalPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounding_box_tracks_current_crouching_pose() {
+        let mut player = LocalPlayer::new();
+        player.position = Position::new(0.5, 0.0, 0.5);
+        let ceiling = Aabb::new(dvec3(0.0, 1.6, 0.0), dvec3(1.0, 2.0, 1.0));
+
+        player.crouching = false;
+        assert!(player.bounding_box().intersects(&ceiling));
+
+        player.crouching = true;
+        assert!(!player.bounding_box().intersects(&ceiling));
+        assert_eq!(player.bounding_box().max.y, CROUCH_HEIGHT);
+    }
 
     #[test]
     fn hurt_state_matches_vanilla_duration_direction_and_expiry() {

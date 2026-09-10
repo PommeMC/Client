@@ -12,6 +12,12 @@ use crate::app::state_slot::StateSlot;
 /// Left-stick deflection past which a direction counts as a digital press.
 pub const STICK_MOVEMENT_THRESHOLD: f32 = 0.25;
 
+/// Convert gilrs left-stick axes into vanilla movement axes: X is `xxa`
+/// (positive left, negative right) and Y is `zza` (positive forward).
+pub(crate) fn gamepad_movement_axes(analog: glam::Vec2) -> glam::Vec2 {
+    glam::vec2(-analog.x, analog.y)
+}
+
 /// Value in milliseconds for how long the controller should rumble to be only
 /// an "instant".
 pub const SHORT_RUMBLE_TIME: u32 = 5;
@@ -454,6 +460,10 @@ impl InputState {
 
     pub fn get_gamepad_left_analog(&self) -> Option<glam::Vec2> {
         self.gamepad_stick(gilrs::Axis::LeftStickX, gilrs::Axis::LeftStickY)
+    }
+
+    pub fn get_gamepad_movement_axes(&self) -> Option<glam::Vec2> {
+        self.get_gamepad_left_analog().map(gamepad_movement_axes)
     }
 
     pub fn get_gamepad_right_analog(&self) -> Option<glam::Vec2> {

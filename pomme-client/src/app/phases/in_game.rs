@@ -1868,7 +1868,10 @@ pub fn update_game(
                         e.position.y.floor() as i32,
                         e.position.z.floor() as i32,
                     );
-                    (block_pos, *feet + glam::DVec3::new(0.0, eye_height, 0.0))
+                    (
+                        block_pos,
+                        *feet + glam::DVec3::new(0.0, f64::from(eye_height), 0.0),
+                    )
                 })
             };
             game.waypoints.extract_dots(

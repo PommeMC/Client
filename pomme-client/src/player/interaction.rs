@@ -29,7 +29,6 @@ use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
 use crate::physics::block_shape::{self, LocalBox};
-use crate::physics::movement::{PLAYER_HALF_WIDTH, PLAYER_HEIGHT};
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::held_item::UseAnim;
 use crate::world::block::registry::BlockRegistry;
@@ -43,6 +42,7 @@ const CREATIVE_ENTITY_REACH_BONUS: f64 = 2.0;
 const DESTROY_COOLDOWN: u32 = 5;
 const MISS_COOLDOWN: u32 = 10;
 const USE_DELAY: u32 = 4;
+
 const SWING_DURATION: i32 = 6;
 /// Vanilla `Consumable`: no bite effects during the first ~22% of the use,
 /// then a burst every 4 ticks.
@@ -229,11 +229,10 @@ impl InteractionState {
         &mut self,
         seq: u32,
         chunks: &ChunkStore,
-        player_pos: DVec3,
+        player: Aabb,
         dirty_chunks: &mut Vec<BlockPos>,
     ) -> Option<DVec3> {
         let snap_allowed = self.last_teleport_seq < seq;
-        let player = Aabb::from_center(player_pos, PLAYER_HALF_WIDTH, PLAYER_HEIGHT / 2.0);
         // Keep the lowest block pos among overlapping reverts so the chosen snap
         // is deterministic (HashMap iteration order is not).
         let mut snap_to: Option<((i32, i32, i32), DVec3)> = None;
@@ -349,6 +348,7 @@ impl InteractionState {
         sender: &PacketSender,
         audio: &AudioEngine,
         player_pos: DVec3,
+        player_aabb: Aabb,
         eye_pos: DVec3,
         look: LookDirection,
         on_ground: bool,
@@ -438,6 +438,7 @@ impl InteractionState {
                 audio,
                 chunks,
                 player_pos,
+                player_aabb,
                 eye_pos,
                 look,
                 place_block,
@@ -626,6 +627,7 @@ impl InteractionState {
         audio: &AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
+        player_aabb: Aabb,
         eye_pos: DVec3,
         look: LookDirection,
         place_block: Option<BlockState>,
@@ -685,7 +687,14 @@ impl InteractionState {
             }
             if place_block.is_some() {
                 self.swing(sender);
-                self.predict_place(hit, place_block, chunks, player_pos, dirty_chunks);
+                self.predict_place(
+                    hit,
+                    place_block,
+                    chunks,
+                    player_pos,
+                    player_aabb,
+                    dirty_chunks,
+                );
                 return true;
             }
             true
@@ -851,10 +860,10 @@ impl InteractionState {
 
     /// Vanilla `LocalPlayer.itemUseSpeedMultiplier`: the in-use item's
     /// `UseEffects` movement-input scale (1.0 when nothing is in use).
-    pub fn use_speed_multiplier(&self) -> f64 {
+    pub fn use_speed_multiplier(&self) -> f32 {
         self.using_item
             .as_ref()
-            .map_or(1.0, |a| a.use_effects.speed_multiplier as f64)
+            .map_or(1.0, |a| a.use_effects.speed_multiplier)
     }
 
     /// Vanilla `LocalPlayer.isSlowDueToUsingItem`, which gates sprinting.
@@ -891,6 +900,7 @@ impl InteractionState {
         place_block: Option<BlockState>,
         chunks: &ChunkStore,
         player_pos: DVec3,
+        player_aabb: Aabb,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
         let Some(state) = place_block else {
@@ -904,11 +914,8 @@ impl InteractionState {
         }
 
         // Don't predict a solid block overlapping the player; the server denies it.
-        if has_collision(state) {
-            let player = Aabb::from_center(player_pos, PLAYER_HALF_WIDTH, PLAYER_HEIGHT / 2.0);
-            if Aabb::block(pos.x, pos.y, pos.z).intersects(&player) {
-                return;
-            }
+        if has_collision(state) && Aabb::block(pos.x, pos.y, pos.z).intersects(&player_aabb) {
+            return;
         }
 
         self.retain_known_server_state(pos, BlockState::AIR, player_pos);
