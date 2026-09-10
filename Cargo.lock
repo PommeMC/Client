@@ -5166,6 +5166,7 @@ dependencies = [
  "gilrs",
  "glam",
  "image",
+ "md-5 0.11.0",
  "mimalloc",
  "open",
  "parking_lot",

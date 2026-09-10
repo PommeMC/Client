@@ -49,6 +49,7 @@ azalea-core = "0.16"
 azalea-registry = "0.16"
 azalea-inventory = "0.16"
 uuid = { version = "1", features = ["v4"] }
+md-5 = "0.11"
 crossbeam-channel = "0.5"
 png = "0.17"
 image = "0.25"
