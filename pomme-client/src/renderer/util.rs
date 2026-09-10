@@ -665,7 +665,7 @@ pub unsafe fn create_nearest_sampler_mipmapped(
         address_mode_v: vk::SamplerAddressMode::ClampToEdge,
         address_mode_w: vk::SamplerAddressMode::ClampToEdge,
         min_lod: 0.0,
-        max_lod: mip_levels as f32,
+        max_lod: mip_levels.saturating_sub(1) as f32,
         ..Default::default()
     };
 

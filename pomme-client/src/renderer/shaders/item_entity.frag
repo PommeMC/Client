@@ -18,7 +18,8 @@ layout(location = 0) out vec4 out_color;
 
 void main() {
     vec4 color = texture(atlas_texture, v_tex_coords);
-    if (color.a < 0.5) discard;
+    // Vanilla ITEM_CUTOUT and ITEM_TRANSLUCENT both use ALPHA_CUTOUT=0.1.
+    if (color.a < 0.1) discard;
     vec3 tinted = color.rgb * v_tint * (world_light * v_light);
     tinted = apply_fog(tinted, v_fog, v_fog_color);
     out_color = vec4(tinted, color.a);

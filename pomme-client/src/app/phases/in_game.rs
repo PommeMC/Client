@@ -197,6 +197,9 @@ pub struct GameState {
     pub previous_game_mode: Option<u8>,
     /// Current dimension identifier (e.g. "minecraft:overworld"), for F3+C.
     pub dimension: String,
+    /// Dimension-type `cardinal_light`: true for vanilla's `nether` lighting,
+    /// false for the default pair of level light directions.
+    pub nether_cardinal_lighting: bool,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -380,6 +383,7 @@ impl GameState {
             pending_chunk_reload: false,
             previous_game_mode: None,
             dimension: String::new(),
+            nether_cardinal_lighting: false,
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
@@ -2706,6 +2710,8 @@ pub fn update_game(
         build_item_render_infos(
             &game.item_entity_store,
             &game.chunk_store,
+            &gfx.renderer,
+            game.nether_cardinal_lighting,
             *gfx.renderer.camera_pivot_position(),
             gfx.renderer.camera_anchor(),
             partial_tick,
@@ -3041,24 +3047,101 @@ fn build_weather_columns(
     columns
 }
 
+fn item_stack_seed(item_id: u32, damage: i32) -> i64 {
+    (item_id as i32).wrapping_add(damage) as i64
+}
+
+fn transform_item_bounds(
+    min: glam::Vec3,
+    max: glam::Vec3,
+    transform: glam::Mat4,
+) -> (glam::Vec3, glam::Vec3) {
+    let mut out_min = glam::Vec3::splat(f32::INFINITY);
+    let mut out_max = glam::Vec3::splat(f32::NEG_INFINITY);
+    for x in [min.x, max.x] {
+        for y in [min.y, max.y] {
+            for z in [min.z, max.z] {
+                let point = transform.transform_point3(glam::Vec3::new(x, y, z));
+                out_min = out_min.min(point);
+                out_max = out_max.max(point);
+            }
+        }
+    }
+    (out_min, out_max)
+}
+
+#[cfg(test)]
+mod dropped_item_tests {
+    use super::{item_stack_seed, transform_item_bounds};
+
+    #[test]
+    fn dropped_item_scatter_seed_includes_damage() {
+        assert_eq!(item_stack_seed(42, 0), 42);
+        assert_eq!(item_stack_seed(42, 7), 49);
+        assert_eq!(item_stack_seed(u32::MAX, 2), 1);
+    }
+
+    #[test]
+    fn transformed_bounds_follow_ground_display_transform() {
+        let transform = glam::Mat4::from_translation(glam::Vec3::new(0.0, 3.0 / 16.0, 0.0))
+            * glam::Mat4::from_scale(glam::Vec3::splat(0.5));
+        let (min, max) =
+            transform_item_bounds(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5), transform);
+
+        assert!((min - glam::Vec3::new(-0.25, -0.0625, -0.25)).length() < 1.0e-6);
+        assert!((max - glam::Vec3::new(0.25, 0.4375, 0.25)).length() < 1.0e-6);
+    }
+}
+
+fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f32, f32) {
+    let mesh = renderer.item_mesh_info(item_name);
+    let is_block_model = mesh
+        .map(|mesh| mesh.is_block_model)
+        .unwrap_or_else(|| renderer.registry().get_item_model(item_name).is_some());
+    let fallback_transform = if is_block_model {
+        crate::world::block::model::default_block_ground_transform()
+    } else {
+        glam::Mat4::from_scale(glam::Vec3::splat(0.5))
+    };
+    let ground_transform = renderer
+        .registry()
+        .get_item_ground_transform(item_name)
+        .unwrap_or(fallback_transform);
+    let (bounds_min, bounds_max) = mesh
+        .map(|mesh| (mesh.bounds_min, mesh.bounds_max))
+        .unwrap_or_else(|| {
+            if is_block_model {
+                (glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5))
+            } else {
+                (
+                    glam::Vec3::new(-0.5, -0.5, -1.0 / 32.0),
+                    glam::Vec3::new(0.5, 0.5, 1.0 / 32.0),
+                )
+            }
+        });
+    let (min, max) = transform_item_bounds(bounds_min, bounds_max, ground_transform);
+    (ground_transform, min.y, max.z - min.z)
+}
+
 /// Emits the hovering, spinning, multi-copy cluster for one dropped item,
-/// shared by resting items and the pickup fly-animation. Mirrors
-/// `ItemEntityRenderer.submit` + `submitMultipleFromCount`: hover from the
-/// post-scale model bounds, 3D-vs-flat copy layout on the model depth, scatter
-/// RNG seeded by item id.
+/// shared by resting items and the pickup fly-animation. `ground_transform`
+/// is the model's resolved GROUND display transform; `min_y` and `z_size` are
+/// the bounds after that transform, matching `ItemStackRenderState`.
 #[allow(clippy::too_many_arguments)]
 fn emit_item_copies(
     infos: &mut Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo>,
     item_name: &str,
     item_id: u32,
+    damage: i32,
     count: i32,
     anchor_rel_pos: glam::Vec3,
     age_f: f32,
     bob_offset: f32,
-    is_block_model: bool,
+    ground_transform: glam::Mat4,
     min_y: f32,
     z_size: f32,
     light: f32,
+    nether_lighting: bool,
 ) {
     use crate::renderer::pipelines::item_entity::ItemRenderInfo;
     use crate::util::JavaRandom;
@@ -3066,36 +3149,32 @@ fn emit_item_copies(
     let bob = (age_f / 10.0 + bob_offset).sin() * 0.1 + 0.1;
     let spin = age_f / 20.0 + bob_offset;
     let copies = stack_render_count(count);
-    // GROUND display scale: blocks 0.25, flat items 0.5.
-    let scale = if is_block_model { 0.25 } else { 0.5 };
-    let min_y_r = min_y * scale;
-    let z_size_r = z_size * scale;
     // hover = bob + (-modelBoundingBox.minY) + 0.0625
-    let hover_y = bob - min_y_r + 0.0625;
+    let hover_y = bob - min_y + 0.0625;
 
     let base = glam::Mat4::from_translation(anchor_rel_pos + glam::Vec3::new(0.0, hover_y, 0.0))
         * glam::Mat4::from_rotation_y(spin);
-    let scale_mat = glam::Mat4::from_scale(glam::Vec3::splat(scale));
     let mut push = |copy_offset: glam::Mat4| {
         infos.push(ItemRenderInfo {
             item_name: item_name.to_string(),
-            model_matrix: base * copy_offset * scale_mat,
+            model_matrix: base * copy_offset * ground_transform,
             light,
+            nether_lighting,
         });
     };
 
-    // getSeedForItemStack seeds from item id (+ damage, not extracted yet).
-    let mut rng = JavaRandom::new(item_id as i64);
+    // ItemClusterRenderState.getSeedForItemStack: registry id + damage value.
+    let mut rng = JavaRandom::new(item_stack_seed(item_id, damage));
     let mut jitter = |spread: f32| (rng.next_float() * 2.0 - 1.0) * spread;
 
-    if z_size_r > 0.0625 {
+    if z_size > 0.0625 {
         push(glam::Mat4::IDENTITY);
         for _ in 1..copies {
             let off = glam::Vec3::new(jitter(0.15), jitter(0.15), jitter(0.15));
             push(glam::Mat4::from_translation(off));
         }
     } else {
-        let z_step = z_size_r * 1.5;
+        let z_step = z_size * 1.5;
         let z_start = -(z_step * (copies - 1) as f32 / 2.0);
         push(glam::Mat4::from_translation(glam::Vec3::new(
             0.0, 0.0, z_start,
@@ -3111,6 +3190,8 @@ fn emit_item_copies(
 fn build_item_render_infos(
     entity_store: &crate::entity::ItemEntityStore,
     chunk_store: &ChunkStore,
+    renderer: &Renderer,
+    nether_cardinal_lighting: bool,
     camera_pos: glam::DVec3,
     anchor: glam::DVec3,
     partial_tick: f32,
@@ -3120,18 +3201,21 @@ fn build_item_render_infos(
         let age_f = item.age as f32 + partial_tick;
         let lerped = item.prev_position.lerp(item.position, partial_tick as f64);
         let light = get_entity_light(chunk_store, lerped);
+        let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item.item_name);
         emit_item_copies(
             &mut infos,
             &item.item_name,
             item.item_id,
+            item.damage,
             item.count,
             (*lerped - anchor).as_vec3(),
             age_f,
             item.bob_offset,
-            item.is_block_model,
-            item.min_y,
-            item.z_size,
+            ground_transform,
+            min_y,
+            z_size,
             light,
+            nether_cardinal_lighting,
         );
     }
 
@@ -3140,18 +3224,21 @@ fn build_item_render_infos(
     for pickup in entity_store.active_pickups(partial_tick) {
         let age_f = pickup.age as f32 + partial_tick;
         let light = get_entity_light(chunk_store, pickup.position);
+        let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &pickup.item_name);
         emit_item_copies(
             &mut infos,
             &pickup.item_name,
             pickup.item_id,
+            pickup.damage,
             pickup.count,
             (*pickup.position - anchor).as_vec3(),
             age_f,
             pickup.bob_offset,
-            pickup.is_block_model,
-            pickup.min_y,
-            pickup.z_size,
+            ground_transform,
+            min_y,
+            z_size,
             light,
+            nether_cardinal_lighting,
         );
     }
 

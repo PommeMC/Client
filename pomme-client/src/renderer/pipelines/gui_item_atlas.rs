@@ -143,6 +143,14 @@ impl DynamicAtlasAllocator {
         self.free_slot_if(|_, slot| slot.discard_after_frame);
     }
 
+    fn invalidate_all(&mut self) {
+        self.used_by_key.clear();
+        self.free.fill(true);
+        for slot in &mut self.slots {
+            slot.discard_after_frame = false;
+        }
+    }
+
     fn free_slot_if(&mut self, mut predicate: impl FnMut(&str, &SlotInternal) -> bool) {
         let to_remove: Vec<String> = self
             .used_by_key
@@ -270,6 +278,10 @@ impl GuiItemAtlas {
 
     pub fn end_frame(&mut self) {
         self.allocator.end_frame();
+    }
+
+    pub fn invalidate_all(&mut self) {
+        self.allocator.invalidate_all();
     }
 
     /// Top-origin pixel coordinates of the slot's upper-left corner; pair with
@@ -655,4 +667,23 @@ fn create_framebuffer(
     device
         .create_framebuffer(&info, None)
         .expect("failed to create gui_item_atlas framebuffer")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalidate_all_releases_cached_slots_as_stale() {
+        let mut atlas = DynamicAtlasAllocator::new(2, 1);
+        let (_, first_state) = atlas.get_or_allocate("cocoa_beans", false).unwrap();
+        assert!(matches!(first_state, SlotState::Empty));
+        let (_, ready_state) = atlas.get_or_allocate("cocoa_beans", false).unwrap();
+        assert!(matches!(ready_state, SlotState::Ready));
+
+        atlas.invalidate_all();
+
+        let (_, rebake_state) = atlas.get_or_allocate("cocoa_beans", false).unwrap();
+        assert!(matches!(rebake_state, SlotState::Stale));
+    }
 }

@@ -383,12 +383,12 @@ fn build_pipeline(
     use crate::renderer::chunk::buffer::{chunk_vertex_attributes, chunk_vertex_bindings};
     let binding_descs = chunk_vertex_bindings();
     let attr_descs = chunk_vertex_attributes();
-    // Binding 0 / attributes 0-3 are the packed vertices; binding 1 /
-    // attributes 4-5 the per-instance meta only the indirect passes use.
+    // Binding 0 / attributes 0-4 are the packed terrain vertex; binding 1 /
+    // attributes 5-6 are per-instance meta used only by the indirect passes.
     let (binding_descs, attr_descs): (&[_], &[_]) = if instanced {
         (&binding_descs, &attr_descs)
     } else {
-        (&binding_descs[..1], &attr_descs[..4])
+        (&binding_descs[..1], &attr_descs[..5])
     };
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
         vertex_binding_description_count: binding_descs.len() as u32,

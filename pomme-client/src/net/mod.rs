@@ -60,6 +60,7 @@ pub enum NetworkEvent {
         height: u32,
         min_y: i32,
         has_skylight: bool,
+        nether_cardinal_lighting: bool,
     },
     ChunkLoaded {
         pos: ChunkPos,
@@ -368,6 +369,7 @@ pub enum NetworkEvent {
         id: i32,
         item_name: String,
         item_id: u32,
+        damage: i32,
         count: i32,
     },
     EntityHeadRotation {

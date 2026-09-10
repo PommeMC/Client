@@ -236,9 +236,10 @@ impl Renderer {
 
         splash(&mut menu_pipeline, 0.2, "Building texture atlas...");
 
+        let generated_item_textures: HashSet<&str> = registry.flat_item_textures().collect();
         let texture_names: HashSet<&str> = registry
             .texture_names()
-            .chain(registry.flat_item_textures())
+            .chain(generated_item_textures.iter().copied())
             .chain(crate::particle::END_ROD_SPRITES)
             .collect();
         let atlas = TextureAtlas::build(
@@ -249,6 +250,7 @@ impl Renderer {
             jar_assets_dir,
             asset_index,
             &texture_names,
+            &generated_item_textures,
             None,
         )?;
 
@@ -448,7 +450,6 @@ impl Renderer {
             &atlas.uv_map,
             &registry,
             jar_assets_dir,
-            asset_index,
         );
 
         Ok(Self {
@@ -1160,10 +1161,15 @@ impl Renderer {
             Some(packs),
         );
 
+        self.item_entity_pipeline
+            .clear_meshes(&self.ctx.device, &self.ctx.allocator);
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
+        let generated_item_textures: std::collections::HashSet<&str> =
+            self.registry.flat_item_textures().collect();
         let texture_names: std::collections::HashSet<&str> = self
             .registry
             .texture_names()
+            .chain(generated_item_textures.iter().copied())
             .chain(crate::particle::END_ROD_SPRITES)
             .collect();
         self.atlas = TextureAtlas::build(
@@ -1174,11 +1180,14 @@ impl Renderer {
             &self.jar_assets_dir,
             &self.asset_index,
             &texture_names,
+            &generated_item_textures,
             Some(packs),
         )
         .expect("failed to rebuild atlas");
 
         self.chunk_pipeline
+            .rebind_atlas(&self.ctx.device, &self.atlas);
+        self.item_entity_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.gui_item_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
@@ -1186,6 +1195,19 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+
+        warm_item_meshes(
+            &self.ctx.device,
+            &self.ctx.allocator,
+            &mut self.item_entity_pipeline,
+            &self.atlas.uv_map,
+            &self.registry,
+            &self.jar_assets_dir,
+        );
+
+        // GUI item slots cache fully rendered pixels. Releasing their keys is
+        // enough: reused slots are marked stale and cleared before rebaking.
+        self.gui_item_atlas.invalidate_all();
 
         tracing::info!("Assets reloaded");
     }
@@ -1290,8 +1312,11 @@ impl Renderer {
         self.menu_pipeline.spans_width(spans, scale)
     }
 
-    /// Builds the item mesh if needed; returns whether it has a 3D model
-    /// (vs a flat sprite), used to pick the first-person transform.
+    /// Local item-mesh classification and bounds used by dropped-item layout.
+    pub fn item_mesh_info(&self, name: &str) -> Option<pipelines::item_entity::ItemMeshInfo> {
+        self.item_entity_pipeline.mesh_info(name)
+    }
+
     pub fn ensure_item_mesh(&mut self, name: &str) -> pipelines::item_entity::ItemMeshInfo {
         if let Some(info) = self.item_entity_pipeline.mesh_info(name) {
             return info;
@@ -1317,8 +1342,6 @@ impl Renderer {
                 name,
                 &texture_key,
                 &self.atlas.uv_map,
-                &self.jar_assets_dir,
-                &self.asset_index,
             );
             false
         };
@@ -1328,8 +1351,16 @@ impl Renderer {
             .mesh_info(name)
             .unwrap_or(pipelines::item_entity::ItemMeshInfo {
                 is_block_model,
-                min_y: -0.5,
-                z_size: if is_block_model { 1.0 } else { 1.0 / 16.0 },
+                bounds_min: if is_block_model {
+                    glam::Vec3::splat(-0.5)
+                } else {
+                    glam::Vec3::new(-0.5, -0.5, -1.0 / 32.0)
+                },
+                bounds_max: if is_block_model {
+                    glam::Vec3::splat(0.5)
+                } else {
+                    glam::Vec3::new(0.5, 0.5, 1.0 / 32.0)
+                },
             })
     }
 
@@ -1944,7 +1975,6 @@ fn warm_item_meshes(
     uv_map: &chunk::atlas::AtlasUVMap,
     registry: &BlockRegistry,
     jar_assets_dir: &Path,
-    asset_index: &Option<AssetIndex>,
 ) {
     let items_dir = jar_assets_dir.join("minecraft").join("items");
     let entries = match std::fs::read_dir(&items_dir) {
@@ -1963,15 +1993,7 @@ fn warm_item_meshes(
                 .get_flat_item_texture_key(name)
                 .map(String::from)
                 .unwrap_or_else(|| format!("item/{name}"));
-            item_entity_pipeline.ensure_flat_mesh(
-                device,
-                allocator,
-                name,
-                &texture_key,
-                uv_map,
-                jar_assets_dir,
-                asset_index,
-            );
+            item_entity_pipeline.ensure_flat_mesh(device, allocator, name, &texture_key, uv_map);
         }
     }
 }
