@@ -56,14 +56,17 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: pomme-client.exe
             name: pomme-client-windows-x64
+            openal_classifier: natives-windows
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: pomme-client
             name: pomme-client-linux-x64-gnu
+            openal_classifier: natives-linux
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: pomme-client
             name: pomme-client-macos-arm64
+            openal_classifier: natives-macos-arm64
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -90,12 +93,30 @@ jobs:
       - name: Build
         run: cargo build -p pomme-client --release --target ${{ matrix.target }}
 
+      # The runner images disagree on whether `python` or `python3` is on PATH,
+      # and the `--require` staging below fails the release rather than degrade.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      # Version, jar member and checksum come from
+      # pomme-client/third-party/openal-natives.txt, which `just openal` also
+      # reads, so a release and a dev build never diverge.
+      - name: Stage Minecraft's OpenAL Soft native
+        shell: bash
+        run: |
+          mkdir -p bundle
+          python tools/fetch_openal.py bundle \
+            --classifier "${{ matrix.openal_classifier }}" --require
+
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           mkdir -p dist bundle
           cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" bundle/
+          cp pomme-client/third-party/OpenAL-Soft-LICENSE.txt bundle/
+          cp pomme-client/third-party/OpenAL-Soft-NOTICE.txt bundle/
 
           # macOS has no system Vulkan, so ship the loader + MoltenVK + ICD next
           # to the binary (build.rs gives it an @executable_path rpath).
@@ -119,8 +140,11 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.artifact }}" -DestinationPath "dist/${{ matrix.name }}.zip"
+          New-Item -ItemType Directory -Force dist, bundle | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.artifact }}" bundle/
+          Copy-Item "pomme-client/third-party/OpenAL-Soft-LICENSE.txt" bundle/
+          Copy-Item "pomme-client/third-party/OpenAL-Soft-NOTICE.txt" bundle/
+          Compress-Archive -Path "bundle/*" -DestinationPath "dist/${{ matrix.name }}.zip"
 
       - uses: actions/upload-artifact@v7
         with:

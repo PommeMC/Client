@@ -12,15 +12,24 @@ launcher-pre-pr:
     @cargo clippy -p pomme-launcher --release --all-targets --all-features -- -D warnings
     @pnpm --filter pomme-launcher pre-pr
 
-client-dev *args:
+# Stage Minecraft's OpenAL Soft next to the dev binaries, as the release job does.
+openal:
+    #!/usr/bin/env bash
+    python=$(command -v python3 || command -v python) || {
+        echo "warning: no python on PATH, skipping OpenAL staging (audio will be disabled)" >&2
+        exit 0
+    }
+    "$python" tools/fetch_openal.py target/debug target/release
+
+client-dev *args: openal
     @cargo run -p pomme-client {{ args }}
 
 # Optimized release client for accurate benchmarking (supplies the launch token the guard needs).
-client-release *args:
+client-release *args: openal
     #!/usr/bin/env bash
     cargo run --release -p pomme-client -- --launch-token "$(mktemp)" {{ args }}
 
-client-build *args:
+client-build *args: openal
     @cargo build -p pomme-client {{ args }}
 
 client-pre-pr:
@@ -29,7 +38,7 @@ client-pre-pr:
     @cargo clippy -p pomme-client --release --all-targets --all-features -- -D warnings
     @cargo clippy -p pomme-protocol --release --all-targets --all-features -- -D warnings
     @cargo test -p pomme-protocol
-    @cargo test -p pomme-client -- net::azalea_compat world::block renderer::camera:: ui::menu:: player::tests::
+    @cargo test -p pomme-client -- net::azalea_compat world::block renderer::camera:: ui::menu:: player::tests:: audio:: net::handler::
 
 # Regenerate a version's packet-id table from the decompiled reference.
 protogen version="26.2":

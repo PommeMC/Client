@@ -1335,7 +1335,7 @@ fn play_block_sound(audio: &AudioEngine, event: &str, pos: BlockPos, volume: f32
         return;
     }
     audio.play_world_sound(
-        &SoundRef::Event(event.to_string()),
+        &SoundRef::event(event),
         CATEGORY_BLOCKS,
         Position::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5),
         volume,

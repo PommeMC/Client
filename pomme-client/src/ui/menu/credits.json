@@ -50,7 +50,7 @@
           },
           {
             "title": "Platform",
-            "names": ["winit", "rodio", "tokio"]
+            "names": ["winit", "OpenAL Soft", "libloading", "symphonia", "tokio"]
           }
         ]
       }

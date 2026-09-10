@@ -1,0 +1,16 @@
+# OpenAL Soft natives, as shipped by Minecraft 26.2 via LWJGL.
+#
+# Read by tools/fetch_openal.py, which both `just openal` and the release
+# workflow call, so a development build and a release bundle can never end up
+# on different builds of the library.
+#
+# Jars come from https://libraries.minecraft.net/org/lwjgl/lwjgl-openal/
+# <version>/lwjgl-openal-<version>-<classifier>.jar and the checksum covers the
+# whole jar, matching what the Mojang library index publishes.
+
+version 3.4.1
+
+# classifier          jar member                                    output name       jar sha256
+natives-windows       windows/x64/org/lwjgl/openal/OpenAL.dll       OpenAL.dll        28d4065b9c6be68454eb4d7c0da665bd4bc7cc77d854c1f67afbd2f38ff730a3
+natives-linux         linux/x64/org/lwjgl/openal/libopenal.so       libopenal.so      c3be36ffda26c46b77bfa359586424a95d7620be11427897c7a454abb16c0994
+natives-macos-arm64   macos/arm64/org/lwjgl/openal/libopenal.dylib  libopenal.dylib   704365e5bfc028c006d2fe54862742d661295bd4b960824a0d2fbe5a9c7b8ffd
