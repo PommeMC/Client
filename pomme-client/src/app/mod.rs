@@ -23,6 +23,7 @@ use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
 use crate::net::connection::{ConnectArgs, spawn_connection};
 use crate::renderer::{self, Renderer};
+use crate::ui::menu::PanoramaTheme;
 use crate::user::UserData;
 
 #[derive(Error, Debug)]
@@ -203,6 +204,17 @@ impl ApplicationHandler for App {
                         };
                     }
                 };
+
+                // The pipeline builds itself from the jar assets, which is only
+                // right for the Default theme; point it at the saved theme's
+                // cubemap before the first menu frame.
+                let theme = self.core.menu.theme();
+                if theme != PanoramaTheme::Default {
+                    renderer.reload_panorama(
+                        &theme.panorama_dir(&self.core.data_dirs),
+                        &self.core.asset_index,
+                    );
+                }
 
                 if let Some(p) = &mut self.core.presence {
                     p.set_in_menu(&self.core.version);

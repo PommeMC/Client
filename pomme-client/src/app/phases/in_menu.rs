@@ -1,7 +1,7 @@
 use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
 use crate::net::connection::ConnectArgs;
-use crate::ui::menu::{MenuAction, PanoramaTheme};
+use crate::ui::menu::MenuAction;
 
 pub enum MenuUpdateResult {
     None,
@@ -68,7 +68,7 @@ pub fn update_menu(
         result.blur,
         result.elements,
         core.input.cursor_pos(),
-        core.menu.is_main_screen(),
+        core.menu.show_skin_preview(),
     ) {
         tracing::error!("Render error: {e}");
     }
@@ -127,12 +127,8 @@ pub fn update_menu(
             return MenuUpdateResult::Connect { connect_args };
         }
         MenuAction::ChangeTheme(theme) => {
-            let panorama_dir = match theme {
-                PanoramaTheme::Default => core.data_dirs.jar_assets_dir.clone(),
-                PanoramaTheme::Pomme => core.data_dirs.pomme_assets_dir.join("panoramas"),
-            };
             gfx.renderer
-                .reload_panorama(&panorama_dir, &core.asset_index);
+                .reload_panorama(&theme.panorama_dir(&core.data_dirs), &core.asset_index);
             core.menu.start_transition_open();
         }
         MenuAction::Quit => {

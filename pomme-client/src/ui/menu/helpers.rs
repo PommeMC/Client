@@ -839,3 +839,258 @@ pub(super) fn push_done_button(
         true,
     )
 }
+
+/// What sits inside an icon button: a GUI sprite at its native size, or one of
+/// Pomme's Font Awesome glyphs for the entries vanilla has no sprite for.
+pub(super) enum IconFace {
+    Sprite { id: SpriteId, w: f32, h: f32 },
+    Glyph(char),
+}
+
+/// Font Awesome glyphs carry their own padding, so they sit a little smaller
+/// than the 15-unit sprites to read at the same weight.
+const GLYPH_ICON_SIZE: f32 = 12.0;
+
+/// Vanilla `SpriteIconButton`: a widget-button frame with the face centred on
+/// it, rather than stretched to fill. `highlighted` paints the hover sprite,
+/// which vanilla also uses for keyboard focus.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_icon_widget(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    gs: f32,
+    face: IconFace,
+    enabled: bool,
+    highlighted: bool,
+) {
+    let (sprite, border) = if !enabled {
+        (SpriteId::ButtonDisabled, 1.0)
+    } else if highlighted {
+        (SpriteId::ButtonHover, 3.0)
+    } else {
+        (SpriteId::ButtonNormal, 3.0)
+    };
+    elements.push(MenuElement::NineSlice {
+        x,
+        y,
+        w: size,
+        h: size,
+        sprite,
+        border: border * gs,
+        tint: WHITE,
+    });
+    match face {
+        IconFace::Sprite { id, w, h } => {
+            let (iw, ih) = (w * gs, h * gs);
+            elements.push(MenuElement::Image {
+                x: x + (size - iw) / 2.0,
+                y: y + (size - ih) / 2.0,
+                w: iw,
+                h: ih,
+                sprite: id,
+                tint: WHITE,
+            });
+        }
+        IconFace::Glyph(icon) => elements.push(MenuElement::Icon {
+            x: x + size / 2.0,
+            y: y + size / 2.0,
+            icon,
+            scale: GLYPH_ICON_SIZE * gs,
+            color: WHITE,
+        }),
+    }
+}
+
+const DROP_TEXT: [f32; 4] = [0.89, 0.90, 0.96, 0.85];
+const DROP_TEXT_BRIGHT: [f32; 4] = [0.94, 0.95, 0.98, 1.0];
+const DROP_ACCENT: [f32; 4] = [0.39, 0.71, 1.0, 0.9];
+
+/// The Pomme link and theme dropdowns, and the wipe that plays while the theme
+/// swaps. Both title screens carry these, so they live here rather than in
+/// either screen's builder.
+impl MainMenu {
+    /// The two dropdowns are mutually exclusive, so opening either closes the
+    /// other. Clearing unconditionally is the same thing: if this toggle just
+    /// closed its own list, the other was already shut.
+    pub(super) fn toggle_links(&mut self) {
+        self.links_open = !self.links_open;
+        self.theme_open = false;
+    }
+
+    pub(super) fn toggle_theme(&mut self) {
+        self.theme_open = !self.theme_open;
+        self.links_open = false;
+    }
+
+    /// Website / Discord / GitHub, opening upwards with its bottom edge at
+    /// `drop_bottom`. `anchor` is the icon that toggles it, so a click on the
+    /// icon itself doesn't count as a click-away.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn push_links_dropdown(
+        &mut self,
+        elements: &mut Vec<MenuElement>,
+        any_hovered: &mut bool,
+        cursor: (f32, f32),
+        clicked: bool,
+        style: &DropdownStyle,
+        anchor: [f32; 4],
+        drop_x: f32,
+        drop_bottom: f32,
+        drop_w: f32,
+    ) {
+        if !self.links_open {
+            return;
+        }
+        let links: [(&str, char, &str); 3] = [
+            ("Website", ICON_GLOBE, "https://pomme.rs"),
+            ("Discord", ICON_COMMENT, "https://discord.gg/ucBA55bHPR"),
+            (
+                "GitHub",
+                ICON_CODE,
+                "https://github.com/PommeMC/Pomme-Client",
+            ),
+        ];
+        let total_h = links.len() as f32 * style.item_h;
+        let drop_y_top = drop_bottom - total_h;
+        style.draw_background(elements, drop_x, drop_y_top, drop_w, total_h);
+        let mut clicked_inside = false;
+        for (i, (label, icon, url)) in links.iter().enumerate() {
+            let item = style.draw_item(
+                elements,
+                any_hovered,
+                cursor,
+                drop_x,
+                drop_y_top,
+                drop_w,
+                i,
+                links.len(),
+                label,
+                Some((*icon, [0.6, 0.7, 0.85, 0.8])),
+                DROP_TEXT_BRIGHT,
+                DROP_TEXT,
+            );
+            if item {
+                clicked_inside = true;
+            }
+            if clicked && item {
+                let _ = open::that(url);
+                self.links_open = false;
+            }
+        }
+        if dismiss_dropdown(
+            cursor,
+            clicked,
+            clicked_inside,
+            [drop_x, drop_y_top, drop_w, total_h],
+            anchor,
+        ) {
+            self.links_open = false;
+        }
+    }
+
+    /// The theme picker. Selecting a different theme starts the wipe; the swap
+    /// itself lands in `drive_theme_transition` once the strips have closed.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn push_theme_dropdown(
+        &mut self,
+        elements: &mut Vec<MenuElement>,
+        any_hovered: &mut bool,
+        cursor: (f32, f32),
+        clicked: bool,
+        style: &DropdownStyle,
+        anchor: [f32; 4],
+        drop_x: f32,
+        drop_bottom: f32,
+        drop_w: f32,
+    ) {
+        if !self.theme_open {
+            return;
+        }
+        let themes: [(&str, PanoramaTheme); 2] = [
+            ("Pomme", PanoramaTheme::Pomme),
+            ("Default", PanoramaTheme::Default),
+        ];
+        let total_h = themes.len() as f32 * style.item_h;
+        let drop_y_top = drop_bottom - total_h;
+        style.draw_background(elements, drop_x, drop_y_top, drop_w, total_h);
+        let mut clicked_inside = false;
+        for (i, (label, theme_val)) in themes.iter().enumerate() {
+            let selected = self.theme == *theme_val;
+            let check = selected.then_some((ICON_CHECK, DROP_ACCENT));
+            let text_c = if selected { DROP_ACCENT } else { DROP_TEXT };
+            let item = style.draw_item(
+                elements,
+                any_hovered,
+                cursor,
+                drop_x,
+                drop_y_top,
+                drop_w,
+                i,
+                themes.len(),
+                label,
+                check,
+                DROP_TEXT_BRIGHT,
+                text_c,
+            );
+            if item {
+                clicked_inside = true;
+            }
+            if clicked && item {
+                if !selected {
+                    self.transition = Some(ThemeTransition {
+                        start: Instant::now(),
+                        target: *theme_val,
+                        reloaded: false,
+                        open_start: None,
+                    });
+                }
+                self.theme_open = false;
+            }
+        }
+        if dismiss_dropdown(
+            cursor,
+            clicked,
+            clicked_inside,
+            [drop_x, drop_y_top, drop_w, total_h],
+            anchor,
+        ) {
+            self.theme_open = false;
+        }
+    }
+
+    /// Advances the theme wipe, committing the new theme (and persisting it)
+    /// under the closed strips. Returns the reload action on the frame it
+    /// commits.
+    pub(super) fn drive_theme_transition(
+        &mut self,
+        elements: &mut Vec<MenuElement>,
+        screen_w: f32,
+        screen_h: f32,
+    ) -> Option<MenuAction> {
+        let mut action = None;
+        let mut committed = false;
+        if let Some(ref mut tr) = self.transition {
+            let close_t = (tr.start.elapsed().as_secs_f32() / CLOSE_DURATION).min(1.0);
+            if close_t >= 1.0 && !tr.reloaded {
+                tr.reloaded = true;
+                self.theme = tr.target;
+                committed = true;
+                action = Some(MenuAction::ChangeTheme(tr.target));
+            }
+            let open_t = tr
+                .open_start
+                .map(|s| (s.elapsed().as_secs_f32() / OPEN_DURATION).min(1.0))
+                .unwrap_or(0.0);
+            emit_transition_strips(elements, screen_w, screen_h, close_t, open_t);
+            if open_t >= 1.0 {
+                self.transition = None;
+            }
+        }
+        if committed {
+            self.save_settings();
+        }
+        action
+    }
+}

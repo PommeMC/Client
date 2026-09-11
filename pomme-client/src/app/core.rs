@@ -266,7 +266,7 @@ impl AppCore {
     ) -> Self {
         let resource_packs = ResourcePackManager::new(&data_dirs.game_dir);
 
-        let menu = MainMenu::new(
+        let mut menu = MainMenu::new(
             &data_dirs.game_dir,
             Arc::clone(&tokio_rt),
             user.username.clone(),
@@ -278,6 +278,8 @@ impl AppCore {
 
         let asset_index =
             AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, &version);
+
+        menu.load_splash(&data_dirs.jar_assets_dir, &asset_index);
 
         let audio = crate::audio::AudioEngine::new(
             &data_dirs.jar_assets_dir,

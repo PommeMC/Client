@@ -749,10 +749,9 @@ fn nine_slice(
     });
 }
 
-/// A 20×20 sprite button with a faint hover highlight; returns whether hovered.
-/// Vanilla `SpriteIconButton`: a widget-button background with the icon
-/// centered at its native size (`iw`×`ih` source pixels), not stretched to the
-/// button.
+/// An icon button with a faint hover highlight; returns whether hovered. These
+/// aren't in a focus ring, so unlike the title screen's they take no
+/// `FocusCtx`.
 #[allow(clippy::too_many_arguments)]
 fn icon_button(
     elements: &mut Vec<MenuElement>,
@@ -769,28 +768,20 @@ fn icon_button(
     tooltip: &str,
 ) -> bool {
     let hovered = common::hit_test(cursor, [x, y, size, size]);
-    nine_slice(
+    push_icon_widget(
         elements,
         x,
         y,
         size,
-        size,
-        if hovered {
-            SpriteId::ButtonHover
-        } else {
-            SpriteId::ButtonNormal
+        gs,
+        IconFace::Sprite {
+            id: sprite,
+            w: iw,
+            h: ih,
         },
-        3.0 * gs,
+        true,
+        hovered,
     );
-    let (icon_w, icon_h) = (iw * gs, ih * gs);
-    elements.push(MenuElement::Image {
-        x: x + (size - icon_w) / 2.0,
-        y: y + (size - icon_h) / 2.0,
-        w: icon_w,
-        h: icon_h,
-        sprite,
-        tint: WHITE,
-    });
     if hovered && !tooltip.is_empty() {
         common::push_tooltip(elements, cursor, screen_w, screen_h, gs, tooltip);
     }
