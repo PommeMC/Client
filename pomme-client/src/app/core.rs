@@ -3,6 +3,7 @@ use std::ops::Add;
 use std::sync::Arc;
 use std::time::Instant;
 
+use azalea_protocol::packets::game::s_player_input::ServerboundPlayerInput;
 use azalea_protocol::packets::game::{
     ServerboundClientCommand, ServerboundGamePacket, s_client_command, s_client_tick_end,
 };
@@ -210,6 +211,34 @@ pub struct PlayerInputState {
     jump: bool,
     shift: bool,
     sprint: bool,
+}
+
+fn player_input_state(
+    input: &InputState,
+    analog_move: glam::Vec2,
+    sprinting: bool,
+) -> PlayerInputState {
+    PlayerInputState {
+        forward: input.key_pressed(KeyCode::KeyW) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
+        backward: input.key_pressed(KeyCode::KeyS) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
+        left: input.key_pressed(KeyCode::KeyA) || analog_move.x > STICK_MOVEMENT_THRESHOLD,
+        right: input.key_pressed(KeyCode::KeyD) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
+        jump: input.performing_action(Action::Jump),
+        shift: input.performing_action(Action::Sneak),
+        sprint: sprinting,
+    }
+}
+
+fn serverbound_player_input(state: &PlayerInputState) -> ServerboundPlayerInput {
+    ServerboundPlayerInput {
+        forward: state.forward,
+        backward: state.backward,
+        left: state.left,
+        right: state.right,
+        jump: state.jump,
+        shift: state.shift,
+        sprint: state.sprint,
+    }
 }
 
 pub struct AppCore {
@@ -1179,10 +1208,11 @@ impl AppCore {
                 }
                 NetworkEvent::BlockChangedAck { seq } => {
                     let mut ack_dirty: Vec<azalea_core::position::BlockPos> = Vec::new();
+                    let player_aabb = game.player.bounding_box();
                     let snap = game.interaction.acknowledge(
                         seq,
                         &game.chunk_store,
-                        game.player.position.into(),
+                        player_aabb,
                         &mut ack_dirty,
                     );
                     if let Some(snap) = snap {
@@ -1875,12 +1905,14 @@ impl AppCore {
         });
         let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
 
+        let player_aabb = game.player.bounding_box();
         let dirty = game.interaction.tick(
             input,
             &game.chunk_store,
             &connection.packet_tx,
             &self.audio,
             game.player.position.into(),
+            player_aabb,
             game.player.eye_pos().into(),
             game.player.look_dir,
             game.player.on_ground,
@@ -1960,29 +1992,15 @@ impl AppCore {
     fn send_input_packet(input: &InputState, connection: &ConnectionHandle, game: &mut GameState) {
         let sender = &connection.packet_tx;
 
-        let analog_move = input.get_gamepad_left_analog().unwrap_or(glam::Vec2::ZERO);
+        let analog_move = input
+            .get_gamepad_movement_axes()
+            .unwrap_or(glam::Vec2::ZERO);
 
-        let current = PlayerInputState {
-            forward: input.key_pressed(KeyCode::KeyW) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
-            backward: input.key_pressed(KeyCode::KeyS) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
-            left: input.key_pressed(KeyCode::KeyA) || analog_move.x > STICK_MOVEMENT_THRESHOLD,
-            right: input.key_pressed(KeyCode::KeyD) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
-            jump: input.performing_action(Action::Jump),
-            shift: input.performing_action(Action::Sneak),
-            sprint: game.player.sprinting,
-        };
+        let current = player_input_state(input, analog_move, game.player.sprinting);
 
         if current != game.last_sent_input {
             sender.send(ServerboundGamePacket::PlayerInput(
-                azalea_protocol::packets::game::s_player_input::ServerboundPlayerInput {
-                    forward: current.forward,
-                    backward: current.backward,
-                    left: current.left,
-                    right: current.right,
-                    jump: current.jump,
-                    shift: current.shift,
-                    sprint: current.sprint,
-                },
+                serverbound_player_input(&current),
             ));
             game.last_sent_input = current;
         }
@@ -2138,7 +2156,33 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::server_view_distance_update;
+    use super::{player_input_state, server_view_distance_update, serverbound_player_input};
+    use crate::app::input::{InputState, gamepad_movement_axes};
+
+    #[test]
+    fn controller_packet_directions_match_physical_stick_direction() {
+        let input = InputState::released();
+
+        let right_state =
+            player_input_state(&input, gamepad_movement_axes(glam::vec2(1.0, 0.0)), false);
+        let right = serverbound_player_input(&right_state);
+        assert!(right.right);
+        assert!(!right.left);
+
+        let left_state =
+            player_input_state(&input, gamepad_movement_axes(glam::vec2(-1.0, 0.0)), false);
+        let left = serverbound_player_input(&left_state);
+        assert!(left.left);
+        assert!(!left.right);
+
+        let forward_right_state =
+            player_input_state(&input, gamepad_movement_axes(glam::vec2(0.8, 0.8)), false);
+        let forward_right = serverbound_player_input(&forward_right_state);
+        assert!(forward_right.forward);
+        assert!(forward_right.right);
+        assert!(!forward_right.backward);
+        assert!(!forward_right.left);
+    }
 
     #[test]
     fn server_view_distance_updates() {
