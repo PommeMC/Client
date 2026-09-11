@@ -4,6 +4,7 @@ mod helpers;
 mod main_screen;
 mod options;
 mod servers;
+mod worlds;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -365,6 +366,7 @@ const DOUBLE_CLICK_MS: u128 = 400;
 enum Screen {
     Main,
     ServerList,
+    WorldList,
     Friends,
     ConfirmDelete(usize),
     DirectConnect,
@@ -407,6 +409,7 @@ impl Screen {
             Self::OptionsCredits => Self::OptionsCredits,
             Self::CreditsRoll => Self::CreditsRoll,
             Self::ServerList => Self::ServerList,
+            Self::WorldList => Self::WorldList,
             Self::DirectConnect => Self::DirectConnect,
             Self::AddServer => Self::AddServer,
             Self::ConfirmDelete(i) => Self::ConfirmDelete(*i),
@@ -441,6 +444,12 @@ pub struct MainMenu {
     screen: Screen,
     server_list: ServerList,
     selected_server: Option<usize>,
+    world_list: crate::ui::world_list::WorldList,
+    /// Keyed by folder name, not row index: filtering rebuilds the rows every
+    /// frame, so an index would follow the filter rather than the world.
+    selected_world: Option<String>,
+    world_search: TextFieldState,
+    saves_dir: PathBuf,
     edit_name: TextFieldState,
     edit_address: TextFieldState,
     last_mp_ip: String,
@@ -560,6 +569,7 @@ impl MainMenu {
         access_token: Option<String>,
     ) -> Self {
         let server_list = ServerList::load(game_dir);
+        let saves_dir = game_dir.join("saves");
         // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
         let settings = load_settings(game_dir);
@@ -569,6 +579,10 @@ impl MainMenu {
             screen: Screen::Main,
             server_list,
             selected_server: None,
+            world_list: crate::ui::world_list::WorldList::scan(&saves_dir),
+            selected_world: None,
+            world_search: TextFieldState::new(MAX_SEARCH),
+            saves_dir,
             edit_name: TextFieldState::new(MAX_NAME),
             edit_address: TextFieldState::new(MAX_ADDRESS),
             last_mp_ip: String::new(),
@@ -908,6 +922,7 @@ impl MainMenu {
             Screen::Main => self.build_main(screen_w, screen_h, input, text_width_fn),
 
             Screen::ServerList => self.build_server_list(screen_w, screen_h, input, &text_width_fn),
+            Screen::WorldList => self.build_world_list(screen_w, screen_h, input, &text_width_fn),
             Screen::Friends => self.build_friends(screen_w, screen_h, input, &text_width_fn),
             Screen::ConfirmDelete(_) => {
                 self.build_confirm_delete(screen_w, screen_h, input, &text_width_fn)

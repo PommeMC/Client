@@ -694,7 +694,13 @@ impl MainMenu {
 
     /// Apply mouse-wheel scrolling within `area`, clamp the offset, and return
     /// the right-edge gutter to reserve for the scrollbar (0 when it all fits).
-    fn scroll_region(&mut self, input: &MenuInput, area: [f32; 4], total: f32, gs: f32) -> f32 {
+    pub(super) fn scroll_region(
+        &mut self,
+        input: &MenuInput,
+        area: [f32; 4],
+        total: f32,
+        gs: f32,
+    ) -> f32 {
         let max_scroll = (total - area[3]).max(0.0);
         if common::hit_test(input.cursor, area) {
             self.scroll_offset -= input.scroll_delta * 20.0 * gs;
@@ -727,26 +733,6 @@ impl MainMenu {
             );
         }
     }
-}
-
-fn nine_slice(
-    elements: &mut Vec<MenuElement>,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    sprite: SpriteId,
-    border: f32,
-) {
-    elements.push(MenuElement::NineSlice {
-        x,
-        y,
-        w,
-        h,
-        sprite,
-        border,
-        tint: WHITE,
-    });
 }
 
 /// A 20×20 sprite button with a faint hover highlight; returns whether hovered.
@@ -887,44 +873,6 @@ fn push_section_header(
         corner_radius: 0.0,
         color: WHITE,
     });
-}
-
-fn push_scrollbar(
-    elements: &mut Vec<MenuElement>,
-    right_x: f32,
-    top: f32,
-    h: f32,
-    total: f32,
-    scroll: f32,
-    gs: f32,
-) {
-    let max_scroll = (total - h).max(0.0);
-    if max_scroll <= 0.0 {
-        return;
-    }
-    // 6px track, inset 2px from the content's right edge (vanilla spacing).
-    let track_w = 6.0 * gs;
-    let track_x = right_x - track_w - 2.0 * gs;
-    let thumb_h = (h * h / total).max(16.0 * gs); // vanilla min thumb is larger
-    let thumb_y = top + (scroll / max_scroll) * (h - thumb_h);
-    nine_slice(
-        elements,
-        track_x,
-        top,
-        track_w,
-        h,
-        SpriteId::ScrollerBackground,
-        gs,
-    );
-    nine_slice(
-        elements,
-        track_x,
-        thumb_y,
-        track_w,
-        thumb_h,
-        SpriteId::Scroller,
-        gs,
-    );
 }
 
 /// Vanilla `gui.friends.presence.status.*` label + color for a friend.
