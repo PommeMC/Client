@@ -532,10 +532,7 @@ fn update_skin_descriptor(
 fn fallback_skin() -> (Vec<u8>, u32, u32) {
     let w = 64u32;
     let h = 64u32;
-    let mut pixels = vec![0u8; (w * h * 4) as usize];
-    for pixel in pixels.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&[196, 161, 125, 255]);
-    }
+    let pixels = [196u8, 161, 125, 255].repeat((w * h) as usize);
     (pixels, w, h)
 }
 
