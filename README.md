@@ -60,6 +60,16 @@ pnpm install
 just launcher-build --release
 ```
 
+### NixOS / Nix
+Pomme is packaged in [nixpkgs](https://github.com/NixOS/nixpkgs) (Maintained by [DerGrumpf](github.com/DerGrumpf)) as `pomme-client` and `pomme-launcher`.
+
+Try it without installing:
+```bash
+nix run nixpkgs#pomme-launcher
+```
+
+Or add `pomme-launcher` to your NixOS `environment.systemPackages`.
+
 ## Running
 
 ### Via the launcher (recommended)
