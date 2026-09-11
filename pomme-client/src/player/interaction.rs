@@ -399,27 +399,6 @@ impl InteractionState {
             );
         }
 
-        if !using && input.performing_action(input::Action::Destroy) {
-            self.continue_attack(
-                chunks,
-                sender,
-                audio,
-                player_pos,
-                on_ground,
-                creative,
-                held_stack,
-                effects,
-                &mut dirty_chunks,
-            );
-        } else {
-            self.miss_time = 0;
-            self.stop_destroying(sender);
-        }
-
-        if self.is_destroying {
-            let _ = input.strong_rumble_for_tick();
-        }
-
         // Vanilla `handleKeybinds`: while an item is in use, holding the use
         // key continues it and releasing sends RELEASE_USE_ITEM (an early
         // cancel; consumables finish on the server's own timer, never on
@@ -454,6 +433,38 @@ impl InteractionState {
             }
         }
 
+        // Vanilla checks `isUsingItem` once before the attack/use/pick loops,
+        // so a use started above does not suppress a pick from the same tick.
+        if !using && input.middle_just_pressed() {
+            self.pick_block_or_entity(sender, input.ctrl_held());
+        }
+
+        let attack_down = input.performing_action(input::Action::Destroy);
+        if !attack_down {
+            self.miss_time = 0;
+        }
+        if self.using_item.is_none() {
+            if attack_down {
+                self.continue_attack(
+                    chunks,
+                    sender,
+                    audio,
+                    player_pos,
+                    on_ground,
+                    creative,
+                    held_stack,
+                    effects,
+                    &mut dirty_chunks,
+                );
+            } else {
+                self.stop_destroying(sender);
+            }
+        }
+
+        if self.is_destroying {
+            let _ = input.strong_rumble_for_tick();
+        }
+
         if self.miss_time > 0 {
             self.miss_time -= 1;
         }
@@ -467,6 +478,24 @@ impl InteractionState {
         self.update_swing();
 
         dirty_chunks
+    }
+
+    fn pick_block_or_entity(&self, sender: &PacketSender, include_data: bool) {
+        match self.target {
+            Some(HitResult::Block(hit)) => sender.send_raw(wire::encode_pick_item_from_block(
+                hit.block_pos.x,
+                hit.block_pos.y,
+                hit.block_pos.z,
+                include_data,
+            )),
+            Some(HitResult::Entity(hit)) => {
+                sender.send_raw(wire::encode_pick_item_from_entity(
+                    hit.entity_id,
+                    include_data,
+                ));
+            }
+            None => {}
+        }
     }
 
     /// Vanilla `Player.tick`: advance the attack cooldown, and reset it when
@@ -1601,6 +1630,48 @@ mod tests {
         ));
         assert!(!same_item_same_components(Some(&a), None));
         assert!(same_item_same_components(None, None));
+    }
+
+    #[test]
+    fn pick_dispatches_current_target_and_ignores_miss() {
+        use crate::net::sender::Outbound;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut interaction = InteractionState::new();
+
+        interaction.target = Some(HitResult::Block(BlockHitResult {
+            block_pos: BlockPos::new(-1, 64, 3),
+            face: Direction::North,
+            hit_point: DVec3::ZERO,
+        }));
+        interaction.pick_block_or_entity(&sender, true);
+        match rx.try_recv().expect("block pick packet") {
+            Outbound::Raw(bytes) => {
+                assert_eq!(bytes, wire::encode_pick_item_from_block(-1, 64, 3, true))
+            }
+            Outbound::Packet(_) => panic!("pick packet must use raw encoding"),
+        }
+
+        interaction.target = Some(HitResult::Entity(EntityHitResult {
+            entity_id: 300,
+            location: DVec3::ZERO,
+            entity_pos: DVec3::ZERO,
+        }));
+        interaction.pick_block_or_entity(&sender, false);
+        match rx.try_recv().expect("entity pick packet") {
+            Outbound::Raw(bytes) => {
+                assert_eq!(bytes, wire::encode_pick_item_from_entity(300, false));
+            }
+            Outbound::Packet(_) => panic!("pick packet must use raw encoding"),
+        }
+
+        interaction.target = None;
+        interaction.pick_block_or_entity(&sender, false);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

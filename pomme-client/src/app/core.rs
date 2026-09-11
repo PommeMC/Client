@@ -841,6 +841,9 @@ impl AppCore {
                         game.set_container_state_id(state_id);
                     }
                 }
+                NetworkEvent::HeldSlot { slot } => {
+                    self.input.set_selected_slot(slot);
+                }
                 NetworkEvent::ContainerData {
                     container_id,
                     id,

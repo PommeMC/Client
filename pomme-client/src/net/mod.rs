@@ -133,6 +133,9 @@ pub enum NetworkEvent {
         item: ItemStack,
         state_id: u32,
     },
+    HeldSlot {
+        slot: u8,
+    },
     /// A menu data value (furnace lit/cook progress, etc.).
     ContainerData {
         container_id: i32,
