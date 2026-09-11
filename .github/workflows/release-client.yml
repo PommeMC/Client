@@ -18,6 +18,13 @@ env:
 
 permissions:
   contents: write
+  actions: read # reading CI's conclusion for the commit being released
+
+# Serialized, never cancelled: two runs would resolve the same next version and
+# race on the tag, and cancelling one mid-upload would leave a partial release.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -31,20 +38,35 @@ jobs:
       - name: Check for new commits since last release
         id: check
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # Only the weekly cron skips an unchanged master; manual/tag runs always release.
+          release() { echo "should_release=true" >> "$GITHUB_OUTPUT"; exit 0; }
+          skip() { echo "should_release=false" >> "$GITHUB_OUTPUT"; echo "$1"; exit 0; }
+
+          # Only the weekly cron is gated; a tag push or manual dispatch is a
+          # deliberate act and always releases.
           if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            release
           fi
+
           git fetch --tags --force
           last_tag=$(git tag --list 'client-v*' --sort=-v:refname | head -n1)
-          if [ -z "$last_tag" ] || [ -n "$(git rev-list "${last_tag}..HEAD")" ]; then
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "No new commits on master since ${last_tag}; skipping weekly release."
+          if [ -n "$last_tag" ] && [ -z "$(git rev-list "${last_tag}..HEAD")" ]; then
+            skip "No new commits on master since ${last_tag}."
           fi
+
+          # Merges are gated on CI, but master can still go red when two PRs pass
+          # separately and then conflict, and this release is announced to
+          # Discord. A run still in progress reports null and also skips.
+          ci=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "none"')
+          if [ "$ci" != "success" ]; then
+            skip "CI for ${GITHUB_SHA} is '${ci}', not success."
+          fi
+
+          release
 
   build-client:
     needs: check

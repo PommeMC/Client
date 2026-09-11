@@ -12,6 +12,12 @@ env:
 permissions:
   contents: write
 
+# Serialized, never cancelled: cancelling mid-upload would leave a partial
+# release. The tag comes from the ref here, so there is no version to race on.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   build-launcher:
     strategy:
