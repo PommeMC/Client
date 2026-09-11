@@ -261,7 +261,9 @@ impl MainMenu {
                 } else {
                     match def.id {
                         0 => {
-                            self.open_world_list();
+                            self.open_world_list(gs, &|t: &str| {
+                                text_width_fn(t, common::FONT_SIZE * gs)
+                            });
                         }
                         1 => {
                             self.set_screen(Screen::ServerList);

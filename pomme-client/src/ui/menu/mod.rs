@@ -367,6 +367,7 @@ enum Screen {
     Main,
     ServerList,
     WorldList,
+    CreateWorld,
     Friends,
     ConfirmDelete(usize),
     DirectConnect,
@@ -410,6 +411,7 @@ impl Screen {
             Self::CreditsRoll => Self::CreditsRoll,
             Self::ServerList => Self::ServerList,
             Self::WorldList => Self::WorldList,
+            Self::CreateWorld => Self::CreateWorld,
             Self::DirectConnect => Self::DirectConnect,
             Self::AddServer => Self::AddServer,
             Self::ConfirmDelete(i) => Self::ConfirmDelete(*i),
@@ -449,6 +451,9 @@ pub struct MainMenu {
     /// frame, so an index would follow the filter rather than the world.
     selected_world: Option<String>,
     world_search: TextFieldState,
+    world_name: TextFieldState,
+    world_seed: TextFieldState,
+    create: worlds::CreateWorldState,
     saves_dir: PathBuf,
     edit_name: TextFieldState,
     edit_address: TextFieldState,
@@ -582,6 +587,9 @@ impl MainMenu {
             world_list: crate::ui::world_list::WorldList::scan(&saves_dir),
             selected_world: None,
             world_search: TextFieldState::new(MAX_SEARCH),
+            world_name: TextFieldState::new(MAX_NAME),
+            world_seed: TextFieldState::new(MAX_NAME),
+            create: worlds::CreateWorldState::default(),
             saves_dir,
             edit_name: TextFieldState::new(MAX_NAME),
             edit_address: TextFieldState::new(MAX_ADDRESS),
@@ -923,6 +931,9 @@ impl MainMenu {
 
             Screen::ServerList => self.build_server_list(screen_w, screen_h, input, &text_width_fn),
             Screen::WorldList => self.build_world_list(screen_w, screen_h, input, &text_width_fn),
+            Screen::CreateWorld => {
+                self.build_create_world(screen_w, screen_h, input, &text_width_fn)
+            }
             Screen::Friends => self.build_friends(screen_w, screen_h, input, &text_width_fn),
             Screen::ConfirmDelete(_) => {
                 self.build_confirm_delete(screen_w, screen_h, input, &text_width_fn)

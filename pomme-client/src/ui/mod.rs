@@ -26,5 +26,8 @@ pub mod text;
 pub mod text_edit;
 pub mod title;
 pub mod toast;
-#[allow(dead_code, reason = "the create and edit screens consume the rest")]
+#[allow(
+    dead_code,
+    reason = "the edit screen and the launch path consume the rest"
+)]
 pub mod world_list;

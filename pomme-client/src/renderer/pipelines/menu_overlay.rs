@@ -1939,6 +1939,10 @@ pub enum SpriteId {
     PingUnknown,
     ServerJoin,
     ServerJoinHighlighted,
+    Tab,
+    TabHighlighted,
+    TabSelected,
+    TabSelectedHighlighted,
     WorldJoin,
     WorldJoinHighlighted,
     WorldError,
@@ -2616,6 +2620,26 @@ fn build_sprite_atlas(
             SpriteId::ServerJoin,
             "minecraft/textures/gui/sprites/server_list/join.png",
             0.0,
+        ),
+        (
+            SpriteId::Tab,
+            "minecraft/textures/gui/sprites/widget/tab.png",
+            2.0,
+        ),
+        (
+            SpriteId::TabHighlighted,
+            "minecraft/textures/gui/sprites/widget/tab_highlighted.png",
+            2.0,
+        ),
+        (
+            SpriteId::TabSelected,
+            "minecraft/textures/gui/sprites/widget/tab_selected.png",
+            2.0,
+        ),
+        (
+            SpriteId::TabSelectedHighlighted,
+            "minecraft/textures/gui/sprites/widget/tab_selected_highlighted.png",
+            2.0,
         ),
         (
             SpriteId::WorldJoin,
