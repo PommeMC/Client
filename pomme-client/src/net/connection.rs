@@ -702,6 +702,18 @@ fn nbt_color_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) ->
     })
 }
 
+fn chat_types_from_registry_holder(
+    holder: &azalea_core::registry_holder::RegistryHolder,
+) -> super::chat::ChatTypeRegistry {
+    let key: azalea_registry::identifier::Identifier = "minecraft:chat_type".into();
+    let entries = holder
+        .extra
+        .get(&key)
+        .map(|registry| registry.map.values().cloned().collect())
+        .unwrap_or_default();
+    super::chat::ChatTypeRegistry::from_entries(entries)
+}
+
 fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<String> {
     compound.get(key).and_then(|v| match v {
         simdnbt::owned::NbtTag::String(s) => Some(s.to_string()),
@@ -722,6 +734,7 @@ async fn game_loop(
         registries: mut registry_holder,
         mut deferred_login,
     } = joined;
+    let mut chat_types = chat_types_from_registry_holder(&registry_holder);
     let sender = PacketSender::new(outbound_tx.clone());
 
     let shared_tree: crate::net::commands::SharedCommandTree =
@@ -738,7 +751,7 @@ async fn game_loop(
         // "signing" feature). Everything is sent unsigned atm, which only
         // works on enforce-secure-profile=false.
         while let Ok(msg) = tokio::task::block_in_place(|| chat_rx.recv()) {
-            let packet = if let Some(command) = msg.strip_prefix('/') {
+            let frame = if let Some(command) = msg.strip_prefix('/') {
                 tracing::info!("Sending command: {command:?}");
                 let signable = chat_tree
                     .lock()
@@ -750,29 +763,22 @@ async fn game_loop(
                         "Command has signable arguments but chat signing is not implemented; sending unsigned"
                     );
                 }
-                ServerboundGamePacket::ChatCommand(
-                    azalea_protocol::packets::game::s_chat_command::ServerboundChatCommand {
-                        command: command.to_string(),
-                    },
-                )
+                super::chat::encode_outbound_command(command)
             } else {
-                ServerboundGamePacket::Chat(
-                    azalea_protocol::packets::game::s_chat::ServerboundChat {
-                        message: msg,
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
-                        salt: 0,
-                        signature: None,
-                        last_seen_messages: Default::default(),
-                    },
-                )
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                super::chat::encode_outbound_message(&msg, timestamp)
             };
-            if chat_outbound_tx
-                .send(Outbound::Packet(Box::new(packet)))
-                .is_err()
-            {
+            let frame = match frame {
+                Ok(frame) => frame,
+                Err(e) => {
+                    tracing::warn!("Not sending invalid chat input: {e}");
+                    continue;
+                }
+            };
+            if chat_outbound_tx.send(Outbound::Raw(frame)).is_err() {
                 break;
             }
         }
@@ -839,7 +845,7 @@ async fn game_loop(
             },
             None => raw,
         };
-        if handle_raw_game_packet(&raw, event_tx) {
+        if handle_raw_game_packet(&raw, event_tx, &chat_types) {
             continue;
         }
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
@@ -863,6 +869,7 @@ async fn game_loop(
                     .await?;
                     if !std::sync::Arc::ptr_eq(&holder, &registry_holder) {
                         registry_holder = holder;
+                        chat_types = chat_types_from_registry_holder(&registry_holder);
                         let _ =
                             event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
                         let _ = event_tx.try_send(NetworkEvent::BiomeColors {

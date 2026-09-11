@@ -319,16 +319,6 @@ pub fn handle_game_packet(
                 walking_speed: p.walking_speed,
             });
         }
-        ClientboundGamePacket::SystemChat(p) => {
-            if p.overlay {
-                send_action_bar(event_tx, &p.content);
-            } else {
-                send_chat(event_tx, &p.content);
-            }
-        }
-        ClientboundGamePacket::SetActionBarText(p) => {
-            send_action_bar(event_tx, &p.text);
-        }
         ClientboundGamePacket::BossEvent(p) => {
             use azalea_protocol::packets::game::c_boss_event::Operation;
 
@@ -531,12 +521,6 @@ pub fn handle_game_packet(
                     });
                 }
             }
-        }
-        ClientboundGamePacket::PlayerChat(p) => {
-            send_chat(event_tx, &p.message());
-        }
-        ClientboundGamePacket::DisguisedChat(p) => {
-            send_chat(event_tx, &p.message);
         }
         ClientboundGamePacket::BlockUpdate(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockUpdate {
@@ -1067,18 +1051,6 @@ pub fn handle_game_packet(
     }
 }
 
-fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
-    tracing::info!("Chat: {text}");
-    let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
-}
-
-fn send_action_bar(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
-}
-
 fn send_scoreboard_team(
     event_tx: &Sender<NetworkEvent>,
     name: &str,
@@ -1243,7 +1215,18 @@ fn send_entity_moved(
 
 /// Consume packets that azalea's 26.2 codecs cannot represent correctly
 /// before the typed decode runs. Returns whether the packet was consumed.
-pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bool {
+pub fn handle_raw_game_packet(
+    raw: &[u8],
+    event_tx: &Sender<NetworkEvent>,
+    chat_types: &super::chat::ChatTypeRegistry,
+) -> bool {
+    if let Some(result) = super::chat::handle_raw_chat_packet(raw, event_tx, chat_types) {
+        if let Err(e) = result {
+            tracing::warn!("Skipping malformed chat packet: {e}");
+        }
+        return true;
+    }
+
     let mut cur = std::io::Cursor::new(raw);
     let Ok(packet_id) = u32::azalea_read_var(&mut cur) else {
         return false;
@@ -1558,7 +1541,11 @@ mod tests {
         7_u64.azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw_game_packet(
+            &raw,
+            &tx,
+            &crate::net::chat::ChatTypeRegistry::default(),
+        ));
         match rx.recv().unwrap() {
             NetworkEvent::PlaySound { category, pos, .. } => {
                 assert_eq!(category, 10);
@@ -1580,7 +1567,11 @@ mod tests {
         9_u64.azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw_game_packet(
+            &raw,
+            &tx,
+            &crate::net::chat::ChatTypeRegistry::default(),
+        ));
         match rx.recv().unwrap() {
             NetworkEvent::PlayEntitySound {
                 category,
@@ -1608,7 +1599,11 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw_game_packet(
+            &raw,
+            &tx,
+            &crate::net::chat::ChatTypeRegistry::default(),
+        ));
         match rx.recv().unwrap() {
             NetworkEvent::StopSound { sound_id, category } => {
                 assert_eq!(category, Some(10));
