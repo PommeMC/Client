@@ -9,212 +9,211 @@ import {
 import { restrictToWindowEdges } from "@dnd-kit/modifiers";
 import { rectSortingStrategy, SortableContext, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import {
-  HiArrowPath,
-  HiEllipsisVertical,
-  HiPencil,
-  HiPlay,
-  HiPlus,
-  HiTrash,
-} from "react-icons/hi2";
-import { useDropdown } from "../lib/hooks";
-import { useAppStateContext } from "../lib/state";
+import { EllipsisVertical, Pencil, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { DropdownMenu } from "radix-ui";
+import { SyntheticEvent, useState } from "react";
+import { getPingText, getPlayersText } from "../lib/servers";
+import { useAppStore } from "../lib/store";
 import { handleLaunchType, Server } from "../lib/types";
 
-const numFormatter = new Intl.NumberFormat();
+const GOOD_PING_MS = 100;
+const OK_PING_MS = 200;
+const DRAG_START_DISTANCE_PX = 5;
+const UNCATEGORIZED_KEY = "__uncategorized";
+const ICON_SIZE = 14;
+const BUTTON_ICON_SIZE = 12;
+const MENU_ICON_SIZE = 16;
+const PING_OFFLINE_CLASS = "text-faint";
+const PING_GOOD_CLASS = "text-green";
+const PING_OK_CLASS = "text-muted";
+const PING_BAD_CLASS = "text-red";
 
-function ServerMenu({
-  anchorRef,
-  menuRef,
-  onEdit,
-  onRemove,
-  onClose,
-}: {
-  anchorRef: React.RefObject<HTMLButtonElement | null>;
-  menuRef: React.RefObject<HTMLDivElement | null>;
-  onEdit: () => void;
-  onRemove: () => void;
-  onClose: () => void;
-}) {
-  const [pos, setPos] = useState({ top: 0, left: 0 });
-
-  useEffect(() => {
-    if (anchorRef.current) {
-      const rect = anchorRef.current.getBoundingClientRect();
-      setPos({ top: rect.bottom + 4, left: rect.right - 120 });
-    }
-  }, [anchorRef]);
-
-  return createPortal(
-    <div
-      ref={menuRef}
-      className="server-menu"
-      style={{ position: "fixed", top: pos.top, left: pos.left, zIndex: 1000 }}
-      onPointerDown={(e) => e.stopPropagation()}
-    >
-      <button
-        onClick={() => {
-          onEdit();
-          onClose();
-        }}
-      >
-        <HiPencil /> Edit
-      </button>
-      <div className="server-menu-divider" />
-      <button
-        className="server-menu-danger"
-        onClick={() => {
-          onRemove();
-          onClose();
-        }}
-      >
-        <HiTrash /> Remove
-      </button>
-    </div>,
-    document.body,
-  );
+function getPingClass(ping: number): string {
+  const isOffline = ping < 0;
+  if (isOffline) {
+    return PING_OFFLINE_CLASS;
+  }
+  const isGood = ping < GOOD_PING_MS;
+  if (isGood) {
+    return PING_GOOD_CLASS;
+  }
+  const isOk = ping < OK_PING_MS;
+  if (isOk) {
+    return PING_OK_CLASS;
+  }
+  return PING_BAD_CLASS;
 }
 
-function SortableServer({
-  s,
-  handleLaunch,
-  startEdit,
-  removeServer,
-}: {
-  s: Server;
+function compareCategories(first: string, second: string): number {
+  const firstIsDefault = first === "";
+  if (firstIsDefault) {
+    return -1;
+  }
+  const secondIsDefault = second === "";
+  if (secondIsDefault) {
+    return 1;
+  }
+  const order = first.localeCompare(second);
+  return order;
+}
+
+function getSortedCategories(servers: Server[]): string[] {
+  const unique = [...new Set(servers.map((server) => server.category || ""))];
+  const sorted = unique.sort(compareCategories);
+  return sorted;
+}
+
+function getServersInCategory(servers: Server[], category: string): Server[] {
+  const inCategory = servers.filter((server) => (server.category || "") === category);
+  return inCategory;
+}
+
+function stopDrag(event: SyntheticEvent) {
+  event.stopPropagation();
+}
+
+interface ServerRowProps {
+  server: Server;
   handleLaunch: handleLaunchType;
-  startEdit: (s: Server) => void;
+  startEdit: (server: Server) => void;
   removeServer: (id: string) => void;
-}) {
+}
+
+function ServerRow({ server, handleLaunch, startEdit, removeServer }: ServerRowProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: s.id,
+    id: server.id,
   });
-  const menuBtnRef = useRef<HTMLButtonElement>(null);
-  const { ref: menuRef, isOpen: menuOpen, toggle: toggleMenu, close: closeMenu } = useDropdown();
-  const { setPage } = useAppStateContext();
+  const setPage = useAppStore((state) => state.setPage);
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition: isDragging ? "none" : transition,
   };
 
-  function pingClass(ping: number) {
-    if (ping < 0) return "offline";
-    if (ping < 100) return "good";
-    if (ping < 200) return "ok";
-    return "bad";
-  }
+  const join = () => {
+    setPage("home");
+    handleLaunch({ serverIp: server.ip, serverVersion: server.version });
+  };
 
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className={`server ${isDragging ? "dragging" : ""}`}
+      className={`row cursor-grab gap-3 px-3.5 py-3 select-none ${
+        isDragging ? "z-10 bg-panel opacity-70" : ""
+      }`}
       {...attributes}
       {...listeners}
     >
-      <div className="server-top">
-        <div className="server-status">
-          <div className={`dot ${s.online ? "on" : "off"}`} />
-        </div>
-        <div className="server-info">
-          <span className="server-name">{s.name}</span>
-          <span className="server-ip">{s.ip}</span>
-        </div>
-        <span className="server-players">
-          {s.online
-            ? `${numFormatter.format(s.players)}/${numFormatter.format(s.max_players)}`
-            : "—"}
-        </span>
-        <span className={`server-ping ${pingClass(s.ping)}`}>
-          {s.ping >= 0 ? `${numFormatter.format(s.ping)}ms` : "offline"}
-        </span>
-        <button
-          className="install-play-btn"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={() => {
-            setPage("home");
-            handleLaunch({ serverIp: s.ip, serverVersion: s.version });
-          }}
-        >
-          <HiPlay /> Join
-        </button>
-        <button
-          ref={menuBtnRef}
-          className={`server-menu-btn ${menuOpen ? "active" : ""}`}
-          onPointerDown={(e) => e.stopPropagation()}
-          onMouseDown={(e) => e.stopPropagation()}
-          onMouseUp={(e) => e.stopPropagation()}
-          onClick={toggleMenu}
-        >
-          <HiEllipsisVertical />
-        </button>
-        {menuOpen && (
-          <ServerMenu
-            anchorRef={menuBtnRef}
-            menuRef={menuRef}
-            onEdit={() => startEdit(s)}
-            onRemove={() => removeServer(s.id)}
-            onClose={closeMenu}
-          />
-        )}
+      <div className={`size-1.5 shrink-0 ${server.online ? "bg-green" : "bg-red"}`} />
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="text-[13px] font-medium text-foreground">{server.name}</span>
+        <span className="text-xs text-muted">{server.ip}</span>
       </div>
+      <span className="shrink-0 text-xs text-muted tabular-nums">{getPlayersText(server)}</span>
+      <span
+        className={`min-w-12 shrink-0 text-right text-xs font-medium tabular-nums ${getPingClass(server.ping)}`}
+      >
+        {getPingText(server)}
+      </span>
+      <button className="button-primary" onPointerDown={stopDrag} onClick={join}>
+        <Play size={BUTTON_ICON_SIZE} fill="currentColor" /> Join
+      </button>
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger asChild>
+          <button
+            className="flex size-7 items-center justify-center text-faint transition-colors duration-75 hover:text-foreground data-[state=open]:text-foreground"
+            onPointerDown={stopDrag}
+            onMouseDown={stopDrag}
+            onMouseUp={stopDrag}
+          >
+            <EllipsisVertical size={MENU_ICON_SIZE} />
+          </button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content align="end" sideOffset={4} className="menu min-w-[140px] p-1">
+            <DropdownMenu.Item
+              className="menu-item justify-start gap-2 px-2.5"
+              onSelect={() => startEdit(server)}
+            >
+              <Pencil size={ICON_SIZE} /> Edit
+            </DropdownMenu.Item>
+            <DropdownMenu.Separator className="my-1 h-px bg-line" />
+            <DropdownMenu.Item
+              className="menu-item justify-start gap-2 px-2.5 data-highlighted:text-red"
+              onSelect={() => removeServer(server.id)}
+            >
+              <Trash2 size={ICON_SIZE} /> Remove
+            </DropdownMenu.Item>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
     </div>
   );
 }
 
 export default function ServersPage({ handleLaunch }: { handleLaunch: handleLaunchType }) {
-  const { servers, moveServer, removeServer, pingAll, setOpenedDialog } = useAppStateContext();
+  const servers = useAppStore((state) => state.servers);
+  const moveServer = useAppStore((state) => state.moveServer);
+  const removeServer = useAppStore((state) => state.removeServer);
+  const pingAllServers = useAppStore((state) => state.pingAllServers);
+  const setOpenedDialog = useAppStore((state) => state.setOpenedDialog);
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: DRAG_START_DISTANCE_PX } }),
+  );
 
-  const categories = [...new Set(servers.map((s) => s.category || ""))].sort((a, b) => {
-    if (a === "") return -1;
-    if (b === "") return 1;
-    return a.localeCompare(b);
-  });
-  const grouped: Record<string, Server[]> = {};
-  for (const cat of categories) {
-    grouped[cat] = servers.filter((s) => (s.category || "") === cat);
-  }
+  const categories = getSortedCategories(servers);
+  const hasServers = servers.length > 0;
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
-    if (over && active.id !== over.id) {
-      moveServer(active.id as string, over.id as string);
+    const hasTarget = over !== null;
+    if (!hasTarget) {
+      return;
     }
+    const samePlace = active.id === over.id;
+    if (samePlace) {
+      return;
+    }
+    moveServer(String(active.id), String(over.id));
   };
 
   const [spinning, setSpinning] = useState(false);
 
+  const refresh = () => {
+    setSpinning(true);
+    pingAllServers();
+  };
+
+  const openAddDialog = () => {
+    setOpenedDialog({ name: "server_dialog", props: { type: "new" } });
+  };
+
+  const openEditDialog = (server: Server) => {
+    setOpenedDialog({ name: "server_dialog", props: { type: "edit", server } });
+  };
+
   return (
-    <div className="page servers-page">
-      <div className="servers-header">
+    <div className="page relative">
+      <div className="page-header">
         <h2 className="page-heading">SERVERS</h2>
-        <div className="servers-actions">
+        <div className="flex items-center gap-2">
           <button
-            className={`servers-refresh-btn ${spinning ? "spinning" : ""}`}
-            onClick={() => {
-              setSpinning(true);
-              pingAll();
-            }}
+            className={`button-secondary button-icon ${spinning ? "[&>svg]:animate-spin-once" : ""}`}
+            onClick={refresh}
             onAnimationEnd={() => setSpinning(false)}
           >
-            <HiArrowPath />
+            <RefreshCw size={ICON_SIZE} />
           </button>
-          <button
-            className="servers-add-btn"
-            onClick={() => setOpenedDialog({ name: "server_dialog", props: { type: "new" } })}
-          >
-            <HiPlus /> Add Server
+          <button className="button-primary" onClick={openAddDialog}>
+            <Plus size={ICON_SIZE} /> Add Server
           </button>
         </div>
       </div>
 
-      {servers.length === 0 && (
-        <p className="servers-empty">No servers added. Click "Add Server" to get started.</p>
+      {!hasServers && (
+        <p className="empty-text">No servers added. Click "Add Server" to get started.</p>
       )}
 
       <DndContext
@@ -223,19 +222,17 @@ export default function ServersPage({ handleLaunch }: { handleLaunch: handleLaun
         modifiers={[restrictToWindowEdges]}
         onDragEnd={handleDragEnd}
       >
-        <SortableContext items={servers.map((s) => s.id)} strategy={rectSortingStrategy}>
-          {categories.map((cat) => (
-            <div key={cat || "__uncategorized"}>
-              {cat && <h3 className="servers-category">{cat}</h3>}
-              <div className="servers-grid">
-                {grouped[cat].map((s) => (
-                  <SortableServer
-                    key={s.id}
-                    s={s}
+        <SortableContext items={servers.map((server) => server.id)} strategy={rectSortingStrategy}>
+          {categories.map((category) => (
+            <div key={category || UNCATEGORIZED_KEY}>
+              {category && <h3 className="label-caps mt-6 mb-2.5 uppercase">{category}</h3>}
+              <div className="list">
+                {getServersInCategory(servers, category).map((server) => (
+                  <ServerRow
+                    key={server.id}
+                    server={server}
                     handleLaunch={handleLaunch}
-                    startEdit={(s) =>
-                      setOpenedDialog({ name: "server_dialog", props: { type: "edit", server: s } })
-                    }
+                    startEdit={openEditDialog}
                     removeServer={removeServer}
                   />
                 ))}

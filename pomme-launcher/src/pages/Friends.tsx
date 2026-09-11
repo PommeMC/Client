@@ -1,101 +1,202 @@
-import { HiArrowPath, HiCheck, HiCog6Tooth, HiPlay, HiPlus, HiXMark } from "react-icons/hi2";
-import { Friend, isOffline, PresenceEntry } from "../lib/friends";
-import { useAppStateContext } from "../lib/state";
+import { Check, Play, Plus, RefreshCw, Settings, X } from "lucide-react";
+import { ReactNode } from "react";
+import { formatStatus, Friend, isOffline, PresenceEntry } from "../lib/friends";
+import { getAccount, useAppStore } from "../lib/store";
 import { handleLaunchType } from "../lib/types";
 
-export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaunchType }) {
-  const {
-    account,
-    friendsList,
-    friendsSorted,
-    friendsError,
-    friendsSkins,
-    friendsPresence,
-    sendFriendRequest,
-    acceptFriendRequest,
-    removeFriend,
-    refreshPresence,
-    clearFriendsError,
-    setOpenedDialog,
-  } = useAppStateContext();
+const ICON_SIZE = 14;
+const BUTTON_ICON_SIZE = 12;
+const JOIN_ADDRESS_PATTERN = /^[a-zA-Z0-9.\-:_[\]]+$/;
+const friendButtonClass = "button-secondary h-[26px] gap-1 px-2.5 text-[11px] font-semibold";
+const acceptButtonClass = `${friendButtonClass} border-green/40 text-green hover:enabled:border-green hover:enabled:text-green`;
 
-  if (!account) {
+function getJoinAddress(presence: PresenceEntry | undefined): string | null {
+  const hasPresence = presence !== undefined;
+  if (!hasPresence) {
+    return null;
+  }
+  const isOnServer = presence.status === "PLAYING_SERVER";
+  if (!isOnServer) {
+    return null;
+  }
+  const rawAddress = presence.joinInfo?.value ?? "";
+  const isSafeAddress = JOIN_ADDRESS_PATTERN.test(rawAddress);
+  if (!isSafeAddress) {
+    return null;
+  }
+  return rawAddress;
+}
+
+interface FriendRowProps {
+  friend: Friend;
+  skinUrl: string | undefined;
+  presence: PresenceEntry | undefined;
+  children: ReactNode;
+}
+
+function FriendRow({ friend, skinUrl, presence, children }: FriendRowProps) {
+  const offline = isOffline(presence);
+  return (
+    <div className="row gap-3 px-3.5 py-3">
+      <div
+        className={`skin-head ${offline ? "opacity-60 grayscale-[0.8]" : ""}`}
+        style={skinUrl ? { backgroundImage: `url("${skinUrl}")` } : undefined}
+      />
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className={`text-[13px] font-medium ${offline ? "text-muted" : "text-foreground"}`}>
+          {friend.name}
+        </span>
+        <span className="text-xs text-muted">{formatStatus(presence)}</span>
+      </div>
+      <div className={`size-1.5 shrink-0 ${offline ? "bg-line-strong" : "bg-green"}`} />
+      <div className="flex shrink-0 items-center gap-1.5">{children}</div>
+    </div>
+  );
+}
+
+interface FriendsSectionProps {
+  title: string;
+  friends: Friend[];
+  skinUrls: Record<string, string>;
+  presence: Record<string, PresenceEntry>;
+  emptyMessage?: string;
+  hideWhenEmpty?: boolean;
+  renderActions: (uuid: string, presence: PresenceEntry | undefined) => ReactNode;
+}
+
+function FriendsSection({
+  title,
+  friends,
+  skinUrls,
+  presence,
+  emptyMessage,
+  hideWhenEmpty,
+  renderActions,
+}: FriendsSectionProps) {
+  const isEmpty = friends.length === 0;
+  const hidden = hideWhenEmpty && isEmpty;
+  if (hidden) {
+    return null;
+  }
+  const showEmptyMessage = isEmpty && emptyMessage !== undefined;
+
+  return (
+    <>
+      <h3 className="label-caps mt-6 mb-2.5 uppercase first-of-type:mt-0">
+        {title} — {friends.length}
+      </h3>
+      <div className="list">
+        {showEmptyMessage && <p className="empty-text">{emptyMessage}</p>}
+        {friends.map((friend) => (
+          <FriendRow
+            key={friend.profileId}
+            friend={friend}
+            skinUrl={skinUrls[friend.profileId]}
+            presence={presence[friend.profileId]}
+          >
+            {renderActions(friend.profileId, presence[friend.profileId])}
+          </FriendRow>
+        ))}
+      </div>
+    </>
+  );
+}
+
+export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaunchType }) {
+  const account = useAppStore(getAccount);
+  const friendsList = useAppStore((state) => state.friendsList);
+  const friendsSorted = useAppStore((state) => state.friendsSorted);
+  const friendsError = useAppStore((state) => state.friendsError);
+  const friendsSkins = useAppStore((state) => state.friendsSkins);
+  const friendsPresence = useAppStore((state) => state.friendsPresence);
+  const sendFriendRequest = useAppStore((state) => state.sendFriendRequest);
+  const acceptFriendRequest = useAppStore((state) => state.acceptFriendRequest);
+  const removeFriend = useAppStore((state) => state.removeFriend);
+  const refreshPresence = useAppStore((state) => state.refreshPresence);
+  const clearFriendsError = useAppStore((state) => state.clearFriendsError);
+  const setOpenedDialog = useAppStore((state) => state.setOpenedDialog);
+
+  const isSignedIn = account !== null;
+  if (!isSignedIn) {
     return (
-      <div className="page friends-page">
-        <h2 className="page-heading">FRIENDS</h2>
-        <p className="servers-empty">Sign in to view your friends list.</p>
+      <div className="page">
+        <h2 className="page-heading mb-6">FRIENDS</h2>
+        <p className="empty-text">Sign in to view your friends list.</p>
       </div>
     );
   }
 
-  const friends = friendsSorted;
   const incoming = friendsList.incomingRequests ?? [];
   const outgoing = friendsList.outgoingRequests ?? [];
 
-  const openAddDialog = () =>
-    setOpenedDialog({
-      name: "add_friend_dialog",
-      props: { onSubmit: sendFriendRequest },
-    });
+  const openAddDialog = () => {
+    setOpenedDialog({ name: "add_friend_dialog", props: { onSubmit: sendFriendRequest } });
+  };
+
+  const openSettingsDialog = () => {
+    setOpenedDialog({ name: "friend_settings_dialog", props: {} });
+  };
 
   return (
-    <div className="page friends-page">
-      <div className="friends-header">
+    <div className="page">
+      <div className="page-header">
         <h2 className="page-heading">FRIENDS</h2>
-        <div className="friends-header-actions">
+        <div className="flex items-center gap-2">
           <button
-            className="friends-settings-btn"
+            className="button-secondary button-icon"
             onClick={refreshPresence}
             title="Refresh presence"
           >
-            <HiArrowPath />
+            <RefreshCw size={ICON_SIZE} />
           </button>
           <button
-            className="friends-settings-btn"
-            onClick={() => setOpenedDialog({ name: "friend_settings_dialog", props: {} })}
+            className="button-secondary button-icon"
+            onClick={openSettingsDialog}
             title="Friend settings"
           >
-            <HiCog6Tooth />
+            <Settings size={ICON_SIZE} />
           </button>
-          <button className="servers-add-btn" onClick={openAddDialog}>
-            <HiPlus /> Add Friend
+          <button className="button-primary" onClick={openAddDialog}>
+            <Plus size={ICON_SIZE} /> Add Friend
           </button>
         </div>
       </div>
 
       {friendsError && (
-        <div className="friends-error" onClick={clearFriendsError}>
+        <div
+          className="mb-4 cursor-pointer border border-red/50 px-3.5 py-2.5 text-xs font-medium text-red"
+          onClick={clearFriendsError}
+        >
           {friendsError}
         </div>
       )}
 
       <FriendsSection
         title="Friends"
-        friends={friends}
+        friends={friendsSorted}
         skinUrls={friendsSkins}
         presence={friendsPresence}
         emptyMessage="You haven't added any friends yet."
-        renderActions={(uuid, p) => {
-          const rawAddr = p?.status === "PLAYING_SERVER" ? p.joinInfo?.value : undefined;
-          const joinAddress =
-            rawAddr && /^[a-zA-Z0-9.\-:_[\]]+$/.test(rawAddr) ? rawAddr : undefined;
+        renderActions={(uuid, presence) => {
+          const joinAddress = getJoinAddress(presence);
+          const canJoin = joinAddress !== null;
           return (
             <>
-              {joinAddress && (
+              {canJoin && (
                 <button
-                  className="friends-btn accept"
+                  className={acceptButtonClass}
                   onClick={() => handleLaunch({ serverIp: joinAddress })}
                   title={`Join ${joinAddress}`}
                 >
-                  <HiPlay /> Join
+                  <Play size={BUTTON_ICON_SIZE} fill="currentColor" /> Join
                 </button>
               )}
               <button
-                className="friends-btn"
+                className={friendButtonClass}
                 onClick={() => removeFriend(uuid)}
                 title="Remove friend"
               >
-                <HiXMark /> Remove
+                <X size={BUTTON_ICON_SIZE} /> Remove
               </button>
             </>
           );
@@ -111,14 +212,18 @@ export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaun
         renderActions={(uuid) => (
           <>
             <button
-              className="friends-btn accept"
+              className={acceptButtonClass}
               onClick={() => acceptFriendRequest(uuid)}
               title="Accept"
             >
-              <HiCheck /> Accept
+              <Check size={BUTTON_ICON_SIZE} /> Accept
             </button>
-            <button className="friends-btn" onClick={() => removeFriend(uuid)} title="Decline">
-              <HiXMark /> Decline
+            <button
+              className={friendButtonClass}
+              onClick={() => removeFriend(uuid)}
+              title="Decline"
+            >
+              <X size={BUTTON_ICON_SIZE} /> Decline
             </button>
           </>
         )}
@@ -131,115 +236,15 @@ export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaun
         presence={friendsPresence}
         hideWhenEmpty
         renderActions={(uuid) => (
-          <button className="friends-btn" onClick={() => removeFriend(uuid)} title="Cancel request">
-            <HiXMark /> Cancel
+          <button
+            className={friendButtonClass}
+            onClick={() => removeFriend(uuid)}
+            title="Cancel request"
+          >
+            <X size={BUTTON_ICON_SIZE} /> Cancel
           </button>
         )}
       />
     </div>
   );
-}
-
-function FriendsSection({
-  title,
-  friends,
-  skinUrls,
-  presence,
-  emptyMessage,
-  hideWhenEmpty,
-  renderActions,
-}: {
-  title: string;
-  friends: Friend[];
-  skinUrls: Record<string, string>;
-  presence: Record<string, PresenceEntry>;
-  emptyMessage?: string;
-  hideWhenEmpty?: boolean;
-  renderActions: (uuid: string, presence: PresenceEntry | undefined) => React.ReactNode;
-}) {
-  if (hideWhenEmpty && friends.length === 0) return null;
-
-  return (
-    <>
-      <h3 className="mock-subheading">
-        {title} — {friends.length}
-      </h3>
-      <div className="mock-list">
-        {friends.length === 0 && emptyMessage && <p className="servers-empty">{emptyMessage}</p>}
-        {friends.map((f) => (
-          <FriendRow
-            key={f.profileId}
-            friend={f}
-            skinUrl={skinUrls[f.profileId]}
-            presence={presence[f.profileId]}
-          >
-            {renderActions(f.profileId, presence[f.profileId])}
-          </FriendRow>
-        ))}
-      </div>
-    </>
-  );
-}
-
-function FriendRow({
-  friend,
-  skinUrl,
-  presence,
-  children,
-}: {
-  friend: Friend;
-  skinUrl: string | undefined;
-  presence: PresenceEntry | undefined;
-  children: React.ReactNode;
-}) {
-  const offline = isOffline(presence);
-  return (
-    <div className="mock-friend">
-      <div
-        className={`mc-head ${offline ? "off" : ""}`}
-        style={skinUrl ? { backgroundImage: `url("${skinUrl}")` } : undefined}
-      />
-      <div className="mock-friend-info">
-        <span className={`mock-friend-name ${offline ? "off" : ""}`}>{friend.name}</span>
-        <span className="mock-friend-status">{formatStatus(presence)}</span>
-      </div>
-      <div className={`mock-dot ${offline ? "off" : "on"}`} />
-      <div className="friends-actions">{children}</div>
-    </div>
-  );
-}
-
-function formatStatus(presence: PresenceEntry | undefined): string {
-  if (!presence || presence.status === "OFFLINE") {
-    const seen = formatLastSeen(presence?.lastUpdated);
-    return seen ? `Offline · ${seen}` : "Offline";
-  }
-  switch (presence.status) {
-    case "ONLINE":
-      return "Online";
-    case "PLAYING_OFFLINE":
-      return "In singleplayer";
-    case "PLAYING_REALMS":
-      return "Playing Realms";
-    case "PLAYING_SERVER":
-      return presence.joinInfo?.value
-        ? `Playing: ${presence.joinInfo.value}`
-        : "Playing multiplayer";
-    case "PLAYING_HOSTED_SERVER":
-      return "Hosting local world";
-    default:
-      return presence.status;
-  }
-}
-
-function formatLastSeen(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) return "";
-  const deltaSec = Math.max(0, (Date.now() - then) / 1000);
-  if (deltaSec < 60) return "just now";
-  if (deltaSec < 3600) return `${Math.floor(deltaSec / 60)}m ago`;
-  if (deltaSec < 86400) return `${Math.floor(deltaSec / 3600)}h ago`;
-  if (deltaSec < 604800) return `${Math.floor(deltaSec / 86400)}d ago`;
-  return new Date(then).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }

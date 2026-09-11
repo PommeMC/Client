@@ -1,61 +1,48 @@
-import { useAppStateContext } from "../lib/state";
+import { Switch } from "radix-ui";
+import SettingRow from "../components/SettingRow";
+import { useAppStore } from "../lib/store";
 
 export default function SettingsPage() {
-  const { launcherSettings } = useAppStateContext();
+  const launcherSettings = useAppStore((state) => state.launcherSettings);
+  const setKeepLauncherOpen = useAppStore((state) => state.setKeepLauncherOpen);
+  const setLaunchWithConsole = useAppStore((state) => state.setLaunchWithConsole);
 
   return (
-    <div className="page settings-page">
-      <h2 className="page-heading">SETTINGS</h2>
+    <div className="page">
+      <h2 className="page-heading mb-6">SETTINGS</h2>
 
-      <div className="settings-section">
-        <h3 className="settings-section-title">General</h3>
+      <section className="mb-7">
+        <h3 className="label-caps mb-2.5 uppercase">General</h3>
 
-        <div className="settings-row">
-          <div className="settings-row-info">
-            <span className="settings-row-label">Language</span>
-            <span className="settings-row-desc">Display language for the launcher</span>
-          </div>
-          <div className="settings-row-control">
-            <button className="settings-select">{launcherSettings.language}</button>
-          </div>
-        </div>
+        <SettingRow label="Language" desc="Display language for the launcher">
+          <button className="button-secondary min-w-24 cursor-default text-foreground">
+            {launcherSettings.language}
+          </button>
+        </SettingRow>
 
-        <div className="settings-row">
-          <div className="settings-row-info">
-            <span className="settings-row-label">Keep launcher open</span>
-            <span className="settings-row-desc">Keep the launcher open after the game starts</span>
-          </div>
-          <div className="settings-row-control">
-            <button
-              className={`settings-toggle ${launcherSettings.keepLauncherOpen ? "on" : ""}`}
-              onClick={() =>
-                launcherSettings.setKeepLauncherOpen(!launcherSettings.keepLauncherOpen)
-              }
-            >
-              <div className="settings-toggle-knob" />
-            </button>
-          </div>
-        </div>
+        <SettingRow label="Keep launcher open" desc="Keep the launcher open after the game starts">
+          <Switch.Root
+            className="switch"
+            checked={launcherSettings.keepLauncherOpen}
+            onCheckedChange={setKeepLauncherOpen}
+          >
+            <Switch.Thumb className="switch-thumb" />
+          </Switch.Root>
+        </SettingRow>
 
-        <div className="settings-row">
-          <div className="settings-row-info">
-            <span className="settings-row-label">Launch with console</span>
-            <span className="settings-row-desc">
-              Automatically open a window with all output from the client- useful when debugging.
-            </span>
-          </div>
-          <div className="settings-row-control">
-            <button
-              className={`settings-toggle ${launcherSettings.launchWithConsole ? "on" : ""}`}
-              onClick={() =>
-                launcherSettings.setLaunchWithConsole(!launcherSettings.launchWithConsole)
-              }
-            >
-              <div className="settings-toggle-knob" />
-            </button>
-          </div>
-        </div>
-      </div>
+        <SettingRow
+          label="Launch with console"
+          desc="Automatically open a window with all output from the client- useful when debugging."
+        >
+          <Switch.Root
+            className="switch"
+            checked={launcherSettings.launchWithConsole}
+            onCheckedChange={setLaunchWithConsole}
+          >
+            <Switch.Thumb className="switch-thumb" />
+          </Switch.Root>
+        </SettingRow>
+      </section>
     </div>
   );
 }

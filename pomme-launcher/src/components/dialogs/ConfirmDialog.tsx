@@ -1,5 +1,6 @@
+import { Dialog } from "radix-ui";
 import { useState } from "react";
-import { useAppStateContext } from "../../lib/state";
+import { useAppStore } from "../../lib/store";
 
 export type ConfirmDialogProps = {
   title: string;
@@ -9,53 +10,52 @@ export type ConfirmDialogProps = {
 };
 
 export function ConfirmDialog(dialogProps: ConfirmDialogProps) {
-  const { setOpenedDialog } = useAppStateContext();
+  const setOpenedDialog = useAppStore((state) => state.setOpenedDialog);
   const [loading, setLoading] = useState(false);
 
+  const cancel = async () => {
+    if (loading) {
+      return;
+    }
+    setOpenedDialog(null);
+    try {
+      await dialogProps.onCancel?.();
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const confirm = async () => {
+    if (loading) {
+      return;
+    }
+    setLoading(true);
+    try {
+      await dialogProps.onConfirm?.();
+      setOpenedDialog(null);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <div className="dialog" onClick={(e) => e.stopPropagation()}>
-      <h2 className="dialog-title">{dialogProps.title}</h2>
+    <>
+      <Dialog.Title className="dialog-title">{dialogProps.title}</Dialog.Title>
 
       <div className="dialog-fields">
         <p className="dialog-text">{dialogProps.message}</p>
       </div>
 
       <div className="dialog-actions">
-        <button
-          className="dialog-cancel"
-          disabled={loading}
-          onClick={async () => {
-            if (loading) return;
-            setOpenedDialog(null);
-            try {
-              await dialogProps.onCancel?.();
-            } catch (e) {
-              console.error(e);
-            }
-          }}
-        >
+        <button className="button-secondary" disabled={loading} onClick={cancel}>
           Cancel
         </button>
-
-        <button
-          className="dialog-confirm"
-          disabled={loading}
-          onClick={async () => {
-            if (loading) return;
-            setLoading(true);
-            try {
-              await dialogProps.onConfirm?.();
-              setOpenedDialog(null);
-            } catch (e) {
-              console.error(e);
-            } finally {
-              setLoading(false);
-            }
-          }}
-        >
+        <button className="button-primary" disabled={loading} onClick={confirm}>
           {loading ? "..." : "Confirm"}
         </button>
       </div>
-    </div>
+    </>
   );
 }

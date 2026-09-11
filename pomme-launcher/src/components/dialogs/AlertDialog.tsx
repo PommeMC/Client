@@ -1,5 +1,6 @@
+import { Dialog } from "radix-ui";
 import { useState } from "react";
-import { useAppStateContext } from "../../lib/state";
+import { useAppStore } from "../../lib/store";
 
 export type AlertDialogProps = {
   title: string;
@@ -8,35 +9,35 @@ export type AlertDialogProps = {
 };
 
 export default function AlertDialog(dialogProps: AlertDialogProps) {
-  const { setOpenedDialog } = useAppStateContext();
+  const setOpenedDialog = useAppStore((state) => state.setOpenedDialog);
   const [loading, setLoading] = useState(false);
 
+  const close = async () => {
+    if (loading) {
+      return;
+    }
+    setLoading(true);
+    try {
+      await dialogProps.onClose?.();
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoading(false);
+      setOpenedDialog(null);
+    }
+  };
+
   return (
-    <div className="dialog" onClick={(e) => e.stopPropagation()}>
-      <h2 className="dialog-title">{dialogProps.title}</h2>
+    <>
+      <Dialog.Title className="dialog-title">{dialogProps.title}</Dialog.Title>
       <div className="dialog-fields">
         <p className="dialog-text">{dialogProps.message}</p>
       </div>
       <div className="dialog-actions">
-        <button
-          className="dialog-confirm"
-          disabled={loading}
-          onClick={async () => {
-            if (loading) return;
-            setLoading(true);
-            try {
-              await dialogProps.onClose?.();
-            } catch (e) {
-              console.error(e);
-            } finally {
-              setLoading(false);
-              setOpenedDialog(null);
-            }
-          }}
-        >
+        <button className="button-primary" disabled={loading} onClick={close}>
           {loading ? "..." : "OK"}
         </button>
       </div>
-    </div>
+    </>
   );
 }

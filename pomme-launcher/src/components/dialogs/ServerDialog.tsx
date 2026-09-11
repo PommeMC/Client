@@ -1,10 +1,12 @@
+import { ChevronDown } from "lucide-react";
+import { Dialog, DropdownMenu } from "radix-ui";
 import { useState } from "react";
-import { HiChevronDown } from "react-icons/hi2";
-import { useDropdown } from "../../lib/hooks";
-import { useAppStateContext } from "../../lib/state";
+import { useAppStore } from "../../lib/store";
 import { Server } from "../../lib/types";
 
 const UNCATEGORIZED = "Uncategorized";
+const ENTER_KEY = "Enter";
+const ICON_SIZE = 14;
 
 type ServerCategoryInputProps = {
   category: string;
@@ -21,82 +23,79 @@ function ServerCategoryInput({
   customCategory,
   setCustomCategory,
 }: ServerCategoryInputProps) {
-  const { ref: categoryDropdownRef, ...categoryDropdown } = useDropdown();
+  const pickCategory = (picked: string) => {
+    setCustomCategory(false);
+    setCategory(picked);
+  };
+
+  const startCustomCategory = () => {
+    setCustomCategory(true);
+    setCategory("");
+  };
+
+  const chevron = (
+    <ChevronDown
+      size={ICON_SIZE}
+      className="text-muted transition-transform duration-100 group-data-[state=open]:rotate-180"
+    />
+  );
 
   return (
     <div className="dialog-field">
-      <label>CATEGORY</label>
-      <div className="custom-select-wrapper" ref={categoryDropdownRef}>
-        <div className="creatable-select">
-          {customCategory ? (
-            <>
-              <input
-                className="creatable-select-input"
-                placeholder="New category name"
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                autoFocus
-              />
-              <button className="creatable-select-toggle" onClick={() => categoryDropdown.toggle()}>
-                <HiChevronDown
-                  className={`custom-select-arrow ${categoryDropdown.isOpen ? "open" : ""}`}
-                />
-              </button>
-            </>
-          ) : (
-            <button
-              className="creatable-select-selected"
-              onClick={categoryDropdown.toggle}
-              type="button"
-            >
-              <span>{category}</span>
-              <HiChevronDown
-                className={`custom-select-arrow ${categoryDropdown.isOpen ? "open" : ""}`}
-              />
-            </button>
-          )}
-        </div>
-        {categoryDropdown.isOpen && (
-          <div className="custom-select-dropdown">
-            <div className="custom-select-list">
+      <label className="field-label">CATEGORY</label>
+      <DropdownMenu.Root>
+        {customCategory ? (
+          <div className="field flex items-stretch p-0 focus-within:border-green">
+            <input
+              className="min-w-0 flex-1 bg-transparent px-3 py-[9px] text-[13px] text-foreground placeholder:text-faint"
+              placeholder="New category name"
+              value={category}
+              onChange={(event) => setCategory(event.target.value)}
+              autoFocus
+            />
+            <DropdownMenu.Trigger asChild>
               <button
-                key={UNCATEGORIZED}
-                className={`custom-select-item ${category === UNCATEGORIZED ? "active" : ""}`}
-                onClick={() => {
-                  setCustomCategory(false);
-                  setCategory(UNCATEGORIZED);
-                  categoryDropdown.close();
-                }}
+                type="button"
+                className="group flex w-9 shrink-0 items-center justify-center border-l border-white/[0.08]"
               >
-                <span>{UNCATEGORIZED}</span>
+                {chevron}
               </button>
-              {existingCategories.map((cat) => (
-                <button
-                  key={cat}
-                  className={`custom-select-item ${category === cat ? "active" : ""}`}
-                  onClick={() => {
-                    setCustomCategory(false);
-                    setCategory(cat);
-                    categoryDropdown.close();
-                  }}
-                >
-                  <span>{cat}</span>
-                </button>
-              ))}
-              <button
-                className="custom-select-item"
-                onClick={() => {
-                  setCustomCategory(true);
-                  setCategory("");
-                  categoryDropdown.close();
-                }}
-              >
-                <span>+ New category</span>
-              </button>
-            </div>
+            </DropdownMenu.Trigger>
           </div>
+        ) : (
+          <DropdownMenu.Trigger asChild>
+            <button type="button" className="group field flex items-center justify-between">
+              <span>{category}</span>
+              {chevron}
+            </button>
+          </DropdownMenu.Trigger>
         )}
-      </div>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content
+            align="end"
+            sideOffset={4}
+            className="menu w-(--radix-dropdown-menu-trigger-width) min-w-[220px]"
+          >
+            <DropdownMenu.RadioGroup
+              value={category}
+              onValueChange={pickCategory}
+              className="max-h-[200px] overflow-y-auto"
+            >
+              <DropdownMenu.RadioItem value={UNCATEGORIZED} className="menu-item">
+                <span>{UNCATEGORIZED}</span>
+              </DropdownMenu.RadioItem>
+              {existingCategories.map((existing) => (
+                <DropdownMenu.RadioItem key={existing} value={existing} className="menu-item">
+                  <span>{existing}</span>
+                </DropdownMenu.RadioItem>
+              ))}
+            </DropdownMenu.RadioGroup>
+            <DropdownMenu.Item className="menu-item" onSelect={startCustomCategory}>
+              <span>+ New category</span>
+            </DropdownMenu.Item>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
     </div>
   );
 }
@@ -104,66 +103,75 @@ function ServerCategoryInput({
 export type ServerDialogProps = { type: "new" } | { type: "edit"; server: Server };
 
 export function ServerDialog(dialogProps: ServerDialogProps) {
-  const { servers, addServer, editServer, setOpenedDialog } = useAppStateContext();
+  const servers = useAppStore((state) => state.servers);
+  const addServer = useAppStore((state) => state.addServer);
+  const editServer = useAppStore((state) => state.editServer);
+  const setOpenedDialog = useAppStore((state) => state.setOpenedDialog);
 
-  const [serverName, setServerName] = useState(
-    dialogProps.type === "edit" ? dialogProps.server.name : "",
-  );
-  const [serverAddress, setServerAddress] = useState(
-    dialogProps.type === "edit" ? dialogProps.server.ip : "",
-  );
-  const [category, setCategory] = useState(
-    dialogProps.type === "edit" && !!dialogProps.server.category
-      ? dialogProps.server.category
-      : UNCATEGORIZED,
-  );
+  const isEdit = dialogProps.type === "edit";
+  const editedServer = isEdit ? dialogProps.server : null;
+
+  const [serverName, setServerName] = useState(editedServer?.name ?? "");
+  const [serverAddress, setServerAddress] = useState(editedServer?.ip ?? "");
+  const [category, setCategory] = useState(editedServer?.category || UNCATEGORIZED);
   const [customCategory, setCustomCategory] = useState(false);
 
-  const existingCategories = [...new Set(servers.map((s) => s.category).filter((c) => c))];
+  const existingCategories = [
+    ...new Set(servers.map((server) => server.category).filter((name) => name)),
+  ];
 
   const handleConfirm = () => {
-    if (!serverAddress.trim()) return;
-
-    const name = serverName.trim() || serverAddress.trim();
     const ip = serverAddress.trim();
-    const cat = category.trim() === UNCATEGORIZED ? "" : category.trim();
+    const hasAddress = ip !== "";
+    if (!hasAddress) {
+      return;
+    }
 
-    if (dialogProps.type === "new") {
-      addServer(name, ip, cat);
+    const name = serverName.trim() || ip;
+    const trimmedCategory = category.trim();
+    const isUncategorized = trimmedCategory === UNCATEGORIZED;
+    const savedCategory = isUncategorized ? "" : trimmedCategory;
+
+    if (editedServer) {
+      editServer(editedServer.id, name, ip, savedCategory);
     } else {
-      editServer(dialogProps.server.id, name, ip, cat);
+      addServer(name, ip, savedCategory);
     }
 
     setOpenedDialog(null);
   };
 
+  const confirmOnEnter = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    const isEnter = event.key === ENTER_KEY;
+    if (isEnter) {
+      handleConfirm();
+    }
+  };
+
   return (
-    <div
-      className="dialog"
-      onClick={(e) => {
-        e.stopPropagation();
-      }}
-    >
-      <h2 className="dialog-title">{dialogProps.type === "edit" ? "Edit Server" : "Add Server"}</h2>
+    <>
+      <Dialog.Title className="dialog-title">{isEdit ? "Edit Server" : "Add Server"}</Dialog.Title>
 
       <div className="dialog-fields">
         <div className="dialog-field">
-          <label>SERVER NAME</label>
+          <label className="field-label">SERVER NAME</label>
           <input
+            className="field"
             value={serverName}
-            onChange={(e) => setServerName(e.target.value)}
+            onChange={(event) => setServerName(event.target.value)}
             placeholder="My Server"
             autoFocus
           />
         </div>
 
         <div className="dialog-field">
-          <label>SERVER ADDRESS</label>
+          <label className="field-label">SERVER ADDRESS</label>
           <input
+            className="field"
             value={serverAddress}
-            onChange={(e) => setServerAddress(e.target.value)}
+            onChange={(event) => setServerAddress(event.target.value)}
             placeholder="play.example.com"
-            onKeyDown={(e) => e.key === "Enter" && handleConfirm()}
+            onKeyDown={confirmOnEnter}
           />
         </div>
 
@@ -177,13 +185,13 @@ export function ServerDialog(dialogProps: ServerDialogProps) {
       </div>
 
       <div className="dialog-actions">
-        <button className="dialog-cancel" onClick={() => setOpenedDialog(null)}>
+        <button className="button-secondary" onClick={() => setOpenedDialog(null)}>
           Cancel
         </button>
-        <button className="dialog-save" onClick={handleConfirm}>
-          {dialogProps.type === "edit" ? "Save" : "Add"}
+        <button className="button-primary" onClick={handleConfirm}>
+          {isEdit ? "Save" : "Add"}
         </button>
       </div>
-    </div>
+    </>
   );
 }
