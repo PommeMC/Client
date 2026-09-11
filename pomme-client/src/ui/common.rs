@@ -577,6 +577,7 @@ fn push_button_inner(
 pub fn push_slider(
     elements: &mut Vec<MenuElement>,
     cursor: (f32, f32),
+    mouse_pressed: bool,
     mouse_held: bool,
     x: f32,
     y: f32,
@@ -587,6 +588,7 @@ pub fn push_slider(
     label: &str,
     value: f32,
     enabled: bool,
+    focused: bool,
     dragging: bool,
     scroll: &LabelScroll<'_>,
 ) -> SliderResult {
@@ -596,7 +598,7 @@ pub fn push_slider(
     let handle_x = x + value.clamp(0.0, 1.0) * track_w;
 
     let actively_dragging = enabled && dragging && mouse_held;
-    let start_drag = hovered && mouse_held && !dragging;
+    let start_drag = hovered && mouse_pressed && !dragging;
 
     let new_value = if actively_dragging || start_drag {
         let rel = (cursor.0 - x - handle_w / 2.0) / track_w;
@@ -616,7 +618,7 @@ pub fn push_slider(
         tint: WHITE,
     });
 
-    let handle_sprite = if actively_dragging || start_drag || hovered {
+    let handle_sprite = if actively_dragging || start_drag || hovered || (enabled && focused) {
         SpriteId::SliderHandleHover
     } else {
         SpriteId::SliderHandle

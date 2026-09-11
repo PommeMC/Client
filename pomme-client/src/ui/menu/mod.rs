@@ -528,6 +528,7 @@ pub struct MainMenu {
     pub display_mode: DisplayMode,
     pub cloud_mode: CloudMode,
     pub attack_indicator: crate::ui::hud::AttackIndicatorMode,
+    focused_slider: Option<&'static str>,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
     menu_open_time: Option<Instant>,
@@ -644,6 +645,7 @@ impl MainMenu {
             attack_indicator: crate::ui::hud::AttackIndicatorMode::from_u8(
                 settings.attack_indicator,
             ),
+            focused_slider: None,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             menu_open_time: None,
@@ -663,6 +665,8 @@ impl MainMenu {
         self.screen = screen;
         self.focused_field = None;
         self.focus = None;
+        self.focused_slider = None;
+        self.active_slider = None;
         self.focusable_count = 0;
         self.last_field_click = None;
         self.field_undo_stack.clear();
