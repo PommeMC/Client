@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod azalea_compat;
+mod chat;
 pub mod commands;
 pub mod conn;
 pub mod connection;
