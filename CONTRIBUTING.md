@@ -39,16 +39,15 @@ just launcher-pre-pr        # Launcher (Rust & TypeScript)
 
 ## Pull Request Format
 
-Every PR must include:
+Opening a PR prefills a template with the sections we expect. Fill them in rather
+than deleting them.
 
-```markdown
-## Summary
-- Brief bullet points of what changed and why
+Ticking a box under **Type of change** applies the matching label automatically,
+and unticking it removes the label again.
 
-## Test plan
-- [ ] Steps to verify the changes work
-- [ ] Edge cases checked
-```
+Under **Reference**, name the classes in `reference/26.2/decompiled` you checked
+the change against. This is what reviewers compare against, so it saves a round
+trip. Put `n/a` for launcher, tooling and chore PRs.
 
 For bug fixes, also include:
 

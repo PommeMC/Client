@@ -64,7 +64,42 @@ jobs:
         # --release reuses the dependency artifacts the clippy step built.
         run: |
           cargo test -p pomme-protocol
-          cargo test -p pomme-client --release -- net::azalea_compat world::block renderer::camera:: ui::menu:: player::tests:: audio:: net::handler::
+          cargo test -p pomme-client --release
+
+  pr-template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check PR template and labeler agree
+        # The labeler matches checkbox text exactly, so a reworded box silently
+        # stops applying its label.
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          def read(path):
+              # Normalized, so a CRLF checkout doesn't look like a missing section.
+              return pathlib.Path(path).read_text(encoding="utf-8").replace("\r\n", "\n")
+
+          template = read(".github/PULL_REQUEST_TEMPLATE.md")
+          workflow = read(".github/workflows/pr-tags.yml")
+
+          section = re.search(r"## Type of change\n(.*?)(?=\n## |\Z)", template, re.S)
+          if section is None:
+              sys.exit("::error::PULL_REQUEST_TEMPLATE.md has no '## Type of change' section")
+
+          boxes = set(re.findall(r"^- \[ \] (.+)$", section.group(1), re.M))
+          mapped = set(re.findall(r'text:\s*"([^"]+)"', workflow))
+
+          drift = [f"checkbox {t!r} has no label in pr-tags.yml" for t in sorted(boxes - mapped)]
+          drift += [f"pr-tags.yml maps {t!r}, which is not a checkbox" for t in sorted(mapped - boxes)]
+          for problem in drift:
+              print(f"::error::{problem}")
+          if drift:
+              sys.exit(1)
+          print(f"{len(boxes)} checkboxes match their label mappings")
+          PY
 
   launcher-frontend:
     runs-on: ubuntu-latest
