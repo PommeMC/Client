@@ -6,6 +6,7 @@ pub mod tab_list;
 use glam::{dvec2, dvec3};
 use inventory::Inventory;
 
+use crate::attribute::AttributeMap;
 use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::physics::aabb::Aabb;
@@ -63,6 +64,7 @@ pub struct LocalPlayer {
     pub death_time: u32,
     pub absorption: f32,
     pub max_health: f32,
+    pub attributes: AttributeMap,
     pub hurt_time: u8,
     pub hurt_dir: f32,
     flash_on_set_health: bool,
@@ -132,6 +134,7 @@ impl LocalPlayer {
             death_time: 0,
             absorption: 0.0,
             max_health: 20.0,
+            attributes: AttributeMap::player(),
             hurt_time: 0,
             hurt_dir: 0.0,
             flash_on_set_health: false,
