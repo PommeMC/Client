@@ -129,17 +129,9 @@ pub enum NetworkEvent {
         operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
         waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,
     },
-    EntityArmorUpdate {
+    EntityAttributesUpdate {
         entity_id: i32,
-        armor: u32,
-    },
-    EntityMaxHealthUpdate {
-        entity_id: i32,
-        max_health: f32,
-    },
-    EntityCameraDistanceUpdate {
-        entity_id: i32,
-        distance: f32,
+        snapshots: Vec<crate::attribute::AttributeSnapshot>,
     },
     ContainerContent {
         container_id: i32,
