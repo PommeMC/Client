@@ -20,6 +20,10 @@ const fn effect(name: &'static str, beneficial: bool, color: u32) -> MobEffectIn
     }
 }
 
+pub const HASTE: u32 = 2;
+pub const MINING_FATIGUE: u32 = 3;
+pub const CONDUIT_POWER: u32 = 28;
+
 pub const MOB_EFFECTS: [MobEffectInfo; 40] = [
     effect("speed", true, 3402751),
     effect("slowness", false, 9154528),
@@ -70,11 +74,11 @@ pub fn info(effect_id: u32) -> Option<&'static MobEffectInfo> {
 /// Vanilla `MobEffectInstance.INFINITE_DURATION`.
 pub const INFINITE_DURATION: i32 = -1;
 
-// TODO: amplifier and show_particles once the inventory effect panel and
-// effect particles are ported.
 #[derive(Clone)]
 pub struct MobEffectInstance {
     pub effect_id: u32,
+    /// Zero-based vanilla effect level (`0` = level I).
+    pub amplifier: i32,
     /// Remaining ticks; `-1` = infinite.
     pub duration: i32,
     pub ambient: bool,
@@ -135,6 +139,25 @@ impl ActiveMobEffects {
         self.0.is_empty()
     }
 
+    pub fn amplifier(&self, effect_id: u32) -> Option<i32> {
+        self.0
+            .iter()
+            .find(|effect| effect.effect_id == effect_id)
+            .map(|effect| effect.amplifier)
+    }
+
+    /// Vanilla `MobEffectUtil.getDigSpeedAmplification`: the larger amplifier
+    /// from Haste and Conduit Power. Presence is checked separately because a
+    /// level-I effect has amplifier 0.
+    pub fn dig_speed_amplifier(&self) -> Option<i32> {
+        match (self.amplifier(HASTE), self.amplifier(CONDUIT_POWER)) {
+            (Some(haste), Some(conduit)) => Some(haste.max(conduit)),
+            (Some(haste), None) => Some(haste),
+            (None, Some(conduit)) => Some(conduit),
+            (None, None) => None,
+        }
+    }
+
     /// Vanilla `tickClient`: durations floor at 0 and the entry stays until
     /// the server's remove packet.
     pub fn tick(&mut self) {
@@ -160,6 +183,7 @@ mod tests {
     fn inst(effect_id: u32, duration: i32, ambient: bool) -> MobEffectInstance {
         MobEffectInstance {
             effect_id,
+            amplifier: 0,
             duration,
             ambient,
             show_icon: true,
@@ -247,5 +271,19 @@ mod tests {
         assert_eq!(sorted.len(), 1);
         assert_eq!(sorted[0].duration, 300);
         assert!(sorted[0].ambient);
+    }
+
+    #[test]
+    fn dig_speed_uses_larger_haste_or_conduit_amplifier() {
+        let mut effects = ActiveMobEffects::default();
+        let mut haste = inst(HASTE, 100, false);
+        haste.amplifier = 1;
+        effects.update(haste);
+        let mut conduit = inst(CONDUIT_POWER, 100, false);
+        conduit.amplifier = 3;
+        effects.update(conduit);
+
+        assert_eq!(effects.dig_speed_amplifier(), Some(3));
+        assert_eq!(effects.amplifier(MINING_FATIGUE), None);
     }
 }

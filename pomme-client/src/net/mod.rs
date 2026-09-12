@@ -35,6 +35,22 @@ pub struct PacketLightData {
     pub empty_block_y_mask: azalea_core::bitset::BitSet,
 }
 
+pub(crate) fn block_tags_from_packet(
+    tags: &azalea_protocol::common::tags::TagMap,
+) -> Option<Vec<(String, Vec<i32>)>> {
+    let block_tags = tags
+        .0
+        .iter()
+        .find(|(registry, _)| registry.namespace() == "minecraft" && registry.path() == "block")?
+        .1;
+    Some(
+        block_tags
+            .iter()
+            .map(|tag| (tag.name.to_string(), tag.elements.clone()))
+            .collect(),
+    )
+}
+
 impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData>
     for PacketLightData
 {
@@ -55,6 +71,9 @@ impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdat
 pub enum NetworkEvent {
     Connected,
     Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
+    BlockTags {
+        tags: Vec<(String, Vec<i32>)>,
+    },
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
     },
@@ -116,13 +135,9 @@ pub enum NetworkEvent {
         operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
         waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,
     },
-    EntityArmorUpdate {
+    EntityAttributesUpdate {
         entity_id: i32,
-        armor: u32,
-    },
-    EntityMaxHealthUpdate {
-        entity_id: i32,
-        max_health: f32,
+        snapshots: Vec<crate::attribute::AttributeSnapshot>,
     },
     ContainerContent {
         container_id: i32,
