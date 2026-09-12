@@ -5,7 +5,7 @@ use glam::{Mat4, Quat, Vec3};
 use serde::Deserialize;
 
 use super::registry::{FaceTextures, Tint};
-use crate::assets::{AssetIndex, resolve_asset_path_with_packs};
+use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs};
 
 #[derive(Deserialize)]
 struct BlockstateFile {
@@ -70,6 +70,56 @@ struct ModelFile {
     textures: HashMap<String, String>,
     #[serde(default)]
     elements: Vec<ElementDef>,
+    #[serde(default)]
+    display: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DisplayTransform {
+    pub rotation: Vec3,
+    pub translation: Vec3,
+    pub scale: Vec3,
+}
+
+impl DisplayTransform {
+    pub fn to_matrix(self) -> Mat4 {
+        Mat4::from_translation(self.translation)
+            * Mat4::from_rotation_x(self.rotation.x.to_radians())
+            * Mat4::from_rotation_y(self.rotation.y.to_radians())
+            * Mat4::from_rotation_z(self.rotation.z.to_radians())
+            * Mat4::from_scale(self.scale)
+    }
+}
+
+fn parse_display_transform(json: &serde_json::Value) -> Option<DisplayTransform> {
+    let obj = json.as_object()?;
+    let rotation = obj
+        .get("rotation")
+        .map(|value| parse_vec3(value, Vec3::ZERO))
+        .unwrap_or(Vec3::ZERO);
+    let translation = obj
+        .get("translation")
+        .map(|value| parse_vec3(value, Vec3::ZERO))
+        .unwrap_or(Vec3::ZERO)
+        * (1.0 / 16.0);
+    let scale = obj
+        .get("scale")
+        .map(|value| parse_vec3(value, Vec3::ONE))
+        .unwrap_or(Vec3::ONE);
+    Some(DisplayTransform {
+        rotation,
+        translation: translation.clamp(Vec3::splat(-5.0), Vec3::splat(5.0)),
+        scale: scale.clamp(Vec3::splat(-4.0), Vec3::splat(4.0)),
+    })
+}
+
+pub(crate) fn default_block_ground_transform() -> Mat4 {
+    DisplayTransform {
+        rotation: Vec3::ZERO,
+        translation: Vec3::new(0.0, 3.0 / 16.0, 0.0),
+        scale: Vec3::splat(0.25),
+    }
+    .to_matrix()
 }
 
 fn deserialize_texture_map<'de, D>(de: D) -> Result<HashMap<String, String>, D::Error>
@@ -378,24 +428,35 @@ pub fn bake_all_models(
     (results, multipart_results)
 }
 
+pub struct BakedItemModels {
+    pub models: HashMap<String, BakedModel>,
+    pub generated_textures: HashSet<String>,
+    pub flat_texture_keys: HashMap<String, String>,
+    pub ground_transforms: HashMap<String, Mat4>,
+}
+
 pub fn bake_item_models(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
-) -> (
-    HashMap<String, BakedModel>,
-    HashSet<String>,
-    HashMap<String, String>,
-) {
+) -> BakedItemModels {
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
-    let mut item_textures: HashSet<String> = HashSet::new();
+    let mut flat_item_textures: HashSet<String> = HashSet::new();
     let mut flat_keys: HashMap<String, String> = HashMap::new();
+    let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
     let items_dir = jar_assets_dir.join("minecraft").join("items");
     let entries = match std::fs::read_dir(&items_dir) {
         Ok(e) => e,
-        Err(_) => return (item_models, item_textures, flat_keys),
+        Err(_) => {
+            return BakedItemModels {
+                models: item_models,
+                generated_textures: flat_item_textures,
+                flat_texture_keys: flat_keys,
+                ground_transforms,
+            };
+        }
     };
 
     for entry in entries.flatten() {
@@ -403,7 +464,10 @@ pub fn bake_item_models(
         let Some(item_name) = fname.strip_suffix(".json") else {
             continue;
         };
-        let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+        let item_asset_key = format!("minecraft/items/{fname}");
+        let item_path =
+            resolve_asset_path_with_packs(jar_assets_dir, asset_index, &item_asset_key, packs);
+        let Ok(contents) = std::fs::read_to_string(item_path) else {
             continue;
         };
         let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&contents) else {
@@ -417,6 +481,8 @@ pub fn bake_item_models(
 
         let tint = determine_tint(item_name);
         let mut merged: Option<BakedModel> = None;
+        let mut ground_transform: Option<Mat4> = None;
+        let mut common_ground_transform = true;
         for part in &parts {
             let resolved = resolve_model(
                 &part.path,
@@ -425,17 +491,22 @@ pub fn bake_item_models(
                 &mut model_cache,
                 packs,
             );
+            if let Some(existing) = ground_transform {
+                common_ground_transform &= existing
+                    .to_cols_array()
+                    .iter()
+                    .zip(resolved.ground_transform.to_cols_array())
+                    .all(|(a, b)| (*a - b).abs() < 1.0e-6);
+            } else {
+                ground_transform = Some(resolved.ground_transform);
+            }
             // A flat sprite (layer0, no elements) only makes sense as the
             // sole part; `merged` stays empty so no 3D model is inserted.
             if parts.len() == 1 && resolved.elements.is_empty() {
-                if let Some(value) = resolved.textures.get("layer0") {
-                    let stripped = strip_mc_prefix(value);
-                    let key = if let Some(rest) = stripped.strip_prefix("block/") {
-                        rest.to_string()
-                    } else {
-                        item_textures.insert(stripped.to_string());
-                        stripped.to_string()
-                    };
+                if let Some(value) = resolved.textures.get("layer0")
+                    && let Some(key) = texture_to_name(value)
+                {
+                    flat_item_textures.insert(key.clone());
                     flat_keys.insert(item_name.to_string(), key);
                 }
                 break;
@@ -460,6 +531,9 @@ pub fn bake_item_models(
                 }
             });
         }
+        if common_ground_transform && let Some(transform) = ground_transform {
+            ground_transforms.insert(item_name.to_string(), transform);
+        }
         if let Some(mut baked) = merged {
             apply_gui_lambert(&mut baked.quads, BLOCK_GUI_ROTATION_DEG);
             item_models.insert(item_name.to_string(), baked);
@@ -467,15 +541,21 @@ pub fn bake_item_models(
     }
 
     item_models.insert("chest".to_string(), bake_chest_item_model());
+    ground_transforms.insert("chest".to_string(), default_block_ground_transform());
     flat_keys.remove("chest");
 
     tracing::info!(
-        "Baked {} item models, {} flat items, and registered {} item textures",
+        "Baked {} item models, {} flat items, and registered {} generated-item textures",
         item_models.len(),
         flat_keys.len(),
-        item_textures.len()
+        flat_item_textures.len()
     );
-    (item_models, item_textures, flat_keys)
+    BakedItemModels {
+        models: item_models,
+        generated_textures: flat_item_textures,
+        flat_texture_keys: flat_keys,
+        ground_transforms,
+    }
 }
 
 pub fn bake_chest_item_model() -> BakedModel {
@@ -747,10 +827,17 @@ fn collect_parts_from_node(
     parent_transform: Option<Mat4>,
     parts: &mut Vec<ModelPart>,
 ) {
-    let transform = match (
-        parent_transform,
-        node.get("transformation").map(parse_item_transformation),
-    ) {
+    let own_transform = match node.get("transformation") {
+        Some(value) => match parse_item_transformation(value) {
+            Some(transform) => Some(transform),
+            None => {
+                tracing::warn!("Skipping item-model part with unsupported transformation encoding");
+                return;
+            }
+        },
+        None => None,
+    };
+    let transform = match (parent_transform, own_transform) {
         (Some(parent), Some(own)) => Some(parent * own),
         (parent, own) => parent.or(own),
     };
@@ -780,24 +867,42 @@ fn collect_parts_from_node(
 }
 
 /// Vanilla `Transformation.compose` (Transformation.java:103): `translation ·
-/// leftRotation · scale · rightRotation`, translation in block units. The
-/// codec's raw-matrix and axis-angle quaternion alternatives are unused by
-/// vanilla assets and ignored.
-fn parse_item_transformation(json: &serde_json::Value) -> Mat4 {
-    let quat = |key: &str| {
-        json.get(key)
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                let get = |i: usize| arr.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                Quat::from_xyzw(get(0), get(1), get(2), get(3))
-            })
-            .unwrap_or(Quat::IDENTITY)
+/// leftRotation · scale · rightRotation`, translation in block units. Pomme
+/// currently supports the stock quaternion-array encoding. Other valid codec
+/// forms are rejected by the caller instead of silently becoming identity.
+fn parse_item_transformation(json: &serde_json::Value) -> Option<Mat4> {
+    let object = json.as_object()?;
+    let quat = |key: &str| -> Option<Quat> {
+        let Some(value) = object.get(key) else {
+            return Some(Quat::IDENTITY);
+        };
+        let arr = value.as_array()?;
+        if arr.len() != 4 {
+            return None;
+        }
+        let get = |i: usize| arr.get(i)?.as_f64().map(|v| v as f32);
+        Some(Quat::from_xyzw(get(0)?, get(1)?, get(2)?, get(3)?))
     };
-    let vec3 = |key: &str, default: Vec3| json.get(key).map_or(default, |v| parse_vec3(v, default));
-    Mat4::from_translation(vec3("translation", Vec3::ZERO))
-        * Mat4::from_quat(quat("left_rotation"))
-        * Mat4::from_scale(vec3("scale", Vec3::ONE))
-        * Mat4::from_quat(quat("right_rotation"))
+    let vec3 = |key: &str, default: Vec3| {
+        object.get(key).map_or(Some(default), |v| {
+            v.as_array().and_then(|arr| {
+                if arr.len() != 3 {
+                    return None;
+                }
+                Some(Vec3::new(
+                    arr[0].as_f64()? as f32,
+                    arr[1].as_f64()? as f32,
+                    arr[2].as_f64()? as f32,
+                ))
+            })
+        })
+    };
+    Some(
+        Mat4::from_translation(vec3("translation", Vec3::ZERO)?)
+            * Mat4::from_quat(quat("left_rotation")?)
+            * Mat4::from_scale(vec3("scale", Vec3::ONE)?)
+            * Mat4::from_quat(quat("right_rotation")?),
+    )
 }
 
 pub fn parse_vec3(value: &serde_json::Value, default: Vec3) -> Vec3 {
@@ -955,6 +1060,7 @@ fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
 struct ResolvedModel {
     textures: HashMap<String, String>,
     elements: Vec<ElementDef>,
+    ground_transform: Mat4,
 }
 
 fn resolve_model(
@@ -966,6 +1072,7 @@ fn resolve_model(
 ) -> ResolvedModel {
     let mut texture_map: HashMap<String, String> = HashMap::new();
     let mut elements: Option<Vec<ElementDef>> = None;
+    let mut ground_transform: Option<Mat4> = None;
     let mut current_id = model_id.to_string();
 
     for _ in 0..20 {
@@ -982,6 +1089,14 @@ fn resolve_model(
         if elements.is_none() && !model.elements.is_empty() {
             elements = Some(model.elements.clone());
         }
+        if ground_transform.is_none()
+            && let Some(transform) = model
+                .display
+                .get("ground")
+                .and_then(parse_display_transform)
+        {
+            ground_transform = Some(transform.to_matrix());
+        }
 
         match &model.parent {
             Some(parent) => current_id = parent.clone(),
@@ -997,6 +1112,7 @@ fn resolve_model(
     ResolvedModel {
         textures: resolved_textures,
         elements: elements.unwrap_or_default(),
+        ground_transform: ground_transform.unwrap_or(Mat4::IDENTITY),
     }
 }
 
@@ -1053,18 +1169,36 @@ fn resolve_model_path(
 }
 
 fn model_id_to_asset_key(model_id: &str) -> String {
-    let stripped = model_id.strip_prefix("minecraft:").unwrap_or(model_id);
-    format!("minecraft/models/{stripped}.json")
+    AssetId::parse(model_id).asset_key("models", ".json")
 }
 
-fn texture_to_name(texture_ref: &str) -> Option<&str> {
+fn texture_to_name(texture_ref: &str) -> Option<String> {
     if texture_ref.starts_with('#') {
         return None;
     }
-    let stripped = texture_ref
-        .strip_prefix("minecraft:")
-        .unwrap_or(texture_ref);
-    stripped.strip_prefix("block/")
+    let id = AssetId::parse(texture_ref);
+    if id.namespace == "minecraft" {
+        if let Some(block_path) = id.path.strip_prefix("block/") {
+            Some(block_path.to_string())
+        } else if id.path.starts_with("item/")
+            || id.path.starts_with("entity/")
+            || id.path.starts_with("particle/")
+        {
+            Some(id.path.to_string())
+        } else {
+            Some(format!("minecraft:{}", id.path))
+        }
+    } else {
+        Some(id.canonical())
+    }
+}
+
+fn resolve_face_texture<'a>(
+    reference: &str,
+    textures: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    let slot = reference.strip_prefix('#').unwrap_or(reference);
+    textures.get(slot).map(String::as_str)
 }
 
 fn bake_resolved_model(
@@ -1096,8 +1230,11 @@ fn bake_resolved_model(
                 continue;
             };
 
-            let texture_ref = resolve_ref(&face_def.texture, &resolved.textures, 0);
-            let Some(texture_name) = texture_to_name(&texture_ref) else {
+            let Some(texture_ref) = resolve_face_texture(&face_def.texture, &resolved.textures)
+            else {
+                continue;
+            };
+            let Some(texture_name) = texture_to_name(texture_ref) else {
                 continue;
             };
 
@@ -1107,12 +1244,6 @@ fn bake_resolved_model(
             let mut positions = apply_element_rotation(positions, &element.rotation);
 
             let mut cullface = face_def.cullface.as_deref().and_then(Direction::from_str);
-
-            let shade_light = if element.shade {
-                dir.shade_light()
-            } else {
-                1.0
-            };
             let quad_tint = if face_def.tint_index.is_some() {
                 tint
             } else {
@@ -1124,10 +1255,18 @@ fn bake_resolved_model(
                 cullface = cullface.map(|d| d.rotate_x(rot_x).rotate_y(rot_y));
             }
 
+            let shade_light = if element.shade {
+                direction_from_positions(&positions)
+                    .unwrap_or(dir)
+                    .shade_light()
+            } else {
+                1.0
+            };
+
             quads.push(BakedQuad {
                 positions,
                 uvs,
-                texture: texture_name.to_string(),
+                texture: texture_name,
                 cullface,
                 tint: quad_tint,
                 shade_light,
@@ -1264,6 +1403,30 @@ fn apply_element_rotation(
     positions
 }
 
+fn direction_from_positions(positions: &[[f32; 3]; 4]) -> Option<Direction> {
+    let p0 = Vec3::from_array(positions[0]);
+    let p1 = Vec3::from_array(positions[1]);
+    let p2 = Vec3::from_array(positions[2]);
+    let normal = (p1 - p0).cross(p2 - p0).try_normalize()?;
+    let mut best = None;
+    let mut closest_product = 0.0f32;
+    for candidate in [
+        Direction::Down,
+        Direction::Up,
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ] {
+        let product = normal.dot(Vec3::from_array(candidate.offset().map(|v| v as f32)));
+        if product >= 0.0 && product > closest_product {
+            closest_product = product;
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
 fn rotate_positions(mut positions: [[f32; 3]; 4], rot_x: i32, rot_y: i32) -> [[f32; 3]; 4] {
     let center = 0.5f32;
 
@@ -1299,10 +1462,7 @@ fn build_face_textures(
     textures: &HashMap<String, String>,
 ) -> Option<FaceTextures> {
     let mut faces = face_textures_base(block_name, textures)?;
-    faces.particle = textures
-        .get("particle")
-        .and_then(|v| texture_to_name(v))
-        .map(Into::into);
+    faces.particle = textures.get("particle").and_then(|v| texture_to_name(v));
     Some(faces)
 }
 
@@ -1310,7 +1470,7 @@ fn face_textures_base(
     block_name: &str,
     textures: &HashMap<String, String>,
 ) -> Option<FaceTextures> {
-    let get = |key: &str| -> Option<&str> { textures.get(key).and_then(|v| texture_to_name(v)) };
+    let get = |key: &str| -> Option<String> { textures.get(key).and_then(|v| texture_to_name(v)) };
 
     let (up, down, north, south, east, west) = (
         get("up"),
@@ -1332,62 +1492,64 @@ fn face_textures_base(
             (None, tint)
         };
         return Some(FaceTextures::new(
-            up,
-            down,
-            north,
-            south,
-            east,
-            west,
+            &up,
+            &down,
+            &north,
+            &south,
+            &east,
+            &west,
             side_overlay,
             tint,
         ));
     }
 
     if let Some(all) = get("all") {
-        return Some(FaceTextures::uniform(all, tint));
+        return Some(FaceTextures::uniform(&all, tint));
     }
 
     if let (Some(end), Some(side)) = (get("end"), get("side")) {
         return Some(FaceTextures::new(
-            end,
-            end,
-            side,
-            side,
-            side,
-            side,
+            &end,
+            &end,
+            &side,
+            &side,
+            &side,
+            &side,
             None,
             Tint::None,
         ));
     }
 
     if let (Some(top), Some(side)) = (get("top"), get("side")) {
-        let bottom = get("bottom").unwrap_or(top);
+        let bottom = get("bottom").unwrap_or_else(|| top.clone());
         return Some(FaceTextures::new(
-            top, bottom, side, side, side, side, None, tint,
+            &top, &bottom, &side, &side, &side, &side, None, tint,
         ));
     }
 
     if let Some(cross) = get("cross") {
-        return Some(FaceTextures::uniform(cross, tint));
+        return Some(FaceTextures::uniform(&cross, tint));
     }
 
     if let (Some(front), Some(side)) = (get("front"), get("side")) {
-        let top = get("top").or(get("end")).unwrap_or(side);
-        let bottom = get("bottom").unwrap_or(top);
+        let top = get("top")
+            .or_else(|| get("end"))
+            .unwrap_or_else(|| side.clone());
+        let bottom = get("bottom").unwrap_or_else(|| top.clone());
         return Some(FaceTextures::new(
-            top,
-            bottom,
-            front,
-            side,
-            side,
-            side,
+            &top,
+            &bottom,
+            &front,
+            &side,
+            &side,
+            &side,
             None,
             Tint::None,
         ));
     }
 
     if let Some(p) = get("particle") {
-        return Some(FaceTextures::uniform(p, tint));
+        return Some(FaceTextures::uniform(&p, tint));
     }
 
     None
@@ -1453,7 +1615,37 @@ mod tests {
             let normal = (p[1] - p[0]).cross(p[2] - p[0]);
             let outward = Vec3::from_array(dir.offset().map(|c| c as f32));
             assert!(normal.dot(outward) > 0.0, "{dir:?} winds the wrong way");
+            assert_eq!(
+                direction_from_positions(&p.map(|position| position.to_array())),
+                Some(dir)
+            );
         }
+    }
+
+    #[test]
+    fn model_rotation_uses_final_face_direction_for_cardinal_shading() {
+        let face = FaceDef {
+            uv: Some([0.0, 0.0, 16.0, 16.0]),
+            texture: "side".to_string(),
+            cullface: None,
+            rotation: None,
+            tint_index: None,
+        };
+        let resolved = ResolvedModel {
+            textures: HashMap::from([("side".to_string(), "block/piston_side".to_string())]),
+            elements: vec![ElementDef {
+                from: [6.0, 6.0, 4.0],
+                to: [10.0, 10.0, 20.0],
+                rotation: None,
+                faces: HashMap::from([("west".to_string(), face)]),
+                shade: true,
+            }],
+            ground_transform: Mat4::IDENTITY,
+        };
+
+        let baked = bake_resolved_model(&resolved, 0, 270, Tint::None).unwrap();
+        assert_eq!(baked.quads.len(), 1);
+        assert!((baked.quads[0].shade_light - Direction::South.shade_light()).abs() < 1.0e-6);
     }
 
     /// Every face must show the full-tile texture upright at rotation 0 and
@@ -1549,6 +1741,18 @@ mod tests {
         assert!((moved - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
     }
 
+    #[test]
+    fn unsupported_item_transformation_encoding_is_rejected() {
+        let raw_matrix = serde_json::json!([
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0
+        ]);
+        let axis_angle = serde_json::json!({
+            "left_rotation": {"axis": [0.0, 1.0, 0.0], "angle": 90.0}
+        });
+        assert!(parse_item_transformation(&raw_matrix).is_none());
+        assert!(parse_item_transformation(&axis_angle).is_none());
+    }
+
     /// Non-composite trees (bundles' select/condition) keep the old
     /// first-model-string behavior.
     #[test]
@@ -1570,6 +1774,120 @@ mod tests {
         assert!(parts[0].transform.is_none());
         let legacy = find_first_model_string(&json).unwrap();
         assert_eq!(parts[0].path, strip_mc_prefix(&legacy));
+    }
+
+    fn test_temp_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("pomme_{label}_{}_{}", std::process::id(), nonce))
+    }
+
+    #[test]
+    fn item_definition_and_ground_transform_follow_resource_pack_override() {
+        let root = test_temp_dir("item_model_pack");
+        let jar = root.join("jar");
+        let instance = root.join("instance");
+        let items = jar.join("minecraft/items");
+        let models = jar.join("minecraft/models/item");
+        let pack_items = instance.join("resourcepacks/test_pack/assets/minecraft/items");
+        let pack_models = instance.join("resourcepacks/test_pack/assets/other/models/item");
+        std::fs::create_dir_all(&items).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::create_dir_all(&pack_items).unwrap();
+        std::fs::create_dir_all(&pack_models).unwrap();
+        std::fs::write(
+            instance.join("resourcepacks/test_pack/pack.mcmeta"),
+            r#"{"pack":{"pack_format":84,"description":"test"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            items.join("test_item.json"),
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/base"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("base.json"),
+            r#"{"parent":"minecraft:item/generated","textures":{"layer0":"minecraft:item/base"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("generated.json"),
+            r#"{"display":{"ground":{"translation":[0,2,0],"scale":[0.5,0.5,0.5]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack_items.join("test_item.json"),
+            r#"{"model":{"type":"minecraft:model","model":"other:item/replacement"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack_models.join("replacement.json"),
+            r#"{"parent":"minecraft:item/generated","textures":{"layer0":"other:item/replacement"}}"#,
+        )
+        .unwrap();
+
+        let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
+        packs.enable_local_pack("test_pack");
+        let baked = bake_item_models(&jar, &None, Some(&packs));
+        assert_eq!(
+            baked.flat_texture_keys.get("test_item").map(String::as_str),
+            Some("other:item/replacement")
+        );
+        let transform = baked.ground_transforms["test_item"];
+        let origin = transform.transform_point3(Vec3::ZERO);
+        assert!((origin - Vec3::new(0.0, 2.0 / 16.0, 0.0)).length() < 1.0e-6);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bare_face_texture_slot_matches_vanilla_texture_slots() {
+        let root = test_temp_dir("bare_texture_slot");
+        let models = root.join("minecraft/models/block");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            models.join("test_core.json"),
+            r#"{
+                "textures":{"all":"block/test_core"},
+                "elements":[{
+                    "from":[4,0,4],"to":[12,8,12],
+                    "faces":{
+                        "down":{"texture":"all"},"up":{"texture":"all"},
+                        "north":{"texture":"all"},"south":{"texture":"all"},
+                        "west":{"texture":"all"},"east":{"texture":"all"}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut cache = HashMap::new();
+        let resolved = resolve_model("block/test_core", &root, &None, &mut cache, None);
+        let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
+        assert_eq!(baked.quads.len(), 6);
+        assert!(baked.quads.iter().all(|quad| quad.texture == "test_core"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ground_display_transform_matches_vanilla_centered_mesh() {
+        let json = serde_json::json!({
+            "rotation": [0.0, 0.0, 0.0],
+            "translation": [0.0, 3.0, 0.0],
+            "scale": [0.5, 0.5, 0.5]
+        });
+        let transform = parse_display_transform(&json).unwrap().to_matrix();
+
+        // ItemTransform applies translation/rotation/scale and then recenters
+        // vanilla's 0..1 model. Pomme stores its item mesh already centered,
+        // so the equivalent matrix leaves out only that final -0.5 step.
+        let min = transform.transform_point3(Vec3::splat(-0.5));
+        let max = transform.transform_point3(Vec3::splat(0.5));
+        assert!((min - Vec3::new(-0.25, -0.0625, -0.25)).length() < 1e-6);
+        assert!((max - Vec3::new(0.25, 0.4375, 0.25)).length() < 1e-6);
     }
 
     #[test]

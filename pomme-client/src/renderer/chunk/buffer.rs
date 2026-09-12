@@ -167,9 +167,10 @@ pub fn chunk_vertex_bindings() -> [vk::VertexInputBindingDescription; 2] {
     ]
 }
 
-pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 6] {
+pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 7] {
     let pos_off = std::mem::offset_of!(PackedVertex, pos) as u32;
     let uv_off = std::mem::offset_of!(PackedVertex, uv) as u32;
+    let atlas_rect_off = std::mem::offset_of!(PackedVertex, atlas_rect) as u32;
     let light_tint_off = std::mem::offset_of!(PackedVertex, light_tint) as u32;
     let origin_off = std::mem::offset_of!(ChunkMeta, origin) as u32;
     let vis_off = std::mem::offset_of!(ChunkMeta, visibility) as u32;
@@ -190,24 +191,30 @@ pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 6] {
         vk::VertexInputAttributeDescription {
             location: 2,
             binding: 0,
-            format: vk::Format::R16G16Unorm,
+            format: vk::Format::R16G16Uint,
             offset: uv_off,
         },
         vk::VertexInputAttributeDescription {
             location: 3,
+            binding: 0,
+            format: vk::Format::R16G16B16A16Uint,
+            offset: atlas_rect_off,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 4,
             binding: 0,
             format: vk::Format::R8G8B8A8Unorm,
             offset: light_tint_off,
         },
         // binding 1 — per-instance meta (origin + fade)
         vk::VertexInputAttributeDescription {
-            location: 4,
+            location: 5,
             binding: 1,
             format: vk::Format::R32G32B32Sint,
             offset: origin_off,
         },
         vk::VertexInputAttributeDescription {
-            location: 5,
+            location: 6,
             binding: 1,
             format: vk::Format::R32Sfloat,
             offset: vis_off,

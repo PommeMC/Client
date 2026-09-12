@@ -469,6 +469,35 @@ impl AppCore {
         renderer.remove_player_entity_skin(uuid);
     }
 
+    fn reload_live_resource_assets(&mut self, game: &mut GameState, renderer: &mut Renderer) {
+        // The shared atlas bakes UVs into chunk vertices, so a live pack swap
+        // must retire chunk geometry before repacking the atlas. Recreate the
+        // CPU mesher and particle atlas state from the same freshly-reloaded
+        // registry/UV map, then let the normal rescan rebuild loaded columns.
+        renderer.clear_chunk_meshes();
+        self.reload_pack_assets(renderer);
+
+        let mesh_dispatcher = renderer
+            .create_mesh_dispatcher(Arc::clone(&game.biome_climate), Some(&self.resource_packs));
+        let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
+        game.mesh_dispatcher = mesh_dispatcher;
+        game.particle_store = crate::particle::ParticleStore::new(
+            renderer.atlas_uv_map().clone(),
+            grass,
+            foliage,
+            dry_foliage,
+        );
+
+        game.meshed.clear();
+        game.section_vis.clear();
+        game.section_vis_epoch.clear();
+        game.vis_mask.clear();
+        game.vis_tiers.clear();
+        game.vis_task = None;
+        game.vis_valid = false;
+        game.pending_load_rescan = true;
+    }
+
     fn clear_server_ui(&mut self, game: &mut GameState, renderer: &mut Renderer) {
         game.tab_list.clear();
         game.scoreboard.clear();
@@ -546,10 +575,12 @@ impl AppCore {
                     height,
                     min_y,
                     has_skylight,
+                    nether_cardinal_lighting,
                 } => {
                     tracing::info!(
-                        "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}"
+                        "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, nether_cardinal_lighting={nether_cardinal_lighting}"
                     );
+                    game.nether_cardinal_lighting = nether_cardinal_lighting;
                     game.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
                     game.light_engine =
@@ -1395,19 +1426,12 @@ impl AppCore {
                     id,
                     item_name,
                     item_id,
+                    damage,
                     count,
                 } => {
-                    let mesh = renderer.ensure_item_mesh(&item_name);
-
-                    game.item_entity_store.set_item_data(
-                        id,
-                        item_name,
-                        item_id,
-                        count,
-                        mesh.is_block_model,
-                        mesh.min_y,
-                        mesh.z_size,
-                    );
+                    renderer.ensure_item_mesh(&item_name);
+                    game.item_entity_store
+                        .set_item_data(id, item_name, item_id, damage, count);
                 }
                 NetworkEvent::EntityData { id, index, value } => {
                     if index == 4
@@ -1583,7 +1607,7 @@ impl AppCore {
                         None => self.resource_packs.clear_server_packs(),
                     };
                     if removed {
-                        self.reload_pack_assets(renderer);
+                        self.reload_live_resource_assets(game, renderer);
                     }
                 }
                 NetworkEvent::Reconfiguring => {
@@ -1656,9 +1680,11 @@ impl AppCore {
                 Ok(Ok(_path)) => {
                     self.resource_packs
                         .apply_server_pack(pending.id, &pending.hash);
+                    // Vanilla acknowledges SuccessfullyLoaded only after the
+                    // resources have been applied. Rebuild the live renderer
+                    // (including shared-atlas chunk geometry) before replying.
+                    self.reload_live_resource_assets(game, renderer);
                     tracing::info!("Resource pack {} loaded successfully", pending.id);
-                    // `apply_server_pack` always changes the stack.
-                    self.reload_pack_assets(renderer);
                     s_resource_pack::Action::SuccessfullyLoaded
                 }
             };

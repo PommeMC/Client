@@ -719,16 +719,13 @@ pub struct ItemEntity {
     pub position: Position,
     pub prev_position: Position,
     pub item_name: String,
-    /// Registry id (vanilla `Item.getId`) — seeds the copy-scatter RNG.
+    /// Registry id (vanilla `Item.getId`) — part of the copy-scatter seed.
     pub item_id: u32,
+    /// Vanilla `ItemStack.getDamageValue()` — the other seed component.
+    pub damage: i32,
     pub count: i32,
     pub age: u32,
     pub bob_offset: f32,
-    pub is_block_model: bool,
-    /// Local-space model bounds (pre per-entity scale) from the baked mesh,
-    /// used for hover height and the 3D-vs-flat copy layout.
-    pub min_y: f32,
-    pub z_size: f32,
     velocity: DVec3,
     on_ground: bool,
     /// Server-authoritative position, tracked from move/teleport packets.
@@ -738,27 +735,23 @@ pub struct ItemEntity {
 struct PickupAnimation {
     item_name: String,
     item_id: u32,
+    damage: i32,
     count: i32,
     start_pos: Position,
     target_pos: Position,
     bob_offset: f32,
     age: u32,
     life: u32,
-    is_block_model: bool,
-    min_y: f32,
-    z_size: f32,
 }
 
 pub struct PickupRenderInfo {
     pub item_name: String,
     pub item_id: u32,
+    pub damage: i32,
     pub count: i32,
     pub position: Position,
     pub bob_offset: f32,
     pub age: u32,
-    pub is_block_model: bool,
-    pub min_y: f32,
-    pub z_size: f32,
 }
 
 const PICKUP_LIFE: u32 = 3;
@@ -786,12 +779,10 @@ impl ItemEntityStore {
                 prev_position: position,
                 item_name: String::new(),
                 item_id: 0,
+                damage: 0,
                 count: 1,
                 age: 0,
                 bob_offset,
-                is_block_model: false,
-                min_y: -0.5,
-                z_size: 1.0,
                 velocity,
                 on_ground: false,
                 server_pos: position,
@@ -799,24 +790,19 @@ impl ItemEntityStore {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn set_item_data(
         &mut self,
         id: i32,
         item_name: String,
         item_id: u32,
+        damage: i32,
         count: i32,
-        is_block_model: bool,
-        min_y: f32,
-        z_size: f32,
     ) {
         if let Some(entity) = self.items.get_mut(&id) {
             entity.item_name = item_name;
             entity.item_id = item_id;
+            entity.damage = damage;
             entity.count = count;
-            entity.is_block_model = is_block_model;
-            entity.min_y = min_y;
-            entity.z_size = z_size;
         }
     }
 
@@ -875,15 +861,13 @@ impl ItemEntityStore {
         let anim = PickupAnimation {
             item_name: entity.item_name.clone(),
             item_id: entity.item_id,
+            damage: entity.damage,
             count: entity.count,
             start_pos,
             target_pos,
             bob_offset: entity.bob_offset,
             age: entity.age,
             life: 0,
-            is_block_model: entity.is_block_model,
-            min_y: entity.min_y,
-            z_size: entity.z_size,
         };
         entity.count -= amount;
         let empty = entity.count <= 0;
@@ -932,13 +916,11 @@ impl ItemEntityStore {
                 PickupRenderInfo {
                     item_name: p.item_name.clone(),
                     item_id: p.item_id,
+                    damage: p.damage,
                     count: p.count,
                     position: pos,
                     bob_offset: p.bob_offset,
                     age: p.age,
-                    is_block_model: p.is_block_model,
-                    min_y: p.min_y,
-                    z_size: p.z_size,
                 }
             })
             .collect()

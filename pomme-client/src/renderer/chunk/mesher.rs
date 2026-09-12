@@ -23,6 +23,17 @@ pub struct ChunkVertex {
     pub light_tint: u32,
 }
 
+#[derive(Copy, Clone)]
+struct TerrainVertex {
+    position: [f32; 3],
+    /// Sprite-local UV where 1.0 spans one full sprite. Greedy quads may exceed
+    /// 1.0 so the chunk shader can repeat the sprite without sampling adjacent
+    /// atlas entries.
+    sprite_uv: [f32; 2],
+    atlas_rect: [u16; 4],
+    light_tint: u32,
+}
+
 impl ChunkVertex {
     pub const STRIDE: u32 = size_of::<Self>() as u32;
 
@@ -60,16 +71,17 @@ impl ChunkVertex {
 
 include!("packing_consts.rs");
 
-/// Compact GPU vertex (14 bytes): section-local position quantized to u16 (see
-/// `POS_RANGE`), rebased in the vertex shader via the integer section origin.
-/// `light_tint` is `[u8; 4]` (not `u32`) so the struct packs to 14 bytes with
-/// no alignment padding; byte order matches the old `R8G8B8A8_UNORM` (light,
-/// r,g,b).
+/// Compact terrain GPU vertex. Positions stay quantized as before. `uv` stores
+/// sprite-local coordinates as u16 fixed point over the section's 0..16 repeat
+/// range, and `atlas_rect` is the exact level-0 sprite rectangle in atlas
+/// texels. Keeping the rectangle as integers avoids atlas-boundary rounding and
+/// lets a greedy quad repeat one sprite instead of walking into its neighbour.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PackedVertex {
     pub pos: [u16; 3],
     pub uv: [u16; 2],
+    pub atlas_rect: [u16; 4],
     pub light_tint: [u8; 4],
 }
 
@@ -88,19 +100,32 @@ fn quantize_coord(local: f32) -> u16 {
     unorm_to_u16((local + POS_BIAS) / POS_RANGE)
 }
 
-fn pack_vertex(v: &ChunkVertex) -> PackedVertex {
+fn pack_sprite_uv(x: f32) -> u16 {
+    (x.clamp(0.0, TERRAIN_UV_MAX_REPEAT) * TERRAIN_UV_FIXED_SCALE + 0.5) as u16
+}
+
+fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
     PackedVertex {
         pos: [
             quantize_coord(v.position[0]),
             quantize_coord(v.position[1]),
             quantize_coord(v.position[2]),
         ],
-        uv: v.tex_coords,
+        uv: [
+            pack_sprite_uv(v.sprite_uv[0]),
+            pack_sprite_uv(v.sprite_uv[1]),
+        ],
+        atlas_rect: v.atlas_rect,
         light_tint: v.light_tint.to_le_bytes(),
     }
 }
 
-fn section_aabb(verts: &[ChunkVertex]) -> ChunkAABB {
+#[cfg(test)]
+fn unpack_sprite_uv(x: u16) -> f32 {
+    x as f32 / TERRAIN_UV_FIXED_SCALE
+}
+
+fn section_aabb(verts: &[TerrainVertex]) -> ChunkAABB {
     let mut mn = [f32::MAX; 3];
     let mut mx = [f32::MIN; 3];
     for v in verts {
@@ -171,7 +196,7 @@ pub struct SectionMesh {
 /// the blended pass.
 #[derive(Default)]
 struct MeshSink {
-    vertices: Vec<ChunkVertex>,
+    vertices: Vec<TerrainVertex>,
     solid: Vec<u32>,
     cutout: Vec<u32>,
     water: Vec<u32>,
@@ -545,8 +570,8 @@ const SECTION_INDEX_HINT: usize = 3072;
 struct BufferPool {
     // Float scratch the workers mesh into; never leaves the worker (packed at
     // section finalize).
-    scratch_tx: crossbeam_channel::Sender<Vec<ChunkVertex>>,
-    scratch_rx: crossbeam_channel::Receiver<Vec<ChunkVertex>>,
+    scratch_tx: crossbeam_channel::Sender<Vec<TerrainVertex>>,
+    scratch_rx: crossbeam_channel::Receiver<Vec<TerrainVertex>>,
     vtx_tx: crossbeam_channel::Sender<Vec<PackedVertex>>,
     vtx_rx: crossbeam_channel::Receiver<Vec<PackedVertex>>,
     idx_tx: crossbeam_channel::Sender<Vec<u32>>,
@@ -581,7 +606,7 @@ impl BufferPool {
         }
     }
 
-    fn take_scratch(&self) -> Vec<ChunkVertex> {
+    fn take_scratch(&self) -> Vec<TerrainVertex> {
         Self::take(&self.scratch_rx, SECTION_VERTEX_HINT)
     }
 
@@ -593,7 +618,7 @@ impl BufferPool {
         Self::take(&self.idx_rx, SECTION_INDEX_HINT)
     }
 
-    fn recycle_scratch(&self, vertices: Vec<ChunkVertex>) {
+    fn recycle_scratch(&self, vertices: Vec<TerrainVertex>) {
         Self::give(&self.scratch_tx, vertices);
     }
 
@@ -1299,7 +1324,7 @@ use super::block_ao::AO_BRIGHTNESS;
 
 #[allow(clippy::too_many_arguments)]
 fn greedy_mesh_section(
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -1367,17 +1392,14 @@ fn greedy_mesh_section(
             });
 
             let base = vertices.len() as u32;
-            let u_span = region.u_max - region.u_min;
-            let v_span = region.v_max - region.v_min;
-
             for (i, (pos, uv)) in verts_uvs.iter().enumerate() {
-                vertices.push(ChunkVertex {
-                    // Greedy quads are already section-local.
+                vertices.push(TerrainVertex {
+                    // Greedy quads are already section-local. Their local UVs
+                    // intentionally run 0..width/height; the chunk shader wraps
+                    // them inside this sprite's atlas rectangle.
                     position: *pos,
-                    tex_coords: pack_uv(
-                        region.u_min + uv[0] * u_span,
-                        region.v_min + uv[1] * v_span,
-                    ),
+                    sprite_uv: *uv,
+                    atlas_rect: region.pixel_rect,
                     light_tint: pack_light_tint(lights[i], tint),
                 });
             }
@@ -1960,16 +1982,14 @@ fn emit_lod_cube(
         let sy = if is_fluid { fluid_top } else { s };
         let base = sink.vertices.len() as u32;
         for i in 0..4 {
-            sink.vertices.push(ChunkVertex {
+            sink.vertices.push(TerrainVertex {
                 position: [
                     block_pos[0] + positions[i][0] * s,
                     block_pos[1] + positions[i][1] * sy,
                     block_pos[2] + positions[i][2] * s,
                 ],
-                tex_coords: pack_uv(
-                    region.u_min + uvs[i][0] * (region.u_max - region.u_min),
-                    region.v_min + uvs[i][1] * (region.v_max - region.v_min),
-                ),
+                sprite_uv: uvs[i],
+                atlas_rect: region.pixel_rect,
                 light_tint: pack_light_tint(light, tint),
             });
         }
@@ -2003,16 +2023,17 @@ fn emit_missing_cube(
             continue;
         }
 
-        let (positions, _, light) = cube_face_geometry(*dir);
+        let (positions, uvs, light) = cube_face_geometry(*dir);
         let base = sink.vertices.len() as u32;
-        for pos in &positions {
-            sink.vertices.push(ChunkVertex {
+        for (pos, uv) in positions.iter().zip(uvs) {
+            sink.vertices.push(TerrainVertex {
                 position: [
                     block_pos[0] + pos[0],
                     block_pos[1] + pos[1],
                     block_pos[2] + pos[2],
                 ],
-                tex_coords: pack_uv(0.0, 0.0),
+                sprite_uv: uv,
+                atlas_rect: [0, 0, 16, 16],
                 light_tint: pack_light_tint(light, MISSING_TINT),
             });
         }
@@ -2058,7 +2079,7 @@ fn emit_face(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_face_into(
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
@@ -2068,20 +2089,15 @@ fn emit_face_into(
     tint: u32,
 ) {
     let base = vertices.len() as u32;
-    let u_span = region.u_max - region.u_min;
-    let v_span = region.v_max - region.v_min;
-
     for i in 0..4 {
-        vertices.push(ChunkVertex {
+        vertices.push(TerrainVertex {
             position: [
                 block_pos[0] + positions[i][0],
                 block_pos[1] + positions[i][1],
                 block_pos[2] + positions[i][2],
             ],
-            tex_coords: pack_uv(
-                region.u_min + uvs[i][0] * u_span,
-                region.v_min + uvs[i][1] * v_span,
-            ),
+            sprite_uv: uvs[i],
+            atlas_rect: region.pixel_rect,
             light_tint: pack_light_tint(lights[i], tint),
         });
     }
@@ -2201,4 +2217,36 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
         face_uvs(dir, from, to, None, None),
         dir.shade_light(),
     )
+}
+
+#[cfg(test)]
+mod terrain_uv_tests {
+    use super::{pack_sprite_uv, unpack_sprite_uv};
+
+    fn wrapped(x: f32) -> f32 {
+        x - x.floor()
+    }
+
+    #[test]
+    fn packed_greedy_uv_preserves_integer_repeat_boundaries_exactly() {
+        for uv in 0..=16 {
+            let decoded = unpack_sprite_uv(pack_sprite_uv(uv as f32));
+            assert_eq!(decoded, uv as f32);
+        }
+    }
+
+    #[test]
+    fn packed_greedy_uv_keeps_fractional_precision() {
+        for uv in [0.25_f32, 1.25, 8.5, 15.75] {
+            let decoded = unpack_sprite_uv(pack_sprite_uv(uv));
+            assert!((decoded - uv).abs() <= 0.5 / 4095.0, "uv {uv} -> {decoded}");
+        }
+    }
+
+    #[test]
+    fn adjacent_blocks_wrap_to_the_same_sprite_position() {
+        let a = unpack_sprite_uv(pack_sprite_uv(0.25));
+        let b = unpack_sprite_uv(pack_sprite_uv(1.25));
+        assert!((wrapped(a) - wrapped(b)).abs() <= 1.0 / 4095.0);
+    }
 }

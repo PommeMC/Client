@@ -20,8 +20,9 @@ use crate::renderer::pipelines::entity_renderer::{
 };
 use crate::ui::text::format_text_spans;
 
-/// Dimension info from a login/respawn registry entry. `has_skylight` lives
-/// in azalea's flattened extras; missing defaults to true (overworld-like).
+/// Dimension info from a login/respawn registry entry. Fields that Azalea does
+/// not model directly live in its flattened extras. Missing `has_skylight`
+/// defaults to true; missing `cardinal_light` defaults to vanilla's `default`.
 fn dimension_info(
     dim: &azalea_core::registry_holder::dimension_type::DimensionKindElement,
 ) -> NetworkEvent {
@@ -34,6 +35,12 @@ fn dimension_info(
             .and_then(|tag| tag.byte())
             .map(|b| b != 0)
             .unwrap_or(true),
+        nether_cardinal_lighting: dim
+            ._extra
+            .get("cardinal_light")
+            .and_then(|tag| tag.string())
+            .map(|value| value.to_str() == "nether")
+            .unwrap_or(false),
     }
 }
 
@@ -715,10 +722,15 @@ pub fn handle_game_packet(
                     ) = &item.value
                 {
                     let name = crate::player::inventory::item_resource_name(data.kind);
+                    let damage = data
+                        .get_component::<azalea_inventory::components::Damage>()
+                        .map(|component| component.amount)
+                        .unwrap_or(0);
                     let _ = event_tx.try_send(NetworkEvent::EntityItemData {
                         id: p.id.0,
                         item_name: name,
                         item_id: data.kind.to_u32(),
+                        damage,
                         count: data.count,
                     });
                 }
@@ -1552,5 +1564,66 @@ mod raw_sound_tests {
             }
             _ => panic!("expected StopSound"),
         }
+    }
+}
+
+#[cfg(test)]
+mod dimension_info_tests {
+    use std::collections::HashMap;
+
+    use simdnbt::owned::NbtTag;
+
+    use super::dimension_info;
+    use crate::net::NetworkEvent;
+
+    #[test]
+    fn dimension_info_reads_vanilla_cardinal_light_type() {
+        let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
+            height: 384,
+            min_y: -64,
+            ultrawarm: None,
+            _extra: HashMap::from([
+                ("has_skylight".to_string(), NbtTag::Byte(1)),
+                (
+                    "cardinal_light".to_string(),
+                    NbtTag::String("nether".into()),
+                ),
+            ]),
+        };
+
+        let NetworkEvent::DimensionInfo {
+            height,
+            min_y,
+            has_skylight,
+            nether_cardinal_lighting,
+        } = dimension_info(&dim)
+        else {
+            panic!("dimension_info returned the wrong event variant");
+        };
+        assert_eq!(height, 384);
+        assert_eq!(min_y, -64);
+        assert!(has_skylight);
+        assert!(nether_cardinal_lighting);
+    }
+
+    #[test]
+    fn dimension_info_defaults_cardinal_light_to_vanilla_default() {
+        let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
+            height: 384,
+            min_y: -64,
+            ultrawarm: None,
+            _extra: HashMap::new(),
+        };
+
+        let NetworkEvent::DimensionInfo {
+            has_skylight,
+            nether_cardinal_lighting,
+            ..
+        } = dimension_info(&dim)
+        else {
+            panic!("dimension_info returned the wrong event variant");
+        };
+        assert!(has_skylight);
+        assert!(!nether_cardinal_lighting);
     }
 }
