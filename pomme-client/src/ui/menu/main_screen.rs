@@ -1,9 +1,10 @@
 use super::*;
 
 impl MainMenu {
-    /// The title screen, in whichever theme is selected. Branching here
-    /// rather than at the screen dispatcher keeps the Friends dialog's
-    /// blurred backdrop, which re-runs this builder, on the same theme.
+    /// The title screen in the selected theme. Branching here keeps the
+    /// Friends backdrop, which re-runs this builder, on the same theme; the
+    /// theme wipe itself is driven by the dispatcher so the backdrop can't
+    /// commit a switch.
     pub(super) fn build_main(
         &mut self,
         screen_w: f32,
@@ -455,10 +456,6 @@ impl MainMenu {
             color: footer_col,
             centered: false,
         });
-
-        if let Some(theme_action) = self.drive_theme_transition(&mut elements, screen_w, screen_h) {
-            action = theme_action;
-        }
 
         self.finish_focus(&ctx);
 

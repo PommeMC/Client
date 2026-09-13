@@ -560,8 +560,8 @@ pub struct MainMenu {
     pub attack_indicator: crate::ui::hud::AttackIndicatorMode,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
-    /// The title screen's splash line, picked once per launch like vanilla.
-    /// Filled in by the app once the asset index is up; `None` renders nothing.
+    /// The title screen's splash line, rolled at launch and on every return
+    /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
     pub splash: Option<String>,
     menu_open_time: Option<Instant>,
     last_favicon_count: usize,
@@ -968,7 +968,15 @@ impl MainMenu {
         text_width_fn: impl Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
         match self.screen {
-            Screen::Main => self.build_main(screen_w, screen_h, input, text_width_fn),
+            Screen::Main => {
+                let mut result = self.build_main(screen_w, screen_h, input, text_width_fn);
+                if let Some(action) =
+                    self.drive_theme_transition(&mut result.elements, screen_w, screen_h)
+                {
+                    result.action = action;
+                }
+                result
+            }
 
             Screen::ServerList => self.build_server_list(screen_w, screen_h, input, &text_width_fn),
             Screen::Friends => self.build_friends(screen_w, screen_h, input, &text_width_fn),

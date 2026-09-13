@@ -77,7 +77,6 @@ impl MainMenu {
         let col_x = cx - COL_W / 2.0 * gs;
         let col_w = COL_W * gs;
 
-        // Logo, then the edition strip overlapping its last 7 units.
         elements.push(MenuElement::Image {
             x: cx - LOGO_W / 2.0 * gs,
             y: LOGO_HEIGHT_OFFSET * gs,
@@ -97,8 +96,6 @@ impl MainMenu {
 
         self.push_splash(&mut elements, cx, gs, &text_width_fn);
 
-        // Singleplayer and Realms are drawn so the column matches vanilla, but
-        // neither is implemented, so both stay inactive.
         // TODO: enable Singleplayer once world loading exists. Realms never.
         let rows: [(&str, bool); 3] = [
             ("Singleplayer", false),
@@ -129,7 +126,7 @@ impl MainMenu {
             }
         }
 
-        // `getHorizontalPosition`: three 20-wide buttons, 4 apart, centred.
+        // `getHorizontalPosition`.
         let icon_row_y = base + 3.0 * ROW_SPACING * gs;
         let icon_size = ICON_W * gs;
         let row_w = 3.0 * ICON_W + 2.0 * ICON_GAP;
@@ -146,12 +143,8 @@ impl MainMenu {
                 },
             ),
             // TODO: no language selection yet.
-            (SpriteId::IconLanguage, false, "Language..."),
-            (
-                SpriteId::IconAccessibility,
-                true,
-                "Accessibility Settings...",
-            ),
+            (SpriteId::IconLanguage, false, "Change Language"),
+            (SpriteId::IconAccessibility, true, "Accessibility Settings"),
         ];
         for (i, (sprite, enabled, tip)) in icons.iter().enumerate() {
             let x = icon_x0 + i as f32 * (ICON_W + ICON_GAP) * gs;
@@ -187,7 +180,6 @@ impl MainMenu {
             }
         }
 
-        // The pair splits the 200-wide column with a 2-unit gutter.
         let bottom_y = base + 4.0 * ROW_SPACING * gs;
         let half_w = HALF_W * gs;
         if push_button_f(
@@ -225,8 +217,7 @@ impl MainMenu {
             action = MenuAction::Quit;
         }
 
-        // Pomme's own entries; vanilla has no slot for these, so they sit in
-        // the bottom-right corner in the same frame as the row above.
+        // Pomme's own entries, which vanilla has no slot for.
         let extras_y = screen_h - (FOOTER_OFFSET + 4.0 + ICON_W) * gs;
         let links_x = screen_w - (ICON_W * 2.0 + ICON_GAP + 4.0) * gs;
         let theme_x = screen_w - (ICON_W + 4.0) * gs;
@@ -263,7 +254,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: 2.0 * gs,
             y: footer_y,
-            text: self.version.clone(),
+            text: format!("Minecraft {}", self.version),
             scale: fs,
             color: WHITE,
             centered: false,
@@ -281,16 +272,18 @@ impl MainMenu {
             centered: false,
         });
         if copy_hovered {
-            // `PlainTextButton` underlines on hover; `MenuElement::Text` carries
-            // no underline flag, so draw the rule directly.
-            elements.push(MenuElement::Rect {
-                x: copy_x,
-                y: footer_y + fs,
-                w: copy_w,
-                h: gs,
-                corner_radius: 0.0,
-                color: WHITE,
-            });
+            // `PlainTextButton` underlines on hover; `MenuElement::Text` has no
+            // underline flag, so draw the rule and its text shadow directly.
+            for (offset, color) in [(gs, [0.25, 0.25, 0.25, 1.0]), (0.0, WHITE)] {
+                elements.push(MenuElement::Rect {
+                    x: copy_x + offset,
+                    y: footer_y + fs + offset,
+                    w: copy_w,
+                    h: gs,
+                    corner_radius: 0.0,
+                    color,
+                });
+            }
             if clicked {
                 any_clicked = true;
                 self.settings_back = Screen::Main;
@@ -298,8 +291,7 @@ impl MainMenu {
             }
         }
 
-        // Both icons sit against the right edge, so both lists right-align to
-        // it rather than opening off-screen.
+        // Both lists right-align to the screen edge rather than opening off it.
         let drop_style = DropdownStyle::new(gs);
         let drop_bottom = extras_y - 2.0 * gs;
         let drop_right = screen_w - 4.0 * gs;
@@ -328,19 +320,13 @@ impl MainMenu {
             theme_w,
         );
 
-        if let Some(theme_action) = self.drive_theme_transition(&mut elements, screen_w, screen_h) {
-            action = theme_action;
-        }
-
         self.finish_focus(&ctx);
 
         MainMenuResult {
             elements,
             action,
             cursor_pointer: any_hovered,
-            // Vanilla's `TitleScreen.extractBackground` is empty: no blur and no
-            // menu-background tint, just the panorama. (`panorama_overlay.png`
-            // is a fully transparent 1x1 in 26.2, so it draws nothing.)
+            // `TitleScreen.extractBackground` is empty: just the panorama.
             blur: 0.0,
             clicked_button: any_clicked,
         }
@@ -399,14 +385,16 @@ fn push_icon_button(
     tooltip: &str,
 ) -> bool {
     let focused = ctx.focused(enabled);
-    let hovered = enabled && common::hit_test(cursor, [x, y, size, size]);
+    let hit = common::hit_test(cursor, [x, y, size, size]);
+    let hovered = enabled && hit;
     push_icon_widget(elements, x, y, size, gs, face, enabled, hovered || focused);
     *any_hovered |= hovered;
     let keyboard = focused && ctx.activate;
     if keyboard {
         ctx.fired = true;
     }
-    if hovered {
+    // Vanilla keys tooltips off `isHovered`, which ignores `active`.
+    if hit {
         common::push_tooltip(elements, cursor, screen_w, screen_h, gs, tooltip);
     }
     (hovered && clicked) || keyboard

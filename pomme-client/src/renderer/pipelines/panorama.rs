@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::{Arc, Mutex};
 
@@ -28,17 +29,20 @@ pub struct PanoramaPipeline {
     staging_buffer: vk::Buffer,
     staging_allocation: Option<Allocation>,
     has_cubemap: bool,
+    /// The files behind the current cubemap, so a reload to the same set is a
+    /// no-op.
+    faces: Option<[PathBuf; 6]>,
 }
 
 impl PanoramaPipeline {
+    /// `faces` comes from [`resolve_panorama_faces`]; `None` draws nothing.
     pub fn new(
         device: &vk::Device,
         queue: vk::Queue,
         command_pool: vk::CommandPool,
         render_pass: vk::RenderPass,
         allocator: &Arc<Mutex<Allocator>>,
-        jar_assets_dir: &std::path::Path,
-        asset_index: &Option<AssetIndex>,
+        faces: Option<[PathBuf; 6]>,
     ) -> Self {
         let params_layout = util::create_descriptor_set_layout(
             device,
@@ -131,14 +135,7 @@ impl PanoramaPipeline {
             staging_buffer,
             staging_alloc_mem,
             has_cubemap,
-        ) = load_cubemap(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            jar_assets_dir,
-            asset_index,
-        );
+        ) = load_cubemap(device, queue, command_pool, allocator, faces.as_ref());
 
         let image_info = vk::DescriptorImageInfo {
             sampler: cube_sampler,
@@ -172,6 +169,7 @@ impl PanoramaPipeline {
             staging_buffer,
             staging_allocation: Some(staging_alloc_mem),
             has_cubemap,
+            faces,
         }
     }
 
@@ -213,9 +211,11 @@ impl PanoramaPipeline {
         queue: vk::Queue,
         command_pool: vk::CommandPool,
         allocator: &Arc<Mutex<Allocator>>,
-        jar_assets_dir: &std::path::Path,
-        asset_index: &Option<AssetIndex>,
+        faces: Option<[PathBuf; 6]>,
     ) {
+        if faces == self.faces {
+            return;
+        }
         let _ = device.wait_idle();
 
         {
@@ -240,15 +240,9 @@ impl PanoramaPipeline {
             staging_buffer,
             staging_alloc,
             has_cubemap,
-        ) = load_cubemap(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            jar_assets_dir,
-            asset_index,
-        );
+        ) = load_cubemap(device, queue, command_pool, allocator, faces.as_ref());
 
+        self.faces = faces;
         self.cube_image = cube_image;
         self.cube_view = cube_view;
         self.cube_sampler = cube_sampler;
@@ -310,9 +304,9 @@ impl PanoramaPipeline {
 
 fn resolve_panorama_face(
     i: u32,
-    jar_assets_dir: &std::path::Path,
+    jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
-) -> Option<std::path::PathBuf> {
+) -> Option<PathBuf> {
     let flat = jar_assets_dir.join(format!("panorama_{i}.png"));
     if flat.exists() {
         return Some(flat);
@@ -320,6 +314,24 @@ fn resolve_panorama_face(
     let asset_key = format!("minecraft/textures/gui/title/background/panorama_{i}.png");
     let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
     path.exists().then_some(path)
+}
+
+/// All six faces from one source: the flat `panorama_{i}.png` overrides in
+/// `panorama_dir` if it has every one, else the jar's. Never mixes the two.
+pub fn resolve_panorama_faces(
+    panorama_dir: &Path,
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+) -> Option<[PathBuf; 6]> {
+    let collect = |resolve: &dyn Fn(u32) -> Option<PathBuf>| -> Option<[PathBuf; 6]> {
+        let faces: Vec<PathBuf> = (0..6).map(resolve).collect::<Option<_>>()?;
+        faces.try_into().ok()
+    };
+    collect(&|i| {
+        let flat = panorama_dir.join(format!("panorama_{i}.png"));
+        flat.exists().then_some(flat)
+    })
+    .or_else(|| collect(&|i| resolve_panorama_face(i, jar_assets_dir, asset_index)))
 }
 
 fn flip_horizontal(data: &[u8], w: u32, h: u32) -> Vec<u8> {
@@ -340,8 +352,7 @@ fn load_cubemap(
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
-    jar_assets_dir: &std::path::Path,
-    asset_index: &Option<AssetIndex>,
+    face_paths: Option<&[PathBuf; 6]>,
 ) -> (
     vk::Image,
     vk::ImageView,
@@ -351,19 +362,17 @@ fn load_cubemap(
     Allocation,
     bool,
 ) {
+    let Some(face_paths) = face_paths else {
+        tracing::info!("Panorama faces not found, skipping cubemap");
+        return create_fallback_cubemap(device, allocator);
+    };
+
     let mut faces: Vec<Vec<u8>> = Vec::new();
     let mut face_w = 0u32;
     let mut face_h = 0u32;
 
-    for i in 0..6 {
-        let path = match resolve_panorama_face(i, jar_assets_dir, asset_index) {
-            Some(p) => p,
-            None => {
-                tracing::info!("Panorama face {i} not found, skipping cubemap");
-                return create_fallback_cubemap(device, allocator);
-            }
-        };
-        match util::load_png(&path) {
+    for (i, path) in face_paths.iter().enumerate() {
+        match util::load_png(path) {
             Some((data, w, h)) if w > 1 && h > 1 => {
                 face_w = w;
                 face_h = h;

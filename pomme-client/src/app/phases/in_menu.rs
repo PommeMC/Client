@@ -127,7 +127,7 @@ pub fn update_menu(
         }
         MenuAction::ChangeTheme(theme) => {
             gfx.renderer
-                .reload_panorama(&theme.panorama_dir(&core.data_dirs), &core.asset_index);
+                .reload_panorama(&theme.panorama_dir(&core.data_dirs));
             core.menu.start_transition_open();
         }
         MenuAction::Quit => {

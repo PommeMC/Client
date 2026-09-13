@@ -12,8 +12,8 @@ use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window};
 
 use crate::app::input::{Action, InputState, STICK_MOVEMENT_THRESHOLD};
-use crate::app::phases::ConnectionPhase;
 use crate::app::phases::in_game::GameState;
+use crate::app::phases::{ConnectionPhase, Gfx};
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
 use crate::assets::AssetIndex;
 use crate::dirs::DataDirs;
@@ -360,6 +360,18 @@ impl AppCore {
         } else {
             self.release_cursor(window);
         }
+    }
+
+    /// Every return from a world or server, before the title screen shows.
+    /// Vanilla builds a fresh `TitleScreen` here, which rolls a new splash.
+    pub fn return_to_menu(&mut self, gfx: &mut Gfx) {
+        gfx.renderer.clear_chunk_meshes();
+        if let Some(p) = &mut self.presence {
+            p.set_in_menu(&self.version);
+        }
+        self.apply_cursor_grab(&gfx.window, None);
+        self.menu
+            .load_splash(&self.data_dirs.jar_assets_dir, &self.asset_index);
     }
 
     /// Releases the cursor and warps it to the window center, like vanilla

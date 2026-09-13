@@ -2086,24 +2086,6 @@ fn rotate_verts(verts: &mut [Vertex], pivot: (f32, f32), rotation: f32) {
     }
 }
 
-/// Copies the `max_w` x `max_h` region starting at row `src_y` out of `rgba`,
-/// clamped to what the image actually holds. Returns the pixels and the size
-/// they ended up being.
-fn crop_region(rgba: &image::RgbaImage, src_y: u32, max_w: u32, max_h: u32) -> (Vec<u8>, u32, u32) {
-    let full_w = rgba.width();
-    let crop_w = max_w.min(full_w);
-    let crop_h = max_h.min(rgba.height().saturating_sub(src_y));
-    let row_bytes = (crop_w * 4) as usize;
-    let mut cropped = vec![0u8; row_bytes * crop_h as usize];
-    for y in 0..crop_h {
-        let src_off = ((src_y + y) * full_w * 4) as usize;
-        let dst_off = y as usize * row_bytes;
-        cropped[dst_off..dst_off + row_bytes]
-            .copy_from_slice(&rgba.as_raw()[src_off..src_off + row_bytes]);
-    }
-    (cropped, crop_w, crop_h)
-}
-
 /// Downscales a straight-alpha sprite, filtering it premultiplied so the
 /// transparent border's black stays out of the edge texels' colour. The atlas
 /// stores straight alpha and the shader premultiplies at sample time, so a
@@ -3107,7 +3089,17 @@ fn build_sprite_atlas(
         match crate::assets::load_image(&path) {
             Ok(img) => {
                 let rgba = img.to_rgba8();
-                let (cropped, crop_w, crop_h) = crop_region(&rgba, src_y, max_w, max_h);
+                let full_w = rgba.width();
+                let crop_w = max_w.min(full_w);
+                let crop_h = max_h.min(rgba.height().saturating_sub(src_y));
+                let mut cropped = vec![0u8; (crop_w * crop_h * 4) as usize];
+                for y in 0..crop_h {
+                    let src_off = ((src_y + y) * full_w * 4) as usize;
+                    let dst_off = (y * crop_w * 4) as usize;
+                    let row_bytes = (crop_w * 4) as usize;
+                    cropped[dst_off..dst_off + row_bytes]
+                        .copy_from_slice(&rgba.as_raw()[src_off..src_off + row_bytes]);
+                }
                 images.push((id, cropped, crop_w, crop_h, 0.0));
             }
             Err(e) => {
@@ -3141,11 +3133,9 @@ fn build_sprite_atlas(
         }
     }
 
-    // `LogoRenderer` blits only the top 256x44 of the logical 256x64
-    // minecraft.png and the top 128x14 of the logical 128x16 edition.png; the
-    // rest of each texture is blank. The shipped files are supersampled
-    // (1024x256 and 512x64), and a resource pack may use any resolution, so
-    // take the region as a fraction of the file's own height.
+    // `LogoRenderer` blits only the top 44/64 of minecraft.png and 14/16 of
+    // edition.png. The files are supersampled and packs may use any size, so
+    // crop by fraction; a row-major prefix is contiguous, so it's a truncate.
     for (id, asset_key, logical_h, used_h) in [
         (
             SpriteId::MinecraftLogo,
@@ -3164,9 +3154,11 @@ fn build_sprite_atlas(
         match crate::assets::load_image(&path) {
             Ok(img) => {
                 let rgba = img.to_rgba8();
-                let used = (rgba.height() * used_h).div_ceil(logical_h);
-                let (cropped, w, h) = crop_region(&rgba, 0, rgba.width(), used);
-                images.push((id, cropped, w, h, 0.0));
+                let (w, h) = (rgba.width(), rgba.height());
+                let used = (h * used_h).div_ceil(logical_h).min(h);
+                let mut raw = rgba.into_raw();
+                raw.truncate((w * used * 4) as usize);
+                images.push((id, raw, w, used, 0.0));
             }
             Err(e) => {
                 tracing::warn!("Failed to load title sprite {asset_key}: {e}");
