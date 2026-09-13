@@ -262,6 +262,10 @@ pub enum NetworkEvent {
         pitch: f32,
         seed: u64,
     },
+    StopSound {
+        sound_id: Option<String>,
+        category: Option<u8>,
+    },
     TimeUpdate {
         game_time: u64,
         day_time: Option<u64>,

@@ -659,6 +659,7 @@ impl ApplicationHandler for App {
                                 game,
                             },
                             GameUpdateResult::ManualDisconnect => {
+                                core.audio.stop_all_sounds();
                                 core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu {
@@ -667,6 +668,7 @@ impl ApplicationHandler for App {
                                 }
                             }
                             GameUpdateResult::Disconnected { reason } => {
+                                core.audio.stop_all_sounds();
                                 core.menu.show_disconnect(reason);
                                 core.return_to_menu(&mut gfx);
 
