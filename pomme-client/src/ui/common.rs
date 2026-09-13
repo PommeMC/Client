@@ -589,6 +589,7 @@ pub fn push_slider(
     value: f32,
     enabled: bool,
     focused: bool,
+    can_change_value: bool,
     dragging: bool,
     scroll: &LabelScroll<'_>,
 ) -> SliderResult {
@@ -607,18 +608,27 @@ pub fn push_slider(
         None
     };
 
+    // `getSprite` / `getHandleSprite`: a focused slider highlights its handle
+    // while Left/Right can move it, and its track once Enter has locked it.
+    let track_sprite = if enabled && focused && !can_change_value {
+        SpriteId::SliderTrackHover
+    } else {
+        SpriteId::SliderTrack
+    };
     elements.push(MenuElement::NineSlice {
         x,
         y,
         w,
         h,
-        sprite: SpriteId::SliderTrack,
+        sprite: track_sprite,
         // `widget/slider.png.mcmeta` declares a 1px border, not the button's 3.
         border: 1.0 * gs,
         tint: WHITE,
     });
 
-    let handle_sprite = if actively_dragging || start_drag || hovered || (enabled && focused) {
+    let handle_sprite = if enabled
+        && (hovered || actively_dragging || start_drag || (focused && can_change_value))
+    {
         SpriteId::SliderHandleHover
     } else {
         SpriteId::SliderHandle
