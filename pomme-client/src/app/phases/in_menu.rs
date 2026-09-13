@@ -100,6 +100,7 @@ pub fn update_menu(
         core.menu.reload_assets = false;
         gfx.renderer
             .reload_assets(&core.data_dirs.game_dir, &core.resource_packs);
+        core.audio.reload_assets(&core.resource_packs);
     }
 
     if result.clicked_button {

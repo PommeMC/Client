@@ -622,6 +622,7 @@ impl ApplicationHandler for App {
                                 game,
                             },
                             ConnectingUpdateResult::ManualDisconnect => {
+                                core.clear_server_resource_packs(&mut gfx.renderer);
                                 gfx.renderer.clear_chunk_meshes();
 
                                 if let Some(p) = &mut core.presence {
@@ -632,6 +633,7 @@ impl ApplicationHandler for App {
                                 AppPhase::InMenu { gfx, panorama }
                             }
                             ConnectingUpdateResult::Disconnected { reason } => {
+                                core.clear_server_resource_packs(&mut gfx.renderer);
                                 gfx.renderer.clear_chunk_meshes();
                                 core.menu.show_disconnect(reason);
 
@@ -674,6 +676,8 @@ impl ApplicationHandler for App {
                                 game,
                             },
                             GameUpdateResult::ManualDisconnect => {
+                                core.audio.stop_all_sounds();
+                                core.clear_server_resource_packs(&mut gfx.renderer);
                                 gfx.renderer.clear_chunk_meshes();
 
                                 if let Some(p) = &mut core.presence {
@@ -687,6 +691,8 @@ impl ApplicationHandler for App {
                                 }
                             }
                             GameUpdateResult::Disconnected { reason } => {
+                                core.audio.stop_all_sounds();
+                                core.clear_server_resource_packs(&mut gfx.renderer);
                                 gfx.renderer.clear_chunk_meshes();
                                 core.menu.show_disconnect(reason);
 
