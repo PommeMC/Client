@@ -82,7 +82,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            third_party/SteelMC/steel-core/src/generated
+            third_party/SteelMC/steel-core/src/behavior/generated
+            third_party/SteelMC/steel-core/src/entity/generated
             third_party/SteelMC/steel-registry/src/generated
             third_party/SteelMC/steel-utils/src/generated
             third_party/SteelMC/steel-utils/build_assets

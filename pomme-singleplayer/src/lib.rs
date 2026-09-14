@@ -130,7 +130,7 @@ impl WorldHandle {
 
 impl Drop for WorldHandle {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        self.begin_shutdown();
         if let Some(thread) = self.thread.take()
             && thread.join().is_err()
         {
