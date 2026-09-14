@@ -5029,6 +5029,7 @@ dependencies = [
  "glam",
  "image",
  "libloading 0.8.9",
+ "md-5 0.11.0",
  "mimalloc",
  "open",
  "parking_lot",
