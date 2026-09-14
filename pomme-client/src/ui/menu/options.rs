@@ -1188,17 +1188,17 @@ impl MainMenu {
             gs,
             text_width_fn,
         );
-        // Vanilla EditBox hint: shown only while empty and unfocused.
-        if self.pack_search.value().is_empty() && self.focused_field != Some(0) {
-            elements.push(MenuElement::Text {
-                x: field_x + 4.0 * gs,
-                y: header_y + (field_h - fs) / 2.0,
-                text: "Search...".into(),
-                scale: fs,
-                color: COL_DIM,
-                centered: false,
-            });
-        }
+        push_field_hint(
+            &mut elements,
+            &self.pack_search,
+            self.focused_field == Some(0),
+            field_x,
+            header_y,
+            field_h,
+            fs,
+            gs,
+            "Search...",
+        );
         header_y += field_h + pad;
 
         let content_top = header_y;

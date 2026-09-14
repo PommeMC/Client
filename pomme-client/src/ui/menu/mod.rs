@@ -4,6 +4,9 @@ mod helpers;
 mod main_screen;
 mod options;
 mod servers;
+mod splash;
+mod title_screen;
+mod worlds;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -97,6 +100,8 @@ struct Settings {
     attack_indicator: u8,
     #[serde(default)]
     display_mode: u8,
+    #[serde(default)]
+    theme: u8,
 }
 
 fn default_fov() -> u32 {
@@ -190,6 +195,7 @@ impl Default for Settings {
             cloud_mode: 2,
             attack_indicator: 1,
             display_mode: 0,
+            theme: 0,
         }
     }
 }
@@ -220,10 +226,35 @@ use super::server_list::{
     ping_all_servers,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanoramaTheme {
     Pomme,
     Default,
+}
+
+impl PanoramaTheme {
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Pomme => 0,
+            Self::Default => 1,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Default,
+            _ => Self::Pomme,
+        }
+    }
+
+    /// The panorama cubemap each theme draws: vanilla's ships in the version
+    /// jar, Pomme's alongside the rest of the branded assets.
+    pub fn panorama_dir(self, dirs: &crate::dirs::DataDirs) -> std::path::PathBuf {
+        match self {
+            Self::Default => dirs.jar_assets_dir.clone(),
+            Self::Pomme => dirs.pomme_assets_dir.join("panoramas"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -367,6 +398,8 @@ const TOP_BTN_W: f32 = 100.0;
 const BOT_BTN_W: f32 = 74.0;
 const SEP_H: f32 = 2.0;
 const FIELD_H: f32 = 20.0;
+/// Text a field can show: its width less the 4-unit padding on each side.
+const FIELD_TEXT_PAD: f32 = 8.0;
 
 const COL_DIM: [f32; 4] = [0.55, 0.57, 0.69, 1.0];
 const COL_DARK_DIM: [f32; 4] = [0.4, 0.42, 0.52, 1.0];
@@ -384,6 +417,10 @@ const DOUBLE_CLICK_MS: u128 = 400;
 enum Screen {
     Main,
     ServerList,
+    WorldList,
+    CreateWorld,
+    EditWorld(String),
+    ConfirmDeleteWorld(String),
     Friends,
     ConfirmDelete(usize),
     DirectConnect,
@@ -426,6 +463,10 @@ impl Screen {
             Self::OptionsCredits => Self::OptionsCredits,
             Self::CreditsRoll => Self::CreditsRoll,
             Self::ServerList => Self::ServerList,
+            Self::WorldList => Self::WorldList,
+            Self::CreateWorld => Self::CreateWorld,
+            Self::EditWorld(f) => Self::EditWorld(f.clone()),
+            Self::ConfirmDeleteWorld(f) => Self::ConfirmDeleteWorld(f.clone()),
             Self::DirectConnect => Self::DirectConnect,
             Self::AddServer => Self::AddServer,
             Self::ConfirmDelete(i) => Self::ConfirmDelete(*i),
@@ -460,6 +501,15 @@ pub struct MainMenu {
     screen: Screen,
     server_list: ServerList,
     selected_server: Option<usize>,
+    world_list: crate::ui::world_list::WorldList,
+    /// Keyed by folder name, not row index: filtering rebuilds the rows every
+    /// frame, so an index would follow the filter rather than the world.
+    selected_world: Option<String>,
+    world_search: TextFieldState,
+    world_name: TextFieldState,
+    world_seed: TextFieldState,
+    create: worlds::CreateWorldState,
+    saves_dir: PathBuf,
     edit_name: TextFieldState,
     edit_address: TextFieldState,
     last_mp_ip: String,
@@ -555,6 +605,9 @@ pub struct MainMenu {
     slider_can_change_value: bool,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
+    /// The title screen's splash line, rolled at launch and on every return
+    /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
+    pub splash: Option<String>,
     menu_open_time: Option<Instant>,
     last_favicon_count: usize,
     favicon_dirty_since: Option<Instant>,
@@ -585,6 +638,7 @@ impl MainMenu {
         access_token: Option<String>,
     ) -> Self {
         let server_list = ServerList::load(game_dir);
+        let saves_dir = game_dir.join("saves");
         // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
         let settings = load_settings(game_dir);
@@ -594,6 +648,13 @@ impl MainMenu {
             screen: Screen::Main,
             server_list,
             selected_server: None,
+            world_list: crate::ui::world_list::WorldList::scan(&saves_dir),
+            selected_world: None,
+            world_search: TextFieldState::new(MAX_SEARCH),
+            world_name: TextFieldState::new(MAX_NAME),
+            world_seed: TextFieldState::new(MAX_NAME),
+            create: worlds::CreateWorldState::default(),
+            saves_dir,
             edit_name: TextFieldState::new(MAX_NAME),
             edit_address: TextFieldState::new(MAX_ADDRESS),
             last_mp_ip: String::new(),
@@ -612,7 +673,7 @@ impl MainMenu {
             links_open: false,
             theme_open: false,
             settings_back: Screen::Options,
-            theme: PanoramaTheme::Pomme,
+            theme: PanoramaTheme::from_u8(settings.theme),
             transition: None,
             scroll_offset: 0.0,
             focused_field: None,
@@ -673,6 +734,7 @@ impl MainMenu {
             slider_can_change_value: true,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
+            splash: None,
             menu_open_time: None,
             last_favicon_count: 0,
             favicon_dirty_since: None,
@@ -772,6 +834,7 @@ impl MainMenu {
                 cloud_mode: self.cloud_mode.to_u8(),
                 attack_indicator: self.attack_indicator.to_u8(),
                 display_mode: self.display_mode.to_u8(),
+                theme: self.theme.to_u8(),
             },
         );
     }
@@ -830,6 +893,34 @@ impl MainMenu {
 
     pub fn is_main_screen(&self) -> bool {
         matches!(self.screen, Screen::Main)
+    }
+
+    pub fn theme(&self) -> PanoramaTheme {
+        self.theme
+    }
+
+    /// The rotating 3D skin is Pomme's own chrome; the vanilla title screen
+    /// has no such thing.
+    pub fn show_skin_preview(&self) -> bool {
+        self.is_main_screen() && self.theme == PanoramaTheme::Pomme
+    }
+
+    /// Picks the title screen's splash line. Separate from `new` because the
+    /// asset index it reads through isn't built until after the menu is.
+    pub fn load_splash(
+        &mut self,
+        jar_assets_dir: &Path,
+        asset_index: &Option<crate::assets::AssetIndex>,
+    ) {
+        let now =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        self.splash = splash::pick(
+            jar_assets_dir,
+            asset_index,
+            &self.username,
+            now.month() as u32,
+            u32::from(now.day()),
+        );
     }
 
     pub fn is_server_list_screen(&self) -> bool {
@@ -943,9 +1034,27 @@ impl MainMenu {
         text_width_fn: impl Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
         match self.screen {
-            Screen::Main => self.build_main(screen_w, screen_h, input, text_width_fn),
+            Screen::Main => {
+                let mut result = self.build_main(screen_w, screen_h, input, text_width_fn);
+                if let Some(action) =
+                    self.drive_theme_transition(&mut result.elements, screen_w, screen_h)
+                {
+                    result.action = action;
+                }
+                result
+            }
 
             Screen::ServerList => self.build_server_list(screen_w, screen_h, input, &text_width_fn),
+            Screen::WorldList => self.build_world_list(screen_w, screen_h, input, &text_width_fn),
+            Screen::CreateWorld => {
+                self.build_create_world(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::EditWorld(_) => {
+                self.build_edit_world(screen_w, screen_h, input, &text_width_fn)
+            }
+            Screen::ConfirmDeleteWorld(_) => {
+                self.build_confirm_delete_world(screen_w, screen_h, input, &text_width_fn)
+            }
             Screen::Friends => self.build_friends(screen_w, screen_h, input, &text_width_fn),
             Screen::ConfirmDelete(_) => {
                 self.build_confirm_delete(screen_w, screen_h, input, &text_width_fn)
@@ -1063,6 +1172,24 @@ mod tests {
             let json = serde_json::to_string(&settings).unwrap();
             let loaded: Settings = serde_json::from_str(&json).unwrap();
             assert_eq!(DisplayMode::from_u8(loaded.display_mode), mode);
+        }
+    }
+
+    #[test]
+    fn theme_settings_are_backward_compatible_and_round_trip() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("theme");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(PanoramaTheme::from_u8(legacy.theme), PanoramaTheme::Pomme);
+
+        for theme in [PanoramaTheme::Pomme, PanoramaTheme::Default] {
+            let settings = Settings {
+                theme: theme.to_u8(),
+                ..Settings::default()
+            };
+            let json = serde_json::to_string(&settings).unwrap();
+            let loaded: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(PanoramaTheme::from_u8(loaded.theme), theme);
         }
     }
 }

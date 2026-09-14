@@ -574,12 +574,12 @@ fn query_source_count(api: &Api, device: *mut AlcDevice) -> Option<usize> {
     if api.alc_error(device, "query context attributes").is_err() {
         return None;
     }
-    for pair in attributes.chunks_exact(2) {
-        if pair[0] == 0 {
+    for &[key, value] in attributes.as_chunks::<2>().0 {
+        if key == 0 {
             break;
         }
-        if pair[0] == ALC_MONO_SOURCES {
-            return usize::try_from(pair[1]).ok();
+        if key == ALC_MONO_SOURCES {
+            return usize::try_from(value).ok();
         }
     }
     None
