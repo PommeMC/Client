@@ -1222,7 +1222,7 @@ impl Translation {
         }
     }
 
-    fn remap_sound(&self, sound: &mut Holder<SoundEvent, CustomSound>) -> bool {
+    pub(super) fn remap_sound(&self, sound: &mut Holder<SoundEvent, CustomSound>) -> bool {
         match sound {
             Holder::Reference(kind) => remap_with(self.to_latest, ClientRegistry::SoundEvent, kind),
             Holder::Direct(_) => true,
