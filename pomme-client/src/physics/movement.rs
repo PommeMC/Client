@@ -87,7 +87,7 @@ pub fn tick(
         slow_due_to_using_item,
     );
 
-    let (sin_y_rot, cos_y_rot) = (player.look_dir.y_rot_rad() as f64).sin_cos();
+    let (sin_y_rot, cos_y_rot) = look_sin_cos(player);
 
     update_fly_state(player, input, sin_y_rot, cos_y_rot);
 
@@ -192,6 +192,10 @@ pub fn tick_dead(player: &mut LocalPlayer, chunk_store: &ChunkStore) {
     player.was_jump_pressed = false;
 }
 
+fn look_sin_cos(player: &LocalPlayer) -> (f64, f64) {
+    (player.look_dir.y_rot_rad() as f64).sin_cos()
+}
+
 // Vanilla `LocalPlayer.aiStep`: a fresh jump press arms the toggle window;
 // a second one inside it toggles flight.
 fn update_fly_state(player: &mut LocalPlayer, input: &InputState, sin_y_rot: f64, cos_y_rot: f64) {
@@ -252,7 +256,7 @@ fn tick_land(
     };
 
     let accel = friction_influenced_speed(speed, player, BLOCK_FRICTION);
-    let (sin_y_rot, cos_y_rot) = (player.look_dir.y_rot_rad() as f64).sin_cos();
+    let (sin_y_rot, cos_y_rot) = look_sin_cos(player);
     let (move_x, move_z) = world_movement(forward, strafe, sin_y_rot, cos_y_rot);
     player.velocity.x += move_x * accel;
     player.velocity.z += move_z * accel;
@@ -294,7 +298,7 @@ fn tick_water(
         player.velocity.y -= 0.04;
     }
 
-    let (sin_y_rot, cos_y_rot) = (player.look_dir.y_rot_rad() as f64).sin_cos();
+    let (sin_y_rot, cos_y_rot) = look_sin_cos(player);
     let (move_x, move_z) = world_movement(forward, strafe, sin_y_rot, cos_y_rot);
     player.velocity.x += move_x * WATER_ACCELERATION;
     player.velocity.z += move_z * WATER_ACCELERATION;
@@ -392,7 +396,7 @@ fn apply_collision(
         player.velocity.y = 0.0;
     }
 
-    let (sin_y_rot, cos_y_rot) = (player.look_dir.y_rot_rad() as f64).sin_cos();
+    let (sin_y_rot, cos_y_rot) = look_sin_cos(player);
     if player.sprinting
         && horizontal_collision
         && forward > 0.0

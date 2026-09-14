@@ -848,6 +848,7 @@ pub fn handle_game_packet(
             }
         }
         // Event id 3 = living entity death.
+        // TODO: event 60 (`makePoofParticles`) when a mob's death clock hits 20.
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 3 => {
             let _ = event_tx.try_send(NetworkEvent::EntityDied { id: p.entity_id.0 });
         }

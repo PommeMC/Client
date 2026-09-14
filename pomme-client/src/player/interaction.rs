@@ -787,9 +787,11 @@ impl InteractionState {
 
     /// Client `LivingEntity.onSyncedDataUpdated(DATA_LIVING_ENTITY_FLAGS)`:
     /// when the server clears the using-item bit, discard the local use state
-    /// immediately. A `true` echo needs no reconstruction here because the
-    /// local client already creates its own active use when it sends UseItem.
+    /// immediately.
     pub fn sync_using_item_flag(&mut self, is_using: bool) {
+        // TODO: vanilla also starts a use when the bit turns on with none
+        // active (a server-initiated use); pomme only starts uses from its own
+        // UseItem send.
         if !is_using {
             self.using_item = None;
         }

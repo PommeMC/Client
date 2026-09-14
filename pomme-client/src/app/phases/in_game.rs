@@ -536,6 +536,15 @@ impl GameState {
         )
     }
 
+    /// Closes the death screen and its confirm, and re-arms the respawn send.
+    pub fn reset_death_screen(&mut self) {
+        self.death_screen_open = false;
+        self.death_screen_ticks = 0;
+        self.death_confirm = false;
+        self.death_confirm_ticks = 0;
+        self.respawn_sent = false;
+    }
+
     /// No menu (pause, inventory, chat) is capturing input.
     pub fn input_live(&self) -> bool {
         !self.paused
@@ -1329,13 +1338,24 @@ fn head_is_carved_pumpkin(player: &LocalPlayer) -> bool {
     }
 }
 
-/// Vanilla `Hud.tick`: the held-item tooltip timer resets to 40 when the
-/// selected item's type or hover name changes, clears when the slot empties,
-/// and otherwise counts down.
-fn local_player_has_red_overlay(death_time: u32, hurt_time: u8) -> bool {
+/// Vanilla `LivingEntityRenderer`: hurt or dying entities take the red overlay.
+fn has_red_overlay(hurt_time: u8, death_time: u32) -> bool {
     hurt_time > 0 || death_time > 0
 }
 
+/// Vanilla `LivingEntityRenderState.deathTime`: the clock plus the partial
+/// tick, or zero while alive.
+fn render_death_time(death_time: u32, partial_tick: f32) -> f32 {
+    if death_time > 0 {
+        death_time as f32 + partial_tick
+    } else {
+        0.0
+    }
+}
+
+/// Vanilla `Hud.tick`: the held-item tooltip timer resets to 40 when the
+/// selected item's type or hover name changes, clears when the slot empties,
+/// and otherwise counts down.
 fn tick_tool_highlight(core: &AppCore, game: &mut GameState) {
     use azalea_inventory::ItemStack;
     let selected = game
@@ -1491,17 +1511,12 @@ pub fn update_game(
             || game.options_from_game
             || game.gui_open()
             || game.chat.is_open();
-        match crate::app::core::death_gui_fallback_action(
-            game.dead,
-            has_screen,
-            game.show_death_screen,
-        ) {
-            crate::app::core::DeathGuiFallbackAction::None => {}
-            crate::app::core::DeathGuiFallbackAction::ShowDeathScreen => {
-                core.open_death_screen(connection, &gfx.window, game, None);
-            }
-            crate::app::core::DeathGuiFallbackAction::Respawn => {
-                core.send_respawn(connection, game);
+        if game.dead && !has_screen {
+            match crate::app::core::death_route(game.show_death_screen) {
+                crate::app::core::DeathRoute::ShowDeathScreen => {
+                    core.open_death_screen(connection, &gfx.window, game, None);
+                }
+                crate::app::core::DeathRoute::Respawn => core.send_respawn(connection, game),
             }
         }
         let local_player_was_removed = game.dead && game.player.death_animation_finished();
@@ -2659,12 +2674,8 @@ pub fn update_game(
                     is_unhappy: e.unhappy_counter > 0,
                     head_y_offset: extras.head_y_offset,
                     head_x_rot_deg_override: extras.head_x_rot_deg_override,
-                    has_red_overlay: e.hurt_time > 0 || e.death_time > 0,
-                    death_time: if e.death_time > 0 {
-                        e.death_time as f32 + partial_tick
-                    } else {
-                        0.0
-                    },
+                    has_red_overlay: has_red_overlay(e.hurt_time, e.death_time),
+                    death_time: render_death_time(e.death_time, partial_tick),
                     aggressive: e.aggressive,
                     flap: extras.flap,
                     flap_speed: extras.flap_speed,
@@ -2731,15 +2742,8 @@ pub fn update_game(
                 .min(1.0),
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
-            has_red_overlay: local_player_has_red_overlay(
-                game.player.death_time,
-                game.player.hurt_time,
-            ),
-            death_time: if game.player.death_time > 0 {
-                game.player.death_time as f32 + partial_tick
-            } else {
-                0.0
-            },
+            has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
+            death_time: render_death_time(game.player.death_time, partial_tick),
             skip_cull: true,
             ..Default::default()
         });
@@ -3707,12 +3711,12 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::local_player_has_red_overlay;
+    use super::has_red_overlay;
 
     #[test]
-    fn local_player_red_overlay_matches_vanilla_hurt_and_death_timers() {
-        assert!(local_player_has_red_overlay(1, 0));
-        assert!(local_player_has_red_overlay(0, 1));
-        assert!(!local_player_has_red_overlay(0, 0));
+    fn red_overlay_matches_vanilla_hurt_and_death_timers() {
+        assert!(has_red_overlay(1, 0));
+        assert!(has_red_overlay(0, 1));
+        assert!(!has_red_overlay(0, 0));
     }
 }
