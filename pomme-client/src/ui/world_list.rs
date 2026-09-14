@@ -37,11 +37,12 @@ impl GameMode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Difficulty {
     Peaceful,
     Easy,
+    #[default]
     Normal,
     Hard,
 }
@@ -62,6 +63,28 @@ impl Difficulty {
             Self::Easy => "Easy",
             Self::Normal => "Normal",
             Self::Hard => "Hard",
+        }
+    }
+
+    /// Vanilla `options.difficulty.<name>.info`.
+    pub fn info(self) -> &'static str {
+        match self {
+            Self::Peaceful => {
+                "No hostile mobs and only some neutral mobs spawn. Hunger bar doesn't deplete and \
+                 health replenishes over time."
+            }
+            Self::Easy => {
+                "Hostile mobs spawn but deal less damage. Hunger bar depletes and drains health \
+                 down to 5 hearts."
+            }
+            Self::Normal => {
+                "Hostile mobs spawn and deal standard damage. Hunger bar depletes and drains \
+                 health down to half a heart."
+            }
+            Self::Hard => {
+                "Hostile mobs spawn and deal more damage. Hunger bar depletes and drains all \
+                 health."
+            }
         }
     }
 }

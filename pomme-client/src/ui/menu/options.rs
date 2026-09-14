@@ -1150,7 +1150,7 @@ impl MainMenu {
             gs,
             text_width_fn,
         );
-        push_search_hint(
+        push_field_hint(
             &mut elements,
             &self.pack_search,
             self.focused_field == Some(0),
@@ -1159,6 +1159,7 @@ impl MainMenu {
             field_h,
             fs,
             gs,
+            "Search...",
         );
         header_y += field_h + pad;
 
