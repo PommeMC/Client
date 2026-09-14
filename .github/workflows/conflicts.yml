@@ -1,0 +1,33 @@
+name: Merge conflict labeler
+
+# Every run rescans all open PRs, which is what covers a stack: pushing a
+# lower layer fires `synchronize` for its own PR, and the rescan re-evaluates
+# the layers sitting on it.
+on:
+  push:
+    branches: [master]
+  # Not `pull_request`, which cannot label PRs from forks. Nothing here checks
+  # out the PR branch.
+  pull_request_target:
+    types: [synchronize]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  conflicts:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # `commentOnDirty`/`commentOnClean` are deliberately unset: a stack is
+      # many open PRs, and one master merge would comment on every one.
+      - name: Label PRs that conflict with master
+        uses: eps1lon/actions-label-merge-conflict@v3
+        with:
+          dirtyLabel: "merge conflict"
+          repoToken: ${{ secrets.GITHUB_TOKEN }}

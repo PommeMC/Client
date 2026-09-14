@@ -12,11 +12,10 @@ use std::time::Duration;
 
 use azalea_protocol::address::ServerAddr;
 use azalea_protocol::packets::ClientIntention;
-use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
 use azalea_protocol::packets::handshake::s_intention::ServerboundIntention;
+use azalea_protocol::packets::status::ClientboundStatusPacket;
 use azalea_protocol::packets::status::c_status_response::ClientboundStatusResponse;
 use azalea_protocol::packets::status::s_status_request::ServerboundStatusRequest;
-use azalea_protocol::packets::status::{ClientboundStatusPacket, ServerboundStatusPacket};
 use azalea_protocol::resolve::{ResolveError, resolve_address};
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -97,11 +96,9 @@ pub async fn request_status(
     let mut conn = connect(server, ClientIntention::Status)
         .await
         .map_err(|e| e.to_string())?;
-    conn.write_packet(&ServerboundStatusPacket::StatusRequest(
-        ServerboundStatusRequest {},
-    ))
-    .await
-    .map_err(|e| format!("Status request failed: {e}"))?;
+    conn.write_packet(ServerboundStatusRequest {})
+        .await
+        .map_err(|e| format!("Status request failed: {e}"))?;
     match conn
         .read_packet::<ClientboundStatusPacket>()
         .await
@@ -120,14 +117,12 @@ pub async fn send_intention(
     port: u16,
     intention: ClientIntention,
 ) -> std::io::Result<()> {
-    conn.write_packet(&ServerboundHandshakePacket::Intention(
-        ServerboundIntention {
-            protocol_version: crate::version::session_protocol(),
-            hostname: host.to_owned(),
-            port,
-            intention,
-        },
-    ))
+    conn.write_packet(ServerboundIntention {
+        protocol_version: crate::version::session_protocol(),
+        hostname: host.to_owned(),
+        port,
+        intention,
+    })
     .await
 }
 
