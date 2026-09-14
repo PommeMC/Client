@@ -147,10 +147,7 @@ pub async fn connect_to_server(
     // login packet rather than in registry_data packets.
     let no_config = super::translate::active().is_some_and(|t| t.no_config_phase());
     if !no_config {
-        conn.write_packet(&ServerboundLoginPacket::LoginAcknowledged(
-            ServerboundLoginAcknowledged {},
-        ))
-        .await?;
+        conn.write_packet(ServerboundLoginAcknowledged {}).await?;
     }
 
     let joined = if no_config {
@@ -338,12 +335,12 @@ async fn login_sequence(conn: &mut Conn, args: &ConnectArgs) -> Result<(), Conne
                 return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
             }
             ClientboundLoginPacket::CookieRequest(p) => {
-                conn.write_packet(&ServerboundLoginPacket::CookieResponse(
+                conn.write_packet(
                     azalea_protocol::packets::login::s_cookie_response::ServerboundCookieResponse {
                         key: p.key,
                         payload: None,
                     },
-                ))
+                )
                 .await?;
             }
             _ => {
@@ -369,43 +366,30 @@ async fn handle_encryption(
         })?;
 
         tracing::info!("Authenticating with session server (uuid: {})", args.uuid);
-        join_session_server(access_token, &args.uuid, e.secret_key, hello)
-            .await
-            .map_err(|e| ConnectionError::Auth(e.to_string()))?;
+        azalea_auth::sessionserver::join(azalea_auth::sessionserver::SessionServerJoinOpts {
+            access_token,
+            public_key: &hello.public_key,
+            private_key: &e.secret_key,
+            uuid: &args.uuid,
+            server_id: &hello.server_id,
+            proxy: None,
+        })
+        .await
+        .map_err(|e| ConnectionError::Auth(e.to_string()))?;
         tracing::info!("Session server authentication successful");
     } else {
         tracing::info!("Server does not require authentication");
     }
 
-    conn.write_packet(&ServerboundLoginPacket::Key(ServerboundKey {
+    conn.write_packet(ServerboundKey {
         key_bytes: e.encrypted_public_key,
         encrypted_challenge: e.encrypted_challenge,
-    }))
+    })
     .await?;
 
     conn.set_encryption_key(e.secret_key);
     tracing::info!("Encryption enabled");
     Ok(())
-}
-
-/// Proves ownership of the account to Mojang so the server can verify the join.
-/// Not a method on [`Conn`]: it is an HTTPS call and touches no connection
-/// state.
-async fn join_session_server(
-    access_token: &str,
-    uuid: &uuid::Uuid,
-    private_key: [u8; 16],
-    hello: &ClientboundHello,
-) -> Result<(), azalea_auth::sessionserver::ClientSessionServerError> {
-    azalea_auth::sessionserver::join(azalea_auth::sessionserver::SessionServerJoinOpts {
-        access_token,
-        public_key: &hello.public_key,
-        private_key: &private_key,
-        uuid,
-        server_id: &hello.server_id,
-        proxy: None,
-    })
-    .await
 }
 
 async fn config_sequence(
@@ -885,7 +869,7 @@ async fn write_config_packet(
     packet: ServerboundConfigPacket,
 ) -> Result<(), ConnectionError> {
     let Some(t) = super::translate::active().filter(|t| t.translates_config()) else {
-        return Ok(conn.write_packet(&packet).await?);
+        return Ok(conn.write_packet(packet).await?);
     };
     if let Some(frame) = t.translate_outbound_config_frame(serialize_frame(&packet)?) {
         conn.writer.write(&frame).await?;

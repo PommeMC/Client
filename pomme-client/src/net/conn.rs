@@ -6,15 +6,15 @@
 //! already transport-generic, so this owns only the struct layer.
 //!
 //! There is also no connection phase here. Azalea makes it a type parameter and
-//! re-types the whole connection on every transition; pomme names the packet
-//! enum at each call site anyway, and dropping it makes the mid-session
+//! re-types the whole connection on every transition; the packet passed at each
+//! call already fixes the phase, and dropping the marker makes the mid-session
 //! reconfiguration excursion ordinary calls on one object.
 
 use std::fmt::Debug;
 use std::io::{self, Cursor};
 
 use azalea_crypto::{Aes128CfbDec, Aes128CfbEnc};
-use azalea_protocol::packets::ProtocolPacket;
+use azalea_protocol::packets::{Packet, ProtocolPacket};
 use azalea_protocol::read::{ReadPacketError, deserialize_packet, read_raw_packet};
 use azalea_protocol::write::{serialize_packet, write_raw_packet};
 use tokio::io::{ReadHalf, SimplexStream, WriteHalf};
@@ -106,8 +106,11 @@ impl Conn {
         deserialize_packet(&mut Cursor::new(&raw))
     }
 
-    pub async fn write_packet<P: ProtocolPacket + Debug>(&mut self, packet: &P) -> io::Result<()> {
-        let raw = serialize_packet(packet).map_err(io::Error::other)?;
+    pub async fn write_packet<P: ProtocolPacket + Debug>(
+        &mut self,
+        packet: impl Packet<P>,
+    ) -> io::Result<()> {
+        let raw = serialize_packet(&packet.into_variant()).map_err(io::Error::other)?;
         self.writer.write(&raw).await
     }
 
@@ -175,7 +178,7 @@ mod tests {
                 a.set_compression_threshold(threshold);
                 b.set_compression_threshold(threshold);
             }
-            a.write_packet(&ping(7)).await.unwrap();
+            a.write_packet(ping(7)).await.unwrap();
             assert_eq!(recv(&mut b).await, ping(7), "threshold {threshold:?}");
         }
     }
@@ -187,8 +190,8 @@ mod tests {
         a.set_encryption_key(key);
         b.set_encryption_key(key);
         // Two packets: the stream cipher must stay in step across frames.
-        a.write_packet(&ping(1)).await.unwrap();
-        a.write_packet(&ping(2)).await.unwrap();
+        a.write_packet(ping(1)).await.unwrap();
+        a.write_packet(ping(2)).await.unwrap();
         assert_eq!(recv(&mut b).await, ping(1));
         assert_eq!(recv(&mut b).await, ping(2));
     }
@@ -196,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn frame_is_length_then_id() {
         let (mut conn, mut wire_rx, _peer_tx) = conn_and_wire();
-        conn.write_packet(&status_request()).await.unwrap();
+        conn.write_packet(status_request()).await.unwrap();
 
         let mut frame = [0u8; 2];
         wire_rx.read_exact(&mut frame).await.unwrap();

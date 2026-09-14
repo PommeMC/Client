@@ -17,13 +17,11 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 pub enum NetReader {
     Tcp(OwnedReadHalf),
-    #[allow(dead_code)]
     Memory(ReadHalf<SimplexStream>),
 }
 
 pub enum NetWriter {
     Tcp(OwnedWriteHalf),
-    #[allow(dead_code)]
     Memory(WriteHalf<SimplexStream>),
 }
 
