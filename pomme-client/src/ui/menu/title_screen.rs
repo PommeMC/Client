@@ -121,7 +121,9 @@ impl MainMenu {
             if hit {
                 any_clicked = true;
                 match *label {
-                    "Singleplayer" => self.open_world_list(),
+                    "Singleplayer" => {
+                        self.open_world_list(gs, &|t: &str| text_width_fn(t, fs));
+                    }
                     "Multiplayer" => self.set_screen(Screen::ServerList),
                     _ => {}
                 }
