@@ -82,9 +82,8 @@ pub struct MemoryEnd {
 /// client's end and the server's.
 ///
 /// Two independent pipes rather than a duplex pair, so neither direction waits
-/// on a lock held by the other. The client-to-server pipe is sized far above
-/// what a tick sends because the game loop reads and writes from one task: a
-/// full outbound pipe would stop the client reading and deadlock both ends.
+/// on a lock held by the other. The client-to-server pipe is oversized because
+/// the game loop writes from the task that reads (see the TODO in `game_loop`).
 #[allow(
     dead_code,
     reason = "the integrated server constructs these once it lands"

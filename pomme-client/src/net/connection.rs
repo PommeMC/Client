@@ -141,7 +141,15 @@ pub async fn connect_to_server(
             negotiate_wire_version(&server_addr, protocol).await?;
             super::resolve::connect(&server_addr, ClientIntention::Login).await?
         }
-        Transport::Memory(end) => open_integrated(end).await?,
+        Transport::Memory(end) => {
+            // An integrated server speaks the latest protocol, so there is
+            // nothing to probe and translation stays inert for the session.
+            adopt_wire_protocol(pomme_protocol::version::LATEST.protocol);
+            let mut conn = Conn::from_memory(end);
+            super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
+                .await?;
+            conn
+        }
     };
 
     let hello = ServerboundLoginPacket::Hello(ServerboundHello {
@@ -209,17 +217,6 @@ pub async fn connect_to_server(
         view_distance,
     )
     .await
-}
-
-/// Opens the connection to an integrated server. It speaks the latest protocol
-/// by definition, so there is nothing to probe and translation stays inert for
-/// the session.
-async fn open_integrated(end: MemoryEnd) -> Result<Conn, ConnectionError> {
-    adopt_wire_protocol(pomme_protocol::version::LATEST.protocol);
-
-    let mut conn = Conn::from_memory(end);
-    super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login).await?;
-    Ok(conn)
 }
 
 /// What the phases before the game loop produced.
@@ -1007,12 +1004,11 @@ mod tests {
     async fn joins_an_integrated_server_over_the_pipe() {
         use azalea_auth::game_profile::GameProfile;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
-        use azalea_protocol::packets::config::ServerboundConfigPacket;
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
         use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
         use uuid::Uuid;
 
-        use crate::net::conn::{Conn, memory_pipes};
+        use crate::net::conn::memory_pipes;
 
         /// The next packet the client sent, in whichever phase the caller
         /// names.

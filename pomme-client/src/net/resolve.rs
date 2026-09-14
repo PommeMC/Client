@@ -109,8 +109,7 @@ pub async fn request_status(
     }
 }
 
-/// Opens the handshake, naming the protocol this session speaks. Every
-/// connection sends this first, an integrated server's included.
+/// Opens the handshake, naming the protocol this session speaks.
 pub async fn send_intention(
     conn: &mut Conn,
     host: &str,
