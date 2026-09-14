@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::ui::text::TextSpan;
-use crate::ui::world_list::{GameMode, WorldSummary};
+use crate::ui::world_list::{Difficulty, GameMode, WorldSummary};
 
 const WORLD_ROW_W: f32 = 270.0;
 const HEADER_H: f32 = 49.0;
@@ -24,8 +24,13 @@ const COL_GREY: [f32; 4] = [0.502, 0.502, 0.502, 1.0];
 const COL_HARDCORE: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
 impl MainMenu {
-    pub(super) fn open_world_list(&mut self) {
+    pub(super) fn open_world_list(&mut self, gs: f32, wf: &dyn Fn(&str) -> f32) {
         self.rescan_worlds();
+        // Vanilla skips an empty list entirely and opens the create screen.
+        if self.world_list.worlds.is_empty() {
+            self.open_create_world(gs, wf);
+            return;
+        }
         self.set_screen(Screen::WorldList);
         self.scroll_offset = 0.0;
         self.selected_world = None;
@@ -95,7 +100,7 @@ impl MainMenu {
             gs,
             text_width_fn,
         );
-        push_search_hint(
+        push_field_hint(
             &mut elements,
             &self.world_search,
             self.focused_field == Some(0),
@@ -104,6 +109,7 @@ impl MainMenu {
             field_h,
             fs,
             gs,
+            "Search...",
         );
 
         push_menu_backdrop(&mut elements, 0.0, list_top, screen_w, list_h, gs);
@@ -261,10 +267,26 @@ impl MainMenu {
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
 
-        // Every action but Back arrives in a later layer.
+        if push_button_f(
+            &mut elements,
+            &mut ctx,
+            &mut any_hovered,
+            cursor,
+            clicked,
+            col(2.0),
+            row1_y,
+            wide_w,
+            btn_h,
+            gs,
+            "Create New World",
+            true,
+        ) {
+            self.open_create_world(gs, &|t: &str| text_width_fn(t, fs));
+        }
+
+        // Every remaining action arrives in a later layer.
         for (x, y, w, label) in [
             (grid_x, row1_y, wide_w, "Play Selected World"),
-            (col(2.0), row1_y, wide_w, "Create New World"),
             (col(0.0), row2_y, narrow_w, "Edit"),
             (col(1.0), row2_y, narrow_w, "Delete"),
             (col(2.0), row2_y, narrow_w, "Re-Create"),
@@ -283,17 +305,15 @@ impl MainMenu {
                 label,
                 false,
             );
-            // Vanilla keys tooltips off hover alone, ignoring the active flag.
-            if common::hit_test(cursor, [x, y, w, btn_h]) {
-                common::push_tooltip(
-                    &mut elements,
-                    cursor,
-                    screen_w,
-                    screen_h,
-                    gs,
-                    "Not available yet",
-                );
-            }
+            push_hover_tooltip(
+                &mut elements,
+                cursor,
+                screen_w,
+                screen_h,
+                gs,
+                [x, y, w, btn_h],
+                "Not available yet",
+            );
         }
 
         if push_button_f(
@@ -325,6 +345,21 @@ impl MainMenu {
     }
 }
 
+/// Vanilla keys tooltips off hover alone, ignoring the button's active flag.
+fn push_hover_tooltip(
+    elements: &mut Vec<MenuElement>,
+    cursor: (f32, f32),
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    rect: [f32; 4],
+    text: &str,
+) {
+    if common::hit_test(cursor, rect) {
+        common::push_tooltip(elements, cursor, screen_w, screen_h, gs, text);
+    }
+}
+
 fn push_icon(elements: &mut Vec<MenuElement>, rect: [f32; 4], sprite: SpriteId) {
     elements.push(MenuElement::Image {
         x: rect[0],
@@ -345,10 +380,7 @@ fn info_line(world: &WorldSummary) -> Vec<TextSpan> {
     if world.hardcore {
         spans.push(TextSpan::new("Hardcore Mode".into(), COL_HARDCORE));
     } else {
-        spans.push(grey(match world.game_mode {
-            GameMode::Survival => "Survival Mode".into(),
-            GameMode::Creative => "Creative Mode".into(),
-        }));
+        spans.push(grey(world.game_mode.label().into()));
     }
     if world.allow_commands {
         spans.push(grey(", Commands".into()));
@@ -371,4 +403,544 @@ fn format_last_played(millis: u64) -> String {
         .ok()
         .and_then(|t| t.format(&FORMAT).ok())
         .unwrap_or_else(|| "unknown".into())
+}
+
+/// Which of vanilla's three create-world tabs is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum CreateTab {
+    #[default]
+    Game,
+    World,
+    More,
+}
+
+/// Vanilla offers three modes here but stores two: hardcore is Survival plus a
+/// flag, and it forces difficulty to Hard and cheats off.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum SelectedMode {
+    #[default]
+    Survival,
+    Hardcore,
+    Creative,
+}
+
+impl SelectedMode {
+    fn cycle(self) -> Self {
+        match self {
+            Self::Survival => Self::Hardcore,
+            Self::Hardcore => Self::Creative,
+            Self::Creative => Self::Survival,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Survival => "Survival",
+            Self::Hardcore => "Hardcore",
+            Self::Creative => "Creative",
+        }
+    }
+
+    /// Vanilla `selectWorld.gameMode.<name>.info`.
+    fn info(self) -> &'static str {
+        match self {
+            Self::Survival => {
+                "Explore a mysterious world where you build, collect, craft, and fight monsters."
+            }
+            Self::Hardcore => {
+                "Survival Mode locked to 'Hard' difficulty. You can't respawn if you die."
+            }
+            Self::Creative => {
+                "Create, build, and explore without limits. You can fly, have endless materials, \
+                 and can't be hurt by monsters."
+            }
+        }
+    }
+
+    fn stored(self) -> (GameMode, bool) {
+        match self {
+            Self::Survival => (GameMode::Survival, false),
+            Self::Hardcore => (GameMode::Survival, true),
+            Self::Creative => (GameMode::Creative, false),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct CreateWorldState {
+    tab: CreateTab,
+    mode: SelectedMode,
+    difficulty: Difficulty,
+    /// `None` until the player touches the control, which is when vanilla stops
+    /// deriving it from the game mode.
+    allow_commands: Option<bool>,
+    folder: String,
+    folder_for: String,
+}
+
+impl CreateWorldState {
+    fn hardcore(&self) -> bool {
+        self.mode == SelectedMode::Hardcore
+    }
+
+    fn difficulty(&self) -> Difficulty {
+        if self.hardcore() {
+            Difficulty::Hard
+        } else {
+            self.difficulty
+        }
+    }
+
+    /// The field this tab shows, if any.
+    pub(super) fn field_target(&self) -> Option<TextTarget> {
+        match self.tab {
+            CreateTab::Game => Some(TextTarget::WorldName),
+            CreateTab::World => Some(TextTarget::WorldSeed),
+            CreateTab::More => None,
+        }
+    }
+
+    fn allow_commands(&self) -> bool {
+        if self.hardcore() {
+            return false;
+        }
+        self.allow_commands
+            .unwrap_or(self.mode == SelectedMode::Creative)
+    }
+}
+
+const TAB_BAR_H: f32 = 24.0;
+const TAB_BAR_MAX_W: f32 = 400.0;
+const TAB_BAR_MARGIN: f32 = 28.0;
+const NAME_FIELD_W: f32 = 208.0;
+const SEED_FIELD_W: f32 = 308.0;
+const OPTION_W: f32 = 210.0;
+const HALF_OPTION_W: f32 = 150.0;
+const SWITCH_W: f32 = 44.0;
+const LABEL_GAP: f32 = 4.0;
+const ROW_GAP: f32 = 8.0;
+const COL_GAP: f32 = 10.0;
+
+impl MainMenu {
+    pub(super) fn open_create_world(&mut self, gs: f32, wf: &dyn Fn(&str) -> f32) {
+        self.create = CreateWorldState::default();
+        self.world_name
+            .set_value("New World", NAME_FIELD_W * gs - 8.0 * gs, wf);
+        self.world_seed.clear();
+        self.set_screen(Screen::CreateWorld);
+        self.focused_field = Some(0);
+        self.world_name.set_focused(true);
+    }
+
+    pub(super) fn build_create_world(
+        &mut self,
+        screen_w: f32,
+        screen_h: f32,
+        input: &MenuInput,
+        text_width_fn: &dyn Fn(&str, f32) -> f32,
+    ) -> MainMenuResult {
+        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let fs = common::FONT_SIZE * gs;
+        let btn_h = common::BTN_H * gs;
+        let field_h = FIELD_H * gs;
+        let row_gap = ROW_GAP * gs;
+        let cursor = input.cursor;
+        let clicked = input.clicked;
+        let cx = screen_w / 2.0;
+
+        if input.escape {
+            self.leave_create_world();
+            return empty_result(2.0);
+        }
+
+        if self.create.field_target().is_some() {
+            self.cycle_fields(input, 1);
+        }
+
+        let mut elements = Vec::new();
+        let mut any_hovered = false;
+        let inert = |elements: &mut Vec<MenuElement>,
+                     any_hovered: &mut bool,
+                     x: f32,
+                     y: f32,
+                     w: f32,
+                     label: &str| {
+            push_button(
+                elements,
+                any_hovered,
+                cursor,
+                x,
+                y,
+                w,
+                btn_h,
+                gs,
+                label,
+                false,
+            );
+            push_hover_tooltip(
+                elements,
+                cursor,
+                screen_w,
+                screen_h,
+                gs,
+                [x, y, w, btn_h],
+                "Not available yet",
+            );
+        };
+
+        // Tab bar across the top.
+        let tab_h = TAB_BAR_H * gs;
+        let bar_w = screen_w.min(TAB_BAR_MAX_W * gs) - TAB_BAR_MARGIN * gs;
+        let tab_w = bar_w / 3.0;
+        let bar_x = (screen_w - bar_w) / 2.0;
+        for (i, (tab, label)) in [
+            (CreateTab::Game, "Game"),
+            (CreateTab::World, "World"),
+            (CreateTab::More, "More"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let x = bar_x + tab_w * i as f32;
+            let active = self.create.tab == tab;
+            let hovered = common::hit_test(cursor, [x, 0.0, tab_w, tab_h]);
+            any_hovered |= hovered;
+            let sprite = match (active, hovered) {
+                (true, true) => SpriteId::TabSelectedHighlighted,
+                (true, false) => SpriteId::TabSelected,
+                (false, true) => SpriteId::TabHighlighted,
+                (false, false) => SpriteId::Tab,
+            };
+            nine_slice(&mut elements, x, 0.0, tab_w, tab_h, sprite, 2.0 * gs);
+            // The selected tab opens onto the page; the others sit 3 lower.
+            let label_top = if active {
+                push_menu_backdrop(
+                    &mut elements,
+                    x + 2.0 * gs,
+                    2.0 * gs,
+                    tab_w - 4.0 * gs,
+                    tab_h - 2.0 * gs,
+                    gs,
+                );
+                0.0
+            } else {
+                3.0 * gs
+            };
+            elements.push(MenuElement::Text {
+                x: x + tab_w / 2.0,
+                y: label_top + (tab_h - label_top - fs) / 2.0,
+                text: label.into(),
+                scale: fs,
+                color: WHITE,
+                centered: true,
+            });
+            if active {
+                // Vanilla underlines the selected tab's label.
+                let uw = text_width_fn(label, fs).min(tab_w - LABEL_GAP * gs);
+                elements.push(MenuElement::Rect {
+                    x: x + (tab_w - uw) / 2.0,
+                    y: tab_h - 2.0 * gs,
+                    w: uw,
+                    h: gs,
+                    corner_radius: 0.0,
+                    color: WHITE,
+                });
+            }
+            if clicked && hovered && !active {
+                self.create.tab = tab;
+                self.focused_field = None;
+            }
+        }
+        // The header separator runs either side of the tabs, not under them.
+        for (x, w) in [(0.0, bar_x), (bar_x + bar_w, screen_w - bar_x - bar_w)] {
+            elements.push(MenuElement::Image {
+                x,
+                y: tab_h - SEP_H * gs,
+                w,
+                h: SEP_H * gs,
+                sprite: SpriteId::HeaderSeparator,
+                tint: WHITE,
+            });
+        }
+
+        // Vanilla places the tab body a sixth of the way down the free space.
+        let footer_h = HEADER_FOOTER_H * gs;
+        let field_block = fs + LABEL_GAP * gs + field_h;
+        let stack_h = match self.create.tab {
+            CreateTab::Game => field_block + (btn_h + row_gap) * 3.0,
+            CreateTab::World => {
+                btn_h + row_gap + field_block + row_gap + btn_h * 2.0 + LABEL_GAP * gs
+            }
+            CreateTab::More => btn_h * 3.0 + row_gap * 2.0,
+        };
+        let mut y = tab_h + (screen_h - footer_h - tab_h - stack_h) / 6.0;
+        let opt_w = OPTION_W * gs;
+        let opt_x = cx - opt_w / 2.0;
+        let half = HALF_OPTION_W * gs;
+
+        match self.create.tab {
+            CreateTab::Game => {
+                let rect = self.labelled_field(
+                    &mut elements,
+                    input,
+                    "World Name",
+                    TextTarget::WorldName,
+                    cx,
+                    &mut y,
+                    NAME_FIELD_W * gs,
+                    gs,
+                    text_width_fn,
+                );
+                self.refresh_target_folder();
+                if common::hit_test(cursor, rect) {
+                    let tip = format!("Save folder: {}", self.create.folder);
+                    common::push_tooltip(&mut elements, cursor, screen_w, screen_h, gs, &tip);
+                }
+                y += row_gap;
+
+                let hardcore = self.create.hardcore();
+                let cheats = if self.create.allow_commands() {
+                    "ON"
+                } else {
+                    "OFF"
+                };
+                let rows = [
+                    (
+                        format!("Game Mode: {}", self.create.mode.label()),
+                        true,
+                        self.create.mode.info(),
+                    ),
+                    (
+                        format!("Difficulty: {}", self.create.difficulty().label()),
+                        !hardcore,
+                        self.create.difficulty().info(),
+                    ),
+                    (
+                        format!("Allow Cheats: {cheats}"),
+                        !hardcore,
+                        "Commands like /gamemode, /experience",
+                    ),
+                ];
+                for (i, (label, enabled, info)) in rows.into_iter().enumerate() {
+                    if push_button(
+                        &mut elements,
+                        &mut any_hovered,
+                        cursor,
+                        opt_x,
+                        y,
+                        opt_w,
+                        btn_h,
+                        gs,
+                        &label,
+                        enabled,
+                    ) && clicked
+                    {
+                        match i {
+                            0 => self.create.mode = self.create.mode.cycle(),
+                            1 => self.create.difficulty = self.create.difficulty.cycle(),
+                            _ => self.create.allow_commands = Some(!self.create.allow_commands()),
+                        }
+                    }
+                    push_hover_tooltip(
+                        &mut elements,
+                        cursor,
+                        screen_w,
+                        screen_h,
+                        gs,
+                        [opt_x, y, opt_w, btn_h],
+                        info,
+                    );
+                    y += btn_h + row_gap;
+                }
+            }
+            CreateTab::World => {
+                let left = cx - (half * 2.0 + COL_GAP * gs) / 2.0;
+                for (i, label) in ["World Type: Default", "Customize"].into_iter().enumerate() {
+                    let x = left + (half + COL_GAP * gs) * i as f32;
+                    inert(&mut elements, &mut any_hovered, x, y, half, label);
+                }
+                y += btn_h + row_gap;
+
+                let rect = self.labelled_field(
+                    &mut elements,
+                    input,
+                    "Seed for the world generator",
+                    TextTarget::WorldSeed,
+                    cx,
+                    &mut y,
+                    SEED_FIELD_W * gs,
+                    gs,
+                    text_width_fn,
+                );
+                push_field_hint(
+                    &mut elements,
+                    &self.world_seed,
+                    self.focused_field == Some(0),
+                    rect[0],
+                    rect[1],
+                    rect[3],
+                    fs,
+                    gs,
+                    "Leave blank for a random seed",
+                );
+                y += row_gap;
+
+                let switch_w = SWITCH_W * gs;
+                let switch_x = left + half * 2.0 + COL_GAP * gs - switch_w;
+                for (label, state) in [("Generate Structures", "ON"), ("Bonus Chest", "OFF")] {
+                    elements.push(MenuElement::Text {
+                        x: left,
+                        y: y + (btn_h - fs) / 2.0,
+                        text: label.into(),
+                        scale: fs,
+                        color: common::COL_DISABLED,
+                        centered: false,
+                    });
+                    inert(
+                        &mut elements,
+                        &mut any_hovered,
+                        switch_x,
+                        y,
+                        switch_w,
+                        state,
+                    );
+                    y += btn_h + LABEL_GAP * gs;
+                }
+            }
+            CreateTab::More => {
+                for label in ["Game Rules", "Experiments", "Data Packs"] {
+                    inert(&mut elements, &mut any_hovered, opt_x, y, opt_w, label);
+                    y += btn_h + row_gap;
+                }
+            }
+        }
+
+        let footer_y = screen_h - footer_h + (footer_h - btn_h) / 2.0;
+        if push_button(
+            &mut elements,
+            &mut any_hovered,
+            cursor,
+            cx - half - row_gap / 2.0,
+            footer_y,
+            half,
+            btn_h,
+            gs,
+            "Create New World",
+            true,
+        ) && clicked
+        {
+            self.create_world();
+        }
+        if push_button(
+            &mut elements,
+            &mut any_hovered,
+            cursor,
+            cx + row_gap / 2.0,
+            footer_y,
+            half,
+            btn_h,
+            gs,
+            "Cancel",
+            true,
+        ) && clicked
+        {
+            self.leave_create_world();
+        }
+
+        MainMenuResult {
+            elements,
+            action: MenuAction::None,
+            cursor_pointer: any_hovered,
+            blur: 2.0,
+            clicked_button: clicked && any_hovered,
+        }
+    }
+
+    /// A caption over a text field, advancing `y` past both and returning the
+    /// field's rect for hit-testing.
+    #[allow(clippy::too_many_arguments)]
+    fn labelled_field(
+        &mut self,
+        elements: &mut Vec<MenuElement>,
+        input: &MenuInput,
+        caption: &str,
+        target: TextTarget,
+        cx: f32,
+        y: &mut f32,
+        w: f32,
+        gs: f32,
+        text_width_fn: &dyn Fn(&str, f32) -> f32,
+    ) -> [f32; 4] {
+        let fs = common::FONT_SIZE * gs;
+        let field_h = FIELD_H * gs;
+        let x = cx - w / 2.0;
+        elements.push(MenuElement::Text {
+            x,
+            y: *y,
+            text: caption.into(),
+            scale: fs,
+            color: COL_DIM,
+            centered: false,
+        });
+        *y += fs + LABEL_GAP * gs;
+        self.text_field(
+            elements,
+            target,
+            0,
+            input,
+            x,
+            *y,
+            w,
+            field_h,
+            fs,
+            gs,
+            text_width_fn,
+        );
+        let rect = [x, *y, w, field_h];
+        *y += field_h;
+        rect
+    }
+
+    /// Back to whatever opened this: the list, or the title screen when there
+    /// were no worlds to list.
+    fn leave_create_world(&mut self) {
+        let back = if self.world_list.worlds.is_empty() {
+            Screen::Main
+        } else {
+            Screen::WorldList
+        };
+        self.set_screen(back);
+    }
+
+    fn create_world(&mut self) {
+        let name = self.world_name.value().trim();
+        let (game_mode, hardcore) = self.create.mode.stored();
+        let summary = crate::ui::world_list::WorldSummary {
+            name: name.to_owned(),
+            folder: self.world_list.available_folder_name(name),
+            last_played: 0,
+            game_mode,
+            hardcore,
+            allow_commands: self.create.allow_commands(),
+            difficulty: self.create.difficulty(),
+            seed: self.world_seed.value().trim().to_owned(),
+            version: self.version.clone(),
+            extra: Default::default(),
+        };
+        if let Err(e) = self.world_list.create(summary) {
+            tracing::error!("Failed to create world: {e}");
+        }
+        self.set_screen(Screen::WorldList);
+    }
+
+    /// Vanilla recomputes this per keystroke; per frame would stat the disk for
+    /// an answer that only changes when the name does.
+    fn refresh_target_folder(&mut self) {
+        if self.create.folder_for != self.world_name.value() {
+            self.create.folder_for = self.world_name.value().to_owned();
+            self.create.folder = self
+                .world_list
+                .available_folder_name(&self.create.folder_for);
+        }
+    }
 }

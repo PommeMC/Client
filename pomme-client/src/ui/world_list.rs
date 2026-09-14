@@ -27,13 +27,88 @@ pub enum GameMode {
     Creative,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+impl GameMode {
+    /// Vanilla `gameMode.<name>`, as the world list's info line shows it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Survival => "Survival Mode",
+            Self::Creative => "Creative Mode",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Difficulty {
     Peaceful,
     Easy,
+    #[default]
     Normal,
     Hard,
+}
+
+impl Difficulty {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Peaceful => Self::Easy,
+            Self::Easy => Self::Normal,
+            Self::Normal => Self::Hard,
+            Self::Hard => Self::Peaceful,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Peaceful => "Peaceful",
+            Self::Easy => "Easy",
+            Self::Normal => "Normal",
+            Self::Hard => "Hard",
+        }
+    }
+
+    /// Vanilla `options.difficulty.<name>.info`.
+    pub fn info(self) -> &'static str {
+        match self {
+            Self::Peaceful => {
+                "No hostile mobs and only some neutral mobs spawn. Hunger bar doesn't deplete and \
+                 health replenishes over time."
+            }
+            Self::Easy => {
+                "Hostile mobs spawn but deal less damage. Hunger bar depletes and drains health \
+                 down to 5 hearts."
+            }
+            Self::Normal => {
+                "Hostile mobs spawn and deal standard damage. Hunger bar depletes and drains \
+                 health down to half a heart."
+            }
+            Self::Hard => {
+                "Hostile mobs spawn and deal more damage. Hunger bar depletes and drains all \
+                 health."
+            }
+        }
+    }
+}
+
+/// Vanilla `WorldOptions.parseSeed`: a decimal long when the text parses as
+/// one, otherwise Java's string hash. `None` means the caller should pick a
+/// random seed.
+pub fn parse_seed(seed: &str) -> Option<i64> {
+    let seed = seed.trim();
+    if seed.is_empty() {
+        return None;
+    }
+    Some(
+        seed.parse::<i64>()
+            .unwrap_or_else(|_| i64::from(java_string_hash(seed))),
+    )
+}
+
+/// Java's `String.hashCode`, which runs over UTF-16 code units, so a character
+/// outside the basic plane contributes two rounds rather than one.
+fn java_string_hash(s: &str) -> i32 {
+    s.encode_utf16().fold(0i32, |h, unit| {
+        h.wrapping_mul(31).wrapping_add(i32::from(unit))
+    })
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -265,6 +340,20 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn parses_seeds_like_vanilla() {
+        assert_eq!(parse_seed(""), None);
+        assert_eq!(parse_seed("   "), None);
+        assert_eq!(parse_seed(" 42 "), Some(42));
+        assert_eq!(parse_seed("-5"), Some(-5));
+        // Not a decimal long, so Java's string hash: 'a' * 31 + 'b'.
+        assert_eq!(parse_seed("ab"), Some(3105));
+        // A character outside the basic plane hashes as its two UTF-16 units.
+        assert_eq!(parse_seed("\u{1D11E}"), Some(1_772_394));
+        // Too large for an i64, so it hashes rather than saturating.
+        assert_eq!(parse_seed("99999999999999999999"), Some(1_260_560_192));
     }
 
     #[test]
