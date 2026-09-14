@@ -64,6 +64,8 @@ pub fn handle_game_packet(
             });
             let _ = event_tx.try_send(NetworkEvent::PlayerLogin {
                 entity_id: p.player_id.0,
+                hardcore: p.hardcore,
+                show_death_screen: p.show_death_screen,
             });
         }
         ClientboundGamePacket::LevelChunkWithLight(p) => {
@@ -845,6 +847,11 @@ pub fn handle_game_packet(
                 }
             }
         }
+        // Event id 3 = living entity death.
+        // TODO: event 60 (`makePoofParticles`) when a mob's death clock hits 20.
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 3 => {
+            let _ = event_tx.try_send(NetworkEvent::EntityDied { id: p.entity_id.0 });
+        }
         // Event id 9 = finished using an item (vanilla `completeUsingItem`).
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 9 => {
             let _ = event_tx.try_send(NetworkEvent::FinishUseItem { id: p.entity_id.0 });
@@ -940,6 +947,7 @@ pub fn handle_game_packet(
         ClientboundGamePacket::PlayerCombatKill(p) => {
             tracing::info!("Player died: {}", p.message);
             let _ = event_tx.try_send(NetworkEvent::PlayerDied {
+                player_id: p.player_id.0,
                 message: p.message.to_string(),
             });
         }

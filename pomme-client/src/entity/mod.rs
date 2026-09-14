@@ -100,6 +100,20 @@ pub const HURT_DURATION: u8 = 10;
 /// (`LivingEntity.getCurrentSwingDuration`).
 const SWING_DURATION: u8 = 6;
 
+fn tick_death_time(health: f32, should_tick: bool, death_time: &mut u32) {
+    if health <= 0.0 && should_tick {
+        *death_time = death_time.wrapping_add(1);
+    }
+}
+
+fn within_simulation_distance(entity: Position, player: Position, distance: u32) -> bool {
+    let entity_x = (entity.x.floor() as i32).div_euclid(16);
+    let entity_z = (entity.z.floor() as i32).div_euclid(16);
+    let player_x = (player.x.floor() as i32).div_euclid(16);
+    let player_z = (player.z.floor() as i32).div_euclid(16);
+    entity_x.abs_diff(player_x).max(entity_z.abs_diff(player_z)) <= distance
+}
+
 #[allow(dead_code)]
 pub struct LivingEntity {
     pub position: Position,
@@ -213,6 +227,7 @@ pub struct LivingEntity {
     pub eat_anim_tick: u8,
     pub prev_eat_anim_tick: u8,
     pub hurt_time: u8,
+    pub death_time: u32,
     pub age_in_ticks: u32,
     pub custom_name: Option<String>,
     /// Mob is targeting/attacking (metadata mob-flags bit 0x04). Raises
@@ -349,6 +364,7 @@ impl LivingEntity {
             eat_anim_tick: 0,
             prev_eat_anim_tick: 0,
             hurt_time: 0,
+            death_time: 0,
             age_in_ticks: 0,
             custom_name: None,
             aggressive: false,
@@ -1210,6 +1226,15 @@ impl EntityStore {
         }
     }
 
+    pub fn mark_dead(&mut self, id: i32) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type != EntityKind::Player
+        {
+            entity.health = 0.0;
+            entity.is_crouching = false;
+        }
+    }
+
     /// Mirrors vanilla `LivingEntity.handleDamageEvent`: `hurtTime = 10`.
     pub fn mark_hurt(&mut self, id: i32) {
         if let Some(entity) = self.living.get_mut(&id) {
@@ -1324,19 +1349,32 @@ impl EntityStore {
             .find(|entity| entity.player_uuid == Some(*uuid))
     }
 
-    pub fn tick_living(&mut self, chunks: &ChunkStore) {
+    pub fn tick_living(
+        &mut self,
+        chunks: &ChunkStore,
+        player_position: Position,
+        simulation_distance: u32,
+    ) {
         for entity in self.living.values_mut() {
             entity.tick_interpolation();
             entity.tick_body_rotation();
             let dx = entity.position.x - entity.prev_position.x;
             let dz = entity.position.z - entity.prev_position.z;
-            update_walk_animation(
-                dx,
-                dz,
-                &mut entity.walk_anim_pos,
-                &mut entity.walk_anim_speed,
-                &mut entity.prev_walk_anim_speed,
-            );
+            if entity.health <= 0.0 {
+                stop_walk_animation(
+                    &mut entity.walk_anim_pos,
+                    &mut entity.walk_anim_speed,
+                    &mut entity.prev_walk_anim_speed,
+                );
+            } else {
+                update_walk_animation(
+                    dx,
+                    dz,
+                    &mut entity.walk_anim_pos,
+                    &mut entity.walk_anim_speed,
+                    &mut entity.prev_walk_anim_speed,
+                );
+            }
             if probes_water(&entity.entity_type) {
                 entity.is_in_water = entity.probe_water(chunks);
             }
@@ -1349,6 +1387,11 @@ impl EntityStore {
             if entity.hurt_time > 0 {
                 entity.hurt_time -= 1;
             }
+            tick_death_time(
+                entity.health,
+                within_simulation_distance(entity.position, player_position, simulation_distance),
+                &mut entity.death_time,
+            );
             if entity.swing_time > 0 {
                 entity.swing_time -= 1;
             }
@@ -1358,6 +1401,12 @@ impl EntityStore {
             entity.age_in_ticks = entity.age_in_ticks.wrapping_add(1);
         }
     }
+}
+
+pub fn stop_walk_animation(walk_pos: &mut f32, walk_speed: &mut f32, prev_walk_speed: &mut f32) {
+    *prev_walk_speed = 0.0;
+    *walk_speed = 0.0;
+    *walk_pos = 0.0;
 }
 
 pub fn update_walk_animation(
@@ -1455,6 +1504,136 @@ fn probes_water(kind: &EntityKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tick_living_advances_remote_interpolation_state() {
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            1,
+            EntityKind::Zombie,
+            Position::new(0.0, 64.0, 0.0),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        store.move_living_delta(1, 3.0, 0.0, 0.0, true);
+        let before = store.living[&1].position;
+
+        store.tick_living(&ChunkStore::new(2), Position::default(), 10);
+
+        let entity = &store.living[&1];
+        assert_eq!(
+            entity.prev_position, before,
+            "each world tick must advance the remote entity interpolation endpoint"
+        );
+        assert_ne!(
+            entity.position, before,
+            "a pending remote movement interpolation must keep progressing"
+        );
+        assert_eq!(
+            entity.age_in_ticks, 1,
+            "remote living entities must keep receiving client ticks"
+        );
+    }
+
+    #[test]
+    fn stop_walk_animation_matches_vanilla_state_reset() {
+        let mut position = 12.5;
+        let mut speed = 0.7;
+        let mut speed_old = 0.4;
+
+        stop_walk_animation(&mut position, &mut speed, &mut speed_old);
+
+        assert_eq!(
+            position, 0.0,
+            "vanilla stop() clears walk animation position"
+        );
+        assert_eq!(speed, 0.0, "vanilla stop() clears current walk speed");
+        assert_eq!(speed_old, 0.0, "vanilla stop() clears previous walk speed");
+    }
+
+    #[test]
+    fn death_clock_matches_health_and_simulation_distance_boundaries() {
+        let mut death_time = 7;
+        tick_death_time(0.01, true, &mut death_time);
+        assert_eq!(
+            death_time, 7,
+            "vanilla does not rewind deathTime merely because health is positive"
+        );
+
+        tick_death_time(0.0, false, &mut death_time);
+        assert_eq!(
+            death_time, 7,
+            "dead entities outside simulation distance must not advance deathTime"
+        );
+        tick_death_time(0.0, true, &mut death_time);
+        assert_eq!(
+            death_time, 8,
+            "zero health in simulation range advances deathTime"
+        );
+        tick_death_time(-1.0, true, &mut death_time);
+        assert_eq!(
+            death_time, 9,
+            "non-positive health in simulation range keeps advancing deathTime"
+        );
+    }
+
+    #[test]
+    fn death_simulation_distance_uses_chunk_chessboard_distance() {
+        let player = Position::new(15.9, 64.0, -0.1);
+        assert!(within_simulation_distance(
+            Position::new(16.0 * 10.0, 64.0, -16.0 * 10.0),
+            player,
+            10,
+        ));
+        assert!(
+            !within_simulation_distance(Position::new(16.0 * 11.0, 64.0, 0.0), player, 10,),
+            "chunk 11 must be outside a simulation distance of 10"
+        );
+    }
+
+    #[test]
+    fn death_event_forces_mobs_but_not_players_to_zero_health() {
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            1,
+            EntityKind::Zombie,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        store.spawn_living(
+            2,
+            EntityKind::Player,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+
+        store.living.get_mut(&1).unwrap().death_time = 6;
+        store.living.get_mut(&1).unwrap().is_crouching = true;
+        store.mark_dead(1);
+        store.mark_dead(2);
+
+        assert_eq!(
+            store.living[&1].health, 0.0,
+            "vanilla event 3 kills non-player living entities client-side"
+        );
+        assert_eq!(
+            store.living[&1].death_time, 6,
+            "event 3 must not restart an already-running vanilla death clock"
+        );
+        assert!(
+            !store.living[&1].is_crouching,
+            "non-player event 3 transitions the entity to the DYING pose"
+        );
+        assert_eq!(
+            store.living[&2].health, 20.0,
+            "vanilla event 3 does not set player health client-side"
+        );
+    }
 
     #[test]
     fn player_index_normalization() {

@@ -123,10 +123,13 @@ pub struct GameState {
     pub mesh_dispatcher: MeshDispatcher,
     pub paused: bool,
     pub dead: bool,
+    pub death_screen_open: bool,
+    pub show_death_screen: bool,
+    pub hardcore: bool,
     pub death_message: String,
-    pub death_instant: Instant,
+    pub death_screen_ticks: u32,
     pub death_confirm: bool,
-    pub death_confirm_instant: Instant,
+    pub death_confirm_ticks: u32,
     pub respawn_sent: bool,
     pub inventory_open: bool,
     pub creative_inventory_open: bool,
@@ -336,10 +339,13 @@ impl GameState {
             mesh_dispatcher,
             paused: false,
             dead: false,
+            death_screen_open: false,
+            show_death_screen: true,
+            hardcore: false,
             death_message: String::new(),
-            death_instant: Instant::now(),
+            death_screen_ticks: 0,
             death_confirm: false,
-            death_confirm_instant: Instant::now(),
+            death_confirm_ticks: 0,
             respawn_sent: false,
             inventory_open: false,
             creative_inventory_open: false,
@@ -530,9 +536,19 @@ impl GameState {
         )
     }
 
+    /// Closes the death screen and its confirm, and re-arms the respawn send.
+    pub fn reset_death_screen(&mut self) {
+        self.death_screen_open = false;
+        self.death_screen_ticks = 0;
+        self.death_confirm = false;
+        self.death_confirm_ticks = 0;
+        self.respawn_sent = false;
+    }
+
     /// No menu (pause, inventory, chat) is capturing input.
     pub fn input_live(&self) -> bool {
         !self.paused
+            && !self.death_screen_open
             && !self.gui_open()
             && !self.chat.is_open()
             && self.benchmark_result.is_none()
@@ -1322,6 +1338,21 @@ fn head_is_carved_pumpkin(player: &LocalPlayer) -> bool {
     }
 }
 
+/// Vanilla `LivingEntityRenderer`: hurt or dying entities take the red overlay.
+fn has_red_overlay(hurt_time: u8, death_time: u32) -> bool {
+    hurt_time > 0 || death_time > 0
+}
+
+/// Vanilla `LivingEntityRenderState.deathTime`: the clock plus the partial
+/// tick, or zero while alive.
+fn render_death_time(death_time: u32, partial_tick: f32) -> f32 {
+    if death_time > 0 {
+        death_time as f32 + partial_tick
+    } else {
+        0.0
+    }
+}
+
 /// Vanilla `Hud.tick`: the held-item tooltip timer resets to 40 when the
 /// selected item's type or hover name changes, clears when the slot empties,
 /// and otherwise counts down.
@@ -1473,20 +1504,40 @@ pub fn update_game(
     core.tick_accumulator += dt;
     while core.tick_accumulator >= TICK_RATE {
         game.tick_count = game.tick_count.wrapping_add(1);
+        // Vanilla Gui.tick falls back from dead health alone when no screen is
+        // open, so death UI/auto-respawn must not depend on PlayerCombatKill.
+        let has_screen = game.death_screen_open
+            || game.paused
+            || game.options_from_game
+            || game.gui_open()
+            || game.chat.is_open();
+        if game.dead && !has_screen {
+            match crate::app::core::death_route(game.show_death_screen) {
+                crate::app::core::DeathRoute::ShowDeathScreen => {
+                    core.open_death_screen(connection, &gfx.window, game, None);
+                }
+                crate::app::core::DeathRoute::Respawn => core.send_respawn(connection, game),
+            }
+        }
+        let local_player_was_removed = game.dead && game.player.death_animation_finished();
         core.tick_physics(&mut gfx.renderer, connection, game);
-        game.player.tick_hurt();
-        game.player.effects.tick();
+        if !local_player_was_removed {
+            // LivingEntity.baseTick hurt/effects and Player.tick sleep state still
+            // run on the tick-20 removal tick, then stop with future entity ticks.
+            game.player.tick_hurt();
+            game.player.effects.tick();
+            game.player.tick_sleep();
+        }
         game.item_entity_store.tick(&game.chunk_store);
         game.particle_store.tick(&game.chunk_store);
         game.block_entity_anim.tick();
         game.title.tick();
         tick_tool_highlight(core, game);
-        game.player.tick_sleep();
-        // Vanilla LocalPlayer.handlePortalTransitionEffect.
-        // TODO: canUsePortal(false) also requires not riding (no passenger
-        // tracking yet).
+        // LocalPlayer.handlePortalTransitionEffect belongs to aiStep, which is
+        // skipped once tickDeath removes the player at exactly death tick 20.
+        let local_player_ai_step_ran = !game.dead || !game.player.death_animation_finished();
         let inside_portal = game.player.is_inside_nether_portal(&game.chunk_store);
-        if game.player.tick_portal_effect(inside_portal) {
+        if local_player_ai_step_ran && game.player.tick_portal_effect(inside_portal) {
             // Vanilla forLocalAmbience: AMBIENT category at the listener,
             // volume 0.25, pitch 0.8..1.2.
             core.audio.play_world_sound(
@@ -1624,7 +1675,7 @@ pub fn update_game(
     // Chat counts as text capture too, so digits/E/Q/F type instead of acting
     // as game keys (vanilla suppresses KeyMappings while any screen is open).
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
-    core.input.menu_capture = game.gui_open();
+    core.input.menu_capture = game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
     if core.input.spectator && game.spectator.is_menu_active() {
         core.ensure_player_face_atlas(&mut gfx.renderer);
@@ -1648,6 +1699,11 @@ pub fn update_game(
     );
     // Per-frame FOV interpolation; set before the frustum/view-projection reads.
     gfx.renderer.set_render_partial_tick(partial_tick);
+    gfx.renderer.set_death_time(if game.dead {
+        game.player.death_time as f32 + partial_tick
+    } else {
+        0.0
+    });
     gfx.renderer.set_hurt(
         game.player.hurt_time,
         game.player.hurt_dir,
@@ -1973,6 +2029,7 @@ pub fn update_game(
         && !game.gui_open()
         && !game.chat.is_open()
         && !game.dead
+        && !game.death_screen_open
     {
         let r = &gfx.renderer;
         crate::ui::player_tab::build_player_tab_overlay(
@@ -2237,7 +2294,7 @@ pub fn update_game(
         elements.extend(result.elements);
         core.input.clear_just_pressed_actions();
         core.sync_display_mode(&gfx.window);
-    } else if game.dead {
+    } else if game.death_screen_open {
         let cursor = core.input.cursor_pos();
         let clicked = core.input.left_just_pressed() && !game.respawn_sent;
         death_action = if game.death_confirm {
@@ -2248,11 +2305,11 @@ pub fn update_game(
                 cursor,
                 clicked,
                 gs,
-                game.death_confirm_instant.elapsed().as_secs_f32() >= 1.0,
+                death::buttons_ready(game.death_confirm_ticks),
             )
         } else {
             let buttons_enabled =
-                !game.respawn_sent && game.death_instant.elapsed().as_secs_f32() >= 1.0;
+                !game.respawn_sent && death::buttons_ready(game.death_screen_ticks);
             let r = &gfx.renderer;
             death::build_death_screen(
                 &mut elements,
@@ -2263,6 +2320,7 @@ pub fn update_game(
                 gs,
                 &game.death_message,
                 game.player.score,
+                game.hardcore,
                 buttons_enabled,
                 &|t, s| r.menu_text_width(t, s),
             )
@@ -2616,7 +2674,8 @@ pub fn update_game(
                     is_unhappy: e.unhappy_counter > 0,
                     head_y_offset: extras.head_y_offset,
                     head_x_rot_deg_override: extras.head_x_rot_deg_override,
-                    has_red_overlay: e.hurt_time > 0,
+                    has_red_overlay: has_red_overlay(e.hurt_time, e.death_time),
+                    death_time: render_death_time(e.death_time, partial_tick),
                     aggressive: e.aggressive,
                     flap: extras.flap,
                     flap_speed: extras.flap_speed,
@@ -2656,7 +2715,10 @@ pub fn update_game(
             .collect()
     };
 
-    if !benchmark_running && !gfx.renderer.is_first_person() {
+    if !benchmark_running
+        && !gfx.renderer.is_first_person()
+        && !game.player.death_animation_finished()
+    {
         let interp_pos = game
             .player
             .prev_position
@@ -2673,13 +2735,15 @@ pub fn update_game(
             head_y_rot_deg: interp_y_rot_deg,
             head_x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
             body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
-            is_crouching: game.player.crouching,
+            is_crouching: game.player.crouching && (!game.dead || game.player.death_time > 0),
             walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
                 + (game.player_walk_speed - game.player_prev_walk_speed) * partial_tick)
                 .min(1.0),
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
+            has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
+            death_time: render_death_time(game.player.death_time, partial_tick),
             skip_cull: true,
             ..Default::default()
         });
@@ -2876,7 +2940,7 @@ pub fn update_game(
         }
         DeathAction::ShowConfirm => {
             game.death_confirm = true;
-            game.death_confirm_instant = Instant::now();
+            game.death_confirm_ticks = 0;
         }
         DeathAction::None => {}
     }
@@ -3643,4 +3707,16 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
     };
 
     (pos_scale, angle_scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_red_overlay;
+
+    #[test]
+    fn red_overlay_matches_vanilla_hurt_and_death_timers() {
+        assert!(has_red_overlay(1, 0));
+        assert!(has_red_overlay(0, 1));
+        assert!(!has_red_overlay(0, 0));
+    }
 }

@@ -2,7 +2,13 @@ use super::common;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 
 const BTN_W: f32 = 200.0;
+pub const BUTTON_DELAY_TICKS: u32 = 20;
 
+pub fn buttons_ready(ticks: u32) -> bool {
+    ticks >= BUTTON_DELAY_TICKS
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeathAction {
     None,
     Respawn,
@@ -30,6 +36,7 @@ pub fn build_death_screen(
     gs: f32,
     message: &str,
     score: i32,
+    hardcore: bool,
     buttons_enabled: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> DeathAction {
@@ -45,7 +52,7 @@ pub fn build_death_screen(
     elements.push(MenuElement::Text {
         x: cx,
         y: 30.0 * gs,
-        text: "You died!".into(),
+        text: if hardcore { "Game Over!" } else { "You Died!" }.into(),
         scale: title_fs,
         color: [1.0, 1.0, 1.0, 1.0],
         centered: true,
@@ -96,7 +103,11 @@ pub fn build_death_screen(
         btn_h,
         gs,
         fs,
-        "Respawn",
+        if hardcore {
+            "Spectate World"
+        } else {
+            "Respawn"
+        },
         buttons_enabled,
     );
     if clicked && h {
@@ -117,7 +128,11 @@ pub fn build_death_screen(
         buttons_enabled,
     );
     if clicked && h {
-        action = DeathAction::ShowConfirm;
+        action = if hardcore {
+            DeathAction::TitleScreen
+        } else {
+            DeathAction::ShowConfirm
+        };
     }
 
     action
@@ -188,4 +203,68 @@ pub fn build_death_confirm(
     }
 
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build(hardcore: bool, cursor: (f32, f32), enabled: bool) -> (DeathAction, Vec<MenuElement>) {
+        let mut elements = Vec::new();
+        let action = build_death_screen(
+            &mut elements,
+            800.0,
+            600.0,
+            cursor,
+            true,
+            1.0,
+            "",
+            0,
+            hardcore,
+            enabled,
+            &|_, _| 0.0,
+        );
+        (action, elements)
+    }
+
+    fn has_text(elements: &[MenuElement], expected: &str) -> bool {
+        elements
+            .iter()
+            .any(|element| matches!(element, MenuElement::Text { text, .. } if text == expected))
+    }
+
+    #[test]
+    fn normal_death_screen_uses_respawn_and_confirm_flow() {
+        let (respawn, elements) = build(false, (400.0, 232.0), true);
+        assert_eq!(respawn, DeathAction::Respawn);
+        assert!(has_text(&elements, "You Died!"));
+        assert!(has_text(&elements, "Respawn"));
+
+        let (title, _) = build(false, (400.0, 256.0), true);
+        assert_eq!(title, DeathAction::ShowConfirm);
+    }
+
+    #[test]
+    fn hardcore_death_screen_uses_spectate_and_direct_exit() {
+        let (spectate, elements) = build(true, (400.0, 232.0), true);
+        assert_eq!(spectate, DeathAction::Respawn);
+        assert!(has_text(&elements, "Game Over!"));
+        assert!(has_text(&elements, "Spectate World"));
+
+        let (title, _) = build(true, (400.0, 256.0), true);
+        assert_eq!(title, DeathAction::TitleScreen);
+    }
+
+    #[test]
+    fn death_buttons_ignore_clicks_until_enabled() {
+        let (action, _) = build(false, (400.0, 232.0), false);
+        assert_eq!(action, DeathAction::None);
+    }
+
+    #[test]
+    fn death_buttons_enable_after_exactly_twenty_client_ticks() {
+        assert!(!buttons_ready(19));
+        assert!(buttons_ready(20));
+        assert!(buttons_ready(21));
+    }
 }
