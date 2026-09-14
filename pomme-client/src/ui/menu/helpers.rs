@@ -1090,3 +1090,85 @@ impl MainMenu {
         action
     }
 }
+
+/// Vanilla EditBox hint: shown only while the field is empty and unfocused.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_search_hint(
+    elements: &mut Vec<MenuElement>,
+    field: &TextFieldState,
+    focused: bool,
+    x: f32,
+    y: f32,
+    field_h: f32,
+    fs: f32,
+    gs: f32,
+) {
+    if field.value().is_empty() && !focused {
+        elements.push(MenuElement::Text {
+            x: x + 4.0 * gs,
+            y: y + (field_h - fs) / 2.0,
+            text: "Search...".into(),
+            scale: fs,
+            color: COL_DIM,
+            centered: false,
+        });
+    }
+}
+
+pub(super) fn nine_slice(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    sprite: SpriteId,
+    border: f32,
+) {
+    elements.push(MenuElement::NineSlice {
+        x,
+        y,
+        w,
+        h,
+        sprite,
+        border,
+        tint: WHITE,
+    });
+}
+
+pub(super) fn push_scrollbar(
+    elements: &mut Vec<MenuElement>,
+    right_x: f32,
+    top: f32,
+    h: f32,
+    total: f32,
+    scroll: f32,
+    gs: f32,
+) {
+    let max_scroll = (total - h).max(0.0);
+    if max_scroll <= 0.0 {
+        return;
+    }
+    // 6px track, inset 2px from the content's right edge (vanilla spacing).
+    let track_w = 6.0 * gs;
+    let track_x = right_x - track_w - 2.0 * gs;
+    let thumb_h = (h * h / total).max(16.0 * gs); // vanilla min thumb is larger
+    let thumb_y = top + (scroll / max_scroll) * (h - thumb_h);
+    nine_slice(
+        elements,
+        track_x,
+        top,
+        track_w,
+        h,
+        SpriteId::ScrollerBackground,
+        gs,
+    );
+    nine_slice(
+        elements,
+        track_x,
+        thumb_y,
+        track_w,
+        thumb_h,
+        SpriteId::Scroller,
+        gs,
+    );
+}

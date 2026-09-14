@@ -921,6 +921,7 @@ impl MainMenu {
             TextTarget::EditAddress => &mut self.edit_address,
             TextTarget::PackSearch => &mut self.pack_search,
             TextTarget::AddFriend => &mut self.add_friend_name,
+            TextTarget::WorldSearch => &mut self.world_search,
         }
     }
 
@@ -930,6 +931,7 @@ impl MainMenu {
             TextTarget::EditAddress => &self.edit_address,
             TextTarget::PackSearch => &self.pack_search,
             TextTarget::AddFriend => &self.add_friend_name,
+            TextTarget::WorldSearch => &self.world_search,
         }
     }
 
@@ -941,6 +943,7 @@ impl MainMenu {
             (Screen::DirectConnect, 0) => Some(TextTarget::EditAddress),
             (Screen::OptionsResourcePacks, 0) => Some(TextTarget::PackSearch),
             (Screen::Friends, 0) => Some(TextTarget::AddFriend),
+            (Screen::WorldList, 0) => Some(TextTarget::WorldSearch),
             _ => None,
         }
     }
@@ -1179,6 +1182,7 @@ pub(super) enum TextTarget {
     EditAddress,
     PackSearch,
     AddFriend,
+    WorldSearch,
 }
 
 fn push_undo(stack: &mut Vec<(u8, String)>, field_idx: u8, prev: String) {
