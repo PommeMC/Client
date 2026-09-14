@@ -4,9 +4,6 @@
 //!
 //! An enum rather than a boxed trait object: framing does many small reads and
 //! a vtable hop per poll is measurable during the chunk-load burst.
-//!
-//! Nothing constructs the memory variants outside tests yet; the connect path
-//! starts offering them when singleplayer lands.
 
 use std::io;
 use std::pin::Pin;
