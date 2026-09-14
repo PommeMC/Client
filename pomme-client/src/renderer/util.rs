@@ -383,7 +383,7 @@ pub fn load_png(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
         png::ColorType::Rgb => {
             let pixels = info.width as usize * info.height as usize;
             let mut rgba = Vec::with_capacity(pixels * 4);
-            for chunk in buf[..pixels * 3].chunks_exact(3) {
+            for chunk in buf[..pixels * 3].as_chunks::<3>().0 {
                 rgba.extend_from_slice(chunk);
                 rgba.push(255);
             }
@@ -392,7 +392,7 @@ pub fn load_png(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
         png::ColorType::GrayscaleAlpha => {
             let pixels = info.width as usize * info.height as usize;
             let mut rgba = Vec::with_capacity(pixels * 4);
-            for chunk in buf[..pixels * 2].chunks_exact(2) {
+            for chunk in buf[..pixels * 2].as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
             }
             rgba

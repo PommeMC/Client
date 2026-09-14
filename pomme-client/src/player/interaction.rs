@@ -1397,7 +1397,7 @@ fn play_block_sound(audio: &AudioEngine, event: &str, pos: BlockPos, volume: f32
         return;
     }
     audio.play_world_sound(
-        &SoundRef::Event(event.to_string()),
+        &SoundRef::event(event),
         CATEGORY_BLOCKS,
         Position::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5),
         volume,
@@ -1660,7 +1660,7 @@ mod tests {
         state.using_item = Some(ActiveUse {
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
-            sound: SoundRef::Event("entity.generic.eat".to_string()),
+            sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
             texture: "item/apple".to_string(),
             use_effects: UseEffects::default(),
@@ -1685,7 +1685,7 @@ mod tests {
         state.using_item = Some(ActiveUse {
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
-            sound: SoundRef::Event("entity.generic.eat".to_string()),
+            sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
             texture: "item/apple".to_string(),
             use_effects: UseEffects::default(),

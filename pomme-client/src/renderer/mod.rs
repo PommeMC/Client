@@ -184,6 +184,7 @@ impl Renderer {
         asset_index: &Option<AssetIndex>,
         game_dir: &Path,
         vsync: bool,
+        panorama_dir: &Path,
     ) -> Result<Self, RendererError> {
         let size = window.inner_size();
 
@@ -324,8 +325,7 @@ impl Renderer {
             ctx.command_pool,
             swapchain_state.render_pass,
             &ctx.allocator,
-            jar_assets_dir,
-            asset_index,
+            pipelines::panorama::resolve_panorama_faces(panorama_dir, jar_assets_dir, asset_index),
         );
 
         splash(&mut menu_pipeline, 0.9, "Finalizing...");
@@ -1194,18 +1194,18 @@ impl Renderer {
         tracing::info!("Assets reloaded");
     }
 
-    pub fn reload_panorama(
-        &mut self,
-        jar_assets_dir: &Path,
-        asset_index: &Option<crate::assets::AssetIndex>,
-    ) {
+    pub fn reload_panorama(&mut self, panorama_dir: &Path) {
+        let faces = pipelines::panorama::resolve_panorama_faces(
+            panorama_dir,
+            &self.jar_assets_dir,
+            &self.asset_index,
+        );
         self.panorama_pipeline.reload_cubemap(
             &self.ctx.device,
             self.ctx.graphics_queue,
             self.ctx.command_pool,
             &self.ctx.allocator,
-            jar_assets_dir,
-            asset_index,
+            faces,
         );
     }
 

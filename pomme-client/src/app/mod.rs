@@ -21,7 +21,7 @@ use crate::app::phases::in_menu::{MenuUpdateResult, update_menu};
 use crate::app::phases::{AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
-use crate::net::connection::{ConnectArgs, spawn_connection};
+use crate::net::connection::{ConnectArgs, Transport, spawn_connection};
 use crate::renderer::{self, Renderer};
 use crate::user::UserData;
 
@@ -192,6 +192,7 @@ impl ApplicationHandler for App {
                     &self.core.asset_index,
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
+                    &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
                 ) {
                     Ok(r) => r,
                     Err(e) => {
@@ -218,14 +219,16 @@ impl ApplicationHandler for App {
                     let connection = spawn_connection(
                         &self.core.tokio_rt,
                         ConnectArgs {
-                            server: server_ip,
+                            // TODO: read the saved server list's protocol for
+                            // this address to skip the join-time probe.
+                            transport: Transport::Remote {
+                                server: server_ip,
+                                protocol: None,
+                            },
                             username: self.core.user.username.clone(),
                             uuid: self.core.user.uuid,
                             access_token: self.core.user.access_token.clone(),
                             view_distance: self.core.menu.render_distance as u8,
-                            // TODO: read the saved server list's protocol for
-                            // this address to skip the join-time probe.
-                            protocol: None,
                         },
                     );
 
@@ -329,13 +332,7 @@ impl ApplicationHandler for App {
                             if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                             {
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut self.core.presence {
-                                    p.set_in_menu(&self.core.version);
-                                }
-
-                                self.core.apply_cursor_grab(&gfx.window, None);
+                                self.core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu {
                                     gfx,
@@ -620,23 +617,13 @@ impl ApplicationHandler for App {
                                 game,
                             },
                             ConnectingUpdateResult::ManualDisconnect => {
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu { gfx, panorama }
                             }
                             ConnectingUpdateResult::Disconnected { reason } => {
-                                gfx.renderer.clear_chunk_meshes();
                                 core.menu.show_disconnect(reason);
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu { gfx, panorama }
                             }
@@ -672,12 +659,8 @@ impl ApplicationHandler for App {
                                 game,
                             },
                             GameUpdateResult::ManualDisconnect => {
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.audio.stop_all_sounds();
+                                core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu {
                                     gfx,
@@ -685,13 +668,9 @@ impl ApplicationHandler for App {
                                 }
                             }
                             GameUpdateResult::Disconnected { reason } => {
-                                gfx.renderer.clear_chunk_meshes();
+                                core.audio.stop_all_sounds();
                                 core.menu.show_disconnect(reason);
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu {
                                     gfx,

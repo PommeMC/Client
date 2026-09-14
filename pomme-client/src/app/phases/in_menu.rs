@@ -1,7 +1,7 @@
 use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
-use crate::net::connection::ConnectArgs;
-use crate::ui::menu::{MenuAction, PanoramaTheme};
+use crate::net::connection::{ConnectArgs, Transport};
+use crate::ui::menu::MenuAction;
 
 pub enum MenuUpdateResult {
     None,
@@ -68,7 +68,7 @@ pub fn update_menu(
         result.blur,
         result.elements,
         core.input.cursor_pos(),
-        core.menu.is_main_screen(),
+        core.menu.show_skin_preview(),
     ) {
         tracing::error!("Render error: {e}");
     }
@@ -100,6 +100,7 @@ pub fn update_menu(
         core.menu.reload_assets = false;
         gfx.renderer
             .reload_assets(&core.data_dirs.game_dir, &core.resource_packs);
+        core.audio.reload_assets(&core.resource_packs);
     }
 
     if result.clicked_button {
@@ -115,23 +116,18 @@ pub fn update_menu(
         } => {
             core.audio.stop_menu_music();
             let connect_args = ConnectArgs {
-                server,
+                transport: Transport::Remote { server, protocol },
                 username,
                 uuid: core.user.uuid,
                 access_token: core.user.access_token.clone(),
                 view_distance: core.menu.render_distance as u8,
-                protocol,
             };
 
             return MenuUpdateResult::Connect { connect_args };
         }
         MenuAction::ChangeTheme(theme) => {
-            let panorama_dir = match theme {
-                PanoramaTheme::Default => core.data_dirs.jar_assets_dir.clone(),
-                PanoramaTheme::Pomme => core.data_dirs.pomme_assets_dir.join("panoramas"),
-            };
             gfx.renderer
-                .reload_panorama(&panorama_dir, &core.asset_index);
+                .reload_panorama(&theme.panorama_dir(&core.data_dirs));
             core.menu.start_transition_open();
         }
         MenuAction::Quit => {
