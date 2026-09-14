@@ -19,6 +19,20 @@ pub(crate) const MIN_FAR: f32 = 1000.0;
 const CONTROLLER_SENSITIVITY: f32 = 150.0;
 pub const THIRD_PERSON_DISTANCE: f32 = 4.0;
 
+fn death_duration(death_time: f32) -> f32 {
+    death_time.clamp(0.0, 20.0)
+}
+
+fn death_roll_degrees(death_time: f32) -> f32 {
+    let duration = death_duration(death_time);
+    40.0 - 8000.0 / (duration + 200.0)
+}
+
+fn death_fov_divisor(death_time: f32) -> f32 {
+    let duration = death_duration(death_time);
+    (1.0 - 500.0 / (duration + 500.0)) * 2.0 + 1.0
+}
+
 /// Vanilla mouse sensitivity curve from `MouseHandler.turnPlayer`, including
 /// the 0.15 turn scale applied by `Entity.turn`.
 ///
@@ -102,9 +116,9 @@ pub struct Camera {
     pub base_fov_degrees: f32,
     fov_modifier: f32,
     old_fov_modifier: f32,
-    /// Unsmoothed multiplier for the death/fluid FOV effect (vanilla
-    /// `modifyFovBasedOnDeathOrFluid`). 1.0 = no effect.
+    /// Unsmoothed fluid multiplier from vanilla `modifyFovBasedOnDeathOrFluid`.
     fluid_fov_factor: f32,
+    death_time: f32,
     /// Render-frame partial tick used to interpolate `fov_modifier` per frame.
     render_partial_tick: f32,
     bob_walk_dist: f32,
@@ -131,6 +145,7 @@ impl Camera {
             fov_modifier: 1.0,
             old_fov_modifier: 1.0,
             fluid_fov_factor: 1.0,
+            death_time: 0.0,
             render_partial_tick: 1.0,
             bob_walk_dist: 0.0,
             bob_amount: 0.0,
@@ -158,16 +173,21 @@ impl Camera {
         self.damage_tilt_strength = damage_tilt_strength;
     }
 
-    /// The view-space hurt and bob transforms, also applied to the first-person
-    /// arm/held item.
+    /// Vanilla applies `bobHurt` (death roll, then hurt tilt) before `bobView`.
+    /// The same composed transform is also applied to the first-person
+    /// arm/item.
     pub fn view_effect_matrix(&self) -> Mat4 {
-        self.hurt_matrix() * self.bob_matrix()
+        self.death_matrix() * self.hurt_matrix() * self.bob_matrix()
     }
 
-    /// Replicates vanilla `GameRenderer.bobHurt`.
-    ///
-    /// TODO: `bobHurt` also rolls the camera while dying, before this timing
-    /// check; that needs a death-animation timer pomme does not track yet.
+    fn death_matrix(&self) -> Mat4 {
+        if self.death_time <= 0.0 || self.top_down.is_some() {
+            return Mat4::IDENTITY;
+        }
+        Mat4::from_rotation_z(death_roll_degrees(self.death_time).to_radians())
+    }
+
+    /// Replicates the damage portion of vanilla `GameRenderer.bobHurt`.
     fn hurt_matrix(&self) -> Mat4 {
         if self.top_down.is_some() {
             return Mat4::IDENTITY;
@@ -261,30 +281,61 @@ impl Camera {
         self.fluid_fov_factor = factor;
     }
 
+    pub fn set_death_time(&mut self, death_time: f32) {
+        self.death_time = death_time.max(0.0);
+    }
+
     pub fn set_render_partial_tick(&mut self, partial_tick: f32) {
         self.render_partial_tick = partial_tick;
     }
 
     pub fn fov_radians(&self, partial_tick: f32) -> f32 {
         let modifier = self.old_fov_modifier.lerp(self.fov_modifier, partial_tick);
-        (self.base_fov_degrees * modifier * self.fluid_fov_factor).to_radians()
+        let mut fov = self.base_fov_degrees * modifier;
+        if self.death_time > 0.0 {
+            fov /= death_fov_divisor(self.death_time);
+        }
+        (fov * self.fluid_fov_factor).to_radians()
+    }
+
+    /// Vanilla `calculateHudFov`: the hand/item projection starts at 70° and
+    /// receives death/fluid FOV effects, but not the dynamic player FOV
+    /// modifier.
+    pub fn hud_fov_radians(&self) -> f32 {
+        let mut fov = DEFAULT_FOV_DEGREES;
+        if self.death_time > 0.0 {
+            fov /= death_fov_divisor(self.death_time);
+        }
+        (fov * self.fluid_fov_factor).to_radians()
     }
 
     pub fn frustum_planes(&self) -> [[f32; 4]; 6] {
-        Self::planes_from_view_projection(self.view_projection())
+        Self::planes_from_view_projection(self.culling_view_projection(self.culling_fov()))
     }
 
     /// Frustum planes for a FOV widened by `extra_radians` (clamped below
     /// 180°), giving an "about to be seen" margin for occlusion-gated mesh
     /// scheduling.
     pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
-        // Vanilla createProjectionMatrixForCulling never culls narrower than the
-        // base FOV, so a narrowing modifier (underwater) can't clip visible edges.
-        let cull_fov = self
-            .fov_radians(self.render_partial_tick)
-            .max(self.base_fov_degrees.to_radians());
-        let fov = (cull_fov + extra_radians).min(2.96);
-        Self::planes_from_view_projection(self.view_projection_with_fov(fov))
+        let fov = (self.culling_fov() + extra_radians).min(2.96);
+        Self::planes_from_view_projection(self.culling_view_projection(fov))
+    }
+
+    fn culling_fov(&self) -> f32 {
+        // Vanilla createProjectionMatrixForCulling never culls narrower than
+        // the configured base FOV, even when death/fluid effects narrow render FOV.
+        self.fov_radians(self.render_partial_tick)
+            .max(self.base_fov_degrees.to_radians())
+    }
+
+    fn culling_view_projection(&self, fov: f32) -> Mat4 {
+        let offset = self.third_person_offset();
+        let (forward, up) = self.view_basis();
+        // Vanilla prepares the cull frustum before bobHurt/bobView are applied.
+        let view = view::look_to_mat4(offset, forward, up);
+        let mut proj = proj::directx::perspective(fov, self.aspect_ratio, NEAR, self.depth_far);
+        proj.y_axis.y *= -1.0;
+        proj * view
     }
 
     fn planes_from_view_projection(m: Mat4) -> [[f32; 4]; 6] {
@@ -379,7 +430,10 @@ impl Camera {
 
     pub fn sky_view_projection(&self) -> Mat4 {
         let (forward, up) = self.view_basis();
-        let view = view::look_to_mat4(Vec3::ZERO, forward, up);
+        // Vanilla renders the sky under the same level projection that already
+        // contains bobHurt (death roll + hurt tilt) followed by bobView. Keep
+        // the full view effect while omitting only camera translation.
+        let view = self.view_effect_matrix() * view::look_to_mat4(Vec3::ZERO, forward, up);
         let mut proj = proj::directx::perspective(
             self.fov_radians(self.render_partial_tick),
             self.aspect_ratio,
@@ -569,6 +623,98 @@ mod tests {
             camera.hurt_matrix(),
             Mat4::IDENTITY,
             "expired hurt timing must not rotate the camera",
+        );
+    }
+
+    #[test]
+    fn death_effects_do_not_rotate_or_narrow_culling_frustum() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        let alive = camera.frustum_planes();
+        camera.death_time = 20.0;
+        let dead = camera.frustum_planes();
+
+        for (alive_plane, dead_plane) in alive.iter().zip(dead.iter()) {
+            for (alive_value, dead_value) in alive_plane.iter().zip(dead_plane.iter()) {
+                assert!(
+                    (alive_value - dead_value).abs() < 1e-6,
+                    "death render effects must not alter Vanilla's culling frustum"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fov_modifier_tick_keeps_render_boundary_continuous() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.old_fov_modifier = 1.0;
+        camera.fov_modifier = 1.2;
+        let previous_tick_end = camera.fov_radians(1.0);
+
+        camera.update_fov_modifier(1.0);
+
+        assert!(
+            (camera.fov_radians(0.0) - previous_tick_end).abs() < 1e-6,
+            "advancing old_fov_modifier each tick must keep FOV continuous when partial_tick resets"
+        );
+    }
+
+    #[test]
+    fn hud_fov_uses_death_effect_without_dynamic_modifier() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.base_fov_degrees = 110.0;
+        camera.old_fov_modifier = 1.5;
+        camera.fov_modifier = 1.5;
+        camera.death_time = 20.0;
+        camera.fluid_fov_factor = 0.9;
+
+        let expected = (DEFAULT_FOV_DEGREES / death_fov_divisor(20.0) * 0.9).to_radians();
+        assert!(
+            (camera.hud_fov_radians() - expected).abs() < 1e-6,
+            "hand FOV must use vanilla's fixed 70-degree HUD base with death/fluid effects"
+        );
+    }
+
+    #[test]
+    fn sky_projection_uses_full_level_view_effect_without_translation() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.death_time = 20.0;
+        camera.set_render_partial_tick(0.5);
+        camera.set_hurt(6, 35.0, 0.75);
+        camera.set_view_bob(1.25, 0.08, true);
+
+        let (forward, up) = camera.view_basis();
+        let view = camera.view_effect_matrix() * view::look_to_mat4(Vec3::ZERO, forward, up);
+        let mut projection = proj::directx::perspective(
+            camera.fov_radians(camera.render_partial_tick),
+            camera.aspect_ratio,
+            NEAR,
+            camera.depth_far,
+        );
+        projection.y_axis.y *= -1.0;
+
+        assert_mat4_close(
+            camera.sky_view_projection(),
+            projection * view,
+            "sky must share death, hurt, and view-bob effects with the level projection",
+        );
+    }
+
+    #[test]
+    fn death_camera_effects_match_vanilla_boundaries() {
+        assert_eq!(death_roll_degrees(0.0), 0.0);
+        assert!((death_roll_degrees(20.0) - (40.0 - 8000.0 / 220.0)).abs() < 1e-6);
+        assert_eq!(
+            death_roll_degrees(200.0),
+            death_roll_degrees(20.0),
+            "death roll clamps at 20 ticks"
+        );
+
+        assert_eq!(death_fov_divisor(0.0), 1.0);
+        assert!((death_fov_divisor(20.0) - ((1.0 - 500.0 / 520.0) * 2.0 + 1.0)).abs() < 1e-6);
+        assert_eq!(
+            death_fov_divisor(200.0),
+            death_fov_divisor(20.0),
+            "death FOV clamps at 20 ticks"
         );
     }
 

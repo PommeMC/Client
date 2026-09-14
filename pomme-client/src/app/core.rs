@@ -392,7 +392,35 @@ impl AppCore {
         self.input.on_cursor_moved(x, y);
     }
 
+    pub(crate) fn open_death_screen(
+        &mut self,
+        connection: &ConnectionHandle,
+        window: &Window,
+        game: &mut GameState,
+        message: Option<String>,
+    ) {
+        game.interaction
+            .stop_destroying_for_screen(&connection.packet_tx);
+        // Minecraft.setScreen(DeathScreen) replaces the current screen.
+        game.paused = false;
+        game.options_from_game = false;
+        game.close_menu();
+        game.close_creative_inventory();
+        game.chat.close();
+        game.game_mode_switcher = None;
+
+        if let Some(message) = message {
+            game.death_message = message;
+        }
+        game.reset_death_screen();
+        game.death_screen_open = true;
+        self.release_cursor(window);
+    }
+
     pub fn send_respawn(&mut self, connection: &ConnectionHandle, game: &mut GameState) {
+        if game.respawn_sent {
+            return;
+        }
         connection
             .packet_tx
             .send(ServerboundGamePacket::ClientCommand(
@@ -719,15 +747,19 @@ impl AppCore {
                     game.player.saturation = saturation;
                     if health > 0.0 && game.dead {
                         game.dead = false;
+                        game.player.reset_death_time();
+                        game.reset_death_screen();
                         self.apply_cursor_grab(window, Some(game));
                     } else if health <= 0.0 && !game.dead {
                         game.dead = true;
-                        game.death_message = String::new();
-                        game.death_instant = Instant::now();
-                        game.death_confirm = false;
-                        game.respawn_sent = false;
-
-                        self.release_cursor(window);
+                        game.player.reset_death_time();
+                        if !game.death_screen_open {
+                            game.death_message.clear();
+                        }
+                        // Vanilla container screens close themselves as soon as
+                        // the local player is no longer alive.
+                        game.close_menu();
+                        game.close_creative_inventory();
                     }
                 }
                 NetworkEvent::SetPassengers {
@@ -855,6 +887,9 @@ impl AppCore {
                         game.set_menu_slot(index as usize, item);
                         game.set_container_state_id(state_id);
                     }
+                }
+                NetworkEvent::HeldSlot { slot } => {
+                    self.input.set_selected_slot(slot);
                 }
                 NetworkEvent::ContainerData {
                     container_id,
@@ -1425,6 +1460,12 @@ impl AppCore {
                     );
                 }
                 NetworkEvent::EntityData { id, index, value } => {
+                    if id == game.player.entity_id
+                        && index == 8
+                        && let crate::entity::MetaValue::Byte(flags) = value
+                    {
+                        game.interaction.sync_using_item_flag(flags & 1 != 0);
+                    }
                     if index == 4
                         && let crate::entity::MetaValue::Bool(silent) = &value
                     {
@@ -1504,6 +1545,23 @@ impl AppCore {
                 }
                 NetworkEvent::EntityDamaged { id } => hurt_entity(game, id, None),
                 NetworkEvent::HurtAnimation { id, yaw } => hurt_entity(game, id, Some(yaw)),
+                NetworkEvent::EntityDied { id } => {
+                    // TODO: vanilla's event 3 plays every living entity's
+                    // getDeathSound client-side; pomme has no per-kind death
+                    // sound table yet, so only the player's is played here.
+                    if id == game.player.entity_id {
+                        let pitch = (fastrand::f32() - fastrand::f32()) * 0.2 + 1.0;
+                        self.audio.play_world_sound(
+                            &crate::audio::SoundRef::event("entity.player.death"),
+                            crate::audio::CATEGORY_PLAYERS,
+                            game.player.position,
+                            1.0,
+                            pitch,
+                            fastrand::u64(..),
+                        );
+                    }
+                    game.entity_store.mark_dead(id);
+                }
                 NetworkEvent::ItemPickedUp {
                     item_id,
                     collector_id,
@@ -1535,8 +1593,14 @@ impl AppCore {
                         );
                     }
                 }
-                NetworkEvent::PlayerLogin { entity_id } => {
+                NetworkEvent::PlayerLogin {
+                    entity_id,
+                    hardcore,
+                    show_death_screen,
+                } => {
                     game.player.entity_id = entity_id;
+                    game.hardcore = hardcore;
+                    game.show_death_screen = show_death_screen;
                 }
                 NetworkEvent::PlayerScore { entity_id, score } => {
                     if entity_id == game.player.entity_id {
@@ -1558,21 +1622,40 @@ impl AppCore {
                     if !keep_entity_data {
                         game.player.absorption = 0.0;
                     }
-                    // Approximation: vanilla keeps attribute base values and
-                    // drops modifiers; the server re-sends UpdateAttributes
-                    // after a death respawn, correcting any non-default base.
-                    if !keep_attribute_modifiers {
-                        game.player.max_health = 20.0;
-                    }
+                    // Vanilla always copies attribute base values to the fresh
+                    // player; bit 1 controls extra values/modifiers. Pomme only
+                    // models the max-health base, so it remains unchanged here.
+                    let _ = keep_attribute_modifiers;
+                    game.dead = false;
+                    game.player.reset_for_respawn(keep_entity_data);
+                    game.interaction.reset_player_transients_for_respawn();
+                    // A fresh LocalPlayer gets a fresh KeyboardInput and packet
+                    // baselines even when bit 2 keeps its entity data, so a kept
+                    // sprint flag re-sends START_SPRINTING next tick as vanilla does.
+                    game.last_sent_input = PlayerInputState::default();
+                    game.was_sprinting = false;
+                    game.last_sent_pos = Position::default();
+                    game.last_sent_look_dir = LookDirection::default();
+                    game.last_sent_on_ground = false;
+                    game.last_sent_horizontal_collision = false;
+                    game.position_send_counter = 0;
+                    game.reset_death_screen();
+                    self.apply_cursor_grab(window, Some(game));
                 }
-                NetworkEvent::PlayerDied { message } => {
-                    game.dead = true;
-                    game.death_message = message;
-                    game.death_instant = Instant::now();
-                    game.death_confirm = false;
-                    game.respawn_sent = false;
-
-                    self.release_cursor(window);
+                NetworkEvent::PlayerDied { player_id, message } => {
+                    if player_id != game.player.entity_id {
+                        continue;
+                    }
+                    match death_route(game.show_death_screen) {
+                        DeathRoute::ShowDeathScreen => {
+                            self.open_death_screen(connection, window, game, Some(message));
+                        }
+                        DeathRoute::Respawn => {
+                            game.death_message = message;
+                            game.reset_death_screen();
+                            self.send_respawn(connection, game);
+                        }
+                    }
                 }
                 NetworkEvent::ResourcePackPush {
                     id,
@@ -1726,7 +1809,89 @@ impl AppCore {
         connection: &ConnectionHandle,
         game: &mut GameState,
     ) {
+        if game.death_screen_open {
+            if game.death_confirm {
+                game.death_confirm_ticks = game.death_confirm_ticks.saturating_add(1);
+            } else {
+                game.death_screen_ticks = game.death_screen_ticks.saturating_add(1);
+            }
+        }
+
+        // Vanilla ticks the camera FOV interpolation even while dead.
+        renderer.set_base_fov(self.menu.fov as f32);
+        let fov_effect_scale = self.menu.fov_effect();
+        renderer.update_fov_mod(compute_fov_modifier(&game.player, fov_effect_scale));
+        // TODO: lava camera fluid (no eyes_in_lava).
+        renderer.set_fluid_fov_factor(if game.player.eyes_in_water {
+            1.0_f32.lerp(0.857_142_87, fov_effect_scale)
+        } else {
+            1.0
+        });
+
+        // Vanilla ClientLevel keeps ticking other entities while the local
+        // player is dead.
+        game.entity_store.tick_living(
+            &game.chunk_store,
+            game.player.position,
+            game.server_simulation_distance,
+        );
+
+        // LocalPlayer.tickDeath removes the client player at tick 20; from then
+        // on ClientLevel.tickEntities skips it entirely.
+        if game.dead && game.player.death_animation_finished() {
+            self.input.clear_click_counts();
+            return;
+        }
+
+        // Vanilla ClientLevel snapshots old entity transform before every tick,
+        // including dead-player ticks up through the removal tick.
+        game.player.snapshot_render_state();
         if game.dead {
+            game.player.tick_death();
+            let removed_this_tick = game.player.death_animation_finished();
+            let held_stack = game
+                .player
+                .inventory
+                .held_stack(self.input.selected_slot())
+                .cloned();
+            game.interaction.tick_dead_living_state(
+                held_stack.as_ref(),
+                &self.audio,
+                &game.chunk_store,
+                game.player.position.into(),
+                game.player.eye_pos().into(),
+                game.player.look_dir,
+                &mut crate::player::interaction::BreakEffects {
+                    particles: &mut game.particle_store,
+                    registry: renderer.registry(),
+                    biome_climate: &game.biome_climate,
+                },
+            );
+
+            // LocalPlayer.tickDeath marks the player removed at exactly tick 20.
+            // LivingEntity.tick then skips aiStep for that removal tick, while
+            // LocalPlayer.tick still executes its post-super player state and
+            // input/position packet tail once.
+            if !removed_this_tick {
+                movement::tick_dead(&mut game.player, &game.chunk_store);
+                crate::entity::stop_walk_animation(
+                    &mut game.player_walk_pos,
+                    &mut game.player_walk_speed,
+                    &mut game.player_prev_walk_speed,
+                );
+                let dx = game.player.position.x - game.player.prev_position.x;
+                let dz = game.player.position.z - game.player.prev_position.z;
+                game.player.tick_bob(dx, dz, true);
+            }
+            game.interaction
+                .tick_dead_player_state(held_stack.as_ref(), !removed_this_tick);
+
+            let neutral = InputState::released();
+            Self::send_abilities_packet(connection, game);
+            Self::send_input_packet(&neutral, connection, game);
+            self.send_sprint_command(connection, game);
+            self.send_position_packet(connection, game);
+
             // Q/F presses queued while dead must not fire on respawn.
             self.input.clear_click_counts();
             return;
@@ -1831,10 +1996,8 @@ impl AppCore {
             game.player.jump_riding_scale = 0.0;
         }
 
-        game.player.prev_look_dir = game.player.look_dir;
         game.player.look_dir = renderer.camera_look_dir();
 
-        game.player.prev_position = game.player.position;
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         }
@@ -1845,8 +2008,6 @@ impl AppCore {
             game.interaction.use_speed_multiplier(),
             game.interaction.slow_due_to_using_item(),
         );
-        game.entity_store.tick_living(&game.chunk_store);
-
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
@@ -1856,18 +2017,7 @@ impl AppCore {
             &mut game.player_walk_speed,
             &mut game.player_prev_walk_speed,
         );
-        game.player.tick_bob(dx, dz);
-
-        renderer.set_base_fov(self.menu.fov as f32);
-        let fov_effect_scale = self.menu.fov_effect();
-        renderer.update_fov_mod(compute_fov_modifier(&game.player, fov_effect_scale));
-        // Vanilla modifyFovBasedOnDeathOrFluid: narrow FOV underwater, unsmoothed.
-        // TODO: lava camera fluid (no eyes_in_lava) and the death-animation factor.
-        renderer.set_fluid_fov_factor(if game.player.eyes_in_water {
-            1.0_f32.lerp(0.857_142_87, fov_effect_scale)
-        } else {
-            1.0
-        });
+        game.player.tick_bob(dx, dz, false);
 
         Self::send_abilities_packet(connection, game);
         Self::send_input_packet(input, connection, game);
@@ -2104,6 +2254,22 @@ impl AppCore {
     }
 }
 
+/// Where a dead local player goes: the death screen, or straight to a respawn
+/// when the server disabled the screen (`showDeathScreen`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeathRoute {
+    ShowDeathScreen,
+    Respawn,
+}
+
+pub(crate) fn death_route(show_death_screen: bool) -> DeathRoute {
+    if show_death_screen {
+        DeathRoute::ShowDeathScreen
+    } else {
+        DeathRoute::Respawn
+    }
+}
+
 /// New `server_render_distance` for a server view-distance announcement, or
 /// `None` to keep the current one. Some servers announce min(our request,
 /// server max); an echo of our own request carries no cap information and
@@ -2153,7 +2319,13 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::server_view_distance_update;
+    use super::{DeathRoute, death_route, server_view_distance_update};
+
+    #[test]
+    fn death_route_follows_show_death_screen() {
+        assert_eq!(death_route(true), DeathRoute::ShowDeathScreen);
+        assert_eq!(death_route(false), DeathRoute::Respawn);
+    }
 
     #[test]
     fn server_view_distance_updates() {

@@ -425,11 +425,9 @@ impl ApplicationHandler for App {
                                         }
                                         KeyCode::Escape
                                             if game.death_confirm
-                                                && game
-                                                    .death_confirm_instant
-                                                    .elapsed()
-                                                    .as_secs_f32()
-                                                    >= 1.0 =>
+                                                && crate::ui::death::buttons_ready(
+                                                    game.death_confirm_ticks,
+                                                ) =>
                                         {
                                             game.death_confirm = false;
                                             self.core.send_respawn(&connection, &mut game);
@@ -708,7 +706,7 @@ impl ApplicationHandler for App {
     ) {
         if let DeviceEvent::MouseMotion { delta } = event
             && self.core.input.is_cursor_captured()
-            && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.gui_open() && !game.chat.is_open())
+            && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.death_screen_open && !game.gui_open() && !game.chat.is_open())
         {
             self.core.input.on_mouse_motion(delta);
         }

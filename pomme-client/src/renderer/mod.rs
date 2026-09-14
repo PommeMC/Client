@@ -854,6 +854,10 @@ impl Renderer {
         self.camera.set_fluid_fov_factor(factor);
     }
 
+    pub fn set_death_time(&mut self, death_time: f32) {
+        self.camera.set_death_time(death_time);
+    }
+
     pub fn set_render_partial_tick(&mut self, partial_tick: f32) {
         self.camera.set_render_partial_tick(partial_tick);
     }
@@ -1718,7 +1722,9 @@ impl Renderer {
                     && self.camera.top_down().is_none()
                 {
                     let aspect = sw / sh.max(1.0);
-                    // Vanilla applies both bobHurt and bobView to the hand pose stack.
+                    let hud_fov = self.camera.hud_fov_radians();
+                    // Vanilla applies bobHurt (death + hurt) and bobView to the
+                    // first-person arm/item pose stack as well as the world.
                     let view_effect = self.camera.view_effect_matrix();
                     // Vanilla renderArmWithItem draws the arm only for an empty
                     // hand; a held item renders alone.
@@ -1727,6 +1733,7 @@ impl Renderer {
                             cmd,
                             frame,
                             aspect,
+                            hud_fov,
                             *swing_progress,
                             *use_anim,
                             item,
@@ -1737,6 +1744,7 @@ impl Renderer {
                             cmd,
                             frame,
                             aspect,
+                            hud_fov,
                             *swing_progress,
                             view_effect,
                         ),

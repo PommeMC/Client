@@ -388,8 +388,8 @@ fn push_icon_button(
     screen_h: f32,
     tooltip: &str,
 ) -> bool {
-    let focused = ctx.focused(enabled);
     let hit = common::hit_test(cursor, [x, y, size, size]);
+    let focused = ctx.focused(enabled, hit);
     let hovered = enabled && hit;
     push_icon_widget(elements, x, y, size, gs, face, enabled, hovered || focused);
     *any_hovered |= hovered;
