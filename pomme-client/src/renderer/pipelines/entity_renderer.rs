@@ -2536,10 +2536,7 @@ fn destroy_player_skin_texture(
 }
 
 pub(super) fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
-    let mut pixels = vec![0u8; (size * size * 4) as usize];
-    for pixel in pixels.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&[219, 148, 148, 255]);
-    }
+    let pixels = [219u8, 148, 148, 255].repeat((size * size) as usize);
     (pixels, size, size)
 }
 
