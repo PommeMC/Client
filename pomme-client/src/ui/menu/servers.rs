@@ -343,7 +343,7 @@ impl MainMenu {
         let row1_x = (screen_w - row1_w) / 2.0;
 
         // Prefill geometry for the edit forms opened from these buttons.
-        let form_inner = FORM_W * gs - 8.0 * gs;
+        let form_inner = (FORM_W - FIELD_TEXT_PAD) * gs;
         let wf = |s: &str| text_width_fn(s, fs);
 
         self.focus_advance(input);
@@ -518,104 +518,29 @@ impl MainMenu {
         let Screen::ConfirmDelete(idx) = self.screen else {
             return empty_result(2.0);
         };
-
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
-        let fs = common::FONT_SIZE * gs;
-        let form_w = FORM_W * gs;
-        let btn_h = common::BTN_H * gs;
-        let gap = BTN_GAP * gs;
-        let cursor = input.cursor;
-        let clicked = input.clicked;
-
-        if input.escape {
-            self.set_screen(Screen::ServerList);
-            return empty_result(2.0);
-        }
-
         let warning = self
             .server_list
             .servers
             .get(idx)
             .map(|s| format!("'{}' will be lost forever! (A long time!)", s.name))
             .unwrap_or_default();
-
-        let mut elements = Vec::new();
-        let mut any_hovered = false;
-
-        let cy = screen_h * 0.3;
-        elements.push(MenuElement::Text {
-            x: screen_w / 2.0,
-            y: cy,
-            text: "Are you sure?".into(),
-            scale: fs,
-            color: WHITE,
-            centered: true,
-        });
-        elements.push(MenuElement::Text {
-            x: screen_w / 2.0,
-            y: cy + fs + 12.0 * gs,
-            text: warning,
-            scale: fs,
-            color: COL_DIM,
-            centered: true,
-        });
-
-        let btn_x = (screen_w - form_w) / 2.0;
-        let btn_y = cy + fs * 2.0 + 44.0 * gs;
-
-        self.focus_advance(input);
-        let mut ctx = self.make_focus_ctx(input);
-        if push_button_f(
-            &mut elements,
-            &mut ctx,
-            &mut any_hovered,
-            cursor,
-            clicked,
-            btn_x,
-            btn_y,
-            form_w,
-            btn_h,
-            gs,
-            "Delete",
-            true,
-        ) {
-            self.server_list.remove(idx);
-            self.selected_server = None;
-            self.set_screen(Screen::ServerList);
-        }
-        if push_button_f(
-            &mut elements,
-            &mut ctx,
-            &mut any_hovered,
-            cursor,
-            clicked,
-            btn_x,
-            btn_y + btn_h + gap,
-            form_w,
-            btn_h,
-            gs,
-            "Cancel",
-            true,
-        ) {
-            self.set_screen(Screen::ServerList);
-        }
-        self.finish_focus(&ctx);
-
-        push_bottom_text(
-            &mut elements,
+        let (result, choice) = self.build_confirm(
             screen_w,
             screen_h,
-            gs,
-            &self.version,
+            input,
             text_width_fn,
+            "Are you sure you want to remove this server?",
+            &warning,
+            "Delete",
         );
-        MainMenuResult {
-            elements,
-            action: MenuAction::None,
-            cursor_pointer: any_hovered,
-            blur: 2.0,
-            clicked_button: (input.clicked && any_hovered) || ctx.fired,
+        if choice == Some(true) {
+            self.server_list.remove(idx);
+            self.selected_server = None;
         }
+        if choice.is_some() {
+            self.set_screen(Screen::ServerList);
+        }
+        result
     }
 
     pub(super) fn build_direct_connect(

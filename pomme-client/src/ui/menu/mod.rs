@@ -379,6 +379,8 @@ const TOP_BTN_W: f32 = 100.0;
 const BOT_BTN_W: f32 = 74.0;
 const SEP_H: f32 = 2.0;
 const FIELD_H: f32 = 20.0;
+/// Text a field can show: its width less the 4-unit padding on each side.
+const FIELD_TEXT_PAD: f32 = 8.0;
 
 const COL_DIM: [f32; 4] = [0.55, 0.57, 0.69, 1.0];
 const COL_DARK_DIM: [f32; 4] = [0.4, 0.42, 0.52, 1.0];

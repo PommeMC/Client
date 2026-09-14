@@ -277,7 +277,15 @@ impl MainMenu {
             push_button_f(
                 elements, ctx, hov, cursor, clicked, r[0], r[1], r[2], r[3], gs, label, false,
             );
-            push_hover_tooltip(elements, cursor, screen_w, screen_h, gs, r, "Not available yet");
+            push_hover_tooltip(
+                elements,
+                cursor,
+                screen_w,
+                screen_h,
+                gs,
+                r,
+                "Not available yet",
+            );
         };
 
         unavailable(
@@ -548,12 +556,15 @@ const SWITCH_W: f32 = 44.0;
 const LABEL_GAP: f32 = 4.0;
 const ROW_GAP: f32 = 8.0;
 const COL_GAP: f32 = 10.0;
+/// Vanilla `EditWorldScreen` spaces its column by 5 with 20-unit spacers.
+const EDIT_SPACING: f32 = 5.0;
+const EDIT_SPACER: f32 = 20.0;
 
 impl MainMenu {
     pub(super) fn open_create_world(&mut self, gs: f32, wf: &dyn Fn(&str) -> f32) {
         self.create = CreateWorldState::default();
         self.world_name
-            .set_value("New World", NAME_FIELD_W * gs - 8.0 * gs, wf);
+            .set_value("New World", (NAME_FIELD_W - FIELD_TEXT_PAD) * gs, wf);
         self.world_seed.clear();
         self.set_screen(Screen::CreateWorld);
         self.focused_field = Some(0);
@@ -716,6 +727,7 @@ impl MainMenu {
                     cx,
                     &mut y,
                     NAME_FIELD_W * gs,
+                    LABEL_GAP * gs,
                     gs,
                     text_width_fn,
                 );
@@ -797,6 +809,7 @@ impl MainMenu {
                     cx,
                     &mut y,
                     SEED_FIELD_W * gs,
+                    LABEL_GAP * gs,
                     gs,
                     text_width_fn,
                 );
@@ -896,6 +909,7 @@ impl MainMenu {
         cx: f32,
         y: &mut f32,
         w: f32,
+        label_gap: f32,
         gs: f32,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
     ) -> [f32; 4] {
@@ -910,7 +924,7 @@ impl MainMenu {
             color: COL_DIM,
             centered: false,
         });
-        *y += fs + LABEL_GAP * gs;
+        *y += fs + label_gap;
         self.text_field(
             elements,
             target,
@@ -977,12 +991,14 @@ impl MainMenu {
     pub(super) fn open_edit_world(&mut self, folder: String, gs: f32, wf: &dyn Fn(&str) -> f32) {
         let name = self.world_display_name(&folder);
         self.set_screen(Screen::EditWorld(folder));
-        self.world_name.set_value(&name, FORM_W * gs - 8.0 * gs, wf);
+        self.world_name
+            .set_value(&name, (FORM_W - FIELD_TEXT_PAD) * gs, wf);
         self.focused_field = Some(0);
         self.world_name.set_focused(true);
     }
 
-    /// Vanilla `EditWorldScreen`: rename plus a column of world-file actions.
+    /// Vanilla `EditWorldScreen`: rename plus a column of world-file actions,
+    /// centred on the screen.
     pub(super) fn build_edit_world(
         &mut self,
         screen_w: f32,
@@ -998,8 +1014,9 @@ impl MainMenu {
         let fs = common::FONT_SIZE * gs;
         let form_w = FORM_W * gs;
         let btn_h = common::BTN_H * gs;
-        let gap = BTN_GAP * gs;
         let field_h = FIELD_H * gs;
+        let spacing = EDIT_SPACING * gs;
+        let spacer = EDIT_SPACER * gs;
         let cursor = input.cursor;
         let clicked = input.clicked;
 
@@ -1015,7 +1032,6 @@ impl MainMenu {
 
         let cx = screen_w / 2.0;
         let form_x = cx - form_w / 2.0;
-        let mut y = 17.0 * gs;
         let button = |elements: &mut Vec<MenuElement>,
                       hovered: &mut bool,
                       x: f32,
@@ -1030,37 +1046,30 @@ impl MainMenu {
 
         elements.push(MenuElement::Text {
             x: cx,
-            y,
+            y: 15.0 * gs,
             text: "Edit World".into(),
             scale: fs,
             color: WHITE,
             centered: true,
         });
-        y += fs + 20.0 * gs;
 
-        elements.push(MenuElement::Text {
-            x: form_x,
-            y,
-            text: "World Name".into(),
-            scale: fs,
-            color: COL_DIM,
-            centered: false,
-        });
-        y += fs + 4.0 * gs;
-        self.text_field(
+        // Spacer, label, field, five buttons, spacer, Save row.
+        let column_h = spacer * 2.0 + fs + field_h + btn_h * 6.0 + spacing * 8.0;
+        let mut y = (screen_h - column_h) / 2.0 + spacer + spacing;
+
+        self.labelled_field(
             &mut elements,
-            TextTarget::WorldName,
-            0,
             input,
-            form_x,
-            y,
+            "World Name",
+            TextTarget::WorldName,
+            cx,
+            &mut y,
             form_w,
-            field_h,
-            fs,
+            spacing,
             gs,
             text_width_fn,
         );
-        y += field_h + 12.0 * gs;
+        y += spacing;
 
         // Vanilla enables Reset Icon only while an icon file exists, and none
         // can until worlds are playable.
@@ -1074,7 +1083,7 @@ impl MainMenu {
             "Reset Icon",
             icon.is_file(),
         );
-        y += btn_h + gap;
+        y += btn_h + spacing;
 
         if button(
             &mut elements,
@@ -1088,7 +1097,7 @@ impl MainMenu {
         {
             let _ = open::that_detached(self.saves_dir.join(&folder));
         }
-        y += btn_h + gap;
+        y += btn_h + spacing;
 
         for label in ["Make Backup", "Open Backups Folder", "Optimize World"] {
             button(
@@ -1109,13 +1118,14 @@ impl MainMenu {
                 [form_x, y, form_w, btn_h],
                 "Not available yet",
             );
-            y += btn_h + gap;
+            y += btn_h + spacing;
         }
-        y += 12.0 * gs;
+        y += spacer + spacing;
 
+        let gap = BTN_GAP * gs;
         let half = (form_w - gap) / 2.0;
         let name = self.world_name.value().trim().to_owned();
-        if button(
+        let save_hit = button(
             &mut elements,
             &mut any_hovered,
             form_x,
@@ -1123,8 +1133,10 @@ impl MainMenu {
             half,
             "Save",
             !name.is_empty(),
-        ) && clicked
-        {
+        );
+        // Vanilla also saves on Enter while the name field is focused.
+        let enter = self.focused_field == Some(0) && input.enter;
+        if !name.is_empty() && ((save_hit && clicked) || enter) {
             if let Err(e) = self.world_list.rename(&folder, &name) {
                 tracing::error!("Failed to rename world: {e}");
             }
@@ -1170,103 +1182,31 @@ impl MainMenu {
         let Some(folder) = self.screen_folder() else {
             return empty_result(2.0);
         };
-
-        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
-        let fs = common::FONT_SIZE * gs;
-        let form_w = FORM_W * gs;
-        let btn_h = common::BTN_H * gs;
-        let gap = BTN_GAP * gs;
-        let cursor = input.cursor;
-        let clicked = input.clicked;
-
-        if input.escape {
-            self.set_screen(Screen::WorldList);
-            return empty_result(2.0);
-        }
-
-        let name = self.world_display_name(&folder);
-
-        let mut elements = Vec::new();
-        let mut any_hovered = false;
-
-        let cy = screen_h * 0.3;
-        elements.push(MenuElement::Text {
-            x: screen_w / 2.0,
-            y: cy,
-            text: "Are you sure you want to delete this world?".into(),
-            scale: fs,
-            color: WHITE,
-            centered: true,
-        });
-        elements.push(MenuElement::Text {
-            x: screen_w / 2.0,
-            y: cy + fs + 12.0 * gs,
-            text: format!("'{name}' will be lost forever! (A long time!)"),
-            scale: fs,
-            color: COL_DIM,
-            centered: true,
-        });
-
-        let btn_x = (screen_w - form_w) / 2.0;
-        let btn_y = cy + fs * 2.0 + 44.0 * gs;
-
-        self.focus_advance(input);
-        let mut ctx = self.make_focus_ctx(input);
-        if push_button_f(
-            &mut elements,
-            &mut ctx,
-            &mut any_hovered,
-            cursor,
-            clicked,
-            btn_x,
-            btn_y,
-            form_w,
-            btn_h,
-            gs,
+        let warning = format!(
+            "'{}' will be lost forever! (A long time!)",
+            self.world_display_name(&folder)
+        );
+        let (result, choice) = self.build_confirm(
+            screen_w,
+            screen_h,
+            input,
+            text_width_fn,
+            "Are you sure you want to delete this world?",
+            &warning,
             "Delete",
-            true,
-        ) {
+        );
+        if choice == Some(true) {
             // TODO: blocking. Fine while a world is one small file; the layer
             // that fills them with terrain should move this off the frame thread.
             if let Err(e) = self.world_list.delete(&folder) {
                 tracing::error!("Failed to delete world: {e}");
             }
             self.selected_world = None;
+        }
+        if choice.is_some() {
             self.set_screen(Screen::WorldList);
         }
-        if push_button_f(
-            &mut elements,
-            &mut ctx,
-            &mut any_hovered,
-            cursor,
-            clicked,
-            btn_x,
-            btn_y + btn_h + gap,
-            form_w,
-            btn_h,
-            gs,
-            "Cancel",
-            true,
-        ) {
-            self.set_screen(Screen::WorldList);
-        }
-        self.finish_focus(&ctx);
-
-        push_bottom_text(
-            &mut elements,
-            screen_w,
-            screen_h,
-            gs,
-            &self.version,
-            text_width_fn,
-        );
-        MainMenuResult {
-            elements,
-            action: MenuAction::None,
-            cursor_pointer: any_hovered,
-            blur: 2.0,
-            clicked_button: (clicked && any_hovered) || ctx.fired,
-        }
+        result
     }
 
     /// A world's display name, falling back to its folder if it has gone.
@@ -1276,8 +1216,7 @@ impl MainMenu {
             .map_or_else(|| folder.to_owned(), |w| w.name.clone())
     }
 
-    /// The folder of whichever world screen is showing. A `String` payload
-    /// cannot be moved out of `self.screen`, so it is matched by reference.
+    /// The folder of whichever world screen is showing.
     fn screen_folder(&self) -> Option<String> {
         match &self.screen {
             Screen::EditWorld(f) | Screen::ConfirmDeleteWorld(f) => Some(f.clone()),

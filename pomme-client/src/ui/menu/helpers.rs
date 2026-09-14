@@ -1173,3 +1173,99 @@ pub(super) fn push_scrollbar(
         gs,
     );
 }
+
+const CONFIRM_BTN_W: f32 = 150.0;
+
+impl MainMenu {
+    /// Vanilla `ConfirmScreen`: question, warning and a yes/no row, centred on
+    /// the screen. `Some(true)` on yes, `Some(false)` on no or Escape.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn build_confirm(
+        &mut self,
+        screen_w: f32,
+        screen_h: f32,
+        input: &MenuInput,
+        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        question: &str,
+        warning: &str,
+        yes: &str,
+    ) -> (MainMenuResult, Option<bool>) {
+        if input.escape {
+            return (empty_result(2.0), Some(false));
+        }
+
+        let gs = crate::ui::hud::gui_scale(screen_w, screen_h, self.gui_scale_setting);
+        let fs = common::FONT_SIZE * gs;
+        let btn_h = common::BTN_H * gs;
+        let btn_w = CONFIRM_BTN_W * gs;
+        let gap = BTN_GAP * gs;
+        let spacing = 8.0 * gs;
+        let row_pad = 16.0 * gs;
+        let cursor = input.cursor;
+        let clicked = input.clicked;
+        let cx = screen_w / 2.0;
+
+        let column_h = (fs + spacing) * 2.0 + row_pad + btn_h;
+        let mut y = (screen_h - column_h) / 2.0;
+
+        let mut elements = Vec::new();
+        let mut any_hovered = false;
+        for text in [question, warning] {
+            elements.push(MenuElement::Text {
+                x: cx,
+                y,
+                text: text.into(),
+                scale: fs,
+                color: WHITE,
+                centered: true,
+            });
+            y += fs + spacing;
+        }
+        y += row_pad;
+
+        self.focus_advance(input);
+        let mut ctx = self.make_focus_ctx(input);
+        let mut choice = None;
+        for (i, (label, x)) in [(yes, cx - btn_w - gap / 2.0), ("Cancel", cx + gap / 2.0)]
+            .into_iter()
+            .enumerate()
+        {
+            if push_button_f(
+                &mut elements,
+                &mut ctx,
+                &mut any_hovered,
+                cursor,
+                clicked,
+                x,
+                y,
+                btn_w,
+                btn_h,
+                gs,
+                label,
+                true,
+            ) {
+                choice = Some(i == 0);
+            }
+        }
+        self.finish_focus(&ctx);
+
+        push_bottom_text(
+            &mut elements,
+            screen_w,
+            screen_h,
+            gs,
+            &self.version,
+            text_width_fn,
+        );
+        (
+            MainMenuResult {
+                elements,
+                action: MenuAction::None,
+                cursor_pointer: any_hovered,
+                blur: 2.0,
+                clicked_button: (clicked && any_hovered) || ctx.fired,
+            },
+            choice,
+        )
+    }
+}
