@@ -1337,8 +1337,9 @@ impl MainMenu {
             }
             for (label, bx, bw) in widgets {
                 let enabled = option_enabled(label, disabled);
+                let hit = common::hit_test(cursor, [bx, by, bw, btn_h]);
+                let hovered = enabled && hit;
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
-                    let hovered = enabled && common::hit_test(cursor, [bx, by, bw, btn_h]);
                     let prev_focus = ctx.focus;
                     let focused = ctx.focused(enabled, hovered);
                     // `setFocused` only re-arms editing when focus moves, so
@@ -1391,10 +1392,9 @@ impl MainMenu {
                     continue;
                 }
 
-                let hit = common::hit_test(cursor, [bx, by, bw, btn_h]);
-                let h = enabled && hit;
-                let focused = ctx.focused(enabled, h);
-                let draw_cursor = helpers::focus_cursor(focused, h, bx, by, bw, btn_h, cursor);
+                let focused = ctx.focused(enabled, hovered);
+                let draw_cursor =
+                    helpers::focus_cursor(focused, hovered, bx, by, bw, btn_h, cursor);
                 common::push_button_scrolling(
                     &mut elements,
                     draw_cursor,
@@ -1408,13 +1408,13 @@ impl MainMenu {
                     enabled,
                     &label_scroll,
                 );
-                any_hovered |= h;
+                any_hovered |= hovered;
                 // Vanilla keys tooltips off `isHovered`, which ignores `active`
                 // (`AbstractWidget.extractTooltipForNextRenderPass`).
                 if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
                     common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
                 }
-                if (clicked && h) || (focused && ctx.activate) {
+                if (clicked && hovered) || (focused && ctx.activate) {
                     any_clicked = true;
                     if let Some((_, target)) = nav.iter().find(|(l, _)| *l == label) {
                         if matches!(target, Screen::OptionsResourcePacks) {
