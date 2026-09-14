@@ -96,9 +96,9 @@ impl MainMenu {
 
         self.push_splash(&mut elements, cx, gs, &text_width_fn);
 
-        // TODO: enable Singleplayer once world loading exists. Realms never.
+        // Realms is never enabled.
         let rows: [(&str, bool); 3] = [
-            ("Singleplayer", false),
+            ("Singleplayer", true),
             ("Multiplayer", true),
             ("Minecraft Realms", false),
         ];
@@ -120,8 +120,10 @@ impl MainMenu {
             );
             if hit {
                 any_clicked = true;
-                if *label == "Multiplayer" {
-                    self.set_screen(Screen::ServerList);
+                match *label {
+                    "Singleplayer" => self.open_world_list(),
+                    "Multiplayer" => self.set_screen(Screen::ServerList),
+                    _ => {}
                 }
             }
         }

@@ -8,13 +8,15 @@ use super::*;
 use crate::ui::text::TextSpan;
 use crate::ui::world_list::{GameMode, WorldSummary};
 
-const ROW_W: f32 = 270.0;
+const WORLD_ROW_W: f32 = 270.0;
 const HEADER_H: f32 = 49.0;
 const FOOTER_H: f32 = 60.0;
 const WIDE_BTN_W: f32 = 150.0;
 const NARROW_BTN_W: f32 = 71.0;
 const ICON_SIZE: f32 = 32.0;
 const SEARCH_W: f32 = 200.0;
+/// Vanilla's footer grid spaces columns by 8 and rows by 4 (`BTN_GAP`).
+const FOOTER_COL_GAP: f32 = 8.0;
 
 /// Vanilla's `0x808080` for the folder and info lines.
 const COL_GREY: [f32; 4] = [0.502, 0.502, 0.502, 1.0];
@@ -48,7 +50,7 @@ impl MainMenu {
         let header_h = HEADER_H * gs;
         let footer_h = FOOTER_H * gs;
         let entry_h = ENTRY_H * gs;
-        let row_w = ROW_W * gs;
+        let row_w = WORLD_ROW_W * gs;
         let cursor = input.cursor;
         let clicked = input.clicked;
 
@@ -93,17 +95,16 @@ impl MainMenu {
             gs,
             text_width_fn,
         );
-        // Vanilla EditBox hint: shown only while empty and unfocused.
-        if self.world_search.value().is_empty() && self.focused_field != Some(0) {
-            elements.push(MenuElement::Text {
-                x: search_x + 4.0 * gs,
-                y: search_y + (field_h - fs) / 2.0,
-                text: "Search...".into(),
-                scale: fs,
-                color: COL_DIM,
-                centered: false,
-            });
-        }
+        push_search_hint(
+            &mut elements,
+            &self.world_search,
+            self.focused_field == Some(0),
+            search_x,
+            search_y,
+            field_h,
+            fs,
+            gs,
+        );
 
         push_menu_backdrop(&mut elements, 0.0, list_top, screen_w, list_h, gs);
         push_separator(
@@ -180,9 +181,7 @@ impl MainMenu {
             let icon = [icon_x, icon_y, icon_size, icon_size];
             push_icon(&mut elements, icon, SpriteId::UnknownServer);
 
-            let rel = (cursor.0 - icon_x, cursor.1 - icon_y);
-            let on_icon =
-                hovered && rel.0 >= 0.0 && rel.0 < icon_size && rel.1 >= 0.0 && rel.1 < icon_size;
+            let on_icon = hovered && common::hit_test(cursor, icon);
 
             if hovered {
                 // Vanilla dims the icon only, not the whole row.
@@ -205,6 +204,8 @@ impl MainMenu {
                 );
             }
 
+            // TODO: clip the three lines to the row's text width with an ellipsis
+            // (vanilla `StringWidget::setMaxWidth`).
             elements.push(MenuElement::Text {
                 x: text_x,
                 y: icon_y + 1.0 * gs,
@@ -216,11 +217,10 @@ impl MainMenu {
             elements.push(MenuElement::Text {
                 x: text_x,
                 y: icon_y + 12.0 * gs,
-                text: format!(
-                    "{} ({})",
-                    world.folder,
-                    format_last_played(world.last_played)
-                ),
+                text: match world.last_played {
+                    0 => world.folder.clone(),
+                    millis => format!("{} ({})", world.folder, format_last_played(millis)),
+                },
                 scale: fs,
                 color: COL_GREY,
                 centered: false,
@@ -251,11 +251,12 @@ impl MainMenu {
 
         let wide_w = WIDE_BTN_W * gs;
         let narrow_w = NARROW_BTN_W * gs;
-        let grid_w = narrow_w * 4.0 + gap * 3.0;
+        let col_gap = FOOTER_COL_GAP * gs;
+        let grid_w = narrow_w * 4.0 + col_gap * 3.0;
         let grid_x = (screen_w - grid_w) / 2.0;
         let row1_y = list_bottom + (footer_h - (btn_h * 2.0 + gap)) / 2.0;
         let row2_y = row1_y + btn_h + gap;
-        let col = |n: f32| grid_x + (narrow_w + gap) * n;
+        let col = |n: f32| grid_x + (narrow_w + col_gap) * n;
 
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);

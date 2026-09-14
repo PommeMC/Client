@@ -1091,6 +1091,30 @@ impl MainMenu {
     }
 }
 
+/// Vanilla EditBox hint: shown only while the field is empty and unfocused.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_search_hint(
+    elements: &mut Vec<MenuElement>,
+    field: &TextFieldState,
+    focused: bool,
+    x: f32,
+    y: f32,
+    field_h: f32,
+    fs: f32,
+    gs: f32,
+) {
+    if field.value().is_empty() && !focused {
+        elements.push(MenuElement::Text {
+            x: x + 4.0 * gs,
+            y: y + (field_h - fs) / 2.0,
+            text: "Search...".into(),
+            scale: fs,
+            color: COL_DIM,
+            centered: false,
+        });
+    }
+}
+
 pub(super) fn nine_slice(
     elements: &mut Vec<MenuElement>,
     x: f32,
