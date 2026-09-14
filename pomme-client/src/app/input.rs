@@ -687,10 +687,10 @@ impl InputState {
         self.selected_slot
     }
 
+    /// The server's held slot; the handler has already checked it is a hotbar
+    /// index.
     pub fn set_selected_slot(&mut self, slot: u8) {
-        if slot < 9 {
-            self.selected_slot = slot;
-        }
+        self.selected_slot = slot;
     }
 
     pub fn on_scroll(&mut self, delta: f32) {
@@ -843,19 +843,4 @@ fn build_rumble_effect(
         .finish(manager)
         .map_err(|e| tracing::warn!("Failed to create rumble effect: {e}"))
         .ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::InputState;
-
-    #[test]
-    fn authoritative_selected_slot_accepts_only_hotbar_indices() {
-        let mut input = InputState::released();
-        input.set_selected_slot(5);
-        assert_eq!(input.selected_slot(), 5);
-
-        input.set_selected_slot(9);
-        assert_eq!(input.selected_slot(), 5);
-    }
 }

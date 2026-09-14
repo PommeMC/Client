@@ -1471,11 +1471,12 @@ fn slot_display_first_item(
 }
 
 #[cfg(test)]
-mod packet_event_tests {
+mod tests {
     use std::sync::Arc;
 
     use azalea_protocol::packets::game::c_set_held_slot::ClientboundSetHeldSlot;
     use parking_lot::Mutex;
+    use pomme_protocol::wire;
 
     use super::*;
 
@@ -1486,40 +1487,30 @@ mod packet_event_tests {
         let (event_tx, event_rx) = crossbeam_channel::bounded(1);
         let registries = RegistryHolder::default();
         let command_tree = Arc::new(Mutex::new(None));
+        let receive = |slot| {
+            handle_game_packet(
+                &ClientboundGamePacket::SetHeldSlot(ClientboundSetHeldSlot { slot }),
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+            );
+        };
 
-        handle_game_packet(
-            &ClientboundGamePacket::SetHeldSlot(ClientboundSetHeldSlot { slot: 5 }),
-            &sender,
-            &event_tx,
-            &registries,
-            &command_tree,
-        );
+        receive(5);
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::HeldSlot { slot: 5 }
         ));
 
         for invalid in [9, u32::MAX] {
-            handle_game_packet(
-                &ClientboundGamePacket::SetHeldSlot(ClientboundSetHeldSlot { slot: invalid }),
-                &sender,
-                &event_tx,
-                &registries,
-                &command_tree,
-            );
+            receive(invalid);
             assert!(matches!(
                 event_rx.try_recv(),
                 Err(crossbeam_channel::TryRecvError::Empty)
             ));
         }
     }
-}
-
-#[cfg(test)]
-mod raw_sound_tests {
-    use pomme_protocol::wire;
-
-    use super::*;
 
     fn direct_sound() -> Holder<SoundEvent, CustomSound> {
         Holder::Direct(CustomSound {
