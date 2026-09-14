@@ -365,6 +365,25 @@ impl MenuInput {
                 )
             })
     }
+
+    /// Net Right minus Left presses this frame, key repeats included
+    /// (`AbstractSliderButton.keyPressed`).
+    pub fn arrow_steps(&self) -> i32 {
+        self.events
+            .iter()
+            .map(|e| match e {
+                TextInputEvent::Key {
+                    code: KeyCode::ArrowRight,
+                    ..
+                } => 1,
+                TextInputEvent::Key {
+                    code: KeyCode::ArrowLeft,
+                    ..
+                } => -1,
+                _ => 0,
+            })
+            .sum()
+    }
 }
 
 /// Vanilla `HeaderAndFooterLayout.DEFAULT_HEADER_AND_FOOTER_HEIGHT`.
@@ -522,10 +541,13 @@ pub struct MainMenu {
     /// Ctrl+Z history per field index (pomme extra; vanilla EditBox has none).
     field_undo_stack: Vec<(u8, String)>,
     /// Keyboard focus index into the current screen's focusable widgets
-    /// (buttons). `focusable_count` records how many the last frame built, so
-    /// Tab can wrap before the count for this frame is known.
+    /// (buttons and sliders). `focusable_count` records how many the last
+    /// frame built, so Tab can wrap before the count for this frame is known.
     focus: Option<usize>,
     focusable_count: usize,
+    /// Bumped by `set_screen`, so a frame that swapped screens mid-build
+    /// doesn't write its focus into the new screen.
+    screen_gen: u32,
     last_click_time: Instant,
     /// Steady clock for label scroll animation.
     created: Instant,
@@ -578,6 +600,9 @@ pub struct MainMenu {
     pub display_mode: DisplayMode,
     pub cloud_mode: CloudMode,
     pub attack_indicator: crate::ui::hud::AttackIndicatorMode,
+    /// `AbstractSliderButton.canChangeValue` for the focused slider: armed
+    /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
+    slider_can_change_value: bool,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
     /// The title screen's splash line, rolled at launch and on every return
@@ -657,6 +682,7 @@ impl MainMenu {
             field_undo_stack: Vec::new(),
             focus: None,
             focusable_count: 0,
+            screen_gen: 0,
             last_click_time: Instant::now(),
             created: Instant::now(),
             credits_scroll: 0.0,
@@ -705,6 +731,7 @@ impl MainMenu {
             attack_indicator: crate::ui::hud::AttackIndicatorMode::from_u8(
                 settings.attack_indicator,
             ),
+            slider_can_change_value: true,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             splash: None,
@@ -725,6 +752,9 @@ impl MainMenu {
         self.screen = screen;
         self.focused_field = None;
         self.focus = None;
+        self.screen_gen += 1;
+        self.slider_can_change_value = true;
+        self.active_slider = None;
         self.focusable_count = 0;
         self.last_field_click = None;
         self.field_undo_stack.clear();
@@ -968,20 +998,28 @@ impl MainMenu {
         }
         let n = self.focusable_count;
         self.focus = (n != 0).then(|| helpers::step_ring(self.focus, n, input.shift));
+        // `setFocused` from a Tab arms keyboard editing on a slider.
+        self.slider_can_change_value = true;
     }
 
     fn make_focus_ctx(&self, input: &MenuInput) -> FocusCtx {
         FocusCtx {
             next_index: 0,
             focus: self.focus,
+            clicked: input.clicked,
+            screen_gen: self.screen_gen,
             activate: input.activate(),
             fired: false,
         }
     }
 
-    /// Record how many focusable widgets this frame built and drop a stale
-    /// focus index that now points past the end.
+    /// Takes back the frame's focus and widget count, dropping a stale index;
+    /// a frame that switched screens leaves the new screen's reset alone.
     fn finish_focus(&mut self, ctx: &FocusCtx) {
+        if ctx.screen_gen != self.screen_gen {
+            return;
+        }
+        self.focus = ctx.focus;
         self.focusable_count = ctx.next_index;
         if self.focus.is_some_and(|f| f >= ctx.next_index) {
             self.focus = None;

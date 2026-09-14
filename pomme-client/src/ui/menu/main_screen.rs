@@ -222,8 +222,8 @@ impl MainMenu {
         for (i, def) in buttons.iter().enumerate() {
             let by = cy + i as f32 * (btn_h + btn_gap);
             let rect = [btn_x, by, content_w, btn_h];
-            let focused = ctx.focused(def.enabled);
             let hovered = def.enabled && common::hit_test(cursor, rect);
+            let focused = ctx.focused(def.enabled, hovered);
             any_hovered |= hovered;
             // Keyboard focus shows the same highlight as hover (vanilla).
             let active = hovered || focused;

@@ -112,6 +112,25 @@ impl MainMenu {
         }
     }
 
+    /// Value count minus one for the discrete sliders, which Left/Right step
+    /// one value at a time; `None` for the unit sliders, which nudge by
+    /// `1 / (width - 8)` (`OptionInstanceSliderButton.keyPressed`).
+    fn discrete_slider_span(&self, prefix: &str) -> Option<f32> {
+        Some(match prefix {
+            "Render Distance:" => self.render_distance_max() as f32 - 2.0,
+            "Chunk Detail:" => 40.0,
+            "Simulation Distance:" => 27.0,
+            "Max Framerate:" => 25.0,
+            "FOV:" => 80.0,
+            _ => return None,
+        })
+    }
+
+    fn slider_key_step(&self, prefix: &str, w: f32, gs: f32) -> f32 {
+        self.discrete_slider_span(prefix)
+            .map_or(gs / (w - 8.0 * gs), |span| 1.0 / span)
+    }
+
     /// Upper bound of the render distance slider: the server-announced view
     /// distance while connected (can exceed 32), 32 otherwise.
     fn render_distance_max(&self) -> u32 {
@@ -821,10 +840,22 @@ impl MainMenu {
             for (label, bx, bw) in widgets {
                 let enabled = option_enabled(label, disabled);
                 if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
+                    let hovered = enabled && common::hit_test(cursor, [bx, by, bw, btn_h]);
+                    let prev_focus = ctx.focus;
+                    let focused = ctx.focused(enabled, hovered);
+                    // `setFocused` only re-arms editing when focus moves, so
+                    // re-clicking a locked slider leaves it locked.
+                    if focused && ctx.focus != prev_focus {
+                        self.slider_can_change_value = true;
+                    }
+                    if focused && ctx.activate {
+                        self.slider_can_change_value = !self.slider_can_change_value;
+                    }
                     let is_active = self.active_slider == Some(*prefix);
                     let result = common::push_slider(
                         &mut elements,
                         cursor,
+                        input.clicked,
                         input.mouse_held,
                         bx,
                         by,
@@ -835,6 +866,8 @@ impl MainMenu {
                         label,
                         *value,
                         enabled,
+                        focused,
+                        self.slider_can_change_value,
                         is_active,
                         &label_scroll,
                     );
@@ -845,15 +878,24 @@ impl MainMenu {
                     if let Some(v) = result.new_value {
                         slider_results.push((prefix, v));
                     }
-                    if !input.mouse_held && is_active {
+                    let steps = input.arrow_steps();
+                    if focused && self.slider_can_change_value && steps != 0 {
+                        let step = self.slider_key_step(prefix, bw, gs);
+                        slider_results
+                            .push((prefix, (*value + steps as f32 * step).clamp(0.0, 1.0)));
+                    }
+                    // `onRelease`: the click sound the press skipped. Also
+                    // covers a press and release inside one frame.
+                    if !input.mouse_held && (is_active || result.dragging) {
                         self.active_slider = None;
+                        any_clicked = true;
                     }
                     continue;
                 }
 
-                let focused = ctx.focused(enabled);
                 let hit = common::hit_test(cursor, [bx, by, bw, btn_h]);
                 let h = enabled && hit;
+                let focused = ctx.focused(enabled, h);
                 let draw_cursor = helpers::focus_cursor(focused, h, bx, by, bw, btn_h, cursor);
                 common::push_button_scrolling(
                     &mut elements,
@@ -969,19 +1011,15 @@ impl MainMenu {
 
         for (prefix, value) in &slider_results {
             let v = *value;
+            let span = self.discrete_slider_span(prefix).unwrap_or(1.0);
             match *prefix {
-                "Render Distance:" => {
-                    let max = self.render_distance_max() as f32;
-                    self.render_distance = (2.0 + v * (max - 2.0)).round() as u32
-                }
-                "Chunk Detail:" => self.chunk_detail = (8.0 + v * 40.0).round() as u32,
+                "Render Distance:" => self.render_distance = (2.0 + v * span).round() as u32,
+                "Chunk Detail:" => self.chunk_detail = (8.0 + v * span).round() as u32,
                 "Simulation Distance:" => {
-                    self.simulation_distance = (5.0 + v * 27.0).round() as u32
+                    self.simulation_distance = (5.0 + v * span).round() as u32
                 }
-                "Max Framerate:" => {
-                    self.max_framerate = (((10.0 + v * 250.0) / 10.0).round() * 10.0) as u32
-                }
-                "FOV:" => self.fov = (30.0 + v * 80.0).round() as u32,
+                "Max Framerate:" => self.max_framerate = 10 + 10 * (v * span).round() as u32,
+                "FOV:" => self.fov = (30.0 + v * span).round() as u32,
                 "FOV Effects:" => self.fov_effect_scale = v,
                 "Damage Tilt:" => self.damage_tilt_strength = v,
                 "Sensitivity:" => self.sensitivity = v,
@@ -1033,8 +1071,8 @@ impl MainMenu {
         }
 
         let done_w = 200.0 * gs;
-        let done_focused = ctx.focused(true);
         let done_h = common::hit_test(cursor, [cx - done_w / 2.0, done_y, done_w, btn_h]);
+        let done_focused = ctx.focused(true, done_h);
         let done_cursor = helpers::focus_cursor(
             done_focused,
             done_h,
@@ -1430,6 +1468,7 @@ impl MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::text_edit::KeyMods;
 
     #[test]
     fn disabled_prefixes_match_dynamic_option_labels() {
@@ -1441,55 +1480,332 @@ mod tests {
         assert!(option_enabled("Graphics Backend: Default", disabled));
     }
 
-    #[test]
-    fn disabled_slider_cannot_hover_or_drag() {
+    #[allow(clippy::too_many_arguments)]
+    fn test_slider(
+        cursor: (f32, f32),
+        mouse_pressed: bool,
+        mouse_held: bool,
+        enabled: bool,
+        focused: bool,
+        can_change_value: bool,
+        dragging: bool,
+    ) -> (common::SliderResult, Vec<MenuElement>) {
         let mut elements = Vec::new();
         let text_width = |_: &str, _: f32| 0.0;
         let scroll = common::LabelScroll {
             text_width_fn: &text_width,
             time_secs: 0.0,
         };
-
         let result = common::push_slider(
             &mut elements,
-            (50.0, 10.0),
-            true,
+            cursor,
+            mouse_pressed,
+            mouse_held,
             0.0,
             0.0,
             100.0,
             20.0,
             1.0,
             common::FONT_SIZE,
-            "Simulation Distance: 12 chunks",
+            "FOV: 70",
             0.5,
-            false,
-            true,
+            enabled,
+            focused,
+            can_change_value,
+            dragging,
             &scroll,
         );
+        (result, elements)
+    }
+
+    fn sprites(elements: &[MenuElement]) -> Vec<SpriteId> {
+        elements
+            .iter()
+            .filter_map(|e| match e {
+                MenuElement::NineSlice { sprite, .. } | MenuElement::Image { sprite, .. } => {
+                    Some(*sprite)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn disabled_slider_cannot_hover_or_drag() {
+        let (result, _) = test_slider((50.0, 10.0), true, true, false, true, true, true);
 
         assert!(!result.hovered);
         assert!(!result.dragging);
         assert_eq!(result.new_value, None);
     }
 
-    /// Drives every options screen so `build_options_grid`'s debug assertion
-    /// checks each screen's rows against its disabled list.
     #[test]
-    fn disabled_prefixes_cover_every_options_screen() {
+    fn held_mouse_does_not_start_slider_without_press() {
+        let (result, _) = test_slider((75.0, 10.0), false, true, true, false, true, false);
+
+        assert!(result.hovered);
+        assert!(!result.dragging);
+        assert_eq!(result.new_value, None);
+    }
+
+    #[test]
+    fn focused_slider_highlights_handle_until_locked() {
+        let (result, elements) = test_slider((-10.0, -10.0), false, false, true, true, true, false);
+        assert!(!result.hovered);
+        assert_eq!(
+            sprites(&elements),
+            [SpriteId::SliderTrack, SpriteId::SliderHandleHover]
+        );
+
+        let (_, elements) = test_slider((-10.0, -10.0), false, false, true, true, false, false);
+        assert_eq!(
+            sprites(&elements),
+            [SpriteId::SliderTrackHover, SpriteId::SliderHandle]
+        );
+    }
+
+    #[test]
+    fn active_slider_keeps_drag_capture_outside_its_bounds() {
+        let (result, _) = test_slider((150.0, 10.0), false, true, true, true, true, true);
+
+        assert!(!result.hovered);
+        assert!(result.dragging);
+        assert_eq!(result.new_value, Some(1.0));
+    }
+
+    /// `dir` must not exist: settings and the server list fall back to
+    /// defaults, and a settings save silently fails instead of writing.
+    fn test_menu(dir: &str) -> MainMenu {
         let rt = std::sync::Arc::new(
             tokio::runtime::Builder::new_current_thread()
                 .build()
                 .expect("current-thread runtime"),
         );
-        // Nonexistent dir: settings and the server list fall back to defaults,
-        // and nothing writes without a click.
         let mut menu = MainMenu::new(
-            std::path::Path::new("pomme-options-coverage-test"),
+            std::path::Path::new(dir),
             rt,
             "tester".into(),
             "26.2".into(),
             None,
         );
+        menu.gui_scale_setting = 1;
+        menu
+    }
+
+    /// A grid of one `Pair` row at 800x600: the left widget spans x 245..395
+    /// and the right one 405..555, both at y 300.
+    struct Grid {
+        menu: MainMenu,
+        rows: [OptRow<'static>; 1],
+        nav: Vec<(&'static str, Screen)>,
+        sliders: Vec<(&'static str, f32)>,
+        disabled: Vec<&'static str>,
+    }
+
+    impl Grid {
+        fn new(left: &'static str, right: &'static str) -> Self {
+            Self {
+                menu: test_menu("pomme-options-focus-test"),
+                rows: [OptRow::Pair(left, right)],
+                nav: Vec::new(),
+                sliders: Vec::new(),
+                disabled: Vec::new(),
+            }
+        }
+
+        fn with_slider(left: &'static str, right: &'static str, prefix: &'static str) -> Self {
+            let mut grid = Self::new(left, right);
+            grid.sliders.push((prefix, 0.5));
+            grid
+        }
+
+        fn frame(&mut self, input: &MenuInput) -> MainMenuResult {
+            let text_width = |_: &str, _: f32| 0.0;
+            self.menu.build_options_grid(
+                800.0,
+                600.0,
+                input,
+                "Test",
+                Screen::Main,
+                &self.rows,
+                &self.nav,
+                &self.sliders,
+                &self.disabled,
+                false,
+                &[],
+                &text_width,
+            )
+        }
+
+        fn shows(&mut self, input: &MenuInput, sprite: SpriteId) -> bool {
+            sprites(&self.frame(input).elements).contains(&sprite)
+        }
+    }
+
+    fn click(x: f32) -> MenuInput {
+        MenuInput {
+            cursor: (x, 300.0),
+            clicked: true,
+            mouse_held: true,
+            ..Default::default()
+        }
+    }
+
+    fn key(code: KeyCode) -> MenuInput {
+        MenuInput {
+            events: vec![TextInputEvent::Key {
+                code,
+                mods: KeyMods {
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                    super_key: false,
+                },
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn tab() -> MenuInput {
+        MenuInput {
+            tab: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mouse_focus_persists_until_another_enabled_option_is_clicked() {
+        let mut grid = Grid::new("First", "Second");
+
+        grid.frame(&click(300.0));
+        assert_eq!(grid.menu.focus, Some(0));
+
+        let hover_second = MenuInput {
+            cursor: (450.0, 300.0),
+            ..Default::default()
+        };
+        let result = grid.frame(&hover_second);
+        assert_eq!(grid.menu.focus, Some(0));
+        let hover_count = sprites(&result.elements)
+            .iter()
+            .filter(|s| **s == SpriteId::ButtonHover)
+            .count();
+        assert_eq!(hover_count, 2);
+
+        grid.disabled = vec!["Second"];
+        grid.frame(&click(450.0));
+        assert_eq!(grid.menu.focus, Some(0));
+
+        grid.disabled.clear();
+        grid.frame(&click(450.0));
+        assert_eq!(grid.menu.focus, Some(1));
+    }
+
+    #[test]
+    fn tab_reaches_sliders_and_enter_toggles_keyboard_editing() {
+        let mut grid = Grid::with_slider("First", "Sensitivity: 50%", "Sensitivity:");
+        let enter = MenuInput {
+            enter: true,
+            ..Default::default()
+        };
+
+        grid.frame(&MenuInput::default());
+        grid.frame(&tab());
+        assert!(grid.shows(&tab(), SpriteId::SliderHandleHover));
+        assert!(!grid.shows(&MenuInput::default(), SpriteId::SliderTrackHover));
+
+        assert!(grid.shows(&enter, SpriteId::SliderTrackHover));
+        assert!(!grid.shows(&MenuInput::default(), SpriteId::SliderHandleHover));
+
+        grid.frame(&key(KeyCode::ArrowRight));
+        grid.frame(&enter);
+        grid.frame(&key(KeyCode::ArrowRight));
+        assert_eq!(grid.menu.focus, Some(1));
+        // Locked, the first arrow did nothing; unlocked, one step is
+        // `1 / (150 - 8)` GUI units.
+        assert!((grid.menu.sensitivity - (0.5 + 1.0 / 142.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn discrete_slider_steps_one_value_per_arrow() {
+        let mut grid = Grid::with_slider("First", "FOV: 70", "FOV:");
+
+        grid.frame(&MenuInput::default());
+        grid.frame(&tab());
+        grid.frame(&tab());
+        grid.frame(&key(KeyCode::ArrowRight));
+        assert_eq!(grid.menu.fov, 71);
+    }
+
+    #[test]
+    fn slider_click_then_tab_moves_to_the_next_widget() {
+        let mut grid = Grid::with_slider("Sensitivity: 50%", "Second", "Sensitivity:");
+
+        grid.frame(&click(300.0));
+        grid.frame(&MenuInput::default());
+        grid.frame(&tab());
+        assert_eq!(grid.menu.focus, Some(1));
+    }
+
+    #[test]
+    fn press_and_release_in_one_frame_releases_the_slider() {
+        let mut grid = Grid::with_slider("First", "Sensitivity: 50%", "Sensitivity:");
+        let tap = MenuInput {
+            mouse_held: false,
+            ..click(450.0)
+        };
+
+        let result = grid.frame(&tap);
+        assert!(result.clicked_button);
+        assert_eq!(grid.menu.active_slider, None);
+        assert_eq!(grid.menu.focus, Some(1));
+    }
+
+    #[test]
+    fn navigating_away_leaves_the_next_screen_unfocused() {
+        let mut grid = Grid::new("First", "Second");
+        grid.nav = vec![("First", Screen::OptionsVideo)];
+
+        grid.frame(&click(300.0));
+        assert!(matches!(grid.menu.screen, Screen::OptionsVideo));
+        assert_eq!(grid.menu.focus, None);
+    }
+
+    #[test]
+    fn button_click_takes_focus_through_the_shared_helper() {
+        let mut ctx = FocusCtx {
+            next_index: 0,
+            focus: None,
+            clicked: true,
+            screen_gen: 0,
+            activate: false,
+            fired: false,
+        };
+        let mut elements = Vec::new();
+        let mut any_hovered = false;
+        let fired = push_button_f(
+            &mut elements,
+            &mut ctx,
+            &mut any_hovered,
+            (10.0, 10.0),
+            true,
+            0.0,
+            0.0,
+            100.0,
+            20.0,
+            1.0,
+            "Go",
+            true,
+        );
+        assert!(fired);
+        assert_eq!(ctx.focus, Some(0));
+    }
+
+    /// Drives every options screen so `build_options_grid`'s debug assertion
+    /// checks each screen's rows against its disabled list.
+    #[test]
+    fn disabled_prefixes_cover_every_options_screen() {
+        let mut menu = test_menu("pomme-options-coverage-test");
         let input = MenuInput::default();
         let text_width = |_: &str, _: f32| 0.0;
         let tw: common::TextWidthFn = &text_width;

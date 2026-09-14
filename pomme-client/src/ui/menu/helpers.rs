@@ -190,6 +190,10 @@ pub(super) struct FocusCtx {
     pub(super) next_index: usize,
     /// The focused widget index (from `MainMenu::focus`), if any.
     pub(super) focus: Option<usize>,
+    /// Left button pressed this frame; a click on a widget focuses it.
+    pub(super) clicked: bool,
+    /// `MainMenu::screen_gen` at build time.
+    pub(super) screen_gen: u32,
     /// Enter / Space pressed this frame (`InputWithModifiers.isSelection`).
     pub(super) activate: bool,
     /// Set once a keyboard activation fires, so the click sound still plays.
@@ -197,19 +201,19 @@ pub(super) struct FocusCtx {
 }
 
 impl FocusCtx {
-    fn take_index(&mut self) -> usize {
-        let i = self.next_index;
-        self.next_index += 1;
-        i
-    }
-
-    /// Claim the next focus index (only enabled widgets join the ring, matching
-    /// vanilla Tab navigation) and report whether it is the focused one.
-    pub(super) fn focused(&mut self, enabled: bool) -> bool {
+    /// Claims the next focus index (only enabled widgets join the ring,
+    /// matching vanilla Tab navigation) and reports whether the widget is
+    /// focused. A click takes focus (`ContainerEventHandler.mouseClicked`);
+    /// widgets built earlier in the frame see that next frame.
+    pub(super) fn focused(&mut self, enabled: bool, hovered: bool) -> bool {
         if !enabled {
             return false;
         }
-        let idx = self.take_index();
+        let idx = self.next_index;
+        self.next_index += 1;
+        if self.clicked && hovered {
+            self.focus = Some(idx);
+        }
         self.focus == Some(idx)
     }
 }
@@ -233,8 +237,8 @@ pub(super) fn push_button_f(
     label: &str,
     enabled: bool,
 ) -> bool {
-    let focused = ctx.focused(enabled);
     let real_hovered = enabled && common::hit_test(cursor, [x, y, w, h]);
+    let focused = ctx.focused(enabled, real_hovered);
     let draw_cursor = focus_cursor(focused, real_hovered, x, y, w, h, cursor);
     common::push_button(
         elements,
