@@ -209,6 +209,9 @@ pub fn handle_game_packet(
                 state_id: p.state_id,
             });
         }
+        ClientboundGamePacket::SetHeldSlot(p) if (0..9).contains(&p.slot) => {
+            let _ = event_tx.try_send(NetworkEvent::HeldSlot { slot: p.slot as u8 });
+        }
         ClientboundGamePacket::ContainerSetData(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerData {
                 container_id: p.container_id,
@@ -1476,10 +1479,46 @@ fn slot_display_first_item(
 }
 
 #[cfg(test)]
-mod raw_sound_tests {
+mod tests {
+    use std::sync::Arc;
+
+    use azalea_protocol::packets::game::c_set_held_slot::ClientboundSetHeldSlot;
+    use parking_lot::Mutex;
     use pomme_protocol::wire;
 
     use super::*;
+
+    #[test]
+    fn set_held_slot_emits_authoritative_hotbar_selection() {
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        let registries = RegistryHolder::default();
+        let command_tree = Arc::new(Mutex::new(None));
+        let receive = |slot| {
+            handle_game_packet(
+                &ClientboundGamePacket::SetHeldSlot(ClientboundSetHeldSlot { slot }),
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+            );
+        };
+
+        receive(5);
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::HeldSlot { slot: 5 }
+        ));
+
+        for invalid in [9, u32::MAX] {
+            receive(invalid);
+            assert!(matches!(
+                event_rx.try_recv(),
+                Err(crossbeam_channel::TryRecvError::Empty)
+            ));
+        }
+    }
 
     fn direct_sound() -> Holder<SoundEvent, CustomSound> {
         Holder::Direct(CustomSound {

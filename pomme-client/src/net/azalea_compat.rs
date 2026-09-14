@@ -37,6 +37,29 @@ fn packet_ids_match_azalea() {
     });
     assert_eq!(attack.id(), table_id(Direction::Serverbound, "attack"));
 
+    // azalea's block variant still carries the pre-1.21.4 `slot` field, which
+    // is why `wire.rs` hand-encodes the position and flag; only the id is
+    // shared here.
+    let pick_block = ServerboundGamePacket::PickItemFromBlock(
+        azalea_protocol::packets::game::s_pick_item_from_block::ServerboundPickItemFromBlock {
+            slot: 0,
+        },
+    );
+    assert_eq!(
+        pick_block.id(),
+        table_id(Direction::Serverbound, "pick_item_from_block")
+    );
+    let pick_entity = ServerboundGamePacket::PickItemFromEntity(
+        azalea_protocol::packets::game::s_pick_item_from_entity::ServerboundPickItemFromEntity {
+            id: MinecraftEntityId(0),
+            include_data: false,
+        },
+    );
+    assert_eq!(
+        pick_entity.id(),
+        table_id(Direction::Serverbound, "pick_item_from_entity")
+    );
+
     let teleport = ServerboundGamePacket::TeleportToEntity(
         azalea_protocol::packets::game::s_teleport_to_entity::ServerboundTeleportToEntity {
             uuid: uuid::Uuid::nil(),

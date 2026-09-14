@@ -701,6 +701,12 @@ impl InputState {
         self.selected_slot
     }
 
+    /// The server's held slot; the handler has already checked it is a hotbar
+    /// index.
+    pub fn set_selected_slot(&mut self, slot: u8) {
+        self.selected_slot = slot;
+    }
+
     pub fn on_scroll(&mut self, delta: f32) {
         if self.menu_capture {
             return;
