@@ -1,0 +1,15 @@
+[package]
+name = "pomme-singleplayer"
+version = "0.1.0"
+edition = "2024"
+# Links SteelMC, which is AGPL-3.0-or-later, so this crate is too. GPLv3 section
+# 13 permits the combination with the GPL-3.0-or-later client.
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+steel-core = { path = "../third_party/SteelMC/steel-core" }
+steel-login = { path = "../third_party/SteelMC/steel-login" }
+steel-utils = { path = "../third_party/SteelMC/steel-utils" }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = { workspace = true }
