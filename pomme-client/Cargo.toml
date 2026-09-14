@@ -38,7 +38,9 @@ bytemuck = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 flate2 = "1"
 azalea-buf = "0.16"
-azalea-protocol = { version = "0.16", features = ["connecting"] }
+# `connecting` and `online-mode` only gate azalea's own connection type, which
+# pomme replaced with net::conn; authentication goes straight to azalea-auth.
+azalea-protocol = { version = "0.16", default-features = false }
 azalea-crypto = "0.16"
 azalea-auth = "0.16"
 azalea-entity = "0.16"
