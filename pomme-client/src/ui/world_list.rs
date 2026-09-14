@@ -13,6 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use super::text_edit::floor_char_boundary;
+
 const SIDECAR: &str = "pomme_level.json";
 const MAX_FILE_NAME: usize = 255;
 
@@ -65,7 +67,7 @@ impl WorldList {
     /// Reads every save under `saves_dir`, most recently played first.
     /// Directories without a readable sidecar are skipped.
     pub fn scan(saves_dir: &Path) -> Self {
-        let mut worlds: Vec<WorldSummary> = std::fs::read_dir(saves_dir)
+        let worlds = std::fs::read_dir(saves_dir)
             .into_iter()
             .flatten() // a missing saves directory is simply no worlds
             .filter_map(Result::ok)
@@ -79,16 +81,21 @@ impl WorldList {
                 Some(summary)
             })
             .collect();
-        // Vanilla `LevelSummary::compareTo`.
-        worlds.sort_by(|a, b| {
+        let mut list = Self {
+            worlds,
+            saves_dir: saves_dir.to_path_buf(),
+        };
+        list.sort();
+        list
+    }
+
+    /// Vanilla `LevelSummary::compareTo`.
+    fn sort(&mut self) {
+        self.worlds.sort_by(|a, b| {
             b.last_played
                 .cmp(&a.last_played)
                 .then_with(|| a.folder.cmp(&b.folder))
         });
-        Self {
-            worlds,
-            saves_dir: saves_dir.to_path_buf(),
-        }
     }
 
     pub fn get(&self, folder: &str) -> Option<&WorldSummary> {
@@ -112,7 +119,7 @@ impl WorldList {
             base = stem;
             count = n;
         }
-        truncate_to(&mut base, MAX_FILE_NAME);
+        base.truncate(floor_char_boundary(&base, MAX_FILE_NAME));
 
         loop {
             let candidate = if count == 0 {
@@ -120,7 +127,7 @@ impl WorldList {
             } else {
                 let suffix = format!(" ({count})");
                 let mut stem = base.clone();
-                truncate_to(&mut stem, MAX_FILE_NAME - suffix.len());
+                stem.truncate(floor_char_boundary(&stem, MAX_FILE_NAME - suffix.len()));
                 stem + &suffix
             };
             if !self.saves_dir.join(&candidate).exists() {
@@ -136,11 +143,11 @@ impl WorldList {
         let dir = self.saves_dir.join(&summary.folder);
         std::fs::create_dir_all(&dir)?;
         self.save(&summary)?;
-        self.worlds.insert(0, summary);
+        self.worlds.push(summary);
+        self.sort();
         Ok(dir)
     }
 
-    /// Changes the display name only, leaving the directory alone.
     pub fn rename(&mut self, folder: &str, new_name: &str) -> std::io::Result<()> {
         self.update(folder, |w| w.name = new_name.trim().to_owned())
     }
@@ -207,19 +214,6 @@ fn split_counter(name: &str) -> Option<(String, u32)> {
     let stem = name.strip_suffix(')')?;
     let (stem, digits) = stem.rsplit_once(" (")?;
     Some((stem.to_owned(), digits.parse().ok()?))
-}
-
-/// Truncates on a character boundary, since a name can hold any UTF-8 the
-/// sanitiser left alone.
-fn truncate_to(name: &mut String, max: usize) {
-    if name.len() <= max {
-        return;
-    }
-    let mut end = max;
-    while !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    name.truncate(end);
 }
 
 #[cfg(test)]

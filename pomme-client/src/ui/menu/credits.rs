@@ -159,8 +159,9 @@ impl MainMenu {
         sh: f32,
         input: &MenuInput,
     ) -> MainMenuResult {
+        let back = self.settings_back.clone_screen();
         if input.escape {
-            self.set_screen(Screen::Options);
+            self.set_screen(back);
             return empty_result(2.0);
         }
 
@@ -222,7 +223,7 @@ impl MainMenu {
             cx,
             gs,
         ) {
-            self.set_screen(Screen::Options);
+            self.set_screen(back);
         }
         self.finish_focus(&ctx);
 

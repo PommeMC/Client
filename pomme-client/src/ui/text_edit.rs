@@ -549,7 +549,7 @@ fn prev_char_boundary(s: &str, idx: usize) -> usize {
     idx - s[..idx].chars().next_back().unwrap().len_utf8()
 }
 
-fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+pub(crate) fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
     if idx >= s.len() {
         return s.len();
     }

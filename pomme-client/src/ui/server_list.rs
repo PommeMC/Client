@@ -135,8 +135,8 @@ async fn ping_server(
     generation: PingGeneration,
     spawned_gen: u64,
 ) {
+    use azalea_protocol::packets::status::ClientboundStatusPacket;
     use azalea_protocol::packets::status::s_ping_request::ServerboundPingRequest;
-    use azalea_protocol::packets::status::{ClientboundStatusPacket, ServerboundStatusPacket};
 
     let result = async {
         use azalea_protocol::address::ServerAddr;
@@ -155,11 +155,9 @@ async fn ping_server(
             .unwrap_or_default()
             .as_millis() as u64;
 
-        conn.write_packet(&ServerboundStatusPacket::PingRequest(
-            ServerboundPingRequest { time },
-        ))
-        .await
-        .map_err(|e| format!("Ping request failed: {e}"))?;
+        conn.write_packet(ServerboundPingRequest { time })
+            .await
+            .map_err(|e| format!("Ping request failed: {e}"))?;
 
         let _ = conn
             .read_packet::<ClientboundStatusPacket>()

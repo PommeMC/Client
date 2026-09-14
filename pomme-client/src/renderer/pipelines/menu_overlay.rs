@@ -906,6 +906,21 @@ impl MenuOverlayPipeline {
                         push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale, *shadow);
                     }
                 }
+                MenuElement::McTextRotated {
+                    x,
+                    y,
+                    pivot,
+                    rotation,
+                    spans,
+                    scale,
+                    shadow,
+                } => {
+                    if let Some(ref gm) = self.mc_glyph_map {
+                        let start = vertices.len();
+                        push_mc_text(&mut vertices, gm, *x, *y, spans, *scale, *shadow);
+                        rotate_verts(&mut vertices[start..], *pivot, *rotation);
+                    }
+                }
                 MenuElement::GradientRect {
                     x,
                     y,
@@ -1692,6 +1707,18 @@ pub enum MenuElement {
         centered: bool,
         shadow: bool,
     },
+    /// Vanilla `SplashRenderer`: text laid out unrotated from `(x, y)`, then
+    /// spun about `pivot` (radians, clockwise on screen like vanilla's
+    /// `Matrix3x2f.rotate`).
+    McTextRotated {
+        x: f32,
+        y: f32,
+        pivot: (f32, f32),
+        rotation: f32,
+        spans: Vec<TextSpan>,
+        scale: f32,
+        shadow: bool,
+    },
     TiledImage {
         x: f32,
         y: f32,
@@ -1957,6 +1984,11 @@ pub enum SpriteId {
     Unreachable,
     SteveHead,
     PommeLogo,
+    MinecraftLogo,
+    MinecraftEdition,
+    IconFriends,
+    IconLanguage,
+    IconAccessibility,
     FriendsBackground,
     FriendsTab,
     FriendsTabDisabled,
@@ -2045,6 +2077,18 @@ const SPRITE_PAD: u32 = 1;
 /// conformant device without querying it. The GUI sprites pack into a fraction
 /// of it, so the cap is never binding in practice.
 const MAX_SPRITE_ATLAS_SIZE: u32 = 4096;
+
+/// Spins already-built vertices about a screen-space pivot. Every quad the
+/// pipeline emits is axis-aligned, so rotation is applied after the fact
+/// rather than threaded through each push helper.
+fn rotate_verts(verts: &mut [Vertex], pivot: (f32, f32), rotation: f32) {
+    let (sin, cos) = rotation.sin_cos();
+    for v in verts {
+        let dx = v.pos[0] - pivot.0;
+        let dy = v.pos[1] - pivot.1;
+        v.pos = [pivot.0 + dx * cos - dy * sin, pivot.1 + dx * sin + dy * cos];
+    }
+}
 
 /// Downscales a straight-alpha sprite, filtering it premultiplied so the
 /// transparent border's black stays out of the edge texels' colour. The atlas
@@ -2536,6 +2580,22 @@ fn build_sprite_atlas(
             SpriteId::FriendsBackground,
             "minecraft/textures/gui/sprites/friends/background.png",
             8.0,
+        ),
+        // `CommonButtons` icons for the title screen's bottom row.
+        (
+            SpriteId::IconFriends,
+            "minecraft/textures/gui/sprites/friends/friends.png",
+            0.0,
+        ),
+        (
+            SpriteId::IconLanguage,
+            "minecraft/textures/gui/sprites/icon/language.png",
+            0.0,
+        ),
+        (
+            SpriteId::IconAccessibility,
+            "minecraft/textures/gui/sprites/icon/accessibility.png",
+            0.0,
         ),
         (
             SpriteId::FriendsTab,
@@ -3093,6 +3153,40 @@ fn build_sprite_atlas(
                         images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
                     }
                 }
+            }
+        }
+    }
+
+    // `LogoRenderer` blits only the top 44/64 of minecraft.png and 14/16 of
+    // edition.png. The files are supersampled and packs may use any size, so
+    // crop by fraction; a row-major prefix is contiguous, so it's a truncate.
+    for (id, asset_key, logical_h, used_h) in [
+        (
+            SpriteId::MinecraftLogo,
+            "minecraft/textures/gui/title/minecraft.png",
+            64u32,
+            44u32,
+        ),
+        (
+            SpriteId::MinecraftEdition,
+            "minecraft/textures/gui/title/edition.png",
+            16,
+            14,
+        ),
+    ] {
+        let path = resolve_asset_path(jar_assets_dir, asset_index, asset_key);
+        match crate::assets::load_image(&path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (w, h) = (rgba.width(), rgba.height());
+                let used = (h * used_h).div_ceil(logical_h).min(h);
+                let mut raw = rgba.into_raw();
+                raw.truncate((w * used * 4) as usize);
+                images.push((id, raw, w, used, 0.0));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load title sprite {asset_key}: {e}");
+                images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
             }
         }
     }

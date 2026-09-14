@@ -141,7 +141,15 @@ pub async fn connect_to_server(
             negotiate_wire_version(&server_addr, protocol).await?;
             super::resolve::connect(&server_addr, ClientIntention::Login).await?
         }
-        Transport::Memory(end) => open_integrated(end).await?,
+        Transport::Memory(end) => {
+            // An integrated server speaks the latest protocol, so there is
+            // nothing to probe and translation stays inert for the session.
+            adopt_wire_protocol(pomme_protocol::version::LATEST.protocol);
+            let mut conn = Conn::from_memory(end);
+            super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
+                .await?;
+            conn
+        }
     };
 
     let hello = ServerboundLoginPacket::Hello(ServerboundHello {
@@ -171,10 +179,7 @@ pub async fn connect_to_server(
     // login packet rather than in registry_data packets.
     let no_config = super::translate::active().is_some_and(|t| t.no_config_phase());
     if !no_config {
-        conn.write_packet(&ServerboundLoginPacket::LoginAcknowledged(
-            ServerboundLoginAcknowledged {},
-        ))
-        .await?;
+        conn.write_packet(ServerboundLoginAcknowledged {}).await?;
     }
 
     let joined = if no_config {
@@ -212,17 +217,6 @@ pub async fn connect_to_server(
         view_distance,
     )
     .await
-}
-
-/// Opens the connection to an integrated server. It speaks the latest protocol
-/// by definition, so there is nothing to probe and translation stays inert for
-/// the session.
-async fn open_integrated(end: MemoryEnd) -> Result<Conn, ConnectionError> {
-    adopt_wire_protocol(pomme_protocol::version::LATEST.protocol);
-
-    let mut conn = Conn::from_memory(end);
-    super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login).await?;
-    Ok(conn)
 }
 
 /// What the phases before the game loop produced.
@@ -383,12 +377,12 @@ async fn login_sequence(
                 return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
             }
             ClientboundLoginPacket::CookieRequest(p) => {
-                conn.write_packet(&ServerboundLoginPacket::CookieResponse(
+                conn.write_packet(
                     azalea_protocol::packets::login::s_cookie_response::ServerboundCookieResponse {
                         key: p.key,
                         payload: None,
                     },
-                ))
+                )
                 .await?;
             }
             _ => {
@@ -415,43 +409,30 @@ async fn handle_encryption(
         })?;
 
         tracing::info!("Authenticating with session server (uuid: {uuid})");
-        join_session_server(access_token, uuid, e.secret_key, hello)
-            .await
-            .map_err(|e| ConnectionError::Auth(e.to_string()))?;
+        azalea_auth::sessionserver::join(azalea_auth::sessionserver::SessionServerJoinOpts {
+            access_token,
+            public_key: &hello.public_key,
+            private_key: &e.secret_key,
+            uuid,
+            server_id: &hello.server_id,
+            proxy: None,
+        })
+        .await
+        .map_err(|e| ConnectionError::Auth(e.to_string()))?;
         tracing::info!("Session server authentication successful");
     } else {
         tracing::info!("Server does not require authentication");
     }
 
-    conn.write_packet(&ServerboundLoginPacket::Key(ServerboundKey {
+    conn.write_packet(ServerboundKey {
         key_bytes: e.encrypted_public_key,
         encrypted_challenge: e.encrypted_challenge,
-    }))
+    })
     .await?;
 
     conn.set_encryption_key(e.secret_key);
     tracing::info!("Encryption enabled");
     Ok(())
-}
-
-/// Proves ownership of the account to Mojang so the server can verify the join.
-/// Not a method on [`Conn`]: it is an HTTPS call and touches no connection
-/// state.
-async fn join_session_server(
-    access_token: &str,
-    uuid: &uuid::Uuid,
-    private_key: [u8; 16],
-    hello: &ClientboundHello,
-) -> Result<(), azalea_auth::sessionserver::ClientSessionServerError> {
-    azalea_auth::sessionserver::join(azalea_auth::sessionserver::SessionServerJoinOpts {
-        access_token,
-        public_key: &hello.public_key,
-        private_key: &private_key,
-        uuid,
-        server_id: &hello.server_id,
-        proxy: None,
-    })
-    .await
 }
 
 async fn config_sequence(
@@ -934,7 +915,7 @@ async fn write_config_packet(
     packet: ServerboundConfigPacket,
 ) -> Result<(), ConnectionError> {
     let Some(t) = super::translate::active().filter(|t| t.translates_config()) else {
-        return Ok(conn.write_packet(&packet).await?);
+        return Ok(conn.write_packet(packet).await?);
     };
     if let Some(frame) = t.translate_outbound_config_frame(serialize_frame(&packet)?) {
         conn.writer.write(&frame).await?;
@@ -1023,13 +1004,11 @@ mod tests {
     async fn joins_an_integrated_server_over_the_pipe() {
         use azalea_auth::game_profile::GameProfile;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
-        use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
-        use azalea_protocol::packets::login::ClientboundLoginPacket;
         use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
         use uuid::Uuid;
 
-        use crate::net::conn::{Conn, memory_pipes};
+        use crate::net::conn::memory_pipes;
 
         /// The next packet the client sent, in whichever phase the caller
         /// names.
@@ -1069,12 +1048,10 @@ mod tests {
             ServerboundLoginPacket::Hello(p) if p.name == "Steve"
         ));
 
-        peer.write_packet(&ClientboundLoginPacket::LoginFinished(
-            ClientboundLoginFinished {
-                game_profile: GameProfile::new(Uuid::nil(), "Steve".to_owned()),
-                session_id: Uuid::nil(),
-            },
-        ))
+        peer.write_packet(ClientboundLoginFinished {
+            game_profile: GameProfile::new(Uuid::nil(), "Steve".to_owned()),
+            session_id: Uuid::nil(),
+        })
         .await
         .unwrap();
 
@@ -1091,11 +1068,9 @@ mod tests {
             ServerboundConfigPacket::ClientInformation(p) if p.information.view_distance == 8
         ));
 
-        peer.write_packet(&ClientboundConfigPacket::FinishConfiguration(
-            ClientboundFinishConfiguration,
-        ))
-        .await
-        .unwrap();
+        peer.write_packet(ClientboundFinishConfiguration)
+            .await
+            .unwrap();
 
         assert!(matches!(
             sent(&mut peer).await,

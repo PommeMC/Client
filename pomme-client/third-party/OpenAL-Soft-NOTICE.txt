@@ -1,0 +1,9 @@
+OpenAL Soft 1.25.1
+
+Pomme release archives bundle the unmodified OpenAL Soft native library shipped
+with Minecraft 26.2's LWJGL OpenAL 3.4.1 natives. OpenAL Soft source for this
+version is available from the upstream 1.25.1 tag:
+https://github.com/kcat/openal-soft/tree/1.25.1
+
+OpenAL Soft is licensed under the GNU Library General Public License version 2;
+see OpenAL-Soft-LICENSE.txt.

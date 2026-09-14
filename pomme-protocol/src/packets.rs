@@ -283,6 +283,18 @@ mod tests {
             Some(115)
         );
         assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "sound_entity"),
+            Some(116)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "sound"),
+            Some(117)
+        );
+        assert_eq!(
+            t.id(Phase::Game, Direction::Clientbound, "stop_sound"),
+            Some(119)
+        );
+        assert_eq!(
             t.id(Phase::Handshake, Direction::Serverbound, "intention"),
             Some(0)
         );

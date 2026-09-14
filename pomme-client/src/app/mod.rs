@@ -192,6 +192,7 @@ impl ApplicationHandler for App {
                     &self.core.asset_index,
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
+                    &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
                 ) {
                     Ok(r) => r,
                     Err(e) => {
@@ -331,13 +332,7 @@ impl ApplicationHandler for App {
                             if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                             {
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut self.core.presence {
-                                    p.set_in_menu(&self.core.version);
-                                }
-
-                                self.core.apply_cursor_grab(&gfx.window, None);
+                                self.core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu {
                                     gfx,
@@ -624,23 +619,13 @@ impl ApplicationHandler for App {
                                 game,
                             },
                             ConnectingUpdateResult::ManualDisconnect => {
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu { gfx, panorama }
                             }
                             ConnectingUpdateResult::Disconnected { reason } => {
-                                gfx.renderer.clear_chunk_meshes();
                                 core.menu.show_disconnect(reason);
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu { gfx, panorama }
                             }
@@ -676,12 +661,8 @@ impl ApplicationHandler for App {
                                 game,
                             },
                             GameUpdateResult::ManualDisconnect => {
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.audio.stop_all_sounds();
+                                core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu {
                                     gfx,
@@ -689,13 +670,9 @@ impl ApplicationHandler for App {
                                 }
                             }
                             GameUpdateResult::Disconnected { reason } => {
-                                gfx.renderer.clear_chunk_meshes();
+                                core.audio.stop_all_sounds();
                                 core.menu.show_disconnect(reason);
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.return_to_menu(&mut gfx);
 
                                 AppPhase::InMenu {
                                     gfx,
