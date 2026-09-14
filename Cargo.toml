@@ -6,9 +6,12 @@ members = [
     "pomme-gpu-allocator",
     "pomme-block",
     "pomme-protocol",
+    "pomme-singleplayer",
     "tools/blockgen",
     "tools/protogen"
 ]
+# Steel is its own workspace; pomme-singleplayer reaches into it by path.
+exclude = ["third_party/SteelMC"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -58,3 +61,16 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Mirrors steel's own dev overrides. Its workspace profile does not apply when
+# pomme is the root, and without these worldgen is unusably slow and the density
+# functions overflow-panic.
+[profile.dev.package.steel-worldgen]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.steel-math]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false

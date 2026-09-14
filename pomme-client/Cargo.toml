@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 
+[features]
+default = ["singleplayer"]
+# Embeds SteelMC as the integrated server. Off, the world screens still list and
+# edit saves but nothing can open one.
+singleplayer = ["dep:pomme-singleplayer"]
+
 [build-dependencies]
 shaderc = "0.10"
 
@@ -29,6 +35,7 @@ tracing-appender = "0.2"
 mimalloc = "0.1"
 pomme-gpu-allocator = { path = "../pomme-gpu-allocator" }
 pomme-protocol = { path = "../pomme-protocol" }
+pomme-singleplayer = { path = "../pomme-singleplayer", optional = true }
 winit = { version = "0.30", features = ["rwh_06"] }
 raw-window-handle = "0.6"
 glam = { workspace = true }

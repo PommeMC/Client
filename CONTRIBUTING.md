@@ -8,9 +8,15 @@ Thanks for your interest in contributing to Pomme!
 2. Clone your fork and set up the development environment:
 
    ```bash
-   git clone https://github.com/<your-username>/Pomme.git
+   git clone --recurse-submodules https://github.com/<your-username>/Pomme.git
    cd Pomme
    ```
+
+   SteelMC is a submodule and the client builds it by default for singleplayer.
+   On an existing clone, `git submodule update --init` fetches it. Its first
+   build downloads the Minecraft server jar and generates registry source, so
+   expect that one to take a while. `cargo build -p pomme-client
+   --no-default-features` skips it entirely.
 
 3. Build and run:
 
@@ -63,7 +69,9 @@ For bug fixes, also include:
 Pomme/
 ├── pomme-client            # Minecraft client (Vulkan, Rust)
 ├── pomme-gpu-allocator     # Port of gpu-allocator, required by the client (Vulkan, Rust)
-└── pomme-launcher          # Launcher app (Tauri, React, TypeScript)
+├── pomme-singleplayer      # Runs SteelMC in-process as the integrated server
+├── pomme-launcher          # Launcher app (Tauri, React, TypeScript)
+└── third_party/SteelMC     # SteelMC submodule (AGPL-3.0-or-later)
 ```
 
 ### Pomme client
