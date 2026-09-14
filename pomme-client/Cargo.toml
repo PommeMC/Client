@@ -57,6 +57,7 @@ simdnbt = "0.10"
 discord-rich-presence = "1.1"
 arboard = { version = "3", features = ["wayland-data-control"] }
 scopeguard = "1.2"
-rodio = "0.22"
+libloading = "0.8"
+symphonia = { version = "0.5.5", default-features = false, features = ["ogg", "vorbis"] }
 fastrand = "2"
 gilrs = "0.11.2"

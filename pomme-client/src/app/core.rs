@@ -12,8 +12,8 @@ use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window};
 
 use crate::app::input::{Action, InputState, STICK_MOVEMENT_THRESHOLD};
-use crate::app::phases::ConnectionPhase;
 use crate::app::phases::in_game::GameState;
+use crate::app::phases::{ConnectionPhase, Gfx};
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
 use crate::assets::AssetIndex;
 use crate::dirs::DataDirs;
@@ -266,7 +266,7 @@ impl AppCore {
     ) -> Self {
         let resource_packs = ResourcePackManager::new(&data_dirs.game_dir);
 
-        let menu = MainMenu::new(
+        let mut menu = MainMenu::new(
             &data_dirs.game_dir,
             Arc::clone(&tokio_rt),
             user.username.clone(),
@@ -279,9 +279,12 @@ impl AppCore {
         let asset_index =
             AssetIndex::load(&data_dirs.indexes_dir, &data_dirs.objects_dir, &version);
 
+        menu.load_splash(&data_dirs.jar_assets_dir, &asset_index);
+
         let audio = crate::audio::AudioEngine::new(
             &data_dirs.jar_assets_dir,
             asset_index.clone(),
+            &resource_packs,
             menu.category_volumes(),
         );
         let (player_skin_tx, player_skin_rx) = crossbeam_channel::unbounded();
@@ -358,6 +361,19 @@ impl AppCore {
         } else {
             self.release_cursor(window);
         }
+    }
+
+    /// Every return from a world or server, before the title screen shows.
+    /// Vanilla builds a fresh `TitleScreen` here, which rolls a new splash.
+    pub fn return_to_menu(&mut self, gfx: &mut Gfx) {
+        self.clear_server_resource_packs(&mut gfx.renderer);
+        gfx.renderer.clear_chunk_meshes();
+        if let Some(p) = &mut self.presence {
+            p.set_in_menu(&self.version);
+        }
+        self.apply_cursor_grab(&gfx.window, None);
+        self.menu
+            .load_splash(&self.data_dirs.jar_assets_dir, &self.asset_index);
     }
 
     /// Releases the cursor and warps it to the window center, like vanilla
@@ -481,6 +497,24 @@ impl AppCore {
         self.player_faces.clear();
         self.player_faces_dirty = false;
         renderer.clear_player_entity_skins();
+    }
+
+    pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
+        if self.resource_packs.clear_server_packs() {
+            self.reload_pack_assets(renderer);
+        }
+    }
+
+    /// Rebuilds every asset a pack can override. Only call this once the
+    /// active stack has really changed: it waits for device idle, drops the
+    /// block cache and rebuilds the texture atlas. Clearing
+    /// `menu.reload_assets` is safe here because the pending local-pack toggle
+    /// it stands for is covered by the reload we just did.
+    fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
+        self.menu.active_packs = self.resource_packs.active_pack_info();
+        renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
+        self.audio.reload_assets(&self.resource_packs);
+        self.menu.reload_assets = false;
     }
 
     pub fn drain_network_events(
@@ -1066,14 +1100,26 @@ impl AppCore {
                     pitch,
                     seed,
                 } => {
+                    if game.silent_entities.contains(&entity_id) {
+                        continue;
+                    }
                     let pos = (entity_id == game.player.entity_id)
-                        .then_some(game.player.position + dvec3(0.0, 1.0, 0.0))
-                        .or_else(|| game.entity_store.living.get(&entity_id).map(|e| e.position));
+                        .then_some(game.player.position)
+                        .or_else(|| game.entity_positions.get(&entity_id).copied());
 
                     if let Some(pos) = pos {
-                        self.audio
-                            .play_world_sound(&sound, category, pos, volume, pitch, seed);
+                        self.audio.play_entity_sound(
+                            &sound,
+                            category,
+                            crate::audio::EntitySoundTarget { id: entity_id, pos },
+                            volume,
+                            pitch,
+                            seed,
+                        );
                     }
+                }
+                NetworkEvent::StopSound { sound_id, category } => {
+                    self.audio.stop_sounds(sound_id.as_deref(), category);
                 }
                 NetworkEvent::GameModeChanged {
                     game_mode,
@@ -1197,6 +1243,8 @@ impl AppCore {
                     x_rot_deg,
                     head_y_rot_deg,
                 } => {
+                    game.entity_positions.insert(id, position);
+                    game.silent_entities.remove(&id);
                     if crate::entity::is_living_mob(&entity_type) {
                         let player_uuid = (entity_type
                             == azalea_registry::builtin::EntityKind::Player)
@@ -1232,6 +1280,10 @@ impl AppCore {
                     game.entity_store
                         .move_living_delta(id, dx, dy, dz, on_ground);
                     game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                    if let Some(pos) = game.entity_positions.get_mut(&id) {
+                        *pos += dvec3(dx, dy, dz);
+                        self.audio.update_entity_sound_position(id, *pos);
+                    }
                 }
                 NetworkEvent::EntityMovedRotated {
                     id,
@@ -1247,6 +1299,10 @@ impl AppCore {
                     game.entity_store
                         .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                     game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
+                    if let Some(pos) = game.entity_positions.get_mut(&id) {
+                        *pos += dvec3(dx, dy, dz);
+                        self.audio.update_entity_sound_position(id, *pos);
+                    }
                 }
                 NetworkEvent::EntityRotated {
                     id,
@@ -1277,6 +1333,8 @@ impl AppCore {
                     }
                     game.item_entity_store
                         .teleport(id, position, velocity, on_ground);
+                    game.entity_positions.insert(id, position);
+                    self.audio.update_entity_sound_position(id, position);
                 }
                 NetworkEvent::LevelEvent {
                     event_type,
@@ -1330,6 +1388,9 @@ impl AppCore {
                         {
                             self.remove_player_skin(renderer, &uuid);
                         }
+                        game.entity_positions.remove(id);
+                        game.silent_entities.remove(id);
+                        self.audio.stop_entity_sounds(*id);
                     }
                     game.item_entity_store.remove(&ids);
                     if game.controlled_vehicle_id.is_some_and(|v| ids.contains(&v)) {
@@ -1364,6 +1425,16 @@ impl AppCore {
                     );
                 }
                 NetworkEvent::EntityData { id, index, value } => {
+                    if index == 4
+                        && let crate::entity::MetaValue::Bool(silent) = &value
+                    {
+                        if *silent {
+                            game.silent_entities.insert(id);
+                            self.audio.stop_entity_sounds(id);
+                        } else {
+                            game.silent_entities.remove(&id);
+                        }
+                    }
                     game.entity_store.apply_entity_data(id, index, value);
                 }
                 NetworkEvent::EntityPose { id, is_crouching } => {
@@ -1455,7 +1526,7 @@ impl AppCore {
                     {
                         // Vanilla plays this client-side in handleTakeItemEntity.
                         self.audio.play_world_sound(
-                            &crate::audio::SoundRef::Event("entity.item.pickup".to_string()),
+                            &crate::audio::SoundRef::event("entity.item.pickup"),
                             crate::audio::CATEGORY_PLAYERS,
                             item_pos,
                             0.2,
@@ -1521,18 +1592,22 @@ impl AppCore {
                     });
                 }
                 NetworkEvent::ResourcePackPop { id } => {
-                    if let Some(id) = id {
-                        self.resource_packs.remove_server_pack(&id);
-                    } else {
-                        self.resource_packs.clear_server_packs();
+                    // A server may pop an id it already popped, or never pushed.
+                    let removed = match id {
+                        Some(id) => self.resource_packs.remove_server_pack(&id),
+                        None => self.resource_packs.clear_server_packs(),
+                    };
+                    if removed {
+                        self.reload_pack_assets(renderer);
                     }
-                    self.menu.active_packs = self.resource_packs.active_pack_info();
-                    self.menu.reload_assets = true;
                 }
                 NetworkEvent::Reconfiguring => {
                     tracing::info!("Server re-entered configuration");
+                    self.audio.stop_all_sounds();
                     game.entity_store = crate::entity::EntityStore::new();
                     game.item_entity_store = crate::entity::ItemEntityStore::new();
+                    game.entity_positions.clear();
+                    game.silent_entities.clear();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
                     self.clear_server_ui(game, renderer);
@@ -1597,7 +1672,8 @@ impl AppCore {
                     self.resource_packs
                         .apply_server_pack(pending.id, &pending.hash);
                     tracing::info!("Resource pack {} loaded successfully", pending.id);
-                    self.menu.reload_assets = true;
+                    // `apply_server_pack` always changes the stack.
+                    self.reload_pack_assets(renderer);
                     s_resource_pack::Action::SuccessfullyLoaded
                 }
             };
