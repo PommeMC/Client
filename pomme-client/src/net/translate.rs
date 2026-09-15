@@ -3002,17 +3002,12 @@ fn translate_resource_pack_response_764(old_id: u32, payload: &[u8]) -> Vec<Vec<
 fn translate_projectile_power_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     let entity = varint_span(&mut cur)?;
-    let at = cur.position() as usize;
-    let mut sq = 0.0f64;
-    for i in 0..3 {
-        let c = f64::from_be_bytes(payload.get(at + i * 8..at + i * 8 + 8)?.try_into().ok()?);
-        sq += c * c;
-    }
+    let magnitude = DVec3::from_array(read_f64s(&mut cur)?).length();
 
     let mut out = Vec::with_capacity(16);
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[entity]);
-    out.extend_from_slice(&sq.sqrt().to_be_bytes());
+    out.extend_from_slice(&magnitude.to_be_bytes());
     Some(out)
 }
 

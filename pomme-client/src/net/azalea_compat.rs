@@ -1072,6 +1072,18 @@ fn write_velocity_shorts(out: &mut Vec<u8>) {
     }
 }
 
+fn write_doubles(out: &mut Vec<u8>, values: impl IntoIterator<Item = f64>) {
+    for v in values {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+}
+
+fn write_floats(out: &mut Vec<u8>, values: impl IntoIterator<Item = f32>) {
+    for v in values {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+}
+
 /// Compares within the `LpVec3` quantization error.
 fn assert_velocity(v: azalea_core::position::Vec3) {
     for (got, expected) in [v.x, v.y, v.z].into_iter().zip(VELOCITY_772) {
@@ -3335,14 +3347,8 @@ fn translate_entity_position_sync_777() {
         on_ground: true,
     });
     let frame = azalea_protocol::write::serialize_packet(&packet).unwrap();
-    let vec3 = |out: &mut Vec<u8>, v: [f64; 3]| {
-        for c in v {
-            out.extend_from_slice(&c.to_be_bytes());
-        }
-    };
     let finish = |old: &mut Vec<u8>| {
-        old.extend_from_slice(&90f32.to_be_bytes());
-        old.extend_from_slice(&(-10f32).to_be_bytes());
+        write_floats(old, [90.0, -10.0]);
         old.push(1);
     };
     let head = || {
@@ -3357,14 +3363,14 @@ fn translate_entity_position_sync_777() {
 
     let mut linear = head();
     wire::write_varint(&mut linear, 0);
-    vec3(&mut linear, [1.0, 65.0, -2.0]);
+    write_doubles(&mut linear, [1.0, 65.0, -2.0]);
     finish(&mut linear);
     let mut stepped = head();
     wire::write_varint(&mut stepped, 1);
     wire::write_varint(&mut stepped, 2);
-    vec3(&mut stepped, [0.0, 64.0, 0.0]);
+    write_doubles(&mut stepped, [0.0, 64.0, 0.0]);
     wire::write_varint(&mut stepped, 1);
-    vec3(&mut stepped, [1.0, 65.0, -2.0]);
+    write_doubles(&mut stepped, [1.0, 65.0, -2.0]);
     wire::write_varint(&mut stepped, 2);
     finish(&mut stepped);
     for old in [linear, stepped] {
@@ -3389,9 +3395,7 @@ fn translate_explode_777() {
     let build = |id, table, play_sound: Option<u8>| {
         let mut out = Vec::new();
         wire::write_varint(&mut out, id);
-        for c in [1.0f64, 65.0, -2.0] {
-            out.extend_from_slice(&c.to_be_bytes());
-        }
+        write_doubles(&mut out, [1.0, 65.0, -2.0]);
         out.extend_from_slice(&4f32.to_be_bytes()); // radius
         out.extend_from_slice(&12i32.to_be_bytes()); // block count
         out.push(0); // no knockback
@@ -3555,12 +3559,8 @@ fn translate_level_particles_777() {
     let particle = |name| registry_id(old_table, ClientRegistry::ParticleType, name);
     let body = |out: &mut Vec<u8>| {
         out.extend_from_slice(&[1, 0]); // override limiter, always show
-        for c in [1.0f64, 65.0, -2.0] {
-            out.extend_from_slice(&c.to_be_bytes());
-        }
-        for c in [0.5f32, 0.25, 0.125] {
-            out.extend_from_slice(&c.to_be_bytes());
-        }
+        write_doubles(out, [1.0, 65.0, -2.0]);
+        write_floats(out, [0.5, 0.25, 0.125]);
     };
     let build = |particle: &[u8]| {
         let mut old = Vec::new();
@@ -3570,9 +3570,7 @@ fn translate_level_particles_777() {
         );
         old.extend_from_slice(particle);
         body(&mut old);
-        for c in [0.1f32, 0.2, 0.3] {
-            old.extend_from_slice(&c.to_be_bytes());
-        }
+        write_floats(&mut old, [0.1, 0.2, 0.3]);
         wire::write_varint(&mut old, 12); // count
         wire::write_varint(&mut old, 0); // default randomization
         old
@@ -3763,9 +3761,7 @@ fn translate_outbound_777() {
     }
 
     let mut moved = Vec::new();
-    for c in [10.0f64, 20.0, 30.0] {
-        moved.extend_from_slice(&c.to_be_bytes());
-    }
+    write_doubles(&mut moved, [10.0, 20.0, 30.0]);
     moved.push(1); // on ground
     assert_eq!(
         t.translate_outbound_game_frame(frame(sb("move_player_pos"), &moved)),
@@ -3773,12 +3769,9 @@ fn translate_outbound_777() {
     );
     let mut teleport = Vec::new();
     wire::write_varint(&mut teleport, 9);
-    for c in [1.0f64, 2.0, 3.0] {
-        teleport.extend_from_slice(&c.to_be_bytes());
-    }
+    write_doubles(&mut teleport, [1.0, 2.0, 3.0]);
     teleport.extend_from_slice(&[0; 24]);
-    teleport.extend_from_slice(&4f32.to_be_bytes());
-    teleport.extend_from_slice(&5f32.to_be_bytes());
+    write_floats(&mut teleport, [4.0, 5.0]);
     teleport.extend_from_slice(&0b111i32.to_be_bytes()); // x, y, z relative
     let teleport = frame(
         old_id(777, Direction::Clientbound, "player_position"),
@@ -3791,11 +3784,8 @@ fn translate_outbound_777() {
 
     let mut expected = Vec::new();
     wire::write_varint(&mut expected, 9);
-    for c in [11.0f64, 22.0, 33.0] {
-        expected.extend_from_slice(&c.to_be_bytes());
-    }
-    expected.extend_from_slice(&4f32.to_be_bytes());
-    expected.extend_from_slice(&5f32.to_be_bytes());
+    write_doubles(&mut expected, [11.0, 22.0, 33.0]);
+    write_floats(&mut expected, [4.0, 5.0]);
     let mut accept = Vec::new();
     wire::write_varint(&mut accept, 9);
     assert_eq!(
