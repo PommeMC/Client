@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{packing, shader, util};
-use crate::ui::font::GlyphMap;
+use crate::ui::font::{FontSources, GlyphMap};
 use crate::ui::text::TextSpan;
 
 const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
@@ -164,6 +165,15 @@ fn build_font_atlas() -> FontAtlas {
 /// (40,8) composited over it) from a wide player skin. `None` if the skin is
 /// too small. Shared by the Steve-head sprite and live friend faces.
 pub(crate) fn extract_face_8x8(rgba: &[u8], sw: u32, sh: u32) -> Option<Vec<u8>> {
+    extract_face_8x8_with_hat(rgba, sw, sh, true)
+}
+
+pub(crate) fn extract_face_8x8_with_hat(
+    rgba: &[u8],
+    sw: u32,
+    sh: u32,
+    hat: bool,
+) -> Option<Vec<u8>> {
     // Skins are 64x64 (or 64x32 legacy); both have the face/hat in the top-left.
     if sw < 48 || sh < 16 {
         return None;
@@ -174,17 +184,19 @@ pub(crate) fn extract_face_8x8(rgba: &[u8], sw: u32, sh: u32) -> Option<Vec<u8>>
             let face_off = (((8 + y) * sw + (8 + x)) * 4) as usize;
             let dst = ((y * 8 + x) * 4) as usize;
             out[dst..dst + 4].copy_from_slice(&rgba[face_off..face_off + 4]);
-            // Composite hat over face (ignore fully transparent hat pixels).
-            let hat_off = (((8 + y) * sw + (40 + x)) * 4) as usize;
-            let ha = rgba[hat_off + 3];
-            if ha > 0 {
-                let a = ha as f32 / 255.0;
-                for c in 0..3 {
-                    let fg = rgba[hat_off + c] as f32;
-                    let bg = out[dst + c] as f32;
-                    out[dst + c] = (fg * a + bg * (1.0 - a)) as u8;
+            if hat {
+                // Composite hat over face (ignore fully transparent hat pixels).
+                let hat_off = (((8 + y) * sw + (40 + x)) * 4) as usize;
+                let ha = rgba[hat_off + 3];
+                if ha > 0 {
+                    let a = ha as f32 / 255.0;
+                    for c in 0..3 {
+                        let fg = rgba[hat_off + c] as f32;
+                        let bg = out[dst + c] as f32;
+                        out[dst + c] = (fg * a + bg * (1.0 - a)) as u8;
+                    }
+                    out[dst + 3] = out[dst + 3].max(ha);
                 }
-                out[dst + 3] = out[dst + 3].max(ha);
             }
         }
     }
@@ -223,7 +235,14 @@ pub struct MenuOverlayPipeline {
     mc_font_allocation: Option<Allocation>,
     mc_font_staging_buffer: vk::Buffer,
     mc_font_staging_allocation: Option<Allocation>,
+    mc_font_color_image: vk::Image,
+    mc_font_color_view: vk::ImageView,
+    mc_font_color_sampler: vk::Sampler,
+    mc_font_color_allocation: Option<Allocation>,
+    mc_font_color_staging_buffer: vk::Buffer,
+    mc_font_color_staging_allocation: Option<Allocation>,
     mc_glyph_map: Option<GlyphMap>,
+    obfuscation_rng: ObfuscationRng,
     vertex_buffer: vk::Buffer,
     vertex_allocation: Option<Allocation>,
     atlas: FontAtlas,
@@ -252,9 +271,9 @@ impl MenuOverlayPipeline {
         command_pool: vk::CommandPool,
         render_pass: vk::RenderPass,
         allocator: &Arc<Mutex<Allocator>>,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
-    ) -> Self {
+        font_sources: FontSources<'_>,
+        font_gpu_limits: FontGpuLimits,
+    ) -> Result<Self, String> {
         let atlas = build_font_atlas();
 
         let globals_layout = util::create_descriptor_set_layout(
@@ -264,7 +283,7 @@ impl MenuOverlayPipeline {
         );
 
         // One combined image sampler per menu_overlay.frag binding.
-        let tex_bindings: [vk::DescriptorSetLayoutBinding; 8] =
+        let tex_bindings: [vk::DescriptorSetLayoutBinding; 9] =
             std::array::from_fn(|binding| vk::DescriptorSetLayoutBinding {
                 binding: binding as u32,
                 descriptor_type: vk::DescriptorType::CombinedImageSampler,
@@ -390,8 +409,8 @@ impl MenuOverlayPipeline {
             queue,
             command_pool,
             allocator,
-            jar_assets_dir,
-            asset_index,
+            font_sources.jar_assets_dir,
+            font_sources.asset_index,
         );
 
         let sprite_sampler = unsafe { util::create_nearest_sampler(device) };
@@ -423,32 +442,106 @@ impl MenuOverlayPipeline {
             staging_alloc: Some(item_staging_alloc),
         });
 
-        let mc_glyph_map = GlyphMap::load(jar_assets_dir, asset_index);
-        crate::lang::load(jar_assets_dir);
-        let (
-            mc_font_image,
-            mc_font_view,
-            mc_font_alloc,
-            mc_font_staging_buffer,
-            mc_font_staging_alloc,
-        ) = if let Some(ref gm) = mc_glyph_map {
-            let (w, h) = gm.dimensions();
-            let (img, view, alloc) =
-                util::create_gpu_image(device, allocator, w, h, "mc_font_atlas");
-            let (stg_buf, stg_alloc) =
-                util::create_staging_buffer(device, allocator, gm.raw_pixels(), "mc_font_staging");
-            util::upload_image(device, queue, command_pool, stg_buf, img, w, h);
-            (img, view, Some(alloc), stg_buf, Some(stg_alloc))
+        let mc_glyph_map = GlyphMap::load(font_sources);
+        crate::lang::load(font_sources.jar_assets_dir);
+
+        let gray_upload = if let Some(ref gm) = mc_glyph_map {
+            let (width, height, layers) = gm.dimensions();
+            FontTextureUpload {
+                pixels: gm.raw_pixels(),
+                extent: util::ImageArrayExtent {
+                    width,
+                    height,
+                    layers,
+                },
+                format: vk::Format::R8Unorm,
+                image_name: "mc_font_atlas",
+                staging_name: "mc_font_staging",
+            }
         } else {
-            let (img, view, alloc) =
-                util::create_gpu_image(device, allocator, 1, 1, "mc_font_dummy");
-            let dummy = [0u8; 4];
-            let (stg_buf, stg_alloc) =
-                util::create_staging_buffer(device, allocator, &dummy, "mc_font_dummy_stg");
-            util::upload_image(device, queue, command_pool, stg_buf, img, 1, 1);
-            (img, view, Some(alloc), stg_buf, Some(stg_alloc))
+            FontTextureUpload {
+                pixels: &[0u8],
+                extent: util::ImageArrayExtent {
+                    width: 1,
+                    height: 1,
+                    layers: 1,
+                },
+                format: vk::Format::R8Unorm,
+                image_name: "mc_font_dummy",
+                staging_name: "mc_font_dummy_staging",
+            }
         };
-        let mc_font_sampler = unsafe { util::create_nearest_sampler(device) };
+        let gray_resources = create_font_texture_resources(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            font_gpu_limits,
+            gray_upload,
+        )?;
+
+        let color_upload = if let Some(ref gm) = mc_glyph_map
+            && !gm.colored_raw_pixels().is_empty()
+        {
+            let (width, height, layers) = gm.colored_dimensions();
+            FontTextureUpload {
+                pixels: gm.colored_raw_pixels(),
+                extent: util::ImageArrayExtent {
+                    width,
+                    height,
+                    layers,
+                },
+                format: MC_FONT_COLOR_FORMAT,
+                image_name: "mc_font_color_atlas",
+                staging_name: "mc_font_color_staging",
+            }
+        } else {
+            FontTextureUpload {
+                pixels: &[0u8, 0, 0, 0],
+                extent: util::ImageArrayExtent {
+                    width: 1,
+                    height: 1,
+                    layers: 1,
+                },
+                format: MC_FONT_COLOR_FORMAT,
+                image_name: "mc_font_color_dummy",
+                staging_name: "mc_font_color_dummy_staging",
+            }
+        };
+        let color_resources = match create_font_texture_resources(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            font_gpu_limits,
+            color_upload,
+        ) {
+            Ok(resources) => resources,
+            Err(error) => {
+                let mut gray_resources = gray_resources;
+                let mut alloc = allocator
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                destroy_texture_resources(device, &mut alloc, &mut gray_resources);
+                return Err(error);
+            }
+        };
+        let TextureResources {
+            sampler: mc_font_sampler,
+            image: mc_font_image,
+            view: mc_font_view,
+            image_alloc: mc_font_alloc,
+            staging_buffer: mc_font_staging_buffer,
+            staging_alloc: mc_font_staging_alloc,
+        } = gray_resources;
+        let TextureResources {
+            sampler: mc_font_color_sampler,
+            image: mc_font_color_image,
+            view: mc_font_color_view,
+            image_alloc: mc_font_color_alloc,
+            staging_buffer: mc_font_color_staging_buffer,
+            staging_alloc: mc_font_color_staging_alloc,
+        } = color_resources;
 
         let font_img_info = vk::DescriptorImageInfo {
             sampler: font_sampler,
@@ -468,6 +561,11 @@ impl MenuOverlayPipeline {
         let mc_font_img_info = vk::DescriptorImageInfo {
             sampler: mc_font_sampler,
             image_view: mc_font_view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let mc_font_color_img_info = vk::DescriptorImageInfo {
+            sampler: mc_font_color_sampler,
+            image_view: mc_font_color_view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
         };
 
@@ -510,8 +608,8 @@ impl MenuOverlayPipeline {
                 queue,
                 command_pool,
                 allocator,
-                jar_assets_dir,
-                asset_index,
+                font_sources.jar_assets_dir,
+                font_sources.asset_index,
             );
         // Both source textures ship mcmeta `blur: true`.
         let overlay_sampler = unsafe { util::create_linear_sampler(device) };
@@ -521,8 +619,8 @@ impl MenuOverlayPipeline {
             queue,
             command_pool,
             allocator,
-            jar_assets_dir,
-            asset_index,
+            font_sources.jar_assets_dir,
+            font_sources.asset_index,
             "minecraft/textures/misc/underwater.png",
             "underwater_overlay",
         );
@@ -551,6 +649,7 @@ impl MenuOverlayPipeline {
             &favicon_img_info,
             &overlay_img_info,
             &underwater_img_info,
+            &mc_font_color_img_info,
         ];
         let writes: Vec<_> = tex_image_infos
             .iter()
@@ -574,7 +673,12 @@ impl MenuOverlayPipeline {
             "menu_vertices",
         );
 
-        Self {
+        let obfuscation_seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+
+        Ok(Self {
             pipeline,
             invert_pipeline,
             pipeline_layout,
@@ -605,7 +709,14 @@ impl MenuOverlayPipeline {
             mc_font_allocation: mc_font_alloc,
             mc_font_staging_buffer,
             mc_font_staging_allocation: mc_font_staging_alloc,
+            mc_font_color_image,
+            mc_font_color_view,
+            mc_font_color_sampler,
+            mc_font_color_allocation: mc_font_color_alloc,
+            mc_font_color_staging_buffer,
+            mc_font_color_staging_allocation: mc_font_color_staging_alloc,
             mc_glyph_map,
+            obfuscation_rng: ObfuscationRng::new(obfuscation_seed),
             vertex_buffer,
             vertex_allocation: Some(vertex_allocation),
             atlas,
@@ -625,7 +736,154 @@ impl MenuOverlayPipeline {
             underwater_view,
             underwater_sampler,
             underwater_allocation: Some(underwater_alloc),
-        }
+        })
+    }
+
+    pub fn reload_minecraft_fonts(
+        &mut self,
+        device: &vk::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        allocator: &Arc<Mutex<Allocator>>,
+        font_sources: FontSources<'_>,
+        font_gpu_limits: FontGpuLimits,
+    ) -> Result<(), String> {
+        let new_map = GlyphMap::load_required(font_sources)?;
+        let (gray_width, gray_height, gray_layers) = new_map.dimensions();
+        let gray_upload = FontTextureUpload {
+            pixels: new_map.raw_pixels(),
+            extent: util::ImageArrayExtent {
+                width: gray_width,
+                height: gray_height,
+                layers: gray_layers,
+            },
+            format: vk::Format::R8Unorm,
+            image_name: "mc_font_atlas_reload",
+            staging_name: "mc_font_staging_reload",
+        };
+        let mut gray_resources = create_font_texture_resources(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            font_gpu_limits,
+            gray_upload,
+        )?;
+
+        let color_upload = if !new_map.colored_raw_pixels().is_empty() {
+            let (width, height, layers) = new_map.colored_dimensions();
+            FontTextureUpload {
+                pixels: new_map.colored_raw_pixels(),
+                extent: util::ImageArrayExtent {
+                    width,
+                    height,
+                    layers,
+                },
+                format: MC_FONT_COLOR_FORMAT,
+                image_name: "mc_font_color_atlas_reload",
+                staging_name: "mc_font_color_staging_reload",
+            }
+        } else {
+            FontTextureUpload {
+                pixels: &[0u8, 0, 0, 0],
+                extent: util::ImageArrayExtent {
+                    width: 1,
+                    height: 1,
+                    layers: 1,
+                },
+                format: MC_FONT_COLOR_FORMAT,
+                image_name: "mc_font_color_dummy_reload",
+                staging_name: "mc_font_color_dummy_staging_reload",
+            }
+        };
+        let mut color_resources = match create_font_texture_resources(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            font_gpu_limits,
+            color_upload,
+        ) {
+            Ok(resources) => resources,
+            Err(error) => {
+                let mut alloc = allocator
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                destroy_texture_resources(device, &mut alloc, &mut gray_resources);
+                return Err(error);
+            }
+        };
+
+        // Acquire every fallible dependency before publishing descriptors.
+        // After this lock succeeds, the descriptor/resource/glyph-map swap is
+        // a single no-fail transaction.
+        let mut alloc = allocator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut old = TextureResources {
+            sampler: self.mc_font_sampler,
+            image: self.mc_font_image,
+            view: self.mc_font_view,
+            image_alloc: self.mc_font_allocation.take(),
+            staging_buffer: self.mc_font_staging_buffer,
+            staging_alloc: self.mc_font_staging_allocation.take(),
+        };
+        let mut old_color = TextureResources {
+            sampler: self.mc_font_color_sampler,
+            image: self.mc_font_color_image,
+            view: self.mc_font_color_view,
+            image_alloc: self.mc_font_color_allocation.take(),
+            staging_buffer: self.mc_font_color_staging_buffer,
+            staging_alloc: self.mc_font_color_staging_allocation.take(),
+        };
+
+        let image_info = vk::DescriptorImageInfo {
+            sampler: gray_resources.sampler,
+            image_view: gray_resources.view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let color_image_info = vk::DescriptorImageInfo {
+            sampler: color_resources.sampler,
+            image_view: color_resources.view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let writes = [
+            vk::WriteDescriptorSet {
+                dst_set: self.tex_set,
+                dst_binding: 3,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: &image_info,
+                ..Default::default()
+            },
+            vk::WriteDescriptorSet {
+                dst_set: self.tex_set,
+                dst_binding: 8,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                image_info: &color_image_info,
+                ..Default::default()
+            },
+        ];
+        device.update_descriptor_sets(&writes, &[]);
+        destroy_texture_resources(device, &mut alloc, &mut old);
+        destroy_texture_resources(device, &mut alloc, &mut old_color);
+        drop(alloc);
+
+        self.mc_font_image = gray_resources.image;
+        self.mc_font_view = gray_resources.view;
+        self.mc_font_sampler = gray_resources.sampler;
+        self.mc_font_allocation = gray_resources.image_alloc.take();
+        self.mc_font_staging_buffer = gray_resources.staging_buffer;
+        self.mc_font_staging_allocation = gray_resources.staging_alloc.take();
+        self.mc_font_color_image = color_resources.image;
+        self.mc_font_color_view = color_resources.view;
+        self.mc_font_color_sampler = color_resources.sampler;
+        self.mc_font_color_allocation = color_resources.image_alloc.take();
+        self.mc_font_color_staging_buffer = color_resources.staging_buffer;
+        self.mc_font_color_staging_allocation = color_resources.staging_alloc.take();
+        self.mc_glyph_map = Some(new_map);
+        Ok(())
     }
 
     pub fn draw(
@@ -666,6 +924,7 @@ impl MenuOverlayPipeline {
         let mut scissor_stack: Vec<[f32; 4]> = Vec::new();
         let mut cmd_start: u32 = 0;
         let mut cur_invert = false;
+        let mut obfuscation_rng = self.obfuscation_rng;
 
         for elem in elements {
             if matches!(
@@ -743,7 +1002,22 @@ impl MenuOverlayPipeline {
                             *x
                         };
                         let span = TextSpan::new(text.clone(), *color);
-                        push_mc_text(&mut vertices, gm, start_x, *y, &[span], *scale, true);
+                        push_mc_text(
+                            &mut vertices,
+                            McTextSources {
+                                gm,
+                                dynamic_regions: &self.favicon_regions,
+                                sprite_atlas: &self.sprite_atlas,
+                            },
+                            &[span],
+                            McTextDraw {
+                                x: start_x,
+                                y: *y,
+                                scale: *scale,
+                                drop_shadow: true,
+                            },
+                            &mut obfuscation_rng,
+                        );
                     }
                 }
                 MenuElement::TextFlat {
@@ -755,7 +1029,22 @@ impl MenuOverlayPipeline {
                 } => {
                     if let Some(ref gm) = self.mc_glyph_map {
                         let span = TextSpan::new(text.clone(), *color);
-                        push_mc_text(&mut vertices, gm, *x, *y, &[span], *scale, false);
+                        push_mc_text(
+                            &mut vertices,
+                            McTextSources {
+                                gm,
+                                dynamic_regions: &self.favicon_regions,
+                                sprite_atlas: &self.sprite_atlas,
+                            },
+                            &[span],
+                            McTextDraw {
+                                x: *x,
+                                y: *y,
+                                scale: *scale,
+                                drop_shadow: false,
+                            },
+                            &mut obfuscation_rng,
+                        );
                     }
                 }
                 MenuElement::TextSpans {
@@ -771,7 +1060,22 @@ impl MenuOverlayPipeline {
                         *x
                     };
                     if let Some(ref gm) = self.mc_glyph_map {
-                        push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale, true);
+                        push_mc_text(
+                            &mut vertices,
+                            McTextSources {
+                                gm,
+                                dynamic_regions: &self.favicon_regions,
+                                sprite_atlas: &self.sprite_atlas,
+                            },
+                            spans,
+                            McTextDraw {
+                                x: start_x,
+                                y: *y,
+                                scale: *scale,
+                                drop_shadow: true,
+                            },
+                            &mut obfuscation_rng,
+                        );
                     }
                 }
                 MenuElement::Icon {
@@ -895,15 +1199,26 @@ impl MenuOverlayPipeline {
                 } => {
                     if let Some(ref gm) = self.mc_glyph_map {
                         let start_x = if *centered {
-                            let total: f32 = spans
-                                .iter()
-                                .map(|s| self.mc_text_width(&s.text, *scale))
-                                .sum();
-                            *x - total / 2.0
+                            *x - self.spans_width(spans, *scale) / 2.0
                         } else {
                             *x
                         };
-                        push_mc_text(&mut vertices, gm, start_x, *y, spans, *scale, *shadow);
+                        push_mc_text(
+                            &mut vertices,
+                            McTextSources {
+                                gm,
+                                dynamic_regions: &self.favicon_regions,
+                                sprite_atlas: &self.sprite_atlas,
+                            },
+                            spans,
+                            McTextDraw {
+                                x: start_x,
+                                y: *y,
+                                scale: *scale,
+                                drop_shadow: *shadow,
+                            },
+                            &mut obfuscation_rng,
+                        );
                     }
                 }
                 MenuElement::McTextRotated {
@@ -917,7 +1232,22 @@ impl MenuOverlayPipeline {
                 } => {
                     if let Some(ref gm) = self.mc_glyph_map {
                         let start = vertices.len();
-                        push_mc_text(&mut vertices, gm, *x, *y, spans, *scale, *shadow);
+                        push_mc_text(
+                            &mut vertices,
+                            McTextSources {
+                                gm,
+                                dynamic_regions: &self.favicon_regions,
+                                sprite_atlas: &self.sprite_atlas,
+                            },
+                            spans,
+                            McTextDraw {
+                                x: *x,
+                                y: *y,
+                                scale: *scale,
+                                drop_shadow: *shadow,
+                            },
+                            &mut obfuscation_rng,
+                        );
                         rotate_verts(&mut vertices[start..], *pivot, *rotation);
                     }
                 }
@@ -1120,9 +1450,13 @@ impl MenuOverlayPipeline {
 
                 let content_w = lines
                     .iter()
-                    .map(|l| (self.mc_text_width(l, *scale) + px).ceil())
+                    .map(|l| self.mc_text_width(l, *scale).ceil())
                     .fold(0.0f32, f32::max);
-                let content_h = lines.len() as f32 * line_h - 2.0 * px;
+                let content_h = if lines.len() == 1 {
+                    *scale
+                } else {
+                    lines.len() as f32 * line_h
+                };
 
                 let mut text_x = *x + 12.0;
                 let mut text_y = *y - 12.0;
@@ -1133,10 +1467,10 @@ impl MenuOverlayPipeline {
                     text_y = *screen_h - content_h - 3.0;
                 }
 
-                let bg_x = text_x - padding - margin - padding;
-                let bg_y = text_y - padding - margin - padding;
-                let bg_w = content_w + (padding + margin + padding) * 2.0;
-                let bg_h = content_h + (padding + margin + padding) * 2.0;
+                let bg_x = text_x - padding - margin;
+                let bg_y = text_y - padding - margin;
+                let bg_w = content_w + (padding + margin) * 2.0;
+                let bg_h = content_h + (padding + margin) * 2.0;
                 let bg_border = margin;
                 let frame_border = 10.0 * px;
 
@@ -1159,14 +1493,22 @@ impl MenuOverlayPipeline {
 
                 for (i, line) in lines.iter().enumerate() {
                     let span = TextSpan::new(line.clone(), white);
+                    let line_y = text_y + i as f32 * line_h + if i > 0 { 2.0 * px } else { 0.0 };
                     push_mc_text(
                         &mut vertices,
-                        gm,
-                        text_x,
-                        text_y + i as f32 * line_h,
+                        McTextSources {
+                            gm,
+                            dynamic_regions: &self.favicon_regions,
+                            sprite_atlas: &self.sprite_atlas,
+                        },
                         &[span],
-                        *scale,
-                        true,
+                        McTextDraw {
+                            x: text_x,
+                            y: line_y,
+                            scale: *scale,
+                            drop_shadow: true,
+                        },
+                        &mut obfuscation_rng,
                     );
                 }
             }
@@ -1187,10 +1529,14 @@ impl MenuOverlayPipeline {
 
                 let line_widths: Vec<f32> = lines
                     .iter()
-                    .map(|l| (self.spans_width(&l.spans, *scale) + px).ceil())
+                    .map(|l| self.spans_width(&l.spans, *scale).ceil())
                     .collect();
                 let content_w = line_widths.iter().copied().fold(0.0f32, f32::max);
-                let content_h = lines.len() as f32 * line_h - 2.0 * px;
+                let content_h = if lines.len() == 1 {
+                    *scale
+                } else {
+                    lines.len() as f32 * line_h
+                };
 
                 let mut text_x = *x + 12.0;
                 let mut text_y = *y - 12.0;
@@ -1201,10 +1547,10 @@ impl MenuOverlayPipeline {
                     text_y = *screen_h - content_h - 3.0;
                 }
 
-                let bg_x = text_x - padding - margin - padding;
-                let bg_y = text_y - padding - margin - padding;
-                let bg_w = content_w + (padding + margin + padding) * 2.0;
-                let bg_h = content_h + (padding + margin + padding) * 2.0;
+                let bg_x = text_x - padding - margin;
+                let bg_y = text_y - padding - margin;
+                let bg_w = content_w + (padding + margin) * 2.0;
+                let bg_h = content_h + (padding + margin) * 2.0;
                 let bg_border = margin;
                 let frame_border = 10.0 * px;
                 let white = [1.0f32; 4];
@@ -1231,18 +1577,28 @@ impl MenuOverlayPipeline {
                     } else {
                         text_x
                     };
+                    let line_y = text_y + i as f32 * line_h + if i > 0 { 2.0 * px } else { 0.0 };
                     push_mc_text(
                         &mut vertices,
-                        gm,
-                        line_x,
-                        text_y + i as f32 * line_h,
+                        McTextSources {
+                            gm,
+                            dynamic_regions: &self.favicon_regions,
+                            sprite_atlas: &self.sprite_atlas,
+                        },
                         &line.spans,
-                        *scale,
-                        true,
+                        McTextDraw {
+                            x: line_x,
+                            y: line_y,
+                            scale: *scale,
+                            drop_shadow: true,
+                        },
+                        &mut obfuscation_rng,
                     );
                 }
             }
         }
+
+        self.obfuscation_rng = obfuscation_rng;
 
         flush_draw_op(
             &mut draw_ops,
@@ -1462,22 +1818,22 @@ impl MenuOverlayPipeline {
     }
 
     pub fn mc_text_width(&self, text: &str, scale: f32) -> f32 {
-        self.text_width_in(text, scale, false)
+        self.text_width_in(text, scale, None)
     }
 
     /// Text width in the SGA (`minecraft:alt`) glyphs.
     pub fn mc_text_width_sga(&self, text: &str, scale: f32) -> f32 {
-        self.text_width_in(text, scale, true)
+        self.text_width_in(text, scale, Some("minecraft:alt"))
     }
 
-    fn text_width_in(&self, text: &str, scale: f32, sga: bool) -> f32 {
+    fn text_width_in(&self, text: &str, scale: f32, font: Option<&str>) -> f32 {
         let Some(ref gm) = self.mc_glyph_map else {
             return 0.0;
         };
         let px_scale = scale / gm.cell_h as f32;
         let raw: f32 = text
             .chars()
-            .map(|ch| glyph_advance(gm, ch, sga) * px_scale)
+            .map(|ch| glyph_advance(gm, ch, font) * px_scale)
             .sum();
         raw.ceil()
     }
@@ -1492,10 +1848,14 @@ impl MenuOverlayPipeline {
         let raw: f32 = spans
             .iter()
             .flat_map(|s| {
-                let bold = if s.bold { 1.0 } else { 0.0 };
-                s.text
-                    .chars()
-                    .map(move |ch| glyph_advance(gm, ch, s.sga) + bold)
+                s.text.chars().map(move |ch| {
+                    if ch == '\u{fffc}' && s.inline_object.is_some() {
+                        8.0 + if s.bold { 1.0 } else { 0.0 }
+                    } else {
+                        let glyph = gm.glyph(ch, s.font.as_deref());
+                        glyph.advance + if s.bold { glyph.bold_offset } else { 0.0 }
+                    }
+                })
             })
             .sum::<f32>()
             * px_scale;
@@ -1559,6 +1919,18 @@ impl MenuOverlayPipeline {
                 image_alloc: self.mc_font_allocation.take(),
                 staging_buffer: self.mc_font_staging_buffer,
                 staging_alloc: self.mc_font_staging_allocation.take(),
+            },
+        );
+        destroy_texture_resources(
+            device,
+            &mut alloc,
+            &mut TextureResources {
+                sampler: self.mc_font_color_sampler,
+                image: self.mc_font_color_image,
+                view: self.mc_font_color_view,
+                image_alloc: self.mc_font_color_allocation.take(),
+                staging_buffer: self.mc_font_color_staging_buffer,
+                staging_alloc: self.mc_font_color_staging_allocation.take(),
             },
         );
 
@@ -1847,6 +2219,7 @@ pub enum SpriteId {
     BossBarProgress(u8),
     BossBarNotchedBackground(u8),
     BossBarNotchedProgress(u8),
+    ChatModified,
     ToastAdvancement,
     ToastRecipe,
     ToastTutorial,
@@ -2785,6 +3158,11 @@ fn build_sprite_atlas(
             0.0,
         ),
         (
+            SpriteId::ChatModified,
+            "minecraft/textures/gui/sprites/icon/chat_modified.png",
+            0.0,
+        ),
+        (
             SpriteId::ToastAdvancement,
             "minecraft/textures/gui/sprites/toast/advancement.png",
             0.0,
@@ -3421,6 +3799,118 @@ fn load_single_texture(
     (image, view, allocation)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct FontGpuLimits {
+    pub max_dimension: u32,
+    pub max_layers: u32,
+}
+
+const MC_FONT_COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Unorm;
+
+struct FontTextureUpload<'a> {
+    pixels: &'a [u8],
+    extent: util::ImageArrayExtent,
+    format: vk::Format,
+    image_name: &'static str,
+    staging_name: &'static str,
+}
+
+fn create_font_texture_resources(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    limits: FontGpuLimits,
+    upload: FontTextureUpload<'_>,
+) -> Result<TextureResources, String> {
+    if upload.extent.width == 0
+        || upload.extent.height == 0
+        || upload.extent.layers == 0
+        || upload.extent.width > limits.max_dimension
+        || upload.extent.height > limits.max_dimension
+        || upload.extent.layers > limits.max_layers
+    {
+        return Err(format!(
+            "font texture {}x{}x{} exceeds device limit {}x{} layers",
+            upload.extent.width,
+            upload.extent.height,
+            upload.extent.layers,
+            limits.max_dimension,
+            limits.max_layers
+        ));
+    }
+
+    let sampler = util::create_nearest_sampler_fallible(device)?;
+    let (image, view, allocation) = match util::create_gpu_image_array_with_format(
+        device,
+        allocator,
+        upload.extent.width,
+        upload.extent.height,
+        upload.extent.layers,
+        upload.format,
+        upload.image_name,
+    ) {
+        Ok(resources) => resources,
+        Err(error) => {
+            device.destroy_sampler(sampler, None);
+            return Err(error);
+        }
+    };
+    let (staging_buffer, staging_allocation) = match util::create_font_staging_buffer(
+        device,
+        allocator,
+        upload.pixels,
+        upload.staging_name,
+    ) {
+        Ok(resources) => resources,
+        Err(error) => {
+            device.destroy_image_view(view, None);
+            device.destroy_image(image, None);
+            let mut alloc = allocator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = alloc.free(allocation);
+            device.destroy_sampler(sampler, None);
+            return Err(error);
+        }
+    };
+    let mut resources = TextureResources {
+        sampler,
+        image,
+        view,
+        image_alloc: Some(allocation),
+        staging_buffer,
+        staging_alloc: Some(staging_allocation),
+    };
+    let upload_result = match upload.format {
+        vk::Format::R8Unorm => util::upload_r8_image_array(
+            device,
+            queue,
+            command_pool,
+            staging_buffer,
+            image,
+            upload.extent,
+        ),
+        MC_FONT_COLOR_FORMAT => util::upload_rgba8_image_array(
+            device,
+            queue,
+            command_pool,
+            staging_buffer,
+            image,
+            upload.extent,
+        ),
+        other => Err(format!("unsupported font atlas format {other:?}")),
+    };
+    if let Err(error) = upload_result {
+        let mut alloc = allocator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        destroy_texture_resources(device, &mut alloc, &mut resources);
+        return Err(error);
+    }
+    Ok(resources)
+}
+
 struct TextureResources {
     sampler: vk::Sampler,
     image: vk::Image,
@@ -3590,6 +4080,29 @@ fn push_rect(
     radius: f32,
     color: [f32; 4],
 ) {
+    if radius <= 0.0 {
+        // Vanilla `GuiGraphics.fill` is a hard integer quad. Do not run these
+        // through the rounded-rect SDF: even at radius 0 that shader softens
+        // every edge and adds a border band, which produces seams between
+        // adjacent chat rows and changes translucent fill opacity.
+        let a = color[3];
+        push_quad(
+            verts,
+            x,
+            y,
+            w,
+            h,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            [color[0] * a, color[1] * a, color[2] * a, a],
+            10.0,
+            [0.0, 0.0],
+            0.0,
+        );
+        return;
+    }
     push_quad(
         verts,
         x,
@@ -3634,7 +4147,7 @@ fn push_gradient_rect(
         [1.0, 1.0],
         [0.0, 1.0],
     ];
-    let colors = [
+    let mut colors = [
         color_top,
         color_top,
         color_bottom,
@@ -3642,12 +4155,23 @@ fn push_gradient_rect(
         color_bottom,
         color_bottom,
     ];
+    let mode = if radius <= 0.0 {
+        for color in &mut colors {
+            let a = color[3];
+            color[0] *= a;
+            color[1] *= a;
+            color[2] *= a;
+        }
+        10.0
+    } else {
+        0.0
+    };
     for i in 0..6 {
         verts.push(Vertex {
             pos: positions[i],
             uv: uvs[i],
             color: colors[i],
-            mode: 0.0,
+            mode,
             rect_size: [w, h],
             corner_radius: radius,
         });
@@ -3777,20 +4301,109 @@ fn push_nine_slice(
 }
 
 /// A glyph's horizontal advance in font-texture pixels.
-fn glyph_advance(gm: &GlyphMap, ch: char, sga: bool) -> f32 {
-    gm.glyph(ch, sga).map(|g| g.width).unwrap_or(gm.cell_w / 2) as f32 + 1.0
+fn glyph_advance(gm: &GlyphMap, ch: char, font: Option<&str>) -> f32 {
+    gm.glyph(ch, font).advance
+}
+
+/// Vanilla's obfuscated style swaps a non-space glyph for a random glyph from
+/// the same font whose advance matches the original. `Font` owns one
+/// `RandomSource` and consumes one bounded random value for every obfuscated
+/// glyph it prepares, so keep equivalent persistent LegacyRandomSource state
+/// on the menu renderer instead of hashing time/position.
+#[derive(Clone, Copy)]
+struct ObfuscationRng {
+    seed: u64,
+}
+
+impl ObfuscationRng {
+    const MASK: u64 = (1u64 << 48) - 1;
+    const MULTIPLIER: u64 = 25_214_903_917;
+    const INCREMENT: u64 = 11;
+
+    fn new(seed: u64) -> Self {
+        Self {
+            seed: (seed ^ 0x5DEECE66D) & Self::MASK,
+        }
+    }
+
+    fn next_bits(&mut self, bits: u32) -> u32 {
+        self.seed = self
+            .seed
+            .wrapping_mul(Self::MULTIPLIER)
+            .wrapping_add(Self::INCREMENT)
+            & Self::MASK;
+        (self.seed >> (48 - bits)) as u32
+    }
+
+    fn next_int(&mut self, bound: usize) -> usize {
+        debug_assert!(bound > 0 && bound <= i32::MAX as usize);
+        let bound = bound as u32;
+        if bound.is_power_of_two() {
+            return (((bound as u64) * (self.next_bits(31) as u64)) >> 31) as usize;
+        }
+        loop {
+            let bits = self.next_bits(31);
+            let value = bits % bound;
+            if bits.wrapping_sub(value).wrapping_add(bound - 1) < (1 << 31) {
+                return value as usize;
+            }
+        }
+    }
+}
+
+fn obfuscated_char(
+    gm: &GlyphMap,
+    original: char,
+    font: Option<&str>,
+    rng: &mut ObfuscationRng,
+) -> char {
+    if original == ' ' {
+        return original;
+    }
+    let target_advance = gm.glyph(original, font).advance.ceil() as u32;
+    let Some(candidates) = gm.obfuscation_bucket(target_advance, font) else {
+        return original;
+    };
+    candidates
+        .get(rng.next_int(candidates.len()))
+        .copied()
+        .unwrap_or(original)
+}
+
+#[derive(Clone, Copy)]
+struct McTextSources<'a> {
+    gm: &'a GlyphMap,
+    dynamic_regions: &'a std::collections::HashMap<String, [f32; 4]>,
+    sprite_atlas: &'a SpriteAtlas,
+}
+
+#[derive(Clone, Copy)]
+struct McTextDraw {
+    x: f32,
+    y: f32,
+    scale: f32,
+    drop_shadow: bool,
 }
 
 fn push_mc_text(
     verts: &mut Vec<Vertex>,
-    gm: &GlyphMap,
-    x: f32,
-    y: f32,
+    sources: McTextSources<'_>,
     spans: &[TextSpan],
-    scale: f32,
-    drop_shadow: bool,
+    draw: McTextDraw,
+    obfuscation_rng: &mut ObfuscationRng,
 ) {
-    let (tex_w, tex_h) = gm.dimensions();
+    let McTextDraw {
+        x,
+        y,
+        scale,
+        drop_shadow,
+    } = draw;
+    let McTextSources {
+        gm,
+        dynamic_regions,
+        sprite_atlas,
+    } = sources;
+    let (tex_w, tex_h, _) = gm.dimensions();
     let inv_w = 1.0 / tex_w as f32;
     let inv_h = 1.0 / tex_h as f32;
     let px_scale = scale / gm.cell_h as f32;
@@ -3801,17 +4414,27 @@ fn push_mc_text(
     let mut line = 0u32;
 
     for span in spans {
-        let shadow_color = [
-            span.color[0] * 0.25,
-            span.color[1] * 0.25,
-            span.color[2] * 0.25,
-            span.color[3],
-        ];
+        let mut span_position = 0u64;
+        let shadow_color = span.shadow_color.map_or(
+            [
+                span.color[0] * 0.25,
+                span.color[1] * 0.25,
+                span.color[2] * 0.25,
+                span.color[3],
+            ],
+            |mut explicit| {
+                // Vanilla multiplies an explicit shadow's alpha by the current
+                // text alpha (chat fading/opacity) while retaining its RGB.
+                explicit[3] *= span.color[3];
+                explicit
+            },
+        );
 
         for ch in span.text.chars() {
             if ch == '\n' {
                 cx = x;
                 line += 1;
+                span_position = 0;
                 cy = y + line as f32 * (glyph_h + 2.0 * px_scale);
                 if line >= 2 {
                     return;
@@ -3819,132 +4442,253 @@ fn push_mc_text(
                 continue;
             }
 
-            let Some(gi) = gm.glyph(ch, span.sga) else {
+            if ch == '\u{fffc}'
+                && let Some(object) = span.inline_object.as_ref()
+            {
+                let glyph_w = 8.0 * px_scale;
+                let advance = glyph_w + if span.bold { px_scale } else { 0.0 };
+                let effect_x0 = if span_position == 0 {
+                    cx - px_scale
+                } else {
+                    cx
+                };
+                let sx = cx.round();
+                let sy = (cy - px_scale).round();
+                let key = object.atlas_key();
+                let fallback = match object {
+                    crate::ui::text::InlineObject::Player { .. } => SpriteId::SteveHead,
+                    crate::ui::text::InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
+                };
+                if drop_shadow {
+                    push_atlas_image(
+                        verts,
+                        dynamic_regions,
+                        sprite_atlas,
+                        &key,
+                        fallback,
+                        sx + px_scale,
+                        sy + px_scale,
+                        glyph_w,
+                        shadow_color,
+                    );
+                }
+                push_atlas_image(
+                    verts,
+                    dynamic_regions,
+                    sprite_atlas,
+                    &key,
+                    fallback,
+                    sx,
+                    sy,
+                    glyph_w,
+                    span.color,
+                );
+                if span.strikethrough {
+                    push_mc_effect(
+                        verts,
+                        [
+                            effect_x0,
+                            cy + 3.5 * px_scale,
+                            cx + advance,
+                            cy + 4.5 * px_scale,
+                        ],
+                        span.color,
+                        shadow_color,
+                        px_scale,
+                        drop_shadow,
+                    );
+                }
+                if span.underline {
+                    push_mc_effect(
+                        verts,
+                        [
+                            effect_x0,
+                            cy + 8.0 * px_scale,
+                            cx + advance,
+                            cy + 9.0 * px_scale,
+                        ],
+                        span.color,
+                        shadow_color,
+                        px_scale,
+                        drop_shadow,
+                    );
+                }
+                cx += advance;
+                span_position = span_position.wrapping_add(1);
                 continue;
-            };
-            let glyph_w = gi.width as f32 * px_scale;
-            let glyph_draw_h = gi.height as f32 * px_scale;
-            let glyph_y_off = gi.y_offset as f32 * px_scale;
+            }
 
-            let u0 = gi.col as f32 * gm.cell_w as f32 * inv_w;
-            let v0 = (gi.row as f32 * gm.cell_h as f32 + gi.y_offset as f32) * inv_h;
-            let u1 = (gi.col as f32 * gm.cell_w as f32 + gi.width as f32) * inv_w;
-            let v1 =
-                (gi.row as f32 * gm.cell_h as f32 + gi.y_offset as f32 + gi.height as f32) * inv_h;
+            let position = span_position;
+            let rendered_ch = if span.obfuscated && ch != ' ' {
+                obfuscated_char(gm, ch, span.font.as_deref(), obfuscation_rng)
+            } else {
+                ch
+            };
+            span_position = span_position.wrapping_add(1);
+            let gi = gm.glyph(rendered_ch, span.font.as_deref());
+            let glyph_w = gi.draw_w * px_scale;
+            let glyph_draw_h = gi.draw_h * px_scale;
+            let glyph_y_off = gi.top * px_scale;
+
+            let u0 = gi.atlas_x as f32 * inv_w;
+            let v0 = gi.atlas_y as f32 * inv_h;
+            let u1 = (gi.atlas_x + gi.pixel_w) as f32 * inv_w;
+            let v1 = (gi.atlas_y + gi.pixel_h) as f32 * inv_h;
 
             let italic_offset = if span.italic { px_scale } else { 0.0 };
 
-            let sx = cx.round();
+            let sx = (cx + gi.left * px_scale).round();
             let sy = (cy + glyph_y_off).round();
 
-            if drop_shadow {
+            let glyph_shadow_offset = gi.shadow_offset * px_scale;
+            let glyph_bold_offset = gi.bold_offset * px_scale;
+
+            if gi.pixel_w > 0 && gi.pixel_h > 0 && drop_shadow {
                 push_mc_glyph(
                     verts,
-                    sx + px_scale,
-                    sy + px_scale,
+                    sx + glyph_shadow_offset,
+                    sy + glyph_shadow_offset,
                     glyph_w.round(),
                     glyph_draw_h.round(),
+                    gi.atlas_layer,
                     u0,
                     v0,
                     u1,
                     v1,
+                    gi.colored,
                     shadow_color,
                     italic_offset,
                 );
                 if span.bold {
                     push_mc_glyph(
                         verts,
-                        sx + 2.0 * px_scale,
-                        sy + px_scale,
+                        sx + glyph_shadow_offset + glyph_bold_offset,
+                        sy + glyph_shadow_offset,
                         glyph_w.round(),
                         glyph_draw_h.round(),
+                        gi.atlas_layer,
                         u0,
                         v0,
                         u1,
                         v1,
+                        gi.colored,
                         shadow_color,
                         italic_offset,
                     );
                 }
             }
 
-            push_mc_glyph(
-                verts,
-                sx,
-                sy,
-                glyph_w.round(),
-                glyph_draw_h.round(),
-                u0,
-                v0,
-                u1,
-                v1,
-                span.color,
-                italic_offset,
-            );
-            if span.bold {
+            if gi.pixel_w > 0 && gi.pixel_h > 0 {
                 push_mc_glyph(
                     verts,
-                    sx + px_scale,
+                    sx,
                     sy,
                     glyph_w.round(),
                     glyph_draw_h.round(),
+                    gi.atlas_layer,
                     u0,
                     v0,
                     u1,
                     v1,
+                    gi.colored,
                     span.color,
                     italic_offset,
                 );
-            }
-
-            if span.strikethrough || span.underline {
-                let lw = glyph_w + if span.bold { px_scale } else { 0.0 };
-                if span.strikethrough {
-                    let sy = cy + glyph_h * 0.45;
-                    push_quad(
+                if span.bold {
+                    push_mc_glyph(
                         verts,
-                        cx,
+                        sx + glyph_bold_offset,
                         sy,
-                        lw,
-                        px_scale,
-                        0.0,
-                        0.0,
-                        0.0,
-                        0.0,
+                        glyph_w.round(),
+                        glyph_draw_h.round(),
+                        gi.atlas_layer,
+                        u0,
+                        v0,
+                        u1,
+                        v1,
+                        gi.colored,
                         span.color,
-                        0.0,
-                        [lw, px_scale],
-                        0.0,
-                    );
-                }
-                if span.underline {
-                    let uy = cy + glyph_h - px_scale;
-                    push_quad(
-                        verts,
-                        cx,
-                        uy,
-                        lw,
-                        px_scale,
-                        0.0,
-                        0.0,
-                        0.0,
-                        0.0,
-                        span.color,
-                        0.0,
-                        [lw, px_scale],
-                        0.0,
+                        italic_offset,
                     );
                 }
             }
 
-            let advance = (gi.width as f32 + 1.0) * px_scale;
-            cx += if span.bold {
-                advance + px_scale
-            } else {
-                advance
-            };
+            let advance = glyph_advance(gm, rendered_ch, span.font.as_deref()) * px_scale
+                + if span.bold { glyph_bold_offset } else { 0.0 };
+            let effect_x0 = if position == 0 { cx - px_scale } else { cx };
+            if span.strikethrough {
+                push_mc_effect(
+                    verts,
+                    [
+                        effect_x0,
+                        cy + 3.5 * px_scale,
+                        cx + advance,
+                        cy + 4.5 * px_scale,
+                    ],
+                    span.color,
+                    shadow_color,
+                    px_scale,
+                    drop_shadow,
+                );
+            }
+            if span.underline {
+                push_mc_effect(
+                    verts,
+                    [
+                        effect_x0,
+                        cy + 8.0 * px_scale,
+                        cx + advance,
+                        cy + 9.0 * px_scale,
+                    ],
+                    span.color,
+                    shadow_color,
+                    px_scale,
+                    drop_shadow,
+                );
+            }
+
+            cx += advance;
         }
     }
+}
+
+fn push_mc_effect(
+    verts: &mut Vec<Vertex>,
+    rect: [f32; 4],
+    color: [f32; 4],
+    shadow_color: [f32; 4],
+    shadow_offset: f32,
+    drop_shadow: bool,
+) {
+    let [x0, y0, x1, y1] = rect;
+    let w = (x1 - x0).max(0.0);
+    let h = (y1 - y0).max(0.0);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    if drop_shadow {
+        push_rect(
+            verts,
+            x0 + shadow_offset,
+            y0 + shadow_offset,
+            w,
+            h,
+            0.0,
+            mc_effect_color(shadow_color),
+        );
+    }
+    push_rect(verts, x0, y0, w, h, 0.0, mc_effect_color(color));
+}
+
+fn mc_effect_color(mut color: [f32; 4]) -> [f32; 4] {
+    // Minecraft font glyphs are converted from gamma-space style colors to
+    // linear RGB in the fragment shader before the sRGB framebuffer write.
+    // Decoration effects use hard quads, so perform the same conversion here
+    // or their 25%-RGB drop shadow becomes visibly too bright/"3D".
+    color[0] = color[0].powf(2.2);
+    color[1] = color[1].powf(2.2);
+    color[2] = color[2].powf(2.2);
+    color
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3954,10 +4698,12 @@ fn push_mc_glyph(
     y: f32,
     w: f32,
     h: f32,
+    layer: u32,
     u0: f32,
     v0: f32,
     u1: f32,
     v1: f32,
+    colored: bool,
     color: [f32; 4],
     italic_offset: f32,
 ) {
@@ -3975,8 +4721,8 @@ fn push_mc_glyph(
             pos: positions[i],
             uv: uvs[i],
             color,
-            mode: 4.0,
-            rect_size: [0.0, 0.0],
+            mode: if colored { 4.25 } else { 4.0 },
+            rect_size: [layer as f32, 0.0],
             corner_radius: 0.0,
         });
     }
@@ -4167,6 +4913,22 @@ fn create_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colored_minecraft_font_atlas_uses_vanilla_unorm_format() {
+        assert_eq!(MC_FONT_COLOR_FORMAT, vk::Format::R8G8B8A8Unorm);
+    }
+
+    #[test]
+    fn obfuscation_rng_matches_java_random_bounded_sequence() {
+        let mut rng = ObfuscationRng::new(0);
+        let got: Vec<usize> = (0..10).map(|_| rng.next_int(1000)).collect();
+        assert_eq!(got, [360, 948, 29, 447, 515, 53, 491, 761, 719, 854]);
+
+        let mut rng = ObfuscationRng::new(0);
+        let got: Vec<usize> = (0..10).map(|_| rng.next_int(16)).collect();
+        assert_eq!(got, [11, 13, 3, 9, 10, 4, 8, 1, 9, 12]);
+    }
 
     #[test]
     fn downscale_keeps_colour_out_of_the_transparent_border() {

@@ -34,7 +34,7 @@ use pipelines::chunk::ChunkPipeline;
 use pipelines::clouds::CloudPipeline;
 use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
 use pipelines::hand::HandPipeline;
-use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
+use pipelines::menu_overlay::{FontGpuLimits, MenuElement, MenuOverlayPipeline};
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
@@ -52,6 +52,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
+use crate::ui::font::{FontOptions, FontSources};
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
@@ -61,6 +62,9 @@ pub enum RendererError {
 
     #[error("vulkan error: {0}")]
     Vulkan(#[from] vk::Error),
+
+    #[error("failed to initialize Minecraft fonts: {0}")]
+    Font(String),
 }
 
 #[derive(Clone, Copy)]
@@ -180,12 +184,18 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(
         window: Arc<Window>,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        font_sources: FontSources<'_>,
         game_dir: &Path,
         vsync: bool,
         panorama_dir: &Path,
     ) -> Result<Self, RendererError> {
+        let FontSources {
+            jar_assets_dir,
+            asset_index,
+            packs,
+            options: font_options,
+        } = font_sources;
+        let resource_packs = packs.expect("renderer startup requires a resource-pack manager");
         let size = window.inner_size();
 
         let registry_handle = {
@@ -209,6 +219,11 @@ impl Renderer {
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
+        let device_properties = ctx.physical_device.get_properties();
+        let font_gpu_limits = FontGpuLimits {
+            max_dimension: device_properties.limits.max_image_dimension2_d,
+            max_layers: device_properties.limits.max_image_array_layers,
+        };
 
         let mut menu_pipeline = MenuOverlayPipeline::new(
             &ctx.device,
@@ -216,9 +231,15 @@ impl Renderer {
             ctx.command_pool,
             swapchain_state.render_pass,
             &ctx.allocator,
-            jar_assets_dir,
-            asset_index,
-        );
+            FontSources {
+                jar_assets_dir,
+                asset_index,
+                packs: Some(resource_packs),
+                options: font_options,
+            },
+            font_gpu_limits,
+        )
+        .map_err(RendererError::Font)?;
 
         let sw = size.width.max(1) as f32;
         let sh = size.height.max(1) as f32;
@@ -1152,6 +1173,7 @@ impl Renderer {
         &mut self,
         game_dir: &Path,
         packs: &crate::resource_pack::ResourcePackManager,
+        font_options: FontOptions,
     ) {
         self.ctx.device.wait_idle().unwrap();
 
@@ -1200,6 +1222,26 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        let device_properties = self.ctx.physical_device.get_properties();
+        let font_gpu_limits = FontGpuLimits {
+            max_dimension: device_properties.limits.max_image_dimension2_d,
+            max_layers: device_properties.limits.max_image_array_layers,
+        };
+        if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            FontSources {
+                jar_assets_dir: &self.jar_assets_dir,
+                asset_index: &self.asset_index,
+                packs: Some(packs),
+                options: font_options,
+            },
+            font_gpu_limits,
+        ) {
+            tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
+        }
 
         warm_item_meshes(
             &self.ctx.device,
@@ -2003,6 +2045,29 @@ pub(crate) struct SkinData {
     pub width: u32,
     pub height: u32,
     pub slim: bool,
+}
+
+pub(crate) async fn fetch_skin_texture_by_name(name: &str) -> Result<SkinData, String> {
+    #[derive(serde::Deserialize)]
+    struct NamedProfile {
+        id: String,
+    }
+
+    let url = format!("https://api.mojang.com/users/profiles/minecraft/{name}");
+    let response = reqwest::get(&url).await.map_err(error_chain)?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
+    ) {
+        return Err(format!("no profile for {name}"));
+    }
+    let profile: NamedProfile = response
+        .error_for_status()
+        .map_err(error_chain)?
+        .json()
+        .await
+        .map_err(error_chain)?;
+    fetch_skin_texture(&profile.id).await
 }
 
 pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {

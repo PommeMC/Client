@@ -18,8 +18,58 @@ use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
+use crate::ui::server_dialog::{DialogReference, ServerLink};
 use crate::ui::text::format_text_spans;
 use crate::world::block::model::CardinalLightType;
+
+fn validated_server_link_url(url: &str) -> Option<String> {
+    crate::chat_component::parse_untrusted_url(url.to_owned())
+        .map_err(|error| tracing::warn!("Ignoring invalid server link `{url}`: {error}"))
+        .ok()
+}
+
+fn server_link_component(
+    kind: &azalea_protocol::common::server_links::ServerLinkKind,
+) -> crate::chat_component::Component {
+    use azalea_protocol::common::server_links::{KnownLinkKind, ServerLinkKind};
+
+    match kind {
+        ServerLinkKind::Component(component) => serde_json::to_value(component)
+            .ok()
+            .and_then(|value| crate::chat_component::Component::from_value(&value).ok())
+            .unwrap_or_else(|| crate::chat_component::Component::text(component.to_string())),
+        ServerLinkKind::Known(kind) => {
+            let key = match kind {
+                KnownLinkKind::BugReport => "known_server_link.report_bug",
+                KnownLinkKind::CommunityGuidelines => "known_server_link.community_guidelines",
+                KnownLinkKind::Support => "known_server_link.support",
+                KnownLinkKind::Status => "known_server_link.status",
+                KnownLinkKind::Feedback => "known_server_link.feedback",
+                KnownLinkKind::Community => "known_server_link.community",
+                KnownLinkKind::Website => "known_server_link.website",
+                KnownLinkKind::Forums => "known_server_link.forums",
+                KnownLinkKind::News => "known_server_link.news",
+                KnownLinkKind::Announcements => "known_server_link.announcements",
+            };
+            crate::chat_component::Component::translate(key, Vec::new())
+        }
+    }
+}
+
+fn dialog_holder_reference(
+    holder: &azalea_registry::Holder<azalea_registry::data::Dialog, simdnbt::owned::Nbt>,
+) -> Result<DialogReference, String> {
+    match holder {
+        azalea_registry::Holder::Reference(dialog) => {
+            Ok(DialogReference::ProtocolId(dialog.to_u32()))
+        }
+        azalea_registry::Holder::Direct(nbt) => {
+            let value = serde_json::to_value(simdnbt::owned::NbtTag::Compound((***nbt).clone()))
+                .map_err(|e| format!("dialog NBT is not serializable: {e}"))?;
+            Ok(DialogReference::Value(value))
+        }
+    }
+}
 
 /// Dimension info from a login/respawn registry entry. Fields that Azalea does
 /// not model directly live in its flattened extras. Missing `has_skylight`
@@ -55,6 +105,7 @@ pub fn handle_game_packet(
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
+    profile_key_services: Option<&crate::net::chat_security::ProfileKeyServices>,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
@@ -78,6 +129,9 @@ pub fn handle_game_packet(
                 entity_id: p.player_id.0,
                 hardcore: p.hardcore,
                 show_death_screen: p.show_death_screen,
+            });
+            let _ = event_tx.try_send(NetworkEvent::SecureChatEnforced {
+                enforced: profile_key_services.is_some() && p.enforces_secure_chat,
             });
         }
         ClientboundGamePacket::LevelChunkWithLight(p) => {
@@ -319,16 +373,6 @@ pub fn handle_game_packet(
                 walking_speed: p.walking_speed,
             });
         }
-        ClientboundGamePacket::SystemChat(p) => {
-            if p.overlay {
-                send_action_bar(event_tx, &p.content);
-            } else {
-                send_chat(event_tx, &p.content);
-            }
-        }
-        ClientboundGamePacket::SetActionBarText(p) => {
-            send_action_bar(event_tx, &p.text);
-        }
         ClientboundGamePacket::BossEvent(p) => {
             use azalea_protocol::packets::game::c_boss_event::Operation;
 
@@ -531,12 +575,6 @@ pub fn handle_game_packet(
                     });
                 }
             }
-        }
-        ClientboundGamePacket::PlayerChat(p) => {
-            send_chat(event_tx, &p.message());
-        }
-        ClientboundGamePacket::DisguisedChat(p) => {
-            send_chat(event_tx, &p.message);
         }
         ClientboundGamePacket::BlockUpdate(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockUpdate {
@@ -998,6 +1036,7 @@ pub fn handle_game_packet(
             use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry};
             let actions = PlayerInfoActions {
                 add_player: p.actions.add_player,
+                initialize_chat: p.actions.initialize_chat,
                 update_game_mode: p.actions.update_game_mode,
                 update_listed: p.actions.update_listed,
                 update_latency: p.actions.update_latency,
@@ -1024,6 +1063,32 @@ pub fn handle_game_packet(
                         .as_ref()
                         .map(|c| crate::ui::text::format_text_spans(c, [1.0, 1.0, 1.0, 1.0])),
                     list_order: e.list_order,
+                    chat_session: if p.actions.initialize_chat {
+                        match (profile_key_services, e.chat_session.as_ref()) {
+                            (Some(services), Some(session)) => match services
+                                .validate_session(e.profile.uuid, session)
+                            {
+                                Ok(session) => Some(session),
+                                Err(error) => {
+                                    tracing::error!(
+                                        player = %e.profile.name,
+                                        "Failed to validate profile key: {error}"
+                                    );
+                                    None
+                                }
+                            },
+                            (None, Some(_)) => {
+                                tracing::warn!(
+                                    player = %e.profile.name,
+                                    "Ignoring chat session due to missing Mojang Services public key"
+                                );
+                                None
+                            }
+                            (_, None) => None,
+                        }
+                    } else {
+                        None
+                    },
                 })
                 .collect();
             let _ = event_tx.try_send(NetworkEvent::PlayerInfoUpdate { actions, entries });
@@ -1049,12 +1114,28 @@ pub fn handle_game_packet(
             *shared_tree.lock() = Some(tree.clone());
             let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
         }
-        ClientboundGamePacket::CommandSuggestions(p) => {
-            let _ = event_tx.try_send(NetworkEvent::CommandSuggestions {
-                id: p.id,
-                start: p.suggestions.range().start(),
-                options: p.suggestions.list().iter().map(|s| s.text()).collect(),
-            });
+        ClientboundGamePacket::ServerLinks(p) => {
+            let links = p
+                .links
+                .iter()
+                .filter_map(|entry| {
+                    let url = validated_server_link_url(&entry.link)?;
+                    Some(ServerLink {
+                        label: server_link_component(&entry.kind),
+                        url,
+                    })
+                })
+                .collect();
+            let _ = event_tx.try_send(NetworkEvent::ServerLinks { links });
+        }
+        ClientboundGamePacket::ShowDialog(p) => match dialog_holder_reference(&p.dialog) {
+            Ok(dialog) => {
+                let _ = event_tx.try_send(NetworkEvent::ShowDialog { dialog });
+            }
+            Err(error) => tracing::warn!("Could not decode server dialog: {error}"),
+        },
+        ClientboundGamePacket::ClearDialog(_) => {
+            let _ = event_tx.try_send(NetworkEvent::ClearDialog);
         }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(
@@ -1065,18 +1146,6 @@ pub fn handle_game_packet(
         }
         _other => {}
     }
-}
-
-fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
-    tracing::info!("Chat: {text}");
-    let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
-}
-
-fn send_action_bar(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
 }
 
 fn send_scoreboard_team(
@@ -1519,6 +1588,7 @@ mod tests {
                 &event_tx,
                 &registries,
                 &command_tree,
+                None,
             );
         };
 
@@ -1542,6 +1612,21 @@ mod tests {
             sound_id: Identifier::new("minecraft:test.ui"),
             range: None,
         })
+    }
+
+    #[test]
+    fn server_links_accept_only_untrusted_http_and_https_urls() {
+        assert_eq!(
+            validated_server_link_url("https://example.com/path").as_deref(),
+            Some("https://example.com/path")
+        );
+        assert_eq!(
+            validated_server_link_url("http://example.com").as_deref(),
+            Some("http://example.com")
+        );
+        assert!(validated_server_link_url("file:///tmp/pomme").is_none());
+        assert!(validated_server_link_url("mailto:test@example.com").is_none());
+        assert!(validated_server_link_url("not a uri").is_none());
     }
 
     #[test]

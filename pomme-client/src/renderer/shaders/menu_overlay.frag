@@ -8,11 +8,12 @@ layout(set = 0, binding = 0) uniform Globals {
 layout(set = 1, binding = 0) uniform sampler2D font_tex;
 layout(set = 1, binding = 1) uniform sampler2D sprite_tex;
 layout(set = 1, binding = 2) uniform sampler2D item_tex;
-layout(set = 1, binding = 3) uniform sampler2D mc_font_tex;
+layout(set = 1, binding = 3) uniform sampler2DArray mc_font_tex;
 layout(set = 1, binding = 4) uniform sampler2D blur_tex;
 layout(set = 1, binding = 5) uniform sampler2D favicon_tex;
 layout(set = 1, binding = 6) uniform sampler2D overlay_tex;
 layout(set = 1, binding = 7) uniform sampler2D underwater_tex;
+layout(set = 1, binding = 8) uniform sampler2DArray mc_font_color_tex;
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec4 v_color;
@@ -64,7 +65,7 @@ void main() {
 
     if (v_mode > 5.5) {
         vec4 tex = texture(favicon_tex, v_uv);
-        out_color = vec4(tex.rgb * tex.a * v_color.a, tex.a * v_color.a);
+        out_color = vec4(tex.rgb * v_color.rgb * tex.a * v_color.a, tex.a * v_color.a);
         return;
     }
 
@@ -91,9 +92,14 @@ void main() {
     }
 
     if (v_mode > 3.5) {
-        vec4 tex = texture(mc_font_tex, v_uv);
         vec3 linear_color = pow(v_color.rgb, vec3(2.2));
-        out_color = vec4(linear_color * tex.a * v_color.a, tex.a * v_color.a);
+        if (v_mode > 4.0) {
+            vec4 tex = texture(mc_font_color_tex, vec3(v_uv, v_rect_size.x));
+            out_color = vec4(tex.rgb * linear_color * tex.a * v_color.a, tex.a * v_color.a);
+        } else {
+            float coverage = texture(mc_font_tex, vec3(v_uv, v_rect_size.x)).r;
+            out_color = vec4(linear_color * coverage * v_color.a, coverage * v_color.a);
+        }
         return;
     }
 

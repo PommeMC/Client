@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod azalea_compat;
+pub(crate) mod chat;
+pub(crate) mod chat_security;
 pub mod commands;
 pub mod conn;
 pub mod connection;
@@ -156,10 +158,29 @@ pub enum NetworkEvent {
     },
     ChatMessage {
         spans: Vec<crate::ui::text::TextSpan>,
+        /// Same bound chat type rendered from the signed body with unsigned
+        /// content removed, for Vanilla's `onlyShowSecureChat` path.
+        secure_spans: Option<Vec<crate::ui::text::TextSpan>>,
+        missing_profile_spans: Option<Vec<crate::ui::text::TextSpan>>,
+        signature: Option<[u8; 256]>,
+        sender_uuid: Option<uuid::Uuid>,
+        signed_body: Option<crate::net::chat_security::SignedChatBody>,
+        source: crate::ui::chat::ChatMessageSource,
+        tag: Option<crate::ui::chat::ChatMessageTag>,
+    },
+    DeleteChatMessage {
+        signature: [u8; 256],
     },
     ActionBar {
         spans: Vec<crate::ui::text::TextSpan>,
     },
+    ServerLinks {
+        links: Vec<crate::ui::server_dialog::ServerLink>,
+    },
+    ShowDialog {
+        dialog: crate::ui::server_dialog::DialogReference,
+    },
+    ClearDialog,
     BossBarUpdate {
         id: uuid::Uuid,
         op: crate::ui::boss_bar::BossBarOp,
@@ -226,7 +247,7 @@ pub enum NetworkEvent {
         /// Offset into the command string (as sent, including the leading `/`)
         /// where the completed range begins.
         start: usize,
-        options: Vec<String>,
+        options: Vec<crate::ui::chat::ChatSuggestion>,
     },
     BlockUpdate {
         pos: BlockPos,
@@ -470,6 +491,9 @@ pub enum NetworkEvent {
         hardcore: bool,
         show_death_screen: bool,
     },
+    SecureChatEnforced {
+        enforced: bool,
+    },
     PlayerScore {
         entity_id: i32,
         score: i32,
@@ -521,14 +545,20 @@ pub enum NetworkEvent {
 /// it in the game phase only, so all three sites share this.
 pub fn client_information(
     view_distance: u8,
+    chat_options: crate::ui::chat::ChatOptions,
 ) -> azalea_protocol::common::client_information::ClientInformation {
     use azalea_entity::HumanoidArm;
     use azalea_protocol::common::client_information::*;
+    let chat_visibility = match chat_options.visibility {
+        crate::ui::chat::ChatVisibilitySetting::Full => ChatVisibility::Full,
+        crate::ui::chat::ChatVisibilitySetting::System => ChatVisibility::System,
+        crate::ui::chat::ChatVisibilitySetting::Hidden => ChatVisibility::Hidden,
+    };
     ClientInformation {
         language: "en_us".into(),
         view_distance,
-        chat_visibility: ChatVisibility::Full,
-        chat_colors: true,
+        chat_visibility,
+        chat_colors: chat_options.colors,
         model_customization: ModelCustomization {
             cape: true,
             jacket: true,
