@@ -28,7 +28,7 @@ pub struct ServerEntry {
 pub enum Compat {
     /// The version the client speaks natively: joined without translation.
     Native,
-    /// An older protocol with embedded translation data: joinable, with the
+    /// Another protocol with embedded translation data: joinable, with the
     /// wire translated on the fly.
     Translated,
     /// A protocol without translation data: a join would be refused.

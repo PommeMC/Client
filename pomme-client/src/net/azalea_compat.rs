@@ -21,6 +21,14 @@ fn table_id(dir: Direction, name: &str) -> u32 {
 }
 
 #[test]
+fn native_matches_azalea() {
+    assert_eq!(
+        azalea_protocol::packets::PROTOCOL_VERSION,
+        pomme_protocol::version::NATIVE.protocol
+    );
+}
+
+#[test]
 fn packet_ids_match_azalea() {
     use azalea_protocol::packets::game::{s_attack, s_interact};
 

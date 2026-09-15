@@ -19,6 +19,8 @@ use steel_core::config::{
 use steel_core::permission::{PermissionGroupManager, PermissionGroupsConfig};
 use steel_core::server::Server;
 use steel_login::{JavaTcpClient, ServerConnectionSession};
+/// The protocol the integrated server speaks.
+pub use steel_registry::packets::CURRENT_MC_PROTOCOL as PROTOCOL;
 use steel_utils::Identifier;
 use steel_utils::threading::{available_worker_threads, worker_threads_for_available};
 pub use steel_utils::types::{Difficulty, GameType};
