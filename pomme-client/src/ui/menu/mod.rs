@@ -509,10 +509,6 @@ pub struct MainMenu {
     /// Keyed by folder name, not row index: filtering rebuilds the rows every
     /// frame, so an index would follow the filter rather than the world.
     selected_world: Option<String>,
-    /// Double-click tracking keyed by folder, for the same reason the selection
-    /// is. Shares `last_click_time` with the server list; only one is on
-    /// screen.
-    last_click_world: Option<String>,
     world_search: TextFieldState,
     world_name: TextFieldState,
     world_seed: TextFieldState,
@@ -658,7 +654,6 @@ impl MainMenu {
             selected_server: None,
             world_list: crate::ui::world_list::WorldList::scan(&saves_dir),
             selected_world: None,
-            last_click_world: None,
             world_search: TextFieldState::new(MAX_SEARCH),
             world_name: TextFieldState::new(MAX_NAME),
             world_seed: TextFieldState::new(MAX_NAME),
@@ -998,17 +993,22 @@ impl MainMenu {
         self.set_screen(Screen::Disconnected(reason));
     }
 
-    /// Resolves a world for launch and marks it as played, since the world list
-    /// and the saves directory are private to the menu.
-    pub fn world_launch(
-        &mut self,
+    /// Resolves a world for launch, since the world list and the saves
+    /// directory are private to the menu.
+    pub fn world_to_launch(
+        &self,
         folder: &str,
     ) -> Option<(crate::ui::world_list::WorldSummary, PathBuf)> {
         let world = self.world_list.get(folder)?.clone();
+        Some((world, self.saves_dir.join(folder)))
+    }
+
+    /// Marks a world as played once its server has opened, so a failed launch
+    /// leaves the list order alone.
+    pub fn world_played(&mut self, folder: &str) {
         if let Err(error) = self.world_list.touch_last_played(folder) {
             tracing::warn!("Failed to record the last played time for {folder}: {error}");
         }
-        Some((world, self.saves_dir.join(folder)))
     }
 
     /// Advance the button focus ring on Tab / Shift+Tab. Wrapping uses last

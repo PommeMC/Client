@@ -106,15 +106,6 @@ impl FramerateLimiter {
     }
 }
 
-/// Stops the integrated server, which saves the world first.
-///
-/// TODO: this blocks the frame thread. Instant for a world that has barely been
-/// played, wrong for a large one; the save-and-quit layer gives it a screen.
-fn close_world(world: Option<World>) {
-    // The drop is the shutdown.
-    let _ = world;
-}
-
 impl App {
     pub fn new(
         version: String,
@@ -344,8 +335,7 @@ impl ApplicationHandler for App {
                             if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                             {
-                                close_world(world);
-                                self.core.return_to_menu(&mut gfx);
+                                self.core.return_to_menu(&mut gfx, world);
 
                                 AppPhase::InMenu {
                                     gfx,
@@ -645,15 +635,13 @@ impl ApplicationHandler for App {
                                 world,
                             },
                             ConnectingUpdateResult::ManualDisconnect => {
-                                close_world(world);
-                                core.return_to_menu(&mut gfx);
+                                core.return_to_menu(&mut gfx, world);
 
                                 AppPhase::InMenu { gfx, panorama }
                             }
                             ConnectingUpdateResult::Disconnected { reason } => {
-                                close_world(world);
                                 core.menu.show_disconnect(reason);
-                                core.return_to_menu(&mut gfx);
+                                core.return_to_menu(&mut gfx, world);
 
                                 AppPhase::InMenu { gfx, panorama }
                             }
@@ -683,10 +671,12 @@ impl ApplicationHandler for App {
                         mut gfx,
                         connection,
                         mut game,
-                        world,
+                        mut world,
                     } => {
-                        let update_result =
-                            update_game(core, dt, raw_dt, &mut gfx, &connection, &mut game);
+                        let update_result = match world.as_mut().map(World::poll) {
+                            Some(Err(reason)) => GameUpdateResult::Disconnected { reason },
+                            _ => update_game(core, dt, raw_dt, &mut gfx, &connection, &mut game),
+                        };
 
                         match update_result {
                             GameUpdateResult::None => AppPhase::InGame {
@@ -696,9 +686,8 @@ impl ApplicationHandler for App {
                                 world,
                             },
                             GameUpdateResult::ManualDisconnect => {
-                                close_world(world);
                                 core.audio.stop_all_sounds();
-                                core.return_to_menu(&mut gfx);
+                                core.return_to_menu(&mut gfx, world);
 
                                 AppPhase::InMenu {
                                     gfx,
@@ -706,10 +695,9 @@ impl ApplicationHandler for App {
                                 }
                             }
                             GameUpdateResult::Disconnected { reason } => {
-                                close_world(world);
                                 core.audio.stop_all_sounds();
                                 core.menu.show_disconnect(reason);
-                                core.return_to_menu(&mut gfx);
+                                core.return_to_menu(&mut gfx, world);
 
                                 AppPhase::InMenu {
                                     gfx,

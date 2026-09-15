@@ -243,15 +243,15 @@ impl MainMenu {
 
             if clicked && hovered {
                 let folder = world.folder.clone();
-                let double = self.last_click_world.as_deref() == Some(folder.as_str())
-                    && self.last_click_time.elapsed().as_millis() < DOUBLE_CLICK_MS;
+                // Vanilla `MouseHandler` keys the double click on time alone,
+                // so the second click may land on a different row.
+                let double = self.last_click_time.elapsed().as_millis() < DOUBLE_CLICK_MS;
 
                 if playable && (on_icon || double) {
                     action = MenuAction::PlayWorld { folder };
                 } else {
-                    self.selected_world = Some(folder.clone());
+                    self.selected_world = Some(folder);
                     self.last_click_time = Instant::now();
-                    self.last_click_world = Some(folder);
                 }
             }
         }

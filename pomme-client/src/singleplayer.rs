@@ -11,7 +11,7 @@ pub const UNAVAILABLE_MESSAGE: &str = "This build was compiled without singlepla
 
 #[cfg(feature = "singleplayer")]
 mod steel {
-    use std::fs::{File, OpenOptions};
+    use std::fs::{File, OpenOptions, TryLockError};
     use std::path::Path;
 
     use pomme_singleplayer::{
@@ -36,18 +36,23 @@ mod steel {
                 .truncate(false)
                 .open(dir.join("session.lock"))
                 .map_err(|error| format!("Could not open the world's session lock: {error}"))?;
-            file.try_lock()
-                .map_err(|_| "That world is already open in another window.".to_owned())?;
+            file.try_lock().map_err(|error| match error {
+                // Vanilla `selectWorld.locked`.
+                TryLockError::WouldBlock => {
+                    "Locked by another running instance of Minecraft.".to_owned()
+                }
+                TryLockError::Error(error) => {
+                    format!("Could not lock the world's session lock: {error}")
+                }
+            })?;
             Ok(Self { _file: file })
         }
     }
 
     enum Server {
         Starting(PendingWorld),
-        /// Held so that dropping it stops the server and saves.
-        Running {
-            _handle: WorldHandle,
-        },
+        /// Dropping the handle stops the server and saves.
+        Running(WorldHandle),
     }
 
     /// The integrated server for this session.
@@ -59,24 +64,31 @@ mod steel {
     }
 
     impl World {
-        /// Advances a starting world, returning the reason it failed to open.
+        /// Advances a starting world and watches a running one, returning the
+        /// reason the server is gone.
         pub fn poll(&mut self) -> Result<(), String> {
-            let Server::Starting(pending) = &mut self.server else {
-                return Ok(());
-            };
-            match pending.poll() {
-                Progress::Starting => Ok(()),
-                Progress::Ready(handle) => {
-                    self.server = Server::Running { _handle: handle };
-                    Ok(())
+            match &mut self.server {
+                Server::Starting(pending) => match pending.poll() {
+                    Progress::Starting => Ok(()),
+                    Progress::Ready(handle) => {
+                        self.server = Server::Running(handle);
+                        Ok(())
+                    }
+                    Progress::Failed(error) => Err(error),
+                },
+                Server::Running(handle) if handle.is_finished() => {
+                    Err("The integrated server stopped unexpectedly.".to_owned())
                 }
-                Progress::Failed(error) => Err(error),
+                Server::Running(_) => Ok(()),
             }
         }
 
-        pub const fn is_starting(&self) -> bool {
-            matches!(self.server, Server::Starting(_))
-        }
+        /// Stops the server, which saves first, and waits for it.
+        ///
+        /// TODO: this blocks the frame thread. Instant for a world that has
+        /// barely been played, wrong for a large one; the save-and-quit layer
+        /// gives it a screen.
+        pub fn close(self) {}
     }
 
     /// Starts `world` and hands back the client's end of the pipe.
@@ -140,8 +152,8 @@ mod steel {
             match *self {}
         }
 
-        pub const fn is_starting(&self) -> bool {
-            match *self {}
+        pub const fn close(self) {
+            match self {}
         }
     }
 

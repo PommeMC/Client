@@ -136,12 +136,13 @@ pub fn update_menu(
             };
         }
         MenuAction::PlayWorld { folder } => {
-            let Some((summary, dir)) = core.menu.world_launch(&folder) else {
+            let Some((summary, dir)) = core.menu.world_to_launch(&folder) else {
                 return MenuUpdateResult::None;
             };
 
             match singleplayer::open(&summary, &dir, core.view_distance()) {
                 Ok((world, client_end)) => {
+                    core.menu.world_played(&folder);
                     core.audio.stop_menu_music();
 
                     let username = core.user.username.clone();

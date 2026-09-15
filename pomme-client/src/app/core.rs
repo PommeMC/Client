@@ -25,6 +25,7 @@ use crate::physics::movement;
 use crate::player::LocalPlayer;
 use crate::renderer::Renderer;
 use crate::resource_pack::ResourcePackManager;
+use crate::singleplayer::World;
 use crate::ui::menu::{
     CREDITS_KEY_CTRL_L, CREDITS_KEY_CTRL_R, CREDITS_KEY_SPACE, CREDITS_KEY_UP, MainMenu, MenuInput,
 };
@@ -370,7 +371,10 @@ impl AppCore {
 
     /// Every return from a world or server, before the title screen shows.
     /// Vanilla builds a fresh `TitleScreen` here, which rolls a new splash.
-    pub fn return_to_menu(&mut self, gfx: &mut Gfx) {
+    pub fn return_to_menu(&mut self, gfx: &mut Gfx, world: Option<World>) {
+        if let Some(world) = world {
+            world.close();
+        }
         self.clear_server_resource_packs(&mut gfx.renderer);
         gfx.renderer.clear_chunk_meshes();
         if let Some(p) = &mut self.presence {

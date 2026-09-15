@@ -30,14 +30,13 @@ pub fn update_connecting(
     world: Option<&mut World>,
 ) -> ConnectingUpdateResult {
     // Polled before the network, so a server that failed to start reports its
-    // own reason rather than the end of file its death also causes.
-    if let Some(world) = world {
-        if let Err(reason) = world.poll() {
-            return ConnectingUpdateResult::Disconnected { reason };
-        }
-        if !world.is_starting() && *connect_phase == ConnectionPhase::StartingWorld {
-            *connect_phase = ConnectionPhase::Connecting;
-        }
+    // own reason rather than the end of file its death also causes. The phase
+    // stays `StartingWorld` until the connection reports in; vanilla shows one
+    // screen from server start until terrain appears.
+    if let Some(world) = world
+        && let Err(reason) = world.poll()
+    {
+        return ConnectingUpdateResult::Disconnected { reason };
     }
 
     let disconnect_reason = core.drain_network_events(
@@ -79,8 +78,6 @@ pub fn update_connecting(
     }
 
     let status_text = match connect_phase {
-        // Vanilla shows one screen from the moment a world starts until
-        // terrain appears, so the wait for the server reads the same.
         ConnectionPhase::StartingWorld | ConnectionPhase::Loading => "Loading terrain...",
         ConnectionPhase::Connecting => "Connecting to the server...",
     };
