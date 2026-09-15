@@ -283,6 +283,10 @@ pub enum MenuAction {
         protocol: Option<i32>,
     },
     ChangeTheme(PanoramaTheme),
+    /// Open the singleplayer world in this save folder.
+    PlayWorld {
+        folder: String,
+    },
     Quit,
 }
 
@@ -987,6 +991,24 @@ impl MainMenu {
 
     pub fn show_disconnect(&mut self, reason: String) {
         self.set_screen(Screen::Disconnected(reason));
+    }
+
+    /// Resolves a world for launch, since the world list and the saves
+    /// directory are private to the menu.
+    pub fn world_to_launch(
+        &self,
+        folder: &str,
+    ) -> Option<(crate::ui::world_list::WorldSummary, PathBuf)> {
+        let world = self.world_list.get(folder)?.clone();
+        Some((world, self.saves_dir.join(folder)))
+    }
+
+    /// Marks a world as played once its server has opened, so a failed launch
+    /// leaves the list order alone.
+    pub fn world_played(&mut self, folder: &str) {
+        if let Err(error) = self.world_list.touch_last_played(folder) {
+            tracing::warn!("Failed to record the last played time for {folder}: {error}");
+        }
     }
 
     /// Advance the button focus ring on Tab / Shift+Tab. Wrapping uses last

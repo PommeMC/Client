@@ -5,6 +5,7 @@ use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama};
 use crate::net::connection::ConnectionHandle;
 use crate::renderer::pipelines::menu_overlay::MenuElement;
+use crate::singleplayer::World;
 use crate::ui::{common, hud};
 
 pub enum ConnectingUpdateResult {
@@ -14,6 +15,10 @@ pub enum ConnectingUpdateResult {
     JoinGame,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per field of the phase it updates"
+)]
 pub fn update_connecting(
     core: &mut AppCore,
     dt: f32,
@@ -22,7 +27,18 @@ pub fn update_connecting(
     connect_phase: &mut ConnectionPhase,
     connection: &ConnectionHandle,
     game: &mut GameState,
+    world: Option<&mut World>,
 ) -> ConnectingUpdateResult {
+    // Polled before the network, so a server that failed to start reports its
+    // own reason rather than the end of file its death also causes. The phase
+    // stays `StartingWorld` until the connection reports in; vanilla shows one
+    // screen from server start until terrain appears.
+    if let Some(world) = world
+        && let Err(reason) = world.poll()
+    {
+        return ConnectingUpdateResult::Disconnected { reason };
+    }
+
     let disconnect_reason = core.drain_network_events(
         connection,
         Some(connect_phase),
@@ -62,7 +78,7 @@ pub fn update_connecting(
     }
 
     let status_text = match connect_phase {
-        ConnectionPhase::Loading => "Loading terrain...",
+        ConnectionPhase::StartingWorld | ConnectionPhase::Loading => "Loading terrain...",
         ConnectionPhase::Connecting => "Connecting to the server...",
     };
 

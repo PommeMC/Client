@@ -182,6 +182,7 @@ impl InputState {
                 gfx,
                 connection: _connection,
                 game,
+                ..
             } = &mut app
             {
                 if self.action_just_pressed(Action::ToggleInventory) {

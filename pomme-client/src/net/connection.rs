@@ -62,10 +62,7 @@ pub enum Transport {
         protocol: Option<i32>,
     },
     /// An integrated server in this process, reached over an in-memory pipe.
-    #[allow(
-        dead_code,
-        reason = "the integrated server constructs these once it lands"
-    )]
+    #[allow(dead_code, reason = "only a singleplayer build opens a world")]
     Memory(MemoryEnd),
 }
 

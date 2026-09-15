@@ -21,6 +21,7 @@ use steel_core::server::Server;
 use steel_login::{JavaTcpClient, ServerConnectionSession};
 use steel_utils::Identifier;
 use steel_utils::threading::{available_worker_threads, worker_threads_for_available};
+pub use steel_utils::types::{Difficulty, GameType};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::runtime::{Builder, Runtime};
 use tokio_util::sync::CancellationToken;
@@ -45,6 +46,10 @@ pub struct LaunchOptions {
     pub view_distance: u8,
     /// Radius the server ticks entities and blocks in.
     pub simulation_distance: u8,
+    pub game_mode: GameType,
+    pub difficulty: Difficulty,
+    /// Cheats. Puts the player in the op group rather than setting a flag.
+    pub allow_commands: bool,
     pub transport: ServerTransport,
 }
 
@@ -245,7 +250,7 @@ async fn open_world(
     chunk_runtime: Arc<Runtime>,
     chunk_threads: usize,
 ) -> Result<Arc<Server>, String> {
-    let groups = PermissionGroupManager::new(PermissionGroupsConfig::default(), None)
+    let groups = PermissionGroupManager::new(permission_groups(options.allow_commands), None)
         .map_err(|error| format!("failed to build the permission groups: {error}"))?;
 
     let server = Arc::new(
@@ -266,6 +271,16 @@ async fn open_world(
         server.save_and_shutdown().await;
         Err("failed to prepare the spawn area".to_owned())
     }
+}
+
+/// Steel's default config always defines the op group, and its name is not
+/// exported, so this names it directly.
+fn permission_groups(allow_commands: bool) -> PermissionGroupsConfig {
+    let mut groups = PermissionGroupsConfig::default();
+    if allow_commands {
+        groups.default_groups.push("op".to_owned());
+    }
+    groups
 }
 
 fn runtime_config(options: &LaunchOptions, chunk_threads: usize) -> RuntimeConfig {
@@ -304,8 +319,8 @@ fn worlds_config(options: &LaunchOptions) -> WorldsConfig {
     WorldsConfig {
         save_path: options.save_path.to_string_lossy().into_owned(),
         seed: Some(options.seed.to_string()),
-        default_gamemode: None,
-        difficulty: None,
+        default_gamemode: Some(options.game_mode),
+        difficulty: Some(options.difficulty),
         storage: Some(StorageSelection::default_world_disk()),
         player_storage: Some(StorageSelection::default_player_file()),
         domains: BTreeMap::from([(
@@ -331,7 +346,10 @@ mod tests {
     use std::fs;
     use std::time::Duration;
 
-    use super::{LaunchOptions, PathBuf, Progress, ServerTransport, launch, thread};
+    use super::{
+        Difficulty, GameType, LaunchOptions, PathBuf, Progress, ServerTransport, launch,
+        permission_groups, thread, worlds_config,
+    };
 
     /// Removes the world whether or not the assertions pass.
     struct TempWorld(PathBuf);
@@ -342,6 +360,23 @@ mod tests {
         }
     }
 
+    fn options(save_path: PathBuf) -> LaunchOptions {
+        LaunchOptions {
+            save_path,
+            seed: 1,
+            view_distance: 4,
+            simulation_distance: 4,
+            game_mode: GameType::Creative,
+            difficulty: Difficulty::Peaceful,
+            allow_commands: true,
+            // Nothing joins, so the server reads end of file and writes nowhere.
+            transport: ServerTransport {
+                read: Box::new(tokio::io::empty()),
+                write: Box::new(tokio::io::sink()),
+            },
+        }
+    }
+
     /// Opens a world, waits for it, then stops it and waits for the save.
     fn open_and_close(label: &str) -> TempWorld {
         let world = TempWorld(
@@ -349,17 +384,7 @@ mod tests {
         );
         fs::create_dir_all(&world.0).expect("the save directory should be creatable");
 
-        let mut pending = launch(LaunchOptions {
-            save_path: world.0.clone(),
-            seed: 1,
-            view_distance: 4,
-            simulation_distance: 4,
-            // Nothing joins, so the server reads end of file and writes nowhere.
-            transport: ServerTransport {
-                read: Box::new(tokio::io::empty()),
-                write: Box::new(tokio::io::sink()),
-            },
-        });
+        let mut pending = launch(options(world.0.clone()));
 
         let handle = loop {
             match pending.poll() {
@@ -391,5 +416,19 @@ mod tests {
                 world.0.display()
             );
         }
+    }
+
+    /// The per-world settings have to reach the config steel actually reads,
+    /// and cheats are a group rather than a flag.
+    #[test]
+    fn world_settings_reach_the_steel_config() {
+        let config = worlds_config(&options(PathBuf::from("saves/world")));
+        assert_eq!(config.default_gamemode, Some(GameType::Creative));
+        assert_eq!(config.difficulty, Some(Difficulty::Peaceful));
+        assert_eq!(config.seed.as_deref(), Some("1"));
+
+        let op = "op".to_owned();
+        assert!(permission_groups(true).default_groups.contains(&op));
+        assert!(!permission_groups(false).default_groups.contains(&op));
     }
 }
