@@ -12,6 +12,7 @@ const fn v(name: &'static str, protocol: i32) -> ProtocolVersion {
 /// All versions the client can be launched as, newest first. Snapshot
 /// protocol numbers encode as `(1 << 30) | snapshot_counter`.
 pub const VERSIONS: &[ProtocolVersion] = &[
+    v("26.3", 777),
     v("26.2", 776),
     v("26.1.2", 775),
     v("26.1.1", 775),
@@ -55,7 +56,12 @@ pub(crate) struct EmbeddedVersion {
     pub registries: &'static str,
 }
 
-pub(crate) const EMBEDDED: [EmbeddedVersion; 13] = [
+pub(crate) const EMBEDDED: [EmbeddedVersion; 14] = [
+    EmbeddedVersion {
+        version: v("26.3", 777),
+        packets: include_str!("data/protocol-26.3.json"),
+        registries: include_str!("data/registries-26.3.json"),
+    },
     EmbeddedVersion {
         version: v("26.1", 775),
         packets: include_str!("data/protocol-26.1.json"),
@@ -160,7 +166,9 @@ mod tests {
     fn lookups() {
         assert_eq!(NATIVE.protocol, 776);
         assert_eq!(ProtocolVersion::from_name(NATIVE.name), Some(NATIVE));
-        assert_eq!(LATEST.protocol, 776);
+        assert_eq!(LATEST.protocol, 777);
+        assert_eq!(ProtocolVersion::from_name("26.3").unwrap().protocol, 777);
+        assert_eq!(ProtocolVersion::from_protocol(777).unwrap().name, "26.3");
         assert_eq!(ProtocolVersion::from_name("26.2").unwrap().protocol, 776);
         assert_eq!(ProtocolVersion::from_name("26.1.2").unwrap().protocol, 775);
         assert_eq!(ProtocolVersion::from_protocol(775).unwrap().name, "26.1.2");

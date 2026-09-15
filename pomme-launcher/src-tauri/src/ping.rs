@@ -233,6 +233,8 @@ mod tests {
             resolve_version_name(Some(773), Some("Paper 1.21.9")),
             "1.21.10"
         );
+        assert_eq!(resolve_version_name(Some(777), None), "26.3");
+        assert_eq!(resolve_version_name(Some(777), Some("Paper 26.3")), "26.3");
         assert_eq!(resolve_version_name(Some(773), None), "1.21.10");
         assert_eq!(
             resolve_version_name(Some(772), Some("Paper 1.21.8")),

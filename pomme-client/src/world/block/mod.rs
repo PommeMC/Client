@@ -204,11 +204,12 @@ impl ScalarOrPerState {
 
 /// Per-protocol block-state data, native first; unknown protocols fall back
 /// to the native version (slot 0).
-const BLOCK_DATA: [(i32, &str); 12] = [
+const BLOCK_DATA: [(i32, &str); 13] = [
     (
         pomme_protocol::version::NATIVE.protocol,
         include_str!("data/blocks-26.2.json"),
     ),
+    (777, include_str!("data/blocks-26.3.json")),
     (775, include_str!("data/blocks-26.1.json")),
     (774, include_str!("data/blocks-1.21.11.json")),
     (773, include_str!("data/blocks-1.21.10.json")),
@@ -240,6 +241,7 @@ const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
 /// values vanilla bakes at runtime, dumped by running its own code.
 const STATE_DATA: [&str; BLOCK_DATA.len()] = [
     include_str!("data/state-26.2.json"),
+    include_str!("data/state-26.3.json"),
     include_str!("data/state-26.1.json"),
     include_str!("data/state-1.21.11.json"),
     include_str!("data/state-1.21.10.json"),
