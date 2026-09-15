@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 
+[features]
+default = ["singleplayer"]
+# Embeds SteelMC as the integrated server. Off, the world screens still list and
+# edit saves but nothing can open one.
+singleplayer = ["dep:pomme-singleplayer"]
+
 [build-dependencies]
 shaderc = "0.10"
 
@@ -29,6 +35,7 @@ tracing-appender = "0.2"
 mimalloc = "0.1"
 pomme-gpu-allocator = { path = "../pomme-gpu-allocator" }
 pomme-protocol = { path = "../pomme-protocol" }
+pomme-singleplayer = { path = "../pomme-singleplayer", optional = true }
 winit = { version = "0.30", features = ["rwh_06"] }
 raw-window-handle = "0.6"
 glam = { workspace = true }
@@ -38,7 +45,9 @@ bytemuck = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 flate2 = "1"
 azalea-buf = "0.16"
-azalea-protocol = { version = "0.16", features = ["connecting"] }
+# `connecting` and `online-mode` only gate azalea's own connection type, which
+# pomme replaced with net::conn; authentication goes straight to azalea-auth.
+azalea-protocol = { version = "0.16", default-features = false }
 azalea-crypto = "0.16"
 azalea-auth = "0.16"
 azalea-entity = "0.16"
@@ -49,6 +58,7 @@ azalea-core = "0.16"
 azalea-registry = "0.16"
 azalea-inventory = "0.16"
 uuid = { version = "1", features = ["v4"] }
+md-5 = "0.11"
 crossbeam-channel = "0.5"
 png = "0.17"
 image = "0.25"

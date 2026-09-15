@@ -115,8 +115,8 @@
 //!   every older mask is a prefix of 26.2's, and `writeFixedBitSet` is one byte
 //!   at 6, 7 and 8 actions alike
 //! - serverbound `move_vehicle` lacks the trailing onGround bool and 1.21.4
-//!   split `pick_item` into the from_block/from_entity pair; pomme sends
-//!   neither
+//!   split `pick_item` into the from_block/from_entity pair; the pair is
+//!   suppressed quietly below 769 (TODO: port the slot-based `pick_item`)
 //! - clientbound `set_held_slot` reads a byte where 26.2 reads a varint; hotbar
 //!   slots encode identically
 //!
@@ -387,7 +387,8 @@ struct GameIds {
     /// also flags the named NBT roots, which every walker below reads.
     v763: Option<Ids763>,
     /// Latest serverbound ids whose packet is knowingly absent on this wire
-    /// version (`client_tick_end`, `player_loaded`); suppressed quietly.
+    /// version (`client_tick_end`, `player_loaded`, the pick pair); suppressed
+    /// quietly.
     quiet_suppressed: Box<[u32]>,
 }
 
@@ -1448,11 +1449,17 @@ impl GameIds {
                     })
                     .expect("player entity type") as u32,
             }),
-            quiet_suppressed: ["client_tick_end", "player_loaded", "chunk_batch_received"]
-                .iter()
-                .filter(|n| table.id(Phase::Game, Serverbound, n).is_none())
-                .map(|n| required_id(latest, Phase::Game, Serverbound, n))
-                .collect(),
+            quiet_suppressed: [
+                "client_tick_end",
+                "player_loaded",
+                "chunk_batch_received",
+                "pick_item_from_block",
+                "pick_item_from_entity",
+            ]
+            .iter()
+            .filter(|n| table.id(Phase::Game, Serverbound, n).is_none())
+            .map(|n| required_id(latest, Phase::Game, Serverbound, n))
+            .collect(),
         })
     }
 }

@@ -21,6 +21,7 @@ mod physics;
 mod player;
 mod renderer;
 mod resource_pack;
+mod singleplayer;
 mod ui;
 mod user;
 mod util;

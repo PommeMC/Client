@@ -21,8 +21,9 @@ use crate::app::phases::in_menu::{MenuUpdateResult, update_menu};
 use crate::app::phases::{AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
-use crate::net::connection::{ConnectArgs, spawn_connection};
+use crate::net::connection::{ConnectArgs, Transport, spawn_connection};
 use crate::renderer::{self, Renderer};
+use crate::singleplayer::World;
 use crate::user::UserData;
 
 #[derive(Error, Debug)]
@@ -192,6 +193,7 @@ impl ApplicationHandler for App {
                     &self.core.asset_index,
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
+                    &self.core.menu.theme().panorama_dir(&self.core.data_dirs),
                 ) {
                     Ok(r) => r,
                     Err(e) => {
@@ -218,14 +220,16 @@ impl ApplicationHandler for App {
                     let connection = spawn_connection(
                         &self.core.tokio_rt,
                         ConnectArgs {
-                            server: server_ip,
+                            // TODO: read the saved server list's protocol for
+                            // this address to skip the join-time probe.
+                            transport: Transport::Remote {
+                                server: server_ip,
+                                protocol: None,
+                            },
                             username: self.core.user.username.clone(),
                             uuid: self.core.user.uuid,
                             access_token: self.core.user.access_token.clone(),
-                            view_distance: self.core.menu.render_distance as u8,
-                            // TODO: read the saved server list's protocol for
-                            // this address to skip the join-time probe.
-                            protocol: None,
+                            view_distance: self.core.view_distance(),
                         },
                     );
 
@@ -248,6 +252,7 @@ impl ApplicationHandler for App {
                         connect_phase: ConnectionPhase::Connecting,
                         connection,
                         game,
+                        world: None,
                     }
                 } else {
                     let gfx = Gfx {
@@ -325,17 +330,12 @@ impl ApplicationHandler for App {
                             connect_phase,
                             connection,
                             game,
+                            world,
                         } => {
                             if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                             {
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut self.core.presence {
-                                    p.set_in_menu(&self.core.version);
-                                }
-
-                                self.core.apply_cursor_grab(&gfx.window, None);
+                                self.core.return_to_menu(&mut gfx, world);
 
                                 AppPhase::InMenu {
                                     gfx,
@@ -348,6 +348,7 @@ impl ApplicationHandler for App {
                                     connect_phase,
                                     connection,
                                     game,
+                                    world,
                                 }
                             }
                         }
@@ -355,6 +356,7 @@ impl ApplicationHandler for App {
                             gfx,
                             connection,
                             mut game,
+                            world,
                         } => {
                             // No repeat filter: vanilla dispatches GLFW repeats
                             // to screens and debug chords alike.
@@ -428,11 +430,9 @@ impl ApplicationHandler for App {
                                         }
                                         KeyCode::Escape
                                             if game.death_confirm
-                                                && game
-                                                    .death_confirm_instant
-                                                    .elapsed()
-                                                    .as_secs_f32()
-                                                    >= 1.0 =>
+                                                && crate::ui::death::buttons_ready(
+                                                    game.death_confirm_ticks,
+                                                ) =>
                                         {
                                             game.death_confirm = false;
                                             self.core.send_respawn(&connection, &mut game);
@@ -455,6 +455,7 @@ impl ApplicationHandler for App {
                                 gfx,
                                 connection,
                                 game,
+                                world,
                             }
                         }
                     }
@@ -572,7 +573,15 @@ impl ApplicationHandler for App {
 
                         match update_result {
                             MenuUpdateResult::None => AppPhase::InMenu { gfx, panorama },
-                            MenuUpdateResult::Connect { connect_args } => {
+                            MenuUpdateResult::Connect {
+                                connect_args,
+                                world,
+                            } => {
+                                let connect_phase = if world.is_some() {
+                                    ConnectionPhase::StartingWorld
+                                } else {
+                                    ConnectionPhase::Connecting
+                                };
                                 let connection = spawn_connection(&core.tokio_rt, connect_args);
 
                                 let game = GameState::new(
@@ -585,9 +594,10 @@ impl ApplicationHandler for App {
                                 AppPhase::Connecting {
                                     gfx,
                                     panorama,
-                                    connect_phase: ConnectionPhase::Connecting,
+                                    connect_phase,
                                     connection,
                                     game,
+                                    world,
                                 }
                             }
                             MenuUpdateResult::Quit => {
@@ -602,6 +612,7 @@ impl ApplicationHandler for App {
                         mut connect_phase,
                         connection,
                         mut game,
+                        mut world,
                     } => {
                         let update_result = update_connecting(
                             core,
@@ -611,6 +622,7 @@ impl ApplicationHandler for App {
                             &mut connect_phase,
                             &connection,
                             &mut game,
+                            world.as_mut(),
                         );
 
                         match update_result {
@@ -620,33 +632,26 @@ impl ApplicationHandler for App {
                                 connect_phase,
                                 connection,
                                 game,
+                                world,
                             },
                             ConnectingUpdateResult::ManualDisconnect => {
-                                core.clear_server_resource_packs(&mut gfx.renderer);
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.return_to_menu(&mut gfx, world);
 
                                 AppPhase::InMenu { gfx, panorama }
                             }
                             ConnectingUpdateResult::Disconnected { reason } => {
-                                core.clear_server_resource_packs(&mut gfx.renderer);
-                                gfx.renderer.clear_chunk_meshes();
                                 core.menu.show_disconnect(reason);
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.return_to_menu(&mut gfx, world);
 
                                 AppPhase::InMenu { gfx, panorama }
                             }
                             ConnectingUpdateResult::JoinGame => {
                                 if let Some(p) = &mut core.presence {
-                                    p.playing_multiplayer(&core.version);
+                                    if world.is_some() {
+                                        p.playing_singleplayer(&core.version);
+                                    } else {
+                                        p.playing_multiplayer(&core.version);
+                                    }
                                 }
                                 // In-game screens use the plain arrow like vanilla, not
                                 // the pointer the branded menu may have left set.
@@ -657,6 +662,7 @@ impl ApplicationHandler for App {
                                     gfx,
                                     connection,
                                     game,
+                                    world,
                                 }
                             }
                         }
@@ -665,25 +671,23 @@ impl ApplicationHandler for App {
                         mut gfx,
                         connection,
                         mut game,
+                        mut world,
                     } => {
-                        let update_result =
-                            update_game(core, dt, raw_dt, &mut gfx, &connection, &mut game);
+                        let update_result = match world.as_mut().map(World::poll) {
+                            Some(Err(reason)) => GameUpdateResult::Disconnected { reason },
+                            _ => update_game(core, dt, raw_dt, &mut gfx, &connection, &mut game),
+                        };
 
                         match update_result {
                             GameUpdateResult::None => AppPhase::InGame {
                                 gfx,
                                 connection,
                                 game,
+                                world,
                             },
                             GameUpdateResult::ManualDisconnect => {
                                 core.audio.stop_all_sounds();
-                                core.clear_server_resource_packs(&mut gfx.renderer);
-                                gfx.renderer.clear_chunk_meshes();
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.return_to_menu(&mut gfx, world);
 
                                 AppPhase::InMenu {
                                     gfx,
@@ -692,14 +696,8 @@ impl ApplicationHandler for App {
                             }
                             GameUpdateResult::Disconnected { reason } => {
                                 core.audio.stop_all_sounds();
-                                core.clear_server_resource_packs(&mut gfx.renderer);
-                                gfx.renderer.clear_chunk_meshes();
                                 core.menu.show_disconnect(reason);
-
-                                if let Some(p) = &mut core.presence {
-                                    p.set_in_menu(&core.version);
-                                }
-                                core.apply_cursor_grab(&gfx.window, None);
+                                core.return_to_menu(&mut gfx, world);
 
                                 AppPhase::InMenu {
                                     gfx,
@@ -735,7 +733,7 @@ impl ApplicationHandler for App {
     ) {
         if let DeviceEvent::MouseMotion { delta } = event
             && self.core.input.is_cursor_captured()
-            && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.gui_open() && !game.chat.is_open())
+            && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.death_screen_open && !game.gui_open() && !game.chat.is_open())
         {
             self.core.input.on_mouse_motion(delta);
         }

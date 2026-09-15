@@ -1,12 +1,26 @@
 use crate::app::core::AppCore;
 use crate::app::phases::{Gfx, Panorama};
-use crate::net::connection::ConnectArgs;
-use crate::ui::menu::{MenuAction, PanoramaTheme};
+use crate::net::connection::{ConnectArgs, Transport};
+use crate::singleplayer::{self, World};
+use crate::ui::menu::MenuAction;
 
 pub enum MenuUpdateResult {
     None,
-    Connect { connect_args: ConnectArgs },
+    Connect {
+        connect_args: ConnectArgs,
+        world: Option<World>,
+    },
     Quit,
+}
+
+fn connect_args(core: &AppCore, transport: Transport, username: String) -> ConnectArgs {
+    ConnectArgs {
+        transport,
+        username,
+        uuid: core.user.uuid,
+        access_token: core.user.access_token.clone(),
+        view_distance: core.view_distance(),
+    }
 }
 
 pub fn update_menu(
@@ -68,7 +82,7 @@ pub fn update_menu(
         result.blur,
         result.elements,
         core.input.cursor_pos(),
-        core.menu.is_main_screen(),
+        core.menu.show_skin_preview(),
     ) {
         tracing::error!("Render error: {e}");
     }
@@ -115,24 +129,37 @@ pub fn update_menu(
             protocol,
         } => {
             core.audio.stop_menu_music();
-            let connect_args = ConnectArgs {
-                server,
-                username,
-                uuid: core.user.uuid,
-                access_token: core.user.access_token.clone(),
-                view_distance: core.menu.render_distance as u8,
-                protocol,
+
+            return MenuUpdateResult::Connect {
+                connect_args: connect_args(core, Transport::Remote { server, protocol }, username),
+                world: None,
+            };
+        }
+        MenuAction::PlayWorld { folder } => {
+            let Some((summary, dir)) = core.menu.world_to_launch(&folder) else {
+                return MenuUpdateResult::None;
             };
 
-            return MenuUpdateResult::Connect { connect_args };
+            match singleplayer::open(&summary, &dir, core.view_distance()) {
+                Ok((world, client_end)) => {
+                    core.menu.world_played(&folder);
+                    core.audio.stop_menu_music();
+
+                    let username = core.user.username.clone();
+                    return MenuUpdateResult::Connect {
+                        connect_args: connect_args(core, Transport::Memory(client_end), username),
+                        world: Some(world),
+                    };
+                }
+                Err(reason) => {
+                    tracing::error!("Failed to open {folder}: {reason}");
+                    core.menu.show_disconnect(reason);
+                }
+            }
         }
         MenuAction::ChangeTheme(theme) => {
-            let panorama_dir = match theme {
-                PanoramaTheme::Default => core.data_dirs.jar_assets_dir.clone(),
-                PanoramaTheme::Pomme => core.data_dirs.pomme_assets_dir.join("panoramas"),
-            };
             gfx.renderer
-                .reload_panorama(&panorama_dir, &core.asset_index);
+                .reload_panorama(&theme.panorama_dir(&core.data_dirs));
             core.menu.start_transition_open();
         }
         MenuAction::Quit => {

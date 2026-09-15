@@ -35,10 +35,13 @@ client-build *args: openal
 client-pre-pr:
     @cargo fmt -p pomme-client -- --check
     @cargo fmt -p pomme-protocol -- --check
+    @cargo fmt -p pomme-singleplayer -- --check
     @cargo clippy -p pomme-client --release --all-targets --all-features -- -D warnings
     @cargo clippy -p pomme-protocol --release --all-targets --all-features -- -D warnings
+    @cargo clippy -p pomme-singleplayer --release --all-targets -- -D warnings
     @cargo test -p pomme-protocol
     @cargo test -p pomme-client
+    @cargo test -p pomme-singleplayer -- --include-ignored
 
 # Regenerate a version's packet-id table from the decompiled reference.
 protogen version="26.2":

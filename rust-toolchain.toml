@@ -1,5 +1,6 @@
 [toolchain]
-# Pinned so local and CI build identically. Bump deliberately; nightly is only
-# needed for rustfmt's options.
-channel = "nightly-2026-03-21"
+# Pinned so local and CI build identically. Nightly is needed for rustfmt's
+# options and to match SteelMC's pin, whose library crates gate on nightly
+# features. Bump deliberately, SteelMC first.
+channel = "nightly-2026-08-21"
 components = ["clippy", "rustfmt", "rust-analyzer", "rust-src"]

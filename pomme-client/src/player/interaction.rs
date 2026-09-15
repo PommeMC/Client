@@ -42,7 +42,6 @@ const CREATIVE_ENTITY_REACH_BONUS: f64 = 2.0;
 const DESTROY_COOLDOWN: u32 = 5;
 const MISS_COOLDOWN: u32 = 10;
 const USE_DELAY: u32 = 4;
-
 const SWING_DURATION: i32 = 6;
 /// Vanilla `Consumable`: no bite effects during the first ~22% of the use,
 /// then a burst every 4 ticks.
@@ -399,27 +398,6 @@ impl InteractionState {
             );
         }
 
-        if !using && input.performing_action(input::Action::Destroy) {
-            self.continue_attack(
-                chunks,
-                sender,
-                audio,
-                player_pos,
-                on_ground,
-                creative,
-                held_stack,
-                effects,
-                &mut dirty_chunks,
-            );
-        } else {
-            self.miss_time = 0;
-            self.stop_destroying(sender);
-        }
-
-        if self.is_destroying {
-            let _ = input.strong_rumble_for_tick();
-        }
-
         // Vanilla `handleKeybinds`: while an item is in use, holding the use
         // key continues it and releasing sends RELEASE_USE_ITEM (an early
         // cancel; consumables finish on the server's own timer, never on
@@ -455,6 +433,38 @@ impl InteractionState {
             }
         }
 
+        // Vanilla checks `isUsingItem` once before the attack/use/pick loops,
+        // so a use started above does not suppress a pick from the same tick.
+        if !using && input.middle_just_pressed() {
+            self.pick_block_or_entity(sender, input.ctrl_held());
+        }
+
+        let attack_down = input.performing_action(input::Action::Destroy);
+        if !attack_down {
+            self.miss_time = 0;
+        }
+        if self.using_item.is_none() {
+            if attack_down {
+                self.continue_attack(
+                    chunks,
+                    sender,
+                    audio,
+                    player_pos,
+                    on_ground,
+                    creative,
+                    held_stack,
+                    effects,
+                    &mut dirty_chunks,
+                );
+            } else {
+                self.stop_destroying(sender);
+            }
+        }
+
+        if self.is_destroying {
+            let _ = input.strong_rumble_for_tick();
+        }
+
         if self.miss_time > 0 {
             self.miss_time -= 1;
         }
@@ -468,6 +478,24 @@ impl InteractionState {
         self.update_swing();
 
         dirty_chunks
+    }
+
+    fn pick_block_or_entity(&self, sender: &PacketSender, include_data: bool) {
+        match self.target {
+            Some(HitResult::Block(hit)) => sender.send_raw(wire::encode_pick_item_from_block(
+                hit.block_pos.x,
+                hit.block_pos.y,
+                hit.block_pos.z,
+                include_data,
+            )),
+            Some(HitResult::Entity(hit)) => {
+                sender.send_raw(wire::encode_pick_item_from_entity(
+                    hit.entity_id,
+                    include_data,
+                ));
+            }
+            None => {}
+        }
     }
 
     /// Vanilla `Player.tick`: advance the attack cooldown, and reset it when
@@ -779,6 +807,65 @@ impl InteractionState {
             );
         }
         true
+    }
+
+    /// A respawn constructs a fresh LocalPlayer in vanilla. Reset only the
+    /// transient player-owned animation/use state that Pomme keeps inside the
+    /// longer-lived interaction controller; block prediction/sequences remain.
+    pub fn reset_player_transients_for_respawn(&mut self) {
+        self.using_item = None;
+        self.swinging = false;
+        self.swing_time = 0;
+        self.attack_anim = 0.0;
+        self.o_attack_anim = 0.0;
+        self.attack_strength_ticker = 0;
+        self.last_item_in_main_hand = None;
+    }
+
+    /// Client `LivingEntity.onSyncedDataUpdated(DATA_LIVING_ENTITY_FLAGS)`:
+    /// when the server clears the using-item bit, discard the local use state
+    /// immediately.
+    pub fn sync_using_item_flag(&mut self, is_using: bool) {
+        // TODO: vanilla also starts a use when the bit turns on with none
+        // active (a server-initiated use); pomme only starts uses from its own
+        // UseItem send.
+        if !is_using {
+            self.using_item = None;
+        }
+    }
+
+    /// Dead-player `LivingEntity.tick` heartbeat that still runs before the
+    /// removed check around `aiStep`. This deliberately excludes keybind and
+    /// block-interaction handling: only an already-active item use advances.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick_dead_living_state(
+        &mut self,
+        held_stack: Option<&ItemStackData>,
+        audio: &AudioEngine,
+        chunks: &ChunkStore,
+        player_pos: DVec3,
+        eye_pos: DVec3,
+        look: LookDirection,
+        effects: &mut BreakEffects,
+    ) {
+        self.update_using_item(
+            held_stack, audio, chunks, player_pos, eye_pos, look, effects,
+        );
+    }
+
+    /// Remaining dead-player `Player.tick` state. Swing animation belongs to
+    /// `Player.aiStep` and therefore stops on the tick-20 removal tick, while
+    /// attack-strength ticking happens after `super.tick` and still advances
+    /// once on that final local-player tick.
+    pub fn tick_dead_player_state(
+        &mut self,
+        held_stack: Option<&ItemStackData>,
+        advance_swing: bool,
+    ) {
+        if advance_swing {
+            self.update_swing();
+        }
+        self.tick_attack_cooldown(held_stack);
     }
 
     /// Per-tick item-use heartbeat, vanilla `LivingEntity.updatingUsingItem`
@@ -1098,6 +1185,11 @@ impl InteractionState {
     /// block with the same item.
     fn same_destroy_target(&self, pos: BlockPos, held: Option<&ItemStackData>) -> bool {
         self.destroy_pos == pos && same_item_same_components(held, self.destroying_item.as_ref())
+    }
+
+    pub fn stop_destroying_for_screen(&mut self, sender: &PacketSender) {
+        self.miss_time = 0;
+        self.stop_destroying(sender);
     }
 
     fn stop_destroying(&mut self, sender: &PacketSender) {
@@ -1593,6 +1685,79 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn respawn_resets_player_owned_interaction_transients() {
+        let mut state = InteractionState::new();
+        state.swinging = true;
+        state.swing_time = 4;
+        state.attack_anim = 0.8;
+        state.o_attack_anim = 0.6;
+        state.attack_strength_ticker = 7;
+        state.last_item_in_main_hand = Some(ItemStackData::new(ItemKind::Stone, 1));
+        state.using_item = Some(ActiveUse {
+            kind: ItemKind::Apple,
+            anim: ItemUseAnimation::Eat,
+            sound: SoundRef::event("entity.generic.eat"),
+            has_particles: true,
+            texture: "item/apple".to_string(),
+            use_effects: UseEffects::default(),
+            duration: 32,
+            remaining: 12,
+        });
+
+        state.reset_player_transients_for_respawn();
+
+        assert!(!state.swinging);
+        assert_eq!(state.swing_time, 0);
+        assert_eq!(state.attack_anim, 0.0);
+        assert_eq!(state.o_attack_anim, 0.0);
+        assert_eq!(state.attack_strength_ticker, 0);
+        assert!(state.last_item_in_main_hand.is_none());
+        assert!(state.using_item.is_none());
+    }
+
+    #[test]
+    fn synced_using_item_flag_clears_server_stopped_use() {
+        let mut state = InteractionState::new();
+        state.using_item = Some(ActiveUse {
+            kind: ItemKind::Apple,
+            anim: ItemUseAnimation::Eat,
+            sound: SoundRef::event("entity.generic.eat"),
+            has_particles: true,
+            texture: "item/apple".to_string(),
+            use_effects: UseEffects::default(),
+            duration: 32,
+            remaining: 12,
+        });
+
+        state.sync_using_item_flag(true);
+        assert!(state.using_item.is_some());
+        state.sync_using_item_flag(false);
+        assert!(state.using_item.is_none());
+    }
+
+    #[test]
+    fn dead_player_heartbeat_stops_swing_on_removal_tick_but_not_attack_cooldown() {
+        let mut state = InteractionState::new();
+        state.swinging = true;
+        state.swing_time = 0;
+        state.attack_strength_ticker = 0;
+
+        state.tick_dead_player_state(None, true);
+        assert_eq!(state.swing_time, 1);
+        assert_eq!(state.attack_strength_ticker, 1);
+
+        state.tick_dead_player_state(None, false);
+        assert_eq!(
+            state.swing_time, 1,
+            "Player.aiStep must be skipped on the tick-20 removal tick"
+        );
+        assert_eq!(
+            state.attack_strength_ticker, 2,
+            "Player.tick state after super.tick still advances once on the removal tick"
+        );
+    }
+
     /// Vanilla `isSameItemSameComponents`: count never matters, the item type
     /// does, and the empty hand only matches itself.
     #[test]
@@ -1608,6 +1773,48 @@ mod tests {
         ));
         assert!(!same_item_same_components(Some(&a), None));
         assert!(same_item_same_components(None, None));
+    }
+
+    #[test]
+    fn pick_dispatches_current_target_and_ignores_miss() {
+        use crate::net::sender::Outbound;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut interaction = InteractionState::new();
+
+        interaction.target = Some(HitResult::Block(BlockHitResult {
+            block_pos: BlockPos::new(-1, 64, 3),
+            face: Direction::North,
+            hit_point: DVec3::ZERO,
+        }));
+        interaction.pick_block_or_entity(&sender, true);
+        match rx.try_recv().expect("block pick packet") {
+            Outbound::Raw(bytes) => {
+                assert_eq!(bytes, wire::encode_pick_item_from_block(-1, 64, 3, true))
+            }
+            Outbound::Packet(_) => panic!("pick packet must use raw encoding"),
+        }
+
+        interaction.target = Some(HitResult::Entity(EntityHitResult {
+            entity_id: 300,
+            location: DVec3::ZERO,
+            entity_pos: DVec3::ZERO,
+        }));
+        interaction.pick_block_or_entity(&sender, false);
+        match rx.try_recv().expect("entity pick packet") {
+            Outbound::Raw(bytes) => {
+                assert_eq!(bytes, wire::encode_pick_item_from_entity(300, false));
+            }
+            Outbound::Packet(_) => panic!("pick packet must use raw encoding"),
+        }
+
+        interaction.target = None;
+        interaction.pick_block_or_entity(&sender, false);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

@@ -36,8 +36,9 @@ const WATER_ACCELERATION: f32 = 0.02;
 const WATER_HORIZONTAL_DRAG: f32 = 0.8;
 const WATER_HORIZONTAL_DRAG_SPRINT: f32 = 0.9;
 const WATER_VERTICAL_DRAG: f32 = 0.8;
-// Pomme's water-gravity path is still simplified. Vanilla supplies effective
-// gravity to the water routine as a double; keep this placeholder double too.
+// TODO: vanilla `travelInWater` applies the 0.8 drag first and then
+// `getFluidFallingAdjustedMovement` (gravity / 16 with the -0.003 falling
+// clamp); pomme still subtracts this placeholder before the drag.
 const WATER_GRAVITY: f64 = 0.02;
 // STEP_HEIGHT is a double attribute, but LivingEntity.maxUpStep casts it to
 // float.
@@ -129,6 +130,33 @@ pub fn tick(
         player.no_jump_delay = 0;
     }
 
+    travel(
+        player,
+        input,
+        chunk_store,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
+    );
+
+    player.tick_air_supply();
+    stop_flying_on_ground(player);
+
+    player.was_forward_pressed = forward_pressed;
+    player.was_jump_pressed = jump_held;
+}
+
+/// Vanilla `LivingEntity.travel`: the water or air routine for this tick.
+fn travel(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunk_store: &ChunkStore,
+    forward: f32,
+    strafe: f32,
+    sin_y_rot: f32,
+    cos_y_rot: f32,
+) {
     if player.in_water {
         tick_water(
             player,
@@ -150,17 +178,49 @@ pub fn tick(
             cos_y_rot,
         );
     }
+}
 
-    player.tick_air_supply();
-
-    // Touching down cancels flight, even in creative.
+/// Touching down cancels flight, even in creative.
+fn stop_flying_on_ground(player: &mut LocalPlayer) {
     if player.on_ground && player.flying && player.game_mode != 3 {
         player.flying = false;
         player.abilities_dirty = true;
     }
+}
 
-    player.was_forward_pressed = forward_pressed;
-    player.was_jump_pressed = jump_held;
+/// Vanilla dead-player `LivingEntity.aiStep`: input is immobile, but travel
+/// still applies existing velocity, gravity, collision, and drag until tick-20
+/// removal.
+pub fn tick_dead(player: &mut LocalPlayer, chunk_store: &ChunkStore) {
+    player.no_jump_delay = 0;
+    player.sprinting = false;
+
+    // Local players enter death through SetHealth; entity event 3 intentionally
+    // skips LivingEntity.die for players, so the current ordinary player pose
+    // remains authoritative until Player.updatePlayerPose runs at tick end.
+    let neutral = InputState::released();
+    player.update_water_state(chunk_store);
+    player.tick_eye_height();
+
+    let (sin_y_rot, cos_y_rot) = vanilla_yaw_sin_cos(player.look_dir.y_rot_deg());
+    travel(
+        player,
+        &neutral,
+        chunk_store,
+        0.0,
+        0.0,
+        sin_y_rot,
+        cos_y_rot,
+    );
+
+    // Player.updatePlayerPose runs after LivingEntity.tick in vanilla. With
+    // death-screen input released, this becomes standing unless clearance keeps
+    // the player in the crouching pose for the following tick.
+    update_crouch_state(player, &neutral, chunk_store);
+
+    stop_flying_on_ground(player);
+    player.was_forward_pressed = false;
+    player.was_jump_pressed = false;
 }
 
 // Vanilla `LocalPlayer.aiStep`: a fresh jump press arms the toggle window;
@@ -527,9 +587,10 @@ fn movement_delta(
         return (0.0, 0.0);
     }
     if length_sq > 1.0 {
-        let inv_len = length_sq.sqrt().recip();
-        x *= inv_len;
-        z *= inv_len;
+        // `Vec3.normalize` divides; a reciprocal multiply lands an ULP off.
+        let length = length_sq.sqrt();
+        x /= length;
+        z /= length;
     }
     let speed = f64::from(speed);
     x *= speed;
@@ -790,6 +851,18 @@ mod tests {
         );
     }
 
+    /// A float direction that widens to just over unit length takes the
+    /// normalize branch, where a reciprocal multiply lands one ULP off.
+    #[test]
+    fn over_unit_input_normalizes_like_vanilla() {
+        let (sin, cos) = vanilla_yaw_sin_cos(0.0);
+        let strafe = f32::from_bits(0x3f7ffb1c);
+        let forward = f32::from_bits(0x3c4829d1);
+        let (dx, dz) = movement_delta(forward, strafe, 1.0, sin, cos);
+        assert_eq!(dx.to_bits(), 0x3fefff637d23f861);
+        assert_eq!(dz.to_bits(), 0x3f89053a1dc39789);
+    }
+
     #[test]
     fn vanilla_mth_trig_and_movement_rotation_match_java_bits() {
         let (sin, cos) = vanilla_yaw_sin_cos(30.0);
@@ -806,5 +879,62 @@ mod tests {
         assert_eq!(dz.to_bits(), 0x3fa999996d18578d);
 
         assert_eq!(vanilla_look_y(30.0).to_bits(), 0xbfdfff8be0000000);
+    }
+
+    #[test]
+    fn dead_player_keeps_zero_input_air_travel() {
+        crate::world::block::init("26.2");
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(0.0, 80.0, 0.0).into();
+        player.velocity = crate::entity::components::Velocity::new(0.25, 0.0, -0.1);
+        player.sprinting = true;
+        player.crouching = true;
+        player.eye_height = 1.27;
+        player.prev_eye_height = 1.27;
+        let chunks = ChunkStore::new(2);
+
+        player.death_time = 1;
+        let starting_height = player.height();
+        tick_dead(&mut player, &chunks);
+
+        assert_eq!(
+            starting_height, CROUCH_HEIGHT,
+            "death must begin from the player's existing ordinary pose"
+        );
+
+        assert!(
+            !player.crouching,
+            "the first dead tick must end by selecting the neutral-input pose"
+        );
+        assert_eq!(
+            player.eye_height, 1.27,
+            "the first dead tick must still use the pre-tick crouching eye height"
+        );
+        player.death_time = 2;
+        tick_dead(&mut player, &chunks);
+        assert!(
+            player.eye_height > 1.27,
+            "the next dead tick must smooth toward the neutral standing pose"
+        );
+        assert!(
+            player.position.x > 0.0,
+            "dead-player momentum must still move the corpse"
+        );
+        assert!(
+            player.position.z < 0.0,
+            "dead-player momentum must still move the corpse"
+        );
+        assert!(
+            player.position.y <= 80.0,
+            "dead-player travel must continue applying gravity"
+        );
+        assert!(
+            player.velocity.y < 0.0,
+            "dead-player travel must retain downward gravity/drag"
+        );
+        assert!(
+            !player.sprinting,
+            "immobile dead-player input must stop sprinting"
+        );
     }
 }

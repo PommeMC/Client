@@ -33,3 +33,11 @@ updates:
           - "react"
           - "react-*"
           - "@types/react*"
+
+  # Monday, so a bad steel bump has the whole week to be caught or fixed
+  # upstream before Sunday's snapshot picks up master.
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
