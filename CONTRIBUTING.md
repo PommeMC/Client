@@ -12,11 +12,8 @@ Thanks for your interest in contributing to Pomme!
    cd Client
    ```
 
-   SteelMC is a submodule and the client builds it by default for singleplayer.
-   On an existing clone, `git submodule update --init` fetches it. Its first
-   build downloads the Minecraft server jar and generates registry source, so
-   expect that one to take a while. `cargo build -p pomme-client
-   --no-default-features` skips it entirely.
+   SteelMC is a submodule; see [Building](./README.md#building) for the
+   submodule, first-build, and skip notes.
 
 3. Build and run:
 
@@ -36,12 +33,14 @@ just launcher-pre-pr        # Launcher (Rust & TypeScript)
 
 `client-pre-pr` includes the singleplayer crate's ignored test, which boots a
 real SteelMC server and writes a world to the temp dir, so it takes a minute.
+CI additionally runs the client's clippy and tests with `--no-default-features`,
+which the recipe does not.
 
 ## Development Guidelines
 
-- **The toolchain is pinned** in `rust-toolchain.toml` (a nightly, for rustfmt's
-  options and to match SteelMC's pin). Never override it locally; when it has to
-  move, bump SteelMC first
+- **The toolchain is pinned** in `rust-toolchain.toml` (a nightly: rustfmt's
+  options, SteelMC's pin, and simdnbt's and azalea's unstable feature gates).
+  Never override it locally; when it has to move, bump SteelMC first
 - No unnecessary comments. Code should be self-explanatory
 - No DRY violations. Don't duplicate logic, extract shared helpers
 - No `unwrap()` outside of tests
@@ -119,7 +118,8 @@ Client releases are built by `.github/workflows/release-client.yml`:
   last tag or when that commit's CI is not green.
 - A manual dispatch, optionally with a version core; blank bumps the patch.
 
-Launcher releases are cut by pushing a `launcher-v*` tag (e.g. `launcher-v0.1.2`).
+Launcher releases are cut by pushing a `launcher-v*` tag (e.g. `launcher-v0.1.2`)
+or by manual dispatch.
 
 A plain `v*` tag does nothing.
 

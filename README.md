@@ -20,7 +20,7 @@ alternative to the official Java client.
 
 ## Features
 
-- **Vulkan rendering**: chunk meshing, GPU frustum and cave-occlusion culling, smooth lighting, water/lava, entities and mobs with skins and capes, block entities, dropped items, particles, weather, clouds, sky, block overlays, hand animation
+- **Vulkan rendering**: chunk meshing, GPU frustum and cave-occlusion culling, smooth lighting, water/lava, entities and mobs with skins, block entities, dropped items, particles, weather, clouds, sky, block overlays, hand animation
 - **Vanilla-exact physics**: movement, collision, swimming, and drowning matched line by line against the decompiled source
 - **Multi-version protocol support**: connects to vanilla servers from 1.20 through 26.2, with per-version packet-id and registry tables generated from the decompiled reference; older versions are translated to the native 26.2 wire layout
 - **Singleplayer**: worlds run on [SteelMC](https://github.com/Steel-Foundation/SteelMC), a Rust server embedded in the client and joined over an in-memory pipe; create, edit, and delete worlds from the menu
@@ -67,10 +67,11 @@ git submodule update --init
 ```
 
 SteelMC's first build downloads the Minecraft server jar and generates registry
-source, so expect it to take a while. To skip it entirely:
+source, so expect it to take a while. To skip building it (the submodule must
+still be checked out):
 
 ```bash
-cargo build -p pomme-client --no-default-features
+just client-build --no-default-features
 ```
 
 Otherwise:
@@ -138,7 +139,7 @@ Run `just` with no arguments to list every recipe. The common ones:
 - `just client-dev` / `just client-build` / `just client-release`: run, build, or benchmark the client; flags forward after `--`, e.g. `just client-dev -- --username Steve`
 - `just launcher-dev` / `just launcher-build`: run or bundle the launcher
 - `just client-pre-pr` / `just launcher-pre-pr`: the fmt, clippy, and test checks CI enforces
-- `just protogen` / `just registrygen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (`just jdk=<bin dir> stategen`)
+- `just protogen` / `just registrygen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (`just jdk=<bin dir> stategen`, Windows only)
 
 ## Contributing
 

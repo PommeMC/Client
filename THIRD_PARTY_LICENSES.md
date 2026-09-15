@@ -91,13 +91,15 @@ combination with the GPL-3.0-or-later client. Builds with
 Source: <https://github.com/Steel-Foundation/SteelMC>
 
 License: AGPL-3.0-or-later. Full text at
-[third_party/SteelMC/LICENSE](./third_party/SteelMC/LICENSE).
+[SteelMC/LICENSE](https://github.com/Steel-Foundation/SteelMC/blob/88e6e2599f939060577eea248aece80ae82b10d4/LICENSE)
+(the submodule's pinned commit).
 
 ## kcat/openal-soft
 
-Release archives bundle, and `just client-*` stages next to dev binaries, the
-unmodified OpenAL Soft native library shipped with Minecraft 26.2's LWJGL
-natives. The exact version, jar member and checksum are recorded in
+Release archives bundle, and the `just client-dev` / `client-build` /
+`client-release` recipes stage next to dev binaries, the unmodified OpenAL Soft
+native library shipped with Minecraft 26.2's LWJGL natives. The LWJGL release,
+jar member and checksum are recorded in
 `pomme-client/third-party/openal-natives.txt`.
 
 Source: <https://github.com/kcat/openal-soft>
