@@ -35,6 +35,148 @@ pub fn create_gpu_image_with_format(
     (image, view, allocation)
 }
 
+pub fn create_gpu_image_array_with_format(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    width: u32,
+    height: u32,
+    layers: u32,
+    format: vk::Format,
+    name: &str,
+) -> Result<(vk::Image, vk::ImageView, Allocation), String> {
+    let usage = vk::ImageUsageFlags::TransferDst | vk::ImageUsageFlags::Sampled;
+    let image_info = vk::ImageCreateInfo {
+        image_type: vk::ImageType::Type2D,
+        format,
+        extent: vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        },
+        mip_levels: 1,
+        array_layers: layers,
+        samples: vk::SampleCountFlags::Type1,
+        tiling: vk::ImageTiling::Optimal,
+        usage,
+        ..Default::default()
+    };
+    let image = device
+        .create_image(&image_info, None)
+        .map_err(|error| format!("failed to create font array image: {error}"))?;
+    let mem_reqs = device.get_image_memory_requirements(image);
+    let allocation = {
+        let mut alloc = allocator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match alloc.allocate(&AllocationCreateDesc {
+            name,
+            requirements: mem_reqs,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        }) {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                device.destroy_image(image, None);
+                return Err(format!(
+                    "failed to allocate font array image memory: {error}"
+                ));
+            }
+        }
+    };
+    if let Err(error) =
+        unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset()) }
+    {
+        let mut alloc = allocator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = alloc.free(allocation);
+        device.destroy_image(image, None);
+        return Err(format!("failed to bind font array image memory: {error}"));
+    }
+    let view_info = vk::ImageViewCreateInfo {
+        image,
+        view_type: vk::ImageViewType::Type2DArray,
+        format,
+        subresource_range: vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::Color,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: layers,
+        },
+        ..Default::default()
+    };
+    let view = match device.create_image_view(&view_info, None) {
+        Ok(view) => view,
+        Err(error) => {
+            let mut alloc = allocator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = alloc.free(allocation);
+            device.destroy_image(image, None);
+            return Err(format!("failed to create font array image view: {error}"));
+        }
+    };
+    Ok((image, view, allocation))
+}
+
+pub fn create_font_staging_buffer(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    data: &[u8],
+    name: &str,
+) -> Result<(vk::Buffer, Allocation), String> {
+    let buffer_info = vk::BufferCreateInfo {
+        size: data.len() as u64,
+        usage: vk::BufferUsageFlags::TransferSrc,
+        sharing_mode: vk::SharingMode::Exclusive,
+        ..Default::default()
+    };
+    let buffer = device
+        .create_buffer(&buffer_info, None)
+        .map_err(|error| format!("failed to create font staging buffer: {error}"))?;
+    let mem_reqs = device.get_buffer_memory_requirements(buffer);
+    let mut allocation = {
+        let mut alloc = allocator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match alloc.allocate(&AllocationCreateDesc {
+            name,
+            requirements: mem_reqs,
+            location: MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        }) {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                device.destroy_buffer(buffer, None);
+                return Err(format!("failed to allocate font staging memory: {error}"));
+            }
+        }
+    };
+    if let Err(error) =
+        unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }
+    {
+        let mut alloc = allocator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = alloc.free(allocation);
+        device.destroy_buffer(buffer, None);
+        return Err(format!("failed to bind font staging memory: {error}"));
+    }
+    let Some(mapped) = allocation.mapped_slice_mut() else {
+        let mut alloc = allocator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = alloc.free(allocation);
+        device.destroy_buffer(buffer, None);
+        return Err("font staging allocation is not mapped".into());
+    };
+    mapped[..data.len()].copy_from_slice(data);
+    Ok((buffer, allocation))
+}
+
 fn create_gpu_image_core(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,
@@ -274,6 +416,185 @@ pub fn upload_image(
     );
 }
 
+#[derive(Clone, Copy)]
+pub struct ImageArrayExtent {
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+}
+
+pub fn upload_r8_image_array(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    staging_buffer: vk::Buffer,
+    image: vk::Image,
+    extent: ImageArrayExtent,
+) -> Result<(), String> {
+    upload_image_array(
+        device,
+        queue,
+        command_pool,
+        staging_buffer,
+        image,
+        extent,
+        1,
+    )
+}
+
+pub fn upload_rgba8_image_array(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    staging_buffer: vk::Buffer,
+    image: vk::Image,
+    extent: ImageArrayExtent,
+) -> Result<(), String> {
+    upload_image_array(
+        device,
+        queue,
+        command_pool,
+        staging_buffer,
+        image,
+        extent,
+        4,
+    )
+}
+
+fn upload_image_array(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    staging_buffer: vk::Buffer,
+    image: vk::Image,
+    extent: ImageArrayExtent,
+    bytes_per_pixel: u64,
+) -> Result<(), String> {
+    let ImageArrayExtent {
+        width,
+        height,
+        layers,
+    } = extent;
+    let layer_bytes = u64::from(width) * u64::from(height) * bytes_per_pixel;
+    submit_one_time_fallible(device, queue, command_pool, |cmd| {
+        let range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::Color,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: layers,
+        };
+        let to_transfer = vk::ImageMemoryBarrier {
+            image,
+            old_layout: vk::ImageLayout::Undefined,
+            new_layout: vk::ImageLayout::TransferDstOptimal,
+            src_access_mask: vk::AccessFlags::empty(),
+            dst_access_mask: vk::AccessFlags::TransferWrite,
+            subresource_range: range,
+            ..Default::default()
+        };
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::TopOfPipe,
+            vk::PipelineStageFlags::Transfer,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_transfer],
+        );
+
+        let regions: Vec<_> = (0..layers)
+            .map(|layer| vk::BufferImageCopy {
+                buffer_offset: layer_bytes * u64::from(layer),
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::Color,
+                    mip_level: 0,
+                    base_array_layer: layer,
+                    layer_count: 1,
+                },
+                image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                image_extent: vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            })
+            .collect();
+        cmd.copy_buffer_to_image(
+            staging_buffer,
+            image,
+            vk::ImageLayout::TransferDstOptimal,
+            &regions,
+        );
+
+        let to_shader = vk::ImageMemoryBarrier {
+            image,
+            old_layout: vk::ImageLayout::TransferDstOptimal,
+            new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+            src_access_mask: vk::AccessFlags::TransferWrite,
+            dst_access_mask: vk::AccessFlags::ShaderRead,
+            subresource_range: range,
+            ..Default::default()
+        };
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::Transfer,
+            vk::PipelineStageFlags::FragmentShader,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_shader],
+        );
+    })
+}
+
+fn submit_one_time_fallible<F: FnOnce(&vk::CommandBuffer)>(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    record: F,
+) -> Result<(), String> {
+    let alloc_info = vk::CommandBufferAllocateInfo {
+        command_pool,
+        level: vk::CommandBufferLevel::Primary,
+        command_buffer_count: 1,
+        ..Default::default()
+    };
+    let mut cmd = vk::CommandBuffer::null();
+    unsafe { device.allocate_command_buffers(&alloc_info, std::slice::from_mut(&mut cmd)) }
+        .map_err(|error| format!("failed to allocate font upload command buffer: {error}"))?;
+    let begin_info = vk::CommandBufferBeginInfo {
+        flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
+        ..Default::default()
+    };
+    if let Err(error) = cmd.begin(&begin_info) {
+        device.free_command_buffers(command_pool, &[cmd.handle()]);
+        return Err(format!(
+            "failed to begin font upload command buffer: {error}"
+        ));
+    }
+    record(&cmd);
+    if let Err(error) = cmd.end() {
+        device.free_command_buffers(command_pool, &[cmd.handle()]);
+        return Err(format!("failed to end font upload command buffer: {error}"));
+    }
+    let submit_info = vk::SubmitInfo {
+        command_buffer_count: 1,
+        command_buffers: &cmd.handle(),
+        ..Default::default()
+    };
+    if let Err(error) = queue.submit(&[submit_info], vk::Fence::null()) {
+        device.free_command_buffers(command_pool, &[cmd.handle()]);
+        return Err(format!("failed to submit font upload: {error}"));
+    }
+    if let Err(error) = queue.wait_idle() {
+        device.free_command_buffers(command_pool, &[cmd.handle()]);
+        return Err(format!("failed to wait for font upload: {error}"));
+    }
+    device.free_command_buffers(command_pool, &[cmd.handle()]);
+    Ok(())
+}
+
 pub fn submit_one_time<F: FnOnce(&vk::CommandBuffer)>(
     device: &vk::Device,
     queue: vk::Queue,
@@ -429,6 +750,20 @@ pub const DEPTH_SUBRESOURCE_RANGE: vk::ImageSubresourceRange = vk::ImageSubresou
     base_array_layer: 0,
     layer_count: 1,
 };
+
+pub fn create_nearest_sampler_fallible(device: &vk::Device) -> Result<vk::Sampler, String> {
+    let info = vk::SamplerCreateInfo {
+        mag_filter: vk::Filter::Nearest,
+        min_filter: vk::Filter::Nearest,
+        address_mode_u: vk::SamplerAddressMode::ClampToEdge,
+        address_mode_v: vk::SamplerAddressMode::ClampToEdge,
+        address_mode_w: vk::SamplerAddressMode::ClampToEdge,
+        ..Default::default()
+    };
+    device
+        .create_sampler(&info, None)
+        .map_err(|error| format!("failed to create font sampler: {error}"))
+}
 
 pub unsafe fn create_nearest_sampler(device: &vk::Device) -> vk::Sampler {
     unsafe { create_nearest_sampler_mipmapped(device, 1) }

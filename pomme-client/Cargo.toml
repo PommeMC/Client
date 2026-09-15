@@ -63,6 +63,7 @@ crossbeam-channel = "0.5"
 png = "0.17"
 image = "0.25"
 fontdue = "0.9.3"
+freetype-rs = "0.38"
 simdnbt = "0.10"
 discord-rich-presence = "1.1"
 arboard = { version = "3", features = ["wayland-data-control"] }
