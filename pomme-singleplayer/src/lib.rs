@@ -116,6 +116,12 @@ impl PendingWorld {
             }
         }
     }
+
+    /// The server, until [`poll`](Self::poll) has handed it over.
+    #[must_use]
+    pub fn handle(&self) -> Option<&WorldHandle> {
+        self.world.as_ref()
+    }
 }
 
 impl WorldHandle {

@@ -43,11 +43,20 @@ pub fn build_pause_menu(
     gs: f32,
     screen: PauseScreen,
     server_rd: u32,
+    singleplayer: bool,
 ) -> PauseAction {
     match screen {
         // The F3+Esc pause renders nothing; update_game skips building it.
         PauseScreen::Hidden => PauseAction::None,
-        PauseScreen::Main => build_main(elements, screen_w, screen_h, cursor, clicked, gs),
+        PauseScreen::Main => build_main(
+            elements,
+            screen_w,
+            screen_h,
+            cursor,
+            clicked,
+            gs,
+            singleplayer,
+        ),
         PauseScreen::Benchmark => build_submenu(
             elements,
             screen_w,
@@ -97,6 +106,7 @@ fn build_main(
     cursor: (f32, f32),
     clicked: bool,
     gs: f32,
+    singleplayer: bool,
 ) -> PauseAction {
     let mut action = PauseAction::None;
     let fs = common::FONT_SIZE * gs;
@@ -230,6 +240,12 @@ fn build_main(
         action = PauseAction::OpenBenchmark;
     }
 
+    // Vanilla `menu.returnToMenu` on a local server.
+    let leave_label = if singleplayer {
+        "Save and Quit to Title"
+    } else {
+        "Disconnect"
+    };
     if common::push_button(
         elements,
         cursor,
@@ -239,7 +255,7 @@ fn build_main(
         btn_h,
         gs,
         fs,
-        "Disconnect",
+        leave_label,
         true,
     ) && clicked
     {
