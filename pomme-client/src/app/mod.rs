@@ -182,6 +182,11 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Minecraft.exitWorldAndClose runs screen().removed() before close().
+        self.core.menu.flush_settings();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.phase.transition(|app| match app {
             AppPhase::Setup {

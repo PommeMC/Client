@@ -208,13 +208,15 @@ fn load_settings(game_dir: &Path) -> Settings {
         .unwrap_or_default()
 }
 
-fn save_settings(game_dir: &Path, settings: &Settings) {
+fn save_settings(game_dir: &Path, settings: &Settings) -> std::io::Result<()> {
     let path = game_dir.join("options.json");
-    if let Ok(json) = serde_json::to_string_pretty(settings)
-        && let Err(error) = crate::util::write_atomic(&path, json.as_bytes())
-    {
+    let result = serde_json::to_string_pretty(settings)
+        .map_err(std::io::Error::other)
+        .and_then(|json| crate::util::write_atomic(&path, json.as_bytes()));
+    if let Err(error) = &result {
         tracing::warn!("Failed to save options to {}: {error}", path.display());
     }
+    result
 }
 
 use helpers::*;
@@ -611,8 +613,7 @@ pub struct MainMenu {
     slider_can_change_value: bool,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
-    /// Set by slider drags, flushed by `set_screen`
-    /// (`OptionsSubScreen.removed()`).
+    /// Set by slider drags, written by `flush_settings`.
     settings_dirty: bool,
     /// The title screen's splash line, rolled at launch and on every return
     /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
@@ -759,9 +760,7 @@ impl MainMenu {
     }
 
     fn set_screen(&mut self, screen: Screen) {
-        if self.settings_dirty {
-            self.save_settings();
-        }
+        self.flush_settings();
         self.screen = screen;
         self.focused_field = None;
         self.focus = None;
@@ -805,9 +804,16 @@ impl MainMenu {
         })
     }
 
+    /// Writes pending slider changes, vanilla `OptionsSubScreen.removed()`.
+    pub fn flush_settings(&mut self) {
+        if self.settings_dirty {
+            self.save_settings();
+        }
+    }
+
     fn save_settings(&mut self) {
-        self.settings_dirty = false;
-        save_settings(
+        // A failed write stays dirty so the next screen change retries it.
+        self.settings_dirty = save_settings(
             &self.settings_dir,
             &Settings {
                 gui_scale: self.gui_scale_setting,
@@ -850,7 +856,8 @@ impl MainMenu {
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
             },
-        );
+        )
+        .is_err();
     }
 
     pub fn set_display_mode(&mut self, display_mode: DisplayMode) {

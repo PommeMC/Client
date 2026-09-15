@@ -257,6 +257,7 @@ impl WorldList {
 
     fn save(&self, summary: &WorldSummary) -> std::io::Result<()> {
         let json = serde_json::to_string_pretty(summary)?;
+        // TODO: use crate::util::write_atomic
         std::fs::write(self.saves_dir.join(&summary.folder).join(SIDECAR), json)
     }
 }
