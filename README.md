@@ -21,7 +21,7 @@ The goal is a lightweight, performant alternative to the official Java client.
 
 - **Vulkan rendering**: chunk meshing, GPU frustum and cave-occlusion culling, smooth lighting, water/lava, entities and mobs, block entities, weather, clouds, sky, block overlays, hand animation
 - **Vanilla-exact physics**: sprinting, swimming, drowning, collision, all matched against decompiled source
-- **Multi-version protocol support**: connects to vanilla servers from 1.20 through 26.2, with per-version packet-id and registry tables generated from the decompiled reference; handles chunk streaming, block updates, chat
+- **Multi-version protocol support**: connects to vanilla servers from 1.20 through 26.3, with per-version packet-id and registry tables generated from the decompiled reference; handles chunk streaming, block updates, chat
 - **Microsoft authentication**: sign in with your Microsoft account, tokens stored in the OS keyring
 - **HUD & menus**: health, hunger, air bubbles, hotbar, F3 debug, chat, pause menu, options, server list
 - **Launcher**: Tauri-based launcher with frosted glass UI, multi-account management, Mojang patch notes, installation manager
@@ -79,25 +79,25 @@ Running the standalone client requires minecraft assets, for which you have 2 op
    just client-dev -- --username Steve
    ```
 
-2. If you're on linux, extract the vanilla 26.2 assets from `.minecraft/` to `reference/`:
+2. If you're on linux, extract the vanilla 26.3 assets from `.minecraft/` to `reference/`:
 
    ```bash
    mkdir -p reference/assets/indexes
    mkdir -p reference/assets/objects
-   mkdir -p reference/versions/26.2/extracted
+   mkdir -p reference/versions/26.3/extracted
    mkdir -p reference/game-dir
 
-   # 32 is the asset index id for 26.2
-   cp ~/.minecraft/assets/indexes/32.json reference/assets/indexes/26.2.json
+   # 34 is the asset index id for 26.3
+   cp ~/.minecraft/assets/indexes/34.json reference/assets/indexes/26.3.json
    cp -r ~/.minecraft/assets/objects/. reference/assets/objects/
-   cp ~/.minecraft/versions/26.2/26.2.jar reference/versions/26.2/
-   unzip reference/versions/26.2/26.2.jar 'assets/*' -d reference/versions/26.2/extracted/
+   cp ~/.minecraft/versions/26.3/26.3.jar reference/versions/26.3/
+   unzip reference/versions/26.3/26.3.jar 'assets/*' -d reference/versions/26.3/extracted/
    ```
 
    Then you can run the client with:
 
    ```bash
-   just client-dev -- --version 26.2 \
+   just client-dev -- --version 26.3 \
      --assets-dir $PWD/reference/assets \
      --versions-dir $PWD/reference/versions \
      --game-dir $PWD/reference/game-dir
