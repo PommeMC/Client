@@ -22,7 +22,7 @@ pub(crate) fn gamepad_movement_axes(analog: glam::Vec2) -> glam::Vec2 {
 /// an "instant".
 pub const SHORT_RUMBLE_TIME: u32 = 5;
 
-#[derive(Hash, PartialEq, Eq, Clone)]
+#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Action {
     Jump,
     Sneak,
@@ -39,6 +39,64 @@ pub enum Action {
     DropItem,
     SwapOffhand,
     SpectatorHotbar,
+}
+
+impl Action {
+    pub const fn default_key(self) -> Option<KeyCode> {
+        match self {
+            Self::Jump => Some(KeyCode::Space),
+            Self::Sneak => Some(KeyCode::ShiftLeft),
+            Self::Sprint => Some(KeyCode::ControlLeft),
+            Self::ToggleInventory => Some(KeyCode::KeyE),
+            Self::OpenMenu => Some(KeyCode::Escape),
+            Self::ViewPlayerList => Some(KeyCode::Tab),
+            Self::ChangePerspective => Some(KeyCode::F5),
+            Self::OpenChat => Some(KeyCode::KeyT),
+            Self::OpenCommands => Some(KeyCode::Slash),
+            Self::DropItem => Some(KeyCode::KeyQ),
+            Self::SwapOffhand => Some(KeyCode::KeyF),
+            Self::Destroy | Self::Use | Self::Close | Self::SpectatorHotbar => None,
+        }
+    }
+}
+
+pub fn keybind_translation(keybind: &str) -> Option<(&'static str, &'static str)> {
+    match keybind {
+        "key.forward" => Some(("key.keyboard.w", "W")),
+        "key.left" => Some(("key.keyboard.a", "A")),
+        "key.back" => Some(("key.keyboard.s", "S")),
+        "key.right" => Some(("key.keyboard.d", "D")),
+        "key.jump" => keycode_translation(Action::Jump.default_key()?),
+        "key.sneak" => keycode_translation(Action::Sneak.default_key()?),
+        "key.sprint" => keycode_translation(Action::Sprint.default_key()?),
+        "key.inventory" => keycode_translation(Action::ToggleInventory.default_key()?),
+        "key.swapOffhand" => keycode_translation(Action::SwapOffhand.default_key()?),
+        "key.drop" => keycode_translation(Action::DropItem.default_key()?),
+        "key.use" => Some(("key.mouse.right", "Right Button")),
+        "key.attack" => Some(("key.mouse.left", "Left Button")),
+        "key.pickItem" | "key.spectatorHotbar" => Some(("key.mouse.middle", "Middle Button")),
+        "key.chat" => keycode_translation(Action::OpenChat.default_key()?),
+        "key.playerlist" => keycode_translation(Action::ViewPlayerList.default_key()?),
+        "key.command" => keycode_translation(Action::OpenCommands.default_key()?),
+        "key.togglePerspective" => keycode_translation(Action::ChangePerspective.default_key()?),
+        _ => None,
+    }
+}
+
+fn keycode_translation(key: KeyCode) -> Option<(&'static str, &'static str)> {
+    match key {
+        KeyCode::Space => Some(("key.keyboard.space", "Space")),
+        KeyCode::ShiftLeft => Some(("key.keyboard.left.shift", "Left Shift")),
+        KeyCode::ControlLeft => Some(("key.keyboard.left.control", "Left Control")),
+        KeyCode::KeyE => Some(("key.keyboard.e", "E")),
+        KeyCode::KeyF => Some(("key.keyboard.f", "F")),
+        KeyCode::KeyQ => Some(("key.keyboard.q", "Q")),
+        KeyCode::KeyT => Some(("key.keyboard.t", "T")),
+        KeyCode::Tab => Some(("key.keyboard.tab", "Tab")),
+        KeyCode::Slash => Some(("key.keyboard.slash", "/")),
+        KeyCode::F5 => Some(("key.keyboard.f5", "F5")),
+        _ => None,
+    }
 }
 
 pub struct InputState {

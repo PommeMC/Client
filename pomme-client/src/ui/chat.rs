@@ -601,7 +601,10 @@ struct CharStyle {
     italic: bool,
     strikethrough: bool,
     underline: bool,
-    sga: bool,
+    obfuscated: bool,
+    shadow_color: Option<[f32; 4]>,
+    font: Option<String>,
+    inline_object: Option<crate::ui::text::InlineObject>,
     component_style: Option<std::sync::Arc<crate::chat_component::ResolvedStyle>>,
 }
 
@@ -631,7 +634,10 @@ pub(crate) fn wrap_spans(
             italic: s.italic,
             strikethrough: s.strikethrough,
             underline: s.underline,
-            sga: s.sga,
+            obfuscated: s.obfuscated,
+            shadow_color: s.shadow_color,
+            font: s.font.clone(),
+            inline_object: s.inline_object.clone(),
             component_style: s.component_style.clone(),
         };
         for ch in s.text.chars() {
@@ -714,7 +720,10 @@ fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
                 italic: st.italic,
                 strikethrough: st.strikethrough,
                 underline: st.underline,
-                sga: st.sga,
+                obfuscated: st.obfuscated,
+                shadow_color: st.shadow_color,
+                font: st.font.clone(),
+                inline_object: st.inline_object.clone(),
                 component_style: st.component_style.clone(),
             });
             last_style = Some(st.clone());
