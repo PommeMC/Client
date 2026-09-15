@@ -459,6 +459,7 @@ fn wrap_motd_spans(
             strikethrough: span.strikethrough,
             underline: span.underline,
             sga: span.sga,
+            component_style: span.component_style.clone(),
         };
 
         for part in span.text.split_inclusive([' ', '\n']) {
