@@ -55,6 +55,7 @@ pub fn handle_game_packet(
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
+    profile_key_services: Option<&crate::net::chat_security::ProfileKeyServices>,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
@@ -78,6 +79,9 @@ pub fn handle_game_packet(
                 entity_id: p.player_id.0,
                 hardcore: p.hardcore,
                 show_death_screen: p.show_death_screen,
+            });
+            let _ = event_tx.try_send(NetworkEvent::SecureChatEnforced {
+                enforced: profile_key_services.is_some() && p.enforces_secure_chat,
             });
         }
         ClientboundGamePacket::LevelChunkWithLight(p) => {
@@ -319,16 +323,6 @@ pub fn handle_game_packet(
                 walking_speed: p.walking_speed,
             });
         }
-        ClientboundGamePacket::SystemChat(p) => {
-            if p.overlay {
-                send_action_bar(event_tx, &p.content);
-            } else {
-                send_chat(event_tx, &p.content);
-            }
-        }
-        ClientboundGamePacket::SetActionBarText(p) => {
-            send_action_bar(event_tx, &p.text);
-        }
         ClientboundGamePacket::BossEvent(p) => {
             use azalea_protocol::packets::game::c_boss_event::Operation;
 
@@ -531,12 +525,6 @@ pub fn handle_game_packet(
                     });
                 }
             }
-        }
-        ClientboundGamePacket::PlayerChat(p) => {
-            send_chat(event_tx, &p.message());
-        }
-        ClientboundGamePacket::DisguisedChat(p) => {
-            send_chat(event_tx, &p.message);
         }
         ClientboundGamePacket::BlockUpdate(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockUpdate {
@@ -998,6 +986,7 @@ pub fn handle_game_packet(
             use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry};
             let actions = PlayerInfoActions {
                 add_player: p.actions.add_player,
+                initialize_chat: p.actions.initialize_chat,
                 update_game_mode: p.actions.update_game_mode,
                 update_listed: p.actions.update_listed,
                 update_latency: p.actions.update_latency,
@@ -1024,6 +1013,32 @@ pub fn handle_game_packet(
                         .as_ref()
                         .map(|c| crate::ui::text::format_text_spans(c, [1.0, 1.0, 1.0, 1.0])),
                     list_order: e.list_order,
+                    chat_session: if p.actions.initialize_chat {
+                        match (profile_key_services, e.chat_session.as_ref()) {
+                            (Some(services), Some(session)) => match services
+                                .validate_session(e.profile.uuid, session)
+                            {
+                                Ok(session) => Some(session),
+                                Err(error) => {
+                                    tracing::error!(
+                                        player = %e.profile.name,
+                                        "Failed to validate profile key: {error}"
+                                    );
+                                    None
+                                }
+                            },
+                            (None, Some(_)) => {
+                                tracing::warn!(
+                                    player = %e.profile.name,
+                                    "Ignoring chat session due to missing Mojang Services public key"
+                                );
+                                None
+                            }
+                            (_, None) => None,
+                        }
+                    } else {
+                        None
+                    },
                 })
                 .collect();
             let _ = event_tx.try_send(NetworkEvent::PlayerInfoUpdate { actions, entries });
@@ -1049,13 +1064,6 @@ pub fn handle_game_packet(
             *shared_tree.lock() = Some(tree.clone());
             let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
         }
-        ClientboundGamePacket::CommandSuggestions(p) => {
-            let _ = event_tx.try_send(NetworkEvent::CommandSuggestions {
-                id: p.id,
-                start: p.suggestions.range().start(),
-                options: p.suggestions.list().iter().map(|s| s.text()).collect(),
-            });
-        }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(
                 "Custom chat completions: {:?} ({} entries)",
@@ -1065,18 +1073,6 @@ pub fn handle_game_packet(
         }
         _other => {}
     }
-}
-
-fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
-    tracing::info!("Chat: {text}");
-    let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
-}
-
-fn send_action_bar(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
 }
 
 fn send_scoreboard_team(
@@ -1519,6 +1515,7 @@ mod tests {
                 &event_tx,
                 &registries,
                 &command_tree,
+                None,
             );
         };
 

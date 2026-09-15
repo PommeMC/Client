@@ -1,7 +1,8 @@
+use std::ops::Range;
 use std::sync::Arc;
 
 use azalea_protocol::packets::game::c_commands::{
-    BrigadierNodeStub, BrigadierParser, ClientboundCommands, NodeType,
+    BrigadierNodeStub, BrigadierParser, BrigadierString, ClientboundCommands, NodeType,
 };
 use parking_lot::Mutex;
 
@@ -81,6 +82,58 @@ impl CommandTree {
     /// `SignableCommand.of`: such commands must be sent signed once a chat
     /// session exists. Returns `false` on any parse miss, leaving validation to
     /// the server (matching vanilla, which sends unsigned when unsure).
+    /// Raw values of the command's signable Brigadier arguments. In Vanilla
+    /// 26.2 only `MessageArgument` implements `SignedArgument`, and its parsed
+    /// string range consumes the remainder of the command verbatim.
+    pub fn signable_arguments(&self, command: &str) -> Vec<(String, String)> {
+        let lexical = command_token_ranges(command);
+        let mut current = self.root_index;
+        let mut token_index = 0usize;
+        let mut out = Vec::new();
+
+        while token_index < lexical.len() {
+            let Some(node) = self.node(current) else {
+                return Vec::new();
+            };
+            let child_ids = self.effective_children(node);
+            let token = &command[lexical[token_index].clone()];
+            if let Some(cid) = child_ids.iter().copied().find(|&cid| {
+                matches!(
+                    self.node(cid).map(|node| &node.node_type),
+                    Some(NodeType::Literal { name }) if name == token
+                )
+            }) {
+                current = cid;
+                token_index += 1;
+                continue;
+            }
+
+            let Some(cid) = child_ids.iter().copied().find(|&cid| self.is_argument(cid)) else {
+                return Vec::new();
+            };
+            let Some(NodeType::Argument { name, parser, .. }) =
+                self.node(cid).map(|node| &node.node_type)
+            else {
+                return Vec::new();
+            };
+            if matches!(parser, BrigadierParser::Message) {
+                out.push((
+                    name.clone(),
+                    command[lexical[token_index].start..].to_owned(),
+                ));
+                return out;
+            }
+            let consumed = argument_token_count(parser, lexical.len() - token_index);
+            if consumed == 0 || token_index + consumed > lexical.len() {
+                return Vec::new();
+            }
+            current = cid;
+            token_index += consumed;
+        }
+        out
+    }
+
+    #[cfg(test)]
     pub fn has_signable_args(&self, command: &str) -> bool {
         let mut current = self.root_index;
         for token in command.split_whitespace() {
@@ -155,6 +208,55 @@ impl CommandTree {
             partial_len: partial.len(),
             needs_server,
         }
+    }
+}
+
+fn command_token_ranges(command: &str) -> Vec<Range<usize>> {
+    let bytes = command.as_bytes();
+    let mut ranges = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+        let start = index;
+        if bytes[index] == b'"' {
+            index += 1;
+            let mut escaped = false;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    break;
+                }
+            }
+        } else {
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+        }
+        ranges.push(start..index);
+    }
+    ranges
+}
+
+fn argument_token_count(parser: &BrigadierParser, remaining: usize) -> usize {
+    match parser {
+        BrigadierParser::Vec3 | BrigadierParser::BlockPos => remaining.min(3),
+        BrigadierParser::Vec2 | BrigadierParser::ColumnPos | BrigadierParser::Rotation => {
+            remaining.min(2)
+        }
+        BrigadierParser::Message
+        | BrigadierParser::FormattedText
+        | BrigadierParser::String(BrigadierString::GreedyPhrase) => remaining,
+        _ => remaining.min(1),
     }
 }
 

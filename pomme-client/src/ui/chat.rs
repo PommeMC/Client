@@ -33,9 +33,80 @@ const GHOST_TEXT: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
 // Vanilla EditBox caret color, 0xFFD0D0D0.
 const CARET_COLOR: [f32; 4] = [0.816, 0.816, 0.816, 1.0];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ChatVisibilitySetting {
+    Full,
+    System,
+    Hidden,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChatOptions {
+    pub visibility: ChatVisibilitySetting,
+    pub opacity: f32,
+    pub line_spacing: f32,
+    pub text_background_opacity: f32,
+    pub scale: f32,
+    pub width: f32,
+    pub height_focused: f32,
+    pub height_unfocused: f32,
+    pub delay_secs: f32,
+    pub colors: bool,
+    pub links: bool,
+    pub links_prompt: bool,
+    pub auto_suggestions: bool,
+    pub only_secure: bool,
+    pub save_drafts: bool,
+}
+
+impl Default for ChatOptions {
+    fn default() -> Self {
+        Self {
+            visibility: ChatVisibilitySetting::Full,
+            opacity: 1.0,
+            line_spacing: 0.0,
+            text_background_opacity: 0.5,
+            scale: 1.0,
+            width: 1.0,
+            height_focused: 1.0,
+            height_unfocused: 70.0 / 160.0,
+            delay_secs: 0.0,
+            colors: true,
+            links: true,
+            links_prompt: true,
+            auto_suggestions: true,
+            only_secure: false,
+            save_drafts: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatMessageSource {
+    Player,
+    SystemServer,
+    SystemClient,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChatMessageTag {
+    System,
+    SystemSinglePlayer,
+    NotSecure,
+    Modified { original: String },
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatSuggestion {
+    pub text: String,
+    pub tooltip: Option<crate::chat_component::Component>,
+}
+
 struct ChatLine {
     spans: Vec<TextSpan>,
     received: Instant,
+    signature: Option<[u8; 256]>,
     /// Lazily wrapped display lines (vanilla `trimmedMessages`). The wrap width
     /// and scale-1 font metrics never change, so the cache never invalidates.
     wrapped: OnceCell<Vec<Vec<TextSpan>>>,
@@ -49,6 +120,7 @@ impl ChatLine {
 }
 
 pub struct ChatState {
+    options: ChatOptions,
     messages: VecDeque<ChatLine>,
     input: TextFieldState,
     open: bool,
@@ -81,11 +153,14 @@ pub struct ChatState {
     /// Request produced by the last recompute, drained once per frame by the
     /// game loop and sent as `ServerboundCommandSuggestion`.
     outgoing_request: Option<(u32, String)>,
+    delayed_deletions: Vec<([u8; 256], Instant)>,
+    processed_signatures: Vec<([u8; 256], bool)>,
 }
 
 impl ChatState {
     pub fn new() -> Self {
         Self {
+            options: ChatOptions::default(),
             messages: VecDeque::new(),
             input: TextFieldState::new(MAX_MESSAGE_LEN),
             open: false,
@@ -102,22 +177,128 @@ impl ChatState {
             next_suggest_id: 0,
             awaiting: None,
             outgoing_request: None,
+            delayed_deletions: Vec::new(),
+            processed_signatures: Vec::new(),
         }
     }
 
+    pub fn only_secure(&self) -> bool {
+        self.options.only_secure
+    }
+
     pub fn push_message(&mut self, spans: Vec<TextSpan>) {
+        self.push_message_with_source(spans, None, ChatMessageSource::SystemClient, None);
+    }
+
+    pub fn push_message_with_source(
+        &mut self,
+        spans: Vec<TextSpan>,
+        signature: Option<[u8; 256]>,
+        source: ChatMessageSource,
+        tag: Option<ChatMessageTag>,
+    ) {
+        let visible = match source {
+            ChatMessageSource::SystemClient => true,
+            ChatMessageSource::SystemServer => {
+                self.options.visibility != ChatVisibilitySetting::Hidden
+            }
+            ChatMessageSource::Player => self.options.visibility == ChatVisibilitySetting::Full,
+        } && !(self.options.only_secure
+            && source == ChatMessageSource::Player
+            && matches!(tag, Some(ChatMessageTag::NotSecure)));
+        if !visible {
+            if let Some(signature) = signature {
+                self.processed_signatures.push((signature, false));
+            }
+            return;
+        }
         self.messages.push_back(ChatLine {
             spans,
             received: Instant::now(),
+            signature,
             wrapped: OnceCell::new(),
         });
         if self.messages.len() > MAX_MESSAGES {
             self.messages.pop_front();
         }
-        // A new line while scrolled keeps the view anchored (vanilla
-        // ChatComponent.addMessage shifts the scrollbar by one).
         if self.scroll_pos > 0 {
             self.scroll_pos += 1;
+        }
+        if let Some(signature) = signature {
+            self.processed_signatures.push((signature, true));
+        }
+    }
+
+    pub fn push_validation_error(
+        &mut self,
+        spans: Vec<TextSpan>,
+        invalid_signature: Option<[u8; 256]>,
+    ) {
+        self.push_message_with_source(
+            spans,
+            None,
+            ChatMessageSource::Player,
+            Some(ChatMessageTag::Error),
+        );
+        if let Some(signature) = invalid_signature {
+            self.processed_signatures.push((signature, false));
+        }
+    }
+
+    pub fn push_fully_filtered(&mut self, signature: Option<[u8; 256]>) {
+        if let Some(signature) = signature {
+            self.processed_signatures.push((signature, false));
+        }
+    }
+
+    pub fn take_processed_signatures(&mut self) -> Vec<([u8; 256], bool)> {
+        std::mem::take(&mut self.processed_signatures)
+    }
+
+    pub fn delete_message(&mut self, signature: [u8; 256]) {
+        let now = Instant::now();
+        if !self.delete_message_if_old_enough(signature, now) {
+            self.delayed_deletions
+                .push((signature, now + std::time::Duration::from_secs(3)));
+        }
+    }
+
+    fn delete_message_if_old_enough(&mut self, signature: [u8; 256], now: Instant) -> bool {
+        let Some(line) = self
+            .messages
+            .iter_mut()
+            .find(|line| line.signature.as_ref() == Some(&signature))
+        else {
+            return true;
+        };
+        if now.duration_since(line.received) < std::time::Duration::from_secs(3) {
+            return false;
+        }
+        let mut marker = TextSpan::new(
+            crate::lang::translate("chat.deleted_marker")
+                .unwrap_or("<message deleted>")
+                .to_owned(),
+            common::rgb(0xaaaaaa),
+        );
+        marker.italic = true;
+        line.spans = vec![marker];
+        line.signature = None;
+        line.wrapped = OnceCell::new();
+        true
+    }
+
+    pub fn tick(&mut self) {
+        let now = Instant::now();
+        let ready: Vec<[u8; 256]> = self
+            .delayed_deletions
+            .iter()
+            .filter(|(_, deadline)| now >= *deadline)
+            .map(|(signature, _)| *signature)
+            .collect();
+        self.delayed_deletions
+            .retain(|(_, deadline)| now < *deadline);
+        for signature in ready {
+            let _ = self.delete_message_if_old_enough(signature, now);
         }
     }
 
@@ -594,13 +775,18 @@ fn line_alpha(age_secs: f32) -> f32 {
     t * t
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct CharStyle {
     color: [f32; 4],
     bold: bool,
     italic: bool,
     strikethrough: bool,
     underline: bool,
+    obfuscated: bool,
+    shadow_color: Option<[f32; 4]>,
+    font: Option<String>,
+    inline_object: Option<crate::ui::text::InlineObject>,
+    component_style: Option<std::sync::Arc<crate::chat_component::ResolvedStyle>>,
 }
 
 type StyledLine = Vec<(char, CharStyle)>;
@@ -629,6 +815,11 @@ pub(crate) fn wrap_spans(
             italic: s.italic,
             strikethrough: s.strikethrough,
             underline: s.underline,
+            obfuscated: s.obfuscated,
+            shadow_color: s.shadow_color,
+            font: s.font.clone(),
+            inline_object: s.inline_object.clone(),
+            component_style: s.component_style.clone(),
         };
         for ch in s.text.chars() {
             if ch.is_whitespace() {
@@ -636,7 +827,7 @@ pub(crate) fn wrap_spans(
                     words.push(std::mem::take(&mut word));
                 }
             } else {
-                word.push((ch, style));
+                word.push((ch, style.clone()));
             }
         }
     }
@@ -652,7 +843,7 @@ pub(crate) fn wrap_spans(
     for w in words {
         if !cur.is_empty() {
             if width0(&format!("{} {}", styled_text(&cur), styled_text(&w))) <= max_w {
-                cur.push((' ', w[0].1));
+                cur.push((' ', w[0].1.clone()));
                 cur.extend(w);
                 continue;
             }
@@ -683,13 +874,13 @@ fn hard_break_word(
 ) -> (Vec<StyledLine>, StyledLine) {
     let mut out: Vec<StyledLine> = Vec::new();
     let mut piece: StyledLine = Vec::new();
-    for &(ch, st) in word {
+    for (ch, st) in word {
         let mut test = styled_text(&piece);
-        test.push(ch);
+        test.push(*ch);
         if width0(&test) > max_w && !piece.is_empty() {
             out.push(std::mem::take(&mut piece));
         }
-        piece.push((ch, st));
+        piece.push((*ch, st.clone()));
     }
     (out, piece)
 }
@@ -699,9 +890,9 @@ fn hard_break_word(
 fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
     let mut spans: Vec<TextSpan> = Vec::new();
     let mut last_style: Option<CharStyle> = None;
-    for &(ch, st) in chars {
-        if last_style == Some(st) {
-            spans.last_mut().unwrap().text.push(ch);
+    for (ch, st) in chars {
+        if last_style.as_ref() == Some(st) {
+            spans.last_mut().unwrap().text.push(*ch);
         } else {
             spans.push(TextSpan {
                 text: ch.to_string(),
@@ -710,9 +901,13 @@ fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
                 italic: st.italic,
                 strikethrough: st.strikethrough,
                 underline: st.underline,
-                sga: false,
+                obfuscated: st.obfuscated,
+                shadow_color: st.shadow_color,
+                font: st.font.clone(),
+                inline_object: st.inline_object.clone(),
+                component_style: st.component_style.clone(),
             });
-            last_style = Some(st);
+            last_style = Some(st.clone());
         }
     }
     spans

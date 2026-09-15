@@ -20,6 +20,7 @@ fn connect_args(core: &AppCore, transport: Transport, username: String) -> Conne
         uuid: core.user.uuid,
         access_token: core.user.access_token.clone(),
         view_distance: core.view_distance(),
+        chat_options: crate::ui::chat::ChatOptions::default(),
     }
 }
 
@@ -112,8 +113,11 @@ pub fn update_menu(
 
     if core.menu.reload_assets {
         core.menu.reload_assets = false;
-        gfx.renderer
-            .reload_assets(&core.data_dirs.game_dir, &core.resource_packs);
+        gfx.renderer.reload_assets(
+            &core.data_dirs.game_dir,
+            &core.resource_packs,
+            crate::ui::font::FontOptions::default(),
+        );
         core.audio.reload_assets(&core.resource_packs);
     }
 
