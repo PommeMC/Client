@@ -302,9 +302,10 @@ pub struct Translation {
     /// profile id in an optional (1.20.2 made it mandatory); `None` needs no
     /// outbound rewrite.
     login_hello_optional_uuid: Option<u32>,
-    /// Latest-space; game-frame rewrites dispatch after the id remap.
-    game_login_id: u32,
-    set_player_team_id: u32,
+    /// Whether `login_finished` lacks the session-id UUID 26.2 appended.
+    login_session_pad: bool,
+    /// The rewrites 26.2 introduced, for wire versions below it.
+    v775: Option<Ids775>,
     /// Handled outside [`GameIds`]: the attribute ids need remapping even on
     /// a version whose packet ids all match the native (26.1).
     update_attributes_id: u32,
@@ -326,9 +327,9 @@ struct ConfigIds {
     inbound: Box<[Option<u32>]>,
     /// Latest serverbound id -> wire-version id; `None` suppresses.
     outbound: Box<[Option<u32>]>,
-    /// Latest-space `registry_data`, whose 765 form is one packet holding
-    /// every registry as a single NBT map.
-    registry_data_id: u32,
+    /// Native-space `registry_data` on wire versions at or below 765, whose
+    /// form is one packet holding every registry as a single NBT map.
+    split_registry_data: Option<u32>,
     /// 764's config payload rewrites: disconnect's JSON component and the
     /// unsplit resource_pack (both phases share the layouts).
     v764: Option<ConfigIds764>,
@@ -355,11 +356,8 @@ struct GameIds {
     /// registration order shifts between versions).
     serializer_map: fn(u32) -> Option<u32>,
     set_entity_data_id: u32,
-    level_chunk_id: u32,
-    set_time_id: u32,
-    attack_id: u32,
-    interact_id: u32,
-    interact_old_id: u32,
+    /// The rewrites 26.1 introduced, for wire versions below it.
+    v774: Option<Ids774>,
     /// Whether the wire version's `entity_effect`/`tinted_leaves` particles
     /// carry a color int (1.20.5 added it); see [`translate_particles`].
     color_particles: bool,
@@ -390,6 +388,25 @@ struct GameIds {
     /// version (`client_tick_end`, `player_loaded`, the pick pair); suppressed
     /// quietly.
     quiet_suppressed: Box<[u32]>,
+}
+
+/// Native-space dispatch ids for the frame rewrites protocols at or below
+/// 775 need: 26.2 inserted `onlineMode` into game `login` and reordered
+/// the team `Parameters`.
+struct Ids775 {
+    game_login_id: u32,
+    set_player_team_id: u32,
+}
+
+/// Dispatch ids for the frame rewrites protocols at or below 774 need: 26.1
+/// added the chunk-section `fluidCount`, the `set_time` clock map and the
+/// serverbound `attack` split.
+struct Ids774 {
+    level_chunk_id: u32,
+    set_time_id: u32,
+    attack_id: u32,
+    interact_id: u32,
+    interact_old_id: u32,
 }
 
 /// Latest-space dispatch ids for the frame rewrites protocols at or below
@@ -720,8 +737,11 @@ impl Translation {
             login_hello_bare: protocol <= 765,
             login_hello_optional_uuid: (protocol <= 763)
                 .then(|| required_id(native, Phase::Login, Direction::Serverbound, "hello")),
-            game_login_id: id(Phase::Game, "login"),
-            set_player_team_id: id(Phase::Game, "set_player_team"),
+            login_session_pad: protocol <= 775,
+            v775: (protocol <= 775).then(|| Ids775 {
+                game_login_id: id(Phase::Game, "login"),
+                set_player_team_id: id(Phase::Game, "set_player_team"),
+            }),
             update_attributes_id: id(Phase::Game, "update_attributes"),
             game_ids: GameIds::build(protocol, table, native),
             config_ids: ConfigIds::build(protocol, table, native),
@@ -758,7 +778,7 @@ impl Translation {
     pub fn translate_login_frame(&self, raw: Box<[u8]>) -> Box<[u8]> {
         let mut cur = Cursor::new(&raw[..]);
         let id = u32::azalea_read_var(&mut cur).ok();
-        if id == Some(self.login_finished_id) {
+        if self.login_session_pad && id == Some(self.login_finished_id) {
             // 26.2 appended a session-id UUID; zero is fine, pomme only
             // reads the game profile. The 1.20.5/1.21-era trailing
             // strictErrorHandling bool goes first (the UUID took its place).
@@ -825,7 +845,7 @@ impl Translation {
             tracing::debug!("Dropping inbound config packet {wire_id} with no latest id");
             return Vec::new();
         };
-        if id == ids.registry_data_id {
+        if ids.split_registry_data == Some(id) {
             return match split_registry_data(id, &raw[pos..]) {
                 Some(frames) => frames,
                 None => {
@@ -940,7 +960,8 @@ impl Translation {
             None => None,
         };
         let payload: &[u8] = converted.as_deref().unwrap_or(&raw[id_end..]);
-        let rewritten = if id == self.game_login_id {
+        let v775 = self.v775.as_ref();
+        let rewritten = if v775.is_some_and(|v| id == v.game_login_id) {
             let v763 = self.game_ids.as_ref().and_then(|g| g.v763.as_ref());
             let old = if v763.is_some() {
                 translate_game_login_763(payload)
@@ -972,7 +993,7 @@ impl Translation {
             } else {
                 translate_update_attributes(self.to_native, id, payload)
             }
-        } else if id == self.set_player_team_id {
+        } else if v775.is_some_and(|v| id == v.set_player_team_id) {
             translate_team(id, payload, v769)
         } else if let Some(ids) = &self.game_ids {
             // Pre-1.20.2 wire NBT carries an empty root name the native
@@ -980,9 +1001,9 @@ impl Translation {
             let named_nbt = ids.v763.is_some();
             if id == ids.set_entity_data_id {
                 translate_entity_data(id, payload, ids, self.to_native)
-            } else if id == ids.level_chunk_id {
+            } else if ids.v774.as_ref().is_some_and(|v| id == v.level_chunk_id) {
                 translate_chunk(id, payload, v769, named_nbt)
-            } else if id == ids.set_time_id {
+            } else if ids.v774.as_ref().is_some_and(|v| id == v.set_time_id) {
                 if v767.is_some() {
                     translate_set_time_767(id, payload)
                 } else {
@@ -1046,11 +1067,13 @@ impl Translation {
         let Some(id) = wire::read_varint(&frame, &mut pos) else {
             return Vec::new();
         };
-        if id == ids.attack_id {
-            return translate_attack(ids.interact_old_id, &frame[pos..]);
-        }
-        if id == ids.interact_id {
-            return translate_interact(ids.interact_old_id, &frame[pos..]);
+        if let Some(v774) = &ids.v774 {
+            if id == v774.attack_id {
+                return translate_attack(v774.interact_old_id, &frame[pos..]);
+            }
+            if id == v774.interact_id {
+                return translate_interact(v774.interact_old_id, &frame[pos..]);
+            }
         }
         if let Some(v770) = &ids.v770
             && id == v770.player_command_id
@@ -1309,11 +1332,13 @@ impl GameIds {
                 p => panic!("no serializer map for protocol {p}"),
             },
             set_entity_data_id: id(Clientbound, "set_entity_data"),
-            level_chunk_id: id(Clientbound, "level_chunk_with_light"),
-            set_time_id: id(Clientbound, "set_time"),
-            attack_id: id(Serverbound, "attack"),
-            interact_id: id(Serverbound, "interact"),
-            interact_old_id: required_id(table, Phase::Game, Serverbound, "interact"),
+            v774: (protocol <= 774).then(|| Ids774 {
+                level_chunk_id: id(Clientbound, "level_chunk_with_light"),
+                set_time_id: id(Clientbound, "set_time"),
+                attack_id: id(Serverbound, "attack"),
+                interact_id: id(Serverbound, "interact"),
+                interact_old_id: required_id(table, Phase::Game, Serverbound, "interact"),
+            }),
             color_particles: protocol >= 766,
             v772: (protocol <= 772).then(|| Ids772 {
                 add_entity_id: id(Clientbound, "add_entity"),
@@ -1599,7 +1624,7 @@ impl ConfigIds {
         Some(ConfigIds {
             inbound,
             outbound,
-            registry_data_id: id(Clientbound, "registry_data"),
+            split_registry_data: (protocol <= 765).then(|| id(Clientbound, "registry_data")),
             v764: (protocol <= 764).then(|| ConfigIds764 {
                 disconnect_id: id(Clientbound, "disconnect"),
                 resource_pack_push_id: id(Clientbound, "resource_pack_push"),
