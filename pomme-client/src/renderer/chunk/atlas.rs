@@ -21,16 +21,25 @@ pub struct AtlasRegion {
     /// The atlas is capped at 8192², so u16 is sufficient and avoids the
     /// boundary rounding that motivated the old terrain inset.
     pub pixel_rect: [u16; 4],
+    /// Index into the atlas's sprite-rectangle buffer, which terrain vertices
+    /// carry instead of the rectangle itself. Index 0 is the missing tile.
+    pub sprite: u16,
     /// Every level-0 texel is fully opaque (alpha 255), so quads using this
     /// sprite can render in the no-discard solid pass (early-Z). Sprites with
     /// any transparent texel are cutout and stay in the discard pass.
     pub opaque: bool,
+    /// Some texel has an alpha strictly between 0 and 255. Vanilla
+    /// `NativeImage.computeTransparency` routes such sprites to the
+    /// translucent item sheet rather than the cutout one.
+    pub translucent: bool,
 }
 
 #[derive(Clone)]
 pub struct AtlasUVMap {
     regions: HashMap<String, AtlasRegion>,
     sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,
+    /// Level-0 rectangles by sprite index, as `(x, y, width, height)`.
+    rects: Vec<[u32; 4]>,
     missing: AtlasRegion,
 }
 
@@ -43,22 +52,24 @@ impl AtlasUVMap {
         self.regions.contains_key(name)
     }
 
+    pub fn missing_region(&self) -> AtlasRegion {
+        self.missing
+    }
+
     pub(crate) fn sprite_alpha_mask(&self, name: &str) -> Option<&SpriteAlphaMask> {
         self.sprite_alpha_masks.get(name)
     }
 }
 
-fn is_item_atlas_key(key: &str) -> bool {
-    let id = AssetId::parse(key);
-    // Vanilla 26.2 `atlases/items.json`: the item/ directory plus generated
-    // trim-item permutations. Resource packs can extend atlas definitions;
-    // Pomme does not yet implement arbitrary atlas-source JSON.
-    id.path.starts_with("item/") || id.path.starts_with("trims/items/")
-}
-
+/// Vanilla 26.2 `atlases/blocks.json`, the only atlas built with mipmaps.
+/// Block keys are bare names here; the three entity sprites are listed as is.
 fn uses_block_atlas_mip_chain(key: &str) -> bool {
-    let id = AssetId::parse(key);
-    !is_item_atlas_key(key) && !id.path.starts_with("particle/")
+    let path = AssetId::parse(key).path;
+    !path.contains('/')
+        || path.starts_with("block/")
+        || path.starts_with("entity/conduit/")
+        || path == "entity/bell/bell_body"
+        || path == "entity/enchantment/enchanting_table_book"
 }
 
 pub fn atlas_asset_path(key: &str) -> String {
@@ -76,8 +87,12 @@ pub struct TextureAtlas {
     pub image: vk::Image,
     pub view: vk::ImageView,
     pub sampler: vk::Sampler,
+    /// Storage buffer of `uvec4` level-0 sprite rectangles, indexed by
+    /// `AtlasRegion::sprite`; the terrain shaders wrap greedy UVs inside it.
+    pub sprite_rects: vk::Buffer,
     pub uv_map: AtlasUVMap,
     allocation: Option<Allocation>,
+    sprite_rects_allocation: Option<Allocation>,
     staging_buffer: vk::Buffer,
     staging_allocation: Option<Allocation>,
 }
@@ -93,8 +108,27 @@ struct Source {
     data: Vec<u8>,
     w: u32,
     h: u32,
+    /// Over every frame, as vanilla's `SpriteContents.transparency` is.
+    opaque: bool,
+    translucent: bool,
     alpha_mask: Option<SpriteAlphaMask>,
     mip_source: Option<MipSource>,
+}
+
+impl Source {
+    /// A texture that failed to load; packs as the missing tile.
+    fn empty(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            data: Vec::new(),
+            w: 0,
+            h: 0,
+            opaque: false,
+            translucent: false,
+            alpha_mask: None,
+            mip_source: None,
+        }
+    }
 }
 
 struct MipSource {
@@ -383,30 +417,17 @@ fn load_source(
         Some((data, width, height)) => {
             let Some(metadata) = read_texture_metadata(metadata_path.as_deref()) else {
                 tracing::warn!("Invalid texture metadata: {name}");
-                return Source {
-                    name: name.to_string(),
-                    data: Vec::new(),
-                    w: 0,
-                    h: 0,
-                    alpha_mask: None,
-                    mip_source: None,
-                };
+                return Source::empty(name);
             };
             let Some(animation) =
                 animation_layout_from_metadata(metadata.animation.as_ref(), width, height)
             else {
                 tracing::warn!("Invalid texture animation metadata: {name}");
-                return Source {
-                    name: name.to_string(),
-                    data: Vec::new(),
-                    w: 0,
-                    h: 0,
-                    alpha_mask: None,
-                    mip_source: None,
-                };
+                return Source::empty(name);
             };
             let alpha_mask =
                 retain_alpha_mask.then(|| sprite_alpha_mask_from_rgba(&data, width, &animation));
+            let (opaque, translucent) = sprite_transparency(&data);
             let display =
                 extract_frame_rgba(&data, width, &animation, animation.initial_display_frame);
             let texture = metadata.texture.as_ref();
@@ -423,20 +444,15 @@ fn load_source(
                 data: display,
                 w: animation.frame_width,
                 h: animation.frame_height,
+                opaque,
+                translucent,
                 alpha_mask,
                 mip_source,
             }
         }
         None => {
             tracing::warn!("Missing texture: {name}");
-            Source {
-                name: name.to_string(),
-                data: Vec::new(),
-                w: 0,
-                h: 0,
-                alpha_mask: None,
-                mip_source: None,
-            }
+            Source::empty(name)
         }
     }
 }
@@ -493,11 +509,12 @@ impl TextureAtlas {
         };
 
         let mut atlas_pixels = vec![0u8; (atlas_size * atlas_size * 4) as usize];
+        // Vanilla `MissingTextureAtlasSprite.generateMissingImage`.
         for py in 0..MISSING_TILE {
             for px in 0..MISSING_TILE {
-                let is_check = ((px / 8) + (py / 8)) % 2 == 0;
-                let color: [u8; 4] = if is_check {
-                    [255, 0, 255, 255]
+                let pink = (py < MISSING_TILE / 2) ^ (px < MISSING_TILE / 2);
+                let color: [u8; 4] = if pink {
+                    [248, 0, 248, 255]
                 } else {
                     [0, 0, 0, 255]
                 };
@@ -508,11 +525,16 @@ impl TextureAtlas {
 
         let mut regions = HashMap::new();
         let mut sprite_alpha_masks = HashMap::new();
+        let mut rects = vec![missing_region.pixel_rect.map(u32::from)];
         for src in &sources {
             match placements.get(src.name.as_str()) {
                 Some(Some((cx, cy))) => {
                     let mut region = pixel_region(*cx, *cy, src.w, src.h, atlas_size);
-                    region.opaque = sprite_is_opaque(&src.data);
+                    region.sprite = u16::try_from(rects.len())
+                        .expect("an 8192² atlas holds fewer than 65536 sprites");
+                    region.opaque = src.opaque;
+                    region.translucent = src.translucent;
+                    rects.push(region.pixel_rect.map(u32::from));
                     for py in 0..src.h {
                         for px in 0..src.w {
                             let s = ((py * src.w + px) * 4) as usize;
@@ -531,9 +553,18 @@ impl TextureAtlas {
             }
         }
 
+        let (sprite_rects, sprite_rects_allocation) = util::create_mapped_buffer(
+            device,
+            allocator,
+            bytemuck::cast_slice(&rects),
+            vk::BufferUsageFlags::StorageBuffer,
+            "atlas_sprite_rects",
+        );
+
         let uv_map = AtlasUVMap {
             regions,
             sprite_alpha_masks,
+            rects,
             missing: missing_region,
         };
 
@@ -574,11 +605,18 @@ impl TextureAtlas {
             image,
             view,
             sampler,
+            sprite_rects,
             uv_map,
             allocation: Some(allocation),
+            sprite_rects_allocation: Some(sprite_rects_allocation),
             staging_buffer,
             staging_allocation: Some(staging_allocation),
         })
+    }
+
+    /// Byte size of `sprite_rects`, for its descriptor range.
+    pub fn sprite_rects_bytes(&self) -> u64 {
+        (self.uv_map.rects.len() * size_of::<[u32; 4]>()) as u64
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -591,11 +629,15 @@ impl TextureAtlas {
 
         device.destroy_image(self.image, None);
 
-        if let Some(alloc) = self.staging_allocation.take() {
-            allocator.lock().unwrap().free(alloc).ok();
+        for (buffer, allocation) in [
+            (self.staging_buffer, self.staging_allocation.take()),
+            (self.sprite_rects, self.sprite_rects_allocation.take()),
+        ] {
+            if let Some(alloc) = allocation {
+                allocator.lock().unwrap().free(alloc).ok();
+            }
+            device.destroy_buffer(buffer, None);
         }
-
-        device.destroy_buffer(self.staging_buffer, None);
     }
 }
 
@@ -1043,16 +1085,25 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion 
         v_max,
         pixel_rect: [x as u16, y as u16, w as u16, h as u16],
         // Filled in by the caller from the sprite's texels; the missing tile is a
-        // solid checker, so the geometric default is opaque.
+        // solid checker at index 0, so these are its values.
+        sprite: 0,
         opaque: true,
+        translucent: false,
     }
 }
 
-/// Whether every level-0 texel of an RGBA sprite is fully opaque (alpha 255).
-/// Conservative: any transparency (or unknown) routes the sprite to the cutout
-/// pass, so a hole never renders solid.
-fn sprite_is_opaque(data: &[u8]) -> bool {
-    data.chunks_exact(4).all(|px| px[3] == 255)
+/// `(opaque, translucent)` over every texel of an RGBA image: opaque when all
+/// alphas are 255, translucent when any alpha lies strictly between 0 and 255.
+/// Conservative for the solid pass: any transparency routes the sprite to the
+/// cutout pass, so a hole never renders solid.
+fn sprite_transparency(data: &[u8]) -> (bool, bool) {
+    data.chunks_exact(4)
+        .fold((true, false), |(opaque, translucent), px| {
+            (
+                opaque && px[3] == 255,
+                translucent || (px[3] != 0 && px[3] != 255),
+            )
+        })
 }
 
 type PackResult = (HashMap<String, Option<(u32, u32)>>, AtlasRegion);
@@ -1089,14 +1140,7 @@ fn pack(sources: &[Source], atlas_size: u32, mip_align: u32) -> (PackResult, boo
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_temp_dir(label: &str) -> PathBuf {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("pomme_{label}_{}_{}", std::process::id(), nonce))
-    }
+    use crate::test_util::test_temp_dir;
 
     fn alpha_index(x: usize, y: usize, width: usize) -> usize {
         (y * width + x) * 4 + 3
@@ -1117,11 +1161,14 @@ mod tests {
         for pixel in data.chunks_exact_mut(4) {
             pixel.copy_from_slice(&color);
         }
+        let (opaque, translucent) = sprite_transparency(&data);
         Source {
             name: name.to_string(),
             data: data.clone(),
             w: width,
             h: height,
+            opaque,
+            translucent,
             alpha_mask: None,
             mip_source: Some(MipSource {
                 full_data: data,
@@ -1167,6 +1214,22 @@ mod tests {
             offset += (size * size * 4) as usize;
         }
         assert_eq!(offset, chain.len());
+    }
+
+    #[test]
+    fn sprite_transparency_follows_vanilla_alpha_classes() {
+        assert_eq!(
+            sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 255]),
+            (true, false)
+        );
+        assert_eq!(
+            sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 0]),
+            (false, false)
+        );
+        assert_eq!(
+            sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 128]),
+            (false, true)
+        );
     }
 
     #[test]
@@ -1444,14 +1507,14 @@ mod tests {
             atlas_asset_path("other:item/custom"),
             "other/textures/item/custom.png"
         );
-        assert!(is_item_atlas_key("other:item/custom"));
-        assert!(is_item_atlas_key(
-            "minecraft:trims/items/helmet_trim_amethyst"
-        ));
-        assert!(!is_item_atlas_key("other:block/custom"));
         assert!(!uses_block_atlas_mip_chain("item/cocoa_beans"));
         assert!(!uses_block_atlas_mip_chain("particle/glitter_0"));
         assert!(uses_block_atlas_mip_chain("sculk_vein"));
         assert!(uses_block_atlas_mip_chain("other:block/custom"));
+        // `atlases/blocks.json` lists three entity sprites; the chest sheet
+        // is its own unmipmapped atlas.
+        assert!(uses_block_atlas_mip_chain("entity/bell/bell_body"));
+        assert!(uses_block_atlas_mip_chain("entity/conduit/base"));
+        assert!(!uses_block_atlas_mip_chain("entity/chest/normal"));
     }
 }

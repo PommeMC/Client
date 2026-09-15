@@ -170,7 +170,7 @@ pub fn chunk_vertex_bindings() -> [vk::VertexInputBindingDescription; 2] {
 pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 7] {
     let pos_off = std::mem::offset_of!(PackedVertex, pos) as u32;
     let uv_off = std::mem::offset_of!(PackedVertex, uv) as u32;
-    let atlas_rect_off = std::mem::offset_of!(PackedVertex, atlas_rect) as u32;
+    let sprite_off = std::mem::offset_of!(PackedVertex, sprite) as u32;
     let light_tint_off = std::mem::offset_of!(PackedVertex, light_tint) as u32;
     let origin_off = std::mem::offset_of!(ChunkMeta, origin) as u32;
     let vis_off = std::mem::offset_of!(ChunkMeta, visibility) as u32;
@@ -197,8 +197,8 @@ pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 7] {
         vk::VertexInputAttributeDescription {
             location: 3,
             binding: 0,
-            format: vk::Format::R16G16B16A16Uint,
-            offset: atlas_rect_off,
+            format: vk::Format::R16Uint,
+            offset: sprite_off,
         },
         vk::VertexInputAttributeDescription {
             location: 4,

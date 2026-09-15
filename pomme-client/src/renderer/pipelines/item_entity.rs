@@ -9,7 +9,7 @@ use pyronyx::vk;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, SpriteAlphaMask, TextureAtlas};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
-use crate::world::block::model::BakedModel;
+use crate::world::block::model::{BakedModel, Direction, direction_from_positions};
 
 /// Item-only vertex format. Vanilla's ENTITY item format keeps UV0 as floats
 /// and carries a baked face normal; both matter here because generated sprite
@@ -98,6 +98,9 @@ struct MeshEntry {
     allocation: Allocation,
     vertex_count: u32,
     is_3d_model: bool,
+    /// Vanilla `BakedQuad.MaterialInfo`: a sprite with partial alpha draws on
+    /// the translucent item sheet, everything else on the cutout one.
+    translucent: bool,
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
 }
@@ -217,8 +220,9 @@ impl ItemPipelineShared {
         device
             .allocate_descriptor_sets(&atlas_alloc_info, slice::from_mut(&mut atlas_set))
             .unwrap_or_else(|_| panic!("failed to allocate {label} atlas set"));
-        // Vanilla ordinary item rendering samples atlas level 0 even when a
-        // model's sprite physically belongs to the mipmapped blocks atlas.
+        // Vanilla's items atlas has no mip chain, so generated items sample
+        // level 0. TODO: block-model items draw from the mipmapped blocks atlas
+        // in vanilla; pomme samples those at level 0 too.
         let atlas_sampler = unsafe { util::create_nearest_sampler(device) };
 
         let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -353,7 +357,10 @@ fn push_world_lighting(
 }
 
 pub struct ItemEntityPipeline {
-    pipeline: vk::Pipeline,
+    /// Vanilla `ITEM_CUTOUT`: alpha-tested, no blending.
+    cutout: vk::Pipeline,
+    /// Vanilla `ITEM_TRANSLUCENT`: alpha-tested and blended.
+    translucent: vk::Pipeline,
     shared: ItemPipelineShared,
     meshes: HashMap<String, MeshEntry>,
 }
@@ -366,10 +373,12 @@ impl ItemEntityPipeline {
         atlas: &TextureAtlas,
     ) -> Self {
         let shared = ItemPipelineShared::new(device, allocator, atlas, "item_entity");
-        let pipeline = create_world_pipeline(device, render_pass, shared.pipeline_layout);
+        let (cutout, translucent) =
+            create_world_pipelines(device, render_pass, shared.pipeline_layout);
 
         Self {
-            pipeline,
+            cutout,
+            translucent,
             shared,
             meshes: HashMap::new(),
         }
@@ -386,6 +395,7 @@ impl ItemEntityPipeline {
         name: &str,
         vertices: &[ItemVertex],
         is_3d_model: bool,
+        translucent: bool,
     ) {
         let bytes = bytemuck::cast_slice(vertices);
         let (buffer, allocation) = util::create_mapped_buffer(
@@ -403,6 +413,7 @@ impl ItemEntityPipeline {
                 allocation,
                 vertex_count: vertices.len() as u32,
                 is_3d_model,
+                translucent,
                 bounds_min,
                 bounds_max,
             },
@@ -435,7 +446,11 @@ impl ItemEntityPipeline {
         }
         let vertices = build_item_mesh(model, uv_map);
         if !vertices.is_empty() {
-            self.insert_mesh(device, allocator, name, &vertices, true);
+            let translucent = model
+                .quads
+                .iter()
+                .any(|quad| uv_map.get_region(&quad.texture).translucent);
+            self.insert_mesh(device, allocator, name, &vertices, true, translucent);
         }
     }
 
@@ -459,42 +474,64 @@ impl ItemEntityPipeline {
             .map(|mask| build_extruded_item_mask(mask, region))
             .unwrap_or_else(|| build_flat_quad(region));
         if !vertices.is_empty() {
-            self.insert_mesh(device, allocator, name, &vertices, false);
+            self.insert_mesh(
+                device,
+                allocator,
+                name,
+                &vertices,
+                false,
+                region.translucent,
+            );
         }
     }
 
+    /// Cutout meshes first, then translucent ones, as vanilla's item sheets
+    /// are ordered.
     pub fn draw(&self, cmd: vk::CommandBuffer, frame: usize, items: &[ItemRenderInfo]) {
         if items.is_empty() {
             return;
         }
 
-        self.shared.bind(cmd, frame, self.pipeline);
-
-        for item in items {
-            let mesh = match self.meshes.get(&item.item_name) {
-                Some(m) => m,
-                None => continue,
-            };
-            cmd.bind_vertex_buffers(0, &[mesh.buffer], &[0]);
-            push_model_light(
-                cmd,
-                self.shared.pipeline_layout,
-                &item.model_matrix,
-                item.light,
-            );
-            push_world_lighting(
-                cmd,
-                self.shared.pipeline_layout,
-                &item.model_matrix,
-                item.nether_lighting,
-            );
-            cmd.draw(mesh.vertex_count, 1, 0, 0);
+        for (pipeline, translucent) in [(self.cutout, false), (self.translucent, true)] {
+            let mut bound = false;
+            for item in items {
+                let Some(mesh) = self.meshes.get(&item.item_name) else {
+                    continue;
+                };
+                if mesh.translucent != translucent {
+                    continue;
+                }
+                if !bound {
+                    self.shared.bind(cmd, frame, pipeline);
+                    bound = true;
+                }
+                cmd.bind_vertex_buffers(0, &[mesh.buffer], &[0]);
+                push_model_light(
+                    cmd,
+                    self.shared.pipeline_layout,
+                    &item.model_matrix,
+                    item.light,
+                );
+                push_world_lighting(
+                    cmd,
+                    self.shared.pipeline_layout,
+                    &item.model_matrix,
+                    item.nether_lighting,
+                );
+                cmd.draw(mesh.vertex_count, 1, 0, 0);
+            }
         }
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
-        device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = create_world_pipeline(device, render_pass, self.shared.pipeline_layout);
+        self.destroy_pipelines(device);
+        (self.cutout, self.translucent) =
+            create_world_pipelines(device, render_pass, self.shared.pipeline_layout);
+    }
+
+    fn destroy_pipelines(&self, device: &vk::Device) {
+        device.destroy_pipeline(self.cutout, None);
+        device.destroy_pipeline(self.translucent, None);
     }
 
     pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
@@ -510,7 +547,7 @@ impl ItemEntityPipeline {
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         self.clear_meshes(device, allocator);
-        device.destroy_pipeline(self.pipeline, None);
+        self.destroy_pipelines(device);
         self.shared.destroy(device, allocator);
     }
 }
@@ -532,37 +569,11 @@ fn mesh_bounds(vertices: &[ItemVertex]) -> (glam::Vec3, glam::Vec3) {
     (min, max)
 }
 
-fn quad_normal(positions: &[[f32; 3]; 4]) -> glam::Vec3 {
-    let p0 = glam::Vec3::from_array(positions[0]);
-    let p1 = glam::Vec3::from_array(positions[1]);
-    let p2 = glam::Vec3::from_array(positions[2]);
-    (p1 - p0).cross(p2 - p0).normalize_or_zero()
-}
-
-/// Vanilla stores a cardinal `BakedQuad.direction()`, even when an element
-/// rotation makes the geometric face normal non-cardinal. `FaceBakery` picks
-/// the cardinal direction with the largest positive dot product, in
-/// Direction.values() order: DOWN, UP, NORTH, SOUTH, WEST, EAST.
-fn baked_quad_normal(positions: &[[f32; 3]; 4]) -> glam::Vec3 {
-    let geometric = quad_normal(positions);
-    let directions = [
-        glam::Vec3::NEG_Y,
-        glam::Vec3::Y,
-        glam::Vec3::NEG_Z,
-        glam::Vec3::Z,
-        glam::Vec3::NEG_X,
-        glam::Vec3::X,
-    ];
-    let mut best = glam::Vec3::Y;
-    let mut best_dot = 0.0_f32;
-    for direction in directions {
-        let dot = geometric.dot(direction);
-        if dot >= 0.0 && dot > best_dot {
-            best_dot = dot;
-            best = direction;
-        }
-    }
-    best
+/// Vanilla stores a cardinal `BakedQuad.direction()` even when an element
+/// rotation makes the geometric normal oblique, `UP` for a degenerate quad.
+fn cardinal_normal(positions: &[[f32; 3]; 4]) -> glam::Vec3 {
+    let direction = direction_from_positions(positions).unwrap_or(Direction::Up);
+    glam::Vec3::from_array(direction.offset().map(|v| v as f32))
 }
 
 fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
@@ -576,7 +587,7 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
         } else {
             crate::renderer::chunk::mesher::pack_tint_shifted([0.569, 0.741, 0.349])
         };
-        let normal = pack_normal(baked_quad_normal(&quad.positions));
+        let normal = pack_normal(cardinal_normal(&quad.positions));
 
         for i in [0, 1, 2, 2, 3, 0] {
             let p = quad.positions[i];
@@ -773,7 +784,7 @@ fn push_side_quad(
     light: f32,
 ) {
     let positions = [[x0, y0, z0], [x0, y0, z1], [x1, y1, z1], [x1, y1, z0]];
-    let normal = pack_normal(quad_normal(&positions));
+    let normal = pack_normal(cardinal_normal(&positions));
     for i in [0, 1, 2, 0, 2, 3] {
         vertices.push(ItemVertex {
             position: positions[i],
@@ -831,21 +842,27 @@ pub(super) fn create_pipeline(
         layout,
         vk::FrontFace::CounterClockwise,
         false,
+        true,
     )
 }
 
-fn create_world_pipeline(
+/// The dropped-item pipelines: `(cutout, translucent)`.
+fn create_world_pipelines(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-) -> vk::Pipeline {
-    create_pipeline_impl(
-        device,
-        render_pass,
-        layout,
-        vk::FrontFace::CounterClockwise,
-        true,
-    )
+) -> (vk::Pipeline, vk::Pipeline) {
+    let world = |blend| {
+        create_pipeline_impl(
+            device,
+            render_pass,
+            layout,
+            vk::FrontFace::CounterClockwise,
+            true,
+            blend,
+        )
+    };
+    (world(false), world(true))
 }
 
 pub(super) fn create_pipeline_with_front_face(
@@ -854,7 +871,7 @@ pub(super) fn create_pipeline_with_front_face(
     layout: vk::PipelineLayout,
     front_face: vk::FrontFace,
 ) -> vk::Pipeline {
-    create_pipeline_impl(device, render_pass, layout, front_face, false)
+    create_pipeline_impl(device, render_pass, layout, front_face, false, true)
 }
 
 fn create_pipeline_impl(
@@ -863,6 +880,7 @@ fn create_pipeline_impl(
     layout: vk::PipelineLayout,
     front_face: vk::FrontFace,
     world_lighting: bool,
+    blend: bool,
 ) -> vk::Pipeline {
     let vert_spv: &[u8] = if world_lighting {
         &shader::include_spirv!("item_entity_world.vert.spv")[..]
@@ -930,7 +948,7 @@ fn create_pipeline_impl(
         ..Default::default()
     };
     let blend_attachment = vk::PipelineColorBlendAttachmentState {
-        blend_enable: vk::TRUE,
+        blend_enable: if blend { vk::TRUE } else { vk::FALSE },
         src_color_blend_factor: vk::BlendFactor::SrcAlpha,
         dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
         color_blend_op: vk::BlendOp::Add,
@@ -995,7 +1013,9 @@ mod tests {
             u_max: 1.0,
             v_max: 1.0,
             pixel_rect: [0, 0, 1, 1],
+            sprite: 0,
             opaque: true,
+            translucent: false,
         }
     }
 
@@ -1080,10 +1100,14 @@ mod tests {
         let mut positions = [p0.to_array(), p1.to_array(), p2.to_array(), p3.to_array()];
 
         // Ensure the synthetic winding points along the intended oblique normal.
-        if quad_normal(&positions).dot(normal) < 0.0 {
+        if crate::world::block::model::quad_normal(&positions)
+            .unwrap()
+            .dot(normal)
+            < 0.0
+        {
             positions.reverse();
         }
-        assert_eq!(baked_quad_normal(&positions), glam::Vec3::Z);
+        assert_eq!(cardinal_normal(&positions), glam::Vec3::Z);
     }
 
     #[test]
@@ -1128,7 +1152,9 @@ mod tests {
             u_max: 32.0 / 64.0,
             v_max: 24.0 / 64.0,
             pixel_rect: [16, 8, 16, 16],
+            sprite: 1,
             opaque: true,
+            translucent: false,
         };
         let vertices = build_extruded_item(&image, region);
 

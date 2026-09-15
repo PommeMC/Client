@@ -239,12 +239,68 @@ impl Direction {
         d
     }
 
+    /// The default table's shade, for the item paths that bake it in; terrain
+    /// looks its dimension's table up at mesh time instead.
     pub(crate) fn shade_light(&self) -> f32 {
+        CardinalLighting::DEFAULT.by_face(*self)
+    }
+}
+
+/// Vanilla `CardinalLighting`: the per-face brightness a dimension shades
+/// block faces with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CardinalLighting {
+    pub down: f32,
+    pub up: f32,
+    pub north: f32,
+    pub south: f32,
+    pub west: f32,
+    pub east: f32,
+}
+
+impl CardinalLighting {
+    pub const DEFAULT: Self = Self {
+        down: 0.5,
+        up: 1.0,
+        north: 0.8,
+        south: 0.8,
+        west: 0.6,
+        east: 0.6,
+    };
+    pub const NETHER: Self = Self {
+        down: 0.9,
+        up: 0.9,
+        north: 0.8,
+        south: 0.8,
+        west: 0.6,
+        east: 0.6,
+    };
+
+    pub fn by_face(&self, dir: Direction) -> f32 {
+        match dir {
+            Direction::Down => self.down,
+            Direction::Up => self.up,
+            Direction::North => self.north,
+            Direction::South => self.south,
+            Direction::West => self.west,
+            Direction::East => self.east,
+        }
+    }
+}
+
+/// A dimension type's `cardinal_light`, vanilla `CardinalLighting.Type`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CardinalLightType {
+    #[default]
+    Default,
+    Nether,
+}
+
+impl CardinalLightType {
+    pub fn table(self) -> CardinalLighting {
         match self {
-            Direction::Up => 1.0,
-            Direction::Down => 0.5,
-            Direction::North | Direction::South => 0.8,
-            Direction::East | Direction::West => 0.6,
+            Self::Default => CardinalLighting::DEFAULT,
+            Self::Nether => CardinalLighting::NETHER,
         }
     }
 }
@@ -256,7 +312,10 @@ pub struct BakedQuad {
     pub texture: String,
     pub cullface: Option<Direction>,
     pub tint: super::registry::Tint,
+    /// The default table's shade, for GUI and held items.
     pub shade_light: f32,
+    /// The face terrain shades this quad as, `None` for `shade: false`.
+    pub shade_face: Option<Direction>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -435,6 +494,32 @@ pub struct BakedItemModels {
     pub ground_transforms: HashMap<String, Mat4>,
 }
 
+/// Every `minecraft/items/*.json` name across the jar and the active packs,
+/// so a pack can add an item, not only replace one. Vanilla walks every pack
+/// in `FallbackResourceManager`.
+fn item_definition_names(
+    jar_assets_dir: &Path,
+    packs: Option<&crate::resource_pack::ResourcePackManager>,
+) -> std::collections::BTreeSet<String> {
+    let pack_dirs = packs
+        .into_iter()
+        .flat_map(|packs| packs.active_pack_dirs())
+        .map(|dir| dir.join("assets"));
+    std::iter::once(jar_assets_dir.to_path_buf())
+        .chain(pack_dirs)
+        .filter_map(|root| std::fs::read_dir(root.join("minecraft").join("items")).ok())
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()?
+                .strip_suffix(".json")
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 pub fn bake_item_models(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
@@ -446,25 +531,9 @@ pub fn bake_item_models(
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
-    let items_dir = jar_assets_dir.join("minecraft").join("items");
-    let entries = match std::fs::read_dir(&items_dir) {
-        Ok(e) => e,
-        Err(_) => {
-            return BakedItemModels {
-                models: item_models,
-                generated_textures: flat_item_textures,
-                flat_texture_keys: flat_keys,
-                ground_transforms,
-            };
-        }
-    };
-
-    for entry in entries.flatten() {
-        let fname = entry.file_name().to_string_lossy().to_string();
-        let Some(item_name) = fname.strip_suffix(".json") else {
-            continue;
-        };
-        let item_asset_key = format!("minecraft/items/{fname}");
+    for item_name in item_definition_names(jar_assets_dir, packs) {
+        let item_name = item_name.as_str();
+        let item_asset_key = format!("minecraft/items/{item_name}.json");
         let item_path =
             resolve_asset_path_with_packs(jar_assets_dir, asset_index, &item_asset_key, packs);
         let Ok(contents) = std::fs::read_to_string(item_path) else {
@@ -481,8 +550,11 @@ pub fn bake_item_models(
 
         let tint = determine_tint(item_name);
         let mut merged: Option<BakedModel> = None;
+        // Vanilla applies each composite part's own GROUND transform. Pomme
+        // merges the parts into one mesh, so it can apply only one; no vanilla
+        // composite disagrees (beds share `block/template_bed`), so the first
+        // part's wins and a disagreement is logged rather than modelled.
         let mut ground_transform: Option<Mat4> = None;
-        let mut common_ground_transform = true;
         for part in &parts {
             let resolved = resolve_model(
                 &part.path,
@@ -491,14 +563,13 @@ pub fn bake_item_models(
                 &mut model_cache,
                 packs,
             );
-            if let Some(existing) = ground_transform {
-                common_ground_transform &= existing
-                    .to_cols_array()
-                    .iter()
-                    .zip(resolved.ground_transform.to_cols_array())
-                    .all(|(a, b)| (*a - b).abs() < 1.0e-6);
-            } else {
-                ground_transform = Some(resolved.ground_transform);
+            match ground_transform {
+                None => ground_transform = Some(resolved.ground_transform),
+                Some(existing) if existing.abs_diff_eq(resolved.ground_transform, 1.0e-6) => {}
+                Some(_) => tracing::warn!(
+                    "{item_name}: composite part {} has a different ground transform; using the first part's",
+                    part.path
+                ),
             }
             // A flat sprite (layer0, no elements) only makes sense as the
             // sole part; `merged` stays empty so no 3D model is inserted.
@@ -531,7 +602,7 @@ pub fn bake_item_models(
                 }
             });
         }
-        if common_ground_transform && let Some(transform) = ground_transform {
+        if let Some(transform) = ground_transform {
             ground_transforms.insert(item_name.to_string(), transform);
         }
         if let Some(mut baked) = merged {
@@ -770,6 +841,7 @@ fn add_chest_cube(
             cullface: None,
             tint: super::registry::Tint::None,
             shade_light: spec.shade,
+            shade_face: None,
         });
     }
 }
@@ -1255,13 +1327,11 @@ fn bake_resolved_model(
                 cullface = cullface.map(|d| d.rotate_x(rot_x).rotate_y(rot_y));
             }
 
-            let shade_light = if element.shade {
-                direction_from_positions(&positions)
-                    .unwrap_or(dir)
-                    .shade_light()
-            } else {
-                1.0
-            };
+            // Vanilla `FaceBakery.bakeQuad`: the shade direction is the
+            // rotated quad's nearest cardinal, `UP` for a degenerate quad.
+            let shade_face = element
+                .shade
+                .then(|| direction_from_positions(&positions).unwrap_or(Direction::Up));
 
             quads.push(BakedQuad {
                 positions,
@@ -1269,7 +1339,8 @@ fn bake_resolved_model(
                 texture: texture_name,
                 cullface,
                 tint: quad_tint,
-                shade_light,
+                shade_light: shade_face.map_or(1.0, |face| face.shade_light()),
+                shade_face,
             });
         }
     }
@@ -1403,11 +1474,18 @@ fn apply_element_rotation(
     positions
 }
 
-fn direction_from_positions(positions: &[[f32; 3]; 4]) -> Option<Direction> {
+/// The quad's winding normal, or `None` when it is degenerate.
+pub(crate) fn quad_normal(positions: &[[f32; 3]; 4]) -> Option<Vec3> {
     let p0 = Vec3::from_array(positions[0]);
     let p1 = Vec3::from_array(positions[1]);
     let p2 = Vec3::from_array(positions[2]);
-    let normal = (p1 - p0).cross(p2 - p0).try_normalize()?;
+    (p1 - p0).cross(p2 - p0).try_normalize()
+}
+
+/// Vanilla `FaceBakery.findClosestDirection`: the cardinal with the largest
+/// positive dot product, first in `Direction` order on a tie; `None` when the
+/// normal points nowhere.
+pub(crate) fn nearest_cardinal_direction(normal: Vec3) -> Option<Direction> {
     let mut best = None;
     let mut closest_product = 0.0f32;
     for candidate in [
@@ -1425,6 +1503,10 @@ fn direction_from_positions(positions: &[[f32; 3]; 4]) -> Option<Direction> {
         }
     }
     best
+}
+
+pub(crate) fn direction_from_positions(positions: &[[f32; 3]; 4]) -> Option<Direction> {
+    nearest_cardinal_direction(quad_normal(positions)?)
 }
 
 fn rotate_positions(mut positions: [[f32; 3]; 4], rot_x: i32, rot_y: i32) -> [[f32; 3]; 4] {
@@ -1776,13 +1858,7 @@ mod tests {
         assert_eq!(parts[0].path, strip_mc_prefix(&legacy));
     }
 
-    fn test_temp_dir(label: &str) -> PathBuf {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("pomme_{label}_{}_{}", std::process::id(), nonce))
-    }
+    use crate::test_util::test_temp_dir;
 
     #[test]
     fn item_definition_and_ground_transform_follow_resource_pack_override() {
@@ -1827,12 +1903,22 @@ mod tests {
             r#"{"parent":"minecraft:item/generated","textures":{"layer0":"other:item/replacement"}}"#,
         )
         .unwrap();
+        // An item the jar does not define at all.
+        std::fs::write(
+            pack_items.join("pack_only.json"),
+            r#"{"model":{"type":"minecraft:model","model":"other:item/replacement"}}"#,
+        )
+        .unwrap();
 
         let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
         packs.enable_local_pack("test_pack");
         let baked = bake_item_models(&jar, &None, Some(&packs));
         assert_eq!(
             baked.flat_texture_keys.get("test_item").map(String::as_str),
+            Some("other:item/replacement")
+        );
+        assert_eq!(
+            baked.flat_texture_keys.get("pack_only").map(String::as_str),
             Some("other:item/replacement")
         );
         let transform = baked.ground_transforms["test_item"];

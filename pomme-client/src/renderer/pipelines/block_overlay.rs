@@ -13,7 +13,7 @@ use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::{CUBE_FACE_DIRS, cube_face_geometry};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
-use crate::world::block::model::{BakedQuad, Direction};
+use crate::world::block::model::{BakedQuad, Direction, direction_from_positions};
 use crate::world::block::registry::BlockRegistry;
 
 const STAGE_COUNT: u32 = 10;
@@ -353,7 +353,7 @@ fn build_overlay_vertices(
     } else if registry.get_textures(state).is_some() {
         // Blocks rendered as a plain opaque cube (no baked model): crack a unit cube.
         for dir in CUBE_FACE_DIRS {
-            let (positions, _, _) = cube_face_geometry(dir);
+            let (positions, _) = cube_face_geometry(dir);
             push_face(&mut verts, origin, &positions, dir);
         }
     }
@@ -369,9 +369,12 @@ fn build_overlay_vertices(
 }
 
 fn push_quad(verts: &mut Vec<OverlayVertex>, origin: [f32; 3], quad: &BakedQuad) {
+    // Vanilla `FaceBakery` stores the nearest cardinal for a quad without a
+    // cull face, `UP` when it is degenerate.
     let dir = quad
         .cullface
-        .unwrap_or_else(|| nearest_direction(&quad.positions));
+        .or_else(|| direction_from_positions(&quad.positions))
+        .unwrap_or(Direction::Up);
     push_face(verts, origin, &quad.positions, dir);
 }
 
@@ -417,31 +420,6 @@ fn face_rotation(dir: Direction) -> Quat {
         Direction::South => Quat::from_rotation_x(FRAC_PI_2),
         Direction::West => Quat::from_rotation_x(FRAC_PI_2) * Quat::from_rotation_z(FRAC_PI_2),
         Direction::East => Quat::from_rotation_x(FRAC_PI_2) * Quat::from_rotation_z(-FRAC_PI_2),
-    }
-}
-
-/// Nearest axis-aligned face to a quad's geometric normal, matching vanilla
-/// `Direction.getApproximateNearest` (used for quads without a cull face).
-fn nearest_direction(positions: &[[f32; 3]; 4]) -> Direction {
-    let p0 = Vec3::from_array(positions[0]);
-    let n = (Vec3::from_array(positions[1]) - p0).cross(Vec3::from_array(positions[2]) - p0);
-    let (ax, ay, az) = (n.x.abs(), n.y.abs(), n.z.abs());
-    if ax >= ay && ax >= az {
-        if n.x >= 0.0 {
-            Direction::East
-        } else {
-            Direction::West
-        }
-    } else if ay >= az {
-        if n.y >= 0.0 {
-            Direction::Up
-        } else {
-            Direction::Down
-        }
-    } else if n.z >= 0.0 {
-        Direction::South
-    } else {
-        Direction::North
     }
 }
 
@@ -663,7 +641,7 @@ mod tests {
             max - min
         };
         for dir in CUBE_FACE_DIRS {
-            let (positions, _, _) = cube_face_geometry(dir);
+            let (positions, _) = cube_face_geometry(dir);
             let uv: [[f32; 2]; 4] =
                 std::array::from_fn(|i| project_crack_uv(Vec3::from_array(positions[i]), dir));
             let us = std::array::from_fn(|i| uv[i][0]);

@@ -15,12 +15,12 @@ layout(location = 2) in vec3 v_tint;
 layout(location = 3) flat in float v_visibility;
 layout(location = 4) in vec3 v_fog_color;
 layout(location = 5) in float v_fog;
-layout(location = 6) flat in uvec4 v_atlas_rect;
+layout(location = 6) flat in uint v_sprite;
 
 layout(location = 0) out vec4 out_color;
 
 void main() {
-    vec4 color = sample_atlas_sprite(atlas_texture, v_sprite_uv, v_atlas_rect);
+    vec4 color = sample_atlas_sprite(atlas_texture, v_sprite_uv, v_sprite);
     vec3 shaded =
         shade_chunk_surface(color.rgb, v_tint, v_light, v_visibility, v_fog_color, v_fog);
     out_color = vec4(shaded, 1.0);

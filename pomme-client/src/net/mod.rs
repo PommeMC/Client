@@ -60,7 +60,7 @@ pub enum NetworkEvent {
         height: u32,
         min_y: i32,
         has_skylight: bool,
-        nether_cardinal_lighting: bool,
+        cardinal_light: crate::world::block::model::CardinalLightType,
     },
     ChunkLoaded {
         pos: ChunkPos,

@@ -21,6 +21,8 @@ mod physics;
 mod player;
 mod renderer;
 mod resource_pack;
+#[cfg(test)]
+mod test_util;
 mod ui;
 mod user;
 mod util;

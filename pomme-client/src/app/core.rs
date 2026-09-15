@@ -477,8 +477,11 @@ impl AppCore {
         renderer.clear_chunk_meshes();
         self.reload_pack_assets(renderer);
 
-        let mesh_dispatcher = renderer
-            .create_mesh_dispatcher(Arc::clone(&game.biome_climate), Some(&self.resource_packs));
+        let mesh_dispatcher = renderer.create_mesh_dispatcher(
+            Arc::clone(&game.biome_climate),
+            Some(&self.resource_packs),
+            game.cardinal_light,
+        );
         let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
         game.mesh_dispatcher = mesh_dispatcher;
         game.particle_store = crate::particle::ParticleStore::new(
@@ -575,12 +578,12 @@ impl AppCore {
                     height,
                     min_y,
                     has_skylight,
-                    nether_cardinal_lighting,
+                    cardinal_light,
                 } => {
                     tracing::info!(
-                        "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, nether_cardinal_lighting={nether_cardinal_lighting}"
+                        "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, cardinal_light={cardinal_light:?}"
                     );
-                    game.nether_cardinal_lighting = nether_cardinal_lighting;
+                    game.cardinal_light = cardinal_light;
                     game.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
                     game.light_engine =
@@ -597,8 +600,11 @@ impl AppCore {
                     game.player.reset_hurt_state();
 
                     renderer.clear_chunk_meshes();
-                    game.mesh_dispatcher =
-                        renderer.create_mesh_dispatcher(Arc::clone(&game.biome_climate), None);
+                    game.mesh_dispatcher = renderer.create_mesh_dispatcher(
+                        Arc::clone(&game.biome_climate),
+                        None,
+                        cardinal_light,
+                    );
                 }
                 NetworkEvent::DimensionName { name } => {
                     game.dimension = name;

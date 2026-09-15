@@ -449,7 +449,6 @@ impl Renderer {
             &mut item_entity_pipeline,
             &atlas.uv_map,
             &registry,
-            jar_assets_dir,
         );
 
         Ok(Self {
@@ -1014,6 +1013,7 @@ impl Renderer {
             std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
         >,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
+        cardinal_light: crate::world::block::model::CardinalLightType,
     ) -> MeshDispatcher {
         let grass_colormap = crate::renderer::chunk::mesher::Colormap::load(
             &self.jar_assets_dir,
@@ -1040,6 +1040,7 @@ impl Renderer {
             foliage_colormap,
             dry_foliage_colormap,
             biome_climate,
+            cardinal_light.table(),
         )
     }
 
@@ -1202,7 +1203,6 @@ impl Renderer {
             &mut self.item_entity_pipeline,
             &self.atlas.uv_map,
             &self.registry,
-            &self.jar_assets_dir,
         );
 
         // GUI item slots cache fully rendered pixels. Releasing their keys is
@@ -1974,18 +1974,8 @@ fn warm_item_meshes(
     item_entity_pipeline: &mut ItemEntityPipeline,
     uv_map: &chunk::atlas::AtlasUVMap,
     registry: &BlockRegistry,
-    jar_assets_dir: &Path,
 ) {
-    let items_dir = jar_assets_dir.join("minecraft").join("items");
-    let entries = match std::fs::read_dir(&items_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let fname = entry.file_name().to_string_lossy().to_string();
-        let Some(name) = fname.strip_suffix(".json") else {
-            continue;
-        };
+    for name in registry.item_names() {
         if let Some(model) = registry.get_item_model(name) {
             item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
         } else {

@@ -148,6 +148,14 @@ impl BlockRegistry {
         self.item_models.get(name)
     }
 
+    /// Every item with a baked 3D model or a generated flat sprite.
+    pub fn item_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.item_models
+            .keys()
+            .chain(self.flat_item_texture_keys.keys())
+            .map(String::as_str)
+    }
+
     pub fn flat_item_textures(&self) -> impl Iterator<Item = &str> + '_ {
         self.flat_item_textures.iter().map(String::as_str)
     }

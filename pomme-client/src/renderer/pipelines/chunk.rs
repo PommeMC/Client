@@ -38,11 +38,32 @@ impl ChunkPipeline {
             vk::DescriptorType::UniformBuffer,
             vk::ShaderStageFlags::Vertex,
         );
-        let atlas_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::CombinedImageSampler,
-            vk::ShaderStageFlags::Fragment,
-        );
+        // Set 1: the atlas sampler and the sprite-rectangle buffer the
+        // fragment shaders wrap greedy UVs with.
+        let atlas_bindings = [
+            vk::DescriptorSetLayoutBinding {
+                binding: 0,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::Fragment,
+                ..Default::default()
+            },
+            vk::DescriptorSetLayoutBinding {
+                binding: 1,
+                descriptor_type: vk::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::Fragment,
+                ..Default::default()
+            },
+        ];
+        let atlas_layout_info = vk::DescriptorSetLayoutCreateInfo {
+            binding_count: atlas_bindings.len() as u32,
+            bindings: atlas_bindings.as_ptr(),
+            ..Default::default()
+        };
+        let atlas_layout = device
+            .create_descriptor_set_layout(&atlas_layout_info, None)
+            .expect("failed to create atlas descriptor set layout");
 
         let layouts = [camera_layout, atlas_layout];
         // Water pushes its section origin + fade per draw (water.vert); the
@@ -74,6 +95,10 @@ impl ChunkPipeline {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: 1,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::StorageBuffer,
                 descriptor_count: 1,
             },
         ];
@@ -140,22 +165,7 @@ impl ChunkPipeline {
             camera_allocations.push(alloc);
         }
 
-        let image_info = vk::DescriptorImageInfo {
-            sampler: atlas.sampler,
-            image_view: atlas.view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let atlas_write = vk::WriteDescriptorSet {
-            dst_set: atlas_set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            image_info: &image_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[atlas_write], &[]);
-
-        Self {
+        let pipeline = Self {
             pipeline_solid,
             pipeline_cutout,
             water_pipeline,
@@ -167,7 +177,9 @@ impl ChunkPipeline {
             atlas_set,
             camera_buffers,
             camera_allocations,
-        }
+        };
+        pipeline.rebind_atlas(device, atlas);
+        pipeline
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
@@ -182,15 +194,30 @@ impl ChunkPipeline {
             image_view: atlas.view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
         };
-        let write = vk::WriteDescriptorSet {
-            dst_set: self.atlas_set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            image_info: &image_info,
-            ..Default::default()
+        let rects_info = vk::DescriptorBufferInfo {
+            buffer: atlas.sprite_rects,
+            offset: 0,
+            range: atlas.sprite_rects_bytes(),
         };
-        device.update_descriptor_sets(&[write], &[]);
+        let writes = [
+            vk::WriteDescriptorSet {
+                dst_set: self.atlas_set,
+                dst_binding: 0,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: 1,
+                image_info: &image_info,
+                ..Default::default()
+            },
+            vk::WriteDescriptorSet {
+                dst_set: self.atlas_set,
+                dst_binding: 1,
+                descriptor_type: vk::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                buffer_info: &rects_info,
+                ..Default::default()
+            },
+        ];
+        device.update_descriptor_sets(&writes, &[]);
     }
 
     pub fn bind(&self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {

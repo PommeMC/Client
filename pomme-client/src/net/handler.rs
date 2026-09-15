@@ -19,6 +19,7 @@ use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
 use crate::ui::text::format_text_spans;
+use crate::world::block::model::CardinalLightType;
 
 /// Dimension info from a login/respawn registry entry. Fields that Azalea does
 /// not model directly live in its flattened extras. Missing `has_skylight`
@@ -35,12 +36,16 @@ fn dimension_info(
             .and_then(|tag| tag.byte())
             .map(|b| b != 0)
             .unwrap_or(true),
-        nether_cardinal_lighting: dim
+        cardinal_light: match dim
             ._extra
             .get("cardinal_light")
             .and_then(|tag| tag.string())
-            .map(|value| value.to_str() == "nether")
-            .unwrap_or(false),
+            .map(|value| value.to_str())
+            .as_deref()
+        {
+            Some("nether") => CardinalLightType::Nether,
+            _ => CardinalLightType::Default,
+        },
     }
 }
 
@@ -1575,6 +1580,7 @@ mod dimension_info_tests {
 
     use super::dimension_info;
     use crate::net::NetworkEvent;
+    use crate::world::block::model::CardinalLightType;
 
     #[test]
     fn dimension_info_reads_vanilla_cardinal_light_type() {
@@ -1595,7 +1601,7 @@ mod dimension_info_tests {
             height,
             min_y,
             has_skylight,
-            nether_cardinal_lighting,
+            cardinal_light,
         } = dimension_info(&dim)
         else {
             panic!("dimension_info returned the wrong event variant");
@@ -1603,7 +1609,7 @@ mod dimension_info_tests {
         assert_eq!(height, 384);
         assert_eq!(min_y, -64);
         assert!(has_skylight);
-        assert!(nether_cardinal_lighting);
+        assert_eq!(cardinal_light, CardinalLightType::Nether);
     }
 
     #[test]
@@ -1617,13 +1623,13 @@ mod dimension_info_tests {
 
         let NetworkEvent::DimensionInfo {
             has_skylight,
-            nether_cardinal_lighting,
+            cardinal_light,
             ..
         } = dimension_info(&dim)
         else {
             panic!("dimension_info returned the wrong event variant");
         };
         assert!(has_skylight);
-        assert!(!nether_cardinal_lighting);
+        assert_eq!(cardinal_light, CardinalLightType::Default);
     }
 }

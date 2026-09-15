@@ -39,6 +39,7 @@ use crate::ui::chat::ChatState;
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
+use crate::world::block::model::CardinalLightType;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
@@ -197,9 +198,9 @@ pub struct GameState {
     pub previous_game_mode: Option<u8>,
     /// Current dimension identifier (e.g. "minecraft:overworld"), for F3+C.
     pub dimension: String,
-    /// Dimension-type `cardinal_light`: true for vanilla's `nether` lighting,
-    /// false for the default pair of level light directions.
-    pub nether_cardinal_lighting: bool,
+    /// Dimension-type `cardinal_light`, which picks the terrain shade table
+    /// and the item entity light directions.
+    pub cardinal_light: CardinalLightType,
     /// F3+F4 game-mode switcher overlay, while open.
     pub game_mode_switcher: Option<crate::ui::game_mode_switcher::GameModeSwitcherState>,
     /// Spectator hotbar menu (vanilla `SpectatorGui`). Not a GUI screen: the
@@ -299,7 +300,13 @@ impl GameState {
         render_distance: u32,
     ) -> Self {
         let biome_climate = Arc::new(HashMap::new());
-        let mesh_dispatcher = renderer.create_mesh_dispatcher(biome_climate, Some(resource_packs));
+        // The dimension's shade table arrives with `DimensionInfo`, which
+        // builds a fresh dispatcher.
+        let mesh_dispatcher = renderer.create_mesh_dispatcher(
+            biome_climate,
+            Some(resource_packs),
+            Default::default(),
+        );
 
         let chunk_store = ChunkStore::new(render_distance);
         Self {
@@ -383,7 +390,7 @@ impl GameState {
             pending_chunk_reload: false,
             previous_game_mode: None,
             dimension: String::new(),
-            nether_cardinal_lighting: false,
+            cardinal_light: Default::default(),
             game_mode_switcher: None,
             spectator: Default::default(),
             switcher_was_open: false,
@@ -2711,7 +2718,7 @@ pub fn update_game(
             &game.item_entity_store,
             &game.chunk_store,
             &gfx.renderer,
-            game.nether_cardinal_lighting,
+            game.cardinal_light,
             *gfx.renderer.camera_pivot_position(),
             gfx.renderer.camera_anchor(),
             partial_tick,
@@ -3191,12 +3198,13 @@ fn build_item_render_infos(
     entity_store: &crate::entity::ItemEntityStore,
     chunk_store: &ChunkStore,
     renderer: &Renderer,
-    nether_cardinal_lighting: bool,
+    cardinal_light: CardinalLightType,
     camera_pos: glam::DVec3,
     anchor: glam::DVec3,
     partial_tick: f32,
 ) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
     let mut infos = Vec::new();
+    let nether_lighting = cardinal_light == CardinalLightType::Nether;
     for item in entity_store.visible_items(camera_pos, 64.0) {
         let age_f = item.age as f32 + partial_tick;
         let lerped = item.prev_position.lerp(item.position, partial_tick as f64);
@@ -3215,7 +3223,7 @@ fn build_item_render_infos(
             min_y,
             z_size,
             light,
-            nether_cardinal_lighting,
+            nether_lighting,
         );
     }
 
@@ -3238,7 +3246,7 @@ fn build_item_render_infos(
             min_y,
             z_size,
             light,
-            nether_cardinal_lighting,
+            nether_lighting,
         );
     }
 

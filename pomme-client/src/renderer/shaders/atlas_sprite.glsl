@@ -1,4 +1,11 @@
-vec4 sample_atlas_sprite(sampler2D atlas_texture, vec2 sprite_uv, uvec4 atlas_rect) {
+// Level-0 sprite rectangles `(x, y, width, height)` in atlas texels, indexed by
+// the vertex's sprite id; index 0 is the missing tile.
+layout(set = 1, binding = 1) readonly buffer SpriteRects {
+    uvec4 sprite_rects[];
+};
+
+vec4 sample_atlas_sprite(sampler2D atlas_texture, vec2 sprite_uv, uint sprite) {
+    uvec4 atlas_rect = sprite_rects[sprite];
     vec2 atlas_size = vec2(textureSize(atlas_texture, 0));
     vec2 sprite_size = vec2(atlas_rect.zw);
     vec2 atlas_origin = vec2(atlas_rect.xy);
