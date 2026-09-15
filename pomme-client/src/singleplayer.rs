@@ -83,21 +83,24 @@ mod steel {
             }
         }
 
+        fn handle(&self) -> Option<&WorldHandle> {
+            match &self.server {
+                Server::Starting(pending) => pending.handle(),
+                Server::Running(handle) => Some(handle),
+            }
+        }
+
         /// Asks the server to save and stop, whether or not it finished
         /// starting. Returns without waiting.
         pub fn begin_close(&self) {
-            match &self.server {
-                Server::Starting(pending) => pending.begin_shutdown(),
-                Server::Running(handle) => handle.begin_shutdown(),
+            if let Some(handle) = self.handle() {
+                handle.begin_shutdown();
             }
         }
 
         /// Whether the server has finished saving and stopped.
         pub fn is_closed(&self) -> bool {
-            match &self.server {
-                Server::Starting(pending) => pending.is_finished(),
-                Server::Running(handle) => handle.is_finished(),
-            }
+            self.handle().is_none_or(WorldHandle::is_finished)
         }
     }
 

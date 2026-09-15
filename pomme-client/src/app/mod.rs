@@ -109,9 +109,11 @@ impl FramerateLimiter {
 
 /// The tail of every exit from a world or server.
 ///
-/// Takes the connection by value so it closes before the server is asked to
-/// stop, the way `Minecraft.disconnect` does: steel then sees end of file and
-/// persists the player before the shutdown save runs.
+/// Takes the connection by value and drops it before the server is asked to
+/// stop, in `Minecraft.disconnect`'s order. Dropping aborts the connection
+/// task, which closes the pipe on a runtime thread, so the server may see the
+/// cancel first; that is fine, since steel's `save_and_shutdown` disconnects
+/// and persists every player still online before it saves the worlds.
 fn leave_world(
     core: &mut AppCore,
     mut gfx: Gfx,
@@ -121,6 +123,7 @@ fn leave_world(
     then: AfterSaving,
 ) -> AppPhase {
     drop(connection);
+    core.audio.stop_all_sounds();
     core.return_to_menu(&mut gfx);
 
     match world {
@@ -342,6 +345,17 @@ impl ApplicationHandler for App {
                         world,
                         AfterSaving::Quit,
                     ),
+                    AppPhase::SavingWorld {
+                        gfx,
+                        panorama,
+                        world,
+                        ..
+                    } => AppPhase::SavingWorld {
+                        gfx,
+                        panorama,
+                        world,
+                        then: AfterSaving::Quit,
+                    },
                     app => {
                         event_loop.exit();
                         app
@@ -763,20 +777,15 @@ impl ApplicationHandler for App {
                                 game,
                                 world,
                             },
-                            GameUpdateResult::ManualDisconnect => {
-                                core.audio.stop_all_sounds();
-
-                                leave_world(
-                                    core,
-                                    gfx,
-                                    Panorama::new(),
-                                    connection,
-                                    world,
-                                    AfterSaving::Menu,
-                                )
-                            }
+                            GameUpdateResult::ManualDisconnect => leave_world(
+                                core,
+                                gfx,
+                                Panorama::new(),
+                                connection,
+                                world,
+                                AfterSaving::Menu,
+                            ),
                             GameUpdateResult::Disconnected { reason } => {
-                                core.audio.stop_all_sounds();
                                 core.menu.show_disconnect(reason);
 
                                 leave_world(

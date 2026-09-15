@@ -161,8 +161,10 @@ impl StateSlot<AppPhase> {
     }
 }
 
-/// Vanilla's `GenericMessageScreen`: panorama, blur and one centred line, with
-/// an optional button under it. Returns whether the button was clicked.
+/// Panorama, blur and one centred line. With a button this is vanilla's
+/// `ConnectScreen` (status at `height / 2 - 50`, the button at
+/// `height / 4 + 132`); without, `GenericMessageScreen` (the line at
+/// `height / 2 - lineHeight / 2`). Returns whether the button was clicked.
 pub fn draw_status(
     core: &mut AppCore,
     dt: f32,
@@ -176,7 +178,7 @@ pub fn draw_status(
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
     let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
-    let fs = 11.0 * gs;
+    let fs = common::FONT_SIZE * gs;
     let cx = sw / 2.0;
     let cy = sh / 2.0;
 
@@ -185,7 +187,7 @@ pub fn draw_status(
 
     elements.push(MenuElement::Text {
         x: cx,
-        y: cy - fs,
+        y: cy - if button.is_some() { 50.0 } else { 4.0 } * gs,
         text: text.into(),
         scale: fs,
         color: common::WHITE,
@@ -194,14 +196,13 @@ pub fn draw_status(
 
     let mut clicked = false;
     if let Some(label) = button {
-        let btn_w = 160.0 * gs;
         clicked = common::push_button(
             &mut elements,
             cursor,
-            cx - btn_w / 2.0,
-            cy + fs,
-            btn_w,
-            30.0 * gs,
+            cx - 100.0 * gs,
+            sh / 4.0 + 132.0 * gs,
+            200.0 * gs,
+            common::BTN_H * gs,
             gs,
             fs,
             label,

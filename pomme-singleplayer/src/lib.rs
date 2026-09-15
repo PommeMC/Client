@@ -117,17 +117,10 @@ impl PendingWorld {
         }
     }
 
-    /// Asks the server to save and stop. Returns without waiting.
-    pub fn begin_shutdown(&self) {
-        if let Some(world) = &self.world {
-            world.begin_shutdown();
-        }
-    }
-
-    /// Whether the server has finished saving and stopped.
+    /// The server, until [`poll`](Self::poll) has handed it over.
     #[must_use]
-    pub fn is_finished(&self) -> bool {
-        self.world.as_ref().is_none_or(WorldHandle::is_finished)
+    pub fn handle(&self) -> Option<&WorldHandle> {
+        self.world.as_ref()
     }
 }
 
