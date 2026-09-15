@@ -1057,8 +1057,83 @@ impl AppCore {
                     game.container_was_open = None;
                     self.apply_cursor_grab(window, Some(game));
                 }
-                NetworkEvent::ChatMessage { spans } => {
-                    game.chat.push_message(spans);
+                NetworkEvent::ChatMessage {
+                    spans,
+                    secure_spans,
+                    missing_profile_spans,
+                    signature,
+                    sender_uuid,
+                    signed_body,
+                    source,
+                    tag,
+                } => {
+                    let only_secure = game.chat.only_secure();
+                    let spans = if only_secure {
+                        secure_spans.unwrap_or(spans)
+                    } else {
+                        spans
+                    };
+                    if let (Some(sender_uuid), Some(body)) = (sender_uuid, signed_body) {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let Some(player) = game.tab_list.players.get_mut(&sender_uuid) else {
+                            if let Some(spans) = missing_profile_spans {
+                                game.chat.push_validation_error(spans, signature);
+                            }
+                            continue;
+                        };
+                        let validation = player.validate_chat_message(
+                            &body,
+                            signature.as_ref(),
+                            game.server_enforces_secure_chat,
+                            now_ms,
+                        );
+                        match validation {
+                            crate::player::tab_list::PlayerChatValidation::Invalid => {
+                                if let Some(spans) = missing_profile_spans {
+                                    game.chat.push_validation_error(spans, signature);
+                                }
+                            }
+                            crate::player::tab_list::PlayerChatValidation::Unsigned => {
+                                if body.fully_filtered {
+                                    game.chat.push_fully_filtered(None);
+                                } else {
+                                    let tag = accepted_player_chat_tag(
+                                        sender_uuid == self.user.uuid,
+                                        validation,
+                                        &body,
+                                        now_ms,
+                                        only_secure,
+                                    );
+                                    game.chat.push_message_with_source(spans, None, source, tag);
+                                }
+                            }
+                            crate::player::tab_list::PlayerChatValidation::Signed => {
+                                if body.fully_filtered {
+                                    game.chat.push_fully_filtered(signature);
+                                } else {
+                                    let tag = accepted_player_chat_tag(
+                                        sender_uuid == self.user.uuid,
+                                        validation,
+                                        &body,
+                                        now_ms,
+                                        only_secure,
+                                    );
+                                    game.chat
+                                        .push_message_with_source(spans, signature, source, tag);
+                                }
+                            }
+                        }
+                    } else {
+                        game.chat
+                            .push_message_with_source(spans, signature, source, tag);
+                    }
+                }
+                NetworkEvent::DeleteChatMessage { signature } => {
+                    connection.packet_tx.ignore_chat_signature(signature);
+                    game.chat.delete_message(signature);
                 }
                 NetworkEvent::ActionBar { spans } => {
                     game.action_bar = Some((spans, game.tick_count));
@@ -1144,7 +1219,11 @@ impl AppCore {
                     game.command_tree = Some(tree);
                 }
                 NetworkEvent::CommandSuggestions { id, start, options } => {
-                    game.chat.apply_server_suggestions(id, start, options);
+                    game.chat.apply_server_suggestions(
+                        id,
+                        start,
+                        options.into_iter().map(|option| option.text).collect(),
+                    );
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
                     apply_server_block(game, &mut priority_remesh, pos, state);
@@ -1672,6 +1751,9 @@ impl AppCore {
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
                     game.show_death_screen = show_death_screen;
+                }
+                NetworkEvent::SecureChatEnforced { enforced } => {
+                    game.server_enforces_secure_chat = enforced;
                 }
                 NetworkEvent::PlayerScore { entity_id, score } => {
                     if entity_id == game.player.entity_id {
@@ -2331,13 +2413,47 @@ pub(crate) fn death_route(show_death_screen: bool) -> DeathRoute {
     }
 }
 
+pub(crate) fn accepted_player_chat_tag(
+    is_local_sender: bool,
+    validation: crate::player::tab_list::PlayerChatValidation,
+    body: &crate::net::chat_security::SignedChatBody,
+    now_ms: u64,
+    only_secure: bool,
+) -> Option<crate::ui::chat::ChatMessageTag> {
+    if is_local_sender {
+        return None;
+    }
+    match validation {
+        crate::player::tab_list::PlayerChatValidation::Unsigned => {
+            Some(crate::ui::chat::ChatMessageTag::NotSecure)
+        }
+        crate::player::tab_list::PlayerChatValidation::Signed => {
+            let expired = now_ms > body.timestamp_ms.max(0) as u64 + 7 * 60 * 1000;
+            if expired {
+                Some(crate::ui::chat::ChatMessageTag::NotSecure)
+            } else if if only_secure {
+                body.modified_when_unsigned_hidden
+            } else {
+                body.modified
+            } {
+                Some(crate::ui::chat::ChatMessageTag::Modified {
+                    original: body.content.clone(),
+                })
+            } else {
+                None
+            }
+        }
+        crate::player::tab_list::PlayerChatValidation::Invalid => None,
+    }
+}
+
 /// New `server_render_distance` for a server view-distance announcement, or
 /// `None` to keep the current one. Some servers announce min(our request,
 /// server max); an echo of our own request carries no cap information and
 /// would ratchet the render distance slider down, so only a differing value
 /// counts. It can't be an echo above the request: any such value is the
 /// server's actual view distance, including later reductions.
-pub(crate) fn server_view_distance_update(announced: u32, last_request: u32) -> Option<u32> {
+fn server_view_distance_update(announced: u32, last_request: u32) -> Option<u32> {
     let announced = announced.min(crate::world::chunk::MAX_VIEW_DISTANCE);
     (announced != last_request).then_some(announced)
 }

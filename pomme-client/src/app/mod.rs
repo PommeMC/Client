@@ -273,6 +273,7 @@ impl ApplicationHandler for App {
                             uuid: self.core.user.uuid,
                             access_token: self.core.user.access_token.clone(),
                             view_distance: self.core.view_distance(),
+                            chat_options: crate::ui::chat::ChatOptions::default(),
                         },
                     );
 
