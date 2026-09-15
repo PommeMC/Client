@@ -28,8 +28,8 @@ What actually happened.
 
 - **OS:**
 - **GPU:**
-- **Rust version:** (`rustc --version`)
-- **Server version:** (e.g., 1.21.11 vanilla)
+- **Pomme version:** (release tag, or commit for a local build)
+- **Server or world:** (e.g., 1.21.11 vanilla server, or a singleplayer world)
 
 ## Logs
 
