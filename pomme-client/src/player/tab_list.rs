@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+use crate::net::chat_security::{SignedChatBody, ValidatedChatSession, verify_player_message};
 use crate::ui::hud::Scoreboard;
 use crate::ui::text::TextSpan;
 
@@ -16,11 +17,13 @@ pub struct PlayerInfoEntry {
     pub latency: i32,
     pub display_name: Option<Vec<TextSpan>>,
     pub list_order: i32,
+    pub chat_session: Option<ValidatedChatSession>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlayerInfoActions {
     pub add_player: bool,
+    pub initialize_chat: bool,
     pub update_game_mode: bool,
     pub update_listed: bool,
     pub update_latency: bool,
@@ -39,6 +42,54 @@ pub struct TabListPlayer {
     pub latency: i32,
     pub listed: bool,
     pub list_order: i32,
+    pub chat_session: Option<ValidatedChatSession>,
+    chat_chain_valid: bool,
+    last_chat_index: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayerChatValidation {
+    Signed,
+    Unsigned,
+    Invalid,
+}
+
+impl TabListPlayer {
+    pub fn validate_chat_message(
+        &mut self,
+        body: &SignedChatBody,
+        signature: Option<&[u8; 256]>,
+        enforces_secure_chat: bool,
+        now_ms: u64,
+    ) -> PlayerChatValidation {
+        let Some(session) = self.chat_session.as_ref() else {
+            return if enforces_secure_chat {
+                PlayerChatValidation::Invalid
+            } else {
+                PlayerChatValidation::Unsigned
+            };
+        };
+        let Some(signature) = signature else {
+            self.chat_chain_valid = false;
+            return PlayerChatValidation::Invalid;
+        };
+        if !self.chat_chain_valid || session.expired_with_grace(now_ms) {
+            self.chat_chain_valid = false;
+            return PlayerChatValidation::Invalid;
+        }
+        if let Some(previous) = self.last_chat_index
+            && body.message_index <= previous
+        {
+            self.chat_chain_valid = false;
+            return PlayerChatValidation::Invalid;
+        }
+        if !verify_player_message(session, self.uuid, body, signature) {
+            self.chat_chain_valid = false;
+            return PlayerChatValidation::Invalid;
+        }
+        self.last_chat_index = Some(body.message_index);
+        PlayerChatValidation::Signed
+    }
 }
 
 #[derive(Default)]
@@ -73,11 +124,19 @@ impl TabList {
                         latency: e.latency,
                         listed: e.listed,
                         list_order: e.list_order,
+                        chat_session: e.chat_session.clone(),
+                        chat_chain_valid: true,
+                        last_chat_index: None,
                     },
                 );
             } else if let Some(p) = self.players.get_mut(&e.uuid) {
                 if let Some(textures) = &e.textures {
                     p.textures = Some(textures.clone());
+                }
+                if actions.initialize_chat {
+                    p.chat_session = e.chat_session.clone();
+                    p.chat_chain_valid = true;
+                    p.last_chat_index = None;
                 }
                 if actions.update_game_mode {
                     p.game_mode = e.game_mode;

@@ -21,6 +21,12 @@ directories = { workspace = true }
 sha1_smol = { workspace = true }
 open = { workspace = true }
 base64 = { workspace = true }
+chrono = "0.4.44"
+rand = "0.9.4"
+regex = "1"
+rsa = "0.10.0-rc.18"
+sha1 = "0.11"
+sha2 = "0.11"
 zip = { workspace = true }
 tokio = { workspace = true, features = ["tracing", "net", "time"] }
 reqwest = { workspace = true, features = ["blocking"] }

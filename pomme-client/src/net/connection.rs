@@ -40,6 +40,9 @@ pub enum ConnectionError {
     #[error("encryption failed: {0}")]
     Encryption(String),
 
+    #[error("protocol encoding failed: {0}")]
+    Protocol(String),
+
     #[error("joining {0} servers is not supported yet")]
     Unjoinable(String),
 }
@@ -72,6 +75,7 @@ pub struct ConnectArgs {
     pub uuid: uuid::Uuid,
     pub access_token: Option<String>,
     pub view_distance: u8,
+    pub chat_options: crate::ui::chat::ChatOptions,
 }
 
 pub struct ConnectionHandle {
@@ -127,6 +131,7 @@ pub async fn connect_to_server(
         uuid,
         access_token,
         view_distance,
+        chat_options,
     } = args;
 
     let mut conn = match transport {
@@ -191,6 +196,7 @@ pub async fn connect_to_server(
             registries: config_sequence(
                 &mut conn,
                 view_distance,
+                chat_options,
                 &event_tx,
                 &mut game_packet_rx,
                 None,
@@ -210,11 +216,16 @@ pub async fn connect_to_server(
     game_loop(
         conn,
         &event_tx,
-        chat_rx,
-        game_packet_tx,
-        game_packet_rx,
-        joined,
-        view_distance,
+        GameLoopArgs {
+            chat_rx,
+            outbound_tx: game_packet_tx,
+            outbound_rx: game_packet_rx,
+            joined,
+            view_distance,
+            chat_options,
+            profile_uuid: uuid,
+            access_token,
+        },
     )
     .await
 }
@@ -438,6 +449,7 @@ async fn handle_encryption(
 async fn config_sequence(
     conn: &mut Conn,
     view_distance: u8,
+    chat_options: crate::ui::chat::ChatOptions,
     event_tx: &Sender<NetworkEvent>,
     outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
     // `Some` on a mid-session reconfiguration: the previous registries,
@@ -468,7 +480,7 @@ async fn config_sequence(
             conn,
             ServerboundConfigPacket::ClientInformation(
                 s_client_information::ServerboundClientInformation {
-                    information: super::client_information(view_distance),
+                    information: super::client_information(view_distance, chat_options),
                 },
             ),
         )
@@ -721,60 +733,192 @@ fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -
     })
 }
 
+struct GameLoopArgs {
+    chat_rx: crossbeam_channel::Receiver<String>,
+    outbound_tx: mpsc::UnboundedSender<Outbound>,
+    outbound_rx: mpsc::UnboundedReceiver<Outbound>,
+    joined: Joined,
+    view_distance: u8,
+    chat_options: crate::ui::chat::ChatOptions,
+    profile_uuid: uuid::Uuid,
+    access_token: Option<String>,
+}
+
 async fn game_loop(
     mut conn: Conn,
     event_tx: &Sender<NetworkEvent>,
-    chat_rx: crossbeam_channel::Receiver<String>,
-    outbound_tx: mpsc::UnboundedSender<Outbound>,
-    mut outbound_rx: mpsc::UnboundedReceiver<Outbound>,
-    joined: Joined,
-    view_distance: u8,
+    args: GameLoopArgs,
 ) -> Result<(), ConnectionError> {
+    let GameLoopArgs {
+        chat_rx,
+        outbound_tx,
+        mut outbound_rx,
+        joined,
+        view_distance,
+        chat_options,
+        profile_uuid,
+        access_token,
+    } = args;
     let Joined {
         registries: mut registry_holder,
         mut deferred_login,
     } = joined;
     let mut chat_types = chat_types_from_registry_holder(&registry_holder);
     let sender = PacketSender::new(outbound_tx.clone());
+    let profile_key_services = match crate::net::chat_security::ProfileKeyServices::fetch().await {
+        Ok(keys) => Some(keys),
+        Err(error) => {
+            tracing::warn!("Could not load Mojang profile-key services: {error}");
+            None
+        }
+    };
 
     let shared_tree: crate::net::commands::SharedCommandTree =
         std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let chat_state = std::sync::Arc::new(parking_lot::Mutex::new(
+        crate::net::chat_security::ChatOutboundState::default(),
+    ));
+    if let Some(token) = access_token.as_deref() {
+        match crate::net::chat_security::LocalChatSession::fetch(token).await {
+            Ok(session) => chat_state.lock().session = Some(session),
+            Err(error) => tracing::warn!("Could not load player chat certificate: {error}"),
+        }
+    }
 
     let chat_outbound_tx = outbound_tx;
     let chat_tree = shared_tree.clone();
+    let chat_send_state = chat_state.clone();
+    let chat_access_token = access_token.clone();
     tokio::spawn(async move {
-        // TODO: secure chat session + signing for enforce-secure-profile=true servers.
-        // When access_token is set, fetch profile certs
-        // (azalea_auth::certs::fetch_certificates),
-        // send ServerboundChatSessionUpdate, then sign chat and signable-arg commands
-        // (ServerboundChatCommandSigned) with azalea_crypto signing (needs the
-        // "signing" feature). Everything is sent unsigned atm, which only
-        // works on enforce-secure-profile=false.
         while let Ok(msg) = tokio::task::block_in_place(|| chat_rx.recv()) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let timestamp = now.as_millis() as u64;
+
+            let should_refresh = {
+                let state = chat_send_state.lock();
+                state.signing_enabled
+                    && state
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.should_refresh(timestamp))
+            };
+            if should_refresh && let Some(token) = chat_access_token.as_deref() {
+                match crate::net::chat_security::LocalChatSession::fetch(token).await {
+                    Ok(session) => {
+                        let update = super::chat::encode_chat_session_update(&session);
+                        chat_send_state.lock().session = Some(session);
+                        match update {
+                            Ok(frame) => {
+                                if chat_outbound_tx.send(Outbound::Raw(frame)).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!("Could not encode refreshed chat session: {error}")
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!("Could not refresh player chat certificate: {error}")
+                    }
+                }
+            }
+
             let frame = if let Some(command) = msg.strip_prefix('/') {
                 tracing::info!("Sending command: {command:?}");
                 let signable = chat_tree
                     .lock()
                     .as_ref()
-                    .map(|tree| tree.has_signable_args(command))
-                    .unwrap_or(false);
-                if signable {
-                    tracing::warn!(
-                        "Command has signable arguments but chat signing is not implemented; sending unsigned"
-                    );
+                    .map(|tree| tree.signable_arguments(command))
+                    .unwrap_or_default();
+                if signable.is_empty() {
+                    super::chat::encode_outbound_command(command)
+                } else {
+                    let salt = rand::random::<i64>();
+                    let mut state = chat_send_state.lock();
+                    let update = state.last_seen.generate_update();
+                    if state.signing_enabled {
+                        if let Some(session) = state.session.as_mut() {
+                            let mut signatures = Vec::with_capacity(signable.len());
+                            let mut error = None;
+                            for (name, value) in signable {
+                                match session.sign_body(
+                                    profile_uuid,
+                                    &value,
+                                    timestamp as i64,
+                                    salt,
+                                    &update.last_seen,
+                                ) {
+                                    Ok(signature) => signatures.push((name, signature)),
+                                    Err(err) => {
+                                        error = Some(err);
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(error) = error {
+                                Err(error)
+                            } else {
+                                super::chat::encode_outbound_signed_command(
+                                    command,
+                                    timestamp,
+                                    salt,
+                                    &signatures,
+                                    &update,
+                                )
+                            }
+                        } else {
+                            super::chat::encode_outbound_signed_command(
+                                command,
+                                timestamp,
+                                salt,
+                                &[],
+                                &update,
+                            )
+                        }
+                    } else {
+                        super::chat::encode_outbound_signed_command(
+                            command,
+                            timestamp,
+                            salt,
+                            &[],
+                            &update,
+                        )
+                    }
                 }
-                super::chat::encode_outbound_command(command)
             } else {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                super::chat::encode_outbound_message(&msg, timestamp)
+                let salt = rand::random::<i64>();
+                let mut state = chat_send_state.lock();
+                let update = state.last_seen.generate_update();
+                if state.signing_enabled {
+                    if let Some(session) = state.session.as_mut() {
+                        match session.sign_body(
+                            profile_uuid,
+                            &msg,
+                            timestamp as i64,
+                            salt,
+                            &update.last_seen,
+                        ) {
+                            Ok(signature) => super::chat::encode_outbound_signed_message(
+                                &msg, timestamp, salt, signature, &update,
+                            ),
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        super::chat::encode_outbound_unsigned_message(
+                            &msg, timestamp, salt, &update,
+                        )
+                    }
+                } else {
+                    super::chat::encode_outbound_unsigned_message(&msg, timestamp, salt, &update)
+                }
             };
             let frame = match frame {
                 Ok(frame) => frame,
-                Err(e) => {
-                    tracing::warn!("Not sending invalid chat input: {e}");
+                Err(error) => {
+                    tracing::warn!("Not sending invalid chat input: {error}");
                     continue;
                 }
             };
@@ -789,12 +933,18 @@ async fn game_loop(
     let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
 
     let translation = super::translate::active();
+    // 1.21.5 (protocol 770) added ClientboundPlayerChat.globalIndex. Older
+    // translated layouts synthesize a zero while normalizing into the latest
+    // packet shape, so validate ordering only when the negotiated wire really
+    // carries the field.
+    let validate_chat_global_index = crate::version::session_protocol() >= 770;
+    let mut expected_chat_global_index = 0u32;
     if deferred_login.is_some() {
         // 1.20.1 sends both from its login handler, where later versions send
         // them in the configuration phase (ClientPacketListener.handleLogin).
         let info = ServerboundGamePacket::ClientInformation(
             azalea_protocol::packets::game::s_client_information::ServerboundClientInformation {
-                client_information: super::client_information(view_distance),
+                client_information: super::client_information(view_distance, chat_options),
             },
         );
         write_game_frame(&mut conn.writer, translation, serialize_frame(&info)?).await?;
@@ -821,11 +971,27 @@ async fn game_loop(
                             if let Some(t) = translation {
                                 t.remap_outbound(&mut packet);
                             }
-                            serialize_frame(&*packet)?
+                            Some(serialize_frame(&*packet)?)
                         }
-                        Outbound::Raw(bytes) => bytes,
+                        Outbound::Raw(bytes) => Some(bytes),
+                        Outbound::ChatProcessed { signature, shown } => {
+                            let ack = chat_state.lock().last_seen.mark_processed(signature, shown);
+                            match ack {
+                                Some(offset) => Some(
+                                    super::chat::encode_chat_ack(offset)
+                                        .map_err(ConnectionError::Protocol)?,
+                                ),
+                                None => None,
+                            }
+                        }
+                        Outbound::ChatDeleted { signature } => {
+                            chat_state.lock().last_seen.ignore_pending(&signature);
+                            None
+                        }
                     };
-                    write_game_frame(&mut conn.writer, translation, frame).await?;
+                    if let Some(frame) = frame {
+                        write_game_frame(&mut conn.writer, translation, frame).await?;
+                    }
                     continue;
                 }
                 raw = conn.reader.read() => raw,
@@ -845,7 +1011,14 @@ async fn game_loop(
             },
             None => raw,
         };
-        if handle_raw_game_packet(&raw, event_tx, &chat_types) {
+        let expected_index = validate_chat_global_index.then_some(&mut expected_chat_global_index);
+        if let Some(result) =
+            super::chat::handle_raw_chat_packet(&raw, event_tx, &chat_types, expected_index)
+        {
+            result.map_err(ConnectionError::Protocol)?;
+            continue;
+        }
+        if handle_raw_game_packet(&raw, event_tx) {
             continue;
         }
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
@@ -862,11 +1035,13 @@ async fn game_loop(
                     let holder = config_sequence(
                         &mut conn,
                         view_distance,
+                        chat_options,
                         event_tx,
                         &mut outbound_rx,
                         Some(&registry_holder),
                     )
                     .await?;
+                    expected_chat_global_index = 0;
                     if !std::sync::Arc::ptr_eq(&holder, &registry_holder) {
                         registry_holder = holder;
                         chat_types = chat_types_from_registry_holder(&registry_holder);
@@ -883,7 +1058,39 @@ async fn game_loop(
                 {
                     continue;
                 }
-                handle_game_packet(&packet, &sender, event_tx, &registry_holder, &shared_tree)
+                let login_online_mode = match &packet {
+                    ClientboundGamePacket::Login(login) => Some(login.online_mode),
+                    _ => None,
+                };
+                if let Some(online_mode) = login_online_mode {
+                    expected_chat_global_index = 0;
+                    let mut state = chat_state.lock();
+                    state.last_seen = Default::default();
+                    state.signing_enabled = online_mode;
+                    if online_mode && let Some(session) = state.session.as_mut() {
+                        session.renew_session();
+                    }
+                }
+                handle_game_packet(
+                    &packet,
+                    &sender,
+                    event_tx,
+                    &registry_holder,
+                    &shared_tree,
+                    profile_key_services.as_ref(),
+                );
+                if login_online_mode == Some(true) {
+                    let frame = chat_state
+                        .lock()
+                        .session
+                        .as_ref()
+                        .map(super::chat::encode_chat_session_update)
+                        .transpose()
+                        .map_err(ConnectionError::Protocol)?;
+                    if let Some(frame) = frame {
+                        write_game_frame(&mut conn.writer, translation, frame).await?;
+                    }
+                }
             }
             Err(e) => skip_malformed_packet(e)?,
         }
@@ -1046,6 +1253,7 @@ mod tests {
                 uuid: Uuid::nil(),
                 access_token: None,
                 view_distance: 8,
+                chat_options: crate::ui::chat::ChatOptions::default(),
             },
             event_tx,
             chat_rx,

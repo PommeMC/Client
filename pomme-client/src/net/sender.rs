@@ -6,6 +6,8 @@ use tokio::sync::mpsc;
 pub enum Outbound {
     Packet(Box<ServerboundGamePacket>),
     Raw(Vec<u8>),
+    ChatProcessed { signature: [u8; 256], shown: bool },
+    ChatDeleted { signature: [u8; 256] },
 }
 
 pub struct PacketSender {
@@ -23,6 +25,14 @@ impl PacketSender {
 
     pub fn send_raw(&self, bytes: Vec<u8>) {
         self.queue(Outbound::Raw(bytes));
+    }
+
+    pub fn mark_chat_processed(&self, signature: [u8; 256], shown: bool) {
+        self.queue(Outbound::ChatProcessed { signature, shown });
+    }
+
+    pub fn ignore_chat_signature(&self, signature: [u8; 256]) {
+        self.queue(Outbound::ChatDeleted { signature });
     }
 
     fn queue(&self, out: Outbound) {

@@ -156,6 +156,7 @@ pub struct GameState {
     pub chat: ChatState,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
+    pub server_enforces_secure_chat: bool,
     /// Locator bar waypoints tracked by the server.
     pub waypoints: crate::world::waypoints::WaypointMap,
     /// Vanilla `Hud.toolHighlightTimer` / `lastToolHighlight` (see
@@ -374,6 +375,7 @@ impl GameState {
             chat: ChatState::new(),
             command_tree: None,
             tab_list: TabList::new(),
+            server_enforces_secure_chat: false,
             waypoints: crate::world::waypoints::WaypointMap::default(),
             tool_highlight_timer: 0,
             last_tool_highlight: azalea_inventory::ItemStack::Empty,
@@ -775,7 +777,10 @@ impl GameState {
             .packet_tx
             .send(ServerboundGamePacket::ClientInformation(
                 ServerboundClientInformation {
-                    client_information: crate::net::client_information(render_distance as u8),
+                    client_information: crate::net::client_information(
+                        render_distance as u8,
+                        crate::ui::chat::ChatOptions::default(),
+                    ),
                 },
             ));
     }
@@ -1441,6 +1446,11 @@ pub fn update_game(
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
     if let Some(reason) = disconnect_reason {
         return GameUpdateResult::Disconnected { reason };
+    }
+
+    game.chat.tick();
+    for (signature, shown) in game.chat.take_processed_signatures() {
+        connection.packet_tx.mark_chat_processed(signature, shown);
     }
 
     // Collect the frame's ready meshes, apply their CPU-side bookkeeping, then

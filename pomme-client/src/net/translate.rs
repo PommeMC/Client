@@ -477,6 +477,7 @@ struct Ids765 {
     creative_slot_id: u32,
     creative_slot_old_id: u32,
     chat_command_id: u32,
+    chat_command_signed_id: u32,
     chat_command_old_id: u32,
 }
 
@@ -580,6 +581,8 @@ struct Ids769 {
     /// bitset, so the native frame needs that trailing byte removed.
     chat_id: u32,
     chat_old_id: u32,
+    chat_command_signed_id: u32,
+    chat_command_signed_old_id: Option<u32>,
     /// Native-space serverbound `container_click` id and the wire
     /// version's, for the hashed-stack rewrite.
     container_click_id: u32,
@@ -1078,6 +1081,9 @@ impl Translation {
             if id == v765.creative_slot_id {
                 return translate_creative_slot_765(v765.creative_slot_old_id, &frame[pos..]);
             }
+            if id == v765.chat_command_signed_id {
+                return translate_chat_command_signed_765(v765.chat_command_old_id, &frame[pos..]);
+            }
             if id == v765.chat_command_id {
                 return translate_chat_command_765(v765.chat_command_old_id, &frame[pos..]);
             }
@@ -1085,6 +1091,11 @@ impl Translation {
         if let Some(v769) = &ids.v769 {
             if id == v769.chat_id {
                 return translate_chat_769(v769.chat_old_id, &frame[pos..]);
+            }
+            if id == v769.chat_command_signed_id
+                && let Some(old_id) = v769.chat_command_signed_old_id
+            {
+                return translate_chat_command_signed_769(old_id, &frame[pos..]);
             }
             if id == v769.container_click_id {
                 return translate_container_click(v769.container_click_old_id, &frame[pos..]);
@@ -1343,6 +1354,12 @@ impl GameIds {
                 update_advancements_id: id(Clientbound, "update_advancements"),
                 chat_id: id(Serverbound, "chat"),
                 chat_old_id: required_id(table, Phase::Game, Serverbound, "chat"),
+                chat_command_signed_id: id(Serverbound, "chat_command_signed"),
+                chat_command_signed_old_id: table.id(
+                    Phase::Game,
+                    Serverbound,
+                    "chat_command_signed",
+                ),
                 container_click_id: id(Serverbound, "container_click"),
                 container_click_old_id: required_id(
                     table,
@@ -1410,6 +1427,7 @@ impl GameIds {
                     "set_creative_mode_slot",
                 ),
                 chat_command_id: id(Serverbound, "chat_command"),
+                chat_command_signed_id: id(Serverbound, "chat_command_signed"),
                 chat_command_old_id: required_id(table, Phase::Game, Serverbound, "chat_command"),
             }),
             v764: (protocol <= 764).then(|| Ids764 {
@@ -1948,6 +1966,20 @@ fn translate_creative_slot_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
 /// acknowledged-message set. 1.21.5 appended a checksum byte there, so strip
 /// that latest-only trailer while remapping the packet id.
 fn translate_chat_769(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    strip_last_seen_checksum(old_id, payload)
+}
+
+fn translate_chat_command_signed_769(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    strip_last_seen_checksum(old_id, payload)
+}
+
+fn translate_chat_command_signed_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    // 1.20.4 and older call this same signed layout `chat_command`; the only
+    // later field absent there is the 1.21.5 last-seen checksum byte.
+    strip_last_seen_checksum(old_id, payload)
+}
+
+fn strip_last_seen_checksum(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     let Some((&_checksum, body)) = payload.split_last() else {
         return Vec::new();
     };
