@@ -202,11 +202,11 @@ impl ScalarOrPerState {
     }
 }
 
-/// Per-protocol block-state data, latest first; unknown protocols fall back
-/// to the latest (slot 0).
+/// Per-protocol block-state data, native first; unknown protocols fall back
+/// to the native version (slot 0).
 const BLOCK_DATA: [(i32, &str); 12] = [
     (
-        pomme_protocol::version::LATEST.protocol,
+        pomme_protocol::version::NATIVE.protocol,
         include_str!("data/blocks-26.2.json"),
     ),
     (775, include_str!("data/blocks-26.1.json")),
@@ -269,9 +269,10 @@ pub fn init(version: &str) {
         .map(|v| v.protocol)
         .unwrap_or_else(|| {
             tracing::warn!(
-                "no block-state data for version {version}, using 26.2 — expect state drift"
+                "no block-state data for version {version}, using {} — expect state drift",
+                pomme_protocol::version::NATIVE.name
             );
-            pomme_protocol::version::LATEST.protocol
+            pomme_protocol::version::NATIVE.protocol
         });
     set_active_protocol(protocol);
 }

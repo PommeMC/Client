@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::version::{EMBEDDED, LATEST, ProtocolVersion};
+use crate::version::{EMBEDDED, NATIVE, ProtocolVersion};
 
 /// The registries carried in `registries-<version>.json` (matching
 /// protogen's `CLIENT_REGISTRIES`): the ones whose numeric ids reach the
@@ -77,10 +77,10 @@ struct TableFile {
 }
 
 impl RegistryTable {
-    pub fn latest() -> &'static RegistryTable {
+    pub fn native() -> &'static RegistryTable {
         static TABLE: OnceLock<RegistryTable> = OnceLock::new();
         TABLE.get_or_init(|| {
-            Self::parse(include_str!("data/registries-26.2.json"), LATEST)
+            Self::parse(include_str!("data/registries-26.2.json"), NATIVE)
                 .expect("embedded 26.2 registry table")
         })
     }
@@ -88,8 +88,8 @@ impl RegistryTable {
     /// The table for a launchable protocol number, or `None` for versions
     /// without an embedded table.
     pub fn for_protocol(protocol: i32) -> Option<&'static RegistryTable> {
-        if protocol == LATEST.protocol {
-            return Some(Self::latest());
+        if protocol == NATIVE.protocol {
+            return Some(Self::native());
         }
         static TABLES: [OnceLock<RegistryTable>; EMBEDDED.len()] =
             [const { OnceLock::new() }; EMBEDDED.len()];
@@ -157,30 +157,30 @@ const RENAMED: &[(ClientRegistry, &str, &str)] = &[
 ];
 
 impl RegistryRemaps {
-    /// Remaps from `protocol`'s id space to the latest version's (for
+    /// Remaps from `protocol`'s id space to the native version's (for
     /// inbound packets), or `None` for versions without an embedded registry
-    /// table. For the latest version itself this is an identity map.
-    pub fn to_latest(protocol: i32) -> Option<&'static RegistryRemaps> {
-        if protocol == LATEST.protocol {
+    /// table. For the native version itself this is an identity map.
+    pub fn to_native(protocol: i32) -> Option<&'static RegistryRemaps> {
+        if protocol == NATIVE.protocol {
             return Some(Self::identity());
         }
         static REMAPS: [OnceLock<RegistryRemaps>; EMBEDDED.len()] =
             [const { OnceLock::new() }; EMBEDDED.len()];
         crate::version::embedded_get(protocol, &REMAPS, |_| {
-            Self::build(Self::embedded_table(protocol), RegistryTable::latest())
+            Self::build(Self::embedded_table(protocol), RegistryTable::native())
         })
     }
 
-    /// Remaps from the latest version's id space to `protocol`'s (for
-    /// outbound packets); the mirror of [`Self::to_latest`].
-    pub fn from_latest(protocol: i32) -> Option<&'static RegistryRemaps> {
-        if protocol == LATEST.protocol {
+    /// Remaps from the native version's id space to `protocol`'s (for
+    /// outbound packets); the mirror of [`Self::to_native`].
+    pub fn from_native(protocol: i32) -> Option<&'static RegistryRemaps> {
+        if protocol == NATIVE.protocol {
             return Some(Self::identity());
         }
         static REMAPS: [OnceLock<RegistryRemaps>; EMBEDDED.len()] =
             [const { OnceLock::new() }; EMBEDDED.len()];
         crate::version::embedded_get(protocol, &REMAPS, |_| {
-            Self::build(RegistryTable::latest(), Self::embedded_table(protocol))
+            Self::build(RegistryTable::native(), Self::embedded_table(protocol))
         })
     }
 
@@ -190,7 +190,7 @@ impl RegistryRemaps {
 
     fn identity() -> &'static RegistryRemaps {
         static IDENTITY: OnceLock<RegistryRemaps> = OnceLock::new();
-        IDENTITY.get_or_init(|| Self::build(RegistryTable::latest(), RegistryTable::latest()))
+        IDENTITY.get_or_init(|| Self::build(RegistryTable::native(), RegistryTable::native()))
     }
 
     fn build(from: &RegistryTable, to: &RegistryTable) -> Self {
@@ -225,7 +225,7 @@ impl RegistryRemaps {
                         // names contain legitimate dots).
                         //
                         // TODO: stripping bridges one way only, so every
-                        // attribute remap through `from_latest` to a pre-1.21.2
+                        // attribute remap through `from_native` to a pre-1.21.2
                         // version is None (26.2 `max_health` misses 1.20.6's
                         // `generic.max_health`). Dormant while only Item and
                         // DataComponentType go outbound. Re-adding a prefix
@@ -263,9 +263,9 @@ mod tests {
         &'static RegistryTable,
     ) {
         (
-            RegistryRemaps::to_latest(protocol).unwrap(),
+            RegistryRemaps::to_native(protocol).unwrap(),
             RegistryTable::for_protocol(protocol).unwrap(),
-            RegistryTable::latest(),
+            RegistryTable::native(),
         )
     }
 
@@ -313,10 +313,10 @@ mod tests {
         };
         let (id, target) = (
             items(from, "chain"),
-            items(RegistryTable::latest(), "iron_chain"),
+            items(RegistryTable::native(), "iron_chain"),
         );
         assert_eq!(r.remap(ClientRegistry::Item, id), Some(target));
-        let rev = RegistryRemaps::from_latest(from.version().protocol).unwrap();
+        let rev = RegistryRemaps::from_native(from.version().protocol).unwrap();
         assert_eq!(rev.remap(ClientRegistry::Item, target), Some(id));
     }
 
@@ -701,13 +701,13 @@ mod tests {
                 RegistryTable::for_protocol(e.version.protocol).unwrap(),
             );
         }
-        check(LATEST, RegistryTable::latest());
+        check(NATIVE, RegistryTable::native());
     }
 
     #[test]
-    fn latest_identity() {
-        let r = RegistryRemaps::to_latest(LATEST.protocol).unwrap();
-        let names = RegistryTable::latest().names(ClientRegistry::SoundEvent);
+    fn native_identity() {
+        let r = RegistryRemaps::to_native(NATIVE.protocol).unwrap();
+        let names = RegistryTable::native().names(ClientRegistry::SoundEvent);
         assert_eq!(
             r.remap(ClientRegistry::SoundEvent, names.len() as u32 - 1),
             Some(names.len() as u32 - 1)

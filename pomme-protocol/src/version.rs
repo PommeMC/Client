@@ -10,7 +10,7 @@ const fn v(name: &'static str, protocol: i32) -> ProtocolVersion {
 }
 
 /// All versions the client can be launched as, newest first. Snapshot
-/// protocol numbers encode as `(1 << 30) | base_protocol`.
+/// protocol numbers encode as `(1 << 30) | snapshot_counter`.
 pub const VERSIONS: &[ProtocolVersion] = &[
     v("26.2", 776),
     v("26.1.2", 775),
@@ -37,13 +37,18 @@ pub const VERSIONS: &[ProtocolVersion] = &[
     v("1.20", 763),
 ];
 
-/// The version the client speaks internally.
+/// The newest listed version: the default to launch as.
 pub const LATEST: ProtocolVersion = VERSIONS[0];
 
-/// An older version with embedded protocol data — the one place a version's
-/// generated tables get wired in. `version` names the reference dir the
-/// tables were generated from; patch releases sharing its protocol number
-/// are wire-identical and served by the same entry.
+/// The version the client speaks natively — azalea's pinned wire and the
+/// integrated server's. Every other listed version is joined by translating
+/// its wire to and from this layout, whether it is older or newer.
+pub const NATIVE: ProtocolVersion = v("26.2", 776);
+
+/// A non-native version with embedded protocol data — the one place a
+/// version's generated tables get wired in. `version` names the reference
+/// dir the tables were generated from; patch releases sharing its protocol
+/// number are wire-identical and served by the same entry.
 pub(crate) struct EmbeddedVersion {
     pub version: ProtocolVersion,
     pub packets: &'static str,
@@ -118,8 +123,8 @@ pub(crate) const EMBEDDED: [EmbeddedVersion; 13] = [
     },
 ];
 
-/// The `EMBEDDED` slot for a protocol number. The latest version's data is
-/// embedded separately (`PacketTable::latest` etc.), not here.
+/// The `EMBEDDED` slot for a protocol number. The native version's data is
+/// embedded separately (`PacketTable::native` etc.), not here.
 pub(crate) fn embedded_index(protocol: i32) -> Option<usize> {
     EMBEDDED.iter().position(|e| e.version.protocol == protocol)
 }
@@ -153,6 +158,8 @@ mod tests {
 
     #[test]
     fn lookups() {
+        assert_eq!(NATIVE.protocol, 776);
+        assert_eq!(ProtocolVersion::from_name(NATIVE.name), Some(NATIVE));
         assert_eq!(LATEST.protocol, 776);
         assert_eq!(ProtocolVersion::from_name("26.2").unwrap().protocol, 776);
         assert_eq!(ProtocolVersion::from_name("26.1.2").unwrap().protocol, 775);
@@ -192,14 +199,21 @@ mod tests {
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
     }
 
-    /// `EMBEDDED` holds the launchable non-latest versions, newest first
+    /// `VERSIONS` is strictly newest first, so `from_protocol` resolves a
+    /// shared number to the newest name.
+    #[test]
+    fn versions_descend() {
+        assert!(VERSIONS.windows(2).all(|w| w[0].protocol >= w[1].protocol));
+    }
+
+    /// `EMBEDDED` holds the launchable non-native versions, newest first
     /// with one entry per protocol, and `embedded_index` is its slot lookup.
     #[test]
     fn embedded_lookup() {
         for (i, e) in EMBEDDED.iter().enumerate() {
             let protocol = e.version.protocol;
             assert_eq!(embedded_index(protocol), Some(i), "{}", e.version.name);
-            assert_ne!(protocol, LATEST.protocol, "{}", e.version.name);
+            assert_ne!(protocol, NATIVE.protocol, "{}", e.version.name);
             assert!(
                 VERSIONS.iter().any(|v| v.protocol == protocol),
                 "{} missing from VERSIONS",
@@ -213,12 +227,12 @@ mod tests {
         );
         for v in VERSIONS {
             assert!(
-                v.protocol == LATEST.protocol || embedded_index(v.protocol).is_some(),
+                v.protocol == NATIVE.protocol || embedded_index(v.protocol).is_some(),
                 "{} has no embedded tables",
                 v.name
             );
         }
-        assert_eq!(embedded_index(LATEST.protocol), None);
+        assert_eq!(embedded_index(NATIVE.protocol), None);
         assert_eq!(embedded_index(0), None);
     }
 }

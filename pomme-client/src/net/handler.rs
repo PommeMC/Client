@@ -1377,7 +1377,7 @@ fn sound_packet_ids() -> SoundPacketIds {
 
     static IDS: std::sync::OnceLock<SoundPacketIds> = std::sync::OnceLock::new();
     *IDS.get_or_init(|| {
-        let table = PacketTable::latest();
+        let table = PacketTable::native();
         SoundPacketIds {
             sound: table
                 .id(Phase::Game, Direction::Clientbound, "sound")
@@ -1411,7 +1411,7 @@ fn parse_level_particles(
     // Signed on the wire; Java's `i < count` loop no-ops on negative counts.
     let count = i32::azalea_read(cur)?.max(0) as u32;
     let type_id = u32::azalea_read_var(cur)?;
-    // Particle ids shift between versions; translate into the latest id
+    // Particle ids shift between versions; translate into the native id
     // space (`ServerParticleKind`'s) when speaking an older protocol.
     let type_id = match super::translate::active() {
         Some(t) => match t.remap_particle(type_id) {
@@ -1442,7 +1442,7 @@ fn level_particles_packet_id() -> u32 {
 
     static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *ID.get_or_init(|| {
-        PacketTable::latest()
+        PacketTable::native()
             .id(Phase::Game, Direction::Clientbound, "level_particles")
             .expect("level_particles in packet table")
     })
