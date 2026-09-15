@@ -55,6 +55,9 @@ impl ResourcePackManager {
     }
 
     pub fn resolve_asset(&self, asset_key: &str) -> Option<PathBuf> {
+        if !crate::assets::valid_asset_key(asset_key) {
+            return None;
+        }
         for pack in self.active_packs.iter().rev() {
             let path = pack.dir.join("assets").join(asset_key);
             if path.exists() {

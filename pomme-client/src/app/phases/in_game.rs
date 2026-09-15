@@ -35,7 +35,7 @@ use crate::renderer::pipelines::entity_renderer::{
 use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::renderer::{Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
-use crate::ui::chat::ChatState;
+use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
 use crate::ui::pause::{self, PauseAction, PauseScreen};
 use crate::ui::{common, hud};
@@ -156,6 +156,7 @@ pub struct GameState {
     pub chat: ChatState,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
+    pub server_enforces_secure_chat: bool,
     /// Locator bar waypoints tracked by the server.
     pub waypoints: crate::world::waypoints::WaypointMap,
     /// Vanilla `Hud.toolHighlightTimer` / `lastToolHighlight` (see
@@ -222,6 +223,8 @@ pub struct GameState {
     pub position_send_counter: u32,
     pub options_from_game: bool,
     pub last_render_distance: u32,
+    pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
+    pub last_chat_colors: bool,
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
@@ -304,6 +307,7 @@ impl GameState {
         resource_packs: &ResourcePackManager,
         render_distance: u32,
         singleplayer: bool,
+        chat_options: crate::ui::chat::ChatOptions,
     ) -> Self {
         let biome_climate = Arc::new(HashMap::new());
         // The dimension's shade table arrives with `DimensionInfo`, which
@@ -330,6 +334,8 @@ impl GameState {
             player_loaded_sent: false,
             options_from_game: false,
             last_render_distance: render_distance,
+            last_chat_visibility: chat_options.visibility,
+            last_chat_colors: chat_options.colors,
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -371,9 +377,14 @@ impl GameState {
             inv_drag: None,
             inv_last_click: None,
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
-            chat: ChatState::new(),
+            chat: {
+                let mut chat = ChatState::new();
+                chat.set_options(chat_options);
+                chat
+            },
             command_tree: None,
             tab_list: TabList::new(),
+            server_enforces_secure_chat: false,
             waypoints: crate::world::waypoints::WaypointMap::default(),
             tool_highlight_timer: 0,
             last_tool_highlight: azalea_inventory::ItemStack::Empty,
@@ -457,6 +468,7 @@ impl GameState {
         self.inventory_open
             || self.creative_inventory_open
             || self.open_container.is_some()
+            || self.chat.has_pending_modal_prompt()
             || self.game_mode_switcher.is_some()
     }
 
@@ -767,15 +779,37 @@ impl GameState {
         ]);
     }
 
-    pub fn sync_render_distance(&mut self, connection: &ConnectionHandle, render_distance: u32) {
+    pub fn sync_client_information(
+        &mut self,
+        connection: &ConnectionHandle,
+        render_distance: u32,
+        chat_options: crate::ui::chat::ChatOptions,
+    ) {
+        let render_changed = self.last_render_distance != render_distance;
+        let chat_changed = self.last_chat_visibility != chat_options.visibility
+            || self.last_chat_colors != chat_options.colors;
         self.last_render_distance = render_distance;
-        tracing::info!("Render distance changed to {render_distance}");
+        self.last_chat_visibility = chat_options.visibility;
+        self.last_chat_colors = chat_options.colors;
+        if render_changed {
+            tracing::info!("Render distance changed to {render_distance}");
+        }
+        if chat_changed {
+            tracing::info!(
+                visibility = ?chat_options.visibility,
+                colors = chat_options.colors,
+                "Chat client information changed"
+            );
+        }
 
         connection
             .packet_tx
             .send(ServerboundGamePacket::ClientInformation(
                 ServerboundClientInformation {
-                    client_information: crate::net::client_information(render_distance as u8),
+                    client_information: crate::net::client_information(
+                        render_distance as u8,
+                        chat_options,
+                    ),
                 },
             ));
     }
@@ -1166,6 +1200,92 @@ enum ResultKind {
 
 /// Carry out the button/dismiss action a benchmark result overlay reported,
 /// targeting the matching benchmark's result/upload fields.
+fn handle_chat_ui_action(
+    action: ChatUiAction,
+    core: &mut AppCore,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    match action {
+        ChatUiAction::OpenUrl(url) => {
+            let Ok(url) = crate::chat_component::parse_untrusted_url(url) else {
+                return;
+            };
+            if let Err(e) = open::that(&url) {
+                tracing::warn!("Could not open chat link {url:?}: {e}");
+            }
+        }
+        ChatUiAction::OpenChatSettings => {
+            game.chat.close();
+            core.menu.open_chat_settings();
+            game.options_from_game = true;
+            game.paused = true;
+        }
+        ChatUiAction::RunCommand(command) => {
+            handle_unattended_command(&command, connection, game);
+        }
+        ChatUiAction::RunCommandUnsigned(command) => {
+            match crate::net::chat::encode_outbound_command(&command) {
+                Ok(frame) => connection.packet_tx.send_raw(frame),
+                Err(error) => tracing::warn!(
+                    "Could not encode confirmed unattended command {command:?}: {error}"
+                ),
+            }
+        }
+        ChatUiAction::Custom { id, payload } => {
+            match crate::net::chat::encode_outbound_custom_click_action(&id, payload.as_ref()) {
+                Ok(frame) => connection.packet_tx.send_raw(frame),
+                Err(e) => tracing::warn!("Could not encode custom chat click action {id:?}: {e}"),
+            }
+        }
+        ChatUiAction::ShowDialog(_) => {}
+    }
+}
+
+fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game: &mut GameState) {
+    use crate::net::commands::UnattendedCommandCheck;
+    use crate::ui::chat::CommandConfirmationKind;
+
+    let command = command.strip_prefix('/').unwrap_or(command);
+    let check = game
+        .command_tree
+        .as_ref()
+        .map_or(UnattendedCommandCheck::ParseErrors, |tree| {
+            tree.verify_unattended(command)
+        });
+    match check {
+        UnattendedCommandCheck::NoIssues => {
+            match crate::net::chat::encode_outbound_command(command) {
+                Ok(frame) => connection.packet_tx.send_raw(frame),
+                Err(error) => {
+                    tracing::warn!("Could not encode unattended command {command:?}: {error}")
+                }
+            }
+        }
+        UnattendedCommandCheck::SignatureRequired => {
+            // Vanilla never signs a server-provided click command silently.
+            // Both current Pomme surfaces are existing screens, so acceptance
+            // copies the command to the clipboard rather than signing/sending.
+            game.chat.request_command_confirmation(
+                command.to_owned(),
+                CommandConfirmationKind::SignatureRequired,
+            );
+        }
+        UnattendedCommandCheck::PermissionsRequired => {
+            game.chat.request_command_confirmation(
+                command.to_owned(),
+                CommandConfirmationKind::PermissionsRequired,
+            );
+        }
+        UnattendedCommandCheck::ParseErrors => {
+            game.chat.request_command_confirmation(
+                command.to_owned(),
+                CommandConfirmationKind::ParseErrors,
+            );
+        }
+    }
+}
+
 fn apply_result_action(
     action: common::ResultAction,
     kind: ResultKind,
@@ -1215,7 +1335,7 @@ fn apply_render_distance(
     rd: u32,
 ) {
     core.menu.render_distance = rd;
-    game.sync_render_distance(connection, rd);
+    game.sync_client_information(connection, rd, core.menu.chat_options);
 }
 
 /// Predict each container click locally (instant UI + drag preview), then send
@@ -1421,6 +1541,7 @@ pub fn update_game(
     core.audio.set_subtitles_enabled(core.menu.show_subtitles);
 
     gfx.renderer.set_vsync(core.menu.vsync);
+    game.chat.set_options(core.menu.chat_options);
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
     // with no screen open pauses the game, which also releases the cursor
@@ -1441,6 +1562,10 @@ pub fn update_game(
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
     if let Some(reason) = disconnect_reason {
         return GameUpdateResult::Disconnected { reason };
+    }
+    game.chat.tick();
+    for (signature, shown) in game.chat.take_processed_signatures() {
+        connection.packet_tx.mark_chat_processed(signature, shown);
     }
 
     // Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
@@ -1663,7 +1788,9 @@ pub fn update_game(
         core.menu.gui_scale_setting,
     );
     let text_fs = common::FONT_SIZE * text_gs;
-    if let Some(msg) = game.chat.handle_key_input(
+    if game.chat.has_pending_modal_prompt() {
+        // ConfirmLinkScreen captures input above the underlying screen.
+    } else if let Some(msg) = game.chat.handle_key_input(
         &text_events,
         enter,
         tab,
@@ -1672,12 +1799,19 @@ pub fn update_game(
         down,
         page_up,
         page_down,
-        text_sw - 12.0 * text_gs,
+        text_sw - 4.0 * text_gs,
         &|s| gfx.renderer.menu_text_width(s, text_fs),
         game.command_tree.as_deref(),
     ) {
         core.send_chat_message(connection, msg);
         core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+    if game.chat.is_open() {
+        let scroll = core.input.consume_menu_scroll();
+        if scroll != 0.0 {
+            game.chat
+                .handle_scroll(core.input.cursor_pos(), scroll, shift);
+        }
     }
     if let Some((id, command)) = game.chat.take_suggestion_request() {
         connection
@@ -1695,7 +1829,6 @@ pub fn update_game(
     if core.input.spectator && game.spectator.is_menu_active() {
         core.ensure_player_face_atlas(&mut gfx.renderer);
     }
-
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();
     if switcher_open != game.switcher_was_open {
@@ -2603,9 +2736,33 @@ pub fn update_game(
     // F1 hides the closed-chat overlay; an open chat is a screen and renders
     // regardless (vanilla Hud.extractChat vs ChatScreen).
     if !game.hide_gui || game.chat.is_open() {
-        game.chat.build(&mut elements, sw, sh, gs, &|t, s| {
-            gfx.renderer.menu_text_width(t, s)
-        });
+        let command_tree = game.command_tree.clone();
+        let chat_action = game.chat.build(
+            &mut elements,
+            crate::ui::chat::ChatBuildContext {
+                screen_w: sw,
+                screen_h: sh,
+                gui_scale: gs,
+                cursor: core.input.cursor_pos(),
+                clicked: core.input.left_just_pressed(),
+                shift: core.input.shift_held(),
+                command_tree: command_tree.as_deref(),
+                advanced_item_tooltips: game.advanced_item_tooltips,
+                text_width_fn: &|t, s| gfx.renderer.menu_text_width(t, s),
+                spans_width_fn: &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+            },
+        );
+        if let Some(action) = chat_action {
+            handle_chat_ui_action(action, core, connection, game);
+        }
+        if game.chat.is_open() && core.input.cursor_moved_this_frame() {
+            let icon = if game.chat.hovering_clickable(core.input.cursor_pos()) {
+                winit::window::CursorIcon::Pointer
+            } else {
+                winit::window::CursorIcon::Default
+            };
+            gfx.window.set_cursor(icon);
+        }
     }
 
     // Subtitles draw above chat and the tab list; toasts stay on top
@@ -2639,6 +2796,21 @@ pub fn update_game(
         game.toasts.build(&mut elements, sw, gs, &|t, s| {
             gfx.renderer.menu_text_width(t, s)
         });
+    }
+
+    if game.chat.has_pending_modal_prompt() {
+        if let Some(action) = game.chat.build_modal_prompt(
+            &mut elements,
+            sw,
+            sh,
+            gs,
+            core.input.cursor_pos(),
+            core.input.left_just_pressed(),
+        ) {
+            handle_chat_ui_action(action, core, connection, game);
+        }
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
     // Chat consumes keys, not clicks; nothing else clears them while only chat
@@ -3033,8 +3205,15 @@ pub fn update_game(
     }
 
     if game.options_from_game {
-        if core.menu.render_distance != game.last_render_distance {
-            game.sync_render_distance(connection, core.menu.render_distance);
+        if core.menu.render_distance != game.last_render_distance
+            || core.menu.chat_options.visibility != game.last_chat_visibility
+            || core.menu.chat_options.colors != game.last_chat_colors
+        {
+            game.sync_client_information(
+                connection,
+                core.menu.render_distance,
+                core.menu.chat_options,
+            );
         }
         if !core.menu.is_options_screen() {
             game.options_from_game = false;
