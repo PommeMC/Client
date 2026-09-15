@@ -18,7 +18,9 @@ fn main() {
     println!("cargo:rerun-if-changed=src/renderer/chunk/packing_consts.rs");
     fs::write(
         Path::new(&out_dir).join("packing.glsl"),
-        format!("const float POS_RANGE = {POS_RANGE:?};\nconst float POS_BIAS = {POS_BIAS:?};\n"),
+        format!(
+            "const float POS_RANGE = {POS_RANGE:?};\nconst float POS_BIAS = {POS_BIAS:?};\nconst float TERRAIN_UV_FIXED_SCALE = {TERRAIN_UV_FIXED_SCALE:?};\n"
+        ),
     )
     .expect("failed to write packing.glsl");
 
@@ -46,7 +48,7 @@ fn main() {
             content,
         })
     });
-    for include in ["fog.glsl", "camera_ubo.glsl"] {
+    for include in ["fog.glsl", "camera_ubo.glsl", "atlas_sprite.glsl"] {
         println!(
             "cargo:rerun-if-changed={}",
             shader_dir.join(include).display()
@@ -80,6 +82,7 @@ fn main() {
         ("chunk_border.vert", shaderc::ShaderKind::Vertex),
         ("chunk_border.frag", shaderc::ShaderKind::Fragment),
         ("item_entity.vert", shaderc::ShaderKind::Vertex),
+        ("item_entity_world.vert", shaderc::ShaderKind::Vertex),
         ("item_entity.frag", shaderc::ShaderKind::Fragment),
         ("weather.vert", shaderc::ShaderKind::Vertex),
         ("weather.frag", shaderc::ShaderKind::Fragment),

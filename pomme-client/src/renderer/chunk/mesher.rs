@@ -10,7 +10,9 @@ use super::greedy;
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::world::block::is_air;
-use crate::world::block::model::{BakedModel, Direction, face_positions, face_uvs};
+use crate::world::block::model::{
+    BakedModel, CardinalLighting, Direction, face_positions, face_uvs,
+};
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
 use crate::world::chunk;
 use crate::world::chunk::ChunkStore;
@@ -21,6 +23,18 @@ pub struct ChunkVertex {
     pub position: [f32; 3],
     pub tex_coords: [u16; 2],
     pub light_tint: u32,
+}
+
+#[derive(Copy, Clone)]
+struct TerrainVertex {
+    position: [f32; 3],
+    /// Sprite-local UV where 1.0 spans one full sprite. Greedy quads may exceed
+    /// 1.0 so the chunk shader can repeat the sprite without sampling adjacent
+    /// atlas entries.
+    sprite_uv: [f32; 2],
+    /// `AtlasRegion::sprite`, resolved to a rectangle in the fragment shader.
+    sprite: u16,
+    light_tint: u32,
 }
 
 impl ChunkVertex {
@@ -60,16 +74,18 @@ impl ChunkVertex {
 
 include!("packing_consts.rs");
 
-/// Compact GPU vertex (14 bytes): section-local position quantized to u16 (see
-/// `POS_RANGE`), rebased in the vertex shader via the integer section origin.
-/// `light_tint` is `[u8; 4]` (not `u32`) so the struct packs to 14 bytes with
-/// no alignment padding; byte order matches the old `R8G8B8A8_UNORM` (light,
-/// r,g,b).
+/// Compact terrain GPU vertex (16 bytes). Positions stay quantized as before.
+/// `uv` stores sprite-local coordinates as u16 fixed point over the section's
+/// 0..16 repeat range, and `sprite` indexes the atlas's rectangle buffer. The
+/// shader wraps the UV inside that integer rectangle, which avoids
+/// atlas-boundary rounding and lets a greedy quad repeat one sprite instead of
+/// walking into its neighbour.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PackedVertex {
     pub pos: [u16; 3],
     pub uv: [u16; 2],
+    pub sprite: u16,
     pub light_tint: [u8; 4],
 }
 
@@ -88,19 +104,32 @@ fn quantize_coord(local: f32) -> u16 {
     unorm_to_u16((local + POS_BIAS) / POS_RANGE)
 }
 
-fn pack_vertex(v: &ChunkVertex) -> PackedVertex {
+fn pack_sprite_uv(x: f32) -> u16 {
+    (x.clamp(0.0, TERRAIN_UV_MAX_REPEAT) * TERRAIN_UV_FIXED_SCALE + 0.5) as u16
+}
+
+fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
     PackedVertex {
         pos: [
             quantize_coord(v.position[0]),
             quantize_coord(v.position[1]),
             quantize_coord(v.position[2]),
         ],
-        uv: v.tex_coords,
+        uv: [
+            pack_sprite_uv(v.sprite_uv[0]),
+            pack_sprite_uv(v.sprite_uv[1]),
+        ],
+        sprite: v.sprite,
         light_tint: v.light_tint.to_le_bytes(),
     }
 }
 
-fn section_aabb(verts: &[ChunkVertex]) -> ChunkAABB {
+#[cfg(test)]
+fn unpack_sprite_uv(x: u16) -> f32 {
+    x as f32 / TERRAIN_UV_FIXED_SCALE
+}
+
+fn section_aabb(verts: &[TerrainVertex]) -> ChunkAABB {
     let mut mn = [f32::MAX; 3];
     let mut mx = [f32::MIN; 3];
     for v in verts {
@@ -171,7 +200,7 @@ pub struct SectionMesh {
 /// the blended pass.
 #[derive(Default)]
 struct MeshSink {
-    vertices: Vec<ChunkVertex>,
+    vertices: Vec<TerrainVertex>,
     solid: Vec<u32>,
     cutout: Vec<u32>,
     water: Vec<u32>,
@@ -545,8 +574,8 @@ const SECTION_INDEX_HINT: usize = 3072;
 struct BufferPool {
     // Float scratch the workers mesh into; never leaves the worker (packed at
     // section finalize).
-    scratch_tx: crossbeam_channel::Sender<Vec<ChunkVertex>>,
-    scratch_rx: crossbeam_channel::Receiver<Vec<ChunkVertex>>,
+    scratch_tx: crossbeam_channel::Sender<Vec<TerrainVertex>>,
+    scratch_rx: crossbeam_channel::Receiver<Vec<TerrainVertex>>,
     vtx_tx: crossbeam_channel::Sender<Vec<PackedVertex>>,
     vtx_rx: crossbeam_channel::Receiver<Vec<PackedVertex>>,
     idx_tx: crossbeam_channel::Sender<Vec<u32>>,
@@ -581,7 +610,7 @@ impl BufferPool {
         }
     }
 
-    fn take_scratch(&self) -> Vec<ChunkVertex> {
+    fn take_scratch(&self) -> Vec<TerrainVertex> {
         Self::take(&self.scratch_rx, SECTION_VERTEX_HINT)
     }
 
@@ -593,7 +622,7 @@ impl BufferPool {
         Self::take(&self.idx_rx, SECTION_INDEX_HINT)
     }
 
-    fn recycle_scratch(&self, vertices: Vec<ChunkVertex>) {
+    fn recycle_scratch(&self, vertices: Vec<TerrainVertex>) {
         Self::give(&self.scratch_tx, vertices);
     }
 
@@ -623,10 +652,14 @@ pub struct MeshDispatcher {
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
     biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+    /// The dimension's face-shade table; a dimension change builds a new
+    /// dispatcher.
+    cardinal_lighting: CardinalLighting,
     pool: Arc<BufferPool>,
 }
 
 impl MeshDispatcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: BlockRegistry,
         uv_map: AtlasUVMap,
@@ -634,6 +667,7 @@ impl MeshDispatcher {
         foliage_colormap: Colormap,
         dry_foliage_colormap: Colormap,
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+        cardinal_lighting: CardinalLighting,
     ) -> Self {
         // Bulk results are bounded for back-pressure; edit results use the
         // unbounded priority channel so they never queue behind the load backlog.
@@ -675,6 +709,7 @@ impl MeshDispatcher {
             foliage_colormap: Arc::new(foliage_colormap),
             dry_foliage_colormap: Arc::new(dry_foliage_colormap),
             biome_climate,
+            cardinal_lighting,
             pool: Arc::new(BufferPool::new(1024)),
         }
     }
@@ -788,6 +823,7 @@ impl MeshDispatcher {
             foliage_colormap: Arc::clone(&self.foliage_colormap),
             dry_foliage_colormap: Arc::clone(&self.dry_foliage_colormap),
             biome_climate: Arc::clone(&self.biome_climate),
+            cardinal_lighting: self.cardinal_lighting,
             min_y: chunk_store.min_y(),
             height: chunk_store.height(),
         }
@@ -1097,11 +1133,20 @@ struct ChunkStoreSnapshot {
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
     biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+    cardinal_lighting: CardinalLighting,
     min_y: i32,
     height: u32,
 }
 
 impl ChunkStoreSnapshot {
+    /// Vanilla `BlockModelLighter`: an unshaded face takes the table's up
+    /// value, which is the brightest in both tables.
+    fn shade(&self, face: Option<Direction>) -> f32 {
+        face.map_or(self.cardinal_lighting.up, |dir| {
+            self.cardinal_lighting.by_face(dir)
+        })
+    }
+
     fn get_block_state(&self, x: i32, y: i32, z: i32) -> azalea_block::BlockState {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let chunk_lock = self
@@ -1299,7 +1344,7 @@ use super::block_ao::AO_BRIGHTNESS;
 
 #[allow(clippy::too_many_arguments)]
 fn greedy_mesh_section(
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -1335,7 +1380,7 @@ fn greedy_mesh_section(
 
     for face_idx in 0..6 {
         let face = greedy::Face::from(face_idx);
-        let dir_shade = face.shade_light();
+        let dir_shade = snapshot.cardinal_lighting.by_face(face.direction());
 
         for quad in &mesher.quads[face_idx] {
             let block_id = quad.voxel_id();
@@ -1367,17 +1412,14 @@ fn greedy_mesh_section(
             });
 
             let base = vertices.len() as u32;
-            let u_span = region.u_max - region.u_min;
-            let v_span = region.v_max - region.v_min;
-
             for (i, (pos, uv)) in verts_uvs.iter().enumerate() {
-                vertices.push(ChunkVertex {
-                    // Greedy quads are already section-local.
+                vertices.push(TerrainVertex {
+                    // Greedy quads are already section-local. Their local UVs
+                    // intentionally run 0..width/height; the chunk shader wraps
+                    // them inside this sprite's atlas rectangle.
                     position: *pos,
-                    tex_coords: pack_uv(
-                        region.u_min + uv[0] * u_span,
-                        region.v_min + uv[1] * v_span,
-                    ),
+                    sprite_uv: *uv,
+                    sprite: region.sprite,
                     light_tint: pack_light_tint(lights[i], tint),
                 });
             }
@@ -1553,7 +1595,7 @@ fn mesh_chunk_snapshot(
                     if logged_missing.insert(id) {
                         tracing::warn!("Missing model: {id}");
                     }
-                    emit_missing_cube(sink, block_pos, snapshot, registry, bx, by, bz);
+                    emit_missing_cube(sink, block_pos, snapshot, registry, uv_map, bx, by, bz);
                 }
                 by += step;
             }
@@ -1635,9 +1677,9 @@ fn emit_baked_model(
             || crate::world::block::redstone_wire_rgb(state),
         );
         let lights = if let Some(dir) = quad.cullface {
-            compute_face_ao(snapshot, registry, bx, by, bz, dir)
+            compute_face_ao(snapshot, registry, bx, by, bz, dir, quad.shade_face)
         } else {
-            [quad.shade_light; 4]
+            [snapshot.shade(quad.shade_face); 4]
         };
         emit_face(
             sink,
@@ -1687,8 +1729,8 @@ fn emit_cube_faces(
             _ => &textures.west,
         };
         let region = uv_map.get_region(face_tex);
-        let (positions, uvs, _) = cube_face_geometry(*dir);
-        let lights = compute_face_ao(snapshot, registry, bx, by, bz, *dir);
+        let (positions, uvs) = cube_face_geometry(*dir);
+        let lights = compute_face_ao(snapshot, registry, bx, by, bz, *dir, Some(*dir));
 
         let is_side = i >= 2;
         if let Some(overlay) = textures.side_overlay.as_deref().filter(|_| is_side) {
@@ -1835,7 +1877,8 @@ fn emit_fluid(
             continue;
         }
 
-        let (mut positions, uvs, light) = cube_face_geometry(*dir);
+        let (mut positions, uvs) = cube_face_geometry(*dir);
+        let light = snapshot.cardinal_lighting.by_face(*dir);
 
         if matches!(dir, Direction::Up) {
             // A water/lava block above would have culled this face already, so
@@ -1906,7 +1949,7 @@ fn emit_multipart(
             block_pos,
             &quad.positions,
             &quad.uvs,
-            [quad.shade_light; 4],
+            [snapshot.shade(quad.shade_face); 4],
             region,
             tint,
         );
@@ -1955,21 +1998,20 @@ fn emit_lod_cube(
         let (region, tint) =
             block_face_tex_tint(state, *dir, uv_map, snapshot, registry, bx, by, bz);
 
-        let (positions, uvs, light) = cube_face_geometry(*dir);
+        let (positions, uvs) = cube_face_geometry(*dir);
+        let light = snapshot.cardinal_lighting.by_face(*dir);
         let s = step as f32;
         let sy = if is_fluid { fluid_top } else { s };
         let base = sink.vertices.len() as u32;
         for i in 0..4 {
-            sink.vertices.push(ChunkVertex {
+            sink.vertices.push(TerrainVertex {
                 position: [
                     block_pos[0] + positions[i][0] * s,
                     block_pos[1] + positions[i][1] * sy,
                     block_pos[2] + positions[i][2] * s,
                 ],
-                tex_coords: pack_uv(
-                    region.u_min + uvs[i][0] * (region.u_max - region.u_min),
-                    region.v_min + uvs[i][1] * (region.v_max - region.v_min),
-                ),
+                sprite_uv: uvs[i],
+                sprite: region.sprite,
                 light_tint: pack_light_tint(light, tint),
             });
         }
@@ -1992,10 +2034,12 @@ fn emit_missing_cube(
     block_pos: [f32; 3],
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
+    uv_map: &AtlasUVMap,
     bx: i32,
     by: i32,
     bz: i32,
 ) {
+    let missing = uv_map.missing_region();
     for dir in &CUBE_FACE_DIRS {
         let offset = dir.offset();
         let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
@@ -2003,16 +2047,18 @@ fn emit_missing_cube(
             continue;
         }
 
-        let (positions, _, light) = cube_face_geometry(*dir);
+        let (positions, uvs) = cube_face_geometry(*dir);
+        let light = snapshot.cardinal_lighting.by_face(*dir);
         let base = sink.vertices.len() as u32;
-        for pos in &positions {
-            sink.vertices.push(ChunkVertex {
+        for (pos, uv) in positions.iter().zip(uvs) {
+            sink.vertices.push(TerrainVertex {
                 position: [
                     block_pos[0] + pos[0],
                     block_pos[1] + pos[1],
                     block_pos[2] + pos[2],
                 ],
-                tex_coords: pack_uv(0.0, 0.0),
+                sprite_uv: uv,
+                sprite: missing.sprite,
                 light_tint: pack_light_tint(light, MISSING_TINT),
             });
         }
@@ -2058,7 +2104,7 @@ fn emit_face(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_face_into(
-    vertices: &mut Vec<ChunkVertex>,
+    vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
     block_pos: [f32; 3],
     positions: &[[f32; 3]; 4],
@@ -2068,20 +2114,15 @@ fn emit_face_into(
     tint: u32,
 ) {
     let base = vertices.len() as u32;
-    let u_span = region.u_max - region.u_min;
-    let v_span = region.v_max - region.v_min;
-
     for i in 0..4 {
-        vertices.push(ChunkVertex {
+        vertices.push(TerrainVertex {
             position: [
                 block_pos[0] + positions[i][0],
                 block_pos[1] + positions[i][1],
                 block_pos[2] + positions[i][2],
             ],
-            tex_coords: pack_uv(
-                region.u_min + uvs[i][0] * u_span,
-                region.v_min + uvs[i][1] * v_span,
-            ),
+            sprite_uv: uvs[i],
+            sprite: region.sprite,
             light_tint: pack_light_tint(lights[i], tint),
         });
     }
@@ -2122,6 +2163,10 @@ fn corners0_offset(dir: Direction) -> [i32; 3] {
     }
 }
 
+/// Per-vertex brightness of `dir`'s face: ambient occlusion, sampled light and
+/// the face's cardinal shade, where `shade_face` is `None` for a model element
+/// with `shade: false`.
+#[allow(clippy::too_many_arguments)]
 fn compute_face_ao(
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -2129,6 +2174,7 @@ fn compute_face_ao(
     by: i32,
     bz: i32,
     dir: Direction,
+    shade_face: Option<Direction>,
 ) -> [f32; 4] {
     let s = |[dx, dy, dz]: [i32; 3]| -> f32 {
         shade_brightness(
@@ -2182,7 +2228,7 @@ fn compute_face_ao(
     };
 
     let n = dir.offset();
-    let dir_shade = dir.shade_light();
+    let dir_shade = snapshot.shade(shade_face);
     rows.map(|[side1, side2, corner]| {
         let ao = super::block_ao::vertex_brightness(s(side1), s(side2), s(corner), shade0);
         let light = avg4(l(n), l(side1), l(side2), l(corner));
@@ -2194,11 +2240,42 @@ fn avg4(a: f32, b: f32, c: f32, d: f32) -> f32 {
     (a + b + c + d) * 0.25
 }
 
-pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4], f32) {
+pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4]) {
     let (from, to) = ([0.0; 3], [1.0; 3]);
     (
         face_positions(dir, from, to),
         face_uvs(dir, from, to, None, None),
-        dir.shade_light(),
     )
+}
+
+#[cfg(test)]
+mod terrain_uv_tests {
+    use super::{pack_sprite_uv, unpack_sprite_uv};
+
+    fn wrapped(x: f32) -> f32 {
+        x - x.floor()
+    }
+
+    #[test]
+    fn packed_greedy_uv_preserves_integer_repeat_boundaries_exactly() {
+        for uv in 0..=16 {
+            let decoded = unpack_sprite_uv(pack_sprite_uv(uv as f32));
+            assert_eq!(decoded, uv as f32);
+        }
+    }
+
+    #[test]
+    fn packed_greedy_uv_keeps_fractional_precision() {
+        for uv in [0.25_f32, 1.25, 8.5, 15.75] {
+            let decoded = unpack_sprite_uv(pack_sprite_uv(uv));
+            assert!((decoded - uv).abs() <= 0.5 / 4095.0, "uv {uv} -> {decoded}");
+        }
+    }
+
+    #[test]
+    fn adjacent_blocks_wrap_to_the_same_sprite_position() {
+        let a = unpack_sprite_uv(pack_sprite_uv(0.25));
+        let b = unpack_sprite_uv(pack_sprite_uv(1.25));
+        assert!((wrapped(a) - wrapped(b)).abs() <= 1.0 / 4095.0);
+    }
 }

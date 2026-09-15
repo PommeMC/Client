@@ -70,6 +70,30 @@ impl ResourcePackManager {
         self.active_packs.iter().map(|pack| pack.dir.as_path())
     }
 
+    /// Resolve a resource-pack asset together with the metadata sidecar that
+    /// vanilla would expose for that resource. Metadata may come from the same
+    /// pack or a higher-priority pack, but never from below the pack that
+    /// supplied the resource itself.
+    pub fn resolve_asset_with_metadata(
+        &self,
+        asset_key: &str,
+    ) -> Option<(PathBuf, Option<PathBuf>)> {
+        let metadata_key = format!("{asset_key}.mcmeta");
+        for (source_index, pack) in self.active_packs.iter().enumerate().rev() {
+            let path = pack.dir.join("assets").join(asset_key);
+            if !path.exists() {
+                continue;
+            }
+            let metadata = self.active_packs[source_index..]
+                .iter()
+                .rev()
+                .map(|candidate| candidate.dir.join("assets").join(&metadata_key))
+                .find(|candidate| candidate.exists());
+            return Some((path, metadata));
+        }
+        None
+    }
+
     fn server_pack_dir(&self, hash: &str) -> PathBuf {
         self.server_cache_dir.join(hash)
     }

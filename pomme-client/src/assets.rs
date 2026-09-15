@@ -3,6 +3,38 @@ use std::path::{Path, PathBuf};
 
 use crate::resource_pack::ResourcePackManager;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AssetId<'a> {
+    pub namespace: &'a str,
+    pub path: &'a str,
+}
+
+impl<'a> AssetId<'a> {
+    pub fn parse(value: &'a str) -> Self {
+        match value.split_once(':') {
+            Some((namespace, path)) if !namespace.is_empty() && !path.is_empty() => {
+                Self { namespace, path }
+            }
+            _ => Self {
+                namespace: "minecraft",
+                path: value,
+            },
+        }
+    }
+
+    pub fn asset_key(self, category: &str, suffix: &str) -> String {
+        format!("{}/{category}/{}{}", self.namespace, self.path, suffix)
+    }
+
+    pub fn canonical(self) -> String {
+        if self.namespace == "minecraft" {
+            self.path.to_string()
+        } else {
+            format!("{}:{}", self.namespace, self.path)
+        }
+    }
+}
+
 /// Pomme's brand mark, embedded rather than resolved from the vanilla asset
 /// tree: the window icon and the credits roll's logo both come from it.
 pub const POMME_ICON_PNG: &[u8] =

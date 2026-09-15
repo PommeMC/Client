@@ -49,6 +49,7 @@ pub struct ParticlePipeline {
     descriptor_pool: vk::DescriptorPool,
     camera_sets: Vec<vk::DescriptorSet>,
     atlas_set: vk::DescriptorSet,
+    atlas_sampler: vk::Sampler,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Option<Allocation>>,
     vertex_buffers: Vec<vk::Buffer>,
@@ -128,6 +129,9 @@ impl ParticlePipeline {
         device
             .allocate_descriptor_sets(&atlas_alloc_info, slice::from_mut(&mut atlas_set))
             .expect("failed to allocate particle atlas set");
+        // Vanilla's particles atlas has no mip chain. Pomme stores particle
+        // sprites in the combined atlas image, so clamp this consumer to LOD 0.
+        let atlas_sampler = unsafe { util::create_nearest_sampler(device) };
 
         let mut camera_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut camera_allocations: Vec<Option<Allocation>> =
@@ -182,6 +186,7 @@ impl ParticlePipeline {
             descriptor_pool,
             camera_sets,
             atlas_set,
+            atlas_sampler,
             camera_buffers,
             camera_allocations,
             vertex_buffers,
@@ -193,7 +198,7 @@ impl ParticlePipeline {
 
     pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
         let image_info = vk::DescriptorImageInfo {
-            sampler: atlas.sampler,
+            sampler: self.atlas_sampler,
             image_view: atlas.view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
         };
@@ -310,6 +315,7 @@ impl ParticlePipeline {
 
         device.destroy_pipeline(self.pipeline, None);
         device.destroy_pipeline(self.translucent_pipeline, None);
+        device.destroy_sampler(self.atlas_sampler, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);

@@ -62,6 +62,7 @@ pub enum NetworkEvent {
         height: u32,
         min_y: i32,
         has_skylight: bool,
+        cardinal_light: crate::world::block::model::CardinalLightType,
     },
     ChunkLoaded {
         pos: ChunkPos,
@@ -373,6 +374,7 @@ pub enum NetworkEvent {
         id: i32,
         item_name: String,
         item_id: u32,
+        damage: i32,
         count: i32,
     },
     EntityHeadRotation {
