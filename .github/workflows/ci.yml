@@ -79,7 +79,7 @@ jobs:
       # assets into its own source tree, which the cargo cache does not cover.
       - name: Cache the generated steel source
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             third_party/SteelMC/steel-core/src/behavior/generated
