@@ -83,12 +83,22 @@ mod steel {
             }
         }
 
-        /// Stops the server, which saves first, and waits for it.
-        ///
-        /// TODO: this blocks the frame thread. Instant for a world that has
-        /// barely been played, wrong for a large one; the save-and-quit layer
-        /// gives it a screen.
-        pub fn close(self) {}
+        /// Asks the server to save and stop, whether or not it finished
+        /// starting. Returns without waiting.
+        pub fn begin_close(&self) {
+            match &self.server {
+                Server::Starting(pending) => pending.begin_shutdown(),
+                Server::Running(handle) => handle.begin_shutdown(),
+            }
+        }
+
+        /// Whether the server has finished saving and stopped.
+        pub fn is_closed(&self) -> bool {
+            match &self.server {
+                Server::Starting(pending) => pending.is_finished(),
+                Server::Running(handle) => handle.is_finished(),
+            }
+        }
     }
 
     /// Starts `world` and hands back the client's end of the pipe.
@@ -152,8 +162,12 @@ mod steel {
             match *self {}
         }
 
-        pub const fn close(self) {
-            match self {}
+        pub const fn begin_close(&self) {
+            match *self {}
+        }
+
+        pub const fn is_closed(&self) -> bool {
+            match *self {}
         }
     }
 

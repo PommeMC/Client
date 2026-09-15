@@ -121,6 +121,8 @@ pub struct GameState {
     pub player_walk_speed: f32,
     pub player_prev_walk_speed: f32,
     pub mesh_dispatcher: MeshDispatcher,
+    /// Whether the server is this process, which the pause menu labels.
+    pub singleplayer: bool,
     pub paused: bool,
     pub dead: bool,
     pub death_screen_open: bool,
@@ -297,6 +299,7 @@ impl GameState {
         renderer: &Renderer,
         resource_packs: &ResourcePackManager,
         render_distance: u32,
+        singleplayer: bool,
     ) -> Self {
         let biome_climate = Arc::new(HashMap::new());
         let mesh_dispatcher = renderer.create_mesh_dispatcher(biome_climate, Some(resource_packs));
@@ -337,6 +340,7 @@ impl GameState {
             player_walk_speed: 0.0,
             player_prev_walk_speed: 0.0,
             mesh_dispatcher,
+            singleplayer,
             paused: false,
             dead: false,
             death_screen_open: false,
@@ -2338,6 +2342,7 @@ pub fn update_game(
             gs,
             game.pause_screen,
             game.server_render_distance,
+            game.singleplayer,
         );
         core.input.clear_just_pressed_actions();
     }

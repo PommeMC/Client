@@ -18,10 +18,11 @@ use crate::app::core::AppCore;
 use crate::app::phases::connecting::{ConnectingUpdateResult, update_connecting};
 use crate::app::phases::in_game::{GameState, GameUpdateResult, update_game};
 use crate::app::phases::in_menu::{MenuUpdateResult, update_menu};
-use crate::app::phases::{AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
+use crate::app::phases::saving::update_saving;
+use crate::app::phases::{AfterSaving, AppPhase, ConnectionPhase, FpsCounter, Gfx, Panorama};
 use crate::app::state_slot::StateSlot;
 use crate::dirs::DataDirs;
-use crate::net::connection::{ConnectArgs, Transport, spawn_connection};
+use crate::net::connection::{ConnectArgs, ConnectionHandle, Transport, spawn_connection};
 use crate::renderer::{self, Renderer};
 use crate::singleplayer::World;
 use crate::user::UserData;
@@ -103,6 +104,36 @@ impl FramerateLimiter {
             }
         }
         self.last_frame = Instant::now();
+    }
+}
+
+/// The tail of every exit from a world or server.
+///
+/// Takes the connection by value so it closes before the server is asked to
+/// stop, the way `Minecraft.disconnect` does: steel then sees end of file and
+/// persists the player before the shutdown save runs.
+fn leave_world(
+    core: &mut AppCore,
+    mut gfx: Gfx,
+    panorama: Panorama,
+    connection: ConnectionHandle,
+    world: Option<World>,
+    then: AfterSaving,
+) -> AppPhase {
+    drop(connection);
+    core.return_to_menu(&mut gfx);
+
+    match world {
+        Some(world) => {
+            world.begin_close();
+            AppPhase::SavingWorld {
+                gfx,
+                panorama,
+                world,
+                then,
+            }
+        }
+        None => AppPhase::InMenu { gfx, panorama },
     }
 }
 
@@ -237,6 +268,7 @@ impl ApplicationHandler for App {
                         &renderer,
                         &self.core.resource_packs,
                         self.core.menu.render_distance,
+                        false,
                     );
 
                     let gfx = Gfx {
@@ -280,7 +312,41 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
-                event_loop.exit();
+                // A world saves on the way out, so the window stays up for it
+                // rather than vanishing while the process finishes writing.
+                self.phase.transition(|app| match app {
+                    AppPhase::Connecting {
+                        gfx,
+                        panorama,
+                        connection,
+                        world: world @ Some(_),
+                        ..
+                    } => leave_world(
+                        &mut self.core,
+                        gfx,
+                        panorama,
+                        connection,
+                        world,
+                        AfterSaving::Quit,
+                    ),
+                    AppPhase::InGame {
+                        gfx,
+                        connection,
+                        world: world @ Some(_),
+                        ..
+                    } => leave_world(
+                        &mut self.core,
+                        gfx,
+                        Panorama::new(),
+                        connection,
+                        world,
+                        AfterSaving::Quit,
+                    ),
+                    app => {
+                        event_loop.exit();
+                        app
+                    }
+                });
             }
             WindowEvent::Resized(new_size) => {
                 if let Some(app_rt) = self.phase.gfx_mut() {
@@ -319,13 +385,13 @@ impl ApplicationHandler for App {
                     self.core.input.on_key_event(&event);
 
                     match app {
-                        AppPhase::Setup { .. } => app,
+                        AppPhase::Setup { .. } | AppPhase::SavingWorld { .. } => app,
                         AppPhase::InMenu { gfx, panorama } => {
                             self.core.input.on_menu_key_event(&event);
                             AppPhase::InMenu { gfx, panorama }
                         }
                         AppPhase::Connecting {
-                            mut gfx,
+                            gfx,
                             panorama,
                             connect_phase,
                             connection,
@@ -335,12 +401,14 @@ impl ApplicationHandler for App {
                             if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                             {
-                                self.core.return_to_menu(&mut gfx, world);
-
-                                AppPhase::InMenu {
+                                leave_world(
+                                    &mut self.core,
                                     gfx,
-                                    panorama: Panorama::new(),
-                                }
+                                    Panorama::new(),
+                                    connection,
+                                    world,
+                                    AfterSaving::Menu,
+                                )
                             } else {
                                 AppPhase::Connecting {
                                     gfx,
@@ -588,6 +656,7 @@ impl ApplicationHandler for App {
                                     &gfx.renderer,
                                     &core.resource_packs,
                                     core.menu.render_distance,
+                                    world.is_some(),
                                 );
                                 core.apply_cursor_grab(&gfx.window, None);
 
@@ -634,16 +703,25 @@ impl ApplicationHandler for App {
                                 game,
                                 world,
                             },
-                            ConnectingUpdateResult::ManualDisconnect => {
-                                core.return_to_menu(&mut gfx, world);
-
-                                AppPhase::InMenu { gfx, panorama }
-                            }
+                            ConnectingUpdateResult::ManualDisconnect => leave_world(
+                                core,
+                                gfx,
+                                panorama,
+                                connection,
+                                world,
+                                AfterSaving::Menu,
+                            ),
                             ConnectingUpdateResult::Disconnected { reason } => {
                                 core.menu.show_disconnect(reason);
-                                core.return_to_menu(&mut gfx, world);
 
-                                AppPhase::InMenu { gfx, panorama }
+                                leave_world(
+                                    core,
+                                    gfx,
+                                    panorama,
+                                    connection,
+                                    world,
+                                    AfterSaving::Menu,
+                                )
                             }
                             ConnectingUpdateResult::JoinGame => {
                                 if let Some(p) = &mut core.presence {
@@ -687,22 +765,48 @@ impl ApplicationHandler for App {
                             },
                             GameUpdateResult::ManualDisconnect => {
                                 core.audio.stop_all_sounds();
-                                core.return_to_menu(&mut gfx, world);
 
-                                AppPhase::InMenu {
+                                leave_world(
+                                    core,
                                     gfx,
-                                    panorama: Panorama::new(),
-                                }
+                                    Panorama::new(),
+                                    connection,
+                                    world,
+                                    AfterSaving::Menu,
+                                )
                             }
                             GameUpdateResult::Disconnected { reason } => {
                                 core.audio.stop_all_sounds();
                                 core.menu.show_disconnect(reason);
-                                core.return_to_menu(&mut gfx, world);
 
-                                AppPhase::InMenu {
+                                leave_world(
+                                    core,
                                     gfx,
-                                    panorama: Panorama::new(),
-                                }
+                                    Panorama::new(),
+                                    connection,
+                                    world,
+                                    AfterSaving::Menu,
+                                )
+                            }
+                        }
+                    }
+                    AppPhase::SavingWorld {
+                        mut gfx,
+                        mut panorama,
+                        world,
+                        then,
+                    } => {
+                        if update_saving(core, dt, &mut gfx, &mut panorama, &world) {
+                            if then == AfterSaving::Quit {
+                                event_loop.exit();
+                            }
+                            AppPhase::InMenu { gfx, panorama }
+                        } else {
+                            AppPhase::SavingWorld {
+                                gfx,
+                                panorama,
+                                world,
+                                then,
                             }
                         }
                     }

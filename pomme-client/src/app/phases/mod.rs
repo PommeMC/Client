@@ -4,15 +4,19 @@ use std::time::Instant;
 
 use winit::window::Window;
 
+use crate::app::core::AppCore;
 use crate::app::phases::in_game::GameState;
 use crate::app::state_slot::StateSlot;
 use crate::net::connection::ConnectionHandle;
 use crate::renderer::Renderer;
+use crate::renderer::pipelines::menu_overlay::MenuElement;
 use crate::singleplayer::World;
+use crate::ui::{common, hud};
 
 pub mod connecting;
 pub mod in_game;
 pub mod in_menu;
+pub mod saving;
 
 pub struct Gfx {
     // Renderer must be dropped before window, as it holds Vulkan resources that require the window
@@ -123,6 +127,20 @@ pub enum AppPhase {
         game: GameState,
         world: Option<World>,
     },
+    /// Waiting on the integrated server to finish saving. Singleplayer only.
+    SavingWorld {
+        gfx: Gfx,
+        panorama: Panorama,
+        world: World,
+        then: AfterSaving,
+    },
+}
+
+/// Where a save leads, so closing the window can wait for it too.
+#[derive(Clone, Copy, PartialEq)]
+pub enum AfterSaving {
+    Menu,
+    Quit,
 }
 
 impl AppPhase {
@@ -132,6 +150,7 @@ impl AppPhase {
             AppPhase::InMenu { gfx, .. } => Some(gfx),
             AppPhase::Connecting { gfx, .. } => Some(gfx),
             AppPhase::InGame { gfx, .. } => Some(gfx),
+            AppPhase::SavingWorld { gfx, .. } => Some(gfx),
         }
     }
 }
@@ -140,4 +159,64 @@ impl StateSlot<AppPhase> {
     pub fn gfx_mut(&mut self) -> Option<&mut Gfx> {
         self.get_mut().gfx_mut()
     }
+}
+
+/// Vanilla's `GenericMessageScreen`: panorama, blur and one centred line, with
+/// an optional button under it. Returns whether the button was clicked.
+pub fn draw_status(
+    core: &mut AppCore,
+    dt: f32,
+    gfx: &mut Gfx,
+    panorama: &mut Panorama,
+    text: &str,
+    button: Option<&str>,
+) -> bool {
+    panorama.update(dt);
+
+    let sw = gfx.renderer.screen_width() as f32;
+    let sh = gfx.renderer.screen_height() as f32;
+    let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
+    let fs = 11.0 * gs;
+    let cx = sw / 2.0;
+    let cy = sh / 2.0;
+
+    let cursor = core.input.cursor_pos();
+    let mut elements = Vec::new();
+
+    elements.push(MenuElement::Text {
+        x: cx,
+        y: cy - fs,
+        text: text.into(),
+        scale: fs,
+        color: common::WHITE,
+        centered: true,
+    });
+
+    let mut clicked = false;
+    if let Some(label) = button {
+        let btn_w = 160.0 * gs;
+        clicked = common::push_button(
+            &mut elements,
+            cursor,
+            cx - btn_w / 2.0,
+            cy + fs,
+            btn_w,
+            30.0 * gs,
+            gs,
+            fs,
+            label,
+            true,
+        ) && core.input.left_just_pressed();
+    }
+
+    core.input.clear_just_pressed_actions();
+
+    if let Err(e) =
+        gfx.renderer
+            .render_menu(&gfx.window, panorama.scroll(), 2.0, elements, cursor, false)
+    {
+        tracing::error!("Render error: {e}");
+    }
+
+    clicked
 }
