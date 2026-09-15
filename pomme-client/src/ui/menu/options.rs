@@ -315,37 +315,59 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
+        let o = self.chat_options;
+        let on_off = |v: bool| if v { "ON" } else { "OFF" };
+        let chat = format!("Chat: {}", o.visibility.label());
+        let colors = format!("Chat Colors: {}", on_off(o.colors));
+        let links = format!("Web Links: {}", on_off(o.links));
+        let prompt = format!("Prompt on Links: {}", on_off(o.links_prompt));
+        let opacity = format!(
+            "Chat Text Opacity: {}%",
+            (o.effective_text_opacity() * 100.0).round() as u32
+        );
+        let bg_opacity = format!(
+            "Text Background Opacity: {}%",
+            (o.text_background_opacity * 100.0).round() as u32
+        );
+        let scale = if o.scale <= 0.0 {
+            "Chat Text Size: OFF".to_owned()
+        } else {
+            format!("Chat Text Size: {}%", (o.scale * 100.0).round() as u32)
+        };
+        let spacing = format!("Line Spacing: {}%", (o.line_spacing * 100.0).round() as u32);
+        let delay = if o.delay_secs <= 0.0 {
+            "Chat Delay: None".to_owned()
+        } else {
+            format!("Chat Delay: {:.1}s", o.delay_secs)
+        };
+        let width = format!("Chat Width: {}px", o.width_px() as u32);
+        let focused = format!("Focused Height: {}px", o.height_px(true) as u32);
+        let unfocused = format!("Unfocused Height: {}px", o.height_px(false) as u32);
+        let suggestions = format!("Command Suggestions: {}", on_off(o.auto_suggestions));
+        let secure = format!("Only Show Secure Chat: {}", on_off(o.only_secure));
+        let drafts = format!("Save Chat Drafts: {}", on_off(o.save_drafts));
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair("Chat: Shown", "Chat Colors: ON"),
-            OptRow::Pair("Web Links: ON", "Prompt on Links: ON"),
-            OptRow::Pair("Chat Text Opacity: 100%", "Text Background Opacity: 50%"),
-            OptRow::Pair("Chat Text Size: 100%", "Line Spacing: 0%"),
-            OptRow::Pair("Chat Delay: None", "Chat Width: 100%"),
-            OptRow::Pair("Focused Height: 100%", "Unfocused Height: 100%"),
-            OptRow::Pair("Narrator: OFF", "Command Suggestions: ON"),
+            OptRow::Pair(&chat, &colors),
+            OptRow::Pair(&links, &prompt),
+            OptRow::Pair(&opacity, &bg_opacity),
+            OptRow::Pair(&scale, &spacing),
+            OptRow::Pair(&delay, &width),
+            OptRow::Pair(&focused, &unfocused),
+            OptRow::Pair("Narrator: OFF", &suggestions),
             OptRow::Pair("Hide Matched Names: ON", "Reduced Debug Info: OFF"),
-            OptRow::Pair("Only Show Secure Chat: OFF", "Save Chat Drafts: OFF"),
+            OptRow::Pair(&secure, &drafts),
         ];
-        let disabled = &[
-            "Chat:",
-            "Chat Colors:",
-            "Web Links:",
-            "Prompt on Links:",
-            "Chat Text Opacity:",
-            "Text Background Opacity:",
-            "Chat Text Size:",
-            "Line Spacing:",
-            "Chat Delay:",
-            "Chat Width:",
-            "Focused Height:",
-            "Unfocused Height:",
-            "Narrator:",
-            "Command Suggestions:",
-            "Hide Matched Names:",
-            "Reduced Debug Info:",
-            "Only Show Secure Chat:",
-            "Save Chat Drafts:",
+        let sliders: &[(&str, f32)] = &[
+            ("Chat Text Opacity:", o.opacity),
+            ("Text Background Opacity:", o.text_background_opacity),
+            ("Chat Text Size:", o.scale),
+            ("Line Spacing:", o.line_spacing),
+            ("Chat Delay:", (o.delay_secs / 6.0).clamp(0.0, 1.0)),
+            ("Chat Width:", o.width),
+            ("Focused Height:", o.height_focused),
+            ("Unfocused Height:", o.height_unfocused),
         ];
+        let disabled = &["Narrator:", "Hide Matched Names:", "Reduced Debug Info:"];
         self.build_options_grid(
             sw,
             sh,
@@ -354,7 +376,7 @@ impl MainMenu {
             Screen::Options,
             &rows,
             &[],
-            &[],
+            sliders,
             disabled,
             true,
             &[],
@@ -382,7 +404,18 @@ impl MainMenu {
                 (self.damage_tilt_strength * 100.0).round()
             )
         };
+        let force_unicode = if self.force_unicode_font {
+            "Force Unicode Font: ON"
+        } else {
+            "Force Unicode Font: OFF"
+        };
+        let japanese_variants = if self.japanese_glyph_variants {
+            "Japanese Glyph Variants: ON"
+        } else {
+            "Japanese Glyph Variants: OFF"
+        };
         let rows: Vec<OptRow> = vec![
+            OptRow::Pair(force_unicode, japanese_variants),
             OptRow::Pair("Narrator: OFF", self.show_subtitles_label()),
             OptRow::Pair("High Contrast: OFF", "Menu Background Blur: 50%"),
             OptRow::Pair(
@@ -960,6 +993,16 @@ impl MainMenu {
                         self.show_subtitles = !self.show_subtitles;
                         self.save_settings();
                     }
+                    if label.starts_with("Force Unicode Font:") {
+                        self.force_unicode_font = !self.force_unicode_font;
+                        self.reload_assets = true;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Japanese Glyph Variants:") {
+                        self.japanese_glyph_variants = !self.japanese_glyph_variants;
+                        self.reload_assets = true;
+                        self.save_settings();
+                    }
                     if label.starts_with("Vignette:") {
                         self.vignette = !self.vignette;
                         self.save_settings();
@@ -970,6 +1013,34 @@ impl MainMenu {
                     }
                     if label.starts_with("Show Current Server:") {
                         self.show_current_server = !self.show_current_server;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Chat:") {
+                        self.chat_options.visibility = self.chat_options.visibility.cycle();
+                        self.save_settings();
+                    }
+                    if label.starts_with("Chat Colors:") {
+                        self.chat_options.colors = !self.chat_options.colors;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Web Links:") {
+                        self.chat_options.links = !self.chat_options.links;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Prompt on Links:") {
+                        self.chat_options.links_prompt = !self.chat_options.links_prompt;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Command Suggestions:") {
+                        self.chat_options.auto_suggestions = !self.chat_options.auto_suggestions;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Only Show Secure Chat:") {
+                        self.chat_options.only_secure = !self.chat_options.only_secure;
+                        self.save_settings();
+                    }
+                    if label.starts_with("Save Chat Drafts:") {
+                        self.chat_options.save_drafts = !self.chat_options.save_drafts;
                         self.save_settings();
                     }
                     if label.starts_with("Cape:") {
@@ -1034,6 +1105,14 @@ impl MainMenu {
                 "Ambient/Environment:" => self.ambient_volume = v,
                 "Voice/Speech:" => self.voice_volume = v,
                 "UI:" => self.ui_volume = v,
+                "Chat Text Opacity:" => self.chat_options.opacity = v,
+                "Text Background Opacity:" => self.chat_options.text_background_opacity = v,
+                "Chat Text Size:" => self.chat_options.scale = v,
+                "Line Spacing:" => self.chat_options.line_spacing = v,
+                "Chat Delay:" => self.chat_options.delay_secs = (v * 60.0).round() / 10.0,
+                "Chat Width:" => self.chat_options.width = v,
+                "Focused Height:" => self.chat_options.height_focused = v,
+                "Unfocused Height:" => self.chat_options.height_unfocused = v,
                 _ => continue,
             }
             self.settings_dirty = true;

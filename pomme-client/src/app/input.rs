@@ -41,6 +41,11 @@ pub enum Action {
     SpectatorHotbar,
 }
 
+pub const KEY_FORWARD: KeyCode = KeyCode::KeyW;
+pub const KEY_LEFT: KeyCode = KeyCode::KeyA;
+pub const KEY_BACK: KeyCode = KeyCode::KeyS;
+pub const KEY_RIGHT: KeyCode = KeyCode::KeyD;
+
 impl Action {
     pub const fn default_key(self) -> Option<KeyCode> {
         match self {
@@ -274,7 +279,12 @@ impl InputState {
                     self.recent_actions.remove(&Action::ToggleInventory);
                 }
                 if self.action_just_pressed(Action::OpenMenu) {
-                    if game.game_mode_switcher.is_some() {
+                    if game.chat.is_open() {
+                        // ChatScreen consumes Escape before the game-level
+                        // pause action: link confirmation, then suggestions,
+                        // then the chat screen itself.
+                        should_apply_cursor_grab = game.chat.handle_escape();
+                    } else if game.game_mode_switcher.is_some() {
                         // Esc cancels the F3+F4 switcher without applying.
                         game.game_mode_switcher = None;
                         should_apply_cursor_grab = true;
@@ -459,13 +469,16 @@ impl InputState {
     pub fn performing_action(&self, action: Action) -> bool {
         match action {
             Action::Jump => {
-                self.key_pressed(KeyCode::Space) || self.gamepad_button_down(Button::South)
+                self.key_pressed(action.default_key().expect("jump has keyboard binding"))
+                    || self.gamepad_button_down(Button::South)
             }
             Action::Sneak => {
-                self.key_pressed(KeyCode::ShiftLeft) || self.gamepad_button_down(Button::LeftThumb)
+                self.key_pressed(action.default_key().expect("sneak has keyboard binding"))
+                    || self.gamepad_button_down(Button::LeftThumb)
             }
             Action::Sprint => {
-                self.key_pressed(KeyCode::ControlLeft) || self.gamepad_button_down(Button::West)
+                self.key_pressed(action.default_key().expect("sprint has keyboard binding"))
+                    || self.gamepad_button_down(Button::West)
             }
             Action::Destroy => self.left_held() || self.gamepad_button_down(Button::RightTrigger2),
             Action::Use => self.right_held() || self.gamepad_button_down(Button::LeftTrigger2),
@@ -474,23 +487,45 @@ impl InputState {
                     || self.gamepad_button_down(Button::North)
             }
             Action::OpenMenu => {
-                self.key_pressed(KeyCode::Escape) || self.gamepad_button_down(Button::Start)
+                self.key_pressed(action.default_key().expect("menu has keyboard binding"))
+                    || self.gamepad_button_down(Button::Start)
             }
             Action::ViewPlayerList => {
-                self.key_pressed(KeyCode::Tab) || self.gamepad_button_down(Button::Select)
+                self.key_pressed(
+                    action
+                        .default_key()
+                        .expect("player list has keyboard binding"),
+                ) || self.gamepad_button_down(Button::Select)
             }
             Action::ChangePerspective => {
-                self.key_pressed(KeyCode::F5) || self.gamepad_button_down(Button::DPadUp)
+                self.key_pressed(
+                    action
+                        .default_key()
+                        .expect("perspective has keyboard binding"),
+                ) || self.gamepad_button_down(Button::DPadUp)
             }
             Action::OpenChat => {
-                self.key_pressed(KeyCode::KeyT) || self.gamepad_button_down(Button::DPadRight)
+                self.key_pressed(action.default_key().expect("chat has keyboard binding"))
+                    || self.gamepad_button_down(Button::DPadRight)
             }
-            Action::OpenCommands => self.key_pressed(KeyCode::Slash),
+            Action::OpenCommands => self.key_pressed(
+                action
+                    .default_key()
+                    .expect("commands have keyboard binding"),
+            ),
             // Controller-only; keyboard Escape closes via OpenMenu and the chat path.
             Action::Close => self.gamepad_button_down(Button::East),
             // Click-count driven (`consume_click`); held state only.
-            Action::DropItem => self.key_pressed(KeyCode::KeyQ),
-            Action::SwapOffhand => self.key_pressed(KeyCode::KeyF),
+            Action::DropItem => self.key_pressed(
+                action
+                    .default_key()
+                    .expect("drop item has keyboard binding"),
+            ),
+            Action::SwapOffhand => self.key_pressed(
+                action
+                    .default_key()
+                    .expect("swap offhand has keyboard binding"),
+            ),
             // Vanilla `key.spectatorHotbar` default: middle mouse.
             Action::SpectatorHotbar => self.middle_click.held,
         }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -13,11 +14,39 @@ pub type SharedCommandTree = Arc<Mutex<Option<Arc<CommandTree>>>>;
 
 /// The server's Brigadier command tree as a flat node list plus the root index.
 /// Mirrors how the vanilla client keeps a `CommandDispatcher` built from
-/// `ClientboundCommandsPacket`; used here to pick signed vs unsigned command
-/// packets (and, in future, to drive tab-completion).
+/// `ClientboundCommandsPacket`; used for command signing, local parse/usage
+/// feedback, and Vanilla-style chat completion/suggestion presentation.
 pub struct CommandTree {
     nodes: Vec<BrigadierNodeStub>,
     root_index: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnattendedCommandCheck {
+    NoIssues,
+    SignatureRequired,
+    PermissionsRequired,
+    ParseErrors,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandTokenKind {
+    Literal,
+    Argument(usize),
+    Unparsed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandTokenRange {
+    pub range: Range<usize>,
+    pub kind: CommandTokenKind,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommandPresentation {
+    pub tokens: Vec<CommandTokenRange>,
+    pub usage: Vec<String>,
+    pub usage_start: usize,
 }
 
 impl CommandTree {
@@ -50,6 +79,36 @@ impl CommandTree {
         )
     }
 
+    fn conservative_subtree_flags(&self, start: u32) -> (bool, bool) {
+        let mut stack = vec![start];
+        let mut visited = HashSet::new();
+        let mut has_message = false;
+        let mut has_restricted = false;
+        while let Some(index) = stack.pop() {
+            if !visited.insert(index) {
+                continue;
+            }
+            let Some(node) = self.node(index) else {
+                continue;
+            };
+            has_restricted |= node.is_restricted;
+            if matches!(
+                &node.node_type,
+                NodeType::Argument {
+                    parser: BrigadierParser::Message,
+                    ..
+                }
+            ) {
+                has_message = true;
+            }
+            stack.extend(node.children.iter().copied());
+            if let Some(redirect) = node.redirect_node {
+                stack.push(redirect);
+            }
+        }
+        (has_message, has_restricted)
+    }
+
     /// Follow one command token: a literal child whose name equals `token`,
     /// else the (single) argument child that would consume it.
     fn descend(&self, child_ids: &[u32], token: &str) -> Option<u32> {
@@ -77,11 +136,108 @@ impl CommandTree {
             .unwrap_or_default()
     }
 
-    /// Whether parsing `command` walks through an argument whose parser is
-    /// `Message` — the only signable argument type. Mirrors vanilla
-    /// `SignableCommand.of`: such commands must be sent signed once a chat
-    /// session exists. Returns `false` on any parse miss, leaving validation to
-    /// the server (matching vanilla, which sends unsigned when unsure).
+    /// Classify a server-provided click command before unattended execution.
+    ///
+    /// Direct execution is deliberately fail-closed: only an all-literal,
+    /// executable, unrestricted path is considered parser-exact here. Network
+    /// argument stubs do not contain enough client-side parser machinery for
+    /// Pomme to reproduce Brigadier's best-branch/exceptions semantics safely.
+    /// Any non-message argument therefore requires confirmation rather than
+    /// risking a false-safe click. A message argument still gets the stronger
+    /// signature-required confirmation, matching Vanilla's consent boundary.
+    pub fn verify_unattended(&self, command: &str) -> UnattendedCommandCheck {
+        let lexical = command_token_ranges(command);
+        if lexical.is_empty() {
+            return UnattendedCommandCheck::ParseErrors;
+        }
+        let mut current = self.root_index;
+        let mut token_index = 0usize;
+
+        while token_index < lexical.len() {
+            let Some(node) = self.node(current) else {
+                return UnattendedCommandCheck::ParseErrors;
+            };
+            if node.is_restricted {
+                return UnattendedCommandCheck::PermissionsRequired;
+            }
+            if let Some(redirect) = node.redirect_node {
+                let (has_message, has_restricted) = self.conservative_subtree_flags(redirect);
+                if has_message {
+                    return UnattendedCommandCheck::SignatureRequired;
+                }
+                if has_restricted {
+                    return UnattendedCommandCheck::PermissionsRequired;
+                }
+                return UnattendedCommandCheck::ParseErrors;
+            }
+            let token = &command[lexical[token_index].clone()];
+            let child_ids = &node.children;
+            if let Some(cid) = child_ids.iter().copied().find(|&cid| {
+                matches!(
+                    self.node(cid).map(|child| &child.node_type),
+                    Some(NodeType::Literal { name }) if name == token
+                )
+            }) {
+                let Some(child) = self.node(cid) else {
+                    return UnattendedCommandCheck::ParseErrors;
+                };
+                if child.is_restricted {
+                    return UnattendedCommandCheck::PermissionsRequired;
+                }
+                current = cid;
+                token_index += 1;
+                continue;
+            }
+
+            let mut saw_argument = false;
+            let mut saw_restricted = false;
+            let mut saw_message = false;
+            for &cid in child_ids {
+                let Some(child) = self.node(cid) else {
+                    continue;
+                };
+                let NodeType::Argument { .. } = &child.node_type else {
+                    continue;
+                };
+                saw_argument = true;
+                let (subtree_message, subtree_restricted) = self.conservative_subtree_flags(cid);
+                saw_message |= subtree_message;
+                saw_restricted |= subtree_restricted;
+            }
+            if saw_message {
+                return UnattendedCommandCheck::SignatureRequired;
+            }
+            if saw_restricted {
+                return UnattendedCommandCheck::PermissionsRequired;
+            }
+            if saw_argument {
+                return UnattendedCommandCheck::ParseErrors;
+            }
+            return UnattendedCommandCheck::ParseErrors;
+        }
+
+        let Some(node) = self.node(current) else {
+            return UnattendedCommandCheck::ParseErrors;
+        };
+        if node.is_restricted {
+            return UnattendedCommandCheck::PermissionsRequired;
+        }
+        if let Some(redirect) = node.redirect_node {
+            let (has_message, has_restricted) = self.conservative_subtree_flags(redirect);
+            if has_message {
+                return UnattendedCommandCheck::SignatureRequired;
+            }
+            if has_restricted {
+                return UnattendedCommandCheck::PermissionsRequired;
+            }
+            return UnattendedCommandCheck::ParseErrors;
+        }
+        if !node.is_executable {
+            return UnattendedCommandCheck::ParseErrors;
+        }
+        UnattendedCommandCheck::NoIssues
+    }
+
     /// Raw values of the command's signable Brigadier arguments. In Vanilla
     /// 26.2 only `MessageArgument` implements `SignedArgument`, and its parsed
     /// string range consumes the remainder of the command verbatim.
@@ -135,27 +291,7 @@ impl CommandTree {
 
     #[cfg(test)]
     pub fn has_signable_args(&self, command: &str) -> bool {
-        let mut current = self.root_index;
-        for token in command.split_whitespace() {
-            let Some(node) = self.node(current) else {
-                return false;
-            };
-            let child_ids = self.effective_children(node);
-            let Some(cid) = self.descend(child_ids, token) else {
-                return false;
-            };
-            if matches!(
-                self.node(cid).map(|c| &c.node_type),
-                Some(NodeType::Argument {
-                    parser: BrigadierParser::Message,
-                    ..
-                })
-            ) {
-                return true;
-            }
-            current = cid;
-        }
-        false
+        !self.signable_arguments(command).is_empty()
     }
 
     /// Local completions for `command` (the chat input with the leading `/`
@@ -208,6 +344,155 @@ impl CommandTree {
             partial_len: partial.len(),
             needs_server,
         }
+    }
+
+    /// Parsed ranges and smart-usage text for ChatScreen's command renderer.
+    /// This mirrors Vanilla's presentation model using the server-supplied
+    /// Brigadier tree. Minecraft-specific argument values are still validated
+    /// by the server, but their consumed ranges and node transitions come from
+    /// the packet metadata rather than a whitespace-only coloring heuristic.
+    pub fn presentation(&self, command: &str) -> CommandPresentation {
+        let lexical = command_token_ranges(command);
+        let mut out = CommandPresentation::default();
+        let mut current = self.root_index;
+        let mut token_index = 0usize;
+        let mut argument_index = 0usize;
+
+        while token_index < lexical.len() {
+            let Some(parent) = self.node(current) else {
+                break;
+            };
+            let children = self.effective_children(parent);
+            let token_text = &command[lexical[token_index].clone()];
+
+            if let Some(child) = children.iter().copied().find(|&id| {
+                matches!(
+                    self.node(id).map(|node| &node.node_type),
+                    Some(NodeType::Literal { name }) if name == token_text
+                )
+            }) {
+                out.tokens.push(CommandTokenRange {
+                    range: lexical[token_index].clone(),
+                    kind: CommandTokenKind::Literal,
+                });
+                current = child;
+                token_index += 1;
+                continue;
+            }
+
+            let Some(child) = children.iter().copied().find(|&id| self.is_argument(id)) else {
+                out.tokens.push(CommandTokenRange {
+                    range: lexical[token_index].start..command.len(),
+                    kind: CommandTokenKind::Unparsed,
+                });
+                return out;
+            };
+            let Some(NodeType::Argument { parser, .. }) =
+                self.node(child).map(|node| &node.node_type)
+            else {
+                unreachable!();
+            };
+            let consumed = argument_token_count(parser, lexical.len() - token_index);
+            if consumed == 0 || token_index + consumed > lexical.len() {
+                out.tokens.push(CommandTokenRange {
+                    range: lexical[token_index].start..command.len(),
+                    kind: CommandTokenKind::Unparsed,
+                });
+                return out;
+            }
+            let end = lexical[token_index + consumed - 1].end;
+            out.tokens.push(CommandTokenRange {
+                range: lexical[token_index].start..end,
+                kind: CommandTokenKind::Argument(argument_index % 5),
+            });
+            argument_index += 1;
+            current = child;
+            token_index += consumed;
+        }
+
+        out.usage_start = if command.ends_with(char::is_whitespace) {
+            command.len()
+        } else {
+            lexical.last().map_or(0, |range| range.start)
+        };
+        if let Some(node) = self.node(current) {
+            out.usage = self
+                .effective_children(node)
+                .iter()
+                .filter_map(|&child| {
+                    let child_node = self.node(child)?;
+                    if matches!(child_node.node_type, NodeType::Literal { .. }) {
+                        return None;
+                    }
+                    self.smart_usage(child, node.is_executable, false)
+                })
+                .collect();
+        }
+        out
+    }
+
+    fn smart_usage(&self, node_id: u32, optional: bool, deep: bool) -> Option<String> {
+        let node = self.node(node_id)?;
+        let usage_text = match &node.node_type {
+            NodeType::Root => return None,
+            NodeType::Literal { name } => name.clone(),
+            NodeType::Argument { name, .. } => format!("<{name}>"),
+        };
+        let this = if optional {
+            format!("[{usage_text}]")
+        } else {
+            usage_text
+        };
+        if deep {
+            return Some(this);
+        }
+        if let Some(redirect) = node.redirect_node {
+            let redirect = if redirect == self.root_index {
+                "...".to_owned()
+            } else {
+                let target = self.node(redirect)?.name()?;
+                format!("-> {target}")
+            };
+            return Some(format!("{this} {redirect}"));
+        }
+
+        let children = self.effective_children(node);
+        if children.is_empty() {
+            return Some(this);
+        }
+        let child_optional = node.is_executable;
+        if children.len() == 1 {
+            let child = self.smart_usage(children[0], child_optional, child_optional)?;
+            return Some(format!("{this} {child}"));
+        }
+
+        let mut usages = Vec::new();
+        for &child in children {
+            if let Some(usage) = self.smart_usage(child, child_optional, true)
+                && !usages.contains(&usage)
+            {
+                usages.push(usage);
+            }
+        }
+        if usages.is_empty() {
+            return Some(this);
+        }
+        if usages.len() == 1 {
+            let usage = if child_optional {
+                format!("[{}]", usages[0])
+            } else {
+                usages.remove(0)
+            };
+            return Some(format!("{this} {usage}"));
+        }
+
+        let separator = usages.join("|");
+        let group = if child_optional {
+            format!("[{separator}]")
+        } else {
+            format!("({separator})")
+        };
+        Some(format!("{this} {group}"))
     }
 }
 
@@ -345,6 +630,10 @@ mod tests {
         ]);
         assert_eq!(t.root_child_names(), vec!["time".to_string()]);
         assert!(!t.has_signable_args("time set day"));
+        assert_eq!(
+            t.verify_unattended("time set day"),
+            UnattendedCommandCheck::NoIssues
+        );
     }
 
     #[test]
@@ -357,15 +646,111 @@ mod tests {
             argument("message", BrigadierParser::Message, vec![], true),
         ]);
         assert!(t.has_signable_args("msg Steve hello there"));
-        // The message token has not been supplied yet, so nothing to sign.
+        assert_eq!(
+            t.verify_unattended("msg Steve hello there"),
+            UnattendedCommandCheck::SignatureRequired
+        );
+        assert_eq!(
+            t.signable_arguments("msg Steve hello there"),
+            vec![("message".to_owned(), "hello there".to_owned())]
+        );
+        // The message token has not been supplied yet, so nothing to sign,
+        // but the command is not executable and therefore still needs user
+        // confirmation rather than unattended execution.
         assert!(!t.has_signable_args("msg Steve"));
+        assert_eq!(
+            t.verify_unattended("msg Steve"),
+            UnattendedCommandCheck::SignatureRequired,
+            "an unparsed target argument must not hide a downstream MessageArgument"
+        );
         assert!(!t.has_signable_args("msg"));
+        assert_eq!(
+            t.verify_unattended("msg"),
+            UnattendedCommandCheck::ParseErrors
+        );
     }
 
     #[test]
     fn unknown_command_is_not_signable() {
         let t = tree(vec![root(vec![1]), literal("time", vec![], true)]);
         assert!(!t.has_signable_args("nonexistent foo"));
+        assert_eq!(
+            t.verify_unattended("nonexistent foo"),
+            UnattendedCommandCheck::ParseErrors
+        );
+    }
+
+    #[test]
+    fn unattended_verifier_fails_closed_for_unparsed_arguments() {
+        let t = tree(vec![
+            root(vec![1]),
+            literal("number", vec![2], false),
+            argument(
+                "value",
+                BrigadierParser::Integer(
+                    azalea_protocol::packets::game::c_commands::BrigadierNumber::new(None, None),
+                ),
+                vec![],
+                true,
+            ),
+        ]);
+        assert_eq!(
+            t.verify_unattended("number not-an-int"),
+            UnattendedCommandCheck::ParseErrors
+        );
+    }
+
+    #[test]
+    fn unattended_verifier_prefers_signature_confirmation_for_ambiguous_message_branch() {
+        let t = tree(vec![
+            root(vec![1]),
+            literal("mixed", vec![2, 3], false),
+            argument(
+                "number",
+                BrigadierParser::Integer(
+                    azalea_protocol::packets::game::c_commands::BrigadierNumber::new(None, None),
+                ),
+                vec![],
+                true,
+            ),
+            argument("message", BrigadierParser::Message, vec![], true),
+        ]);
+        assert_eq!(
+            t.verify_unattended("mixed hello"),
+            UnattendedCommandCheck::SignatureRequired
+        );
+    }
+
+    #[test]
+    fn unattended_verifier_fails_closed_through_redirects_and_trailing_input() {
+        let mut alias = literal("alias", vec![], false);
+        alias.redirect_node = Some(2);
+        let t = tree(vec![
+            root(vec![1, 4]),
+            alias,
+            literal("target", vec![3], false),
+            argument("message", BrigadierParser::Message, vec![], true),
+            literal("plain", vec![], true),
+        ]);
+        assert_eq!(
+            t.verify_unattended("alias hello"),
+            UnattendedCommandCheck::SignatureRequired
+        );
+        assert_eq!(
+            t.verify_unattended("plain extra"),
+            UnattendedCommandCheck::ParseErrors
+        );
+    }
+
+    #[test]
+    fn unattended_verifier_reports_restricted_nodes() {
+        let mut restricted = literal("admin", vec![], true);
+        restricted.is_restricted = true;
+        let t = tree(vec![root(vec![1]), restricted]);
+        assert_eq!(
+            t.verify_unattended("admin"),
+            UnattendedCommandCheck::PermissionsRequired
+        );
     }
 
     #[test]
