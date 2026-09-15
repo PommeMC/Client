@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Add;
 use std::sync::Arc;
 use std::time::Instant;
@@ -41,9 +41,16 @@ pub struct PendingPackDownload {
 
 pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::PackError>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PlayerSkinSource {
+    Uuid,
+    Textures(String),
+    Name(String),
+}
+
 struct PlayerSkinResult {
     uuid: uuid::Uuid,
-    textures: Option<String>,
+    source: PlayerSkinSource,
     result: Result<crate::renderer::SkinData, String>,
 }
 
@@ -263,20 +270,40 @@ pub struct AppCore {
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
+    /// Last cursor-grab state applied to the OS window. `apply_cursor_grab`
+    /// is edge-triggered so screens/modals do not recenter the pointer every
+    /// frame while they remain open.
     cursor_grab_applied: Option<bool>,
     player_skin_tx: crossbeam_channel::Sender<PlayerSkinResult>,
     player_skin_rx: crossbeam_channel::Receiver<PlayerSkinResult>,
-    requested_player_skins: HashMap<uuid::Uuid, Option<String>>,
+    requested_player_skins: HashMap<uuid::Uuid, PlayerSkinSource>,
     /// 8x8 RGBA faces of fetched player skins, for the spectator menu's
     /// face atlas (the GPU-side skins keep no CPU pixels).
     player_faces: HashMap<uuid::Uuid, Vec<u8>>,
+    player_faces_no_hat: HashMap<uuid::Uuid, Vec<u8>>,
     player_faces_dirty: bool,
+    inline_object_sprites: HashMap<String, Vec<u8>>,
+    game_dynamic_atlas_keys: HashSet<String>,
 }
 
 /// Folds the credits roll's keys into a `CREDITS_KEY_*` mask. Both control
 /// keys count separately in vanilla's `speedupModifiers`, so this can't go
 /// through `InputState::ctrl_held`, which folds them into one winit modifier
 /// bit.
+fn inline_player_cache_uuid(key: &str) -> uuid::Uuid {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(key.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // Mark the synthetic cache key as RFC 4122 variant/version 4. It is never
+    // sent to the server; this only keeps it distinct and stable in Pomme's
+    // existing UUID-keyed skin cache.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
+}
+
 fn credits_key_mask(mut is_set: impl FnMut(KeyCode) -> bool) -> u8 {
     [
         (KeyCode::ArrowUp, CREDITS_KEY_UP),
@@ -288,6 +315,10 @@ fn credits_key_mask(mut is_set: impl FnMut(KeyCode) -> bool) -> u8 {
     .filter(|&(code, _)| is_set(code))
     .map(|(_, bit)| bit)
     .sum()
+}
+
+fn cursor_grab_transition_needed(applied: Option<bool>, desired: bool) -> bool {
+    applied != Some(desired)
 }
 
 impl AppCore {
@@ -344,7 +375,10 @@ impl AppCore {
             player_skin_rx,
             requested_player_skins: HashMap::new(),
             player_faces: HashMap::new(),
+            player_faces_no_hat: HashMap::new(),
             player_faces_dirty: false,
+            inline_object_sprites: HashMap::new(),
+            game_dynamic_atlas_keys: HashSet::new(),
         }
     }
 
@@ -383,13 +417,16 @@ impl AppCore {
     }
 
     pub fn invalidate_cursor_grab_state(&mut self) {
+        // The OS/window manager can drop a grab out-of-band on focus/display
+        // transitions. Force the next application to touch the real window
+        // state instead of trusting the cached desired state.
         self.cursor_grab_applied = None;
     }
 
     pub fn apply_cursor_grab(&mut self, window: &Window, game: Option<&mut GameState>) {
         let captured =
             game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
-        if self.cursor_grab_applied == Some(captured) {
+        if !cursor_grab_transition_needed(self.cursor_grab_applied, captured) {
             return;
         }
         if captured {
@@ -489,29 +526,42 @@ impl AppCore {
     }
 
     fn queue_player_skin(&mut self, uuid: uuid::Uuid, textures: Option<String>) {
-        if self.requested_player_skins.get(&uuid) == Some(&textures) {
+        let source = textures
+            .map(PlayerSkinSource::Textures)
+            .unwrap_or(PlayerSkinSource::Uuid);
+        self.queue_player_skin_source(uuid, source);
+    }
+
+    fn queue_player_skin_source(&mut self, uuid: uuid::Uuid, source: PlayerSkinSource) {
+        if self.requested_player_skins.get(&uuid) == Some(&source) {
             return;
         }
-        self.requested_player_skins.insert(uuid, textures.clone());
+        self.requested_player_skins.insert(uuid, source.clone());
 
         // Name-derived (v3) UUIDs from offline-mode servers have no Mojang
-        // profile to fetch; keep the default skin.
-        if textures.is_none() && uuid.get_version_num() == 3 {
+        // UUID profile to fetch; keep the default skin unless a different
+        // source (embedded textures or an explicit profile name) was supplied.
+        if matches!(source, PlayerSkinSource::Uuid) && uuid.get_version_num() == 3 {
             return;
         }
 
         let tx = self.player_skin_tx.clone();
-        let requested_textures = textures.clone();
         self.tokio_rt.spawn(async move {
-            let result = if let Some(textures) = textures {
-                crate::renderer::fetch_skin_texture_from_profile_property(&textures).await
-            } else {
-                let uuid_str = uuid.to_string().replace('-', "");
-                crate::renderer::fetch_skin_texture(&uuid_str).await
+            let result = match &source {
+                PlayerSkinSource::Textures(textures) => {
+                    crate::renderer::fetch_skin_texture_from_profile_property(textures).await
+                }
+                PlayerSkinSource::Name(name) => {
+                    crate::renderer::fetch_skin_texture_by_name(name).await
+                }
+                PlayerSkinSource::Uuid => {
+                    let uuid_str = uuid.to_string().replace('-', "");
+                    crate::renderer::fetch_skin_texture(&uuid_str).await
+                }
             };
             let _ = tx.send(PlayerSkinResult {
                 uuid,
-                textures: requested_textures,
+                source,
                 result,
             });
         });
@@ -519,7 +569,7 @@ impl AppCore {
 
     fn drain_player_skin_results(&mut self, renderer: &mut Renderer) {
         while let Ok(skin) = self.player_skin_rx.try_recv() {
-            if self.requested_player_skins.get(&skin.uuid) != Some(&skin.textures) {
+            if self.requested_player_skins.get(&skin.uuid) != Some(&skin.source) {
                 continue;
             }
             match skin.result {
@@ -530,6 +580,16 @@ impl AppCore {
                         data.height,
                     ) {
                         self.player_faces.insert(skin.uuid, face);
+                        if let Some(base) =
+                            crate::renderer::pipelines::menu_overlay::extract_face_8x8_with_hat(
+                                &data.pixels,
+                                data.width,
+                                data.height,
+                                false,
+                            )
+                        {
+                            self.player_faces_no_hat.insert(skin.uuid, base);
+                        }
                         self.player_faces_dirty = true;
                     }
                     renderer.update_player_entity_skin(&skin.uuid, &data);
@@ -541,25 +601,148 @@ impl AppCore {
         }
     }
 
-    /// Flush cached faces into the shared face/favicon atlas. Called only
-    /// while the spectator menu is open: the rebuild waits on the GPU queue,
-    /// so it must stay off the common frame path.
-    pub fn ensure_player_face_atlas(&mut self, renderer: &mut Renderer) {
-        if !self.player_faces_dirty || self.player_faces.is_empty() {
+    /// Synchronize the shared in-game dynamic UI atlas. Spectator faces and
+    /// 26.2 inline chat object glyphs share the same texture binding, so they
+    /// must be packed together whenever either feature is active.
+    pub fn sync_game_dynamic_atlas(
+        &mut self,
+        game: &GameState,
+        renderer: &mut Renderer,
+        spectator_active: bool,
+    ) {
+        use crate::ui::text::InlineObject;
+
+        let objects = game.chat.inline_objects();
+        if objects.is_empty() && !spectator_active {
             return;
         }
-        self.player_faces_dirty = false;
-        let faces: Vec<(String, Vec<u8>, u32)> = self
-            .player_faces
-            .iter()
-            .map(|(uuid, face)| (uuid.to_string(), face.clone(), 8))
-            .collect();
-        renderer.update_face_atlas(&faces);
+
+        #[derive(Clone)]
+        struct PlayerAlias {
+            key: String,
+            cache_uuid: uuid::Uuid,
+            hat: bool,
+        }
+
+        let mut desired_keys = HashSet::new();
+        let mut player_aliases = Vec::new();
+
+        if spectator_active {
+            for uuid in self.player_faces.keys() {
+                desired_keys.insert(uuid.to_string());
+            }
+        }
+
+        for object in objects {
+            match object {
+                InlineObject::AtlasSprite {
+                    ref atlas,
+                    ref sprite,
+                } => {
+                    let key = object.atlas_key();
+                    desired_keys.insert(key.clone());
+                    if !self.inline_object_sprites.contains_key(&key) {
+                        let pixels = crate::ui::object_glyph::load_atlas_sprite_8x8(
+                            &self.data_dirs.jar_assets_dir,
+                            &self.asset_index,
+                            &self.resource_packs,
+                            atlas,
+                            sprite,
+                        )
+                        .unwrap_or_else(crate::ui::object_glyph::missing_tile_8x8);
+                        self.inline_object_sprites.insert(key, pixels);
+                    }
+                }
+                InlineObject::Player {
+                    uuid,
+                    ref name,
+                    ref textures,
+                    hat,
+                } => {
+                    let key = object.atlas_key();
+                    desired_keys.insert(key.clone());
+
+                    let tab_match = name.as_ref().and_then(|name| {
+                        game.tab_list
+                            .players
+                            .values()
+                            .find(|player| player.name == *name)
+                    });
+                    let cache_uuid = uuid
+                        .or_else(|| tab_match.map(|player| player.uuid))
+                        .unwrap_or_else(|| inline_player_cache_uuid(&key));
+
+                    if !self.player_faces.contains_key(&cache_uuid) {
+                        let source = if let Some(textures) = textures.clone() {
+                            Some(PlayerSkinSource::Textures(textures))
+                        } else if let Some(player) = tab_match {
+                            player
+                                .textures
+                                .clone()
+                                .map(PlayerSkinSource::Textures)
+                                .or(Some(PlayerSkinSource::Uuid))
+                        } else if uuid.is_some() {
+                            Some(PlayerSkinSource::Uuid)
+                        } else {
+                            name.clone().map(PlayerSkinSource::Name)
+                        };
+                        if let Some(source) = source {
+                            self.queue_player_skin_source(cache_uuid, source);
+                        }
+                    }
+
+                    player_aliases.push(PlayerAlias {
+                        key,
+                        cache_uuid,
+                        hat,
+                    });
+                }
+            }
+        }
+
+        let needs_rebuild = self.player_faces_dirty || desired_keys != self.game_dynamic_atlas_keys;
+        if !needs_rebuild {
+            return;
+        }
+
+        let mut entries = Vec::<(String, Vec<u8>, u32)>::new();
+        if spectator_active {
+            entries.extend(
+                self.player_faces
+                    .iter()
+                    .map(|(uuid, face)| (uuid.to_string(), face.clone(), 8)),
+            );
+        }
+        for key in &desired_keys {
+            if let Some(sprite) = self.inline_object_sprites.get(key) {
+                entries.push((key.clone(), sprite.clone(), 8));
+            }
+        }
+        for alias in player_aliases {
+            let face = if alias.hat {
+                self.player_faces.get(&alias.cache_uuid)
+            } else {
+                self.player_faces_no_hat.get(&alias.cache_uuid)
+            };
+            if let Some(face) = face {
+                entries.push((alias.key, face.clone(), 8));
+            }
+        }
+
+        if !entries.is_empty() {
+            renderer.update_face_atlas(&entries);
+            self.game_dynamic_atlas_keys = desired_keys;
+            self.player_faces_dirty = false;
+        }
     }
 
     fn remove_player_skin(&mut self, renderer: &mut Renderer, uuid: &uuid::Uuid) {
         self.requested_player_skins.remove(uuid);
-        self.player_faces.remove(uuid);
+        let removed = self.player_faces.remove(uuid).is_some();
+        self.player_faces_no_hat.remove(uuid);
+        if removed {
+            self.player_faces_dirty = true;
+        }
         renderer.remove_player_entity_skin(uuid);
     }
 
@@ -606,7 +789,10 @@ impl AppCore {
         game.subtitles.clear();
         self.requested_player_skins.clear();
         self.player_faces.clear();
+        self.player_faces_no_hat.clear();
         self.player_faces_dirty = false;
+        self.inline_object_sprites.clear();
+        self.game_dynamic_atlas_keys.clear();
         renderer.clear_player_entity_skins();
     }
 
@@ -629,6 +815,8 @@ impl AppCore {
             self.menu.font_options(),
         );
         self.audio.reload_assets(&self.resource_packs);
+        self.inline_object_sprites.clear();
+        self.game_dynamic_atlas_keys.clear();
         self.menu.reload_assets = false;
     }
 
@@ -1152,6 +1340,29 @@ impl AppCore {
                 }
                 NetworkEvent::ActionBar { spans } => {
                     game.action_bar = Some((spans, game.tick_count));
+                }
+                NetworkEvent::ServerLinks { links } => {
+                    game.server_links = links;
+                }
+                NetworkEvent::ShowDialog { dialog } => {
+                    game.chat.close();
+                    game.close_menu();
+                    game.close_creative_inventory();
+                    match crate::ui::server_dialog::ServerDialogState::open(
+                        dialog,
+                        &game.registries,
+                        &game.server_links,
+                    ) {
+                        Ok(dialog) => {
+                            game.server_dialog = Some(dialog);
+                            self.apply_cursor_grab(window, Some(game));
+                        }
+                        Err(error) => tracing::warn!("Could not open server dialog: {error}"),
+                    }
+                }
+                NetworkEvent::ClearDialog => {
+                    game.server_dialog = None;
+                    self.apply_cursor_grab(window, Some(game));
                 }
                 NetworkEvent::BossBarUpdate { id, op } => {
                     game.boss_bars.apply(id, op);
@@ -2424,6 +2635,12 @@ pub(crate) fn death_route(show_death_screen: bool) -> DeathRoute {
     }
 }
 
+/// New `server_render_distance` for a server view-distance announcement, or
+/// `None` to keep the current one. Some servers announce min(our request,
+/// server max); an echo of our own request carries no cap information and
+/// would ratchet the render distance slider down, so only a differing value
+/// counts. It can't be an echo above the request: any such value is the
+/// server's actual view distance, including later reductions.
 pub(crate) fn accepted_player_chat_tag(
     is_local_sender: bool,
     validation: crate::player::tab_list::PlayerChatValidation,
@@ -2458,12 +2675,6 @@ pub(crate) fn accepted_player_chat_tag(
     }
 }
 
-/// New `server_render_distance` for a server view-distance announcement, or
-/// `None` to keep the current one. Some servers announce min(our request,
-/// server max); an echo of our own request carries no cap information and
-/// would ratchet the render distance slider down, so only a differing value
-/// counts. It can't be an echo above the request: any such value is the
-/// server's actual view distance, including later reductions.
 fn server_view_distance_update(announced: u32, last_request: u32) -> Option<u32> {
     let announced = announced.min(crate::world::chunk::MAX_VIEW_DISTANCE);
     (announced != last_request).then_some(announced)
@@ -2508,10 +2719,13 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeathRoute, death_route, player_input_state, server_view_distance_update,
-        serverbound_player_input,
+        DeathRoute, accepted_player_chat_tag, cursor_grab_transition_needed, death_route,
+        player_input_state, server_view_distance_update, serverbound_player_input,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
+    use crate::net::chat_security::SignedChatBody;
+    use crate::player::tab_list::PlayerChatValidation;
+    use crate::ui::chat::ChatMessageTag;
 
     #[test]
     fn controller_packet_directions_match_physical_stick_direction() {
@@ -2542,6 +2756,80 @@ mod tests {
     fn death_route_follows_show_death_screen() {
         assert_eq!(death_route(true), DeathRoute::ShowDeathScreen);
         assert_eq!(death_route(false), DeathRoute::Respawn);
+    }
+
+    #[test]
+    fn cursor_grab_is_applied_only_on_state_edges() {
+        assert!(cursor_grab_transition_needed(None, false));
+        assert!(cursor_grab_transition_needed(None, true));
+        assert!(!cursor_grab_transition_needed(Some(false), false));
+        assert!(!cursor_grab_transition_needed(Some(true), true));
+        assert!(cursor_grab_transition_needed(Some(false), true));
+        assert!(cursor_grab_transition_needed(Some(true), false));
+    }
+
+    fn chat_body() -> SignedChatBody {
+        SignedChatBody {
+            content: "hello".to_owned(),
+            timestamp_ms: 1_000,
+            salt: 0,
+            last_seen: Vec::new(),
+            message_index: 0,
+            modified: true,
+            modified_when_unsigned_hidden: true,
+            fully_filtered: false,
+        }
+    }
+
+    #[test]
+    fn accepted_local_player_chat_is_always_secure_after_validation() {
+        let body = chat_body();
+        let expired_now = 1_000 + 8 * 60 * 1000;
+        assert_eq!(
+            accepted_player_chat_tag(
+                true,
+                PlayerChatValidation::Unsigned,
+                &body,
+                expired_now,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            accepted_player_chat_tag(
+                true,
+                PlayerChatValidation::Signed,
+                &body,
+                expired_now,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            accepted_player_chat_tag(true, PlayerChatValidation::Signed, &body, 1_001, true,),
+            None
+        );
+
+        assert_eq!(
+            accepted_player_chat_tag(false, PlayerChatValidation::Unsigned, &body, 1_001, false,),
+            Some(ChatMessageTag::NotSecure)
+        );
+        assert_eq!(
+            accepted_player_chat_tag(
+                false,
+                PlayerChatValidation::Signed,
+                &body,
+                expired_now,
+                false,
+            ),
+            Some(ChatMessageTag::NotSecure)
+        );
+        assert_eq!(
+            accepted_player_chat_tag(false, PlayerChatValidation::Signed, &body, 1_001, true,),
+            Some(ChatMessageTag::Modified {
+                original: "hello".to_owned(),
+            })
+        );
     }
 
     #[test]

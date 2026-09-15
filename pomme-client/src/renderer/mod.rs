@@ -2047,6 +2047,29 @@ pub(crate) struct SkinData {
     pub slim: bool,
 }
 
+pub(crate) async fn fetch_skin_texture_by_name(name: &str) -> Result<SkinData, String> {
+    #[derive(serde::Deserialize)]
+    struct NamedProfile {
+        id: String,
+    }
+
+    let url = format!("https://api.mojang.com/users/profiles/minecraft/{name}");
+    let response = reqwest::get(&url).await.map_err(error_chain)?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::NOT_FOUND
+    ) {
+        return Err(format!("no profile for {name}"));
+    }
+    let profile: NamedProfile = response
+        .error_for_status()
+        .map_err(error_chain)?
+        .json()
+        .await
+        .map_err(error_chain)?;
+    fetch_skin_texture(&profile.id).await
+}
+
 pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
     #[derive(serde::Deserialize)]
     struct SessionProfile {

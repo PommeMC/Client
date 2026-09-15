@@ -154,6 +154,8 @@ pub struct GameState {
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
     pub chat: ChatState,
+    pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
+    pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
     pub server_enforces_secure_chat: bool,
@@ -382,6 +384,8 @@ impl GameState {
                 chat.set_options(chat_options);
                 chat
             },
+            server_dialog: None,
+            server_links: Vec::new(),
             command_tree: None,
             tab_list: TabList::new(),
             server_enforces_secure_chat: false,
@@ -468,6 +472,7 @@ impl GameState {
         self.inventory_open
             || self.creative_inventory_open
             || self.open_container.is_some()
+            || self.server_dialog.is_some()
             || self.chat.has_pending_modal_prompt()
             || self.game_mode_switcher.is_some()
     }
@@ -553,6 +558,13 @@ impl GameState {
     /// hotkeys. The anvil field is editable only while its input slot is
     /// filled, matching vanilla.
     pub fn wants_text_input(&self) -> bool {
+        if self
+            .server_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.wants_text_input())
+        {
+            return true;
+        }
         if self.creative_inventory_open {
             return self.creative_state.tab.captures_typing();
         }
@@ -1238,7 +1250,17 @@ fn handle_chat_ui_action(
                 Err(e) => tracing::warn!("Could not encode custom chat click action {id:?}: {e}"),
             }
         }
-        ChatUiAction::ShowDialog(_) => {}
+        ChatUiAction::ShowDialog(dialog) => {
+            game.chat.close();
+            handle_server_dialog_action(
+                crate::ui::server_dialog::ServerDialogAction::ShowDialog(
+                    crate::ui::server_dialog::DialogReference::Value(dialog),
+                ),
+                core,
+                connection,
+                game,
+            );
+        }
     }
 }
 
@@ -1282,6 +1304,40 @@ fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game:
                 command.to_owned(),
                 CommandConfirmationKind::ParseErrors,
             );
+        }
+    }
+}
+
+pub(crate) fn handle_server_dialog_action(
+    action: crate::ui::server_dialog::ServerDialogAction,
+    _core: &mut AppCore,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    use crate::ui::server_dialog::{ServerDialogAction, ServerDialogState};
+
+    match action {
+        ServerDialogAction::OpenUrl(url) => {
+            if let Some(ChatUiAction::OpenUrl(url)) = game.chat.request_open_url(url) {
+                handle_chat_ui_action(ChatUiAction::OpenUrl(url), _core, connection, game);
+            }
+        }
+        ServerDialogAction::RunCommand(command) => {
+            handle_unattended_command(&command, connection, game);
+        }
+        ServerDialogAction::ShowDialog(reference) => {
+            match ServerDialogState::open(reference, &game.registries, &game.server_links) {
+                Ok(dialog) => game.server_dialog = Some(dialog),
+                Err(error) => tracing::warn!("Could not open nested server dialog: {error}"),
+            }
+        }
+        ServerDialogAction::Custom { id, payload } => {
+            match crate::net::chat::encode_outbound_custom_click_action(&id, payload.as_ref()) {
+                Ok(frame) => connection.packet_tx.send_raw(frame),
+                Err(error) => {
+                    tracing::warn!("Could not encode dialog custom click action {id:?}: {error}")
+                }
+            }
         }
     }
 }
@@ -1790,6 +1846,10 @@ pub fn update_game(
     let text_fs = common::FONT_SIZE * text_gs;
     if game.chat.has_pending_modal_prompt() {
         // ConfirmLinkScreen captures input above the underlying screen.
+    } else if let Some(dialog) = game.server_dialog.as_mut() {
+        dialog.handle_text_input(&text_events, text_sw - 16.0 * text_gs, &|s| {
+            gfx.renderer.menu_text_width(s, text_fs)
+        });
     } else if let Some(msg) = game.chat.handle_key_input(
         &text_events,
         enter,
@@ -1806,7 +1866,7 @@ pub fn update_game(
         core.send_chat_message(connection, msg);
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
-    if game.chat.is_open() {
+    if game.server_dialog.is_none() && game.chat.is_open() {
         let scroll = core.input.consume_menu_scroll();
         if scroll != 0.0 {
             game.chat
@@ -1826,9 +1886,12 @@ pub fn update_game(
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
     core.input.menu_capture = game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
-    if core.input.spectator && game.spectator.is_menu_active() {
-        core.ensure_player_face_atlas(&mut gfx.renderer);
-    }
+    core.sync_game_dynamic_atlas(
+        game,
+        &mut gfx.renderer,
+        core.input.spectator && game.spectator.is_menu_active(),
+    );
+
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();
     if switcher_open != game.switcher_was_open {
@@ -2796,6 +2859,32 @@ pub fn update_game(
         game.toasts.build(&mut elements, sw, gs, &|t, s| {
             gfx.renderer.menu_text_width(t, s)
         });
+    }
+
+    if game.server_dialog.is_some() {
+        let (action, finished) = {
+            let dialog = game.server_dialog.as_mut().unwrap();
+            let action = dialog.build(
+                &mut elements,
+                sw,
+                sh,
+                gs,
+                core.input.cursor_pos(),
+                core.input.left_just_pressed() && !game.chat.has_pending_modal_prompt(),
+                core.input.left_held() && !game.chat.has_pending_modal_prompt(),
+                &|t, s| gfx.renderer.menu_text_width(t, s),
+                &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+            );
+            (action, dialog.is_finished())
+        };
+        if finished {
+            game.server_dialog = None;
+        }
+        if let Some(action) = action {
+            handle_server_dialog_action(action, core, connection, game);
+        }
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
     }
 
     if game.chat.has_pending_modal_prompt() {

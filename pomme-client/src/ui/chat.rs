@@ -603,6 +603,25 @@ impl ChatState {
         std::mem::take(&mut self.processed_signatures)
     }
 
+    pub fn inline_objects(&self) -> Vec<crate::ui::text::InlineObject> {
+        let mut objects = std::collections::HashSet::new();
+        for line in &self.messages {
+            for span in &line.spans {
+                if let Some(object) = &span.inline_object {
+                    objects.insert(object.clone());
+                }
+            }
+        }
+        for pending in &self.delayed_messages {
+            for span in &pending.spans {
+                if let Some(object) = &span.inline_object {
+                    objects.insert(object.clone());
+                }
+            }
+        }
+        objects.into_iter().collect()
+    }
+
     fn flush_delayed_messages(&mut self, now: Instant) {
         while let Some(message) = self.delayed_messages.pop_front() {
             self.accept_pending_message(message, now);
