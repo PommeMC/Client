@@ -1,5 +1,9 @@
 //! Small shared utilities.
 
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
 /// Java `java.util.Random` (`LegacyRandomSource`) reimplementation: a 48-bit
 /// LCG matching the JVM bit-for-bit so seeded sequences line up with vanilla.
 ///
@@ -63,5 +67,40 @@ impl JavaRandom {
                 return val;
             }
         }
+    }
+}
+
+/// Writes `bytes` to a `.tmp` sibling and renames it over `path`, so an
+/// interrupted save leaves the old file intact instead of a truncated one.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let result = fs::File::create(&tmp)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_atomic_replaces_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("pomme-write-atomic-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("options.json");
+        write_atomic(&path, b"first").unwrap();
+        write_atomic(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        assert!(!dir.join("options.json.tmp").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

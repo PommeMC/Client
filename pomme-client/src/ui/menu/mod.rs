@@ -210,8 +210,10 @@ fn load_settings(game_dir: &Path) -> Settings {
 
 fn save_settings(game_dir: &Path, settings: &Settings) {
     let path = game_dir.join("options.json");
-    if let Ok(json) = serde_json::to_string_pretty(settings) {
-        let _ = std::fs::write(path, json);
+    if let Ok(json) = serde_json::to_string_pretty(settings)
+        && let Err(error) = crate::util::write_atomic(&path, json.as_bytes())
+    {
+        tracing::warn!("Failed to save options to {}: {error}", path.display());
     }
 }
 
@@ -609,6 +611,9 @@ pub struct MainMenu {
     slider_can_change_value: bool,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
+    /// Set by slider drags, flushed by `set_screen`
+    /// (`OptionsSubScreen.removed()`).
+    settings_dirty: bool,
     /// The title screen's splash line, rolled at launch and on every return
     /// from a world like vanilla's fresh `TitleScreen`. `None` renders nothing.
     pub splash: Option<String>,
@@ -738,6 +743,7 @@ impl MainMenu {
             slider_can_change_value: true,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
+            settings_dirty: false,
             splash: None,
             menu_open_time: None,
             last_favicon_count: 0,
@@ -753,6 +759,9 @@ impl MainMenu {
     }
 
     fn set_screen(&mut self, screen: Screen) {
+        if self.settings_dirty {
+            self.save_settings();
+        }
         self.screen = screen;
         self.focused_field = None;
         self.focus = None;
@@ -796,7 +805,8 @@ impl MainMenu {
         })
     }
 
-    fn save_settings(&self) {
+    fn save_settings(&mut self) {
+        self.settings_dirty = false;
         save_settings(
             &self.settings_dir,
             &Settings {
