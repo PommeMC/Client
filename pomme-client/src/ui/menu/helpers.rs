@@ -461,7 +461,7 @@ fn wrap_motd_spans(
             obfuscated: span.obfuscated,
             shadow_color: span.shadow_color,
             font: span.font.clone(),
-            inline_object: span.inline_object.clone(),
+            inline_object: None,
             component_style: span.component_style.clone(),
         };
 

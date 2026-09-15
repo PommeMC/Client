@@ -219,10 +219,14 @@ fn player_input_state(
     sprinting: bool,
 ) -> PlayerInputState {
     PlayerInputState {
-        forward: input.key_pressed(KeyCode::KeyW) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
-        backward: input.key_pressed(KeyCode::KeyS) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
-        left: input.key_pressed(KeyCode::KeyA) || analog_move.x > STICK_MOVEMENT_THRESHOLD,
-        right: input.key_pressed(KeyCode::KeyD) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
+        forward: input.key_pressed(crate::app::input::KEY_FORWARD)
+            || analog_move.y > STICK_MOVEMENT_THRESHOLD,
+        backward: input.key_pressed(crate::app::input::KEY_BACK)
+            || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
+        left: input.key_pressed(crate::app::input::KEY_LEFT)
+            || analog_move.x > STICK_MOVEMENT_THRESHOLD,
+        right: input.key_pressed(crate::app::input::KEY_RIGHT)
+            || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
         jump: input.performing_action(Action::Jump),
         shift: input.performing_action(Action::Sneak),
         sprint: sprinting,
@@ -259,6 +263,7 @@ pub struct AppCore {
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
+    cursor_grab_applied: Option<bool>,
     player_skin_tx: crossbeam_channel::Sender<PlayerSkinResult>,
     player_skin_rx: crossbeam_channel::Receiver<PlayerSkinResult>,
     requested_player_skins: HashMap<uuid::Uuid, Option<String>>,
@@ -334,6 +339,7 @@ impl AppCore {
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
             unfocused_since: None,
+            cursor_grab_applied: None,
             player_skin_tx,
             player_skin_rx,
             requested_player_skins: HashMap::new(),
@@ -376,9 +382,16 @@ impl AppCore {
         }
     }
 
+    pub fn invalidate_cursor_grab_state(&mut self) {
+        self.cursor_grab_applied = None;
+    }
+
     pub fn apply_cursor_grab(&mut self, window: &Window, game: Option<&mut GameState>) {
         let captured =
             game.is_some_and(|g| g.input_live() && !g.dead && self.input.is_cursor_captured());
+        if self.cursor_grab_applied == Some(captured) {
+            return;
+        }
         if captured {
             // Vanilla centers on grab too; warp before locking, which
             // freezes the position on some platforms.
@@ -387,6 +400,7 @@ impl AppCore {
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
             window.set_cursor_visible(false);
+            self.cursor_grab_applied = Some(true);
         } else {
             self.release_cursor(window);
         }
@@ -417,6 +431,7 @@ impl AppCore {
         let _ = window.set_cursor_grab(CursorGrabMode::None);
         window.set_cursor_visible(true);
         self.center_cursor(window);
+        self.cursor_grab_applied = Some(false);
     }
 
     fn center_cursor(&mut self, window: &Window) {
@@ -611,7 +626,7 @@ impl AppCore {
         renderer.reload_assets(
             &self.data_dirs.game_dir,
             &self.resource_packs,
-            crate::ui::font::FontOptions::default(),
+            self.menu.font_options(),
         );
         self.audio.reload_assets(&self.resource_packs);
         self.menu.reload_assets = false;
@@ -1219,11 +1234,7 @@ impl AppCore {
                     game.command_tree = Some(tree);
                 }
                 NetworkEvent::CommandSuggestions { id, start, options } => {
-                    game.chat.apply_server_suggestions(
-                        id,
-                        start,
-                        options.into_iter().map(|option| option.text).collect(),
-                    );
+                    game.chat.apply_server_suggestions(id, start, options);
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
                     apply_server_block(game, &mut priority_remesh, pos, state);
