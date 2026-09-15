@@ -8,6 +8,7 @@ use crate::app::phases::in_game::GameState;
 use crate::app::state_slot::StateSlot;
 use crate::net::connection::ConnectionHandle;
 use crate::renderer::Renderer;
+use crate::singleplayer::World;
 
 pub mod connecting;
 pub mod in_game;
@@ -92,6 +93,8 @@ impl FpsCounter {
 
 #[derive(PartialEq)]
 pub enum ConnectionPhase {
+    /// Waiting on the integrated server. Singleplayer only.
+    StartingWorld,
     Connecting,
     Loading,
 }
@@ -111,11 +114,14 @@ pub enum AppPhase {
         connect_phase: ConnectionPhase,
         connection: ConnectionHandle,
         game: GameState,
+        /// The integrated server, when this is a singleplayer session.
+        world: Option<World>,
     },
     InGame {
         gfx: Gfx,
         connection: ConnectionHandle,
         game: GameState,
+        world: Option<World>,
     },
 }
 

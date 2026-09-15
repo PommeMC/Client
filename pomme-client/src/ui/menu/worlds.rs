@@ -73,6 +73,8 @@ impl MainMenu {
 
         let mut elements = Vec::new();
         let mut any_hovered = false;
+        let mut action = MenuAction::None;
+        let playable = crate::singleplayer::AVAILABLE;
 
         elements.push(MenuElement::Text {
             x: screen_w / 2.0,
@@ -240,7 +242,17 @@ impl MainMenu {
             });
 
             if clicked && hovered {
-                self.selected_world = Some(world.folder.clone());
+                let folder = world.folder.clone();
+                let double = self.last_click_world.as_deref() == Some(folder.as_str())
+                    && self.last_click_time.elapsed().as_millis() < DOUBLE_CLICK_MS;
+
+                if playable && (on_icon || double) {
+                    action = MenuAction::PlayWorld { folder };
+                } else {
+                    self.selected_world = Some(folder.clone());
+                    self.last_click_time = Instant::now();
+                    self.last_click_world = Some(folder);
+                }
             }
         }
 
@@ -268,33 +280,35 @@ impl MainMenu {
         let mut ctx = self.make_focus_ctx(input);
 
         let has_sel = self.selected_world.is_some();
-        // Emission order is the tab ring, so keep vanilla's grid order.
-        let unavailable = |elements: &mut Vec<MenuElement>,
-                           ctx: &mut FocusCtx,
-                           hov: &mut bool,
-                           r: [f32; 4],
-                           label: &str| {
-            push_button_f(
-                elements, ctx, hov, cursor, clicked, r[0], r[1], r[2], r[3], gs, label, false,
+        let tipped = |elements: &mut Vec<MenuElement>,
+                      ctx: &mut FocusCtx,
+                      hov: &mut bool,
+                      r: [f32; 4],
+                      label: &str,
+                      enabled: bool,
+                      tip: Option<&str>| {
+            let fired = push_button_f(
+                elements, ctx, hov, cursor, clicked, r[0], r[1], r[2], r[3], gs, label, enabled,
             );
-            push_hover_tooltip(
-                elements,
-                cursor,
-                screen_w,
-                screen_h,
-                gs,
-                r,
-                "Not available yet",
-            );
+            if let Some(tip) = tip {
+                push_hover_tooltip(elements, cursor, screen_w, screen_h, gs, r, tip);
+            }
+            fired
         };
 
-        unavailable(
+        // Emission order is the tab ring, so keep vanilla's grid order.
+        if tipped(
             &mut elements,
             &mut ctx,
             &mut any_hovered,
             [grid_x, row1_y, wide_w, btn_h],
             "Play Selected World",
-        );
+            has_sel && playable,
+            (!playable).then_some(crate::singleplayer::UNAVAILABLE_MESSAGE),
+        ) && let Some(folder) = self.selected_world.clone()
+        {
+            action = MenuAction::PlayWorld { folder };
+        }
         if push_button_f(
             &mut elements,
             &mut ctx,
@@ -345,12 +359,14 @@ impl MainMenu {
         {
             self.set_screen(Screen::ConfirmDeleteWorld(folder));
         }
-        unavailable(
+        tipped(
             &mut elements,
             &mut ctx,
             &mut any_hovered,
             [col(2.0), row2_y, narrow_w, btn_h],
             "Re-Create",
+            false,
+            Some("Not available yet"),
         );
         if push_button_f(
             &mut elements,
@@ -373,7 +389,7 @@ impl MainMenu {
 
         MainMenuResult {
             elements,
-            action: MenuAction::None,
+            action,
             cursor_pointer: any_hovered,
             blur: 2.0,
             clicked_button: (clicked && any_hovered) || ctx.fired,

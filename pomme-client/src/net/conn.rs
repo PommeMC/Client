@@ -84,10 +84,7 @@ pub struct MemoryEnd {
 /// Two independent pipes rather than a duplex pair, so neither direction waits
 /// on a lock held by the other. The client-to-server pipe is oversized because
 /// the game loop writes from the task that reads (see the TODO in `game_loop`).
-#[allow(
-    dead_code,
-    reason = "the integrated server constructs these once it lands"
-)]
+#[allow(dead_code, reason = "only a singleplayer build opens a world")]
 pub fn memory_pipes() -> (MemoryEnd, MemoryEnd) {
     const TO_CLIENT: usize = 1024 * 1024;
     const TO_SERVER: usize = 256 * 1024;

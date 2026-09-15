@@ -363,6 +363,11 @@ impl AppCore {
         }
     }
 
+    /// The chunk radius to ask a server for, from the video settings.
+    pub const fn view_distance(&self) -> u8 {
+        self.menu.render_distance as u8
+    }
+
     /// Every return from a world or server, before the title screen shows.
     /// Vanilla builds a fresh `TitleScreen` here, which rolls a new splash.
     pub fn return_to_menu(&mut self, gfx: &mut Gfx) {
