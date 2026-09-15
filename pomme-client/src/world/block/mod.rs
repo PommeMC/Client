@@ -202,11 +202,10 @@ impl ScalarOrPerState {
     }
 }
 
-/// Per-protocol block-state data, latest first; unknown protocols fall back
-/// to the latest (slot 0).
+/// Per-protocol block-state data, the native version at [`NATIVE_SLOT`].
 const BLOCK_DATA: [(i32, &str); 12] = [
     (
-        pomme_protocol::version::LATEST.protocol,
+        pomme_protocol::version::NATIVE.protocol,
         include_str!("data/blocks-26.2.json"),
     ),
     (775, include_str!("data/blocks-26.1.json")),
@@ -257,7 +256,11 @@ const STATE_DATA: [&str; BLOCK_DATA.len()] = [
 /// protocol currently spoken (see [`set_active_protocol`]).
 static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; BLOCK_DATA.len()] =
     [const { OnceLock::new() }; BLOCK_DATA.len()];
-static ACTIVE_TABLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The [`BLOCK_DATA`] slot holding the native version's tables: the initial
+/// active table and the fallback for protocols without their own data.
+const NATIVE_SLOT: usize = 0;
+static ACTIVE_TABLE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(NATIVE_SLOT);
 
 /// Vanilla getFluidState overrides on blocks without a `waterlogged` property.
 const IMPLICIT_WATER: [&str; 4] = ["seagrass", "tall_seagrass", "kelp", "kelp_plant"];
@@ -269,9 +272,10 @@ pub fn init(version: &str) {
         .map(|v| v.protocol)
         .unwrap_or_else(|| {
             tracing::warn!(
-                "no block-state data for version {version}, using 26.2 — expect state drift"
+                "no block-state data for version {version}, using {} — expect state drift",
+                pomme_protocol::version::NATIVE.name
             );
-            pomme_protocol::version::LATEST.protocol
+            pomme_protocol::version::NATIVE.protocol
         });
     set_active_protocol(protocol);
 }
@@ -290,7 +294,7 @@ pub fn set_active_protocol(protocol: i32) {
 /// Builds the given protocol's table if it isn't already, without switching
 /// to it; safe at any time (e.g. from a server-list ping, ahead of the join).
 pub fn prewarm_protocol(protocol: i32) -> usize {
-    let slot = block_data_slot(protocol).unwrap_or(0);
+    let slot = block_data_slot(protocol).unwrap_or(NATIVE_SLOT);
     BLOCK_TABLES[slot].get_or_init(|| build_table(BLOCK_DATA[slot].1, STATE_DATA[slot]));
     slot
 }
@@ -919,5 +923,11 @@ mod tests {
         for v in pomme_protocol::version::VERSIONS {
             assert!(block_data_slot(v.protocol).is_some(), "{}", v.name);
         }
+    }
+
+    #[test]
+    fn native_slot() {
+        let native = pomme_protocol::version::NATIVE.protocol;
+        assert_eq!(block_data_slot(native), Some(NATIVE_SLOT));
     }
 }

@@ -139,9 +139,12 @@ pub async fn connect_to_server(
             super::resolve::connect(&server_addr, ClientIntention::Login).await?
         }
         Transport::Memory(end) => {
-            // An integrated server speaks the latest protocol, so there is
+            // The integrated server speaks the native protocol, so there is
             // nothing to probe and translation stays inert for the session.
-            adopt_wire_protocol(pomme_protocol::version::LATEST.protocol);
+            #[cfg(feature = "singleplayer")]
+            const _: () =
+                assert!(pomme_singleplayer::PROTOCOL == pomme_protocol::version::NATIVE.protocol);
+            adopt_wire_protocol(pomme_protocol::version::NATIVE.protocol);
             let mut conn = Conn::from_memory(end);
             super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
                 .await?;
@@ -888,7 +891,7 @@ fn serialize_frame<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug
         .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))
 }
 
-/// Writes one latest-layout frame, translating it for older wire versions.
+/// Writes one native-layout frame, translating it for other wire versions.
 async fn write_game_frame(
     writer: &mut RawWriter,
     translation: Option<&super::translate::Translation>,
@@ -904,7 +907,7 @@ async fn write_game_frame(
     Ok(())
 }
 
-/// Writes one latest-layout configuration packet, translating it for older
+/// Writes one native-layout configuration packet, translating it for other
 /// wire versions (765 down: id remap plus suppression of packets the wire
 /// version lacks).
 async fn write_config_packet(
@@ -954,7 +957,7 @@ fn friendly_error_reason(err: &ConnectionError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use pomme_protocol::version::LATEST;
+    use pomme_protocol::version::NATIVE;
 
     use super::*;
 
@@ -962,15 +965,22 @@ mod tests {
     /// wire translation; 775 has one.
     #[test]
     fn resolve_wire_gates_unjoinable_versions() {
-        let latest = LATEST.protocol;
-        assert_eq!(resolve_wire(Some(775), latest), Ok(775));
-        assert_eq!(resolve_wire(Some(762), latest), Ok(latest));
-        assert_eq!(resolve_wire(None, latest), Ok(latest));
+        let native = NATIVE.protocol;
+        // Launched as the native version.
+        assert_eq!(resolve_wire(Some(775), native), Ok(775));
+        assert_eq!(resolve_wire(Some(762), native), Ok(native));
+        assert_eq!(resolve_wire(None, native), Ok(native));
+        // Launched as the newest listed version, which need not be native.
+        let latest = pomme_protocol::version::LATEST.protocol;
+        assert_eq!(resolve_wire(Some(native), latest), Ok(native));
+        if crate::net::translate::joinable(latest) {
+            assert_eq!(resolve_wire(None, latest), Ok(latest));
+        }
         // An untranslated launched version is refused whatever the probe
         // yielded, unless the server itself speaks a joinable protocol.
         assert_eq!(resolve_wire(None, 762), Err(762));
         assert_eq!(resolve_wire(Some(762), 762), Err(762));
-        assert_eq!(resolve_wire(Some(latest), 762), Ok(latest));
+        assert_eq!(resolve_wire(Some(native), 762), Ok(native));
         // A staged version (tables embedded, not yet in TRANSLATED) is
         // refused when launched and adopted around when the server is
         // joinable.
@@ -979,8 +989,8 @@ mod tests {
                 && !crate::net::translate::joinable(v.protocol)
             {
                 assert_eq!(
-                    resolve_wire(Some(v.protocol), latest),
-                    Ok(latest),
+                    resolve_wire(Some(v.protocol), native),
+                    Ok(native),
                     "{}",
                     v.name
                 );
@@ -1038,7 +1048,7 @@ mod tests {
 
         assert!(matches!(
             sent(&mut peer).await,
-            ServerboundHandshakePacket::Intention(p) if p.protocol_version == LATEST.protocol
+            ServerboundHandshakePacket::Intention(p) if p.protocol_version == NATIVE.protocol
         ));
         assert!(matches!(
             sent(&mut peer).await,

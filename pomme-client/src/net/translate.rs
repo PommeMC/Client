@@ -1,10 +1,10 @@
-//! Wire translation for older protocol versions.
+//! Wire translation for non-native protocol versions.
 //!
-//! The client speaks the latest supported version (26.2) internally. When a
-//! connection negotiates an older wire version, inbound frames are rewritten
-//! into the latest layout before azalea's typed decode where the wire format
-//! changed, and static-registry ids (which shift between versions) are
-//! remapped in both directions so the rest of the client stays
+//! The client speaks 26.2 natively (`pomme_protocol::version::NATIVE`). When
+//! a connection negotiates a different wire version, inbound frames are
+//! rewritten into the native layout before azalea's typed decode where the
+//! wire format changed, and static-registry ids (which shift between versions)
+//! are remapped in both directions so the rest of the client stays
 //! single-version. Layouts were line-checked against the decompiled
 //! references (`reference/<version>/decompiled/.../network/protocol/`).
 //!
@@ -231,7 +231,7 @@
 //!   through `NbtIo.write`, where 1.20.2 switched to `writeAnyTag`), so item
 //!   tags, entity `compound_tag` values, chunk heightmaps, every chunk block
 //!   entity and the `block_entity_data` / `tag_query` tags carry two extra
-//!   bytes the latest readers don't expect
+//!   bytes the native readers don't expect
 //! - `add_player` spawned other players; 1.20.2 dropped it for `add_entity`,
 //!   which the frame is rewritten onto (yaw and pitch swap, the head yaw
 //!   repeats the yaw, and the data and velocity fields are zero)
@@ -286,33 +286,33 @@ use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacke
 use azalea_registry::builtin::{DataComponentKind, SoundEvent};
 use azalea_registry::{Holder, Registry};
 use glam::DVec3;
-use pomme_protocol::version::LATEST;
+use pomme_protocol::version::NATIVE;
 use pomme_protocol::{
     ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
 };
 
 pub struct Translation {
-    to_latest: &'static RegistryRemaps,
-    from_latest: &'static RegistryRemaps,
+    to_native: &'static RegistryRemaps,
+    from_native: &'static RegistryRemaps,
     login_finished_id: u32,
     login_hello_id: u32,
     login_profile_strict: bool,
     login_hello_bare: bool,
-    /// The latest serverbound `hello` id when the wire version wraps its
+    /// The native serverbound `hello` id when the wire version wraps its
     /// profile id in an optional (1.20.2 made it mandatory); `None` needs no
     /// outbound rewrite.
     login_hello_optional_uuid: Option<u32>,
-    /// Latest-space; game-frame rewrites dispatch after the id remap.
+    /// Native-space; game-frame rewrites dispatch after the id remap.
     game_login_id: u32,
     set_player_team_id: u32,
     /// Handled outside [`GameIds`]: the attribute ids need remapping even on
-    /// a version whose packet ids all match the latest (26.1).
+    /// a version whose packet ids all match the native (26.1).
     update_attributes_id: u32,
     /// Game-phase packet-id translation and the rewrites tied to it; `None`
-    /// when the wire version's ids match the latest (26.1).
+    /// when the wire version's ids match the native (26.1).
     game_ids: Option<GameIds>,
     /// Configuration-phase translation; `None` when the wire version's
-    /// config ids match the latest (766 up: additions were appended).
+    /// config ids match the native (766 up: additions were appended).
     config_ids: Option<ConfigIds>,
     /// Whether the wire version predates the configuration phase (1.20.2
     /// introduced it), so the join skips it rather than translating it.
@@ -322,11 +322,11 @@ pub struct Translation {
 /// Configuration-phase id tables and the registry-data rewrite for wire
 /// versions whose config protocol diverged (765 and older).
 struct ConfigIds {
-    /// Wire-version clientbound id -> latest id; `None` drops the frame.
+    /// Wire-version clientbound id -> native id; `None` drops the frame.
     inbound: Box<[Option<u32>]>,
-    /// Latest serverbound id -> wire-version id; `None` suppresses.
+    /// Native serverbound id -> wire-version id; `None` suppresses.
     outbound: Box<[Option<u32>]>,
-    /// Latest-space `registry_data`, whose 765 form is one packet holding
+    /// Native-space `registry_data`, whose 765 form is one packet holding
     /// every registry as a single NBT map.
     registry_data_id: u32,
     /// 764's config payload rewrites: disconnect's JSON component and the
@@ -334,7 +334,7 @@ struct ConfigIds {
     v764: Option<ConfigIds764>,
 }
 
-/// Latest config-space ids for the 764 payload rewrites.
+/// Native config-space ids for the 764 payload rewrites.
 struct ConfigIds764 {
     disconnect_id: u32,
     resource_pack_push_id: u32,
@@ -342,13 +342,13 @@ struct ConfigIds764 {
 }
 
 /// Game-phase id tables for a wire version whose ids diverged from the
-/// latest, plus the latest-space ids its frame rewrites dispatch on.
+/// native, plus the native-space ids its frame rewrites dispatch on.
 struct GameIds {
-    /// Wire-version clientbound id -> latest id; `None` drops the frame
-    /// (no latest equivalent — none exist for 1.21.11/1.21.10, kept for
+    /// Wire-version clientbound id -> native id; `None` drops the frame
+    /// (no native equivalent — none exist for 1.21.11/1.21.10, kept for
     /// safety).
     inbound: Box<[Option<u32>]>,
-    /// Latest serverbound id -> wire-version id; `None` suppresses the
+    /// Native serverbound id -> wire-version id; `None` suppresses the
     /// frame (the packet doesn't exist on the older version).
     outbound: Box<[Option<u32>]>,
     /// The wire version's `EntityDataSerializers` interleave (the
@@ -386,13 +386,13 @@ struct GameIds {
     /// The rewrites 1.20.2 introduced, for wire version 763. Its presence
     /// also flags the named NBT roots, which every walker below reads.
     v763: Option<Ids763>,
-    /// Latest serverbound ids whose packet is knowingly absent on this wire
+    /// Native serverbound ids whose packet is knowingly absent on this wire
     /// version (`client_tick_end`, `player_loaded`, the pick pair); suppressed
     /// quietly.
     quiet_suppressed: Box<[u32]>,
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocols at or below
+/// Native-space dispatch ids for the frame rewrites protocols at or below
 /// 768 need.
 struct Ids768 {
     level_particles_id: u32,
@@ -438,10 +438,10 @@ impl Ids767 {
     }
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocol 766 needs.
+/// Native-space dispatch ids for the frame rewrites protocol 766 needs.
 struct Ids766 {
     projectile_power_id: u32,
-    /// Serverbound `use_item`: latest + wire ids for the rotation strip.
+    /// Serverbound `use_item`: native + wire ids for the rotation strip.
     use_item_id: u32,
     use_item_old_id: u32,
 }
@@ -452,7 +452,7 @@ impl Ids766 {
     }
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocol 765 needs.
+/// Native-space dispatch ids for the frame rewrites protocol 765 needs.
 struct Ids765 {
     container_set_content_id: u32,
     set_equipment_id: u32,
@@ -471,7 +471,7 @@ struct Ids765 {
     disguised_chat_id: u32,
     /// The wire version's registry names, for the attribute-key lookup.
     registry: &'static RegistryTable,
-    /// Serverbound: latest + wire ids for the item-form rewrites.
+    /// Serverbound: native + wire ids for the item-form rewrites.
     container_click_id: u32,
     container_click_old_id: u32,
     creative_slot_id: u32,
@@ -495,7 +495,7 @@ impl Ids765 {
     }
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocol 764 needs:
+/// Native-space dispatch ids for the frame rewrites protocol 764 needs:
 /// the pre-1.20.3 JSON text components (`component_pass`), the scoreboard
 /// rework, and the unsplit resource_pack packet.
 struct Ids764 {
@@ -520,7 +520,7 @@ struct Ids764 {
     /// Dropped quietly: component-bearing packets pomme never consumes
     /// (`server_data`, `map_item_data`).
     drops: [u32; 2],
-    /// Serverbound: latest + wire ids for the resource_pack reply rewrite.
+    /// Serverbound: native + wire ids for the resource_pack reply rewrite.
     resource_pack_response_id: u32,
     resource_pack_response_old_id: u32,
 }
@@ -571,11 +571,11 @@ impl Ids764 {
     }
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocol 769 needs.
+/// Native-space dispatch ids for the frame rewrites protocol 769 needs.
 struct Ids769 {
     player_chat_id: u32,
     update_advancements_id: u32,
-    /// Latest-space serverbound `container_click` id and the wire
+    /// Native-space serverbound `container_click` id and the wire
     /// version's, for the hashed-stack rewrite.
     container_click_id: u32,
     container_click_old_id: u32,
@@ -598,7 +598,7 @@ struct Ids770 {
     player_command_old_id: u32,
 }
 
-/// Latest-space dispatch ids for the frame rewrites only protocols at or
+/// Native-space dispatch ids for the frame rewrites only protocols at or
 /// below 772 need (the layouts 1.21.9 changed). Its presence also flags the
 /// pre-1.21.9 entity-data serializer set and `profile` component layout.
 struct Ids772 {
@@ -609,7 +609,7 @@ struct Ids772 {
     explode_id: u32,
 }
 
-/// A version-specific frame rewriter: latest-space id + payload to the
+/// A version-specific frame rewriter: native-space id + payload to the
 /// rewritten frame, `None` when malformed.
 type FrameRewrite = fn(u32, &[u8]) -> Option<Vec<u8>>;
 
@@ -625,7 +625,7 @@ impl Ids772 {
     }
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocol 763 needs, plus
+/// Native-space dispatch ids for the frame rewrites protocol 763 needs, plus
 /// the wire ids and entity type the `add_player` rewrite synthesizes with.
 struct Ids763 {
     respawn_id: u32,
@@ -635,7 +635,7 @@ struct Ids763 {
     add_player_old_id: u32,
     add_entity_old_id: u32,
     /// The wire version's `player` entity type; `remap_inbound` turns it into
-    /// the latest id after the frame decodes.
+    /// the native id after the frame decodes.
     player_entity_type: u32,
 }
 
@@ -659,19 +659,18 @@ const TRANSLATED: &[i32] = &[
     775, 774, 773, 772, 771, 770, 769, 768, 767, 766, 765, 764, 763,
 ];
 
-/// Whether a server speaking `protocol` can be joined: the native latest
-/// version, or an older one with a complete wire translation. Gates both
+/// Whether a server speaking `protocol` can be joined: the native version,
+/// or another one with a complete wire translation. Gates both
 /// wire-version negotiation and the server list's compatibility marker.
 pub fn joinable(protocol: i32) -> bool {
-    protocol == LATEST.protocol || TRANSLATED.contains(&protocol)
+    protocol == NATIVE.protocol || TRANSLATED.contains(&protocol)
 }
 
 /// The translation for the wire version negotiated with the current server,
-/// or `None` when the client speaks it natively (the latest version, or one
-/// outside `TRANSLATED`, which connects untranslated as before).
+/// or `None` for the native version.
 pub fn active() -> Option<&'static Translation> {
     let protocol = crate::version::session_protocol();
-    if protocol == LATEST.protocol {
+    if protocol == NATIVE.protocol {
         return None;
     }
     // One leaked entry per old protocol ever spoken (bounded by the embedded
@@ -683,7 +682,7 @@ pub fn active() -> Option<&'static Translation> {
     }
     let translation = Translation::for_protocol(protocol).map(|t| &*Box::leak(Box::new(t)));
     if translation.is_some() {
-        tracing::info!("Translating protocol {protocol} <-> {}", LATEST.protocol);
+        tracing::info!("Translating protocol {protocol} <-> {}", NATIVE.protocol);
     }
     cache.push((protocol, translation));
     translation
@@ -700,17 +699,17 @@ pub fn prewarm(protocol: i32) {
 impl Translation {
     /// The translation for one protocol number, or `None` outside
     /// `TRANSLATED`: the frame rewrites below are version-specific, so
-    /// embedded data alone isn't enough (and the latest version needs none).
+    /// embedded data alone isn't enough (and the native version needs none).
     pub(crate) fn for_protocol(protocol: i32) -> Option<Translation> {
         if !TRANSLATED.contains(&protocol) {
             return None;
         }
         let table = PacketTable::for_protocol(protocol)?;
-        let latest = PacketTable::latest();
-        let id = |phase, name| required_id(latest, phase, Direction::Clientbound, name);
+        let native = PacketTable::native();
+        let id = |phase, name| required_id(native, phase, Direction::Clientbound, name);
         Some(Translation {
-            to_latest: RegistryRemaps::to_latest(protocol)?,
-            from_latest: RegistryRemaps::from_latest(protocol)?,
+            to_native: RegistryRemaps::to_native(protocol)?,
+            from_native: RegistryRemaps::from_native(protocol)?,
             // Login-phase ids are identical across all supported versions.
             login_finished_id: id(Phase::Login, "login_finished"),
             login_hello_id: id(Phase::Login, "hello"),
@@ -719,19 +718,19 @@ impl Translation {
             login_profile_strict: matches!(protocol, 766 | 767),
             login_hello_bare: protocol <= 765,
             login_hello_optional_uuid: (protocol <= 763)
-                .then(|| required_id(latest, Phase::Login, Direction::Serverbound, "hello")),
+                .then(|| required_id(native, Phase::Login, Direction::Serverbound, "hello")),
             game_login_id: id(Phase::Game, "login"),
             set_player_team_id: id(Phase::Game, "set_player_team"),
             update_attributes_id: id(Phase::Game, "update_attributes"),
-            game_ids: GameIds::build(protocol, table, latest),
-            config_ids: ConfigIds::build(protocol, table, latest),
+            game_ids: GameIds::build(protocol, table, native),
+            config_ids: ConfigIds::build(protocol, table, native),
             no_config_phase: table
                 .name_of(Phase::Configuration, Direction::Clientbound, 0)
                 .is_none(),
         })
     }
 
-    /// Rewrites a latest-layout serverbound login frame into the wire
+    /// Rewrites a native-layout serverbound login frame into the wire
     /// version's. Only 763's `hello` differs, by wrapping the profile id in an
     /// optional.
     pub fn translate_outbound_login_frame(&self, frame: Vec<u8>) -> Vec<u8> {
@@ -754,7 +753,7 @@ impl Translation {
         out
     }
 
-    /// Rewrites a raw login-phase frame into the latest layout.
+    /// Rewrites a raw login-phase frame into the native layout.
     pub fn translate_login_frame(&self, raw: Box<[u8]>) -> Box<[u8]> {
         let mut cur = Cursor::new(&raw[..]);
         let id = u32::azalea_read_var(&mut cur).ok();
@@ -796,7 +795,7 @@ impl Translation {
     /// from 1.20.2 on, capturing the dimension-type order on the way.
     pub fn split_login_registries(&self, raw: &[u8]) -> Option<Vec<Box<[u8]>>> {
         let id = required_id(
-            PacketTable::latest(),
+            PacketTable::native(),
             Phase::Configuration,
             Direction::Clientbound,
             "registry_data",
@@ -810,7 +809,7 @@ impl Translation {
         split_registry_data(id, &codec)
     }
 
-    /// Rewrites a raw configuration-phase frame into latest-layout frames;
+    /// Rewrites a raw configuration-phase frame into native-layout frames;
     /// empty = dropped. 765's single registry_data packet fans out into one
     /// frame per registry.
     pub fn translate_config_frame(&self, raw: Box<[u8]>) -> Vec<Box<[u8]>> {
@@ -822,7 +821,7 @@ impl Translation {
             return Vec::new();
         };
         let Some(id) = ids.inbound.get(wire_id as usize).copied().flatten() else {
-            tracing::debug!("Dropping inbound config packet {wire_id} with no latest id");
+            tracing::debug!("Dropping inbound config packet {wire_id} with no native id");
             return Vec::new();
         };
         if id == ids.registry_data_id {
@@ -856,7 +855,7 @@ impl Translation {
         plain_config_frame(id, &raw[pos..])
     }
 
-    /// Translates a latest-layout serverbound configuration frame into the
+    /// Translates a native-layout serverbound configuration frame into the
     /// wire version's; `None` suppresses it. Only 764's resource_pack reply
     /// changes layout; everything else is an id remap.
     pub fn translate_outbound_config_frame(&self, frame: Vec<u8>) -> Option<Vec<u8>> {
@@ -888,12 +887,12 @@ impl Translation {
         }
     }
 
-    /// Rewrites a raw game-phase frame into the latest layout; `None` drops
-    /// the packet (malformed beyond repair, or without a latest equivalent).
+    /// Rewrites a raw game-phase frame into the native layout; `None` drops
+    /// the packet (malformed beyond repair, or without a native equivalent).
     pub fn translate_game_frame(&self, raw: Box<[u8]>) -> Option<Box<[u8]>> {
         let mut id_end = 0;
         let wire_id = wire::read_varint(&raw, &mut id_end)?;
-        // add_player has no latest equivalent, so it becomes an add_entity
+        // add_player has no native equivalent, so it becomes an add_entity
         // before the id map below would drop it.
         if let Some(v) = self.game_ids.as_ref().and_then(|g| g.v763.as_ref())
             && wire_id == v.add_player_old_id
@@ -903,11 +902,11 @@ impl Translation {
         }
         let id = match &self.game_ids {
             Some(ids) => {
-                let Some(latest) = ids.inbound.get(wire_id as usize).copied().flatten() else {
-                    tracing::debug!("Dropping inbound game packet {wire_id} with no latest id");
+                let Some(native) = ids.inbound.get(wire_id as usize).copied().flatten() else {
+                    tracing::debug!("Dropping inbound game packet {wire_id} with no native id");
                     return None;
                 };
-                latest
+                native
             }
             None => wire_id,
         };
@@ -965,21 +964,21 @@ impl Translation {
             if v766.is_some() {
                 translate_update_attributes_uuid(
                     v765.map(|v| v.registry),
-                    self.to_latest,
+                    self.to_native,
                     id,
                     payload,
                 )
             } else {
-                translate_update_attributes(self.to_latest, id, payload)
+                translate_update_attributes(self.to_native, id, payload)
             }
         } else if id == self.set_player_team_id {
             translate_team(id, payload, v769)
         } else if let Some(ids) = &self.game_ids {
-            // Pre-1.20.2 wire NBT carries an empty root name the latest
+            // Pre-1.20.2 wire NBT carries an empty root name the native
             // version's readers don't expect.
             let named_nbt = ids.v763.is_some();
             if id == ids.set_entity_data_id {
-                translate_entity_data(id, payload, ids, self.to_latest)
+                translate_entity_data(id, payload, ids, self.to_native)
             } else if id == ids.level_chunk_id {
                 translate_chunk(id, payload, v769, named_nbt)
             } else if id == ids.set_time_id {
@@ -999,7 +998,7 @@ impl Translation {
             } else if v765.is_some_and(|v| id == v.container_set_slot_id) {
                 v767.and_then(|v| translate_container_set_slot_765(v, payload, named_nbt))
             } else if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
-                translate_explode(id, payload, ids, self.to_latest)
+                translate_explode(id, payload, ids, self.to_native)
             } else if let Some(rewrite) = ids.version_rewrite(id) {
                 rewrite(id, payload)
             } else if let Some(v) = v767.filter(|v| id == v.teleport_entity_id) {
@@ -1007,7 +1006,7 @@ impl Translation {
             } else if let Some(v) = v767.filter(|v| id == v.container_set_slot_id) {
                 translate_container_set_slot_767(v, payload)
             } else if v767.is_some_and(|v| id == v.cooldown_id) {
-                translate_cooldown_767(self.to_latest, id, payload)
+                translate_cooldown_767(self.to_native, id, payload)
             } else if id == wire_id && converted.is_none() {
                 return Some(raw);
             } else {
@@ -1029,12 +1028,12 @@ impl Translation {
     }
 
     /// Whether outbound game frames need translation before hitting the
-    /// wire (the version's serverbound ids or layouts diverge from latest).
+    /// wire (the version's serverbound ids or layouts diverge from native).
     pub fn translates_outbound(&self) -> bool {
         self.game_ids.is_some()
     }
 
-    /// Translates a latest-layout serverbound game frame into the wire
+    /// Translates a native-layout serverbound game frame into the wire
     /// version's: id remap, `attack`/`interact` layout rewrites, and
     /// suppression of packets the older version lacks. Returns the frames to
     /// send (empty = suppressed, two for `interact`, one otherwise).
@@ -1120,63 +1119,63 @@ impl Translation {
         }
     }
 
-    /// The latest-version particle id for a source-version one, for the raw
+    /// The native-version particle id for a source-version one, for the raw
     /// `level_particles` path; `None` drops the particle.
     pub fn remap_particle(&self, id: u32) -> Option<u32> {
-        self.to_latest.remap(ClientRegistry::ParticleType, id)
+        self.to_native.remap(ClientRegistry::ParticleType, id)
     }
 
-    /// Remaps a decoded packet's static-registry ids into the latest
+    /// Remaps a decoded packet's static-registry ids into the native
     /// version's id space; `false` drops the packet (its subject no longer
     /// exists, e.g. the bed block entity removed in 26.2).
     pub fn remap_inbound(&self, packet: &mut ClientboundGamePacket) -> bool {
         use ClientRegistry as R;
         match packet {
             ClientboundGamePacket::AddEntity(p) => {
-                remap_with(self.to_latest, R::EntityType, &mut p.entity_type)
+                remap_with(self.to_native, R::EntityType, &mut p.entity_type)
             }
             ClientboundGamePacket::Sound(p) => self.remap_sound(&mut p.sound),
             ClientboundGamePacket::SoundEntity(p) => self.remap_sound(&mut p.sound),
             ClientboundGamePacket::UpdateAttributes(p) => {
                 p.values
-                    .retain_mut(|v| remap_with(self.to_latest, R::Attribute, &mut v.attribute));
+                    .retain_mut(|v| remap_with(self.to_native, R::Attribute, &mut v.attribute));
                 true
             }
             ClientboundGamePacket::BlockEntityData(p) => {
-                remap_with(self.to_latest, R::BlockEntityType, &mut p.block_entity_type)
+                remap_with(self.to_native, R::BlockEntityType, &mut p.block_entity_type)
             }
             ClientboundGamePacket::LevelChunkWithLight(p) => {
                 p.chunk_data
                     .block_entities
-                    .retain_mut(|be| remap_with(self.to_latest, R::BlockEntityType, &mut be.kind));
+                    .retain_mut(|be| remap_with(self.to_native, R::BlockEntityType, &mut be.kind));
                 true
             }
             ClientboundGamePacket::ContainerSetContent(p) => {
                 for item in &mut p.items {
-                    remap_stack(self.to_latest, item);
+                    remap_stack(self.to_native, item);
                 }
-                remap_stack(self.to_latest, &mut p.carried_item);
+                remap_stack(self.to_native, &mut p.carried_item);
                 true
             }
             ClientboundGamePacket::ContainerSetSlot(p) => {
-                remap_stack(self.to_latest, &mut p.item_stack);
+                remap_stack(self.to_native, &mut p.item_stack);
                 true
             }
             ClientboundGamePacket::SetCursorItem(p) => {
-                remap_stack(self.to_latest, &mut p.contents);
+                remap_stack(self.to_native, &mut p.contents);
                 true
             }
             ClientboundGamePacket::SetEntityData(p) => {
                 for item in &mut p.packed_items.0 {
                     if let azalea_entity::EntityDataValue::ItemStack(stack) = &mut item.value {
-                        remap_stack(self.to_latest, stack);
+                        remap_stack(self.to_native, stack);
                     }
                 }
                 true
             }
             ClientboundGamePacket::SetEquipment(p) => {
                 for (_, stack) in &mut p.slots.slots {
-                    remap_stack(self.to_latest, stack);
+                    remap_stack(self.to_native, stack);
                 }
                 true
             }
@@ -1184,15 +1183,15 @@ impl Translation {
                 // An `ItemCost` has no empty form, so an untranslatable base
                 // cost drops the offer rather than the whole trade list.
                 p.offers.retain_mut(|offer| {
-                    remap_stack(self.to_latest, &mut offer.result);
+                    remap_stack(self.to_native, &mut offer.result);
                     if offer
                         .cost_b
                         .as_mut()
-                        .is_some_and(|c| !remap_with(self.to_latest, R::Item, &mut c.item))
+                        .is_some_and(|c| !remap_with(self.to_native, R::Item, &mut c.item))
                     {
                         offer.cost_b = None;
                     }
-                    remap_with(self.to_latest, R::Item, &mut offer.base_cost_a.item)
+                    remap_with(self.to_native, R::Item, &mut offer.base_cost_a.item)
                 });
                 true
             }
@@ -1214,9 +1213,9 @@ impl Translation {
                 self.remap_hashed(&mut p.carried_item);
             }
             ServerboundGamePacket::SetCreativeModeSlot(p) => {
-                remap_stack(self.from_latest, &mut p.item_stack);
+                remap_stack(self.from_native, &mut p.item_stack);
                 if let ItemStack::Present(data) = &mut p.item_stack {
-                    strip_untranslatable_components(self.from_latest, data);
+                    strip_untranslatable_components(self.from_native, data);
                 }
             }
             _ => {}
@@ -1225,7 +1224,7 @@ impl Translation {
 
     pub(super) fn remap_sound(&self, sound: &mut Holder<SoundEvent, CustomSound>) -> bool {
         match sound {
-            Holder::Reference(kind) => remap_with(self.to_latest, ClientRegistry::SoundEvent, kind),
+            Holder::Reference(kind) => remap_with(self.to_native, ClientRegistry::SoundEvent, kind),
             Holder::Direct(_) => true,
         }
     }
@@ -1233,16 +1232,16 @@ impl Translation {
     fn remap_hashed(&self, stack: &mut HashedStack) {
         use ClientRegistry as R;
         let Some(item) = &mut stack.0 else { return };
-        if !remap_with(self.from_latest, R::Item, &mut item.kind) {
+        if !remap_with(self.from_native, R::Item, &mut item.kind) {
             stack.0 = None;
             return;
         }
         item.components
             .added_components
-            .retain_mut(|(kind, _)| remap_with(self.from_latest, R::DataComponentType, kind));
+            .retain_mut(|(kind, _)| remap_with(self.from_native, R::DataComponentType, kind));
         item.components
             .removed_components
-            .retain_mut(|kind| remap_with(self.from_latest, R::DataComponentType, kind));
+            .retain_mut(|kind| remap_with(self.from_native, R::DataComponentType, kind));
     }
 }
 
@@ -1281,18 +1280,18 @@ impl GameIds {
     }
 
     /// Name-matched game-phase id tables between one wire version and the
-    /// latest. `None` when translation-by-id is a no-op: every inbound id
+    /// native. `None` when translation-by-id is a no-op: every inbound id
     /// maps to itself and every outbound id maps to itself or to nothing
     /// (26.1's only divergence is 26.2's `spectate_entity` ->
     /// `spectator_action` rename, which pomme never sends).
-    fn build(protocol: i32, table: &PacketTable, latest: &PacketTable) -> Option<GameIds> {
+    fn build(protocol: i32, table: &PacketTable, native: &PacketTable) -> Option<GameIds> {
         use Direction::{Clientbound, Serverbound};
-        let inbound = id_map(table, latest, Phase::Game, Clientbound);
-        let outbound = id_map(latest, table, Phase::Game, Serverbound);
+        let inbound = id_map(table, native, Phase::Game, Clientbound);
+        let outbound = id_map(native, table, Phase::Game, Serverbound);
         if identity_maps(&inbound, &outbound) {
             return None;
         }
-        let id = |dir, name| required_id(latest, Phase::Game, dir, name);
+        let id = |dir, name| required_id(native, Phase::Game, dir, name);
         Some(GameIds {
             inbound,
             outbound,
@@ -1458,7 +1457,7 @@ impl GameIds {
             ]
             .iter()
             .filter(|n| table.id(Phase::Game, Serverbound, n).is_none())
-            .map(|n| required_id(latest, Phase::Game, Serverbound, n))
+            .map(|n| required_id(native, Phase::Game, Serverbound, n))
             .collect(),
         })
     }
@@ -1588,14 +1587,14 @@ fn id_map(
 impl ConfigIds {
     /// Name-matched configuration id tables; `None` when every id maps to
     /// itself or nothing (766 up: later versions only appended).
-    fn build(protocol: i32, table: &PacketTable, latest: &PacketTable) -> Option<ConfigIds> {
+    fn build(protocol: i32, table: &PacketTable, native: &PacketTable) -> Option<ConfigIds> {
         use Direction::{Clientbound, Serverbound};
-        let inbound = id_map(table, latest, Phase::Configuration, Clientbound);
-        let outbound = id_map(latest, table, Phase::Configuration, Serverbound);
+        let inbound = id_map(table, native, Phase::Configuration, Clientbound);
+        let outbound = id_map(native, table, Phase::Configuration, Serverbound);
         if identity_maps(&inbound, &outbound) {
             return None;
         }
-        let id = |dir, name| required_id(latest, Phase::Configuration, dir, name);
+        let id = |dir, name| required_id(native, Phase::Configuration, dir, name);
         Some(ConfigIds {
             inbound,
             outbound,
@@ -1622,7 +1621,7 @@ fn identity_maps(inbound: &[Option<u32>], outbound: &[Option<u32>]) -> bool {
             .all(|(i, v)| v.is_none() || *v == Some(i as u32))
 }
 
-/// A latest-layout config frame with only its id rewritten.
+/// A native-layout config frame with only its id rewritten.
 fn plain_config_frame(id: u32, payload: &[u8]) -> Vec<Box<[u8]>> {
     let mut out = Vec::with_capacity(payload.len() + 2);
     wire::write_varint(&mut out, id);
@@ -1654,7 +1653,7 @@ fn interact_frame(interact_old_id: u32, entity_id: u32, action: u32) -> Vec<u8> 
     out
 }
 
-/// Rewrites a latest `player_command` payload (`entityId, action, data`
+/// Rewrites a native `player_command` payload (`entityId, action, data`
 /// varints) for pre-1.21.6 wires, where PRESS/RELEASE_SHIFT_KEY still head
 /// the action enum: every newer ordinal shifts up two.
 fn translate_player_command(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
@@ -1847,7 +1846,7 @@ fn translate_container_set_slot_765(
     Some(out)
 }
 
-/// Rewrites `cooldown`'s item id into the latest registry space. Vanilla
+/// Rewrites `cooldown`'s item id into the native registry space. Vanilla
 /// 26.2 names a cooldown group instead, but azalea still decodes the item
 /// registry id and these frames feed azalea (like the team-color ordinal).
 /// TODO: write the cooldown group once pomme owns the decoder (see the
@@ -1958,13 +1957,13 @@ fn translate_use_item(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     vec![out]
 }
 
-/// Rewrites `update_attributes`' attribute ids into the latest registry
+/// Rewrites `update_attributes`' attribute ids into the native registry
 /// space. Each snapshot names its attribute by registry id
 /// (`Attribute.STREAM_CODEC` is a plain `holderRegistry` varint), and those
 /// ids shift between versions — 1.21.2 also dropped every category prefix, so
 /// `generic.max_health` and `max_health` are the same entry at different
 /// indices. Without the remap the client reads a different attribute
-/// entirely. Modifier bodies are already the latest layout on every version
+/// entirely. Modifier bodies are already the native layout on every version
 /// reaching here, so they copy verbatim.
 fn translate_update_attributes(
     remaps: &RegistryRemaps,
@@ -2166,7 +2165,7 @@ fn translate_update_mob_effect_765(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Rewrites `update_attributes` for the pre-1.21 layouts: the attribute id
-/// is remapped into the latest registry space and each modifier's UUID id
+/// is remapped into the native registry space and each modifier's UUID id
 /// becomes a hex resource location. 1.20.4 keys the attribute by resource
 /// location rather than registry id, so it passes its own table as
 /// `key_table` to resolve the name first.
@@ -2470,7 +2469,7 @@ fn convert_spawn_info_dimension(payload: &[u8], spawn_at: usize) -> Option<Vec<u
     Some(out)
 }
 
-/// The latest serializer id for a 1.20.4 `EntityDataSerializers` id:
+/// The native serializer id for a 1.20.4 `EntityDataSerializers` id:
 /// 1.20.5 inserted `particles` (18), `wolf_variant` (23) and
 /// `armadillo_state` (28), whose set then held through 1.21.4; mapping
 /// through the 766-era ids covers the rest.
@@ -2832,7 +2831,7 @@ fn translate_projectile_power_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Rewrites a latest `container_click` payload for 1.21.4, which carries
+/// Rewrites a native `container_click` payload for 1.21.4, which carries
 /// full item stacks where 1.21.5 hashes them (`ServerboundContainerClick-
 /// Packet` in both references). A hash can't be reversed, so each stack is
 /// reconstructed bare (item + count, no components); the server reconciles
@@ -2923,7 +2922,7 @@ fn translate_update_advancements(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Rewrites a latest `attack` payload (`entityId`) into an old-layout
+/// Rewrites a native `attack` payload (`entityId`) into an old-layout
 /// `interact` frame with the `ATTACK` action. The old packet's trailing
 /// `usingSecondaryAction` bool doesn't exist on the new one and the server
 /// ignores it for attacks, so it's synthesized as false.
@@ -2937,7 +2936,7 @@ fn translate_attack(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     vec![out]
 }
 
-/// Rewrites a latest `interact` payload (`entityId, hand, LpVec3 location,
+/// Rewrites a native `interact` payload (`entityId, hand, LpVec3 location,
 /// usingSecondaryAction`) into old-layout `interact` frames. Old clients
 /// always send `INTERACT_AT` (raw-float hit location, then hand) and follow
 /// with `INTERACT` (hand only) unless the client-side `interactAt` result
@@ -2972,7 +2971,7 @@ fn translate_interact(interact_old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     vec![at, plain]
 }
 
-/// The latest serializer id for a 1.21.11 `EntityDataSerializers` id: 26.x
+/// The native serializer id for a 1.21.11 `EntityDataSerializers` id: 26.x
 /// interleaved `cat/cow/pig/chicken_sound_variant` at ids 22/24/29/31
 /// (line-checked against both versions' `EntityDataSerializers.java`
 /// registration blocks; anchored by tests in `azalea_compat`).
@@ -2987,7 +2986,7 @@ fn remap_serializer_774(old: u32) -> Option<u32> {
     })
 }
 
-/// The latest serializer id for a 1.21.10 `EntityDataSerializers` id:
+/// The native serializer id for a 1.21.10 `EntityDataSerializers` id:
 /// 1.21.11 inserted `zombie_nautilus_variant` right above `chicken_variant`
 /// (27), shifting everything past it by one more slot; below that the
 /// 1.21.11 interleave applies unchanged (its trailing `humanoid_arm`
@@ -3005,7 +3004,7 @@ fn remap_serializer_773(old: u32) -> Option<u32> {
 /// `translate_entity_data` strips entries using it.
 const COMPOUND_TAG_SERIALIZER: u32 = 16;
 
-/// The latest serializer id for a 1.21.8 `EntityDataSerializers` id: 1.21.9
+/// The native serializer id for a 1.21.8 `EntityDataSerializers` id: 1.21.9
 /// removed `compound_tag` (16), shifting everything above it down one, and
 /// inserted `copper_golem_state`/`weathering_copper_state` right below
 /// `vector3`; on either side the 1.21.10 interleave applies unchanged.
@@ -3019,7 +3018,7 @@ fn remap_serializer_772(old: u32) -> Option<u32> {
     }
 }
 
-/// The latest serializer id for a 1.21.4 `EntityDataSerializers` id: 1.21.5
+/// The native serializer id for a 1.21.4 `EntityDataSerializers` id: 1.21.5
 /// interleaved the cow/pig/chicken/wolf-sound variant serializers (and
 /// renamed `optional_uuid` to the wire-identical
 /// `optional_living_entity_reference`); mapping through the 1.21.8 ids
@@ -3052,7 +3051,7 @@ fn translate_game_login(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// layouts are identical between the versions (verified serializer by
 /// serializer); they're skipped, not decoded, except particle values, whose
 /// type ids are remapped in place ([`translate_particles`]). An entry using
-/// a serializer the latest version dropped (1.21.8's `compound_tag`) is
+/// a serializer the native version dropped (1.21.8's `compound_tag`) is
 /// stripped rather than failing the packet. An item-stack value can't
 /// always be walked without full component codecs — the remainder is copied
 /// verbatim, which is correct unless a shifted serializer follows one (no
@@ -3135,7 +3134,7 @@ fn translate_entity_data(
     Some(out)
 }
 
-/// Latest-registry component ids whose payloads the stack walker can advance
+/// Native-registry component ids whose payloads the stack walker can advance
 /// past (26.2 `DataComponents` registration order; anchored in
 /// `component_id_anchors` in `azalea_compat`). Matching happens after the
 /// remap, so one set of ids serves every wire version.
@@ -3143,7 +3142,7 @@ pub(crate) const COMPONENT_MAP_ID: u32 = 46;
 pub(crate) const COMPONENT_PROFILE: u32 = 70;
 
 /// Remaps one entity-data item stack (count, item id, component patch) into
-/// the latest registry space. `old_profile` marks the pre-1.21.9 `profile`
+/// the native registry space. `old_profile` marks the pre-1.21.9 `profile`
 /// component layout (see [`translate_old_profile`]). `None` means a
 /// component payload the walker doesn't know (or a malformed stack); the
 /// caller falls back to the verbatim-tail copy.
@@ -3169,10 +3168,10 @@ fn translate_item_stack(
     out.extend_from_slice(&cur.get_ref()[removed_at..cur.position() as usize]);
     for _ in 0..added {
         let component = u32::azalea_read_var(cur).ok()?;
-        let latest = remaps.remap(ClientRegistry::DataComponentType, component)?;
-        wire::write_varint(out, latest);
+        let native = remaps.remap(ClientRegistry::DataComponentType, component)?;
+        wire::write_varint(out, native);
         let value_at = cur.position() as usize;
-        match latest {
+        match native {
             COMPONENT_MAP_ID => {
                 varint_span(cur)?;
             }
@@ -3217,7 +3216,7 @@ fn translate_old_profile(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<(
     Some(())
 }
 
-/// Advances past one entity-data value of the given latest-version
+/// Advances past one entity-data value of the given native-version
 /// serializer (the caller remaps first). `Some(false)` means the value (and
 /// thus anything after it) can't be walked; `None` means the data is
 /// malformed.
@@ -3331,7 +3330,7 @@ fn translate_particles(
         let old = u32::azalea_read_var(cur).ok()?;
         let new = remaps.remap(ClientRegistry::ParticleType, old)?;
         wire::write_varint(out, new);
-        let name = RegistryTable::latest().name_of(ClientRegistry::ParticleType, new)?;
+        let name = RegistryTable::native().name_of(ClientRegistry::ParticleType, new)?;
         match name {
             "entity_effect" | "tinted_leaves" if ids.color_particles => {
                 let color_at = cur.position() as usize;
@@ -3471,7 +3470,7 @@ fn copy_block_entities(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: bo
 }
 
 /// Copies one NBT value, dropping the root name the wire version writes so the
-/// output is the unnamed network form the latest version expects.
+/// output is the unnamed network form the native version expects.
 fn copy_unnamed_nbt(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: bool) -> Option<()> {
     let tag = read_u8(cur)?;
     out.push(tag);
@@ -3710,7 +3709,7 @@ fn remap_with<T: Registry>(remaps: &RegistryRemaps, reg: ClientRegistry, value: 
     }
 }
 
-/// azalea's typed encoder always writes latest-version component-type ids,
+/// azalea's typed encoder always writes native-version component-type ids,
 /// and `DataComponentPatch` is opaque (single entries can't be rewritten or
 /// removed), so a patch touching any component the target version numbers
 /// differently is cleared wholesale rather than sent misencoded.
