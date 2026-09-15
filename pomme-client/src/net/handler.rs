@@ -18,8 +18,58 @@ use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
 };
+use crate::ui::server_dialog::{DialogReference, ServerLink};
 use crate::ui::text::format_text_spans;
 use crate::world::block::model::CardinalLightType;
+
+fn validated_server_link_url(url: &str) -> Option<String> {
+    crate::chat_component::parse_untrusted_url(url.to_owned())
+        .map_err(|error| tracing::warn!("Ignoring invalid server link `{url}`: {error}"))
+        .ok()
+}
+
+fn server_link_component(
+    kind: &azalea_protocol::common::server_links::ServerLinkKind,
+) -> crate::chat_component::Component {
+    use azalea_protocol::common::server_links::{KnownLinkKind, ServerLinkKind};
+
+    match kind {
+        ServerLinkKind::Component(component) => serde_json::to_value(component)
+            .ok()
+            .and_then(|value| crate::chat_component::Component::from_value(&value).ok())
+            .unwrap_or_else(|| crate::chat_component::Component::text(component.to_string())),
+        ServerLinkKind::Known(kind) => {
+            let key = match kind {
+                KnownLinkKind::BugReport => "known_server_link.report_bug",
+                KnownLinkKind::CommunityGuidelines => "known_server_link.community_guidelines",
+                KnownLinkKind::Support => "known_server_link.support",
+                KnownLinkKind::Status => "known_server_link.status",
+                KnownLinkKind::Feedback => "known_server_link.feedback",
+                KnownLinkKind::Community => "known_server_link.community",
+                KnownLinkKind::Website => "known_server_link.website",
+                KnownLinkKind::Forums => "known_server_link.forums",
+                KnownLinkKind::News => "known_server_link.news",
+                KnownLinkKind::Announcements => "known_server_link.announcements",
+            };
+            crate::chat_component::Component::translate(key, Vec::new())
+        }
+    }
+}
+
+fn dialog_holder_reference(
+    holder: &azalea_registry::Holder<azalea_registry::data::Dialog, simdnbt::owned::Nbt>,
+) -> Result<DialogReference, String> {
+    match holder {
+        azalea_registry::Holder::Reference(dialog) => {
+            Ok(DialogReference::ProtocolId(dialog.to_u32()))
+        }
+        azalea_registry::Holder::Direct(nbt) => {
+            let value = serde_json::to_value(simdnbt::owned::NbtTag::Compound((***nbt).clone()))
+                .map_err(|e| format!("dialog NBT is not serializable: {e}"))?;
+            Ok(DialogReference::Value(value))
+        }
+    }
+}
 
 /// Dimension info from a login/respawn registry entry. Fields that Azalea does
 /// not model directly live in its flattened extras. Missing `has_skylight`
@@ -1064,6 +1114,29 @@ pub fn handle_game_packet(
             *shared_tree.lock() = Some(tree.clone());
             let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
         }
+        ClientboundGamePacket::ServerLinks(p) => {
+            let links = p
+                .links
+                .iter()
+                .filter_map(|entry| {
+                    let url = validated_server_link_url(&entry.link)?;
+                    Some(ServerLink {
+                        label: server_link_component(&entry.kind),
+                        url,
+                    })
+                })
+                .collect();
+            let _ = event_tx.try_send(NetworkEvent::ServerLinks { links });
+        }
+        ClientboundGamePacket::ShowDialog(p) => match dialog_holder_reference(&p.dialog) {
+            Ok(dialog) => {
+                let _ = event_tx.try_send(NetworkEvent::ShowDialog { dialog });
+            }
+            Err(error) => tracing::warn!("Could not decode server dialog: {error}"),
+        },
+        ClientboundGamePacket::ClearDialog(_) => {
+            let _ = event_tx.try_send(NetworkEvent::ClearDialog);
+        }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(
                 "Custom chat completions: {:?} ({} entries)",
@@ -1539,6 +1612,21 @@ mod tests {
             sound_id: Identifier::new("minecraft:test.ui"),
             range: None,
         })
+    }
+
+    #[test]
+    fn server_links_accept_only_untrusted_http_and_https_urls() {
+        assert_eq!(
+            validated_server_link_url("https://example.com/path").as_deref(),
+            Some("https://example.com/path")
+        );
+        assert_eq!(
+            validated_server_link_url("http://example.com").as_deref(),
+            Some("http://example.com")
+        );
+        assert!(validated_server_link_url("file:///tmp/pomme").is_none());
+        assert!(validated_server_link_url("mailto:test@example.com").is_none());
+        assert!(validated_server_link_url("not a uri").is_none());
     }
 
     #[test]

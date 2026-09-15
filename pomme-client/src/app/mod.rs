@@ -461,6 +461,41 @@ impl ApplicationHandler for App {
                                     if !game.handle_debug_key(code, f3_held, &connection) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
+                                } else if game.server_dialog.is_some() {
+                                    match code {
+                                        KeyCode::Escape => {
+                                            let action = game
+                                                .server_dialog
+                                                .as_mut()
+                                                .and_then(|dialog| dialog.handle_escape());
+                                            let finished = game
+                                                .server_dialog
+                                                .as_ref()
+                                                .is_some_and(|dialog| dialog.is_finished());
+                                            if finished {
+                                                game.server_dialog = None;
+                                            }
+                                            if let Some(action) = action {
+                                                crate::app::phases::in_game::handle_server_dialog_action(
+                                                    action,
+                                                    &mut self.core,
+                                                    &connection,
+                                                    &mut game,
+                                                );
+                                            }
+                                            self.core
+                                                .input
+                                                .clear_action(crate::app::input::Action::OpenMenu);
+                                            self.core
+                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
+                                        }
+                                        KeyCode::Tab => {
+                                            if let Some(dialog) = game.server_dialog.as_mut() {
+                                                dialog.handle_tab(self.core.input.shift_held());
+                                            }
+                                        }
+                                        _ => self.core.input.on_menu_key_event(&event),
+                                    }
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {

@@ -174,6 +174,13 @@ pub enum NetworkEvent {
     ActionBar {
         spans: Vec<crate::ui::text::TextSpan>,
     },
+    ServerLinks {
+        links: Vec<crate::ui::server_dialog::ServerLink>,
+    },
+    ShowDialog {
+        dialog: crate::ui::server_dialog::DialogReference,
+    },
+    ClearDialog,
     BossBarUpdate {
         id: uuid::Uuid,
         op: crate::ui::boss_bar::BossBarOp,
