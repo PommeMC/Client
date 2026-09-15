@@ -1,8 +1,8 @@
 //! Pomme-owned Minecraft protocol data and wire encoding.
 //!
-//! The client always speaks the latest supported version internally; this
-//! crate is the seam where per-version protocol knowledge (packet ids, wire
-//! formats, registry ids) lives so older servers can be supported by
+//! The client speaks one version natively (`version::NATIVE`); this crate is
+//! the seam where per-version protocol knowledge (packet ids, wire formats,
+//! registry ids) lives so servers on other versions can be supported by
 //! translation. Depends on no azalea crates by design — azalea cross-checks
 //! live in pomme-client's tests.
 

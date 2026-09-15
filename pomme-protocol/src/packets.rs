@@ -313,6 +313,70 @@ mod tests {
         assert_eq!(t.id(Phase::Game, Direction::Serverbound, "no_such"), None);
     }
 
+    /// Registration-order anchors for 26.3, the first table newer than the
+    /// native version, spot-checked by hand against
+    /// `reference/26.3/decompiled/.../GameProtocols.java` and cross-checked in
+    /// full against Mojang's `generated/reports/packets.json`. 26.3 inserted
+    /// `add_transient_block` (37), `post_effects` (configuration 10, game 83)
+    /// and `swing_animation` (123) clientbound and replaced serverbound
+    /// `swing` (63) with `punch` (46); every other id moves by the insertions
+    /// before it, and the remaining phases are identical to 26.2.
+    #[test]
+    fn anchors_26_3() {
+        let t = PacketTable::for_protocol(777).unwrap();
+        let native = PacketTable::native();
+        assert_eq!(t.version().protocol, 777);
+        assert_eq!(t.version().name, "26.3");
+        let cb = |name| t.id(Phase::Game, Direction::Clientbound, name);
+        assert_eq!(cb("add_transient_block"), Some(37));
+        assert_eq!(cb("post_effects"), Some(83));
+        assert_eq!(cb("swing_animation"), Some(123));
+        assert_eq!(cb("respawn"), Some(84));
+        assert_eq!(cb("show_dialog"), Some(143));
+        assert_eq!(t.name_of(Phase::Game, Direction::Clientbound, 144), None);
+        let sb = |name| t.id(Phase::Game, Direction::Serverbound, name);
+        assert_eq!(sb("punch"), Some(46));
+        assert_eq!(sb("swing"), None);
+        assert_eq!(sb("spectator_action"), Some(63));
+        assert_eq!(t.name_of(Phase::Game, Direction::Serverbound, 69), None);
+        let config = |name| t.id(Phase::Configuration, Direction::Clientbound, name);
+        assert_eq!(config("post_effects"), Some(10));
+        assert_eq!(config("code_of_conduct"), Some(20));
+
+        let shifted = |phase, dir, shift: fn(u32) -> Option<u32>| {
+            let mut id = 0;
+            while let Some(name) = native.name_of(phase, dir, id) {
+                assert_eq!(
+                    t.id(phase, dir, name),
+                    shift(id),
+                    "{phase:?} {dir:?} {name}"
+                );
+                id += 1;
+            }
+        };
+        shifted(Phase::Game, Direction::Clientbound, |id| {
+            Some(id + u32::from(id >= 37) + u32::from(id >= 82) + u32::from(id >= 121))
+        });
+        shifted(Phase::Game, Direction::Serverbound, |id| match id {
+            46..=62 => Some(id + 1),
+            63 => None,
+            _ => Some(id),
+        });
+        shifted(Phase::Configuration, Direction::Clientbound, |id| {
+            Some(id + u32::from(id >= 10))
+        });
+        for (phase, dir) in [
+            (Phase::Handshake, Direction::Serverbound),
+            (Phase::Status, Direction::Serverbound),
+            (Phase::Status, Direction::Clientbound),
+            (Phase::Login, Direction::Serverbound),
+            (Phase::Login, Direction::Clientbound),
+            (Phase::Configuration, Direction::Serverbound),
+        ] {
+            assert_prefix(t, native, phase, dir, true);
+        }
+    }
+
     /// Registration-order anchors for 26.1, spot-checked by hand against
     /// `reference/26.1/decompiled/.../GameProtocols.java`. Ids match 26.2
     /// everywhere; the serverbound slot 62 packet was renamed in 26.2
