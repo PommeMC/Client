@@ -360,7 +360,9 @@ fn sprite_alpha_mask_from_rgba(
         .iter()
         .map(|frame| {
             extract_frame_rgba(data, full_width, layout, *frame)
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|pixel| pixel[3] != 0)
                 .collect()
         })
@@ -859,7 +861,7 @@ fn generate_rgba_mips(
 }
 
 fn has_fully_transparent_texel(data: &[u8]) -> bool {
-    data.chunks_exact(4).any(|pixel| pixel[3] == 0)
+    data.as_chunks::<4>().0.iter().any(|pixel| pixel[3] == 0)
 }
 
 fn srgb_to_linear_10(channel: u8) -> u16 {
@@ -991,7 +993,7 @@ fn scale_alpha_to_coverage(
         }
         scale = (min_scale + max_scale) * 0.5;
     }
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         let alpha =
             (f32::from(pixel[3]) / 255.0 * best_scale + alpha_cutoff_bias + 0.025).clamp(0.0, 1.0);
         pixel[3] = (alpha * 255.0).floor() as u8;
@@ -1062,7 +1064,7 @@ fn fill_transparent_rgb_with_dark_color(data: &mut [u8], width: u32, height: u32
         (u16::from(darkest[1]) * 3 / 4) as u8,
         (u16::from(darkest[2]) * 3 / 4) as u8,
     ];
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         if pixel[3] == 0 {
             pixel[..3].copy_from_slice(&dark);
         }
@@ -1097,7 +1099,9 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion 
 /// Conservative for the solid pass: any transparency routes the sprite to the
 /// cutout pass, so a hole never renders solid.
 fn sprite_transparency(data: &[u8]) -> (bool, bool) {
-    data.chunks_exact(4)
+    data.as_chunks::<4>()
+        .0
+        .iter()
         .fold((true, false), |(opaque, translucent), px| {
             (
                 opaque && px[3] == 255,
@@ -1158,7 +1162,7 @@ mod tests {
 
     fn solid_source(name: &str, width: u32, height: u32, color: [u8; 4]) -> Source {
         let mut data = vec![0; (width * height * 4) as usize];
-        for pixel in data.chunks_exact_mut(4) {
+        for pixel in data.as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&color);
         }
         let (opaque, translucent) = sprite_transparency(&data);
@@ -1255,8 +1259,20 @@ mod tests {
             }
         }
         let levels = generate_rgba_mips(pixels, 4, 4, 1, MipmapStrategy::Cutout, 0.0);
-        assert!(levels[0].chunks_exact(4).all(|pixel| pixel[1] == 255));
-        assert!(levels[1].chunks_exact(4).all(|pixel| pixel[1] == 255));
+        assert!(
+            levels[0]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[1] == 255)
+        );
+        assert!(
+            levels[1]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[1] == 255)
+        );
     }
 
     #[test]
@@ -1341,7 +1357,13 @@ mod tests {
 
         let mut pixels = [0, 0, 0, 128].repeat(4);
         scale_alpha_to_coverage(&mut pixels, 2, 2, 1.0, 0.5, texture.alpha_cutoff_bias);
-        assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 159));
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 159)
+        );
     }
 
     #[test]

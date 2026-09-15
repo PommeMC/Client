@@ -76,6 +76,8 @@ pub fn handle_game_packet(
             });
             let _ = event_tx.try_send(NetworkEvent::PlayerLogin {
                 entity_id: p.player_id.0,
+                hardcore: p.hardcore,
+                show_death_screen: p.show_death_screen,
             });
         }
         ClientboundGamePacket::LevelChunkWithLight(p) => {
@@ -218,6 +220,9 @@ pub fn handle_game_packet(
                 item: p.item_stack.clone(),
                 state_id: p.state_id,
             });
+        }
+        ClientboundGamePacket::SetHeldSlot(p) if (0..9).contains(&p.slot) => {
+            let _ = event_tx.try_send(NetworkEvent::HeldSlot { slot: p.slot as u8 });
         }
         ClientboundGamePacket::ContainerSetData(p) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerData {
@@ -862,6 +867,11 @@ pub fn handle_game_packet(
                 }
             }
         }
+        // Event id 3 = living entity death.
+        // TODO: event 60 (`makePoofParticles`) when a mob's death clock hits 20.
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 3 => {
+            let _ = event_tx.try_send(NetworkEvent::EntityDied { id: p.entity_id.0 });
+        }
         // Event id 9 = finished using an item (vanilla `completeUsingItem`).
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 9 => {
             let _ = event_tx.try_send(NetworkEvent::FinishUseItem { id: p.entity_id.0 });
@@ -957,6 +967,7 @@ pub fn handle_game_packet(
         ClientboundGamePacket::PlayerCombatKill(p) => {
             tracing::info!("Player died: {}", p.message);
             let _ = event_tx.try_send(NetworkEvent::PlayerDied {
+                player_id: p.player_id.0,
                 message: p.message.to_string(),
             });
         }
@@ -1485,10 +1496,46 @@ fn slot_display_first_item(
 }
 
 #[cfg(test)]
-mod raw_sound_tests {
+mod tests {
+    use std::sync::Arc;
+
+    use azalea_protocol::packets::game::c_set_held_slot::ClientboundSetHeldSlot;
+    use parking_lot::Mutex;
     use pomme_protocol::wire;
 
     use super::*;
+
+    #[test]
+    fn set_held_slot_emits_authoritative_hotbar_selection() {
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        let registries = RegistryHolder::default();
+        let command_tree = Arc::new(Mutex::new(None));
+        let receive = |slot| {
+            handle_game_packet(
+                &ClientboundGamePacket::SetHeldSlot(ClientboundSetHeldSlot { slot }),
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+            );
+        };
+
+        receive(5);
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::HeldSlot { slot: 5 }
+        ));
+
+        for invalid in [9, u32::MAX] {
+            receive(invalid);
+            assert!(matches!(
+                event_rx.try_recv(),
+                Err(crossbeam_channel::TryRecvError::Empty)
+            ));
+        }
+    }
 
     fn direct_sound() -> Holder<SoundEvent, CustomSound> {
         Holder::Direct(CustomSound {

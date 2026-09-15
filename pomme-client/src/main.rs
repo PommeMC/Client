@@ -21,6 +21,7 @@ mod physics;
 mod player;
 mod renderer;
 mod resource_pack;
+mod singleplayer;
 #[cfg(test)]
 mod test_util;
 mod ui;

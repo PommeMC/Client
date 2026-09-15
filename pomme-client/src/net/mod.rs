@@ -1,10 +1,12 @@
 #[cfg(test)]
 mod azalea_compat;
 pub mod commands;
+pub mod conn;
 pub mod connection;
 pub mod handler;
 pub mod resolve;
 pub mod sender;
+pub mod stream;
 pub mod translate;
 
 use std::sync::Arc;
@@ -133,6 +135,9 @@ pub enum NetworkEvent {
         index: u16,
         item: ItemStack,
         state_id: u32,
+    },
+    HeldSlot {
+        slot: u8,
     },
     /// A menu data value (furnace lit/cook progress, etc.).
     ContainerData {
@@ -448,6 +453,9 @@ pub enum NetworkEvent {
     EntityDamaged {
         id: i32,
     },
+    EntityDied {
+        id: i32,
+    },
     HurtAnimation {
         id: i32,
         yaw: f32,
@@ -459,6 +467,8 @@ pub enum NetworkEvent {
     },
     PlayerLogin {
         entity_id: i32,
+        hardcore: bool,
+        show_death_screen: bool,
     },
     PlayerScore {
         entity_id: i32,
@@ -475,6 +485,7 @@ pub enum NetworkEvent {
         keep_attribute_modifiers: bool,
     },
     PlayerDied {
+        player_id: i32,
         message: String,
     },
     ResourcePackPush {

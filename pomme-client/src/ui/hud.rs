@@ -1125,6 +1125,11 @@ fn build_scoreboard(
     }
 }
 
+/// Vanilla `Gui.SAVING_LEVEL`, shared by the indicator and the saving screen.
+pub fn saving_level_text() -> &'static str {
+    crate::lang::translate("menu.savingLevel").unwrap_or("Saving world")
+}
+
 /// Vanilla `Hud.extractSavingIndicator`: "Saving world" text 5 GUI units from
 /// the bottom-right, faded by `alpha`. No backdrop rect: vanilla's
 /// `getBackgroundColor(0.0f)` is 0 under default options.
@@ -1136,7 +1141,7 @@ pub fn build_saving_indicator(
     alpha: f32,
     text_width_fn: TextWidthFn,
 ) {
-    let text = crate::lang::translate("menu.savingLevel").unwrap_or("Saving world");
+    let text = saving_level_text();
     let fs = FONT_SIZE * gs;
     let w = text_width_fn(text, fs);
     let mut span = TextSpan::new(text.into(), WHITE);

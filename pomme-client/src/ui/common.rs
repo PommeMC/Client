@@ -577,6 +577,7 @@ fn push_button_inner(
 pub fn push_slider(
     elements: &mut Vec<MenuElement>,
     cursor: (f32, f32),
+    mouse_pressed: bool,
     mouse_held: bool,
     x: f32,
     y: f32,
@@ -587,6 +588,8 @@ pub fn push_slider(
     label: &str,
     value: f32,
     enabled: bool,
+    focused: bool,
+    can_change_value: bool,
     dragging: bool,
     scroll: &LabelScroll<'_>,
 ) -> SliderResult {
@@ -596,7 +599,7 @@ pub fn push_slider(
     let handle_x = x + value.clamp(0.0, 1.0) * track_w;
 
     let actively_dragging = enabled && dragging && mouse_held;
-    let start_drag = hovered && mouse_held && !dragging;
+    let start_drag = hovered && mouse_pressed && !dragging;
 
     let new_value = if actively_dragging || start_drag {
         let rel = (cursor.0 - x - handle_w / 2.0) / track_w;
@@ -605,18 +608,27 @@ pub fn push_slider(
         None
     };
 
+    // `getSprite` / `getHandleSprite`: a focused slider highlights its handle
+    // while Left/Right can move it, and its track once Enter has locked it.
+    let track_sprite = if enabled && focused && !can_change_value {
+        SpriteId::SliderTrackHover
+    } else {
+        SpriteId::SliderTrack
+    };
     elements.push(MenuElement::NineSlice {
         x,
         y,
         w,
         h,
-        sprite: SpriteId::SliderTrack,
+        sprite: track_sprite,
         // `widget/slider.png.mcmeta` declares a 1px border, not the button's 3.
         border: 1.0 * gs,
         tint: WHITE,
     });
 
-    let handle_sprite = if actively_dragging || start_drag || hovered {
+    let handle_sprite = if enabled
+        && (hovered || actively_dragging || start_drag || (focused && can_change_value))
+    {
         SpriteId::SliderHandleHover
     } else {
         SpriteId::SliderHandle

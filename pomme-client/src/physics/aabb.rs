@@ -2,7 +2,8 @@ use glam::{DVec3, dvec3};
 
 use super::block_shape::LocalBox;
 
-/// Vanilla `Mth.EPSILON`, the slop `AABB.clip` works to.
+/// Vanilla's double `1.0E-7` slop used by `AABB.clip`/voxel collision math.
+/// This is intentionally not `Mth.EPSILON`, which is the float `1.0E-5f`.
 const EPSILON: f64 = 1.0e-7;
 
 #[derive(Debug, Clone, Copy)]

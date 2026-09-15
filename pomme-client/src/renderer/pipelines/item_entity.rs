@@ -1055,7 +1055,12 @@ mod tests {
         ];
 
         assert_eq!(vertices.len(), 36);
-        for (face, expected) in vertices[12..].chunks_exact(6).zip(expected_normals) {
+        for (face, expected) in vertices[12..]
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .zip(expected_normals)
+        {
             let p0 = glam::Vec3::from_array(face[0].position);
             let p1 = glam::Vec3::from_array(face[1].position);
             let p2 = glam::Vec3::from_array(face[2].position);
@@ -1080,7 +1085,7 @@ mod tests {
             glam::Vec3::X,
         ];
 
-        for (face, expected) in vertices.chunks_exact(6).zip(expected) {
+        for (face, expected) in vertices.as_chunks::<6>().0.iter().zip(expected) {
             for vertex in face {
                 assert_eq!(unpack_normal(vertex), expected);
             }

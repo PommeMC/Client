@@ -184,6 +184,7 @@ impl Renderer {
         asset_index: &Option<AssetIndex>,
         game_dir: &Path,
         vsync: bool,
+        panorama_dir: &Path,
     ) -> Result<Self, RendererError> {
         let size = window.inner_size();
 
@@ -326,8 +327,7 @@ impl Renderer {
             ctx.command_pool,
             swapchain_state.render_pass,
             &ctx.allocator,
-            jar_assets_dir,
-            asset_index,
+            pipelines::panorama::resolve_panorama_faces(panorama_dir, jar_assets_dir, asset_index),
         );
 
         splash(&mut menu_pipeline, 0.9, "Finalizing...");
@@ -854,6 +854,10 @@ impl Renderer {
         self.camera.set_fluid_fov_factor(factor);
     }
 
+    pub fn set_death_time(&mut self, death_time: f32) {
+        self.camera.set_death_time(death_time);
+    }
+
     pub fn set_render_partial_tick(&mut self, partial_tick: f32) {
         self.camera.set_render_partial_tick(partial_tick);
     }
@@ -1212,18 +1216,18 @@ impl Renderer {
         tracing::info!("Assets reloaded");
     }
 
-    pub fn reload_panorama(
-        &mut self,
-        jar_assets_dir: &Path,
-        asset_index: &Option<crate::assets::AssetIndex>,
-    ) {
+    pub fn reload_panorama(&mut self, panorama_dir: &Path) {
+        let faces = pipelines::panorama::resolve_panorama_faces(
+            panorama_dir,
+            &self.jar_assets_dir,
+            &self.asset_index,
+        );
         self.panorama_pipeline.reload_cubemap(
             &self.ctx.device,
             self.ctx.graphics_queue,
             self.ctx.command_pool,
             &self.ctx.allocator,
-            jar_assets_dir,
-            asset_index,
+            faces,
         );
     }
 
@@ -1749,7 +1753,9 @@ impl Renderer {
                     && self.camera.top_down().is_none()
                 {
                     let aspect = sw / sh.max(1.0);
-                    // Vanilla applies both bobHurt and bobView to the hand pose stack.
+                    let hud_fov = self.camera.hud_fov_radians();
+                    // Vanilla applies bobHurt (death + hurt) and bobView to the
+                    // first-person arm/item pose stack as well as the world.
                     let view_effect = self.camera.view_effect_matrix();
                     // Vanilla renderArmWithItem draws the arm only for an empty
                     // hand; a held item renders alone.
@@ -1758,6 +1764,7 @@ impl Renderer {
                             cmd,
                             frame,
                             aspect,
+                            hud_fov,
                             *swing_progress,
                             *use_anim,
                             item,
@@ -1768,6 +1775,7 @@ impl Renderer {
                             cmd,
                             frame,
                             aspect,
+                            hud_fov,
                             *swing_progress,
                             view_effect,
                         ),

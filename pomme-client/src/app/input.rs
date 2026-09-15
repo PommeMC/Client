@@ -12,6 +12,12 @@ use crate::app::state_slot::StateSlot;
 /// Left-stick deflection past which a direction counts as a digital press.
 pub const STICK_MOVEMENT_THRESHOLD: f32 = 0.25;
 
+/// Convert gilrs left-stick axes into vanilla movement axes: X is `xxa`
+/// (positive left, negative right) and Y is `zza` (positive forward).
+pub(crate) fn gamepad_movement_axes(analog: glam::Vec2) -> glam::Vec2 {
+    glam::vec2(-analog.x, analog.y)
+}
+
 /// Value in milliseconds for how long the controller should rumble to be only
 /// an "instant".
 pub const SHORT_RUMBLE_TIME: u32 = 5;
@@ -182,6 +188,7 @@ impl InputState {
                 gfx,
                 connection: _connection,
                 game,
+                ..
             } = &mut app
             {
                 if self.action_just_pressed(Action::ToggleInventory) {
@@ -193,6 +200,7 @@ impl InputState {
                         should_apply_cursor_grab = true;
                     } else if !game.paused
                         && !game.dead
+                        && !game.death_screen_open
                         && game.player.game_mode != 3
                         && !game.chat.is_open()
                         && game.game_mode_switcher.is_none()
@@ -217,7 +225,7 @@ impl InputState {
                         // update_game restores the render distance next frame.
                         game.chunk_load_abort = true;
                         should_apply_cursor_grab = true;
-                    } else if !game.dead && !game.options_from_game {
+                    } else if !game.dead && !game.death_screen_open && !game.options_from_game {
                         use crate::ui::pause::PauseScreen;
                         if game.inventory_open || game.open_container.is_some() {
                             game.close_menu();
@@ -242,7 +250,10 @@ impl InputState {
                     self.recent_actions.remove(&Action::OpenMenu);
                 }
                 if self.action_just_pressed(Action::Close) {
-                    if !game.dead && (game.inventory_open || game.open_container.is_some()) {
+                    if !game.dead
+                        && !game.death_screen_open
+                        && (game.inventory_open || game.open_container.is_some())
+                    {
                         game.close_menu();
                         should_apply_cursor_grab = true;
                     }
@@ -255,12 +266,18 @@ impl InputState {
                     self.recent_actions.remove(&Action::Close);
                 }
                 if self.action_just_pressed(Action::ChangePerspective) {
-                    gfx.renderer.cycle_camera_mode();
+                    if !game.death_screen_open {
+                        gfx.renderer.cycle_camera_mode();
+                    }
 
                     self.recent_actions.remove(&Action::ChangePerspective);
                 }
                 if self.action_just_pressed(Action::OpenChat) {
-                    if !game.paused && !game.gui_open() && !game.chat.is_open() {
+                    if !game.paused
+                        && !game.death_screen_open
+                        && !game.gui_open()
+                        && !game.chat.is_open()
+                    {
                         game.chat.open();
                         // The frame flag is written at end of update; set it now
                         // so keys later in this same event batch already type.
@@ -271,7 +288,11 @@ impl InputState {
                     self.recent_actions.remove(&Action::OpenChat);
                 }
                 if self.action_just_pressed(Action::OpenCommands) {
-                    if !game.paused && !game.gui_open() && !game.chat.is_open() {
+                    if !game.paused
+                        && !game.death_screen_open
+                        && !game.gui_open()
+                        && !game.chat.is_open()
+                    {
                         game.chat.open_with_slash();
                         self.text_capture = true;
                         should_apply_cursor_grab = true;
@@ -312,13 +333,13 @@ impl InputState {
                     self.recent_actions.insert(Action::Destroy, true);
                 }
                 // TODO: gamepad spectator-menu support (vanilla has none).
-                Button::RightTrigger if !self.spectator => {
+                Button::RightTrigger if !self.spectator && !self.menu_capture => {
                     self.selected_slot = (self.selected_slot + 1) % 9;
                 }
                 Button::LeftTrigger2 => {
                     self.recent_actions.insert(Action::Use, true);
                 }
-                Button::LeftTrigger if !self.spectator => {
+                Button::LeftTrigger if !self.spectator && !self.menu_capture => {
                     self.selected_slot = (self.selected_slot + 8) % 9;
                 }
                 Button::North => {
@@ -454,6 +475,10 @@ impl InputState {
 
     pub fn get_gamepad_left_analog(&self) -> Option<glam::Vec2> {
         self.gamepad_stick(gilrs::Axis::LeftStickX, gilrs::Axis::LeftStickY)
+    }
+
+    pub fn get_gamepad_movement_axes(&self) -> Option<glam::Vec2> {
+        self.get_gamepad_left_analog().map(gamepad_movement_axes)
     }
 
     pub fn get_gamepad_right_analog(&self) -> Option<glam::Vec2> {
@@ -687,7 +712,16 @@ impl InputState {
         self.selected_slot
     }
 
+    /// The server's held slot; the handler has already checked it is a hotbar
+    /// index.
+    pub fn set_selected_slot(&mut self, slot: u8) {
+        self.selected_slot = slot;
+    }
+
     pub fn on_scroll(&mut self, delta: f32) {
+        if self.menu_capture {
+            return;
+        }
         if delta > 0.0 {
             self.selected_slot = (self.selected_slot + 8) % 9;
         } else if delta < 0.0 {
