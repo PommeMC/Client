@@ -458,7 +458,10 @@ fn wrap_motd_spans(
             italic: span.italic,
             strikethrough: span.strikethrough,
             underline: span.underline,
-            sga: span.sga,
+            obfuscated: span.obfuscated,
+            shadow_color: span.shadow_color,
+            font: span.font.clone(),
+            inline_object: span.inline_object.clone(),
             component_style: span.component_style.clone(),
         };
 

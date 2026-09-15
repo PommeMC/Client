@@ -426,7 +426,7 @@ fn push_option_rows(
         panel.image(elements, level_sprite, 61.0, row_y + 1.0, 16.0, 16.0);
 
         let mut span = TextSpan::new(message, rgb(sga_color));
-        span.sga = true;
+        span.font = Some("minecraft:alt".into());
         elements.push(MenuElement::McText {
             x: panel.ox + 80.0 * s,
             y: panel.oy + (row_y + 2.0) * s,
