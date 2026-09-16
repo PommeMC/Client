@@ -327,6 +327,91 @@ mod tests {
         }
     }
 
+    /// Anchor checks against the 26.3 -> 26.2 registry diff, the first remap
+    /// from a version newer than native (spot-checked by hand against the two
+    /// data-generator reports). Entries 26.3 added have no native id; ids
+    /// below each insertion are stable.
+    #[test]
+    fn remap_26_3_anchors() {
+        let (r, from, to) = setup(777);
+
+        // cushion was inserted at entity id 33, the poplar boats at 106.
+        assert_eq!(
+            from.name_of(ClientRegistry::EntityType, 33),
+            Some("cushion")
+        );
+        assert_eq!(r.remap(ClientRegistry::EntityType, 32), Some(32));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 34), Some(33));
+        assert_eq!(r.remap(ClientRegistry::EntityType, 160), Some(157));
+        assert_unmapped(r, from, ClientRegistry::EntityType, "cushion");
+
+        // Items diverge at poplar_planks (72).
+        assert_eq!(r.remap(ClientRegistry::Item, 71), Some(71));
+        assert_unmapped(r, from, ClientRegistry::Item, "poplar_planks");
+        assert_eq!(r.remap(ClientRegistry::Item, 73), Some(72));
+        assert_eq!(r.remap(ClientRegistry::Item, 1657), Some(1536));
+
+        // The three poplar leaf particles sit where tinted_leaves was (43).
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 42), Some(42));
+        assert_unmapped(r, from, ClientRegistry::ParticleType, "red_poplar_leaves");
+        assert_eq!(r.remap(ClientRegistry::ParticleType, 46), Some(43));
+
+        // 26.3 replaced swing_animation (26.2's 40) with attack_animation and
+        // interact_animation, inserted block_transformer and villager_food at
+        // 43 and compostable, cooking_fuel, brewing_fuel and mob_visibility
+        // after break_sound, dropped map_color (26.2's 45), and appended
+        // provides_pottery_pattern through cushion/color, so component ids
+        // diverge from 40.
+        assert_eq!(
+            to.name_of(ClientRegistry::DataComponentType, 40),
+            Some("swing_animation")
+        );
+        assert_eq!(r.remap(ClientRegistry::DataComponentType, 39), Some(39));
+        assert_unmapped(
+            r,
+            from,
+            ClientRegistry::DataComponentType,
+            "attack_animation",
+        );
+        for (wire, native, name) in [
+            (42, 41, "additional_trade_cost"),
+            (45, 42, "stored_enchantments"),
+            (48, 46, "map_id"),
+            (72, 70, "profile"),
+            (116, 110, "shulker/color"),
+        ] {
+            assert_eq!(
+                from.name_of(ClientRegistry::DataComponentType, wire),
+                Some(name)
+            );
+            assert_eq!(
+                r.remap(ClientRegistry::DataComponentType, wire),
+                Some(native)
+            );
+        }
+        assert_unmapped(
+            RegistryRemaps::from_native(from.version().protocol).unwrap(),
+            to,
+            ClientRegistry::DataComponentType,
+            "map_color",
+        );
+
+        // Four cushion sounds were inserted at 492; the other 19 are appended.
+        assert_eq!(r.remap(ClientRegistry::SoundEvent, 491), Some(491));
+        assert_unmapped(r, from, ClientRegistry::SoundEvent, "entity.cushion.break");
+        assert_eq!(r.remap(ClientRegistry::SoundEvent, 496), Some(492));
+        assert_eq!(r.remap(ClientRegistry::SoundEvent, 1990), None);
+
+        for reg in [
+            ClientRegistry::Attribute,
+            ClientRegistry::BlockEntityType,
+            ClientRegistry::GameEvent,
+        ] {
+            assert_eq!(from.names(reg), to.names(reg));
+        }
+        assert_round_trips(r, from, to);
+    }
+
     /// Anchors hand-checked against the 26.1/26.2 `registries.json` report
     /// diff (insertion points and the one removed entry).
     #[test]
@@ -678,7 +763,7 @@ mod tests {
                 );
             }
         };
-        for e in &EMBEDDED {
+        for e in EMBEDDED {
             check(
                 e.version,
                 RegistryTable::for_protocol(e.version.protocol).unwrap(),
