@@ -9,6 +9,7 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 steel-core = { path = "../third_party/SteelMC/steel-core" }
 steel-login = { path = "../third_party/SteelMC/steel-login" }
+steel-registry = { path = "../third_party/SteelMC/steel-registry" }
 steel-utils = { path = "../third_party/SteelMC/steel-utils" }
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }

@@ -5279,6 +5279,7 @@ version = "0.1.0"
 dependencies = [
  "steel-core",
  "steel-login",
+ "steel-registry",
  "steel-utils",
  "tokio",
  "tokio-util",

@@ -202,8 +202,7 @@ impl ScalarOrPerState {
     }
 }
 
-/// Per-protocol block-state data, native first; unknown protocols fall back
-/// to the native version (slot 0).
+/// Per-protocol block-state data, the native version at [`NATIVE_SLOT`].
 const BLOCK_DATA: [(i32, &str); 13] = [
     (
         pomme_protocol::version::NATIVE.protocol,
@@ -259,7 +258,11 @@ const STATE_DATA: [&str; BLOCK_DATA.len()] = [
 /// protocol currently spoken (see [`set_active_protocol`]).
 static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; BLOCK_DATA.len()] =
     [const { OnceLock::new() }; BLOCK_DATA.len()];
-static ACTIVE_TABLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The [`BLOCK_DATA`] slot holding the native version's tables: the initial
+/// active table and the fallback for protocols without their own data.
+const NATIVE_SLOT: usize = 0;
+static ACTIVE_TABLE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(NATIVE_SLOT);
 
 /// Vanilla getFluidState overrides on blocks without a `waterlogged` property.
 const IMPLICIT_WATER: [&str; 4] = ["seagrass", "tall_seagrass", "kelp", "kelp_plant"];
@@ -293,7 +296,7 @@ pub fn set_active_protocol(protocol: i32) {
 /// Builds the given protocol's table if it isn't already, without switching
 /// to it; safe at any time (e.g. from a server-list ping, ahead of the join).
 pub fn prewarm_protocol(protocol: i32) -> usize {
-    let slot = block_data_slot(protocol).unwrap_or(0);
+    let slot = block_data_slot(protocol).unwrap_or(NATIVE_SLOT);
     BLOCK_TABLES[slot].get_or_init(|| build_table(BLOCK_DATA[slot].1, STATE_DATA[slot]));
     slot
 }
@@ -922,5 +925,11 @@ mod tests {
         for v in pomme_protocol::version::VERSIONS {
             assert!(block_data_slot(v.protocol).is_some(), "{}", v.name);
         }
+    }
+
+    #[test]
+    fn native_slot() {
+        let native = pomme_protocol::version::NATIVE.protocol;
+        assert_eq!(block_data_slot(native), Some(NATIVE_SLOT));
     }
 }

@@ -54,23 +54,16 @@ struct PhaseFile {
 }
 
 impl PacketTable {
-    /// The table for the version the client speaks natively. Parsed once
-    /// from the embedded JSON; panics on malformed data (a generator bug,
-    /// caught at first use / in tests rather than emitting wrong ids).
+    /// The table for the version the client speaks natively.
     pub fn native() -> &'static PacketTable {
-        static TABLE: OnceLock<PacketTable> = OnceLock::new();
-        TABLE.get_or_init(|| {
-            Self::parse(include_str!("data/protocol-26.2.json"), NATIVE)
-                .expect("embedded 26.2 packet table")
-        })
+        Self::for_protocol(NATIVE.protocol).expect("native packet table is embedded")
     }
 
     /// The table for a launchable protocol number, or `None` for versions
-    /// without an embedded table.
+    /// without an embedded table. Parsed once from the embedded JSON; panics
+    /// on malformed data (a generator bug, caught at first use / in tests
+    /// rather than emitting wrong ids).
     pub fn for_protocol(protocol: i32) -> Option<&'static PacketTable> {
-        if protocol == NATIVE.protocol {
-            return Some(Self::native());
-        }
         static TABLES: [OnceLock<PacketTable>; EMBEDDED.len()] =
             [const { OnceLock::new() }; EMBEDDED.len()];
         crate::version::embedded_get(protocol, &TABLES, |e| {

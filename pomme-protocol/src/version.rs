@@ -13,7 +13,7 @@ const fn v(name: &'static str, protocol: i32) -> ProtocolVersion {
 /// protocol numbers encode as `(1 << 30) | snapshot_counter`.
 pub const VERSIONS: &[ProtocolVersion] = &[
     v("26.3", 777),
-    v("26.2", 776),
+    NATIVE,
     v("26.1.2", 775),
     v("26.1.1", 775),
     v("26.1", 775),
@@ -38,7 +38,7 @@ pub const VERSIONS: &[ProtocolVersion] = &[
     v("1.20", 763),
 ];
 
-/// The newest listed version: the default to launch as.
+/// The newest listed version.
 pub const LATEST: ProtocolVersion = VERSIONS[0];
 
 /// The version the client speaks natively — azalea's pinned wire and the
@@ -46,21 +46,26 @@ pub const LATEST: ProtocolVersion = VERSIONS[0];
 /// its wire to and from this layout, whether it is older or newer.
 pub const NATIVE: ProtocolVersion = v("26.2", 776);
 
-/// A non-native version with embedded protocol data — the one place a
-/// version's generated tables get wired in. `version` names the reference
-/// dir the tables were generated from; patch releases sharing its protocol
-/// number are wire-identical and served by the same entry.
+/// A version with embedded protocol data — the one place a version's
+/// generated tables get wired in. `version` names the reference dir the
+/// tables were generated from; patch releases sharing its protocol number
+/// are wire-identical and served by the same entry.
 pub(crate) struct EmbeddedVersion {
     pub version: ProtocolVersion,
     pub packets: &'static str,
     pub registries: &'static str,
 }
 
-pub(crate) const EMBEDDED: [EmbeddedVersion; 14] = [
+pub(crate) const EMBEDDED: [EmbeddedVersion; 15] = [
     EmbeddedVersion {
         version: v("26.3", 777),
         packets: include_str!("data/protocol-26.3.json"),
         registries: include_str!("data/registries-26.3.json"),
+    },
+    EmbeddedVersion {
+        version: NATIVE,
+        packets: include_str!("data/protocol-26.2.json"),
+        registries: include_str!("data/registries-26.2.json"),
     },
     EmbeddedVersion {
         version: v("26.1", 775),
@@ -129,8 +134,7 @@ pub(crate) const EMBEDDED: [EmbeddedVersion; 14] = [
     },
 ];
 
-/// The `EMBEDDED` slot for a protocol number. The native version's data is
-/// embedded separately (`PacketTable::native` etc.), not here.
+/// The `EMBEDDED` slot for a protocol number.
 pub(crate) fn embedded_index(protocol: i32) -> Option<usize> {
     EMBEDDED.iter().position(|e| e.version.protocol == protocol)
 }
@@ -166,7 +170,6 @@ mod tests {
     fn lookups() {
         assert_eq!(NATIVE.protocol, 776);
         assert_eq!(ProtocolVersion::from_name(NATIVE.name), Some(NATIVE));
-        assert_eq!(LATEST.protocol, 777);
         assert_eq!(ProtocolVersion::from_name("26.3").unwrap().protocol, 777);
         assert_eq!(ProtocolVersion::from_protocol(777).unwrap().name, "26.3");
         assert_eq!(ProtocolVersion::from_name("26.2").unwrap().protocol, 776);
@@ -207,21 +210,27 @@ mod tests {
         assert!(ProtocolVersion::from_name("1.8.9").is_none());
     }
 
-    /// `VERSIONS` is strictly newest first, so `from_protocol` resolves a
-    /// shared number to the newest name.
+    /// `VERSIONS` is newest first with unique names; release numbers descend
+    /// with it (snapshot counters don't compare against them, so are skipped).
     #[test]
     fn versions_descend() {
-        assert!(VERSIONS.windows(2).all(|w| w[0].protocol >= w[1].protocol));
+        let releases: Vec<i32> = VERSIONS
+            .iter()
+            .map(|v| v.protocol)
+            .filter(|p| p & (1 << 30) == 0)
+            .collect();
+        assert!(releases.windows(2).all(|w| w[0] >= w[1]));
+        let names: std::collections::HashSet<_> = VERSIONS.iter().map(|v| v.name).collect();
+        assert_eq!(names.len(), VERSIONS.len());
     }
 
-    /// `EMBEDDED` holds the launchable non-native versions, newest first
-    /// with one entry per protocol, and `embedded_index` is its slot lookup.
+    /// `EMBEDDED` holds the launchable versions, newest first with one entry
+    /// per protocol, and `embedded_index` is its slot lookup.
     #[test]
     fn embedded_lookup() {
         for (i, e) in EMBEDDED.iter().enumerate() {
             let protocol = e.version.protocol;
             assert_eq!(embedded_index(protocol), Some(i), "{}", e.version.name);
-            assert_ne!(protocol, NATIVE.protocol, "{}", e.version.name);
             assert!(
                 VERSIONS.iter().any(|v| v.protocol == protocol),
                 "{} missing from VERSIONS",
@@ -235,12 +244,11 @@ mod tests {
         );
         for v in VERSIONS {
             assert!(
-                v.protocol == NATIVE.protocol || embedded_index(v.protocol).is_some(),
+                embedded_index(v.protocol).is_some(),
                 "{} has no embedded tables",
                 v.name
             );
         }
-        assert_eq!(embedded_index(NATIVE.protocol), None);
         assert_eq!(embedded_index(0), None);
     }
 }
