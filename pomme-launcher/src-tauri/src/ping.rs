@@ -223,38 +223,35 @@ mod tests {
 
     #[test]
     fn version_name_resolution() {
+        use pomme_protocol::ProtocolVersion;
+        use pomme_protocol::version::VERSIONS;
+
+        // Every supported protocol resolves to its newest listed name.
+        for v in VERSIONS {
+            assert_eq!(
+                resolve_version_name(Some(v.protocol), None),
+                ProtocolVersion::from_protocol(v.protocol).unwrap().name
+            );
+        }
         // The self-reported name wins when it names the same protocol.
         assert_eq!(resolve_version_name(Some(773), Some("1.21.9")), "1.21.9");
         assert_eq!(resolve_version_name(Some(773), Some("1.21.10")), "1.21.10");
         assert_eq!(resolve_version_name(Some(772), Some("1.21.7")), "1.21.7");
         assert_eq!(resolve_version_name(Some(775), Some("26.1.1")), "26.1.1");
+        assert_eq!(resolve_version_name(Some(768), Some("1.21.2")), "1.21.2");
+        assert_eq!(resolve_version_name(Some(767), Some("1.21")), "1.21");
+        assert_eq!(resolve_version_name(Some(766), Some("1.20.5")), "1.20.5");
+        assert_eq!(resolve_version_name(Some(765), Some("1.20.3")), "1.20.3");
+        assert_eq!(resolve_version_name(Some(763), Some("1.20")), "1.20");
         // Junk or protocol-mismatched names fall back to the newest name.
         assert_eq!(
             resolve_version_name(Some(773), Some("Paper 1.21.9")),
             "1.21.10"
         );
-        assert_eq!(resolve_version_name(Some(777), None), "26.3");
-        assert_eq!(resolve_version_name(Some(777), Some("Paper 26.3")), "26.3");
-        assert_eq!(resolve_version_name(Some(773), None), "1.21.10");
         assert_eq!(
             resolve_version_name(Some(772), Some("Paper 1.21.8")),
             "1.21.8"
         );
-        assert_eq!(resolve_version_name(Some(772), None), "1.21.8");
-        assert_eq!(resolve_version_name(Some(771), None), "1.21.6");
-        assert_eq!(resolve_version_name(Some(770), None), "1.21.5");
-        assert_eq!(resolve_version_name(Some(769), None), "1.21.4");
-        assert_eq!(resolve_version_name(Some(768), Some("1.21.2")), "1.21.2");
-        assert_eq!(resolve_version_name(Some(768), None), "1.21.3");
-        assert_eq!(resolve_version_name(Some(767), Some("1.21")), "1.21");
-        assert_eq!(resolve_version_name(Some(767), None), "1.21.1");
-        assert_eq!(resolve_version_name(Some(766), Some("1.20.5")), "1.20.5");
-        assert_eq!(resolve_version_name(Some(766), None), "1.20.6");
-        assert_eq!(resolve_version_name(Some(765), Some("1.20.3")), "1.20.3");
-        assert_eq!(resolve_version_name(Some(765), None), "1.20.4");
-        assert_eq!(resolve_version_name(Some(764), None), "1.20.2");
-        assert_eq!(resolve_version_name(Some(763), Some("1.20")), "1.20");
-        assert_eq!(resolve_version_name(Some(763), None), "1.20.1");
         assert_eq!(resolve_version_name(Some(776), Some("1.21.10")), "26.2");
         // Unsupported protocols show the raw reported string.
         assert_eq!(resolve_version_name(Some(1), Some("1.8.9")), "1.8.9");

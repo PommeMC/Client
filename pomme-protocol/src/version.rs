@@ -56,7 +56,7 @@ pub(crate) struct EmbeddedVersion {
     pub registries: &'static str,
 }
 
-pub(crate) const EMBEDDED: [EmbeddedVersion; 15] = [
+pub(crate) const EMBEDDED: &[EmbeddedVersion] = &[
     EmbeddedVersion {
         version: v("26.3", 777),
         packets: include_str!("data/protocol-26.3.json"),

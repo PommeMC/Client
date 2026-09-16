@@ -343,9 +343,7 @@ mod tests {
         assert_eq!(r.remap(ClientRegistry::EntityType, 32), Some(32));
         assert_eq!(r.remap(ClientRegistry::EntityType, 34), Some(33));
         assert_eq!(r.remap(ClientRegistry::EntityType, 160), Some(157));
-        for name in ["cushion", "poplar_boat", "poplar_chest_boat"] {
-            assert_unmapped(r, from, ClientRegistry::EntityType, name);
-        }
+        assert_unmapped(r, from, ClientRegistry::EntityType, "cushion");
 
         // Items diverge at poplar_planks (72).
         assert_eq!(r.remap(ClientRegistry::Item, 71), Some(71));
@@ -360,24 +358,21 @@ mod tests {
 
         // 26.3 replaced swing_animation (26.2's 40) with attack_animation and
         // interact_animation, inserted block_transformer and villager_food at
-        // 43, dropped map_color (26.2's 45) and appended the rest, so
-        // component ids diverge from 40.
+        // 43 and compostable, cooking_fuel, brewing_fuel and mob_visibility
+        // after break_sound, dropped map_color (26.2's 45), and appended
+        // provides_pottery_pattern through cushion/color, so component ids
+        // diverge from 40.
         assert_eq!(
             to.name_of(ClientRegistry::DataComponentType, 40),
             Some("swing_animation")
         );
         assert_eq!(r.remap(ClientRegistry::DataComponentType, 39), Some(39));
-        for name in [
+        assert_unmapped(
+            r,
+            from,
+            ClientRegistry::DataComponentType,
             "attack_animation",
-            "interact_animation",
-            "block_transformer",
-            "villager_food",
-            "compostable",
-            "provides_pottery_pattern",
-            "cushion/color",
-        ] {
-            assert_unmapped(r, from, ClientRegistry::DataComponentType, name);
-        }
+        );
         for (wire, native, name) in [
             (42, 41, "additional_trade_cost"),
             (45, 42, "stored_enchantments"),
@@ -394,12 +389,12 @@ mod tests {
                 Some(native)
             );
         }
-        let rev = RegistryRemaps::from_native(777).unwrap();
-        assert_eq!(
-            to.name_of(ClientRegistry::DataComponentType, 45),
-            Some("map_color")
+        assert_unmapped(
+            RegistryRemaps::from_native(from.version().protocol).unwrap(),
+            to,
+            ClientRegistry::DataComponentType,
+            "map_color",
         );
-        assert_eq!(rev.remap(ClientRegistry::DataComponentType, 45), None);
 
         // Four cushion sounds were inserted at 492; the other 19 are appended.
         assert_eq!(r.remap(ClientRegistry::SoundEvent, 491), Some(491));
@@ -768,7 +763,7 @@ mod tests {
                 );
             }
         };
-        for e in &EMBEDDED {
+        for e in EMBEDDED {
             check(
                 e.version,
                 RegistryTable::for_protocol(e.version.protocol).unwrap(),

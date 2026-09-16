@@ -202,56 +202,55 @@ impl ScalarOrPerState {
     }
 }
 
+/// One version's embedded block tables. `blocks` is the state layout (ids and
+/// properties from the data-generator report); `state` (`just stategen`)
+/// holds the per-state values vanilla bakes at runtime, dumped by running its
+/// own code.
+struct EmbeddedBlocks {
+    protocol: i32,
+    blocks: &'static str,
+    state: &'static str,
+}
+
+/// The `blocks-<v>.json` / `state-<v>.json` pair for version `v`, keyed by
+/// its protocol (checked against the file in [`build_table`]).
+macro_rules! embedded_blocks {
+    ($protocol:expr, $version:literal) => {
+        EmbeddedBlocks {
+            protocol: $protocol,
+            blocks: include_str!(concat!("data/blocks-", $version, ".json")),
+            state: include_str!(concat!("data/state-", $version, ".json")),
+        }
+    };
+}
+
 /// Per-protocol block-state data, the native version at [`NATIVE_SLOT`].
-const BLOCK_DATA: [(i32, &str); 13] = [
-    (
-        pomme_protocol::version::NATIVE.protocol,
-        include_str!("data/blocks-26.2.json"),
-    ),
-    (777, include_str!("data/blocks-26.3.json")),
-    (775, include_str!("data/blocks-26.1.json")),
-    (774, include_str!("data/blocks-1.21.11.json")),
-    (773, include_str!("data/blocks-1.21.10.json")),
-    (772, include_str!("data/blocks-1.21.8.json")),
-    (770, include_str!("data/blocks-1.21.5.json")),
-    (769, include_str!("data/blocks-1.21.4.json")),
-    (768, include_str!("data/blocks-1.21.3.json")),
-    (767, include_str!("data/blocks-1.21.1.json")),
-    (765, include_str!("data/blocks-1.20.4.json")),
-    (764, include_str!("data/blocks-1.20.2.json")),
-    (763, include_str!("data/blocks-1.20.1.json")),
+const BLOCK_DATA: &[EmbeddedBlocks] = &[
+    embedded_blocks!(pomme_protocol::version::NATIVE.protocol, "26.2"),
+    embedded_blocks!(777, "26.3"),
+    embedded_blocks!(775, "26.1"),
+    embedded_blocks!(774, "1.21.11"),
+    embedded_blocks!(773, "1.21.10"),
+    embedded_blocks!(772, "1.21.8"),
+    embedded_blocks!(770, "1.21.5"),
+    embedded_blocks!(769, "1.21.4"),
+    embedded_blocks!(768, "1.21.3"),
+    embedded_blocks!(767, "1.21.1"),
+    embedded_blocks!(765, "1.20.4"),
+    embedded_blocks!(764, "1.20.2"),
+    embedded_blocks!(763, "1.20.1"),
 ];
 
 /// Protocols whose block set is identical to a newer embedded version's (no
 /// blocks added between them); they share that version's slot instead of
-/// building a second copy of the same table. The slot also serves
-/// `STATE_DATA`, so an alias requires the two versions' `generated/state.json`
+/// building a second copy of the same table. The slot also serves the state
+/// table, so an alias requires the two versions' `generated/state.json`
 /// dumps to be identical as well, not just the block list.
 const SHARED_BLOCK_DATA: &[(i32, i32)] = &[
     // 1.21.7 added no blocks.
     (771, 772),
     // 1.21's trial-chamber blocks already existed in 1.20.6.
     (766, 767),
-];
-
-/// Per-state property tables (`just stategen`), index-aligned with
-/// [`BLOCK_DATA`]. `blocks-<v>.json` is the state layout (ids and properties
-/// from the data-generator report); `state-<v>.json` holds the per-state
-/// values vanilla bakes at runtime, dumped by running its own code.
-const STATE_DATA: [&str; BLOCK_DATA.len()] = [
-    include_str!("data/state-26.2.json"),
-    include_str!("data/state-26.3.json"),
-    include_str!("data/state-26.1.json"),
-    include_str!("data/state-1.21.11.json"),
-    include_str!("data/state-1.21.10.json"),
-    include_str!("data/state-1.21.8.json"),
-    include_str!("data/state-1.21.5.json"),
-    include_str!("data/state-1.21.4.json"),
-    include_str!("data/state-1.21.3.json"),
-    include_str!("data/state-1.21.1.json"),
-    include_str!("data/state-1.20.4.json"),
-    include_str!("data/state-1.20.2.json"),
-    include_str!("data/state-1.20.1.json"),
 ];
 
 /// One lazily-built table per embedded data file; `ACTIVE_TABLE` indexes the
@@ -297,7 +296,7 @@ pub fn set_active_protocol(protocol: i32) {
 /// to it; safe at any time (e.g. from a server-list ping, ahead of the join).
 pub fn prewarm_protocol(protocol: i32) -> usize {
     let slot = block_data_slot(protocol).unwrap_or(NATIVE_SLOT);
-    BLOCK_TABLES[slot].get_or_init(|| build_table(BLOCK_DATA[slot].1, STATE_DATA[slot]));
+    BLOCK_TABLES[slot].get_or_init(|| build_table(&BLOCK_DATA[slot]));
     slot
 }
 
@@ -307,7 +306,7 @@ fn block_data_slot(protocol: i32) -> Option<usize> {
         .iter()
         .find(|&&(p, _)| p == protocol)
         .map_or(protocol, |&(_, shared)| shared);
-    BLOCK_DATA.iter().position(|&(p, _)| p == protocol)
+    BLOCK_DATA.iter().position(|d| d.protocol == protocol)
 }
 
 fn load_behaviors() -> HashMap<String, BehaviorEntry> {
@@ -315,10 +314,17 @@ fn load_behaviors() -> HashMap<String, BehaviorEntry> {
         .expect("invalid block-behavior data")
 }
 
-fn build_table(data: &str, state_data: &str) -> Vec<BlockData> {
-    let file: BlockFile = serde_json::from_str(data).expect("invalid block-state data");
+fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
+    let file: BlockFile = serde_json::from_str(data.blocks).expect("invalid block-state data");
+    assert_eq!(
+        pomme_protocol::ProtocolVersion::from_name(&file.version).map(|v| v.protocol),
+        Some(data.protocol),
+        "block data for {} is keyed to protocol {}",
+        file.version,
+        data.protocol
+    );
     let behaviors = load_behaviors();
-    let state_file: StateFile = serde_json::from_str(state_data).expect("invalid state data");
+    let state_file: StateFile = serde_json::from_str(data.state).expect("invalid state data");
     assert_eq!(
         state_file.version, file.version,
         "state data is for a different version"
@@ -880,8 +886,8 @@ mod tests {
     /// all versions, not just the one `setup` activates.
     #[test]
     fn all_tables_build() {
-        for (slot, (_, data)) in BLOCK_DATA.iter().enumerate() {
-            build_table(data, STATE_DATA[slot]);
+        for data in BLOCK_DATA {
+            build_table(data);
         }
     }
 
@@ -894,18 +900,20 @@ mod tests {
     fn shared_tables_cover_all_versions() {
         let behaviors = load_behaviors();
         let mut known = HashSet::new();
-        for (protocol, data) in BLOCK_DATA {
-            let file: BlockFile = serde_json::from_str(data).unwrap();
+        for data in BLOCK_DATA {
+            let file: BlockFile = serde_json::from_str(data.blocks).unwrap();
             for block in &file.blocks {
                 assert!(
                     behaviors.contains_key(&block.name),
-                    "no behavior entry for '{}' (protocol {protocol})",
-                    block.name
+                    "no behavior entry for '{}' ({})",
+                    block.name,
+                    file.version
                 );
                 assert!(
                     sound::BLOCK_SOUNDS.contains_key(&block.name),
-                    "no sound entry for '{}' (protocol {protocol})",
-                    block.name
+                    "no sound entry for '{}' ({})",
+                    block.name,
+                    file.version
                 );
                 known.insert(block.name.clone());
             }
