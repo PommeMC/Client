@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::version::{EMBEDDED, LATEST, ProtocolVersion};
+use crate::version::{EMBEDDED, NATIVE, ProtocolVersion};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
@@ -54,23 +54,16 @@ struct PhaseFile {
 }
 
 impl PacketTable {
-    /// The table for the version the client speaks internally. Parsed once
-    /// from the embedded JSON; panics on malformed data (a generator bug,
-    /// caught at first use / in tests rather than emitting wrong ids).
-    pub fn latest() -> &'static PacketTable {
-        static TABLE: OnceLock<PacketTable> = OnceLock::new();
-        TABLE.get_or_init(|| {
-            Self::parse(include_str!("data/protocol-26.2.json"), LATEST)
-                .expect("embedded 26.2 packet table")
-        })
+    /// The table for the version the client speaks natively.
+    pub fn native() -> &'static PacketTable {
+        Self::for_protocol(NATIVE.protocol).expect("native packet table is embedded")
     }
 
     /// The table for a launchable protocol number, or `None` for versions
-    /// without an embedded table.
+    /// without an embedded table. Parsed once from the embedded JSON; panics
+    /// on malformed data (a generator bug, caught at first use / in tests
+    /// rather than emitting wrong ids).
     pub fn for_protocol(protocol: i32) -> Option<&'static PacketTable> {
-        if protocol == LATEST.protocol {
-            return Some(Self::latest());
-        }
         static TABLES: [OnceLock<PacketTable>; EMBEDDED.len()] =
             [const { OnceLock::new() }; EMBEDDED.len()];
         crate::version::embedded_get(protocol, &TABLES, |e| {
@@ -227,7 +220,7 @@ mod tests {
     /// `reference/26.2/decompiled/.../GameProtocols.java`.
     #[test]
     fn anchors_26_2() {
-        let t = PacketTable::latest();
+        let t = PacketTable::native();
         assert_eq!(t.version().protocol, 776);
         assert_eq!(t.id(Phase::Game, Direction::Serverbound, "attack"), Some(1));
         assert_eq!(
@@ -341,11 +334,11 @@ mod tests {
         );
         assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "login"),
-            PacketTable::latest().id(Phase::Game, Direction::Clientbound, "login")
+            PacketTable::native().id(Phase::Game, Direction::Clientbound, "login")
         );
         assert_eq!(
             t.id(Phase::Game, Direction::Clientbound, "set_player_team"),
-            PacketTable::latest().id(Phase::Game, Direction::Clientbound, "set_player_team")
+            PacketTable::native().id(Phase::Game, Direction::Clientbound, "set_player_team")
         );
     }
 
@@ -1053,13 +1046,13 @@ mod tests {
         }
     }
 
-    /// The latest protocol resolves to the shared latest table, every
+    /// The native protocol resolves to the shared native table, every
     /// embedded version to its own table, and anything else to nothing.
     #[test]
     fn for_protocol_lookups() {
         assert!(std::ptr::eq(
-            PacketTable::for_protocol(LATEST.protocol).unwrap(),
-            PacketTable::latest()
+            PacketTable::for_protocol(NATIVE.protocol).unwrap(),
+            PacketTable::native()
         ));
         for e in &EMBEDDED {
             let protocol = e.version.protocol;
@@ -1080,7 +1073,7 @@ mod tests {
     /// that changes these means the game version moved.
     #[test]
     fn counts_26_2() {
-        let t = PacketTable::latest();
+        let t = PacketTable::native();
         let count = |phase, dir| {
             (0..)
                 .take_while(|&i| t.name_of(phase, dir, i).is_some())

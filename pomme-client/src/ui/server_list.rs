@@ -26,9 +26,9 @@ pub struct ServerEntry {
 /// How the client can speak to a pinged server.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Compat {
-    /// The latest supported version: joined without translation.
+    /// The version the client speaks natively: joined without translation.
     Native,
-    /// An older protocol with embedded translation data: joinable, with the
+    /// Another protocol with embedded translation data: joinable, with the
     /// wire translated on the fly.
     Translated,
     /// A protocol without translation data: a join would be refused.
@@ -170,10 +170,8 @@ async fn ping_server(
         // Vanilla MOTD base color: 0x808080.
         let motd = format_text_spans(&status.description, [0.5, 0.5, 0.5, 1.0]);
         let version = status.version.name.clone();
-        // Native is keyed to the latest version, not the launched one: the
-        // client's internal representation is always the latest, so any
-        // older server is joined through translation.
-        let compat = if status.version.protocol == pomme_protocol::version::LATEST.protocol {
+        // Keyed to the native version, not the launched one.
+        let compat = if status.version.protocol == pomme_protocol::version::NATIVE.protocol {
             Compat::Native
         } else if crate::net::translate::joinable(status.version.protocol) {
             let protocol = status.version.protocol;

@@ -17,7 +17,15 @@ use pomme_protocol::packets::{Direction, PacketTable, Phase};
 use pomme_protocol::wire;
 
 fn table_id(dir: Direction, name: &str) -> u32 {
-    PacketTable::latest().id(Phase::Game, dir, name).unwrap()
+    PacketTable::native().id(Phase::Game, dir, name).unwrap()
+}
+
+#[test]
+fn native_matches_azalea() {
+    assert_eq!(
+        azalea_protocol::packets::PROTOCOL_VERSION,
+        pomme_protocol::version::NATIVE.protocol
+    );
 }
 
 #[test]
@@ -318,11 +326,11 @@ const SHIFTED_ITEM_KIND: azalea_registry::builtin::ItemKind =
 /// tables at all never translates.
 #[test]
 fn no_translation_without_coverage() {
-    use pomme_protocol::version::{LATEST, VERSIONS};
+    use pomme_protocol::version::{NATIVE, VERSIONS};
     for v in VERSIONS {
         assert_eq!(
             crate::net::translate::Translation::for_protocol(v.protocol).is_some(),
-            crate::net::translate::joinable(v.protocol) && v.protocol != LATEST.protocol,
+            crate::net::translate::joinable(v.protocol) && v.protocol != NATIVE.protocol,
             "{}",
             v.name
         );
@@ -505,7 +513,7 @@ fn registry_table_matches_azalea() {
     use azalea_registry::builtin::{Attribute, BlockEntityKind, EntityKind};
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
-    let t = RegistryTable::latest();
+    let t = RegistryTable::native();
     let index = |reg, name: &str| t.names(reg).iter().position(|n| n == name).unwrap() as u32;
     assert_eq!(
         EntityKind::SulfurCube.to_u32(),
@@ -701,7 +709,7 @@ fn translate_empty_entity_particles_774() {
 
 /// A stack component the walker doesn't know falls back to the verbatim-tail
 /// copy instead of dropping the packet. `damage` (id 3 in both 774 and the
-/// latest registry, varint payload) keeps the verbatim bytes decodable.
+/// native registry, varint payload) keeps the verbatim bytes decodable.
 #[test]
 fn translate_entity_item_stack_fallback_774() {
     let mut old = Vec::new();
@@ -723,12 +731,12 @@ fn translate_entity_item_stack_fallback_774() {
     ));
 }
 
-/// `translate_item_stack`'s component ids against the latest registry table.
+/// `translate_item_stack`'s component ids against the native registry table.
 #[test]
 fn component_id_anchors() {
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
-    let table = RegistryTable::latest();
+    let table = RegistryTable::native();
     assert_eq!(
         table.name_of(
             ClientRegistry::DataComponentType,
@@ -1017,7 +1025,7 @@ fn translate_entity_data_particles_772() {
     );
     wire::write_varint(&mut expected, 9);
     expected.extend_from_slice(&[10, 17, 1]); // 26.2 particles serializer
-    wire::write_varint(&mut expected, entity_effect(RegistryTable::latest()));
+    wire::write_varint(&mut expected, entity_effect(RegistryTable::native()));
     expected.extend_from_slice(&0x11223344u32.to_be_bytes());
     expected.extend_from_slice(&[19, 18, 1, 2, 3]); // 26.2 villager_data serializer
     expected.push(0xFF);
@@ -1193,7 +1201,7 @@ fn translate_explode_772() {
     let particle_id = |table, name| registry_id(table, ClientRegistry::ParticleType, name);
     let sound_id = |table, name| registry_id(table, ClientRegistry::SoundEvent, name);
     let old_table = RegistryTable::for_protocol(772).unwrap();
-    let latest_table = RegistryTable::latest();
+    let native_table = RegistryTable::native();
 
     let mut old = Vec::new();
     wire::write_varint(&mut old, old_id(772, Direction::Clientbound, "explode"));
@@ -1222,10 +1230,10 @@ fn translate_explode_772() {
     for c in [0.1f64, 0.2, 0.3] {
         expected.extend_from_slice(&c.to_be_bytes());
     }
-    wire::write_varint(&mut expected, particle_id(latest_table, "explosion"));
+    wire::write_varint(&mut expected, particle_id(native_table, "explosion"));
     wire::write_varint(
         &mut expected,
-        sound_id(latest_table, "entity.generic.explode") + 1,
+        sound_id(native_table, "entity.generic.explode") + 1,
     );
     expected.push(0); // no block particles
     assert_eq!(&translated[..], &expected[..]);
@@ -1680,7 +1688,7 @@ fn translate_container_set_slot_767() {
     assert_eq!(p.slot, 1);
 }
 
-/// 767 `cooldown` item ids remap into the latest registry space (azalea
+/// 767 `cooldown` item ids remap into the native registry space (azalea
 /// still decodes the item id form).
 #[test]
 fn translate_cooldown_767() {
@@ -2758,7 +2766,7 @@ fn translate_entity_data_764() {
 
 /// `update_attributes` names its attribute by registry id, and those shift
 /// between versions (1.21.2 also dropped the category prefixes), so each is
-/// remapped into the latest space. Unremapped, an old `max_health` decodes as
+/// remapped into the native space. Unremapped, an old `max_health` decodes as
 /// whatever attribute holds that id in 26.2.
 #[test]
 fn translate_update_attributes_old_versions() {
@@ -3011,7 +3019,7 @@ fn translate_add_player_763() {
 fn translate_hello_763() {
     let name = "pomme";
     let uuid = uuid::Uuid::from_u128(9);
-    let id = PacketTable::latest()
+    let id = PacketTable::native()
         .id(Phase::Login, Direction::Serverbound, "hello")
         .unwrap();
 
