@@ -7,7 +7,6 @@
 
 use std::time::Instant;
 
-/// Vanilla `MAX_OLD_SAMPLES_WEIGHT`.
 const MAX_OLD_SAMPLES_WEIGHT: u32 = 49;
 /// Vanilla `CLAMP_COEFFICIENT`: one batch can move the average by at most 3x
 /// in either direction.

@@ -684,10 +684,9 @@ impl AppCore {
                     game.player.reset_hurt_state();
 
                     renderer.clear_chunk_meshes();
-                    // The renderer's meshes went with the old level, so the
-                    // bookkeeping that tracks them has to go too; a stale
-                    // entry would otherwise report the new level's camera
-                    // section as already meshed.
+                    // The meshes went with the old level, so their bookkeeping
+                    // has to go too, or the new level's camera section reads as
+                    // already meshed.
                     game.section_vis.clear();
                     game.section_vis_epoch.clear();
                     game.meshed.clear();
@@ -803,10 +802,9 @@ impl AppCore {
                             to_chunk_coord(new_position.z),
                         ));
 
-                    // The camera is the eye (`sync_camera_pos` feeds it the
-                    // interpolated eye position every frame); seeding it with
-                    // the feet would put it a block and a half low until the
-                    // first in-game frame.
+                    // The camera is the eye, as `sync_camera_pos` keeps it
+                    // every frame; the feet would seed it a block and a half
+                    // low until the first in-game frame.
                     renderer.reset_camera(game.player.eye_pos(), new_look_dir);
 
                     if !game.position_set {
@@ -1912,44 +1910,46 @@ impl AppCore {
         connection: &ConnectionHandle,
         game: &mut GameState,
     ) {
-        if game.level_load.is_none() {
+        // Taken for the tick so the readiness inputs can borrow `game`; put
+        // back below unless the level is ready, which is vanilla clearing
+        // `levelLoadTracker`.
+        let Some(mut tracker) = game.level_load.take() else {
             return;
-        }
+        };
         let now = Instant::now();
 
         let min_y = game.chunk_store.min_y();
         let max_y = min_y + game.chunk_store.height() as i32 - 1;
         let outside_build_height = |y: i32| y < min_y || y > max_y;
-
         // Vanilla reads `gameRenderer.mainCamera().blockPosition()`.
         let camera_block = renderer.camera_render_position().floor().as_ivec3();
-        let camera_y = camera_block.y;
 
-        let inputs = ReadyInputs {
-            player_outside_build_height: outside_build_height(game.player.position.y.floor() as i32),
-            camera_outside_build_height: outside_build_height(camera_y),
-            spectator: crate::player::is_spectator(game.player.game_mode),
-            alive: !game.dead,
-            // Until the server's first position the camera sits at the origin,
-            // whose section says nothing about where we spawn.
-            player_section_ready: game.position_set && game.camera_section_ready(camera_block),
-        };
+        tracker.tick_client_load(
+            now,
+            &ReadyInputs {
+                player_outside_build_height: outside_build_height(
+                    game.player.position.y.floor() as i32
+                ),
+                camera_outside_build_height: outside_build_height(camera_block.y),
+                spectator: crate::player::is_spectator(game.player.game_mode),
+                alive: !game.dead,
+                // Until the server's first position the camera sits at the
+                // origin, whose section says nothing about where we spawn.
+                player_section_ready: game.position_set && game.camera_section_ready(camera_block),
+            },
+        );
 
-        let tracker = game.level_load.as_mut().expect("checked above");
-        tracker.tick_client_load(now, &inputs);
-
-        if tracker.is_level_ready(now) {
-            // Vanilla's `notifyPlayerLoaded` guards on `hasClientLoaded`; here
-            // the tracker only exists while unloaded, so dropping it is enough
-            // to send this once.
-            game.level_load = None;
-            game.client_loaded = true;
-            connection
-                .packet_tx
-                .send(ServerboundGamePacket::PlayerLoaded(
-                    azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
-                ));
+        if !tracker.is_level_ready(now) {
+            game.level_load = Some(tracker);
+            return;
         }
+
+        game.client_loaded = true;
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::PlayerLoaded(
+                azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
+            ));
     }
 
     /// Marks the end of the client tick (1.21.2+). Must be the last packet of

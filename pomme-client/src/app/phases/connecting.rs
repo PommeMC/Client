@@ -52,8 +52,7 @@ pub fn update_connecting(
             .set_camera_position(*game.player.position);
         game.drain_and_upload_meshes(&mut gfx.renderer);
         // Vanilla runs `ClientLevel.update()` every frame, loading screen
-        // included. The level load gate waits on the spawn chunks' light
-        // having applied, which is this call.
+        // included; the load gate waits on the light this applies.
         game.update_light(core.menu.chunk_detail);
 
         // Vanilla keeps ticking behind the loading screen: the tracker advances

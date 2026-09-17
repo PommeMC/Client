@@ -31,9 +31,10 @@ pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 5] {
     ]
 }
 
-/// `pos` and the eight columns around it. Vanilla's renderer requires all nine
-/// to be loaded and lit before a section in the middle one may first compile
-/// (`SectionUpdateTracker.hasAllNeighbors`).
+/// `pos` and the eight columns around it: what vanilla requires to be loaded
+/// and lit before a section in the middle one may first compile
+/// (`SectionUpdateTracker.hasAllNeighbors`). The smaller set a mesh samples is
+/// `mesh_neighborhood`.
 pub(crate) fn column_neighborhood(pos: ChunkPos) -> impl Iterator<Item = ChunkPos> {
     (-1..=1).flat_map(move |dx| (-1..=1).map(move |dz| ChunkPos::new(pos.x + dx, pos.z + dz)))
 }
