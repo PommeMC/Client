@@ -135,9 +135,9 @@ impl InteractionState {
         Self {
             target: None,
             seq: 0,
-            // Vanilla `MultiPlayerGameMode.carriedIndex` starts at 0, matching
-            // the slot a freshly built inventory selects, so a join sends
-            // nothing until the selection actually changes.
+            // Vanilla `MultiPlayerGameMode.carriedIndex` starts at 0, the slot
+            // a fresh inventory selects, so a join sends nothing until it
+            // changes.
             carried_slot: 0,
             last_teleport_seq: 0,
             pending_predictions: HashMap::new(),
