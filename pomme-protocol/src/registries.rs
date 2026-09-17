@@ -13,51 +13,66 @@ use std::sync::OnceLock;
 
 use crate::version::{EMBEDDED, NATIVE, ProtocolVersion};
 
-/// The registries carried in `registries-<version>.json` (matching
-/// protogen's `CLIENT_REGISTRIES`): the ones whose numeric ids reach the
-/// client inside game packets.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ClientRegistry {
-    Attribute,
-    BlockEntityType,
-    DataComponentType,
-    EntityType,
-    GameEvent,
-    Item,
-    ParticleType,
-    SoundEvent,
+/// Declares `ClientRegistry` with its `ALL` list and report keys from one
+/// table, so the variants, their order and their keys can't drift apart.
+macro_rules! client_registries {
+    ($(#[$meta:meta])* $($variant:ident => $key:literal,)*) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum ClientRegistry {
+            $($variant,)*
+        }
+
+        impl ClientRegistry {
+            pub const ALL: [ClientRegistry; [$($key),*].len()] =
+                [$(ClientRegistry::$variant),*];
+
+            fn key(self) -> &'static str {
+                match self {
+                    $(ClientRegistry::$variant => $key,)*
+                }
+            }
+        }
+    };
+}
+
+client_registries! {
+    /// The registries carried in `registries-<version>.json` (matching
+    /// protogen's `CLIENT_REGISTRIES`): the ones whose numeric ids reach the
+    /// client inside game packets.
+    Attribute => "attribute",
+    BlockEntityType => "block_entity_type",
+    CommandArgumentType => "command_argument_type",
+    ConsumeEffectType => "consume_effect_type",
+    DataComponentType => "data_component_type",
+    DebugSubscription => "debug_subscription",
+    EntityType => "entity_type",
+    GameEvent => "game_event",
+    Item => "item",
+    Menu => "menu",
+    NumberFormatType => "number_format_type",
+    ParticleType => "particle_type",
+    PositionSourceType => "position_source_type",
+    RecipeDisplay => "recipe_display",
+    RecipeSerializer => "recipe_serializer",
+    SlotDisplay => "slot_display",
+    SoundEvent => "sound_event",
 }
 
 impl ClientRegistry {
-    pub const ALL: [ClientRegistry; 8] = [
-        ClientRegistry::Attribute,
-        ClientRegistry::BlockEntityType,
-        ClientRegistry::DataComponentType,
-        ClientRegistry::EntityType,
-        ClientRegistry::GameEvent,
-        ClientRegistry::Item,
-        ClientRegistry::ParticleType,
-        ClientRegistry::SoundEvent,
-    ];
-
-    fn key(self) -> &'static str {
-        match self {
-            ClientRegistry::Attribute => "attribute",
-            ClientRegistry::BlockEntityType => "block_entity_type",
-            ClientRegistry::DataComponentType => "data_component_type",
-            ClientRegistry::EntityType => "entity_type",
-            ClientRegistry::GameEvent => "game_event",
-            ClientRegistry::Item => "item",
-            ClientRegistry::ParticleType => "particle_type",
-            ClientRegistry::SoundEvent => "sound_event",
-        }
-    }
-
     /// First protocol carrying this registry; older tables omit it.
     fn since(self) -> i32 {
         match self {
+            // Scoreboard number formats arrived in 1.20.3.
+            ClientRegistry::NumberFormatType => 765,
             // Item components arrived in 1.20.5.
             ClientRegistry::DataComponentType => 766,
+            // Recipe displays and consume effects arrived in 1.21.2.
+            ClientRegistry::RecipeDisplay
+            | ClientRegistry::SlotDisplay
+            | ClientRegistry::ConsumeEffectType => 768,
+            // Debug subscriptions arrived in 1.21.9.
+            ClientRegistry::DebugSubscription => 773,
             _ => 0,
         }
     }
@@ -748,26 +763,25 @@ mod tests {
     }
 
     /// Every table parses and carries exactly the registries its version
-    /// should, so a generation slip fails here rather than silently remapping
-    /// a whole registry to None. Anchor tests only cover the versions someone
-    /// wrote one for.
+    /// should, with unique names so ids and names resolve both ways. A
+    /// generation slip fails here rather than silently remapping a whole
+    /// registry to None. Anchor tests only cover the versions someone wrote
+    /// one for.
     #[test]
     fn embedded_registry_tables_parse() {
-        let check = |version: ProtocolVersion, t: &RegistryTable| {
-            for reg in ClientRegistry::ALL {
-                assert_eq!(
-                    t.names(reg).is_empty(),
-                    version.protocol < reg.since(),
-                    "{} {reg:?}",
-                    version.name
-                );
-            }
-        };
         for e in EMBEDDED {
-            check(
-                e.version,
-                RegistryTable::for_protocol(e.version.protocol).unwrap(),
-            );
+            let t = RegistryTable::for_protocol(e.version.protocol).unwrap();
+            for reg in ClientRegistry::ALL {
+                let names = t.names(reg);
+                assert_eq!(
+                    names.is_empty(),
+                    e.version.protocol < reg.since(),
+                    "{} {reg:?}",
+                    e.version.name
+                );
+                let unique: std::collections::HashSet<_> = names.iter().collect();
+                assert_eq!(unique.len(), names.len(), "{} {reg:?}", e.version.name);
+            }
         }
     }
 
