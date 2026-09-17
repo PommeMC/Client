@@ -131,6 +131,8 @@ pub fn build_game_mode_switcher(
             w: 16.0 * gs,
             h: 16.0 * gs,
             item_name: (*item).into(),
+            item_stack: None,
+            item_tints: [0xFFFFFF; 2],
             tint: WHITE,
         });
         if mouse_moved && common::hit_test(cursor, [x, y0, SLOT_AREA * gs, SLOT_AREA * gs]) {

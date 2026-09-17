@@ -2,6 +2,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use azalea_block::BlockState;
+use azalea_inventory::ItemStackData;
+use azalea_inventory::components::{DyedColor, FireworkExplosion, MapColor, PotionContents};
+use azalea_registry::Registry as AzaleaRegistry;
+use azalea_registry::builtin::{MobEffect, Potion};
 use serde::{Deserialize, Serialize};
 
 pub const BLOCK_CACHE_FILE: &str = "block_cache_v3.json";
@@ -73,8 +77,9 @@ pub struct BlockRegistry {
     multipart: HashMap<String, Vec<model::MultipartEntry>>,
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
-    flat_item_texture_keys: HashMap<String, String>,
+    flat_item_texture_keys: HashMap<String, Vec<String>>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
+    item_tint_sources: HashMap<String, Vec<model::ItemTintSource>>,
     /// Block name -> its single `BlockState`, for one-state blocks (see
     /// `placeable_block_for_item`).
     placeable_blocks: HashMap<&'static str, BlockState>,
@@ -124,6 +129,7 @@ impl BlockRegistry {
         let flat_item_textures = baked_items.generated_textures;
         let flat_item_texture_keys = baked_items.flat_texture_keys;
         let item_ground_transforms = baked_items.ground_transforms;
+        let item_tint_sources = baked_items.tint_sources;
 
         Self {
             textures,
@@ -133,6 +139,7 @@ impl BlockRegistry {
             flat_item_textures,
             flat_item_texture_keys,
             item_ground_transforms,
+            item_tint_sources,
             placeable_blocks: build_placeable_blocks(),
         }
     }
@@ -160,8 +167,26 @@ impl BlockRegistry {
         self.flat_item_textures.iter().map(String::as_str)
     }
 
-    pub fn get_flat_item_texture_key(&self, name: &str) -> Option<&str> {
-        self.flat_item_texture_keys.get(name).map(String::as_str)
+    pub fn get_flat_item_texture_keys(&self, name: &str) -> Option<&[String]> {
+        self.flat_item_texture_keys.get(name).map(Vec::as_slice)
+    }
+
+    /// Evaluate the stock item definition's tint sources for this stack.
+    /// Vanilla 26.2 uses at most two tint entries per item model.
+    pub fn item_tint_palette(&self, name: &str, stack: Option<&ItemStackData>) -> [u32; 2] {
+        let mut palette = [0xFFFFFF; 2];
+        if let Some(sources) = self.item_tint_sources.get(name) {
+            for (slot, source) in palette.iter_mut().zip(sources.iter()) {
+                *slot = evaluate_item_tint(source, stack);
+            }
+        }
+        palette
+    }
+
+    pub fn item_tint_count(&self, name: &str) -> usize {
+        self.item_tint_sources
+            .get(name)
+            .map_or(0, |sources| sources.len().min(2))
     }
 
     pub fn get_item_ground_transform(&self, name: &str) -> Option<glam::Mat4> {
@@ -257,6 +282,135 @@ impl BlockRegistry {
             .chain(multipart_textures)
             .chain(item_model_textures)
     }
+}
+
+fn evaluate_item_tint(source: &model::ItemTintSource, stack: Option<&ItemStackData>) -> u32 {
+    match *source {
+        model::ItemTintSource::Constant(color) | model::ItemTintSource::Grass { color } => color,
+        model::ItemTintSource::Dye { default } => stack
+            .and_then(|stack| stack.get_component::<DyedColor>())
+            .map(|color| color.rgb as u32 & 0x00FF_FFFF)
+            .unwrap_or(default),
+        model::ItemTintSource::Firework { default } => stack
+            .and_then(|stack| stack.get_component::<FireworkExplosion>())
+            .and_then(|explosion| average_rgb(&explosion.colors))
+            .unwrap_or(default),
+        model::ItemTintSource::Potion { default } => stack
+            .and_then(|stack| stack.get_component::<PotionContents>())
+            .map(|contents| potion_contents_color(&contents, default))
+            .unwrap_or(default),
+        model::ItemTintSource::MapColor { default } => stack
+            .and_then(|stack| stack.get_component::<MapColor>())
+            .map(|color| color.color as u32 & 0x00FF_FFFF)
+            .unwrap_or(default),
+    }
+}
+
+fn average_rgb(colors: &[i32]) -> Option<u32> {
+    if colors.is_empty() {
+        return None;
+    }
+    if colors.len() == 1 {
+        return Some(colors[0] as u32 & 0x00FF_FFFF);
+    }
+    let mut red = 0_u32;
+    let mut green = 0_u32;
+    let mut blue = 0_u32;
+    for &color in colors {
+        let color = color as u32;
+        red += (color >> 16) & 0xFF;
+        green += (color >> 8) & 0xFF;
+        blue += color & 0xFF;
+    }
+    let count = colors.len() as u32;
+    Some(((red / count) << 16) | ((green / count) << 8) | (blue / count))
+}
+
+fn potion_contents_color(contents: &PotionContents, default: u32) -> u32 {
+    if let Some(color) = contents.custom_color {
+        return color as u32 & 0x00FF_FFFF;
+    }
+
+    let mut effects: Vec<(u32, u32)> = Vec::new();
+    if let Some(potion) = contents.potion {
+        potion_effect_colors(potion, &mut effects);
+    }
+    for effect in &contents.custom_effects {
+        if effect.details.show_particles {
+            effects.push((
+                mob_effect_color(effect.id),
+                (effect.details.amplifier.max(0) as u32) + 1,
+            ));
+        }
+    }
+    weighted_effect_color(&effects).unwrap_or(default)
+}
+
+fn weighted_effect_color(effects: &[(u32, u32)]) -> Option<u32> {
+    let mut red = 0_u64;
+    let mut green = 0_u64;
+    let mut blue = 0_u64;
+    let mut weight_sum = 0_u64;
+    for &(color, weight) in effects {
+        let weight = weight as u64;
+        red += ((color >> 16) & 0xFF) as u64 * weight;
+        green += ((color >> 8) & 0xFF) as u64 * weight;
+        blue += (color & 0xFF) as u64 * weight;
+        weight_sum += weight;
+    }
+    let red = red.checked_div(weight_sum)? as u32;
+    let green = green.checked_div(weight_sum)? as u32;
+    let blue = blue.checked_div(weight_sum)? as u32;
+    Some((red << 16) | (green << 8) | blue)
+}
+
+fn potion_effect_colors(potion: Potion, out: &mut Vec<(u32, u32)>) {
+    use Potion::*;
+    let one = |out: &mut Vec<(u32, u32)>, effect, amplifier: u32| {
+        out.push((mob_effect_color(effect), amplifier + 1));
+    };
+    match potion {
+        Water | Mundane | Thick | Awkward => {}
+        NightVision | LongNightVision => one(out, MobEffect::NightVision, 0),
+        Invisibility | LongInvisibility => one(out, MobEffect::Invisibility, 0),
+        Leaping | LongLeaping => one(out, MobEffect::JumpBoost, 0),
+        StrongLeaping => one(out, MobEffect::JumpBoost, 1),
+        FireResistance | LongFireResistance => one(out, MobEffect::FireResistance, 0),
+        Swiftness | LongSwiftness => one(out, MobEffect::Speed, 0),
+        StrongSwiftness => one(out, MobEffect::Speed, 1),
+        Slowness | LongSlowness => one(out, MobEffect::Slowness, 0),
+        StrongSlowness => one(out, MobEffect::Slowness, 3),
+        TurtleMaster | LongTurtleMaster => {
+            one(out, MobEffect::Slowness, 3);
+            one(out, MobEffect::Resistance, 2);
+        }
+        StrongTurtleMaster => {
+            one(out, MobEffect::Slowness, 5);
+            one(out, MobEffect::Resistance, 3);
+        }
+        WaterBreathing | LongWaterBreathing => one(out, MobEffect::WaterBreathing, 0),
+        Healing => one(out, MobEffect::InstantHealth, 0),
+        StrongHealing => one(out, MobEffect::InstantHealth, 1),
+        Harming => one(out, MobEffect::InstantDamage, 0),
+        StrongHarming => one(out, MobEffect::InstantDamage, 1),
+        Poison | LongPoison => one(out, MobEffect::Poison, 0),
+        StrongPoison => one(out, MobEffect::Poison, 1),
+        Regeneration | LongRegeneration => one(out, MobEffect::Regeneration, 0),
+        StrongRegeneration => one(out, MobEffect::Regeneration, 1),
+        Strength | LongStrength => one(out, MobEffect::Strength, 0),
+        StrongStrength => one(out, MobEffect::Strength, 1),
+        Weakness | LongWeakness => one(out, MobEffect::Weakness, 0),
+        Luck => one(out, MobEffect::Luck, 0),
+        SlowFalling | LongSlowFalling => one(out, MobEffect::SlowFalling, 0),
+        WindCharged => one(out, MobEffect::WindCharged, 0),
+        Weaving => one(out, MobEffect::Weaving, 0),
+        Oozing => one(out, MobEffect::Oozing, 0),
+        Infested => one(out, MobEffect::Infested, 0),
+    }
+}
+
+fn mob_effect_color(effect: MobEffect) -> u32 {
+    crate::mob_effect::info(effect.to_u32()).map_or(0xFFFFFF, |info| info.color)
 }
 
 /// Builds the block-name -> single-`BlockState` map from the block table,

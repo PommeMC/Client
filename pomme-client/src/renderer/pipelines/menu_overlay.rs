@@ -932,9 +932,12 @@ impl MenuOverlayPipeline {
                     w,
                     h,
                     item_name,
+                    item_tints,
                     tint,
+                    ..
                 } => {
-                    if let Some(uv) = item_atlas_uvs.get(item_name) {
+                    let atlas_key = item_icon_atlas_key(item_name, *item_tints);
+                    if let Some(uv) = item_atlas_uvs.get(&atlas_key) {
                         push_quad(
                             &mut vertices,
                             *x,
@@ -1712,6 +1715,10 @@ impl TooltipLine {
     }
 }
 
+pub fn item_icon_atlas_key(item_name: &str, item_tints: [u32; 2]) -> String {
+    format!("{item_name}#{:06x}-{:06x}", item_tints[0], item_tints[1])
+}
+
 #[allow(dead_code)]
 pub enum MenuElement {
     ScissorPush {
@@ -1790,6 +1797,8 @@ pub enum MenuElement {
         w: f32,
         h: f32,
         item_name: String,
+        item_stack: Option<azalea_inventory::ItemStackData>,
+        item_tints: [u32; 2],
         tint: [f32; 4],
     },
     McText {

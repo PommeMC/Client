@@ -1079,7 +1079,7 @@ impl Renderer {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
-        held_item: Option<(String, f32)>,
+        held_item: Option<(String, f32, azalea_inventory::ItemStackData)>,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
@@ -1096,11 +1096,13 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
-        let held_item = held_item.map(|(name, light)| {
+        let held_item = held_item.map(|(name, light, stack)| {
+            let item_tints = self.registry.item_tint_palette(&name, Some(&stack));
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
             pipelines::held_item::HeldItemInfo {
                 name,
                 light,
+                item_tints,
                 has_3d_model,
             }
         });
@@ -1362,16 +1364,17 @@ impl Renderer {
             );
             true
         } else {
-            let texture_key = self
+            let texture_keys = self
                 .registry
-                .get_flat_item_texture_key(name)
-                .map(String::from)
-                .unwrap_or_else(|| format!("item/{name}"));
+                .get_flat_item_texture_keys(name)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| vec![format!("item/{name}")]);
             self.item_entity_pipeline.ensure_flat_mesh(
                 &self.ctx.device,
                 &self.ctx.allocator,
                 name,
-                &texture_key,
+                &texture_keys,
+                self.registry.item_tint_count(name),
                 &self.atlas.uv_map,
             );
             false
@@ -1400,7 +1403,7 @@ impl Renderer {
         window: &Window,
         hide_cursor: bool,
         clear_color: [f32; 4],
-        mode: RenderMode<'_>,
+        mut mode: RenderMode<'_>,
     ) -> Result<(), RendererError> {
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
@@ -1520,10 +1523,23 @@ impl Renderer {
             },
         ];
 
-        let menu_elements: &[MenuElement] = match &mode {
-            RenderMode::World { overlay, .. } => overlay.as_slice(),
-            RenderMode::MainMenu { elements, .. } => elements.as_slice(),
+        let menu_elements: &mut [MenuElement] = match &mut mode {
+            RenderMode::World { overlay, .. } => overlay.as_mut_slice(),
+            RenderMode::MainMenu { elements, .. } => elements.as_mut_slice(),
         };
+        for elem in menu_elements.iter_mut() {
+            if let MenuElement::ItemIcon {
+                item_name,
+                item_stack,
+                item_tints,
+                ..
+            } = elem
+            {
+                *item_tints = self
+                    .registry
+                    .item_tint_palette(item_name, item_stack.as_ref());
+            }
+        }
 
         let target_slot_px =
             pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(
@@ -1552,36 +1568,47 @@ impl Renderer {
                 .set_atlas_px(self.gui_item_atlas.atlas_px());
         }
 
-        let mut unique_names: HashSet<String> = HashSet::new();
-        for elem in menu_elements {
-            if let MenuElement::ItemIcon { item_name, .. } = elem {
-                unique_names.insert(item_name.clone());
+        let mut unique_items: HashMap<String, (String, [u32; 2])> = HashMap::new();
+        for elem in menu_elements.iter() {
+            if let MenuElement::ItemIcon {
+                item_name,
+                item_tints,
+                ..
+            } = elem
+            {
+                let key = pipelines::menu_overlay::item_icon_atlas_key(item_name, *item_tints);
+                unique_items
+                    .entry(key)
+                    .or_insert_with(|| (item_name.clone(), *item_tints));
             }
         }
-        if !self.gui_item_atlas.has_space_for_all(&unique_names)
-            && !self.gui_item_atlas.reclaim_space_for(&unique_names)
+        let unique_keys: HashSet<String> = unique_items.keys().cloned().collect();
+        if !self.gui_item_atlas.has_space_for_all(&unique_keys)
+            && !self.gui_item_atlas.reclaim_space_for(&unique_keys)
         {
             tracing::warn!(
                 "gui_item_atlas: out of slots for {} unique items; some icons will not render",
-                unique_names.len()
+                unique_items.len()
             );
         }
         let mut item_atlas_uvs: HashMap<String, [f32; 4]> = HashMap::new();
         struct BakeJob {
             slot: pipelines::gui_item_atlas::Slot,
             name: String,
+            item_tints: [u32; 2],
             is_block: bool,
             needs_clear: bool,
         }
         let mut bake_list: Vec<BakeJob> = Vec::new();
-        for name in &unique_names {
+        for (key, (name, item_tints)) in &unique_items {
             let discard = pipelines::gui_item_atlas::is_animated_item(name);
-            if let Some((slot, state)) = self.gui_item_atlas.get_or_allocate(name, discard) {
-                item_atlas_uvs.insert(name.clone(), self.gui_item_atlas.slot_uv(&slot));
+            if let Some((slot, state)) = self.gui_item_atlas.get_or_allocate(key, discard) {
+                item_atlas_uvs.insert(key.clone(), self.gui_item_atlas.slot_uv(&slot));
                 if !matches!(state, pipelines::gui_item_atlas::SlotState::Ready) {
                     bake_list.push(BakeJob {
                         slot,
                         name: name.clone(),
+                        item_tints: *item_tints,
                         is_block: self.registry.get_item_model(name).is_some(),
                         needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
                     });
@@ -1605,6 +1632,7 @@ impl Renderer {
                     self.gui_item_atlas.slot_px(),
                     &job.name,
                     job.is_block,
+                    job.item_tints,
                 );
             }
             self.gui_item_atlas.end_bake_pass(cmd);
@@ -1720,7 +1748,8 @@ impl Renderer {
                 self.block_entity_pipeline
                     .draw(cmd, frame, anchor, block_entities);
 
-                self.item_entity_pipeline.draw(cmd, frame, item_entities);
+                self.item_entity_pipeline
+                    .draw(cmd, frame, item_entities, &self.registry);
 
                 // Break particles draw after entities but before translucent
                 // water: they write depth, and pomme's water doesn't, so this
@@ -2014,11 +2043,18 @@ fn warm_item_meshes(
         if let Some(model) = registry.get_item_model(name) {
             item_entity_pipeline.ensure_mesh(device, allocator, name, model, uv_map);
         } else {
-            let texture_key = registry
-                .get_flat_item_texture_key(name)
-                .map(String::from)
-                .unwrap_or_else(|| format!("item/{name}"));
-            item_entity_pipeline.ensure_flat_mesh(device, allocator, name, &texture_key, uv_map);
+            let texture_keys = registry
+                .get_flat_item_texture_keys(name)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| vec![format!("item/{name}")]);
+            item_entity_pipeline.ensure_flat_mesh(
+                device,
+                allocator,
+                name,
+                &texture_keys,
+                registry.item_tint_count(name),
+                uv_map,
+            );
         }
     }
 }

@@ -729,6 +729,7 @@ pub fn handle_game_packet(
                         item_id: data.kind.to_u32(),
                         damage,
                         count: data.count,
+                        stack: data.clone(),
                     });
                 }
                 // Index 6 = entity pose

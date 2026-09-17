@@ -16,6 +16,7 @@ use crate::renderer::pipelines::item_entity::{
 pub struct HeldItemInfo {
     pub name: String,
     pub light: f32,
+    pub item_tints: [u32; 2],
     pub has_3d_model: bool,
 }
 
@@ -86,7 +87,13 @@ impl HeldItemPipeline {
 
         self.shared.bind(cmd, frame, self.pipeline);
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
-        push_model_light(cmd, self.shared.pipeline_layout, &model, item.light);
+        push_model_light(
+            cmd,
+            self.shared.pipeline_layout,
+            &model,
+            item.light,
+            item.item_tints,
+        );
         cmd.draw(vertex_count, 1, 0, 0);
     }
 

@@ -414,6 +414,8 @@ pub fn push_item_icon(
         w: size,
         h: size,
         item_name: item_resource_name(data.kind),
+        item_stack: Some(data.clone()),
+        item_tints: [0xFFFFFF; 2],
         tint: WHITE,
     });
     if data.count > 1 {

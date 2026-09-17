@@ -664,6 +664,8 @@ fn push_item(elements: &mut Vec<MenuElement>, item: Option<&String>, x: f32, y: 
             w: size,
             h: size,
             item_name: item.clone(),
+            item_stack: None,
+            item_tints: [0xFFFFFF; 2],
             tint: [1.0; 4],
         });
     }

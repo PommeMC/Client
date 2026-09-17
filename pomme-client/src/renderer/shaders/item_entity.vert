@@ -6,6 +6,8 @@
 
 layout(push_constant) uniform PushConstants {
     mat4 model;
+    layout(offset = 72) uint item_tint0;
+    layout(offset = 76) uint item_tint1;
 };
 
 layout(location = 0) in vec3 position;
@@ -24,7 +26,20 @@ void main() {
     gl_Position = view_proj * vec4(rel, 1.0);
     v_tex_coords = tex_coords;
     v_light = light_tint.r;
-    v_tint = light_tint.gba;
+    // Tint-indexed vertices encode index+1 in the middle tint byte, with
+    // zeroes in the other two bytes. Stock 26.2 item definitions use at most
+    // two tint entries; the actual stack-dependent colors are supplied per draw.
+    if (light_tint.g == 0.0 && light_tint.a == 0.0 && light_tint.b > 0.0) {
+        uint tint_index = uint(round(light_tint.b * 255.0)) - 1u;
+        uint item_tint = tint_index == 0u ? item_tint0 : item_tint1;
+        v_tint = vec3(
+            float((item_tint >> 16) & 255u),
+            float((item_tint >> 8) & 255u),
+            float(item_tint & 255u)
+        ) / 255.0;
+    } else {
+        v_tint = light_tint.gba;
+    }
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
 }

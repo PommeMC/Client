@@ -77,6 +77,7 @@ fn pack_normal(normal: glam::Vec3) -> [i8; 4] {
 
 pub struct ItemRenderInfo {
     pub item_name: String,
+    pub item_stack: Option<azalea_inventory::ItemStackData>,
     pub model_matrix: Mat4,
     pub light: f32,
     pub nether_lighting: bool,
@@ -312,6 +313,7 @@ pub(super) fn push_model_light(
     layout: vk::PipelineLayout,
     model: &Mat4,
     light: f32,
+    item_tints: [u32; 2],
 ) {
     let mvp_data = model.to_cols_array();
     cmd.push_constants(
@@ -325,6 +327,12 @@ pub(super) fn push_model_light(
         vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
         64,
         bytemuck::bytes_of(&light),
+    );
+    cmd.push_constants(
+        layout,
+        vk::ShaderStageFlags::Vertex,
+        72,
+        bytemuck::bytes_of(&item_tints),
     );
 }
 
@@ -459,35 +467,43 @@ impl ItemEntityPipeline {
         device: &vk::Device,
         allocator: &Arc<Mutex<Allocator>>,
         name: &str,
-        texture_key: &str,
+        texture_keys: &[String],
+        tint_count: usize,
         uv_map: &AtlasUVMap,
     ) {
         if self.meshes.contains_key(name) {
             return;
         }
-        if !uv_map.has_region(texture_key) {
-            return;
+
+        let mut vertices = Vec::new();
+        let mut translucent = false;
+        for (layer, texture_key) in texture_keys.iter().enumerate() {
+            if !uv_map.has_region(texture_key) {
+                continue;
+            }
+            let region = uv_map.get_region(texture_key);
+            translucent |= region.translucent;
+            let tint_index = (layer < tint_count).then_some(layer as u32);
+            let mut layer_vertices = uv_map
+                .sprite_alpha_mask(texture_key)
+                .map(|mask| build_extruded_item_mask(mask, region, tint_index))
+                .unwrap_or_else(|| build_flat_quad(region, tint_index));
+            vertices.append(&mut layer_vertices);
         }
-        let region = uv_map.get_region(texture_key);
-        let vertices = uv_map
-            .sprite_alpha_mask(texture_key)
-            .map(|mask| build_extruded_item_mask(mask, region))
-            .unwrap_or_else(|| build_flat_quad(region));
         if !vertices.is_empty() {
-            self.insert_mesh(
-                device,
-                allocator,
-                name,
-                &vertices,
-                false,
-                region.translucent,
-            );
+            self.insert_mesh(device, allocator, name, &vertices, false, translucent);
         }
     }
 
     /// Cutout meshes first, then translucent ones, as vanilla's item sheets
     /// are ordered.
-    pub fn draw(&self, cmd: vk::CommandBuffer, frame: usize, items: &[ItemRenderInfo]) {
+    pub fn draw(
+        &self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        items: &[ItemRenderInfo],
+        registry: &crate::world::block::registry::BlockRegistry,
+    ) {
         if items.is_empty() {
             return;
         }
@@ -511,6 +527,7 @@ impl ItemEntityPipeline {
                     self.shared.pipeline_layout,
                     &item.model_matrix,
                     item.light,
+                    registry.item_tint_palette(&item.item_name, item.item_stack.as_ref()),
                 );
                 push_world_lighting(
                     cmd,
@@ -576,17 +593,22 @@ fn cardinal_normal(positions: &[[f32; 3]; 4]) -> glam::Vec3 {
     glam::Vec3::from_array(direction.offset().map(|v| v as f32))
 }
 
+fn item_tint_marker(index: u32) -> u32 {
+    // ItemVertex is R8G8B8A8_UNORM: byte 0 is light, bytes 1..=3 are tint.
+    // Reserve tint RGB (0, index+1, 0) as a shader-side tint-index marker.
+    ((index.min(254) + 1) & 0xFF) << 16
+}
+
 fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
     let mut vertices = Vec::new();
     for quad in &model.quads {
         let region = uv_map.get_region(&quad.texture);
         let u_span = region.u_max - region.u_min;
         let v_span = region.v_max - region.v_min;
-        let tint = if matches!(quad.tint, crate::world::block::registry::Tint::None) {
-            crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED
-        } else {
-            crate::renderer::chunk::mesher::pack_tint_shifted([0.569, 0.741, 0.349])
-        };
+        let tint = quad.item_tint_index.map_or(
+            crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+            item_tint_marker,
+        );
         let normal = pack_normal(cardinal_normal(&quad.positions));
 
         for i in [0, 1, 2, 2, 3, 0] {
@@ -617,10 +639,14 @@ fn build_extruded_item(img: &image::RgbaImage, region: AtlasRegion) -> Vec<ItemV
         height: h,
         frames: vec![img.pixels().map(|pixel| pixel[3] != 0).collect()],
     };
-    build_extruded_item_mask(&mask, region)
+    build_extruded_item_mask(&mask, region, None)
 }
 
-fn build_extruded_item_mask(mask: &SpriteAlphaMask, region: AtlasRegion) -> Vec<ItemVertex> {
+fn build_extruded_item_mask(
+    mask: &SpriteAlphaMask,
+    region: AtlasRegion,
+    tint_index: Option<u32>,
+) -> Vec<ItemVertex> {
     let w = mask.width as i32;
     let h = mask.height as i32;
     let mut vertices = Vec::new();
@@ -631,6 +657,10 @@ fn build_extruded_item_mask(mask: &SpriteAlphaMask, region: AtlasRegion) -> Vec<
     let v_span = region.v_max - region.v_min;
     let z_min = 7.5 / 16.0 - 0.5;
     let z_max = 8.5 / 16.0 - 0.5;
+    let tint = tint_index.map_or(
+        crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+        item_tint_marker,
+    );
 
     let front = [
         [-0.5, -0.5, z_max],
@@ -652,10 +682,7 @@ fn build_extruded_item_mask(mask: &SpriteAlphaMask, region: AtlasRegion) -> Vec<
         vertices.push(ItemVertex {
             position: front[i],
             tex_coords: front_uvs[i],
-            light_tint: crate::renderer::chunk::mesher::pack_light_tint(
-                1.0,
-                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
-            ),
+            light_tint: crate::renderer::chunk::mesher::pack_light_tint(1.0, tint),
             normal: pack_normal(glam::Vec3::Z),
         });
     }
@@ -685,10 +712,7 @@ fn build_extruded_item_mask(mask: &SpriteAlphaMask, region: AtlasRegion) -> Vec<
         vertices.push(ItemVertex {
             position: back[i],
             tex_coords: back_uvs[i],
-            light_tint: crate::renderer::chunk::mesher::pack_light_tint(
-                1.0,
-                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
-            ),
+            light_tint: crate::renderer::chunk::mesher::pack_light_tint(1.0, tint),
             normal: pack_normal(glam::Vec3::NEG_Z),
         });
     }
@@ -724,6 +748,7 @@ fn build_extruded_item_mask(mask: &SpriteAlphaMask, region: AtlasRegion) -> Vec<
                     z_max,
                     [[u0, v0], [u0, v1], [u1, v1], [u1, v0]],
                     0.8,
+                    tint,
                 );
             }
             if bottom_exposed {
@@ -737,6 +762,7 @@ fn build_extruded_item_mask(mask: &SpriteAlphaMask, region: AtlasRegion) -> Vec<
                     z_max,
                     [[u1, v1], [u1, v0], [u0, v0], [u0, v1]],
                     0.8,
+                    tint,
                 );
             }
             if left_exposed {
@@ -750,6 +776,7 @@ fn build_extruded_item_mask(mask: &SpriteAlphaMask, region: AtlasRegion) -> Vec<
                     z_max,
                     [[u1, v1], [u0, v1], [u0, v0], [u1, v0]],
                     0.8,
+                    tint,
                 );
             }
             if right_exposed {
@@ -763,6 +790,7 @@ fn build_extruded_item_mask(mask: &SpriteAlphaMask, region: AtlasRegion) -> Vec<
                     z_max,
                     [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
                     0.8,
+                    tint,
                 );
             }
         }
@@ -782,6 +810,7 @@ fn push_side_quad(
     z1: f32,
     uvs: [[f32; 2]; 4],
     light: f32,
+    tint: u32,
 ) {
     let positions = [[x0, y0, z0], [x0, y0, z1], [x1, y1, z1], [x1, y1, z0]];
     let normal = pack_normal(cardinal_normal(&positions));
@@ -789,16 +818,13 @@ fn push_side_quad(
         vertices.push(ItemVertex {
             position: positions[i],
             tex_coords: uvs[i],
-            light_tint: crate::renderer::chunk::mesher::pack_light_tint(
-                light,
-                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
-            ),
+            light_tint: crate::renderer::chunk::mesher::pack_light_tint(light, tint),
             normal,
         });
     }
 }
 
-fn build_flat_quad(region: AtlasRegion) -> Vec<ItemVertex> {
+fn build_flat_quad(region: AtlasRegion, tint_index: Option<u32>) -> Vec<ItemVertex> {
     let h = 0.5;
     let positions = [
         [-h, -h, 0.0],
@@ -808,6 +834,10 @@ fn build_flat_quad(region: AtlasRegion) -> Vec<ItemVertex> {
         [h, h, 0.0],
         [-h, h, 0.0],
     ];
+    let tint = tint_index.map_or(
+        crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+        item_tint_marker,
+    );
     let uvs = [
         [region.u_min, region.v_max],
         [region.u_max, region.v_max],
@@ -822,10 +852,7 @@ fn build_flat_quad(region: AtlasRegion) -> Vec<ItemVertex> {
         .map(|(p, uv)| ItemVertex {
             position: *p,
             tex_coords: *uv,
-            light_tint: crate::renderer::chunk::mesher::pack_light_tint(
-                1.0,
-                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
-            ),
+            light_tint: crate::renderer::chunk::mesher::pack_light_tint(1.0, tint),
             normal: pack_normal(glam::Vec3::Z),
         })
         .collect()
@@ -1116,13 +1143,37 @@ mod tests {
     }
 
     #[test]
+    fn item_tint_marker_encodes_palette_index_without_looking_white() {
+        let first = crate::renderer::chunk::mesher::pack_light_tint(1.0, item_tint_marker(0));
+        let second = crate::renderer::chunk::mesher::pack_light_tint(1.0, item_tint_marker(1));
+        assert_eq!(first.to_le_bytes(), [255, 0, 1, 0]);
+        assert_eq!(second.to_le_bytes(), [255, 0, 2, 0]);
+    }
+
+    #[test]
+    fn generated_item_layer_marks_its_tint_index() {
+        let mask = SpriteAlphaMask {
+            width: 1,
+            height: 1,
+            frames: vec![vec![true]],
+        };
+        let vertices = build_extruded_item_mask(&mask, unit_region(), Some(1));
+        assert!(!vertices.is_empty());
+        assert!(
+            vertices
+                .iter()
+                .all(|vertex| vertex.light_tint.to_le_bytes()[1..] == [0, 2, 0])
+        );
+    }
+
+    #[test]
     fn animated_extrusion_unions_exposed_edges_per_frame() {
         let mask = SpriteAlphaMask {
             width: 2,
             height: 1,
             frames: vec![vec![true, false], vec![false, true]],
         };
-        let vertices = build_extruded_item_mask(&mask, unit_region());
+        let vertices = build_extruded_item_mask(&mask, unit_region(), None);
 
         // Each frame exposes the shared edge from one side, so vanilla emits
         // eight side quads total. Collapsing the frames into one opacity bitmap

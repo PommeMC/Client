@@ -51,7 +51,8 @@ impl GuiItemPipeline {
         let push_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
             offset: 0,
-            size: 68,
+            // 64-byte model + fragment light + two item tint colors.
+            size: 80,
         };
         let layouts = [camera_layout, atlas_layout];
         let layout_info = vk::PipelineLayoutCreateInfo {
@@ -256,6 +257,7 @@ impl GuiItemPipeline {
         slot_size_px: u32,
         item_name: &str,
         is_block: bool,
+        item_tints: [u32; 2],
     ) {
         let Some((buffer, vertex_count)) = item_entity.mesh_handle(item_name) else {
             return;
@@ -271,7 +273,7 @@ impl GuiItemPipeline {
         );
 
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
-        push_model_light(cmd, self.pipeline_layout, &model, 1.0);
+        push_model_light(cmd, self.pipeline_layout, &model, 1.0, item_tints);
         cmd.draw(vertex_count, 1, 0, 0);
     }
 
