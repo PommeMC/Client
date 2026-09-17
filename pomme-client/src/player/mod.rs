@@ -9,7 +9,7 @@ use inventory::Inventory;
 use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position, Velocity};
 use crate::physics::aabb::Aabb;
-use crate::world::block::{FluidKind, fluid};
+use crate::world::block::{Fluid, FluidKind, block_id, blocks_motion, fluid, is_full_face_sturdy};
 
 pub const MAX_AIR_SUPPLY: i32 = 300;
 // Vanilla stores player dimensions/eye heights as floats and only widens them
@@ -17,8 +17,10 @@ pub const MAX_AIR_SUPPLY: i32 = 300;
 pub const PLAYER_HALF_WIDTH: f64 = (0.6_f32 / 2.0_f32) as f64;
 pub const STANDING_HEIGHT: f64 = 1.8_f32 as f64;
 pub const CROUCH_HEIGHT: f64 = 1.5_f32 as f64;
+pub const SWIMMING_HEIGHT: f64 = 0.6_f32 as f64;
 pub const STANDING_EYE_HEIGHT: f32 = 1.62;
 pub const CROUCH_EYE_HEIGHT: f32 = 1.27;
+pub const SWIMMING_EYE_HEIGHT: f32 = 0.4;
 // Entity.checkInsideBlocks passes the float literal through AABB's double API.
 const INSIDE_BLOCK_MARGIN: f64 = 1.0e-5_f32 as f64;
 const DROWN_DAMAGE_THRESHOLD: i32 = -20;
@@ -52,6 +54,84 @@ fn is_water_block(state: azalea_block::BlockState) -> bool {
     fluid(state).kind == FluidKind::Water
 }
 
+#[inline]
+fn vanilla_vec3_normalize(v: glam::DVec3) -> glam::DVec3 {
+    let length = v.length();
+    if length < f64::from(1.0e-5_f32) {
+        glam::DVec3::ZERO
+    } else {
+        v / length
+    }
+}
+
+#[inline]
+fn affects_water_flow(f: Fluid) -> bool {
+    matches!(f.kind, FluidKind::Empty | FluidKind::Water)
+}
+
+fn water_flow_at(
+    chunks: &crate::world::chunk::ChunkStore,
+    x: i32,
+    y: i32,
+    z: i32,
+    state_fluid: Fluid,
+) -> glam::DVec3 {
+    debug_assert_eq!(state_fluid.kind, FluidKind::Water);
+    let own_height = state_fluid.height();
+    let mut flow_x = 0.0_f64;
+    let mut flow_z = 0.0_f64;
+
+    // Direction.Plane.HORIZONTAL iteration order in vanilla is
+    // NORTH, EAST, SOUTH, WEST.
+    for (dx, dz) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+        let nx = x + dx;
+        let nz = z + dz;
+        let neighbor_state = chunks.get_block_state(nx, y, nz);
+        let neighbor_fluid = fluid(neighbor_state);
+        if !affects_water_flow(neighbor_fluid) {
+            continue;
+        }
+
+        let mut neighbor_height = neighbor_fluid.height();
+        let mut distance = 0.0_f32;
+        if neighbor_height == 0.0 {
+            let below_fluid = fluid(chunks.get_block_state(nx, y - 1, nz));
+            if !blocks_motion(neighbor_state) && affects_water_flow(below_fluid) && {
+                neighbor_height = below_fluid.height();
+                neighbor_height > 0.0
+            } {
+                distance = own_height - (neighbor_height - 0.888_888_9_f32);
+            }
+        } else if neighbor_height > 0.0 {
+            distance = own_height - neighbor_height;
+        }
+        if distance != 0.0 {
+            flow_x += f64::from((dx as f32) * distance);
+            flow_z += f64::from((dz as f32) * distance);
+        }
+    }
+
+    let mut flow = dvec3(flow_x, 0.0, flow_z);
+    if state_fluid.falling {
+        for (dx, dz, direction) in [(0, -1, 2_usize), (1, 0, 5), (0, 1, 3), (-1, 0, 4)] {
+            let nx = x + dx;
+            let nz = z + dz;
+            let solid_face = |by| {
+                let state = chunks.get_block_state(nx, by, nz);
+                let same_water = fluid(state).kind == FluidKind::Water;
+                !same_water
+                    && !matches!(block_id(state), "ice" | "frosted_ice")
+                    && is_full_face_sturdy(state, direction)
+            };
+            if solid_face(y) || solid_face(y + 1) {
+                flow = vanilla_vec3_normalize(flow) + dvec3(0.0, -6.0, 0.0);
+                break;
+            }
+        }
+    }
+    vanilla_vec3_normalize(flow)
+}
+
 pub struct LocalPlayer {
     pub position: Position,
     pub prev_position: Position,
@@ -59,6 +139,9 @@ pub struct LocalPlayer {
     pub look_dir: LookDirection,
     pub prev_look_dir: LookDirection,
     pub on_ground: bool,
+    /// Vanilla `Entity.fallDistance`, used by powder-snow collision and fall
+    /// handling. Stored as f64 in 26.2.
+    pub fall_distance: f64,
     pub health: f32,
     pub death_time: u32,
     pub absorption: f32,
@@ -71,7 +154,13 @@ pub struct LocalPlayer {
     pub saturation: f32,
     pub inventory: Inventory,
     pub sprinting: bool,
+    /// Physical Entity pose: true when the current pose is CROUCHING. This is
+    /// selected by Player.updatePlayerPose at tick end and controls dimensions.
     pub crouching: bool,
+    /// Vanilla LocalPlayer's private `crouching` movement flag. aiStep updates
+    /// this before KeyboardInput.tick; it can differ from the physical pose on
+    /// crouch/swim transitions.
+    pub movement_crouching: bool,
     // TODO: remaining Abilities fields - invulnerable, instabuild, may_build
     pub flying: bool,
     pub may_fly: bool,
@@ -95,13 +184,35 @@ pub struct LocalPlayer {
     pub bob: f32,
     pub prev_bob: f32,
     pub horizontal_collision: bool,
+    /// Vanilla `Entity.minorHorizontalCollision`, produced by `Entity.move` and
+    /// consumed by the following `LocalPlayer.aiStep` sprint-stop decision.
+    pub minor_horizontal_collision: bool,
+    /// Vanilla `Entity.mainSupportingBlockPos`, retained across ticks so block
+    /// friction/jump/speed properties use the actual supporting collider rather
+    /// than whichever block happens to contain the player's center point.
+    pub main_supporting_block_pos: Option<azalea_core::position::BlockPos>,
+    /// Vanilla `Entity.onGroundNoBlocks`; controls the one-tick fallback search
+    /// at the previous horizontal position when support changes underfoot.
+    pub on_ground_no_blocks: bool,
     pub sprint_toggle_timer: u32,
+    /// Vanilla LocalPlayer.aiStep samples these from ClientInput before
+    /// KeyboardInput.tick refreshes the current physical keys.
     pub was_forward_pressed: bool,
+    pub was_shift_pressed: bool,
     pub in_water: bool,
     /// Vanilla `getFluidHeight(WATER)`: water surface height above the feet.
     pub fluid_height: f64,
     pub eyes_in_water: bool,
+    /// Vanilla `LocalPlayer.wasUnderwater`. `Player.tick` snapshots this from
+    /// the previous EntityFluidInteraction before `Entity.baseTick` refreshes
+    /// the current tick's eye-fluid state, so surface swim transitions lag raw
+    /// eye contact by one tick.
+    pub under_water: bool,
+    /// Vanilla shared swimming flag, updated during Entity.baseTick.
     pub swimming: bool,
+    /// Physical Pose.SWIMMING selected later by Player.updatePlayerPose. This
+    /// intentionally lags `swimming` by the remainder of the current tick.
+    pub swimming_pose: bool,
     pub air_supply: i32,
     /// Vanilla LocalPlayer.portalEffectIntensity: drives the full-screen
     /// portal overlay while standing in a nether portal.
@@ -128,6 +239,7 @@ impl LocalPlayer {
             look_dir: LookDirection::default(),
             prev_look_dir: LookDirection::default(),
             on_ground: false,
+            fall_distance: 0.0,
             health: 20.0,
             death_time: 0,
             absorption: 0.0,
@@ -141,6 +253,7 @@ impl LocalPlayer {
             inventory: Inventory::new(),
             sprinting: false,
             crouching: false,
+            movement_crouching: false,
             flying: false,
             may_fly: false,
             fly_speed: 0.05,
@@ -158,12 +271,18 @@ impl LocalPlayer {
             bob: 0.0,
             prev_bob: 0.0,
             horizontal_collision: false,
+            minor_horizontal_collision: false,
+            main_supporting_block_pos: None,
+            on_ground_no_blocks: false,
             sprint_toggle_timer: 0,
             was_forward_pressed: false,
+            was_shift_pressed: false,
             in_water: false,
             fluid_height: 0.0,
             eyes_in_water: false,
+            under_water: false,
             swimming: false,
+            swimming_pose: false,
             air_supply: MAX_AIR_SUPPLY,
             portal_effect_intensity: 0.0,
             prev_portal_effect_intensity: 0.0,
@@ -223,12 +342,20 @@ impl LocalPlayer {
         self.bob = 0.0;
         self.prev_bob = 0.0;
         self.horizontal_collision = false;
+        self.minor_horizontal_collision = false;
+        self.main_supporting_block_pos = None;
+        self.on_ground_no_blocks = false;
+        self.fall_distance = 0.0;
         self.sprint_toggle_timer = 0;
         self.was_forward_pressed = false;
+        self.was_shift_pressed = false;
+        self.movement_crouching = false;
         self.in_water = false;
         self.fluid_height = 0.0;
         self.eyes_in_water = false;
+        self.under_water = false;
         self.swimming = false;
+        self.swimming_pose = false;
         self.sleep_counter = 0;
         self.on_ground = false;
 
@@ -257,6 +384,15 @@ impl LocalPlayer {
             self.air_supply = MAX_AIR_SUPPLY;
             self.sleeping_pos = None;
         }
+    }
+
+    pub fn sync_shared_flags(&mut self, flags: u8) {
+        // Entity shared flags: bit 3 = sprinting, bit 4 = swimming. Vanilla
+        // applies ClientboundSetEntityData to LocalPlayer just like any other
+        // entity; Pomme keeps the local player outside EntityStore, so these
+        // prediction-critical bits must be mirrored explicitly.
+        self.sprinting = flags & 0x08 != 0;
+        self.swimming = flags & 0x10 != 0;
     }
 
     pub fn snapshot_render_state(&mut self) {
@@ -305,7 +441,9 @@ impl LocalPlayer {
     }
 
     pub fn height(&self) -> f64 {
-        if self.crouching {
+        if self.swimming_pose {
+            SWIMMING_HEIGHT
+        } else if self.crouching {
             CROUCH_HEIGHT
         } else {
             STANDING_HEIGHT
@@ -317,7 +455,9 @@ impl LocalPlayer {
     }
 
     pub fn target_eye_height(&self) -> f32 {
-        if self.crouching {
+        if self.swimming_pose {
+            SWIMMING_EYE_HEIGHT
+        } else if self.crouching {
             CROUCH_EYE_HEIGHT
         } else {
             STANDING_EYE_HEIGHT
@@ -366,10 +506,35 @@ impl LocalPlayer {
         }
     }
 
-    pub fn update_water_state(&mut self, chunks: &crate::world::chunk::ChunkStore) {
-        let half_w = PLAYER_HALF_WIDTH;
-        let height = self.height();
-        let eye_height = f64::from(self.target_eye_height());
+    pub fn update_water_state(
+        &mut self,
+        chunks: &crate::world::chunk::ChunkStore,
+        is_passenger: bool,
+    ) {
+        self.refresh_water_interaction(chunks);
+        self.update_swimming_state(chunks, is_passenger);
+    }
+
+    /// Vanilla `Entity.updateFluidInteraction()` without the subsequent
+    /// `Entity.updateSwimming()`. `LivingEntity.checkFallDamage()` calls this
+    /// again after a dry movement enters fluid, so movement code needs this
+    /// operation independently from swimming-state selection.
+    pub(crate) fn refresh_water_interaction(&mut self, chunks: &crate::world::chunk::ChunkStore) {
+        self.update_water_interaction_for_dimensions(
+            chunks,
+            PLAYER_HALF_WIDTH,
+            self.height(),
+            f64::from(self.target_eye_height()),
+        );
+    }
+
+    fn update_water_interaction_for_dimensions(
+        &mut self,
+        chunks: &crate::world::chunk::ChunkStore,
+        half_w: f64,
+        height: f64,
+        eye_height: f64,
+    ) {
         // Vanilla `EntityFluidInteraction.update`: scan the bounding box
         // deflated by 0.001; a block's fluid column is `amount / 9` of a
         // block, or a full block when more water sits directly above.
@@ -383,6 +548,8 @@ impl LocalPlayer {
         let z1 = (self.position.z + half_w - MARGIN).ceil() as i32 - 1;
 
         let mut fluid_height = 0.0f64;
+        let mut accumulated_current = glam::DVec3::ZERO;
+        let mut current_count = 0_u32;
         for bx in x0..=x1 {
             for by in y0..=y1 {
                 for bz in z0..=z1 {
@@ -397,22 +564,94 @@ impl LocalPlayer {
                         f64::from(f.amount as f32 / 9.0)
                     };
                     let fluid_top = f64::from(by) + block_height;
-                    if fluid_top >= feet_y + MARGIN {
-                        fluid_height = fluid_height.max(fluid_top - feet_y);
+                    if fluid_top < feet_y + MARGIN {
+                        continue;
                     }
+
+                    fluid_height = fluid_height.max(fluid_top - feet_y);
+                    let mut flow = water_flow_at(chunks, bx, by, bz, f);
+                    // EntityFluidInteraction scales each sampled flow by the
+                    // tracker's current max submerged height when below 0.4.
+                    if fluid_height < 0.4 {
+                        flow *= fluid_height;
+                    }
+                    accumulated_current += flow;
+                    current_count += 1;
                 }
             }
         }
 
-        let eye_y = (self.position.y + eye_height).floor() as i32;
-        let eye_x = self.position.x.floor() as i32;
-        let eye_z = self.position.z.floor() as i32;
+        if !self.flying
+            && current_count != 0
+            && accumulated_current.length_squared() >= f64::from(1.0e-5_f32)
+        {
+            // Players average intersecting fluid currents instead of
+            // normalizing the accumulated vector like non-player entities.
+            let mut impulse = accumulated_current / f64::from(current_count);
+            impulse *= 0.014;
+            if self.velocity.x.abs() < 0.003
+                && self.velocity.z.abs() < 0.003
+                && impulse.length() < 0.004_500_000_000_000_000_5
+            {
+                impulse = vanilla_vec3_normalize(impulse) * 0.004_500_000_000_000_000_5;
+            }
+            self.velocity.x += impulse.x;
+            self.velocity.y += impulse.y;
+            self.velocity.z += impulse.z;
+        }
+
+        let eye_y = self.position.y + eye_height;
+        let eye_block_x = self.position.x.floor() as i32;
+        let eye_block_y = eye_y.floor() as i32;
+        let eye_block_z = self.position.z.floor() as i32;
+        let eye_fluid = fluid(chunks.get_block_state(eye_block_x, eye_block_y, eye_block_z));
+        let eye_fluid_top = if eye_fluid.kind == FluidKind::Water {
+            let above = chunks.get_block_state(eye_block_x, eye_block_y + 1, eye_block_z);
+            f64::from(eye_block_y)
+                + if is_water_block(above) {
+                    1.0
+                } else {
+                    f64::from(eye_fluid.height())
+                }
+        } else {
+            f64::NEG_INFINITY
+        };
 
         self.fluid_height = fluid_height;
         // Vanilla `wasTouchingWater` is exactly "fluid height > 0".
         self.in_water = fluid_height > 0.0;
-        self.eyes_in_water = is_water_block(chunks.get_block_state(eye_x, eye_y, eye_z));
-        self.swimming = self.sprinting && self.in_water && self.eyes_in_water;
+        if self.in_water {
+            // Entity.updateFluidInteraction resets fall distance immediately,
+            // including the mid-move refresh from LivingEntity.checkFallDamage.
+            self.fall_distance = 0.0;
+        }
+        // EntityFluidInteraction marks eyes-inside only when the eye point is
+        // actually below the fluid surface, not merely when its block contains water.
+        self.eyes_in_water = eye_fluid.kind == FluidKind::Water && eye_y <= eye_fluid_top;
+    }
+
+    fn update_swimming_state(
+        &mut self,
+        chunks: &crate::world::chunk::ChunkStore,
+        is_passenger: bool,
+    ) {
+        // Entity.baseTick updates swimming after updateFluidInteraction and
+        // before LocalPlayer.aiStep mutates sprinting for the current input
+        // tick. Starting swimming requires the eyes and feet block to be in
+        // water; once started it latches until sprinting/water ends. Entity
+        // updateSwimming also clears the shared flag while riding.
+        self.swimming = if self.flying || is_passenger {
+            false
+        } else if self.swimming {
+            self.sprinting && self.in_water
+        } else {
+            let feet_state = chunks.get_block_state(
+                self.position.x.floor() as i32,
+                self.position.y.floor() as i32,
+                self.position.z.floor() as i32,
+            );
+            self.sprinting && self.under_water && self.in_water && is_water_block(feet_state)
+        };
     }
 
     /// Vanilla Entity.checkInsideBlocks: a nether portal counts as entered when
@@ -487,20 +726,20 @@ impl LocalPlayer {
 
 #[cfg(test)]
 mod tests {
+    use azalea_core::position::ChunkPos;
+    use azalea_world::chunk::Chunk;
+
     use super::*;
 
-    #[test]
-    fn bounding_box_tracks_current_crouching_pose() {
-        let mut player = LocalPlayer::new();
-        player.position = Position::new(0.5, 0.0, 0.5);
-        let ceiling = Aabb::new(dvec3(0.0, 1.6, 0.0), dvec3(1.0, 2.0, 1.0));
-
-        player.crouching = false;
-        assert!(player.bounding_box().intersects(&ceiling));
-
-        player.crouching = true;
-        assert!(!player.bounding_box().intersects(&ceiling));
-        assert_eq!(player.bounding_box().max.y, CROUCH_HEIGHT);
+    fn flow_test_store() -> crate::world::chunk::ChunkStore {
+        crate::world::block::init("26.2");
+        let mut chunks = crate::world::chunk::ChunkStore::new(2);
+        chunks.partial_storage.set(
+            &ChunkPos::new(0, 0),
+            Some(Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        chunks
     }
 
     #[test]
@@ -708,6 +947,140 @@ mod tests {
             player.prev_eye_height, player.eye_height,
             "eye interpolation must not reuse stale state"
         );
+    }
+
+    #[test]
+    fn shallow_water_contact_uses_actual_fluid_surface_height() {
+        let chunks = flow_test_store();
+        let shallow = crate::world::block::find_state("water", &[("level", "7")]);
+        chunks.set_block_state(8, 64, 8, shallow);
+
+        let mut player = LocalPlayer::new();
+        player.position = Position::new(8.5, 64.2, 8.5);
+        player.update_water_state(&chunks, false);
+        assert!(
+            !player.in_water,
+            "level-7 water is only 1/9 block high; feet above its surface are not in water"
+        );
+
+        player.position = Position::new(8.5, 64.05, 8.5);
+        player.update_water_state(&chunks, false);
+        assert!(
+            player.in_water,
+            "feet below the level-7 surface must still register water contact"
+        );
+    }
+
+    #[test]
+    fn passenger_state_clears_shared_swimming_flag() {
+        let chunks = flow_test_store();
+        let source = crate::world::block::find_state("water", &[("level", "0")]);
+        for y in 64..=66 {
+            chunks.set_block_state(8, y, 8, source);
+        }
+
+        let mut unmounted = LocalPlayer::new();
+        unmounted.position = Position::new(8.5, 64.0, 8.5);
+        unmounted.sprinting = true;
+        unmounted.swimming = true;
+        unmounted.update_water_state(&chunks, false);
+        assert!(unmounted.swimming);
+
+        let mut mounted = LocalPlayer::new();
+        mounted.position = Position::new(8.5, 64.0, 8.5);
+        mounted.sprinting = true;
+        mounted.swimming = true;
+        mounted.update_water_state(&chunks, true);
+        assert!(
+            !mounted.swimming,
+            "Entity.updateSwimming clears the shared swimming flag while passenger"
+        );
+    }
+
+    #[test]
+    fn water_flow_is_zero_across_equal_source_levels() {
+        let chunks = flow_test_store();
+        let source = crate::world::block::find_state("water", &[("level", "0")]);
+        for (x, z) in [(8, 8), (8, 7), (9, 8), (8, 9), (7, 8)] {
+            chunks.set_block_state(x, 64, z, source);
+        }
+
+        let flow = water_flow_at(&chunks, 8, 64, 8, fluid(source));
+        assert_eq!(flow, glam::DVec3::ZERO);
+    }
+
+    #[test]
+    fn water_flow_points_toward_lower_neighbor() {
+        let chunks = flow_test_store();
+        let source = crate::world::block::find_state("water", &[("level", "0")]);
+        let lower = crate::world::block::find_state("water", &[("level", "1")]);
+        chunks.set_block_state(8, 64, 8, source);
+        chunks.set_block_state(8, 64, 7, source);
+        chunks.set_block_state(9, 64, 8, lower);
+        chunks.set_block_state(8, 64, 9, source);
+        chunks.set_block_state(7, 64, 8, source);
+
+        let flow = water_flow_at(&chunks, 8, 64, 8, fluid(source));
+        assert_eq!(flow, glam::DVec3::X);
+    }
+
+    #[test]
+    fn falling_water_next_to_sturdy_wall_pulls_downward() {
+        let chunks = flow_test_store();
+        let falling = crate::world::block::find_state("water", &[("level", "8")]);
+        let stone = crate::world::block::find_state("stone", &[]);
+        chunks.set_block_state(8, 64, 8, falling);
+        chunks.set_block_state(9, 64, 8, stone);
+
+        let flow = water_flow_at(&chunks, 8, 64, 8, fluid(falling));
+        assert_eq!(flow, glam::DVec3::NEG_Y);
+    }
+
+    #[test]
+    fn local_shared_flags_can_clear_swimming_without_clearing_sprint() {
+        let mut player = LocalPlayer::new();
+        player.sprinting = true;
+        player.swimming = true;
+
+        player.sync_shared_flags(0x08);
+
+        assert!(
+            player.sprinting,
+            "server shared flag bit 3 keeps sprinting set"
+        );
+        assert!(
+            !player.swimming,
+            "server shared flag bit 4 must clear the stale local swim latch"
+        );
+    }
+
+    #[test]
+    fn swimming_pose_uses_vanilla_dimensions_and_eye_height() {
+        let mut player = LocalPlayer::new();
+        player.position = Position::new(0.5, 64.0, 0.5);
+        player.swimming_pose = true;
+        player.crouching = false;
+
+        assert_eq!(player.height(), SWIMMING_HEIGHT);
+        assert_eq!(
+            player.bounding_box().max.y - player.bounding_box().min.y,
+            SWIMMING_HEIGHT
+        );
+        assert_eq!(player.target_eye_height(), SWIMMING_EYE_HEIGHT);
+    }
+
+    #[test]
+    fn bounding_box_tracks_current_crouching_pose() {
+        let mut player = LocalPlayer::new();
+        player.position = Position::new(0.5, 0.0, 0.5);
+        let ceiling = Aabb::new(dvec3(0.0, 1.6, 0.0), dvec3(1.0, 2.0, 1.0));
+
+        player.crouching = false;
+        assert!(player.bounding_box().intersects(&ceiling));
+
+        player.crouching = true;
+        assert!(!player.bounding_box().intersects(&ceiling));
+        assert_eq!(player.bounding_box().max.y, CROUCH_HEIGHT);
     }
 
     #[test]

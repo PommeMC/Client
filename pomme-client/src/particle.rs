@@ -221,7 +221,7 @@ impl Particle {
         let mut delta = orig;
         if delta != DVec3::ZERO && delta.length_squared() < MAX_COLLISION_VELOCITY_SQ {
             let aabb = Aabb::from_center(self.pos, HALF_WIDTH, HALF_WIDTH);
-            (delta, _) = resolve_collision(chunks, aabb, orig.into(), 0.0);
+            (delta, _) = resolve_collision(chunks, aabb, orig.into(), 0.0, false);
         }
         self.pos += delta;
         if orig.y.abs() >= 1e-5 && delta.y.abs() < 1e-5 {

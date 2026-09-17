@@ -916,6 +916,36 @@ pub fn block_behavior(state: BlockState) -> &'static BlockBehavior {
     &block_data(state).behavior
 }
 
+/// Vanilla `BlockBehaviour` movement friction. Only five 26.2 blocks override
+/// the default 0.6 value; keeping this native avoids depending on Azalea's
+/// version-lagging block metadata.
+pub fn movement_friction(state: BlockState) -> f32 {
+    match block_id(state) {
+        "ice" | "packed_ice" | "frosted_ice" => 0.98,
+        "blue_ice" => 0.989,
+        "slime_block" => 0.8,
+        _ => 0.6,
+    }
+}
+
+/// Vanilla `BlockBehaviour.speedFactor`. In 26.2 only soul sand and honey
+/// override the default for ordinary player movement.
+pub fn movement_speed_factor(state: BlockState) -> f32 {
+    match block_id(state) {
+        "soul_sand" | "honey_block" => 0.4,
+        _ => 1.0,
+    }
+}
+
+/// Vanilla `BlockBehaviour.jumpFactor` for the player's ground jump.
+pub fn movement_jump_factor(state: BlockState) -> f32 {
+    if block_id(state) == "honey_block" {
+        0.5
+    } else {
+        1.0
+    }
+}
+
 /// Vanilla `RedStoneWireBlock.getColorForPower`: dust tint for the state's
 /// `power` value.
 pub fn redstone_wire_rgb(state: BlockState) -> [f32; 3] {
@@ -946,7 +976,6 @@ pub fn has_collision(state: BlockState) -> bool {
 }
 
 /// Vanilla `BlockState.blocksMotion()`, distinct from collision and occlusion.
-#[allow(dead_code)]
 pub fn blocks_motion(state: BlockState) -> bool {
     block_data(state).blocks_motion
 }
@@ -966,7 +995,6 @@ pub fn is_replaceable(state: BlockState) -> bool {
 
 /// Vanilla `BlockState.isFaceSturdy(..., SupportType.FULL)` for a Direction
 /// ordinal (DOWN, UP, NORTH, SOUTH, WEST, EAST).
-#[allow(dead_code)]
 pub fn is_full_face_sturdy(state: BlockState, direction: usize) -> bool {
     direction < 6 && (block_data(state).full_face_sturdy & (1 << direction)) != 0
 }
@@ -1193,6 +1221,19 @@ mod tests {
         assert_eq!(fluid(logged).amount, 8);
 
         assert_eq!(fluid(BlockState::AIR).kind, FluidKind::Empty);
+    }
+
+    #[test]
+    fn movement_block_properties_match_vanilla_26_2_overrides() {
+        setup();
+        assert_eq!(movement_friction(find_state("stone", &[])), 0.6);
+        assert_eq!(movement_friction(find_state("ice", &[])), 0.98);
+        assert_eq!(movement_friction(find_state("blue_ice", &[])), 0.989);
+        assert_eq!(movement_friction(find_state("slime_block", &[])), 0.8);
+        assert_eq!(movement_speed_factor(find_state("soul_sand", &[])), 0.4);
+        assert_eq!(movement_speed_factor(find_state("honey_block", &[])), 0.4);
+        assert_eq!(movement_jump_factor(find_state("honey_block", &[])), 0.5);
+        assert_eq!(movement_jump_factor(find_state("stone", &[])), 1.0);
     }
 
     #[test]

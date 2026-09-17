@@ -113,27 +113,36 @@ impl Aabb {
     }
 
     fn clip_axis(&self, other: &Aabb, mut delta: f64, axis: Axis) -> f64 {
+        // Vanilla `Shapes.collide` treats sub-epsilon motion as zero before
+        // examining shapes. This is observable in exact ground/contact probes.
+        if delta.abs() < EPSILON {
+            return 0.0;
+        }
+
         let (c1, c2) = axis.cross_axes();
 
-        if component(other.max, c1) <= component(self.min, c1)
-            || component(other.min, c1) >= component(self.max, c1)
+        // `VoxelShape.collideX` samples the two cross axes from the moving
+        // AABB's min+epsilon / max-epsilon. For an AABB voxel shape this is
+        // equivalent to deflating the moving box on those axes by EPSILON.
+        if component(other.max, c1) - EPSILON <= component(self.min, c1)
+            || component(other.min, c1) + EPSILON >= component(self.max, c1)
         {
             return delta;
         }
-        if component(other.max, c2) <= component(self.min, c2)
-            || component(other.min, c2) >= component(self.max, c2)
+        if component(other.max, c2) - EPSILON <= component(self.min, c2)
+            || component(other.min, c2) + EPSILON >= component(self.max, c2)
         {
             return delta;
         }
 
-        if delta > 0.0 && component(other.max, axis) <= component(self.min, axis) {
+        if delta > 0.0 {
             let clip = component(self.min, axis) - component(other.max, axis);
-            if clip < delta {
+            if clip >= -EPSILON && clip < delta {
                 delta = clip;
             }
-        } else if delta < 0.0 && component(other.min, axis) >= component(self.max, axis) {
+        } else if delta < 0.0 {
             let clip = component(self.max, axis) - component(other.min, axis);
-            if clip > delta {
+            if clip <= EPSILON && clip > delta {
                 delta = clip;
             }
         }
@@ -251,6 +260,18 @@ mod tests {
         assert!(unit.contains(dvec3(0.5, 0.5, 0.5)));
         assert!(!unit.contains(dvec3(1.0, 0.5, 0.5)));
         assert!(!unit.contains(dvec3(0.5, -0.001, 0.5)));
+    }
+
+    #[test]
+    fn collision_clipping_uses_vanilla_epsilon() {
+        let block = Aabb::block(0, 0, 0);
+        let touching = Aabb::new(dvec3(-0.6, 0.0, 0.0), dvec3(0.0, 1.0, 1.0));
+
+        assert_eq!(block.clip_x_collide(&touching, 0.5e-7), 0.0);
+        assert_eq!(block.clip_x_collide(&touching, 1.5e-7), 0.0);
+
+        let separated = touching.offset(dvec3(-1.5e-7, 0.0, 0.0));
+        assert_eq!(block.clip_x_collide(&separated, 2.0e-7), 1.5e-7);
     }
 
     #[test]
