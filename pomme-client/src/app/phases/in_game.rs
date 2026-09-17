@@ -274,6 +274,10 @@ pub struct GameState {
     /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
     /// `section_gen`. Fed by mesh results; consumed by the occlusion walk.
     pub section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
+    /// Per-column bitmask of sections whose mesh is finished and, if it had
+    /// any geometry, uploaded — vanilla's "not `UNCOMPILED`", where an empty
+    /// mesh counts too. The level load gate waits on the camera's bit.
+    pub compiled: HashMap<ChunkPos, u32>,
     /// Highest upload epoch each `section_vis` entry was set from; mirrors the
     /// buffer's per-section geometry gate so a stale bulk can't re-stale an
     /// edited section's visibility.
@@ -432,6 +436,7 @@ impl GameState {
             vis_mask: HashMap::new(),
             section_gen: HashMap::new(),
             next_section_gen: 0,
+            compiled: HashMap::new(),
             section_vis: HashMap::new(),
             section_vis_epoch: HashMap::new(),
             vis_tiers: HashMap::new(),
@@ -940,7 +945,7 @@ impl GameState {
             }
             // Visibility updates are independent of the GPU upload; apply them now so
             // the mesh can move into the upload batch.
-            self.apply_mesh_visibility(&mut mesh);
+            self.apply_mesh_bookkeeping(&mut mesh);
             batch.push(mesh);
         }
         self.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
@@ -966,7 +971,11 @@ impl GameState {
                 && self.light_engine.light_on_in_column((p.x, p.z))
         });
         let section = (camera_block.y - self.chunk_store.min_y()) >> 4;
-        neighbourhood_lit && self.section_vis.contains_key(&(column, section))
+        let compiled = self
+            .compiled
+            .get(&column)
+            .is_some_and(|mask| section_range_mask(section..section + 1) & mask != 0);
+        neighbourhood_lit && compiled
     }
 
     /// Vanilla `ClientPacketListener.handleLogin`/`handleRespawn`: clear the
@@ -989,9 +998,11 @@ impl GameState {
         self.level_load = Some(tracker);
     }
 
-    /// Adopt a mesh's per-section visibility sets, epoch-guarded so a stale
-    /// result can't overwrite a newer edit's visibility.
-    fn apply_mesh_visibility(&mut self, mesh: &mut ChunkMeshData) {
+    /// Adopt a finished mesh's CPU-side state: its per-section visibility sets,
+    /// epoch-guarded so a stale result can't overwrite a newer edit's
+    /// visibility, and the sections it compiled. The upload can still drop a
+    /// section afterwards, which `clear_dropped_meshed` takes back out.
+    fn apply_mesh_bookkeeping(&mut self, mesh: &mut ChunkMeshData) {
         let pos = mesh.pos;
         for (si, vis) in std::mem::take(&mut mesh.visibility) {
             let e = self.section_vis_epoch.entry((pos, si)).or_insert(0);
@@ -1000,15 +1011,20 @@ impl GameState {
                 self.section_vis.insert((pos, si), vis);
             }
         }
+        *self.compiled.entry(pos).or_default() |= section_range_mask(mesh.replaced.clone());
     }
 
     /// Sections dropped on pool exhaustion were retired from the buffer; clear
-    /// their meshed bit so the next rescan re-enqueues them.
+    /// their meshed bit so the next rescan re-enqueues them, and their compiled
+    /// bit, since nothing of them reached the GPU.
     fn clear_dropped_meshed(&mut self, dropped: Vec<(ChunkPos, Vec<i32>)>) {
         for (pos, sections) in dropped {
-            if let Some(m) = self.meshed.get_mut(&pos) {
-                for si in sections {
+            for si in sections {
+                if let Some(m) = self.meshed.get_mut(&pos) {
                     m.mask &= !(1u32 << si);
+                }
+                if let Some(mask) = self.compiled.get_mut(&pos) {
+                    *mask &= !(1u32 << si);
                 }
             }
         }
@@ -1017,7 +1033,7 @@ impl GameState {
     /// Upload a finished mesh and apply its bookkeeping. The sync edit path;
     /// the frame drain batches uploads instead.
     fn apply_mesh_upload(&mut self, renderer: &mut Renderer, mut mesh: ChunkMeshData) {
-        self.apply_mesh_visibility(&mut mesh);
+        self.apply_mesh_bookkeeping(&mut mesh);
         let dropped = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
         self.clear_dropped_meshed(dropped);
         self.mesh_dispatcher.recycle(mesh);
@@ -1218,6 +1234,14 @@ fn column_frustum_tier(
     } else {
         2
     }
+}
+
+/// Bitmask of the section indices in `range`, ignoring any outside a column's
+/// 32 addressable sections (a camera outside build height lands there).
+fn section_range_mask(range: std::ops::Range<i32>) -> u32 {
+    range
+        .filter(|si| (0..32).contains(si))
+        .fold(0u32, |mask, si| mask | 1u32 << si)
 }
 
 /// Full mask for an `n`-section column (bits `0..n` set).
@@ -3874,7 +3898,18 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::has_red_overlay;
+    use super::{has_red_overlay, section_range_mask};
+
+    #[test]
+    fn section_range_mask_covers_the_range_and_ignores_the_rest() {
+        assert_eq!(section_range_mask(0..3), 0b111);
+        assert_eq!(section_range_mask(2..3), 0b100);
+        assert_eq!(section_range_mask(0..0), 0);
+        // A camera outside build height resolves to a section index no column
+        // has; it must read as "not compiled", not shift out of range.
+        assert_eq!(section_range_mask(-3..-2), 0);
+        assert_eq!(section_range_mask(40..41), 0);
+    }
 
     #[test]
     fn red_overlay_matches_vanilla_hurt_and_death_timers() {

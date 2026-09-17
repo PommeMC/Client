@@ -690,6 +690,7 @@ impl AppCore {
                     game.section_vis.clear();
                     game.section_vis_epoch.clear();
                     game.meshed.clear();
+                    game.compiled.clear();
                     game.mesh_dispatcher = renderer.create_mesh_dispatcher(
                         Arc::clone(&game.biome_climate),
                         None,
@@ -728,6 +729,7 @@ impl AppCore {
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
                     game.content_gen.remove(&pos);
                     game.meshed.remove(&pos);
+                    game.compiled.remove(&pos);
                     game.vis_mask.remove(&pos);
                     game.vis_tiers.remove(&pos);
                     game.section_gen.retain(|(p, _), _| *p != pos);
