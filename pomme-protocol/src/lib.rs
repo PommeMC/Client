@@ -6,11 +6,13 @@
 //! or newer, can be supported by translation. Depends on no azalea crates by
 //! design — azalea cross-checks live in pomme-client's tests.
 
+pub mod known_packs;
 pub mod packets;
 pub mod registries;
 pub mod version;
 pub mod wire;
 
+pub use known_packs::KnownPack;
 pub use packets::{Direction, PacketTable, Phase};
 pub use registries::{ClientRegistry, RegistryRemaps, RegistryTable};
 pub use version::ProtocolVersion;

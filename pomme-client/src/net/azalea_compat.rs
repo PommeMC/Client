@@ -3149,3 +3149,79 @@ fn translate_tag_query_763() {
     assert_eq!(p.transaction_id, 7);
     assert_eq!(p.tag.compound().and_then(|c| c.int("d")), Some(5));
 }
+
+/// Every element pomme embeds for `minecraft:core` has to survive azalea's
+/// registry holder: an entry it fails to deserialize is logged and skipped
+/// (`RegistryType::append_nbt`), which shifts the protocol id of every entry
+/// after it. Claiming the pack is only safe while this holds.
+#[test]
+fn embedded_known_pack_elements_deserialize_through_azalea() {
+    let protocol = pomme_protocol::version::NATIVE.protocol;
+    for (registry, elements) in pomme_protocol::known_packs::registries(protocol) {
+        let registry_id = Identifier::new(format!("minecraft:{registry}"));
+        // What the server sends for a pack the client claimed: ids, no data.
+        let sent: Vec<(Identifier, Option<simdnbt::owned::NbtCompound>)> = elements
+            .iter()
+            .map(|(id, _)| (Identifier::new(format!("minecraft:{id}")), None))
+            .collect();
+        let filled = crate::net::known_packs::fill_known_entries(&registry_id, sent)
+            .unwrap_or_else(|e| panic!("{registry}: {e}"));
+        assert!(
+            filled.iter().all(|(_, data)| data.is_some()),
+            "{registry}: an entry was left without data",
+        );
+
+        let mut holder = azalea_core::registry_holder::RegistryHolder::default();
+        holder.append(registry_id.clone(), filled);
+        let kept = match registry {
+            "dimension_type" => holder.dimension_type.map.len(),
+            "enchantment" => holder.enchantment.map.len(),
+            _ => holder.extra[&registry_id].map.len(),
+        };
+        assert_eq!(kept, elements.len(), "{registry}: entries were dropped");
+
+        // The values have to survive the JSON -> NBT conversion too, not just
+        // the deserialize: `dimension_info` reads these two off the holder.
+        if registry == "dimension_type" {
+            let overworld = &holder.dimension_type.map[&Identifier::new("minecraft:overworld")];
+            assert_eq!(overworld.height, 384);
+            assert_eq!(overworld.min_y, -64);
+        }
+    }
+}
+
+/// The reply's fields go out as namespace, id, version (`KnownPack`'s stream
+/// codec), and pomme claims vanilla's core pack at the native version.
+#[test]
+fn select_known_packs_reply_is_byte_exact() {
+    use azalea_buf::AzBuf;
+    use azalea_protocol::packets::config::s_select_known_packs::{
+        KnownPack, ServerboundSelectKnownPacks,
+    };
+
+    let offered = vec![
+        KnownPack {
+            namespace: "minecraft".to_owned(),
+            id: "core".to_owned(),
+            version: pomme_protocol::version::NATIVE.name.to_owned(),
+        },
+        KnownPack {
+            namespace: "pomme".to_owned(),
+            id: "core".to_owned(),
+            version: pomme_protocol::version::NATIVE.name.to_owned(),
+        },
+    ];
+    let known_packs = crate::net::known_packs::select_packs(&offered);
+    assert_eq!(known_packs, offered[..1]);
+
+    let mut bytes = Vec::new();
+    ServerboundSelectKnownPacks { known_packs }
+        .azalea_write(&mut bytes)
+        .unwrap();
+    let mut expected = vec![1]; // one pack
+    for field in ["minecraft", "core", pomme_protocol::version::NATIVE.name] {
+        expected.push(field.len() as u8);
+        expected.extend_from_slice(field.as_bytes());
+    }
+    assert_eq!(bytes, expected);
+}

@@ -450,6 +450,9 @@ async fn config_sequence(
 
     let mut registry_holder = RegistryHolder::default();
     let mut received_registry_data = false;
+    // Whether we claimed any pack, and so have to fill in the entries the
+    // server sends without data.
+    let mut selected_known_packs = false;
 
     // Vanilla sends brand and client information once, from the login
     // listener; a reconfiguration sends neither.
@@ -536,21 +539,31 @@ async fn config_sequence(
         match packet {
             ClientboundConfigPacket::RegistryData(p) => {
                 received_registry_data = true;
-                registry_holder.append(p.registry_id, p.entries);
+                // The server omits the data of every entry the pack we claimed
+                // carries, so fill those in before azalea drops them.
+                let entries = if selected_known_packs {
+                    super::known_packs::fill_known_entries(&p.registry_id, p.entries)
+                        .map_err(ConnectionError::Disconnected)?
+                } else {
+                    p.entries
+                };
+                registry_holder.append(p.registry_id, entries);
             }
             ClientboundConfigPacket::UpdateTags(_) => {
                 tracing::debug!("Received tags");
             }
-            ClientboundConfigPacket::SelectKnownPacks(_) => {
-                // Claiming no known packs forces the server to send NBT for
-                // every registry entry; `variant_index` (handler.rs) relies on
-                // that to equate registry-map position with protocol id.
+            ClientboundConfigPacket::SelectKnownPacks(p) => {
+                // Vanilla `handleSelectKnownPacks`: claim the offered packs we
+                // have ourselves, so the server can skip their registry data.
+                // Anything we don't claim arrives with its NBT, which is what
+                // `variant_index` (handler.rs) needs to equate registry-map
+                // position with protocol id.
+                let known_packs = super::known_packs::select_packs(&p.known_packs);
+                selected_known_packs = !known_packs.is_empty();
                 write_config_packet(
                     conn,
                     ServerboundConfigPacket::SelectKnownPacks(
-                        s_select_known_packs::ServerboundSelectKnownPacks {
-                            known_packs: vec![],
-                        },
+                        s_select_known_packs::ServerboundSelectKnownPacks { known_packs },
                     ),
                 )
                 .await?;
@@ -960,6 +973,40 @@ mod tests {
     use pomme_protocol::version::NATIVE;
 
     use super::*;
+
+    /// A server that accepts pomme's known-pack claim sends the biomes as ids
+    /// alone; the climate the mesher colours with then comes entirely from the
+    /// embedded elements.
+    #[test]
+    fn filled_biome_entries_carry_their_climate() {
+        use azalea_registry::identifier::Identifier;
+
+        let biome_registry = Identifier::new("minecraft:worldgen/biome");
+        let sent: Vec<(Identifier, Option<simdnbt::owned::NbtCompound>)> =
+            pomme_protocol::known_packs::registries(NATIVE.protocol)
+                .into_iter()
+                .find(|(registry, _)| *registry == "worldgen/biome")
+                .expect("embedded biomes")
+                .1
+                .iter()
+                .map(|(id, _)| (Identifier::new(format!("minecraft:{id}")), None))
+                .collect();
+        let plains_id = sent
+            .iter()
+            .position(|(id, _)| id.path() == "plains")
+            .expect("plains biome") as u32;
+
+        let mut holder = azalea_core::registry_holder::RegistryHolder::default();
+        holder.append(
+            biome_registry.clone(),
+            super::super::known_packs::fill_known_entries(&biome_registry, sent).unwrap(),
+        );
+
+        let climate = extract_biome_climate(&holder);
+        let plains = &climate[&plains_id];
+        assert_eq!(plains.temperature, 0.8);
+        assert_eq!(plains.downfall, 0.4);
+    }
 
     /// 762 (1.19.4) is not a supported version at all, so it never gains a
     /// wire translation; 775 has one.

@@ -17,17 +17,23 @@
 //! `<reference-root>/generated/reports/registries.json`, for building
 //! cross-version id remaps.
 //!
+//! The `knownpacks` mode emits the packs the client can claim in
+//! `select_known_packs` and the synchronized-registry elements they carry,
+//! read from `<reference-root>/extracted/data/minecraft`.
+//!
 //! The protocol number is parsed from `SharedConstants.getProtocolVersion()`;
 //! `--protocol` overrides it (and is required if the method body isn't a bare
 //! integer literal). The parser hard-fails on anything it can't resolve
 //! rather than emit silently-wrong data.
+
+mod known_packs;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-type Error = Box<dyn std::error::Error>;
+pub type Error = Box<dyn std::error::Error>;
 
 /// (JSON key, `<Phase>Protocols.java` path, has a clientbound template).
 const PHASES: [(&str, &str, bool); 5] = [
@@ -58,6 +64,21 @@ fn main() -> ExitCode {
             },
             _ => {
                 eprintln!("usage: protogen registries <reference-root> <version> <out.json>");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args.first().map(String::as_str) == Some("knownpacks") {
+        return match args.as_slice() {
+            [_, root, version, out] => match known_packs::generate(Path::new(root), version, out) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("protogen: {e}");
+                    ExitCode::FAILURE
+                }
+            },
+            _ => {
+                eprintln!("usage: protogen knownpacks <reference-root> <version> <out.json>");
                 ExitCode::FAILURE
             }
         };

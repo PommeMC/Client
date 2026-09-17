@@ -139,7 +139,7 @@ Run `just` with no arguments to list every recipe. The common ones:
 - `just client-dev` / `just client-build` / `just client-release`: run, build, or benchmark the client; flags forward after `--`, e.g. `just client-dev -- --username Steve`
 - `just launcher-dev` / `just launcher-build`: run or bundle the launcher
 - `just client-pre-pr` / `just launcher-pre-pr`: the fmt, clippy, and test checks CI enforces
-- `just protogen` / `just registrygen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (`just jdk=<bin dir> stategen`, Windows only)
+- `just protogen` / `just registrygen` / `just knownpackgen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, known-pack, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (`just jdk=<bin dir> stategen`, Windows only)
 
 ## Contributing
 
