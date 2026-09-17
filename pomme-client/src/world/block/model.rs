@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 use serde::Deserialize;
 
 use super::registry::{FaceTextures, Tint};
@@ -72,6 +72,15 @@ struct ModelFile {
     elements: Vec<ElementDef>,
     #[serde(default)]
     display: HashMap<String, serde_json::Value>,
+    gui_light: Option<GuiLight>,
+}
+
+#[derive(Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum GuiLight {
+    Front,
+    #[default]
+    Side,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,6 +91,12 @@ struct DisplayTransform {
 }
 
 impl DisplayTransform {
+    const IDENTITY: Self = Self {
+        rotation: Vec3::ZERO,
+        translation: Vec3::ZERO,
+        scale: Vec3::ONE,
+    };
+
     pub fn to_matrix(self) -> Mat4 {
         Mat4::from_translation(self.translation)
             * Mat4::from_rotation_x(self.rotation.x.to_radians())
@@ -111,6 +126,22 @@ fn parse_display_transform(json: &serde_json::Value) -> Option<DisplayTransform>
         translation: translation.clamp(Vec3::splat(-5.0), Vec3::splat(5.0)),
         scale: scale.clamp(Vec3::splat(-4.0), Vec3::splat(4.0)),
     })
+}
+
+fn default_block_gui_transform() -> DisplayTransform {
+    DisplayTransform {
+        rotation: Vec3::new(30.0, 225.0, 0.0),
+        translation: Vec3::ZERO,
+        scale: Vec3::splat(0.625),
+    }
+}
+
+fn chest_gui_transform() -> DisplayTransform {
+    DisplayTransform {
+        rotation: Vec3::new(30.0, 45.0, 0.0),
+        translation: Vec3::ZERO,
+        scale: Vec3::splat(0.625),
+    }
 }
 
 pub(crate) fn default_block_ground_transform() -> Mat4 {
@@ -550,11 +581,13 @@ pub fn bake_item_models(
 
         let tint = determine_tint(item_name);
         let mut merged: Option<BakedModel> = None;
-        // Vanilla applies each composite part's own GROUND transform. Pomme
+        // Vanilla applies each composite part's own display transforms. Pomme
         // merges the parts into one mesh, so it can apply only one; no vanilla
         // composite disagrees (beds share `block/template_bed`), so the first
         // part's wins and a disagreement is logged rather than modelled.
         let mut ground_transform: Option<Mat4> = None;
+        let mut gui_transform: Option<DisplayTransform> = None;
+        let mut gui_light: Option<GuiLight> = None;
         for part in &parts {
             let resolved = resolve_model(
                 &part.path,
@@ -568,6 +601,22 @@ pub fn bake_item_models(
                 Some(existing) if existing.abs_diff_eq(resolved.ground_transform, 1.0e-6) => {}
                 Some(_) => tracing::warn!(
                     "{item_name}: composite part {} has a different ground transform; using the first part's",
+                    part.path
+                ),
+            }
+            match gui_transform {
+                None => gui_transform = Some(resolved.gui_transform),
+                Some(existing) if existing == resolved.gui_transform => {}
+                Some(_) => tracing::warn!(
+                    "{item_name}: composite part {} has a different GUI transform; using the first part's",
+                    part.path
+                ),
+            }
+            match gui_light {
+                None => gui_light = Some(resolved.gui_light),
+                Some(existing) if existing == resolved.gui_light => {}
+                Some(_) => tracing::warn!(
+                    "{item_name}: composite part {} has a different GUI light; using the first part's",
                     part.path
                 ),
             }
@@ -606,7 +655,11 @@ pub fn bake_item_models(
             ground_transforms.insert(item_name.to_string(), transform);
         }
         if let Some(mut baked) = merged {
-            apply_gui_lambert(&mut baked.quads, BLOCK_GUI_ROTATION_DEG);
+            apply_gui_lambert(
+                &mut baked.quads,
+                gui_transform.unwrap_or_else(default_block_gui_transform),
+                gui_light.unwrap_or_default(),
+            );
             item_models.insert(item_name.to_string(), baked);
         }
     }
@@ -632,7 +685,7 @@ pub fn bake_item_models(
 pub fn bake_chest_item_model() -> BakedModel {
     let tex = "entity/chest/normal";
     let mut quads = Vec::new();
-    let shades = vanilla_gui_face_shades(CHEST_GUI_ROTATION_DEG);
+    let shades = vanilla_gui_face_shades(chest_gui_transform(), GuiLight::Side);
     add_chest_cube(
         &mut quads,
         1.0 / 16.0,
@@ -688,35 +741,34 @@ pub fn bake_chest_item_model() -> BakedModel {
     }
 }
 
-const CHEST_GUI_ROTATION_DEG: [f32; 3] = [30.0, 45.0, 0.0];
-const BLOCK_GUI_ROTATION_DEG: [f32; 3] = [30.0, 225.0, 0.0];
-
-fn rotate_y(v: [f32; 3], angle: f32) -> [f32; 3] {
-    let (s, c) = angle.sin_cos();
-    [c * v[0] + s * v[2], v[1], -s * v[0] + c * v[2]]
-}
-
-fn rotate_x(v: [f32; 3], angle: f32) -> [f32; 3] {
-    let (s, c) = angle.sin_cos();
-    [v[0], c * v[1] - s * v[2], s * v[1] + c * v[2]]
-}
-
 fn items_3d_lights() -> ([f32; 3], [f32; 3]) {
-    let base = |x: f32, y: f32, z: f32| {
-        let len = (x * x + y * y + z * z).sqrt();
-        [x / len, y / len, z / len]
+    let pose = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0))
+        * Mat4::from_rotation_y(1.0821041)
+        * Mat4::from_rotation_x(3.2375858)
+        * Mat4::from_rotation_y(-std::f32::consts::PI / 8.0)
+        * Mat4::from_rotation_x(2.3561945);
+    let transform = |x: f32, y: f32, z: f32| {
+        pose.transform_vector3(Vec3::new(x, y, z).normalize())
+            .to_array()
     };
-    let transform = |v: [f32; 3]| {
-        let v = rotate_y(v, -std::f32::consts::PI / 8.0);
-        let v = rotate_x(v, 2.3561945);
-        let v = rotate_y(v, 1.0821041);
-        let v = rotate_x(v, 3.2375858);
-        [v[0], -v[1], v[2]]
+    (transform(0.2, 1.0, -0.7), transform(-0.2, 1.0, 0.7))
+}
+
+fn items_flat_lights() -> ([f32; 3], [f32; 3]) {
+    let pose =
+        Mat4::from_rotation_y(-std::f32::consts::PI / 8.0) * Mat4::from_rotation_x(2.3561945);
+    let transform = |x: f32, y: f32, z: f32| {
+        pose.transform_vector3(Vec3::new(x, y, z).normalize())
+            .to_array()
     };
-    (
-        transform(base(0.2, 1.0, -0.7)),
-        transform(base(-0.2, 1.0, 0.7)),
-    )
+    (transform(0.2, 1.0, -0.7), transform(-0.2, 1.0, 0.7))
+}
+
+fn gui_lights(gui_light: GuiLight) -> ([f32; 3], [f32; 3]) {
+    match gui_light {
+        GuiLight::Front => items_flat_lights(),
+        GuiLight::Side => items_3d_lights(),
+    }
 }
 
 fn lambert_shade(world_normal: [f32; 3], l0: [f32; 3], l1: [f32; 3]) -> f32 {
@@ -725,13 +777,17 @@ fn lambert_shade(world_normal: [f32; 3], l0: [f32; 3], l1: [f32; 3]) -> f32 {
     ((d0 + d1) * 0.6 + 0.4).min(1.0)
 }
 
-fn rotate_mesh_normal(n_mesh: [f32; 3], rotation_deg: [f32; 3]) -> [f32; 3] {
-    let after_y = rotate_y(n_mesh, rotation_deg[1].to_radians());
-    rotate_x(after_y, rotation_deg[0].to_radians())
+fn transform_gui_normal(n_mesh: [f32; 3], display: DisplayTransform) -> [f32; 3] {
+    // GuiItemAtlas applies (slot, -slot, slot) before ItemTransform. Vanilla's
+    // PoseStack transforms normals by the inverse-transpose of that composed
+    // pose, including each model's actual GUI rotation/scale.
+    let pose = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)) * display.to_matrix();
+    let normal = Mat3::from_mat4(pose).inverse().transpose() * Vec3::from_array(n_mesh);
+    normal.normalize_or_zero().to_array()
 }
 
-fn vanilla_gui_face_shades(rotation_deg: [f32; 3]) -> [f32; 6] {
-    let (l0, l1) = items_3d_lights();
+fn vanilla_gui_face_shades(display: DisplayTransform, gui_light: GuiLight) -> [f32; 6] {
+    let (l0, l1) = gui_lights(gui_light);
     let normals = [
         [0.0, 1.0, 0.0],
         [0.0, -1.0, 0.0],
@@ -742,27 +798,22 @@ fn vanilla_gui_face_shades(rotation_deg: [f32; 3]) -> [f32; 6] {
     ];
     let mut shades = [0.0; 6];
     for (i, &n) in normals.iter().enumerate() {
-        shades[i] = lambert_shade(rotate_mesh_normal(n, rotation_deg), l0, l1);
+        shades[i] = lambert_shade(transform_gui_normal(n, display), l0, l1);
     }
     shades
 }
 
-fn apply_gui_lambert(quads: &mut [BakedQuad], rotation_deg: [f32; 3]) {
-    let (l0, l1) = items_3d_lights();
+fn apply_gui_lambert(quads: &mut [BakedQuad], display: DisplayTransform, gui_light: GuiLight) {
+    let (l0, l1) = gui_lights(gui_light);
     for quad in quads {
-        let p = &quad.positions;
-        let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
-        let e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
-        let nx = e1[1] * e2[2] - e1[2] * e2[1];
-        let ny = e1[2] * e2[0] - e1[0] * e2[2];
-        let nz = e1[0] * e2[1] - e1[1] * e2[0];
-        let len = (nx * nx + ny * ny + nz * nz).sqrt();
-        if len < 1e-6 {
-            continue;
-        }
-        let n_mesh = [nx / len, ny / len, nz / len];
-        let n_world = rotate_mesh_normal(n_mesh, rotation_deg);
-        quad.shade_light *= lambert_shade(n_world, l0, l1);
+        // ItemFeatureRenderer sends BakedQuad.direction() through the pose's
+        // normal matrix. It does not apply BlockModelLighter's cardinal face
+        // brightness in GUI rendering, so this replaces (rather than
+        // multiplies) the terrain-oriented shade byte from bake_resolved_model.
+        let direction = direction_from_positions(&quad.positions).unwrap_or(Direction::Up);
+        let n_mesh = direction.offset().map(|component| component as f32);
+        let n_gui = transform_gui_normal(n_mesh, display);
+        quad.shade_light = lambert_shade(n_gui, l0, l1);
     }
 }
 
@@ -784,59 +835,69 @@ fn add_chest_cube(
     shades: [f32; 6],
 ) {
     const TEX_SIZE: f32 = 64.0;
-    let face_specs: [FaceSpec; 6] = [
+
+    // Vanilla ModelPart.Cube names the z=min vertices `t*` and z=max
+    // vertices `l*`, then builds faces in DOWN/UP/WEST/NORTH/EAST/SOUTH
+    // order. Keep that layout exactly: chest items use the special entity
+    // model rather than a normal block/item JSON mesh.
+    let t0 = [x0, y0, z0];
+    let t1 = [x1, y0, z0];
+    let t2 = [x1, y1, z0];
+    let t3 = [x0, y1, z0];
+    let l0 = [x0, y0, z1];
+    let l1 = [x1, y0, z1];
+    let l2 = [x1, y1, z1];
+    let l3 = [x0, y1, z1];
+
+    let u0 = u;
+    let u1 = u + d;
+    let u2 = u + d + w;
+    let u22 = u + d + w + w;
+    let u3 = u + d + w + d;
+    let u4 = u + d + w + d + w;
+    let v0 = v;
+    let v1 = v + d;
+    let v2 = v + d + h;
+
+    let face_specs = [
         FaceSpec {
-            positions: [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]],
-            uv_pixels: (u + d + w, v, u + d + w + w, v + d),
-            uv_pattern: UvPattern::Up,
-            shade: shades[0],
-        },
-        FaceSpec {
-            positions: [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
-            uv_pixels: (u + d, v, u + d + w, v + d),
-            uv_pattern: UvPattern::Down,
+            positions: [l1, l0, t0, t1],
+            uv_pixels: [[u2, v0], [u1, v0], [u1, v1], [u2, v1]],
             shade: shades[1],
         },
         FaceSpec {
-            positions: [[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]],
-            uv_pixels: (u + d, v + d, u + d + w, v + d + h),
-            uv_pattern: UvPattern::North,
-            shade: shades[2],
+            positions: [t2, t3, l3, l2],
+            uv_pixels: [[u22, v1], [u2, v1], [u2, v0], [u22, v0]],
+            shade: shades[0],
         },
         FaceSpec {
-            positions: [[x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [x0, y0, z1]],
-            uv_pixels: (u + d + w + d, v + d, u + d + w + d + w, v + d + h),
-            uv_pattern: UvPattern::SouthWestEast,
-            shade: shades[3],
-        },
-        FaceSpec {
-            positions: [[x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0]],
-            uv_pixels: (u, v + d, u + d, v + d + h),
-            uv_pattern: UvPattern::SouthWestEast,
+            positions: [t0, l0, l3, t3],
+            uv_pixels: [[u1, v1], [u0, v1], [u0, v2], [u1, v2]],
             shade: shades[4],
         },
         FaceSpec {
-            positions: [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]],
-            uv_pixels: (u + d + w, v + d, u + d + w + d, v + d + h),
-            uv_pattern: UvPattern::SouthWestEast,
+            positions: [t1, t0, t3, t2],
+            uv_pixels: [[u2, v1], [u1, v1], [u1, v2], [u2, v2]],
+            shade: shades[2],
+        },
+        FaceSpec {
+            positions: [l1, t1, t2, l2],
+            uv_pixels: [[u3, v1], [u2, v1], [u2, v2], [u3, v2]],
             shade: shades[5],
         },
+        FaceSpec {
+            positions: [l0, l1, l2, l3],
+            uv_pixels: [[u4, v1], [u3, v1], [u3, v2], [u4, v2]],
+            shade: shades[3],
+        },
     ];
+
     for spec in face_specs {
-        let (u_min_px, v_min_px, u_max_px, v_max_px) = spec.uv_pixels;
-        let u1 = (u_min_px + 0.5) / TEX_SIZE;
-        let v1 = (v_min_px + 0.5) / TEX_SIZE;
-        let u2 = (u_max_px - 0.5) / TEX_SIZE;
-        let v2 = (v_max_px - 0.5) / TEX_SIZE;
-        let uvs = match spec.uv_pattern {
-            UvPattern::Up => [[u1, v2], [u2, v2], [u2, v1], [u1, v1]],
-            UvPattern::Down => [[u1, v1], [u2, v1], [u2, v2], [u1, v2]],
-            UvPattern::North => [[u1, v2], [u1, v1], [u2, v1], [u2, v2]],
-            UvPattern::SouthWestEast => [[u2, v2], [u2, v1], [u1, v1], [u1, v2]],
-        };
         quads.push(BakedQuad {
             positions: spec.positions,
-            uvs,
+            uvs: spec
+                .uv_pixels
+                .map(|[u_px, v_px]| [u_px / TEX_SIZE, v_px / TEX_SIZE]),
             texture: texture.to_string(),
             cullface: None,
             tint: super::registry::Tint::None,
@@ -848,16 +909,8 @@ fn add_chest_cube(
 
 struct FaceSpec {
     positions: [[f32; 3]; 4],
-    uv_pixels: (f32, f32, f32, f32),
-    uv_pattern: UvPattern,
+    uv_pixels: [[f32; 2]; 4],
     shade: f32,
-}
-
-enum UvPattern {
-    Up,
-    Down,
-    North,
-    SouthWestEast,
 }
 
 struct ModelPart {
@@ -1132,6 +1185,8 @@ fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
 struct ResolvedModel {
     textures: HashMap<String, String>,
     elements: Vec<ElementDef>,
+    gui_transform: DisplayTransform,
+    gui_light: GuiLight,
     ground_transform: Mat4,
 }
 
@@ -1144,6 +1199,8 @@ fn resolve_model(
 ) -> ResolvedModel {
     let mut texture_map: HashMap<String, String> = HashMap::new();
     let mut elements: Option<Vec<ElementDef>> = None;
+    let mut gui_transform: Option<DisplayTransform> = None;
+    let mut gui_light: Option<GuiLight> = None;
     let mut ground_transform: Option<Mat4> = None;
     let mut current_id = model_id.to_string();
 
@@ -1160,6 +1217,14 @@ fn resolve_model(
 
         if elements.is_none() && !model.elements.is_empty() {
             elements = Some(model.elements.clone());
+        }
+        if gui_transform.is_none()
+            && let Some(transform) = model.display.get("gui").and_then(parse_display_transform)
+        {
+            gui_transform = Some(transform);
+        }
+        if gui_light.is_none() {
+            gui_light = model.gui_light;
         }
         if ground_transform.is_none()
             && let Some(transform) = model
@@ -1184,6 +1249,8 @@ fn resolve_model(
     ResolvedModel {
         textures: resolved_textures,
         elements: elements.unwrap_or_default(),
+        gui_transform: gui_transform.unwrap_or(DisplayTransform::IDENTITY),
+        gui_light: gui_light.unwrap_or_default(),
         ground_transform: ground_transform.unwrap_or(Mat4::IDENTITY),
     }
 }
@@ -1705,6 +1772,151 @@ mod tests {
     }
 
     #[test]
+    fn items_3d_lights_match_vanilla_pose_order() {
+        let (light0, light1) = items_3d_lights();
+        let expected = [
+            (light0, [-0.9334393, -0.26269472, -0.24430019]),
+            (light1, [-0.10357136, -0.97660685, 0.18844643]),
+        ];
+        for (actual, expected) in expected {
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() < 1.0e-6,
+                    "expected {expected}, got {actual}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn items_flat_lights_match_vanilla_pose_order() {
+        let (light0, light1) = items_flat_lights();
+        let expected = [
+            (light0, [-0.222519, -0.17149863, 0.9597257]),
+            (light1, [-0.21501213, -0.97182524, 0.0965678]),
+        ];
+        for (actual, expected) in expected {
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() < 1.0e-6,
+                    "expected {expected}, got {actual}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gui_face_shades_include_vanilla_atlas_y_flip() {
+        let block = vanilla_gui_face_shades(default_block_gui_transform(), GuiLight::Side);
+        let chest = vanilla_gui_face_shades(chest_gui_transform(), GuiLight::Side);
+        let expected_block = [1.0, 0.4, 0.4, 1.0, 0.49398834, 0.6505372];
+        let expected_chest = [1.0, 0.4, 1.0, 0.4, 0.6505372, 0.49398834];
+        for (actual, expected) in block.into_iter().zip(expected_block) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "expected {expected}, got {actual}"
+            );
+        }
+        for (actual, expected) in chest.into_iter().zip(expected_chest) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn gui_face_shades_follow_model_display_transform() {
+        let fence = vanilla_gui_face_shades(
+            DisplayTransform {
+                rotation: Vec3::new(30.0, 135.0, 0.0),
+                translation: Vec3::ZERO,
+                scale: Vec3::splat(0.625),
+            },
+            GuiLight::Side,
+        );
+        let expected = [1.0, 0.4, 0.65053713, 0.49398836, 0.4, 1.0];
+        for (actual, expected) in fence.into_iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn gui_lambert_replaces_terrain_cardinal_shade() {
+        let mut quad = BakedQuad {
+            positions: face_positions(Direction::Up, [0.0; 3], [1.0; 3]),
+            uvs: [[0.0; 2]; 4],
+            texture: "block/stone".to_string(),
+            cullface: None,
+            tint: Tint::None,
+            shade_light: 0.25,
+            shade_face: Some(Direction::Up),
+        };
+        apply_gui_lambert(
+            std::slice::from_mut(&mut quad),
+            default_block_gui_transform(),
+            GuiLight::Side,
+        );
+        assert!((quad.shade_light - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn chest_body_faces_match_vanilla_modelpart_cube() {
+        let model = bake_chest_item_model();
+        assert_eq!(model.quads.len(), 18);
+
+        let x0 = 1.0 / 16.0;
+        let x1 = 15.0 / 16.0;
+        let y0 = 0.0;
+        let y1 = 10.0 / 16.0;
+        let z0 = 1.0 / 16.0;
+        let z1 = 15.0 / 16.0;
+        let t0 = [x0, y0, z0];
+        let t1 = [x1, y0, z0];
+        let t2 = [x1, y1, z0];
+        let t3 = [x0, y1, z0];
+        let l0 = [x0, y0, z1];
+        let l1 = [x1, y0, z1];
+        let l2 = [x1, y1, z1];
+        let l3 = [x0, y1, z1];
+
+        let expected = [
+            (
+                [l1, l0, t0, t1],
+                [[28.0, 19.0], [14.0, 19.0], [14.0, 33.0], [28.0, 33.0]],
+            ),
+            (
+                [t2, t3, l3, l2],
+                [[42.0, 33.0], [28.0, 33.0], [28.0, 19.0], [42.0, 19.0]],
+            ),
+            (
+                [t0, l0, l3, t3],
+                [[14.0, 33.0], [0.0, 33.0], [0.0, 43.0], [14.0, 43.0]],
+            ),
+            (
+                [t1, t0, t3, t2],
+                [[28.0, 33.0], [14.0, 33.0], [14.0, 43.0], [28.0, 43.0]],
+            ),
+            (
+                [l1, t1, t2, l2],
+                [[42.0, 33.0], [28.0, 33.0], [28.0, 43.0], [42.0, 43.0]],
+            ),
+            (
+                [l0, l1, l2, l3],
+                [[56.0, 33.0], [42.0, 33.0], [42.0, 43.0], [56.0, 43.0]],
+            ),
+        ];
+
+        for (quad, (positions, uv_pixels)) in model.quads.iter().take(6).zip(expected) {
+            assert_eq!(quad.positions, positions);
+            assert_eq!(quad.uvs, uv_pixels.map(|[u, v]| [u / 64.0, v / 64.0]));
+        }
+    }
+
+    #[test]
     fn model_rotation_uses_final_face_direction_for_cardinal_shading() {
         let face = FaceDef {
             uv: Some([0.0, 0.0, 16.0, 16.0]),
@@ -1722,6 +1934,8 @@ mod tests {
                 faces: HashMap::from([("west".to_string(), face)]),
                 shade: true,
             }],
+            gui_transform: DisplayTransform::IDENTITY,
+            gui_light: GuiLight::Side,
             ground_transform: Mat4::IDENTITY,
         };
 
@@ -1859,6 +2073,37 @@ mod tests {
     }
 
     use crate::test_util::test_temp_dir;
+
+    #[test]
+    fn resolved_model_inherits_gui_transform() {
+        let root = test_temp_dir("item_gui_transform");
+        let models = root.join("minecraft/models/block");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            models.join("child.json"),
+            r#"{"parent":"minecraft:block/parent"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("parent.json"),
+            r#"{"gui_light":"front","display":{"gui":{"rotation":[30,135,0],"scale":[0.625,0.625,0.625]}}}"#,
+        )
+        .unwrap();
+
+        let mut cache = HashMap::new();
+        let resolved = resolve_model("block/child", &root, &None, &mut cache, None);
+        assert_eq!(
+            resolved.gui_transform,
+            DisplayTransform {
+                rotation: Vec3::new(30.0, 135.0, 0.0),
+                translation: Vec3::ZERO,
+                scale: Vec3::splat(0.625),
+            }
+        );
+        assert_eq!(resolved.gui_light, GuiLight::Front);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn item_definition_and_ground_transform_follow_resource_pack_override() {
