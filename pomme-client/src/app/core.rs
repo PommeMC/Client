@@ -1897,17 +1897,15 @@ impl AppCore {
             1.0
         });
 
-        // Vanilla ClientLevel keeps ticking other entities while the local
-        // player is dead.
-        game.entity_store.tick_living(
-            &game.chunk_store,
-            game.player.position,
-            game.server_simulation_distance,
-        );
-
         // LocalPlayer.tickDeath removes the client player at tick 20; from then
-        // on ClientLevel.tickEntities skips it entirely.
+        // on ClientLevel.tickEntities skips it entirely. Remote entities still
+        // tick even though the removed local player no longer does.
         if game.dead && game.player.death_animation_finished() {
+            game.entity_store.tick_living(
+                &game.chunk_store,
+                game.player.position,
+                game.server_simulation_distance,
+            );
             self.input.clear_click_counts();
             return;
         }
@@ -1916,6 +1914,11 @@ impl AppCore {
         // including dead-player ticks up through the removal tick.
         game.player.snapshot_render_state();
         if game.dead {
+            game.entity_store.tick_living(
+                &game.chunk_store,
+                game.player.position,
+                game.server_simulation_distance,
+            );
             game.player.tick_death();
             let removed_this_tick = game.player.death_animation_finished();
             let held_stack = game
@@ -2067,6 +2070,44 @@ impl AppCore {
 
         game.player.look_dir = renderer.camera_look_dir();
 
+        // Vanilla `Minecraft.tick` performs picking before `ClientLevel.tickEntities`.
+        // Use the remote entities' pre-interpolation sample so an approaching mob
+        // does not become attackable a few centimeters too early.
+        game.interaction.update_target(
+            game.player.eye_pos(),
+            game.player.look_dir,
+            &game.chunk_store,
+            &game.entity_store,
+            crate::player::is_creative(game.player.game_mode),
+        );
+
+        game.entity_store.tick_living(
+            &game.chunk_store,
+            game.player.position,
+            game.server_simulation_distance,
+        );
+
+        // ClientLevel exposes the local player as a push target for remote living
+        // entity ticks. This is the ordinary default-team/non-climbable path;
+        // team collision rules and climbable suppression remain out of scope.
+        if game.player.health > 0.0 && !crate::player::is_spectator(game.player.game_mode) {
+            let local_box = game.player.bounding_box();
+            for entity in game.entity_store.living.values_mut() {
+                if entity.health <= 0.0
+                    || !crate::entity::living_entity_aabb(entity).intersects(&local_box)
+                {
+                    continue;
+                }
+                if let Some((local_impulse, remote_impulse)) =
+                    crate::entity::living_push_impulses(game.player.position, entity.position)
+                {
+                    game.player.velocity.x += local_impulse.x;
+                    game.player.velocity.z += local_impulse.z;
+                    entity.velocity += remote_impulse;
+                }
+            }
+        }
+
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         }
@@ -2092,15 +2133,6 @@ impl AppCore {
         Self::send_input_packet(input, connection, game);
         self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
-
-        let eye_pos = game.player.eye_pos();
-        game.interaction.update_target(
-            eye_pos,
-            game.player.look_dir,
-            &game.chunk_store,
-            &game.entity_store,
-            crate::player::is_creative(game.player.game_mode),
-        );
 
         let held_stack = game.player.inventory.held_stack(input.selected_slot());
         let place_block = held_stack.and_then(|data| {

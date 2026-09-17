@@ -4,6 +4,7 @@ pub mod villager;
 use std::collections::HashMap;
 
 use azalea_core::position::ChunkPos;
+use azalea_entity::dimensions::EntityDimensions;
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
@@ -255,6 +256,53 @@ pub struct LivingEntity {
     interp_steps: i32,
     interp_head_y_rot_deg: f32,
     interp_head_y_rot_steps: i32,
+}
+
+pub(crate) fn living_entity_dimensions(entity: &LivingEntity) -> EntityDimensions {
+    let mut dims = EntityDimensions::from(entity.entity_type);
+    if entity.is_baby {
+        // Vanilla squid/glow-squid babies use an explicit 0.5 x 0.5 shape;
+        // other Pomme-modeled ageable living entities use half-scale dims.
+        if matches!(
+            entity.entity_type,
+            EntityKind::Squid | EntityKind::GlowSquid
+        ) {
+            dims.width = 0.5;
+            dims.height = 0.5;
+        } else {
+            dims.width *= 0.5;
+            dims.height *= 0.5;
+        }
+    }
+    dims
+}
+
+pub(crate) fn living_entity_aabb(entity: &LivingEntity) -> Aabb {
+    let dims = living_entity_dimensions(entity);
+    Aabb::from_center(
+        entity.position.into(),
+        f64::from(dims.width) * 0.5,
+        f64::from(dims.height) * 0.5,
+    )
+}
+
+/// Horizontal impulse pair from vanilla `Entity.push(Entity)` for an
+/// overlapping remote living entity and the local player. The first vector is
+/// applied to the local player (`this`), the second to the remote entity.
+pub(crate) fn living_push_impulses(local: Position, remote: Position) -> Option<(DVec3, DVec3)> {
+    let mut x = remote.x - local.x;
+    let mut z = remote.z - local.z;
+    let mut distance = x.abs().max(z.abs()); // Mth.absMax
+    if distance < f64::from(0.01_f32) {
+        return None;
+    }
+    distance = distance.sqrt();
+    x /= distance;
+    z /= distance;
+    let scale = (1.0 / distance).min(1.0) * f64::from(0.05_f32);
+    x *= scale;
+    z *= scale;
+    Some((DVec3::new(-x, 0.0, -z), DVec3::new(x, 0.0, z)))
 }
 
 impl LivingEntity {
@@ -1486,6 +1534,17 @@ fn probes_water(kind: &EntityKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn living_push_impulse_matches_vanilla_entity_push_math() {
+        let local = Position::new(0.0, 64.0, 0.0);
+        let remote = Position::new(0.25, 64.0, 0.0);
+        let (local_impulse, remote_impulse) = living_push_impulses(local, remote).unwrap();
+        let expected = f64::from(0.05_f32) * 0.5;
+        assert_eq!(local_impulse, DVec3::new(-expected, 0.0, 0.0));
+        assert_eq!(remote_impulse, DVec3::new(expected, 0.0, 0.0));
+        assert!(living_push_impulses(local, Position::new(0.009, 64.0, 0.0)).is_none());
+    }
 
     #[test]
     fn tick_living_advances_remote_interpolation_state() {
