@@ -345,6 +345,10 @@ impl AppCore {
     pub fn build_menu_input(&mut self, dt: f32) -> MenuInput {
         let credits_keys_down = credits_key_mask(|code| self.input.key_pressed(code));
         let credits_keys_pressed = credits_key_mask(|code| self.input.key_just_pressed(code));
+        // Gamepad DPad mirrors ArrowLeft/ArrowRight so focused sliders move
+        // on controller; held state steps once per frame while focused.
+        let gamepad_steps = (self.input.gamepad_button_down(gilrs::Button::DPadRight) as i32)
+            - (self.input.gamepad_button_down(gilrs::Button::DPadLeft) as i32);
         MenuInput {
             cursor: self.input.cursor_pos(),
             clicked: self.input.left_just_pressed(),
@@ -355,6 +359,7 @@ impl AppCore {
             escape: self.input.escape_pressed(),
             tab: self.input.tab_pressed(),
             f5: self.input.f5_pressed(),
+            gamepad_steps,
             scroll_delta: self.input.consume_menu_scroll(),
             dt,
             credits_keys_down,
