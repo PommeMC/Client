@@ -283,7 +283,7 @@ fn generate(
 }
 
 /// The static registries whose numeric ids reach the client over the wire
-/// and can shift between versions; the remap layer covers exactly these.
+/// and can shift between versions, whether remapped or only named for decoding.
 const CLIENT_REGISTRIES: [&str; 17] = [
     "attribute",
     "block_entity_type",
