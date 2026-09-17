@@ -895,15 +895,12 @@ impl GameState {
         self.next_section_gen
     }
 
-    /// Adopt a mesh's per-section visibility sets, epoch-guarded so a stale
-    /// result can't overwrite a newer edit's visibility.
     /// Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
-    /// upload them. Shared with the loading phase, which streams the spawn
-    /// chunks in before the game phase takes over.
+    /// upload them in one coalesced GPU transfer (one fence wait, not one per
+    /// mesh) to avoid the streaming stutter from per-mesh `queue.wait_idle`.
+    /// Shared with the loading phase, which streams the spawn chunks in before
+    /// the game phase takes over.
     pub fn drain_and_upload_meshes(&mut self, renderer: &mut Renderer) {
-        // Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
-        // upload them in one coalesced GPU transfer (one fence wait, not one per
-        // mesh) to avoid the streaming stutter from per-mesh `queue.wait_idle`.
         let drain_start = std::time::Instant::now();
         let results: Vec<_> = self.mesh_dispatcher.drain_results().collect();
         let mut batch = Vec::with_capacity(results.len());
@@ -977,6 +974,8 @@ impl GameState {
         self.level_load = Some(tracker);
     }
 
+    /// Adopt a mesh's per-section visibility sets, epoch-guarded so a stale
+    /// result can't overwrite a newer edit's visibility.
     fn apply_mesh_visibility(&mut self, mesh: &mut ChunkMeshData) {
         let pos = mesh.pos;
         for (si, vis) in std::mem::take(&mut mesh.visibility) {

@@ -16,9 +16,7 @@ const CLIENT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What `WaitingForPlayerChunk.isReady` reads each tick.
 pub struct ReadyInputs {
-    /// Player block Y is outside the dimension's build height.
     pub player_outside_build_height: bool,
-    /// Camera block Y is outside the dimension's build height.
     pub camera_outside_build_height: bool,
     pub spectator: bool,
     pub alive: bool,

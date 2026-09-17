@@ -52,11 +52,10 @@ pub fn update_connecting(
             .set_camera_position(*game.player.position);
         game.drain_and_upload_meshes(&mut gfx.renderer);
 
-        // Vanilla keeps ticking behind the loading screen: the level load
-        // tracker advances and every tick is still marked with
-        // `client_tick_end`, while `LocalPlayer.tick` stays parked. Vanilla
-        // gates those ticks on having a level, which is the login that also
-        // starts the tracker.
+        // Vanilla keeps ticking behind the loading screen: the tracker advances
+        // and every tick is still marked with `client_tick_end`, while
+        // `LocalPlayer.tick` stays parked. Those ticks need a level, which
+        // arrives with the login that also starts the tracker.
         if game.level_load.is_some() {
             core.tick_accumulator += dt;
             while core.tick_accumulator >= TICK_RATE {

@@ -1924,15 +1924,16 @@ impl AppCore {
         );
 
         if tracker.is_level_ready(now) {
+            // Vanilla's `notifyPlayerLoaded` guards on `hasClientLoaded`; here
+            // the tracker only exists while unloaded, so dropping it is enough
+            // to send this once.
             game.level_load = None;
-            if !game.client_loaded {
-                game.client_loaded = true;
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::PlayerLoaded(
-                        azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
-                    ));
-            }
+            game.client_loaded = true;
+            connection
+                .packet_tx
+                .send(ServerboundGamePacket::PlayerLoaded(
+                    azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
+                ));
         }
     }
 
