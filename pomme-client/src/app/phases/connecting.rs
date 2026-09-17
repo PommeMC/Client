@@ -1,5 +1,4 @@
-use azalea_protocol::packets::game::ServerboundGamePacket;
-
+use crate::app::TICK_RATE;
 use crate::app::core::AppCore;
 use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama, draw_status};
@@ -51,27 +50,29 @@ pub fn update_connecting(
     if matches!(connect_phase, ConnectionPhase::Loading) {
         game.mesh_dispatcher
             .set_camera_position(*game.player.position);
-        let ready_meshes: Vec<_> = game.mesh_dispatcher.drain_results().collect();
-        gfx.renderer.upload_chunk_meshes(&ready_meshes);
-        for mesh in ready_meshes {
-            game.mesh_dispatcher.recycle(mesh);
-        }
+        game.drain_and_upload_meshes(&mut gfx.renderer);
 
-        let ready = game.position_set && (game.dead || gfx.renderer.loaded_chunk_count() > 0);
-
-        // Mirror vanilla's `notifyPlayerLoaded`; servers gate
-        // per-player entity tracking on it.
-        if ready && !game.player_loaded_sent {
-            connection
-                .packet_tx
-                .send(ServerboundGamePacket::PlayerLoaded(
-                    azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
-                ));
-            game.player_loaded_sent = true;
-        }
-
-        if ready {
-            return ConnectingUpdateResult::JoinGame;
+        // Vanilla keeps ticking behind the loading screen: the level load
+        // tracker advances and every tick is still marked with
+        // `client_tick_end`, while `LocalPlayer.tick` stays parked. Vanilla
+        // gates those ticks on having a level, which is the login that also
+        // starts the tracker.
+        if game.level_load.is_some() {
+            core.tick_accumulator += dt;
+            while core.tick_accumulator >= TICK_RATE {
+                AppCore::tick_level_load(&gfx.renderer, connection, game);
+                if game.client_loaded {
+                    // Vanilla closes `LevelLoadingScreen` on the same tick that
+                    // sends `player_loaded`, and the local player then ticks
+                    // (and moves) later in it. Hand this tick to the game phase
+                    // unspent so it plays out there.
+                    return ConnectingUpdateResult::JoinGame;
+                }
+                AppCore::send_client_tick_end(connection);
+                core.tick_accumulator -= TICK_RATE;
+            }
+        } else {
+            core.tick_accumulator = 0.0;
         }
     }
 

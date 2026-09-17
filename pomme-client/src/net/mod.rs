@@ -58,6 +58,8 @@ pub enum NetworkEvent {
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
     },
+    /// `LEVEL_CHUNKS_LOAD_START`: the server has started sending the level.
+    LevelChunksLoadStart,
     DimensionInfo {
         height: u32,
         min_y: i32,

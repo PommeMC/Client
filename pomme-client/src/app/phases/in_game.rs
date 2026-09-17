@@ -10,6 +10,7 @@ use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
+use crate::app::level_load::LevelLoadTracker;
 use crate::app::phases::Gfx;
 use crate::app::{TICK_RATE, input};
 use crate::audio::{CATEGORY_AMBIENT, CATEGORY_PLAYERS, SoundRef};
@@ -113,7 +114,12 @@ pub struct GameState {
     /// Entity ids whose shared `DATA_SILENT` flag is currently true.
     pub silent_entities: HashSet<i32>,
     pub position_set: bool,
-    pub player_loaded_sent: bool,
+    /// Vanilla `ClientPacketListener.levelLoadTracker`: present from login or
+    /// respawn until the level is ready and `player_loaded` has been sent.
+    pub level_load: Option<LevelLoadTracker>,
+    /// Vanilla `ClientPacketListener.clientLoaded`. While false, the local
+    /// player doesn't tick and sends no movement.
+    pub client_loaded: bool,
     pub player: LocalPlayer,
     /// Bubble index the pop sound last played for, so each pop fires once.
     pub last_bubble_pop_sound_played: i32,
@@ -327,7 +333,8 @@ impl GameState {
             entity_positions: HashMap::new(),
             silent_entities: HashSet::new(),
             position_set: false,
-            player_loaded_sent: false,
+            level_load: None,
+            client_loaded: false,
             options_from_game: false,
             last_render_distance: render_distance,
             server_render_distance: 0,
@@ -890,6 +897,86 @@ impl GameState {
 
     /// Adopt a mesh's per-section visibility sets, epoch-guarded so a stale
     /// result can't overwrite a newer edit's visibility.
+    /// Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
+    /// upload them. Shared with the loading phase, which streams the spawn
+    /// chunks in before the game phase takes over.
+    pub fn drain_and_upload_meshes(&mut self, renderer: &mut Renderer) {
+        // Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
+        // upload them in one coalesced GPU transfer (one fence wait, not one per
+        // mesh) to avoid the streaming stutter from per-mesh `queue.wait_idle`.
+        let drain_start = std::time::Instant::now();
+        let results: Vec<_> = self.mesh_dispatcher.drain_results().collect();
+        let mut batch = Vec::with_capacity(results.len());
+        for mut mesh in results {
+            // Stale meshes count too: worker time spent is worker time spent.
+            if let Some(bench) = &mut self.chunk_load_bench {
+                bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
+            }
+            // Drop a mesh built from an out-of-date snapshot. A mesh for a chunk
+            // that has since unloaded is always stale (uploading it would resurrect
+            // a column nothing cleans up). Edits (priority lane, single section)
+            // are keyed per section so editing one section never drops a sibling's
+            // in-flight result; bulk loads keep the column key.
+            let stale = self.chunk_store.get_chunk(&mesh.pos).is_none()
+                || if mesh.timing.is_some() {
+                    mesh.replaced.clone().any(|si| {
+                        self.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen)
+                    })
+                } else {
+                    mesh.content_gen < self.content_gen.get(&mesh.pos).copied().unwrap_or(0)
+                };
+            if stale {
+                self.mesh_dispatcher.recycle(mesh);
+                continue;
+            }
+            if let Some(t) = &mesh.timing {
+                let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
+                tracing::debug!(
+                    "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
+                    mesh.pos.x,
+                    mesh.pos.z,
+                    ms(t.started_at - t.enqueued_at),
+                    ms(t.meshed_at - t.started_at),
+                    ms(t.meshed_at.elapsed()),
+                    ms(t.enqueued_at.elapsed()),
+                );
+            }
+            // Visibility updates are independent of the GPU upload; apply them now so
+            // the mesh can move into the upload batch.
+            self.apply_mesh_visibility(&mut mesh);
+            batch.push(mesh);
+        }
+        self.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
+        let upload_start = std::time::Instant::now();
+        let dropped = renderer.upload_chunk_meshes(&batch);
+        self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
+        self.clear_dropped_meshed(dropped);
+        // Return the uploaded meshes' buffers to the worker pool for reuse.
+        for mesh in batch {
+            self.mesh_dispatcher.recycle(mesh);
+        }
+    }
+
+    /// Vanilla `ClientPacketListener.handleLogin`/`handleRespawn`: clear the
+    /// loaded flag and start waiting for the new level.
+    pub fn start_level_load(&mut self) {
+        self.client_loaded = false;
+        // TODO: vanilla gives a newly created singleplayer world a 500ms close
+        // delay (`Minecraft.doWorldLoad`); Pomme can't tell a fresh world from
+        // an opened one yet.
+        let mut tracker = LevelLoadTracker::start_client_load(
+            std::time::Duration::ZERO,
+            std::time::Instant::now(),
+        );
+        // 1.20.1 and 1.20.2 have no LEVEL_CHUNKS_LOAD_START game event (1.20.4
+        // added it), so nothing would ever move the tracker on; those clients
+        // had the level from the login packet.
+        if crate::version::session_protocol() < 765 {
+            tracker.loading_packets_received();
+        }
+        self.level_load = Some(tracker);
+    }
+
     fn apply_mesh_visibility(&mut self, mesh: &mut ChunkMeshData) {
         let pos = mesh.pos;
         for (si, vis) in std::mem::take(&mut mesh.visibility) {
@@ -1443,60 +1530,7 @@ pub fn update_game(
         return GameUpdateResult::Disconnected { reason };
     }
 
-    // Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
-    // upload them in one coalesced GPU transfer (one fence wait, not one per
-    // mesh) to avoid the streaming stutter from per-mesh `queue.wait_idle`.
-    let drain_start = std::time::Instant::now();
-    let results: Vec<_> = game.mesh_dispatcher.drain_results().collect();
-    let mut batch = Vec::with_capacity(results.len());
-    for mut mesh in results {
-        // Stale meshes count too: worker time spent is worker time spent.
-        if let Some(bench) = &mut game.chunk_load_bench {
-            bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
-        }
-        // Drop a mesh built from an out-of-date snapshot. A mesh for a chunk
-        // that has since unloaded is always stale (uploading it would resurrect
-        // a column nothing cleans up). Edits (priority lane, single section)
-        // are keyed per section so editing one section never drops a sibling's
-        // in-flight result; bulk loads keep the column key.
-        let stale = game.chunk_store.get_chunk(&mesh.pos).is_none()
-            || if mesh.timing.is_some() {
-                mesh.replaced.clone().any(|si| {
-                    game.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen)
-                })
-            } else {
-                mesh.content_gen < game.content_gen.get(&mesh.pos).copied().unwrap_or(0)
-            };
-        if stale {
-            game.mesh_dispatcher.recycle(mesh);
-            continue;
-        }
-        if let Some(t) = &mesh.timing {
-            let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
-            tracing::debug!(
-                "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
-                mesh.pos.x,
-                mesh.pos.z,
-                ms(t.started_at - t.enqueued_at),
-                ms(t.meshed_at - t.started_at),
-                ms(t.meshed_at.elapsed()),
-                ms(t.enqueued_at.elapsed()),
-            );
-        }
-        // Visibility updates are independent of the GPU upload; apply them now so
-        // the mesh can move into the upload batch.
-        game.apply_mesh_visibility(&mut mesh);
-        batch.push(mesh);
-    }
-    game.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
-    let upload_start = std::time::Instant::now();
-    let dropped = gfx.renderer.upload_chunk_meshes(&batch);
-    game.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
-    game.clear_dropped_meshed(dropped);
-    // Return the uploaded meshes' buffers to the worker pool for reuse.
-    for mesh in batch {
-        game.mesh_dispatcher.recycle(mesh);
-    }
+    game.drain_and_upload_meshes(&mut gfx.renderer);
 
     game.mesh_dispatcher
         .set_camera_position(*game.player.position);
@@ -1519,6 +1553,10 @@ pub fn update_game(
     core.tick_accumulator += dt;
     while core.tick_accumulator >= TICK_RATE {
         game.tick_count = game.tick_count.wrapping_add(1);
+        // Vanilla `Minecraft.tick` order: `gameMode.tick` drives the connection
+        // tick (and so the level load tracker) before the level's entities,
+        // i.e. before the local player moves or sends anything.
+        AppCore::tick_level_load(&gfx.renderer, connection, game);
         // Vanilla Gui.tick falls back from dead health alone when no screen is
         // open, so death UI/auto-respawn must not depend on PlayerCombatKill.
         let has_screen = game.death_screen_open
@@ -1536,7 +1574,9 @@ pub fn update_game(
         }
         let local_player_was_removed = game.dead && game.player.death_animation_finished();
         core.tick_physics(&mut gfx.renderer, connection, game);
-        if !local_player_was_removed {
+        // `LocalPlayer.tick` returns before `super.tick()` until the client has
+        // loaded, so the player's own baseTick state waits with it.
+        if game.client_loaded && !local_player_was_removed {
             // LivingEntity.baseTick hurt/effects and Player.tick sleep state still
             // run on the tick-20 removal tick, then stop with future entity ticks.
             game.player.tick_hurt();
@@ -1584,6 +1624,7 @@ pub fn update_game(
             // prioritized while the screen is open.
             game.xp_display_start_tick = game.tick_count as i64;
         }
+        AppCore::send_client_tick_end(connection);
         core.tick_accumulator -= TICK_RATE;
     }
 

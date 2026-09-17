@@ -586,6 +586,12 @@ pub fn handle_game_packet(
                         previous: None,
                     });
                 }
+                // Vanilla `handleGameEvent` hands LEVEL_CHUNKS_LOAD_START to
+                // the level load tracker, which only then starts waiting for
+                // the player's own chunk.
+                EventType::WaitForLevelChunks => {
+                    let _ = event_tx.try_send(NetworkEvent::LevelChunksLoadStart);
+                }
                 EventType::StartRaining
                 | EventType::StopRaining
                 | EventType::RainLevelChange
