@@ -1668,6 +1668,12 @@ impl AppCore {
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
                     game.show_death_screen = show_death_screen;
+                    // Vanilla `handleLogin` builds a new LocalPlayer, whose
+                    // inventory selects slot 0; the server's own SetHeldSlot
+                    // follows. Ours lives in the app-wide input state, so a
+                    // reconnect would otherwise keep the last session's slot
+                    // and report it before the server says otherwise.
+                    self.input.set_selected_slot(0);
                 }
                 NetworkEvent::PlayerScore { entity_id, score } => {
                     if entity_id == game.player.entity_id {
