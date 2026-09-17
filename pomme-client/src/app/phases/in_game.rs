@@ -436,8 +436,8 @@ impl GameState {
             vis_mask: HashMap::new(),
             section_gen: HashMap::new(),
             next_section_gen: 0,
-            compiled: HashMap::new(),
             section_vis: HashMap::new(),
+            compiled: HashMap::new(),
             section_vis_epoch: HashMap::new(),
             vis_tiers: HashMap::new(),
             vis_valid: false,
@@ -943,8 +943,8 @@ impl GameState {
                     ms(t.enqueued_at.elapsed()),
                 );
             }
-            // Visibility updates are independent of the GPU upload; apply them now so
-            // the mesh can move into the upload batch.
+            // Taken before the upload so the mesh can move into the batch; the
+            // upload reports back what it had to drop.
             self.apply_mesh_bookkeeping(&mut mesh);
             batch.push(mesh);
         }
@@ -974,7 +974,7 @@ impl GameState {
         let compiled = self
             .compiled
             .get(&column)
-            .is_some_and(|mask| section_range_mask(section..section + 1) & mask != 0);
+            .is_some_and(|mask| mask & section_bit(section) != 0);
         neighbourhood_lit && compiled
     }
 
@@ -1011,7 +1011,7 @@ impl GameState {
                 self.section_vis.insert((pos, si), vis);
             }
         }
-        *self.compiled.entry(pos).or_default() |= section_range_mask(mesh.replaced.clone());
+        *self.compiled.entry(pos).or_default() |= section_bits(mesh.replaced.clone());
     }
 
     /// Sections dropped on pool exhaustion were retired from the buffer; clear
@@ -1019,13 +1019,12 @@ impl GameState {
     /// bit, since nothing of them reached the GPU.
     fn clear_dropped_meshed(&mut self, dropped: Vec<(ChunkPos, Vec<i32>)>) {
         for (pos, sections) in dropped {
-            for si in sections {
-                if let Some(m) = self.meshed.get_mut(&pos) {
-                    m.mask &= !(1u32 << si);
-                }
-                if let Some(mask) = self.compiled.get_mut(&pos) {
-                    *mask &= !(1u32 << si);
-                }
+            let retired = section_bits(sections);
+            if let Some(m) = self.meshed.get_mut(&pos) {
+                m.mask &= !retired;
+            }
+            if let Some(mask) = self.compiled.get_mut(&pos) {
+                *mask &= !retired;
             }
         }
     }
@@ -1236,12 +1235,17 @@ fn column_frustum_tier(
     }
 }
 
-/// Bitmask of the section indices in `range`, ignoring any outside a column's
-/// 32 addressable sections (a camera outside build height lands there).
-fn section_range_mask(range: std::ops::Range<i32>) -> u32 {
-    range
-        .filter(|si| (0..32).contains(si))
-        .fold(0u32, |mask, si| mask | 1u32 << si)
+/// Bit for one section index, 0 outside a column's 32 addressable sections (a
+/// camera outside build height resolves to such an index).
+fn section_bit(si: i32) -> u32 {
+    if (0..32).contains(&si) { 1u32 << si } else { 0 }
+}
+
+/// The bits for several section indices.
+fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
+    indices
+        .into_iter()
+        .fold(0u32, |mask, si| mask | section_bit(si))
 }
 
 /// Full mask for an `n`-section column (bits `0..n` set).
@@ -3898,17 +3902,18 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_red_overlay, section_range_mask};
+    use super::{has_red_overlay, section_bit, section_bits};
 
     #[test]
-    fn section_range_mask_covers_the_range_and_ignores_the_rest() {
-        assert_eq!(section_range_mask(0..3), 0b111);
-        assert_eq!(section_range_mask(2..3), 0b100);
-        assert_eq!(section_range_mask(0..0), 0);
+    fn section_bits_cover_the_indices_and_ignore_the_rest() {
+        assert_eq!(section_bits(0..3), 0b111);
+        assert_eq!(section_bits(0..0), 0);
+        assert_eq!(section_bits([2, 5]), 0b100100);
         // A camera outside build height resolves to a section index no column
         // has; it must read as "not compiled", not shift out of range.
-        assert_eq!(section_range_mask(-3..-2), 0);
-        assert_eq!(section_range_mask(40..41), 0);
+        assert_eq!(section_bit(-1), 0);
+        assert_eq!(section_bit(32), 0);
+        assert_eq!(section_bits(-3..-2), 0);
     }
 
     #[test]
