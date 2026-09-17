@@ -9,11 +9,11 @@ use pyronyx::vk;
 use super::greedy;
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
-use crate::world::block::is_air;
 use crate::world::block::model::{
     BakedModel, CardinalLighting, Direction, face_positions, face_uvs,
 };
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
+use crate::world::block::{FluidKind, fluid, is_air, is_solid, light_props};
 use crate::world::chunk;
 use crate::world::chunk::ChunkStore;
 
@@ -122,11 +122,6 @@ fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
         sprite: v.sprite,
         light_tint: v.light_tint.to_le_bytes(),
     }
-}
-
-#[cfg(test)]
-fn unpack_sprite_uv(x: u16) -> f32 {
-    x as f32 / TERRAIN_UV_FIXED_SCALE
 }
 
 fn section_aabb(verts: &[TerrainVertex]) -> ChunkAABB {
@@ -1569,6 +1564,12 @@ fn mesh_chunk_snapshot(
                     (by - (min_y + s as i32 * 16)) as f32,
                     (bz - world_z) as f32,
                 ];
+                let model_offset = crate::world::block::block_position_offset(state, bx, bz);
+                let model_pos = [
+                    block_pos[0] + model_offset.x as f32,
+                    block_pos[1] + model_offset.y as f32,
+                    block_pos[2] + model_offset.z as f32,
+                ];
 
                 if lod > 0 {
                     emit_lod_cube(
@@ -1580,22 +1581,22 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(baked) = registry.get_baked_model(state) {
                     emit_baked_model(
-                        sink, block_pos, state, baked, snapshot, registry, uv_map, bx, by, bz,
+                        sink, model_pos, state, baked, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(quads) = registry.get_multipart_quads(state) {
                     emit_multipart(
-                        sink, block_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
+                        sink, model_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
-                        sink, block_pos, textures, snapshot, registry, uv_map, bx, by, bz,
+                        sink, model_pos, textures, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else {
                     let id = crate::world::block::block_id(state);
                     if logged_missing.insert(id) {
                         tracing::warn!("Missing model: {id}");
                     }
-                    emit_missing_cube(sink, block_pos, snapshot, registry, uv_map, bx, by, bz);
+                    emit_missing_cube(sink, model_pos, snapshot, registry, uv_map, bx, by, bz);
                 }
                 by += step;
             }
@@ -1790,11 +1791,203 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
 }
 
 // TODO: biome-based water color
-// TODO: per-corner height averaging for smooth water surfaces
 // TODO: flowing water texture (water_flow) with direction-based rotation
-// TODO: per-level height for flowing water (level / 9.0 per corner)
 
-const FLUID_MAX_HEIGHT: f32 = 8.0 / 9.0;
+const MAX_FLUID_HEIGHT: f32 = 8.0 / 9.0;
+
+fn same_fluid(state: azalea_block::BlockState, kind: FluidKind) -> bool {
+    fluid(state).kind == kind
+}
+
+fn direction_ordinal(direction: Direction) -> usize {
+    match direction {
+        Direction::Down => 0,
+        Direction::Up => 1,
+        Direction::North => 2,
+        Direction::South => 3,
+        Direction::West => 4,
+        Direction::East => 5,
+    }
+}
+
+/// Vanilla `FluidRenderer.isFaceOccludedByState` reduced to the generated
+/// face-occlusion mask. The mask is exact for vanilla's 1/16-aligned block
+/// face shapes; the fluid box contributes a full-width face from y=0 through
+/// `height` on horizontal sides.
+fn fluid_face_occluded_by_state(
+    state: azalea_block::BlockState,
+    direction: Direction,
+    height: f32,
+) -> bool {
+    let props = light_props(state);
+    if !props.can_occlude {
+        return false;
+    }
+
+    let state_face = direction_ordinal(direction) ^ 1;
+    let row = |v: usize| -> u16 {
+        if props.use_shape_for_light_occlusion {
+            props
+                .face_occlusion
+                .expect("shaped occluder must carry generated face masks")[state_face][v]
+        } else {
+            0xFFFF
+        }
+    };
+
+    match direction {
+        Direction::Up => {
+            // Shapes.blockOccludes requires the fluid box to reach the shared
+            // top boundary before the above block can hide the surface.
+            (height - 1.0).abs() <= 1.0e-7 && (0..16).all(|v| row(v) == 0xFFFF)
+        }
+        Direction::Down => (0..16).all(|v| row(v) == 0xFFFF),
+        Direction::North | Direction::South | Direction::West | Direction::East => {
+            let rows = ((height.clamp(0.0, 1.0) * 16.0).ceil() as usize).min(16);
+            (0..rows).all(|v| row(v) == 0xFFFF)
+        }
+    }
+}
+
+fn fluid_face_occluded_by_self(state: azalea_block::BlockState, direction: Direction) -> bool {
+    let opposite = match direction {
+        Direction::Down => Direction::Up,
+        Direction::Up => Direction::Down,
+        Direction::North => Direction::South,
+        Direction::South => Direction::North,
+        Direction::West => Direction::East,
+        Direction::East => Direction::West,
+    };
+    fluid_face_occluded_by_state(state, opposite, 1.0)
+}
+
+fn fluid_render_height(
+    snapshot: &ChunkStoreSnapshot,
+    kind: FluidKind,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> f32 {
+    let state = snapshot.get_block_state(x, y, z);
+    let state_fluid = fluid(state);
+    if state_fluid.kind == kind {
+        if same_fluid(snapshot.get_block_state(x, y + 1, z), kind) {
+            1.0
+        } else {
+            state_fluid.height()
+        }
+    } else if !is_solid(state) {
+        0.0
+    } else {
+        -1.0
+    }
+}
+
+fn add_weighted_fluid_height(sum: &mut f32, weight: &mut f32, height: f32) {
+    if height >= 0.8 {
+        *sum += height * 10.0;
+        *weight += 10.0;
+    } else if height >= 0.0 {
+        *sum += height;
+        *weight += 1.0;
+    }
+}
+
+fn average_fluid_corner_values(
+    height_self: f32,
+    height2: f32,
+    height1: f32,
+    corner: Option<f32>,
+) -> f32 {
+    if height1 >= 1.0 || height2 >= 1.0 {
+        return 1.0;
+    }
+    let mut sum = 0.0;
+    let mut weight = 0.0;
+    if (height1 > 0.0 || height2 > 0.0)
+        && let Some(corner) = corner
+    {
+        if corner >= 1.0 {
+            return 1.0;
+        }
+        add_weighted_fluid_height(&mut sum, &mut weight, corner);
+    }
+    add_weighted_fluid_height(&mut sum, &mut weight, height_self);
+    add_weighted_fluid_height(&mut sum, &mut weight, height1);
+    add_weighted_fluid_height(&mut sum, &mut weight, height2);
+    debug_assert!(weight > 0.0);
+    sum / weight
+}
+
+fn average_fluid_corner_height(
+    snapshot: &ChunkStoreSnapshot,
+    kind: FluidKind,
+    height_self: f32,
+    height2: f32,
+    height1: f32,
+    corner_pos: [i32; 3],
+) -> f32 {
+    let [corner_x, y, corner_z] = corner_pos;
+    let corner = (height1 > 0.0 || height2 > 0.0)
+        .then(|| fluid_render_height(snapshot, kind, corner_x, y, corner_z));
+    average_fluid_corner_values(height_self, height2, height1, corner)
+}
+
+/// Vanilla FluidRenderer corner order: north-west, south-west, south-east,
+/// north-east. These are logical fluid-surface heights before the renderer's
+/// 0.001 anti-z-fighting inset.
+fn fluid_corner_heights(
+    snapshot: &ChunkStoreSnapshot,
+    kind: FluidKind,
+    bx: i32,
+    by: i32,
+    bz: i32,
+) -> [f32; 4] {
+    let self_height = fluid_render_height(snapshot, kind, bx, by, bz);
+    if self_height >= 1.0 {
+        return [1.0; 4];
+    }
+
+    let north = fluid_render_height(snapshot, kind, bx, by, bz - 1);
+    let south = fluid_render_height(snapshot, kind, bx, by, bz + 1);
+    let east = fluid_render_height(snapshot, kind, bx + 1, by, bz);
+    let west = fluid_render_height(snapshot, kind, bx - 1, by, bz);
+
+    [
+        average_fluid_corner_height(
+            snapshot,
+            kind,
+            self_height,
+            north,
+            west,
+            [bx - 1, by, bz - 1],
+        ),
+        average_fluid_corner_height(
+            snapshot,
+            kind,
+            self_height,
+            south,
+            west,
+            [bx - 1, by, bz + 1],
+        ),
+        average_fluid_corner_height(
+            snapshot,
+            kind,
+            self_height,
+            south,
+            east,
+            [bx + 1, by, bz + 1],
+        ),
+        average_fluid_corner_height(
+            snapshot,
+            kind,
+            self_height,
+            north,
+            east,
+            [bx + 1, by, bz - 1],
+        ),
+    ]
+}
 
 #[allow(clippy::too_many_arguments)]
 fn block_face_tex_tint(
@@ -1867,45 +2060,123 @@ fn emit_fluid(
         solid
     };
 
+    let fluid_kind = fluid(state).kind;
+    debug_assert!(matches!(fluid_kind, FluidKind::Water | FluidKind::Lava));
+    let above = snapshot.get_block_state(bx, by + 1, bz);
+    let below = snapshot.get_block_state(bx, by - 1, bz);
+
+    // Vanilla computes the logical fluid surface first, then applies the
+    // 0.001 render inset only when the top face is actually visible.
+    let mut heights = fluid_corner_heights(snapshot, fluid_kind, bx, by, bz);
+    let min_top = heights.iter().copied().fold(1.0_f32, f32::min);
+    let render_up = !same_fluid(above, fluid_kind)
+        && !fluid_face_occluded_by_state(above, Direction::Up, min_top);
+    let render_down = !same_fluid(below, fluid_kind)
+        && !fluid_face_occluded_by_self(state, Direction::Down)
+        && !fluid_face_occluded_by_state(below, Direction::Down, MAX_FLUID_HEIGHT);
+    let bottom_offset = if render_down { 0.001 } else { 0.0 };
+
+    if render_up {
+        for height in &mut heights {
+            *height -= 0.001;
+        }
+    }
+    let [north_west, south_west, south_east, north_east] = heights;
+
     for dir in &CUBE_FACE_DIRS {
         let offset = dir.offset();
         let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
 
-        if matches!(classify_block(neighbor), BlockKind::Water | BlockKind::Lava)
-            || registry.occludes_neighbor(neighbor)
-        {
+        if same_fluid(neighbor, fluid_kind) {
             continue;
         }
 
         let (mut positions, uvs) = cube_face_geometry(*dir);
         let light = snapshot.cardinal_lighting.by_face(*dir);
+        match dir {
+            Direction::Up => {
+                if !render_up {
+                    continue;
+                }
+                positions[0][1] = north_west;
+                positions[1][1] = south_west;
+                positions[2][1] = south_east;
+                positions[3][1] = north_east;
 
-        if matches!(dir, Direction::Up) {
-            // A water/lava block above would have culled this face already, so
-            // the surface always sits at the lowered fluid height.
-            for p in &mut positions {
-                p[1] = FLUID_MAX_HEIGHT;
+                emit_face_into(
+                    vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
+                );
+
+                let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
+                let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
+                emit_face_into(
+                    vertices,
+                    indices,
+                    block_pos,
+                    &rev_positions,
+                    &rev_uvs,
+                    [light; 4],
+                    region,
+                    tint,
+                );
+                continue;
             }
-
-            emit_face_into(
-                vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
-            );
-
-            // Vanilla's backward up-face: the surface seen from below (underwater
-            // looking up). Reversed winding so it survives back-face culling.
-            let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
-            let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
-            emit_face_into(
-                vertices,
-                indices,
-                block_pos,
-                &rev_positions,
-                &rev_uvs,
-                [light; 4],
-                region,
-                tint,
-            );
-            continue;
+            Direction::Down => {
+                if !render_down {
+                    continue;
+                }
+                for p in &mut positions {
+                    p[1] = bottom_offset;
+                }
+            }
+            Direction::North => {
+                let side_height = north_east.max(north_west);
+                if fluid_face_occluded_by_self(state, *dir)
+                    || fluid_face_occluded_by_state(neighbor, *dir, side_height)
+                {
+                    continue;
+                }
+                positions[0][1] = north_east;
+                positions[3][1] = north_west;
+                positions[1][1] = bottom_offset;
+                positions[2][1] = bottom_offset;
+            }
+            Direction::South => {
+                let side_height = south_west.max(south_east);
+                if fluid_face_occluded_by_self(state, *dir)
+                    || fluid_face_occluded_by_state(neighbor, *dir, side_height)
+                {
+                    continue;
+                }
+                positions[0][1] = south_west;
+                positions[3][1] = south_east;
+                positions[1][1] = bottom_offset;
+                positions[2][1] = bottom_offset;
+            }
+            Direction::West => {
+                let side_height = north_west.max(south_west);
+                if fluid_face_occluded_by_self(state, *dir)
+                    || fluid_face_occluded_by_state(neighbor, *dir, side_height)
+                {
+                    continue;
+                }
+                positions[0][1] = north_west;
+                positions[3][1] = south_west;
+                positions[1][1] = bottom_offset;
+                positions[2][1] = bottom_offset;
+            }
+            Direction::East => {
+                let side_height = south_east.max(north_east);
+                if fluid_face_occluded_by_self(state, *dir)
+                    || fluid_face_occluded_by_state(neighbor, *dir, side_height)
+                {
+                    continue;
+                }
+                positions[0][1] = south_east;
+                positions[3][1] = north_east;
+                positions[1][1] = bottom_offset;
+                positions[2][1] = bottom_offset;
+            }
         }
 
         emit_face_into(
@@ -1972,11 +2243,12 @@ fn emit_lod_cube(
     let is_fluid = matches!(classify_block(state), BlockKind::Water | BlockKind::Lava);
     // We have to do this otherwise there becomes a visible seam at the LOD border
     let fluid_top = if is_fluid {
+        let state_fluid = fluid(state);
         let above = snapshot.get_block_state(bx, by + 1, bz);
-        if matches!(classify_block(above), BlockKind::Water | BlockKind::Lava) {
+        if same_fluid(above, state_fluid.kind) {
             1.0
         } else {
-            FLUID_MAX_HEIGHT
+            state_fluid.height()
         }
     } else {
         1.0
@@ -2249,33 +2521,71 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
 }
 
 #[cfg(test)]
-mod terrain_uv_tests {
-    use super::{pack_sprite_uv, unpack_sprite_uv};
+mod fluid_height_tests {
+    use super::{average_fluid_corner_values, fluid_face_occluded_by_state};
+    use crate::world::block::find_state;
+    use crate::world::block::model::Direction;
 
-    fn wrapped(x: f32) -> f32 {
-        x - x.floor()
+    #[test]
+    fn fluid_corner_averaging_matches_vanilla_weighting() {
+        let low = 1.0_f32 / 9.0;
+        let isolated = average_fluid_corner_values(low, 0.0, 0.0, None);
+        assert!((isolated - low / 3.0).abs() < 1e-7);
+
+        let flat = average_fluid_corner_values(low, low, low, Some(low));
+        assert!((flat - low).abs() < 1e-7);
+
+        let source = 8.0_f32 / 9.0;
+        let weighted = average_fluid_corner_values(source, source, source, Some(source));
+        assert!((weighted - source).abs() < 1e-7);
+
+        assert_eq!(average_fluid_corner_values(low, 1.0, 0.0, None), 1.0);
+        assert_eq!(average_fluid_corner_values(low, low, low, Some(1.0)), 1.0);
     }
 
     #[test]
-    fn packed_greedy_uv_preserves_integer_repeat_boundaries_exactly() {
-        for uv in 0..=16 {
-            let decoded = unpack_sprite_uv(pack_sprite_uv(uv as f32));
-            assert_eq!(decoded, uv as f32);
-        }
-    }
+    fn fluid_face_occlusion_matches_vanilla_height_aware_slab_rules() {
+        crate::world::block::init("26.2");
+        let stone = find_state("stone", &[]);
+        let bottom = find_state("oak_slab", &[("type", "bottom"), ("waterlogged", "false")]);
+        let top = find_state("oak_slab", &[("type", "top"), ("waterlogged", "false")]);
 
-    #[test]
-    fn packed_greedy_uv_keeps_fractional_precision() {
-        for uv in [0.25_f32, 1.25, 8.5, 15.75] {
-            let decoded = unpack_sprite_uv(pack_sprite_uv(uv));
-            assert!((decoded - uv).abs() <= 0.5 / 4095.0, "uv {uv} -> {decoded}");
-        }
-    }
+        // Full blocks hide every horizontal fluid side regardless of height.
+        assert!(fluid_face_occluded_by_state(
+            stone,
+            Direction::North,
+            1.0 / 9.0
+        ));
 
-    #[test]
-    fn adjacent_blocks_wrap_to_the_same_sprite_position() {
-        let a = unpack_sprite_uv(pack_sprite_uv(0.25));
-        let b = unpack_sprite_uv(pack_sprite_uv(1.25));
-        assert!((wrapped(a) - wrapped(b)).abs() <= 1.0 / 4095.0);
+        // A bottom slab covers only the lower half of a horizontal face.
+        assert!(fluid_face_occluded_by_state(bottom, Direction::North, 0.5));
+        assert!(!fluid_face_occluded_by_state(
+            bottom,
+            Direction::North,
+            0.75
+        ));
+        assert!(!fluid_face_occluded_by_state(top, Direction::North, 0.5));
+
+        // `Shapes.blockOccludes` requires a top fluid face to reach y=1 before
+        // the block above can hide it, even when that neighbor is a full cube.
+        assert!(!fluid_face_occluded_by_state(
+            stone,
+            Direction::Up,
+            8.0 / 9.0
+        ));
+        assert!(fluid_face_occluded_by_state(stone, Direction::Up, 1.0));
+
+        // The below-neighbor test uses its UP face. A top slab reaches that
+        // boundary; a bottom slab does not.
+        assert!(fluid_face_occluded_by_state(
+            top,
+            Direction::Down,
+            8.0 / 9.0
+        ));
+        assert!(!fluid_face_occluded_by_state(
+            bottom,
+            Direction::Down,
+            8.0 / 9.0
+        ));
     }
 }
