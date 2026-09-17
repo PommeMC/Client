@@ -1459,16 +1459,20 @@ fn apply_element_rotation(
             _ => (dx, dy, dz),
         };
 
-        if rot.rescale {
-            let scale = 1.0 / cos.abs();
-            pos[0] = origin[0] + nx * scale;
-            pos[1] = origin[1] + ny * scale;
-            pos[2] = origin[2] + nz * scale;
+        let scale = if rot.rescale {
+            1.0 / cos.abs().max(sin.abs())
         } else {
-            pos[0] = origin[0] + nx;
-            pos[1] = origin[1] + ny;
-            pos[2] = origin[2] + nz;
-        }
+            1.0
+        };
+        let [sx, sy, sz] = match rot.axis.as_str() {
+            "x" => [1.0, scale, scale],
+            "y" => [scale, 1.0, scale],
+            "z" => [scale, scale, 1.0],
+            _ => [1.0; 3],
+        };
+        pos[0] = origin[0] + nx * sx;
+        pos[1] = origin[1] + ny * sy;
+        pos[2] = origin[2] + nz * sz;
     }
 
     positions
@@ -1728,6 +1732,44 @@ mod tests {
         let baked = bake_resolved_model(&resolved, 0, 270, Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 1);
         assert!((baked.quads[0].shade_light - Direction::South.shade_light()).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn element_rescale_preserves_rotation_axis() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        for (axis, axis_index) in [("x", 0), ("y", 1), ("z", 2)] {
+            let rotation = Some(ElementRotation {
+                origin: [8.0, 8.0, 8.0],
+                axis: axis.to_string(),
+                angle: 45.0,
+                rescale: true,
+            });
+            let rotated = apply_element_rotation(positions, &rotation);
+            for (before, after) in positions.iter().zip(rotated) {
+                assert!(
+                    (before[axis_index] - after[axis_index]).abs() < 1.0e-6,
+                    "{axis}-axis rescale changed the rotation-axis coordinate from {} to {}",
+                    before[axis_index],
+                    after[axis_index]
+                );
+            }
+        }
+
+        let quarter_turn = Some(ElementRotation {
+            origin: [8.0, 8.0, 8.0],
+            axis: "y".to_string(),
+            angle: 90.0,
+            rescale: true,
+        });
+        let rotated = apply_element_rotation([[0.75, 0.5, 0.5]; 4], &quarter_turn);
+        assert!((rotated[0][0] - 0.5).abs() < 1.0e-6);
+        assert!((rotated[0][1] - 0.5).abs() < 1.0e-6);
+        assert!((rotated[0][2] - 0.25).abs() < 1.0e-6);
     }
 
     /// Every face must show the full-tile texture upright at rotation 0 and
