@@ -4,7 +4,6 @@ use azalea_block::BlockState;
 use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
 use azalea_core::direction::Direction;
 use azalea_core::position::BlockPos;
-use azalea_entity::dimensions::EntityDimensions;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
     AttributeModifiers, Consumable, EquipmentSlotGroup, Food, ItemUseAnimation,
@@ -17,13 +16,13 @@ use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerA
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use azalea_registry::builtin::{Attribute, BlockKind, EntityKind, ItemKind};
+use azalea_registry::builtin::{Attribute, BlockKind, ItemKind};
 use glam::{DVec3, Vec3};
 use pomme_protocol::wire;
 
 use crate::app::input::{self, InputState};
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
-use crate::entity::EntityStore;
+use crate::entity::{EntityStore, living_entity_dimensions};
 use crate::entity::components::{LookDirection, Position};
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
@@ -1556,21 +1555,7 @@ fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<
     let mut nearest_dist_sq = f64::MAX;
     let mut nearest = None;
     for (&entity_id, entity) in &entities.living {
-        let mut dims = EntityDimensions::from(entity.entity_type);
-        if entity.is_baby {
-            // `Squid.BABY_DIMENSIONS` is an explicit 0.5x0.5, not the
-            // generic half scale.
-            if matches!(
-                entity.entity_type,
-                EntityKind::Squid | EntityKind::GlowSquid
-            ) {
-                dims.width = 0.5;
-                dims.height = 0.5;
-            } else {
-                dims.width *= 0.5;
-                dims.height *= 0.5;
-            }
-        }
+        let dims = living_entity_dimensions(entity);
         let aabb = dims.make_bounding_box(entity.position.into());
 
         let (location, dist_sq) = if aabb.contains(from_v) {
