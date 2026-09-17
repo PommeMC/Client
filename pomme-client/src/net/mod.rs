@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod azalea_compat;
+pub mod chunk_batch;
 pub mod commands;
 pub mod conn;
 pub mod connection;
@@ -85,6 +86,9 @@ pub enum NetworkEvent {
         z: i32,
     },
     PlayerPosition {
+        /// Teleport id to acknowledge. Vanilla answers on the main thread,
+        /// from `handleMovePlayer`, so the ack and its echo stay together.
+        id: u32,
         change: azalea_protocol::common::movements::PositionMoveRotation,
         relative: azalea_protocol::common::movements::RelativeMovements,
     },

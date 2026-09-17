@@ -14,6 +14,7 @@ use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
+use crate::net::chunk_batch::ChunkBatchSizeCalculator;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
@@ -55,6 +56,7 @@ pub fn handle_game_packet(
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
+    batch_size_calculator: &mut ChunkBatchSizeCalculator,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
@@ -173,12 +175,10 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z });
         }
         ClientboundGamePacket::PlayerPosition(p) => {
-            sender.send(ServerboundGamePacket::AcceptTeleportation(
-                azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation {
-                    id: p.id,
-                },
-            ));
+            // The ack rides with the position echo on the main thread, as
+            // vanilla's deferred `handleMovePlayer` sends the pair.
             let _ = event_tx.try_send(NetworkEvent::PlayerPosition {
+                id: p.id,
                 change: p.change.clone(),
                 relative: p.relative.clone(),
             });
@@ -188,15 +188,17 @@ pub fn handle_game_packet(
                 azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive { id: p.id },
             ));
         }
+        ClientboundGamePacket::ChunkBatchStart(_) => {
+            batch_size_calculator.on_batch_start();
+        }
         ClientboundGamePacket::ChunkBatchFinished(p) => {
-            let desired = (p.batch_size as f32).max(25.0);
-            tracing::trace!(
-                "ChunkBatchFinished: batch_size={}, responding with desired={desired}",
-                p.batch_size
-            );
+            // Vanilla answers from how long the batch took per chunk, on the
+            // network thread (`handleChunkBatchFinished` is one of the few
+            // handlers it doesn't defer to the main thread).
+            batch_size_calculator.on_batch_finished(p.batch_size);
             sender.send(ServerboundGamePacket::ChunkBatchReceived(
                 azalea_protocol::packets::game::s_chunk_batch_received::ServerboundChunkBatchReceived {
-                    desired_chunks_per_tick: desired,
+                    desired_chunks_per_tick: batch_size_calculator.desired_chunks_per_tick(),
                 },
             ));
         }
@@ -1525,6 +1527,7 @@ mod tests {
                 &event_tx,
                 &registries,
                 &command_tree,
+                &mut ChunkBatchSizeCalculator::default(),
             );
         };
 

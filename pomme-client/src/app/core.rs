@@ -684,6 +684,13 @@ impl AppCore {
                     game.player.reset_hurt_state();
 
                     renderer.clear_chunk_meshes();
+                    // The renderer's meshes went with the old level, so the
+                    // bookkeeping that tracks them has to go too; a stale
+                    // entry would otherwise report the new level's camera
+                    // section as already meshed.
+                    game.section_vis.clear();
+                    game.section_vis_epoch.clear();
+                    game.meshed.clear();
                     game.mesh_dispatcher = renderer.create_mesh_dispatcher(
                         Arc::clone(&game.biome_climate),
                         None,
@@ -735,7 +742,11 @@ impl AppCore {
                     game.chunk_store
                         .set_center(azalea_core::position::ChunkPos::new(x, z));
                 }
-                NetworkEvent::PlayerPosition { change, relative } => {
+                NetworkEvent::PlayerPosition {
+                    id,
+                    change,
+                    relative,
+                } => {
                     fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
                         if is_relative { base + value } else { value }
                     }
@@ -792,7 +803,11 @@ impl AppCore {
                             to_chunk_coord(new_position.z),
                         ));
 
-                    renderer.reset_camera(new_position, new_look_dir);
+                    // The camera is the eye (`sync_camera_pos` feeds it the
+                    // interpolated eye position every frame); seeding it with
+                    // the feet would put it a block and a half low until the
+                    // first in-game frame.
+                    renderer.reset_camera(game.player.eye_pos(), new_look_dir);
 
                     if !game.position_set {
                         game.position_set = true;
@@ -804,6 +819,14 @@ impl AppCore {
                         );
                     }
 
+                    // Vanilla `handleMovePlayer` sends the acknowledgement and
+                    // this echo back to back, once the packet reaches the main
+                    // thread.
+                    connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
+                        azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation {
+                            id,
+                        },
+                    ));
                     connection.packet_tx.send(ServerboundGamePacket::MovePlayerPosRot(
                         azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
                             pos: new_position.into(),
@@ -1889,39 +1912,31 @@ impl AppCore {
         connection: &ConnectionHandle,
         game: &mut GameState,
     ) {
-        let Some(tracker) = &mut game.level_load else {
+        if game.level_load.is_none() {
             return;
-        };
+        }
         let now = Instant::now();
 
         let min_y = game.chunk_store.min_y();
         let max_y = min_y + game.chunk_store.height() as i32 - 1;
         let outside_build_height = |y: i32| y < min_y || y > max_y;
 
-        let camera = renderer.camera_render_position();
-        let camera_block = camera.floor().as_ivec3();
+        // Vanilla reads `gameRenderer.mainCamera().blockPosition()`.
+        let camera_block = renderer.camera_render_position().floor().as_ivec3();
         let camera_y = camera_block.y;
-        // Vanilla `LevelRenderer.isSectionCompiledAndVisible`: the render
-        // section at the camera block has an uploaded mesh. `section_vis` gets
-        // an entry per uploaded section, empty ones included, and nearby
-        // sections fade in over 0 ticks, so an uploaded section is visible.
-        let camera_section = (
-            azalea_core::position::ChunkPos::new(camera_block.x >> 4, camera_block.z >> 4),
-            (camera_y - min_y) >> 4,
-        );
 
-        tracker.tick_client_load(
-            now,
-            &ReadyInputs {
-                player_outside_build_height: outside_build_height(
-                    game.player.position.y.floor() as i32
-                ),
-                camera_outside_build_height: outside_build_height(camera_y),
-                spectator: crate::player::is_spectator(game.player.game_mode),
-                alive: !game.dead,
-                player_section_ready: game.section_vis.contains_key(&camera_section),
-            },
-        );
+        let inputs = ReadyInputs {
+            player_outside_build_height: outside_build_height(game.player.position.y.floor() as i32),
+            camera_outside_build_height: outside_build_height(camera_y),
+            spectator: crate::player::is_spectator(game.player.game_mode),
+            alive: !game.dead,
+            // Until the server's first position the camera sits at the origin,
+            // whose section says nothing about where we spawn.
+            player_section_ready: game.position_set && game.camera_section_ready(camera_block),
+        };
+
+        let tracker = game.level_load.as_mut().expect("checked above");
+        tracker.tick_client_load(now, &inputs);
 
         if tracker.is_level_ready(now) {
             // Vanilla's `notifyPlayerLoaded` guards on `hasClientLoaded`; here

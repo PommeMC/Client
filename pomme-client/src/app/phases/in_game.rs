@@ -954,6 +954,21 @@ impl GameState {
         }
     }
 
+    /// Vanilla `SectionUpdateTracker.hasAllNeighbors` plus
+    /// `LevelRenderer.isSectionCompiledAndVisible`: the section holding
+    /// `camera_block` may only have compiled once its column's whole 3x3
+    /// neighbourhood was loaded and lit, and it must have a mesh — an empty one
+    /// counts, as vanilla's empty `CompiledSectionMesh` does.
+    pub fn camera_section_ready(&self, camera_block: glam::IVec3) -> bool {
+        let column = ChunkPos::new(camera_block.x >> 4, camera_block.z >> 4);
+        let neighbourhood_lit = crate::world::chunk::column_neighborhood(column).all(|p| {
+            self.chunk_store.get_chunk(&p).is_some()
+                && self.light_engine.light_on_in_column((p.x, p.z))
+        });
+        let section = (camera_block.y - self.chunk_store.min_y()) >> 4;
+        neighbourhood_lit && self.section_vis.contains_key(&(column, section))
+    }
+
     /// Vanilla `ClientPacketListener.handleLogin`/`handleRespawn`: clear the
     /// loaded flag and start waiting for the new level.
     pub fn start_level_load(&mut self) {
@@ -1141,6 +1156,11 @@ impl GameState {
             // Mesh the whole column once, then nothing until a lod/content change.
             // Occlusion gates drawing, not meshing, so off-screen and hidden
             // sections still mesh (the queue orders the backlog nearest-first).
+            // TODO: vanilla won't schedule a section's first compile until its
+            // 3x3 column neighbourhood is loaded and lit
+            // (`LevelExtractor.java:155` / `SectionUpdateTracker.hasAllNeighbors`);
+            // we mesh against missing neighbours as air and repair the borders
+            // when their light bumps `content_gen`.
             let to_mesh = match self.meshed.get(&pos) {
                 Some(m) if m.lod == lod && m.content_gen == content_gen => full & !m.mask,
                 _ => full,

@@ -724,6 +724,7 @@ async fn game_loop(
     } = joined;
     let sender = PacketSender::new(outbound_tx.clone());
 
+    let mut batch_size_calculator = super::chunk_batch::ChunkBatchSizeCalculator::default();
     let shared_tree: crate::net::commands::SharedCommandTree =
         std::sync::Arc::new(parking_lot::Mutex::new(None));
 
@@ -876,7 +877,14 @@ async fn game_loop(
                 {
                     continue;
                 }
-                handle_game_packet(&packet, &sender, event_tx, &registry_holder, &shared_tree)
+                handle_game_packet(
+                    &packet,
+                    &sender,
+                    event_tx,
+                    &registry_holder,
+                    &shared_tree,
+                    &mut batch_size_calculator,
+                )
             }
             Err(e) => skip_malformed_packet(e)?,
         }
