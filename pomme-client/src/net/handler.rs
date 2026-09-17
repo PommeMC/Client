@@ -49,6 +49,14 @@ fn dimension_info(
     }
 }
 
+fn queue_player_knockback(event_tx: &Sender<NetworkEvent>, delta: glam::DVec3) {
+    let _ = event_tx.send(NetworkEvent::PlayerKnockback { delta });
+}
+
+fn queue_entity_motion(event_tx: &Sender<NetworkEvent>, id: i32, velocity: glam::DVec3) {
+    let _ = event_tx.send(NetworkEvent::EntityMotion { id, velocity });
+}
+
 pub fn handle_game_packet(
     packet: &ClientboundGamePacket,
     sender: &PacketSender,
@@ -173,20 +181,40 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z });
         }
         ClientboundGamePacket::PlayerPosition(p) => {
-            sender.send(ServerboundGamePacket::AcceptTeleportation(
-                azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation {
-                    id: p.id,
-                },
-            ));
-            let _ = event_tx.try_send(NetworkEvent::PlayerPosition {
+            // Vanilla applies the correction first, then sends the teleport ACK
+            // immediately followed by its mandatory PosRot response. Keep the
+            // pair together on the application thread instead of ACKing here
+            // before local state has consumed the correction.
+            // Player corrections are protocol-critical: dropping one also drops
+            // its required teleport acknowledgement. Backpressure the network
+            // task instead of silently discarding it when the render queue is full.
+            let _ = event_tx.send(NetworkEvent::PlayerPosition {
+                id: p.id,
                 change: p.change.clone(),
                 relative: p.relative.clone(),
+            });
+        }
+        ClientboundGamePacket::PlayerRotation(p) => {
+            // Like teleports, forced player rotations require an immediate
+            // vanilla acknowledgement and therefore cannot be lossy.
+            let _ = event_tx.send(NetworkEvent::PlayerRotation {
+                y_rot: p.y_rot,
+                relative_y: p.relative_y,
+                x_rot: p.x_rot,
+                relative_x: p.relative_x,
             });
         }
         ClientboundGamePacket::KeepAlive(p) => {
             sender.send(ServerboundGamePacket::KeepAlive(
                 azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive { id: p.id },
             ));
+        }
+        ClientboundGamePacket::Ping(p) => {
+            // Vanilla handles common ping on the main client thread. Queue it
+            // into the ordered app event stream instead of replying from the
+            // network task; the app drain then preserves its receive order
+            // relative to teleport corrections and other main-thread packets.
+            let _ = event_tx.send(NetworkEvent::Ping { id: p.id });
         }
         ClientboundGamePacket::ChunkBatchFinished(p) => {
             let desired = (p.batch_size as f32).max(25.0);
@@ -539,7 +567,10 @@ pub fn handle_game_packet(
             send_chat(event_tx, &p.message);
         }
         ClientboundGamePacket::BlockUpdate(p) => {
-            let _ = event_tx.try_send(NetworkEvent::BlockUpdate {
+            // Server-verified block state participates in next-tick collision
+            // prediction. Vanilla queues the packet onto the main client thread
+            // without dropping it; preserve that ordering/backpressure here.
+            let _ = event_tx.send(NetworkEvent::BlockUpdate {
                 pos: p.pos,
                 state: p.block_state,
             });
@@ -557,7 +588,7 @@ pub fn handle_game_packet(
                     (block_pos, s.state)
                 })
                 .collect();
-            let _ = event_tx.try_send(NetworkEvent::SectionBlocksUpdate { updates });
+            let _ = event_tx.send(NetworkEvent::SectionBlocksUpdate { updates });
         }
         ClientboundGamePacket::BlockChangedAck(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockChangedAck { seq: p.seq });
@@ -682,10 +713,26 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::SetEntityMotion(p) => {
-            let _ = event_tx.try_send(NetworkEvent::EntityMotion {
-                id: p.id.0,
-                velocity: lp_to_dvec3(&p.delta),
-            });
+            // This packet is an authoritative absolute velocity set. In
+            // particular, ServerEntity sends it to the player after hurtMarked;
+            // following an explosion it may carry the resulting combined
+            // server velocity. Dropping it leaves local prediction on the
+            // no-knockback candidate, so it must be ordered/non-lossy.
+            queue_entity_motion(event_tx, p.id.0, lp_to_dvec3(&p.delta));
+        }
+        ClientboundGamePacket::Explode(p) => {
+            if let Some(knockback) = p.player_knockback {
+                // Vanilla applies explosion knockback on the main client thread
+                // as part of handling this packet. This velocity is prediction-
+                // critical and must not be silently dropped behind a full event
+                // queue (explosions can arrive alongside large block-update
+                // bursts). Backpressure preserves both the impulse and packet
+                // ordering relative to surrounding ping transaction events.
+                queue_player_knockback(
+                    event_tx,
+                    glam::DVec3::new(knockback.x, knockback.y, knockback.z),
+                );
+            }
         }
         ClientboundGamePacket::LevelEvent(p) => {
             let _ = event_tx.try_send(NetworkEvent::LevelEvent {
@@ -1269,6 +1316,13 @@ pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bo
         };
     }
 
+    if packet_id == explode_packet_id() {
+        if let Err(e) = handle_raw_explode(&mut cur, event_tx) {
+            tracing::warn!("Skipping malformed Explode packet prefix: {e}");
+        }
+        return true;
+    }
+
     if packet_id != level_particles_packet_id() {
         return false;
     }
@@ -1280,6 +1334,61 @@ pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bo
         Err(e) => tracing::warn!("Skipping malformed LevelParticles packet: {e}"),
     }
     true
+}
+
+/// Vanilla 26.2 `ClientboundExplodePacket` starts with the center, radius,
+/// block count and optional player knockback. Azalea's pinned typed codec fails
+/// later while decoding real native 26.2 explosion frames, so consume the frame
+/// here and recover the prediction-critical prefix before typed decoding can
+/// discard the whole packet.
+///
+/// Consuming the raw frame means its trailing presentation payload never
+/// reaches typed decoding: Pomme intentionally drops the explosion particle
+/// descriptors and explosion sound here. Keep this parser version-locked with
+/// [`RAW_EXPLODE_LAYOUT_PROTOCOL`] until the full typed 26.2 codec is usable.
+fn handle_raw_explode(
+    cur: &mut std::io::Cursor<&[u8]>,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<(), azalea_buf::BufReadError> {
+    // Center is used only by vanilla's sound/particle presentation; Pomme does
+    // not currently render the packet's explosion particles here.
+    let _center_x = f64::azalea_read(cur)?;
+    let _center_y = f64::azalea_read(cur)?;
+    let _center_z = f64::azalea_read(cur)?;
+    let _radius = f32::azalea_read(cur)?;
+    let _block_count = i32::azalea_read(cur)?;
+
+    if bool::azalea_read(cur)? {
+        queue_player_knockback(
+            event_tx,
+            glam::DVec3::new(
+                f64::azalea_read(cur)?,
+                f64::azalea_read(cur)?,
+                f64::azalea_read(cur)?,
+            ),
+        );
+    }
+    Ok(())
+}
+
+const RAW_EXPLODE_LAYOUT_PROTOCOL: i32 = 776;
+const RAW_EXPLODE_LAYOUT_VERSION: &str = "26.2";
+
+fn explode_packet_id() -> u32 {
+    use pomme_protocol::{Direction, PacketTable, Phase};
+
+    static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        let native = pomme_protocol::version::NATIVE;
+        assert_eq!(
+            (native.name, native.protocol),
+            (RAW_EXPLODE_LAYOUT_VERSION, RAW_EXPLODE_LAYOUT_PROTOCOL),
+            "raw ClientboundExplode prefix parser must be reviewed when the native protocol changes"
+        );
+        PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, "explode")
+            .expect("explode in 26.2 packet table")
+    })
 }
 
 /// Azalea's pinned 26.2 `SoundSource` omits Vanilla's ordinal-10 `UI` value
@@ -1499,11 +1608,160 @@ fn slot_display_first_item(
 mod tests {
     use std::sync::Arc;
 
+    use azalea_protocol::packets::game::c_ping::ClientboundPing;
+    use azalea_protocol::packets::game::c_player_rotation::ClientboundPlayerRotation;
     use azalea_protocol::packets::game::c_set_held_slot::ClientboundSetHeldSlot;
     use parking_lot::Mutex;
     use pomme_protocol::wire;
 
     use super::*;
+
+    #[test]
+    fn forced_player_rotation_backpressures_instead_of_being_dropped() {
+        use std::sync::{Barrier, mpsc as std_mpsc};
+        use std::time::Duration;
+
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        event_tx.send(NetworkEvent::Connected).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let (done_tx, done_rx) = std_mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let event_tx = event_tx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+                let sender = PacketSender::new(out_tx);
+                let registries = RegistryHolder::default();
+                let command_tree = Arc::new(Mutex::new(None));
+                worker_barrier.wait();
+                handle_game_packet(
+                    &ClientboundGamePacket::PlayerRotation(ClientboundPlayerRotation {
+                        y_rot: 45.0,
+                        relative_y: false,
+                        x_rot: 20.0,
+                        relative_x: false,
+                    }),
+                    &sender,
+                    &event_tx,
+                    &registries,
+                    &command_tree,
+                );
+                done_tx.send(()).unwrap();
+            });
+
+            barrier.wait();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+                "critical correction must wait for queue capacity instead of being dropped"
+            );
+            assert!(matches!(event_rx.recv().unwrap(), NetworkEvent::Connected));
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(matches!(
+                event_rx.recv().unwrap(),
+                NetworkEvent::PlayerRotation {
+                    y_rot: 45.0,
+                    x_rot: 20.0,
+                    relative_y: false,
+                    relative_x: false,
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn authoritative_entity_motion_backpressures_instead_of_being_dropped() {
+        use std::sync::{Barrier, mpsc as std_mpsc};
+        use std::time::Duration;
+
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        event_tx.send(NetworkEvent::Connected).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let (done_tx, done_rx) = std_mpsc::channel();
+        let expected = glam::DVec3::new(0.125, 0.75, -0.25);
+
+        std::thread::scope(|scope| {
+            let event_tx = event_tx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                worker_barrier.wait();
+                queue_entity_motion(&event_tx, 42, expected);
+                done_tx.send(()).unwrap();
+            });
+
+            barrier.wait();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+                "authoritative entity motion must wait for queue capacity instead of being dropped"
+            );
+            assert!(matches!(event_rx.recv().unwrap(), NetworkEvent::Connected));
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(matches!(
+                event_rx.recv().unwrap(),
+                NetworkEvent::EntityMotion { id: 42, velocity } if velocity == expected
+            ));
+        });
+    }
+
+    #[test]
+    fn explosion_knockback_backpressures_instead_of_being_dropped() {
+        use std::sync::{Barrier, mpsc as std_mpsc};
+        use std::time::Duration;
+
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        event_tx.send(NetworkEvent::Connected).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let (done_tx, done_rx) = std_mpsc::channel();
+        let expected = glam::DVec3::new(0.25, 0.5, -0.125);
+
+        std::thread::scope(|scope| {
+            let event_tx = event_tx.clone();
+            let worker_barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                worker_barrier.wait();
+                queue_player_knockback(&event_tx, expected);
+                done_tx.send(()).unwrap();
+            });
+
+            barrier.wait();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+                "explosion knockback must wait for queue capacity instead of being dropped"
+            );
+            assert!(matches!(event_rx.recv().unwrap(), NetworkEvent::Connected));
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(matches!(
+                event_rx.recv().unwrap(),
+                NetworkEvent::PlayerKnockback { delta } if delta == expected
+            ));
+        });
+    }
+
+    #[test]
+    fn play_ping_is_queued_for_ordered_app_thread_handling() {
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        let registries = RegistryHolder::default();
+        let command_tree = Arc::new(Mutex::new(None));
+
+        handle_game_packet(
+            &ClientboundGamePacket::Ping(ClientboundPing { id: 0x1234_5678 }),
+            &sender,
+            &event_tx,
+            &registries,
+            &command_tree,
+        );
+
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::Ping { id: 0x1234_5678 }
+        ));
+        assert!(
+            out_rx.try_recv().is_err(),
+            "network task must not pong immediately"
+        );
+    }
 
     #[test]
     fn set_held_slot_emits_authoritative_hotbar_selection() {
@@ -1535,6 +1793,54 @@ mod tests {
                 Err(crossbeam_channel::TryRecvError::Empty)
             ));
         }
+    }
+
+    fn explosion_prefix(knockback: Option<glam::DVec3>) -> Vec<u8> {
+        let mut raw = Vec::new();
+        wire::write_varint(&mut raw, explode_packet_id());
+        for value in [12.5_f64, 64.0, -3.25] {
+            raw.extend_from_slice(&value.to_be_bytes());
+        }
+        raw.extend_from_slice(&4.0_f32.to_be_bytes());
+        raw.extend_from_slice(&7_i32.to_be_bytes());
+        raw.push(knockback.is_some() as u8);
+        if let Some(delta) = knockback {
+            for value in [delta.x, delta.y, delta.z] {
+                raw.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        raw
+    }
+
+    #[test]
+    fn raw_native_explosion_recovers_knockback_without_decoding_trailing_payload() {
+        let expected = glam::DVec3::new(-0.3125, 0.4375, 0.0625);
+        let mut raw = explosion_prefix(Some(expected));
+        // The real failure that motivated this raw edge is in Azalea's native
+        // 26.2 trailing explosion payload. The player-knockback prefix is fully
+        // defined before it, so deliberately-invalid tail bytes must not make
+        // Pomme discard the prediction-critical impulse.
+        raw.extend_from_slice(&[0xff, 0x80]);
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::PlayerKnockback { delta } if delta == expected
+        ));
+    }
+
+    #[test]
+    fn raw_native_explosion_without_knockback_is_consumed_without_event() {
+        let mut raw = explosion_prefix(None);
+        raw.push(0xff);
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        ));
     }
 
     fn direct_sound() -> Holder<SoundEvent, CustomSound> {

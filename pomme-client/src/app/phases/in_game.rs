@@ -43,6 +43,8 @@ use crate::world::block::model::CardinalLightType;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
+pub(crate) const CLIENT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Which screen a server-opened container renders as.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ContainerScreen {
@@ -114,6 +116,12 @@ pub struct GameState {
     pub silent_entities: HashSet<i32>,
     pub position_set: bool,
     pub player_loaded_sent: bool,
+    /// Player section whose renderer mesh compilation completed while the
+    /// terrain loading screen is active. The key makes a loading-time teleport
+    /// invalidate readiness from the old section automatically.
+    pub player_compiled_section: Option<(ChunkPos, i32)>,
+    /// Vanilla LevelLoadTracker's 30-second client-side chunk wait deadline.
+    pub client_load_deadline: Instant,
     pub player: LocalPlayer,
     /// Bubble index the pop sound last played for, so each pop fires once.
     pub last_bubble_pop_sound_played: i32,
@@ -328,6 +336,8 @@ impl GameState {
             silent_entities: HashSet::new(),
             position_set: false,
             player_loaded_sent: false,
+            player_compiled_section: None,
+            client_load_deadline: Instant::now() + CLIENT_WAIT_TIMEOUT,
             options_from_game: false,
             last_render_distance: render_distance,
             server_render_distance: 0,
@@ -1601,7 +1611,7 @@ pub fn update_game(
         && game.player.is_sleeping()
         && core.input.action_just_pressed(input::Action::Jump)
     {
-        core.send_stop_sleeping(connection);
+        core.send_stop_sleeping(connection, game.player.entity_id);
     }
     // TODO: remaining vanilla keybinds with no backing feature yet:
     // L advancements, P social interactions, O friends overlay (in-game),

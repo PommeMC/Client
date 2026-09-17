@@ -216,7 +216,7 @@ pub struct PlayerInputState {
 fn player_input_state(
     input: &InputState,
     analog_move: glam::Vec2,
-    sprinting: bool,
+    sprint_key_down: bool,
 ) -> PlayerInputState {
     PlayerInputState {
         forward: input.key_pressed(KeyCode::KeyW) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
@@ -225,8 +225,100 @@ fn player_input_state(
         right: input.key_pressed(KeyCode::KeyD) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
         jump: input.performing_action(Action::Jump),
         shift: input.performing_action(Action::Sneak),
-        sprint: sprinting,
+        sprint: sprint_key_down,
     }
+}
+
+fn resolve_corrected_look(
+    current: LookDirection,
+    y_rot: f32,
+    x_rot: f32,
+    relative_y: bool,
+    relative_x: bool,
+) -> LookDirection {
+    let resolved_yaw = if relative_y {
+        current.y_rot_deg() + y_rot
+    } else {
+        y_rot
+    };
+    let resolved_pitch = if relative_x {
+        current.x_rot_deg() + x_rot
+    } else {
+        x_rot
+    };
+    // Vanilla `PositionMoveRotation.calculateAbsolute` clamps here, before
+    // Entity.setXRot's modulo/clamp setter is invoked.
+    LookDirection::new(resolved_yaw, resolved_pitch.clamp(-90.0, 90.0))
+}
+
+struct ResolvedPlayerCorrection {
+    position: Position,
+    prev_position: Position,
+    velocity: Velocity,
+    look_dir: LookDirection,
+    prev_look_dir: LookDirection,
+}
+
+fn resolve_player_position_correction(
+    player: &LocalPlayer,
+    change: &azalea_protocol::common::movements::PositionMoveRotation,
+    relative: &azalea_protocol::common::movements::RelativeMovements,
+    is_passenger: bool,
+) -> Option<ResolvedPlayerCorrection> {
+    if is_passenger {
+        return None;
+    }
+
+    fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
+        if is_relative { base + value } else { value }
+    }
+
+    let position = Position::new(
+        resolve(player.position.x, relative.x, change.pos.x),
+        resolve(player.position.y, relative.y, change.pos.y),
+        resolve(player.position.z, relative.z, change.pos.z),
+    );
+    let look_dir = resolve_corrected_look(
+        player.look_dir,
+        change.look_direction.y_rot(),
+        change.look_direction.x_rot(),
+        relative.y_rot,
+        relative.x_rot,
+    );
+    let prev_look_dir = resolve_corrected_look(
+        player.prev_look_dir,
+        change.look_direction.y_rot(),
+        change.look_direction.x_rot(),
+        relative.y_rot,
+        relative.x_rot,
+    );
+    let prev_position = Position::new(
+        resolve(player.prev_position.x, relative.x, change.pos.x),
+        resolve(player.prev_position.y, relative.y, change.pos.y),
+        resolve(player.prev_position.z, relative.z, change.pos.z),
+    );
+
+    let mut velocity = player.velocity;
+    if relative.rotate_delta {
+        let x_rot_delta = player.look_dir.x_rot_deg() - look_dir.x_rot_deg();
+        let y_rot_delta = player.look_dir.y_rot_deg() - look_dir.y_rot_deg();
+        velocity = velocity
+            .x_rot(x_rot_delta.to_radians() as f64)
+            .y_rot(y_rot_delta.to_radians() as f64);
+    }
+    velocity = Velocity::new(
+        resolve(velocity.x, relative.delta_x, change.delta.x),
+        resolve(velocity.y, relative.delta_y, change.delta.y),
+        resolve(velocity.z, relative.delta_z, change.delta.z),
+    );
+
+    Some(ResolvedPlayerCorrection {
+        position,
+        prev_position,
+        velocity,
+        look_dir,
+        prev_look_dir,
+    })
 }
 
 fn serverbound_player_input(state: &PlayerInputState) -> ServerboundPlayerInput {
@@ -630,18 +722,22 @@ impl AppCore {
         // chunks stream in, instead of starving behind the load backlog.
         let mut priority_remesh: Vec<(azalea_core::position::ChunkPos, i32)> = Vec::new();
         let mut disconnect_reason: Option<String> = None;
-        let mut processed = 0u32;
         self.drain_player_skin_results(renderer);
 
+        // Vanilla 26.2 PacketProcessor.processQueuedPackets drains the entire
+        // queued packet list before running any client ticks. Do the same here:
+        // stopping at an arbitrary event count can leave transaction-sensitive
+        // state (explosion knockback, teleports, pings) pending while movement
+        // simulation advances against stale network state.
         while let Ok(event) = rx.try_recv() {
-            processed += 1;
-            if processed > 4096 {
-                break;
-            }
             match event {
                 NetworkEvent::Connected => {
                     if let Some(state) = connect_phase.as_deref_mut() {
                         tracing::info!("Connected to server");
+                        // Start the play-state tick envelope cleanly. While the
+                        // loading screen is up vanilla still emits one
+                        // CLIENT_TICK_END every 50 ms.
+                        self.tick_accumulator = 0.0;
                         *state = ConnectionPhase::Loading;
                     } else {
                         tracing::warn!("Unexpected NetworkEvent::Connected, skipping");
@@ -669,6 +765,9 @@ impl AppCore {
                         crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
                     game.position_set = false;
                     game.player_loaded_sent = false;
+                    game.player_compiled_section = None;
+                    game.client_load_deadline = std::time::Instant::now()
+                        + crate::app::phases::in_game::CLIENT_WAIT_TIMEOUT;
                     // Login/respawn recreate vanilla's LocalPlayer, resetting
                     // the XP display sentinel; waypoints persist.
                     game.xp_display_start_tick = i64::MIN;
@@ -730,78 +829,92 @@ impl AppCore {
                     game.chunk_store
                         .set_center(azalea_core::position::ChunkPos::new(x, z));
                 }
-                NetworkEvent::PlayerPosition { change, relative } => {
-                    fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
-                        if is_relative { base + value } else { value }
-                    }
+                NetworkEvent::Ping { id } => {
+                    // Common client packets run on vanilla's main client thread
+                    // in network receive order. Reply here, inside the ordered
+                    // event drain, so transaction pongs cannot overtake or lag
+                    // behind adjacent teleport acknowledgements while still
+                    // remaining ahead of this frame's ordinary movement tick.
+                    connection.packet_tx.send(ServerboundGamePacket::Pong(
+                        azalea_protocol::packets::game::s_pong::ServerboundPong { id },
+                    ));
+                }
+                NetworkEvent::PlayerPosition {
+                    id,
+                    change,
+                    relative,
+                } => {
+                    let is_passenger = game.riding_vehicle_id.is_some();
+                    if let Some(correction) = resolve_player_position_correction(
+                        &game.player,
+                        &change,
+                        &relative,
+                        is_passenger,
+                    ) {
+                        game.player.position = correction.position;
+                        game.player.prev_position = correction.prev_position;
+                        game.player.velocity = correction.velocity;
+                        game.player.look_dir = correction.look_dir;
+                        game.player.prev_look_dir = correction.prev_look_dir;
 
-                    let new_position = Position::new(
-                        resolve(game.player.position.x, relative.x, change.pos.x),
-                        resolve(game.player.position.y, relative.y, change.pos.y),
-                        resolve(game.player.position.z, relative.z, change.pos.z),
-                    );
+                        let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
+                        game.chunk_store
+                            .set_center(azalea_core::position::ChunkPos::new(
+                                to_chunk_coord(correction.position.x),
+                                to_chunk_coord(correction.position.z),
+                            ));
+                        renderer.reset_camera(correction.position, correction.look_dir);
 
-                    let new_look_dir = LookDirection::new(
-                        resolve(
-                            game.player.look_dir.y_rot_deg(),
-                            relative.y_rot,
-                            change.look_direction.y_rot(),
-                        ),
-                        resolve(
-                            game.player.look_dir.x_rot_deg(),
-                            relative.x_rot,
-                            change.look_direction.x_rot(),
-                        ),
-                    );
-
-                    let new_velocity = {
-                        let mut new_velocity = game.player.velocity;
-                        if relative.rotate_delta {
-                            let x_rot_delta =
-                                game.player.look_dir.x_rot_deg() - new_look_dir.x_rot_deg();
-                            let y_rot_delta =
-                                game.player.look_dir.y_rot_deg() - new_look_dir.y_rot_deg();
-
-                            new_velocity = new_velocity
-                                .x_rot(x_rot_delta.to_radians() as f64)
-                                .y_rot(y_rot_delta.to_radians() as f64);
+                        if !game.position_set {
+                            game.position_set = true;
+                            tracing::info!(
+                                "Player position set to ({:.1}, {:.1}, {:.1})",
+                                correction.position.x,
+                                correction.position.y,
+                                correction.position.z
+                            );
                         }
-                        Velocity::new(
-                            resolve(new_velocity.x, relative.delta_x, change.delta.x),
-                            resolve(new_velocity.y, relative.delta_y, change.delta.y),
-                            resolve(new_velocity.z, relative.delta_z, change.delta.z),
-                        )
-                    };
-
-                    game.player.position = new_position;
-                    game.player.prev_position = game.player.position;
-                    game.player.velocity = new_velocity;
-                    game.player.look_dir = new_look_dir;
-                    game.player.prev_look_dir = game.player.look_dir;
-                    game.interaction.on_teleport();
-
-                    let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
-                    game.chunk_store
-                        .set_center(azalea_core::position::ChunkPos::new(
-                            to_chunk_coord(new_position.x),
-                            to_chunk_coord(new_position.z),
-                        ));
-
-                    renderer.reset_camera(new_position, new_look_dir);
-
-                    if !game.position_set {
-                        game.position_set = true;
-                        tracing::info!(
-                            "Player position set to ({:.1}, {:.1}, {:.1})",
-                            new_position.x,
-                            new_position.y,
-                            new_position.z
-                        );
                     }
 
+                    // Vanilla mounted players skip applying the correction but
+                    // still acknowledge it and echo their current PosRot.
+                    connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
+                        azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation { id },
+                    ));
                     connection.packet_tx.send(ServerboundGamePacket::MovePlayerPosRot(
                         azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
-                            pos: new_position.into(),
+                            pos: game.player.position.into(),
+                            look_direction: game.player.look_dir.into(),
+                            flags: azalea_protocol::common::movements::MoveFlags {
+                                on_ground: false,
+                                horizontal_collision: false,
+                            },
+                        },
+                    ));
+                    game.interaction.on_teleport();
+                }
+                NetworkEvent::PlayerRotation {
+                    y_rot,
+                    relative_y,
+                    x_rot,
+                    relative_x,
+                } => {
+                    let new_look_dir = resolve_corrected_look(
+                        game.player.look_dir,
+                        y_rot,
+                        x_rot,
+                        relative_y,
+                        relative_x,
+                    );
+
+                    // Vanilla `handleRotatePlayer` sets current rotation and
+                    // then copies that exact result into the old rotation before
+                    // acknowledging with a Rot packet.
+                    game.player.look_dir = new_look_dir;
+                    game.player.prev_look_dir = new_look_dir;
+                    renderer.reset_camera(game.player.position, new_look_dir);
+                    connection.packet_tx.send(ServerboundGamePacket::MovePlayerRot(
+                        azalea_protocol::packets::game::s_move_player_rot::ServerboundMovePlayerRot {
                             look_direction: new_look_dir.into(),
                             flags: azalea_protocol::common::movements::MoveFlags {
                                 on_ground: false,
@@ -1423,8 +1536,24 @@ impl AppCore {
                         .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
                 }
                 NetworkEvent::EntityMotion { id, velocity } => {
-                    game.item_entity_store.set_motion(id, velocity);
-                    game.entity_store.set_living_motion(id, velocity);
+                    // Vanilla `handleSetEntityMotion` resolves the local player
+                    // through ClientLevel and applies the packet with
+                    // `Entity.lerpMotion` (which is a direct velocity set).
+                    // Pomme keeps the local player outside EntityStore, so it
+                    // must be handled explicitly instead of silently dropping
+                    // server knockback/motion corrections for our entity id.
+                    if id == game.player.entity_id {
+                        game.player.velocity = velocity.into();
+                    } else {
+                        game.item_entity_store.set_motion(id, velocity);
+                        game.entity_store.set_living_motion(id, velocity);
+                    }
+                }
+                NetworkEvent::PlayerKnockback { delta } => {
+                    // `handleExplosion` uses LocalPlayer.addDeltaMovement.
+                    game.player.velocity.x += delta.x;
+                    game.player.velocity.y += delta.y;
+                    game.player.velocity.z += delta.z;
                 }
                 NetworkEvent::EntityTeleported {
                     id,
@@ -1878,6 +2007,25 @@ impl AppCore {
         connection: &ConnectionHandle,
         game: &mut GameState,
     ) {
+        self.tick_physics_with_input(renderer, connection, game, true);
+    }
+
+    pub fn tick_loading_physics(
+        &mut self,
+        renderer: &mut Renderer,
+        connection: &ConnectionHandle,
+        game: &mut GameState,
+    ) {
+        self.tick_physics_with_input(renderer, connection, game, false);
+    }
+
+    fn tick_physics_with_input(
+        &mut self,
+        renderer: &mut Renderer,
+        connection: &ConnectionHandle,
+        game: &mut GameState,
+        allow_live_input: bool,
+    ) {
         if game.death_screen_open {
             if game.death_confirm {
                 game.death_confirm_ticks = game.death_confirm_ticks.saturating_add(1);
@@ -1909,6 +2057,7 @@ impl AppCore {
         // on ClientLevel.tickEntities skips it entirely.
         if game.dead && game.player.death_animation_finished() {
             self.input.clear_click_counts();
+            Self::send_client_tick_end(connection);
             return;
         }
 
@@ -1963,13 +2112,14 @@ impl AppCore {
 
             // Q/F presses queued while dead must not fire on respawn.
             self.input.clear_click_counts();
+            Self::send_client_tick_end(connection);
             return;
         }
 
         // Open menus only release the keys; the simulation keeps ticking. The
         // chunk-load benchmark also freezes the player so every run measures the
         // same fixed origin.
-        let input_live = game.input_live() && game.chunk_load_bench.is_none();
+        let input_live = allow_live_input && game.input_live() && game.chunk_load_bench.is_none();
 
         // Vanilla Minecraft.handleKeybinds: drop and offhand-swap consume the
         // queued key presses each tick; spectators consume without acting.
@@ -2067,6 +2217,51 @@ impl AppCore {
 
         game.player.look_dir = renderer.camera_look_dir();
 
+        // Vanilla updates the crosshair target and handles game-mode/keybind
+        // interactions before LocalPlayer.tick sends input/sprint/movement.
+        // Packets emitted by interaction handling therefore belong before the
+        // movement packet inside this CLIENT_TICK_END envelope.
+        game.interaction.update_target(
+            game.player.eye_pos(),
+            game.player.look_dir,
+            &game.chunk_store,
+            &game.entity_store,
+            crate::player::is_creative(game.player.game_mode),
+        );
+        let held_stack = game
+            .player
+            .inventory
+            .held_stack(input.selected_slot())
+            .cloned();
+        let place_block = held_stack.as_ref().and_then(|data| {
+            let name = crate::player::inventory::item_resource_name(data.kind);
+            renderer.registry().placeable_block_for_item(&name)
+        });
+        let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
+        let player_aabb = game.player.bounding_box();
+        let dirty = game.interaction.tick_actions(
+            input,
+            &game.chunk_store,
+            &connection.packet_tx,
+            &self.audio,
+            game.player.position.into(),
+            player_aabb,
+            game.player.eye_pos().into(),
+            game.player.look_dir,
+            game.player.on_ground,
+            crate::player::is_creative(game.player.game_mode),
+            game.player.food,
+            input.selected_slot(),
+            held_stack.as_ref(),
+            place_block,
+            hands_empty,
+            &mut crate::player::interaction::BreakEffects {
+                particles: &mut game.particle_store,
+                registry: renderer.registry(),
+                biome_climate: &game.biome_climate,
+            },
+        );
+
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         }
@@ -2088,50 +2283,28 @@ impl AppCore {
         );
         game.player.tick_bob(dx, dz, false);
 
-        Self::send_abilities_packet(connection, game);
-        Self::send_input_packet(input, connection, game);
-        self.send_sprint_command(connection, game);
-        self.send_position_packet(connection, game);
-
-        let eye_pos = game.player.eye_pos();
-        game.interaction.update_target(
-            eye_pos,
-            game.player.look_dir,
-            &game.chunk_store,
-            &game.entity_store,
-            crate::player::is_creative(game.player.game_mode),
-        );
-
-        let held_stack = game.player.inventory.held_stack(input.selected_slot());
-        let place_block = held_stack.and_then(|data| {
-            let name = crate::player::inventory::item_resource_name(data.kind);
-            renderer.registry().placeable_block_for_item(&name)
-        });
-        let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
-
-        let player_aabb = game.player.bounding_box();
-        let dirty = game.interaction.tick(
-            input,
-            &game.chunk_store,
-            &connection.packet_tx,
+        // LivingEntity/Player heartbeat state advances during the entity tick,
+        // still before LocalPlayer sends its changed input and movement. This
+        // path deliberately sends no packets.
+        game.interaction.tick_player_state(
+            input.is_cursor_captured(),
+            held_stack.as_ref(),
             &self.audio,
+            &game.chunk_store,
             game.player.position.into(),
-            player_aabb,
             game.player.eye_pos().into(),
             game.player.look_dir,
-            game.player.on_ground,
-            crate::player::is_creative(game.player.game_mode),
-            game.player.food,
-            input.selected_slot(),
-            held_stack,
-            place_block,
-            hands_empty,
             &mut crate::player::interaction::BreakEffects {
                 particles: &mut game.particle_store,
                 registry: renderer.registry(),
                 biome_climate: &game.biome_climate,
             },
         );
+
+        Self::send_abilities_packet(connection, game);
+        Self::send_input_packet(input, connection, game);
+        self.send_sprint_command(connection, game);
+        self.send_position_packet(connection, game);
         if !dirty.is_empty() {
             let min_y = game.chunk_store.min_y();
             let n = game.chunk_store.section_count();
@@ -2170,6 +2343,10 @@ impl AppCore {
         // Marks the end of the client tick (1.21.2+). Must be the last packet of
         // the tick: servers and anti-cheat batch our movement between these to
         // tick-align it, so omitting it makes them reject/rubber-band movement.
+        Self::send_client_tick_end(connection);
+    }
+
+    fn send_client_tick_end(connection: &ConnectionHandle) {
         connection
             .packet_tx
             .send(ServerboundGamePacket::ClientTickEnd(
@@ -2200,7 +2377,8 @@ impl AppCore {
             .get_gamepad_movement_axes()
             .unwrap_or(glam::Vec2::ZERO);
 
-        let current = player_input_state(input, analog_move, game.player.sprinting);
+        let current =
+            player_input_state(input, analog_move, input.performing_action(Action::Sprint));
 
         if current != game.last_sent_input {
             sender.send(ServerboundGamePacket::PlayerInput(
@@ -2213,13 +2391,14 @@ impl AppCore {
     fn send_player_command(
         &self,
         connection: &ConnectionHandle,
+        entity_id: i32,
         action: azalea_protocol::packets::game::s_player_command::Action,
     ) {
         connection
             .packet_tx
             .send(ServerboundGamePacket::PlayerCommand(
                 azalea_protocol::packets::game::s_player_command::ServerboundPlayerCommand {
-                    id: azalea_core::entity_id::MinecraftEntityId(0),
+                    id: azalea_core::entity_id::MinecraftEntityId(entity_id),
                     action,
                     data: 0,
                 },
@@ -2234,15 +2413,16 @@ impl AppCore {
             } else {
                 azalea_protocol::packets::game::s_player_command::Action::StopSprinting
             };
-            self.send_player_command(connection, action);
+            self.send_player_command(connection, game.player.entity_id, action);
             game.was_sprinting = sprinting;
         }
     }
 
     /// Vanilla InBedChatScreen: leaving bed sends PlayerCommand STOP_SLEEPING.
-    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle) {
+    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle, entity_id: i32) {
         self.send_player_command(
             connection,
+            entity_id,
             azalea_protocol::packets::game::s_player_command::Action::StopSleeping,
         );
     }
@@ -2377,10 +2557,12 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeathRoute, death_route, player_input_state, server_view_distance_update,
-        serverbound_player_input,
+        DeathRoute, death_route, player_input_state, resolve_corrected_look,
+        resolve_player_position_correction, server_view_distance_update, serverbound_player_input,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
+    use crate::entity::components::{LookDirection, Position, Velocity};
+    use crate::player::LocalPlayer;
 
     #[test]
     fn controller_packet_directions_match_physical_stick_direction() {
@@ -2411,6 +2593,59 @@ mod tests {
     fn death_route_follows_show_death_screen() {
         assert_eq!(death_route(true), DeathRoute::ShowDeathScreen);
         assert_eq!(death_route(false), DeathRoute::Respawn);
+    }
+
+    #[test]
+    fn correction_pitch_clamps_before_entity_setter_modulo() {
+        let current = LookDirection::new(30.0, 80.0);
+
+        let absolute = resolve_corrected_look(current, 720.0, 360.0, false, false);
+        assert_eq!(absolute.y_rot_deg(), 720.0);
+        assert_eq!(absolute.x_rot_deg(), 90.0);
+
+        let relative = resolve_corrected_look(current, 400.0, 50.0, true, true);
+        assert_eq!(relative.y_rot_deg(), 430.0);
+        assert_eq!(relative.x_rot_deg(), 90.0);
+    }
+
+    #[test]
+    fn mounted_player_position_correction_is_acknowledged_without_local_application() {
+        use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+
+        let mut player = LocalPlayer::new();
+        player.position = Position::new(1.0, 2.0, 3.0);
+        player.prev_position = Position::new(0.5, 1.5, 2.5);
+        player.velocity = Velocity::new(0.1, 0.2, 0.3);
+        player.look_dir = LookDirection::new(10.0, 20.0);
+        player.prev_look_dir = LookDirection::new(5.0, 15.0);
+
+        let change = PositionMoveRotation {
+            pos: azalea_core::position::Vec3::new(100.0, 200.0, 300.0),
+            delta: azalea_core::position::Vec3::new(1.0, 2.0, 3.0),
+            look_direction: azalea_entity::LookDirection::new(90.0, 45.0),
+        };
+        let relative = RelativeMovements::all_absolute();
+
+        let unmounted = resolve_player_position_correction(&player, &change, &relative, false)
+            .expect("unmounted correction applies");
+        assert_eq!(unmounted.position, Position::new(100.0, 200.0, 300.0));
+        assert_eq!(unmounted.velocity, Velocity::new(1.0, 2.0, 3.0));
+        assert_eq!(unmounted.look_dir, LookDirection::new(90.0, 45.0));
+
+        assert!(
+            resolve_player_position_correction(&player, &change, &relative, true).is_none(),
+            "vanilla mounted clients acknowledge the teleport but keep current local PosRot"
+        );
+    }
+
+    #[test]
+    fn player_input_packet_uses_physical_sprint_key_state() {
+        let input = InputState::released();
+        let pressed = serverbound_player_input(&player_input_state(&input, glam::Vec2::ZERO, true));
+        let released =
+            serverbound_player_input(&player_input_state(&input, glam::Vec2::ZERO, false));
+        assert!(pressed.sprint);
+        assert!(!released.sprint);
     }
 
     #[test]
