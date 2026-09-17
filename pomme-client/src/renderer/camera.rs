@@ -230,11 +230,7 @@ impl Camera {
 
     pub fn update_look(&mut self, input: &mut InputState, dt: f32, sensitivity: f32) {
         if let Some(look_vec) = input.get_gamepad_right_analog() {
-            let step = CONTROLLER_SENSITIVITY * dt;
-            let y_rot_deg =
-                ((self.look_dir.y_rot_deg() + look_vec.x * step) + 180.0).rem_euclid(360.0) - 180.0;
-            let x_rot_deg = self.look_dir.x_rot_deg() - look_vec.y * step; //TODO: Add preference for inverting the Y axis
-            self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
+            self.update_gamepad_look(look_vec, dt, false);
         }
 
         if input.is_cursor_captured() {
@@ -246,6 +242,15 @@ impl Camera {
             let x_rot_deg = self.look_dir.x_rot_deg() + dy as f32 * mouse_sensitivity;
             self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
         }
+    }
+
+    fn update_gamepad_look(&mut self, look_vec: glam::Vec2, dt: f32, invert_y: bool) {
+        let step = CONTROLLER_SENSITIVITY * dt;
+        let y_rot_deg =
+            ((self.look_dir.y_rot_deg() + look_vec.x * step) + 180.0).rem_euclid(360.0) - 180.0;
+        let y = if invert_y { look_vec.y } else { -look_vec.y };
+        let x_rot_deg = self.look_dir.x_rot_deg() + y * step;
+        self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
     }
 
     pub fn set_aspect_ratio(&mut self, aspect: f32) {
