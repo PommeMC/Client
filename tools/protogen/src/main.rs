@@ -284,14 +284,23 @@ fn generate(
 
 /// The static registries whose numeric ids reach the client over the wire
 /// and can shift between versions; the remap layer covers exactly these.
-const CLIENT_REGISTRIES: [&str; 8] = [
+const CLIENT_REGISTRIES: [&str; 17] = [
     "attribute",
     "block_entity_type",
+    "command_argument_type",
+    "consume_effect_type",
     "data_component_type",
+    "debug_subscription",
     "entity_type",
     "game_event",
     "item",
+    "menu",
+    "number_format_type",
     "particle_type",
+    "position_source_type",
+    "recipe_display",
+    "recipe_serializer",
+    "slot_display",
     "sound_event",
 ];
 
@@ -323,9 +332,8 @@ fn generate_registries(root: &Path, version: &str, out_path: &str) -> Result<(),
                     .get("protocol_id")
                     .and_then(|id| id.as_u64())
                     .ok_or_else(|| format!("{name}: {key} has no protocol_id"))?;
-                let key = key
-                    .strip_prefix("minecraft:")
-                    .ok_or_else(|| format!("{name}: non-minecraft entry {key}"))?;
+                // As `Identifier.toShortString`: other namespaces (brigadier:) stay.
+                let key = key.strip_prefix("minecraft:").unwrap_or(key);
                 Ok((key, id))
             })
             .collect::<Result<_, Error>>()?;
