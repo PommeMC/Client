@@ -12,28 +12,24 @@
 
 use azalea_protocol::packets::config::s_select_known_packs::KnownPack;
 use azalea_registry::identifier::Identifier;
+use pomme_protocol::KnownPackTable;
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
+
+fn table() -> Option<&'static KnownPackTable> {
+    KnownPackTable::for_protocol(crate::version::session_protocol())
+}
 
 /// Vanilla `KnownPacksManager.trySelectingPacks`: the offered packs this
 /// client has, in the order the server sent them. Versions with no embedded
 /// table claim nothing, so the server keeps sending full registry data.
 pub fn select_packs(offered: &[KnownPack]) -> Vec<KnownPack> {
-    let protocol = crate::version::session_protocol();
-    let offered: Vec<pomme_protocol::KnownPack> = offered
+    let Some(table) = table() else {
+        return Vec::new();
+    };
+    offered
         .iter()
-        .map(|pack| pomme_protocol::KnownPack {
-            namespace: pack.namespace.clone(),
-            id: pack.id.clone(),
-            version: pack.version.clone(),
-        })
-        .collect();
-    pomme_protocol::known_packs::select_packs(protocol, &offered)
-        .into_iter()
-        .map(|pack| KnownPack {
-            namespace: pack.namespace,
-            id: pack.id,
-            version: pack.version,
-        })
+        .filter(|p| table.knows(&p.namespace, &p.id, &p.version))
+        .cloned()
         .collect()
 }
 
@@ -45,22 +41,18 @@ pub fn fill_known_entries(
     registry: &Identifier,
     entries: Vec<(Identifier, Option<NbtCompound>)>,
 ) -> Result<Vec<(Identifier, Option<NbtCompound>)>, String> {
-    let protocol = crate::version::session_protocol();
     entries
         .into_iter()
-        .map(|(id, data)| match data {
-            Some(data) => Ok((id, Some(data))),
-            None => {
-                let element = pomme_protocol::known_packs::element(
-                    protocol,
-                    &registry.to_string(),
-                    &id.to_string(),
-                )
+        .map(|(id, data)| {
+            if data.is_some() {
+                return Ok((id, data));
+            }
+            let element = table()
+                .and_then(|t| t.element(&registry.to_string(), &id.to_string()))
                 .ok_or_else(|| {
                     format!("Failed to find resource {registry}/{id} for element {id}")
                 })?;
-                Ok((id, Some(json_to_compound(element))))
-            }
+            Ok((id, Some(json_to_compound(element))))
         })
         .collect()
 }
@@ -68,7 +60,8 @@ pub fn fill_known_entries(
 /// A registry element's JSON as NBT, the way vanilla's `JsonOps` -> `NbtOps`
 /// conversion does it: booleans are bytes, whole numbers are ints (longs when
 /// they don't fit), fractions are floats — the codecs behind these registries
-/// read `Codec.FLOAT` — and arrays become homogeneous lists.
+/// read `Codec.FLOAT` — and arrays become lists, which simdnbt makes
+/// homogeneous exactly as `NbtOps.createList` does.
 fn json_to_compound(value: &serde_json::Value) -> NbtCompound {
     let mut compound = NbtCompound::new();
     if let Some(fields) = value.as_object() {
@@ -92,62 +85,25 @@ fn json_to_nbt(value: &serde_json::Value) -> Option<NbtTag> {
             None => NbtTag::Float(n.as_f64().unwrap_or_default() as f32),
         },
         serde_json::Value::String(s) => NbtTag::String(s.as_str().into()),
-        serde_json::Value::Array(items) => NbtTag::List(json_to_list(items)),
+        serde_json::Value::Array(items) => NbtTag::List(NbtList::from(
+            items.iter().filter_map(json_to_nbt).collect::<Vec<_>>(),
+        )),
         serde_json::Value::Object(_) => NbtTag::Compound(json_to_compound(value)),
     })
 }
 
-/// NBT lists are homogeneous. Vanilla's `NbtOps.createList` wraps the elements
-/// of a mixed list in compounds keyed `""`; the registry data has none, but
-/// keep the same fallback so one can't silently lose entries.
-fn json_to_list(items: &[serde_json::Value]) -> NbtList {
-    let tags: Vec<NbtTag> = items.iter().filter_map(json_to_nbt).collect();
-    let Some(first) = tags.first() else {
-        return NbtList::Empty;
-    };
-    if tags.iter().any(|tag| tag.id() != first.id()) {
-        return NbtList::Compound(
-            tags.into_iter()
-                .map(|tag| {
-                    let mut wrapper = NbtCompound::new();
-                    wrapper.insert("", tag);
-                    wrapper
-                })
-                .collect(),
-        );
-    }
-    match first {
-        NbtTag::Byte(_) => NbtList::Byte(tags.iter().filter_map(NbtTag::byte).collect()),
-        NbtTag::Short(_) => NbtList::Short(tags.iter().filter_map(NbtTag::short).collect()),
-        NbtTag::Int(_) => NbtList::Int(tags.iter().filter_map(NbtTag::int).collect()),
-        NbtTag::Long(_) => NbtList::Long(tags.iter().filter_map(NbtTag::long).collect()),
-        NbtTag::Float(_) => NbtList::Float(tags.iter().filter_map(NbtTag::float).collect()),
-        NbtTag::Double(_) => NbtList::Double(tags.iter().filter_map(NbtTag::double).collect()),
-        NbtTag::String(_) => NbtList::String(
-            tags.iter()
-                .filter_map(NbtTag::string)
-                .map(|s| s.to_owned())
-                .collect(),
-        ),
-        NbtTag::Compound(_) => NbtList::Compound(
-            tags.into_iter()
-                .filter_map(|tag| match tag {
-                    NbtTag::Compound(c) => Some(c),
-                    _ => None,
-                })
-                .collect(),
-        ),
-        NbtTag::List(_) => NbtList::List(
-            tags.into_iter()
-                .filter_map(|tag| match tag {
-                    NbtTag::List(l) => Some(l),
-                    _ => None,
-                })
-                .collect(),
-        ),
-        // The registries hold no array-typed elements.
-        _ => NbtList::Empty,
-    }
+/// The entries a server sends for a registry carried by a pack we claimed:
+/// ids in table order, with no data.
+#[cfg(test)]
+pub fn data_less_entries(registry: &str) -> Vec<(Identifier, Option<NbtCompound>)> {
+    table()
+        .expect("embedded table")
+        .registries()
+        .find(|(r, _)| *r == registry)
+        .unwrap_or_else(|| panic!("{registry} is not embedded"))
+        .1
+        .map(|(id, _)| (Identifier::new(format!("minecraft:{id}")), None))
+        .collect()
 }
 
 #[cfg(test)]
@@ -175,14 +131,13 @@ mod tests {
         let compound = json_to_compound(&serde_json::json!({
             "strings": ["a", "b"],
             "compounds": [{"id": 1}],
-            "empty": [],
             "mixed": ["a", 1],
         }));
         assert!(matches!(compound.list("strings"), Some(NbtList::String(s)) if s.len() == 2));
         assert!(matches!(compound.list("compounds"), Some(NbtList::Compound(c)) if c.len() == 1));
-        assert!(matches!(compound.list("empty"), Some(NbtList::Empty)));
-        let NbtList::Compound(mixed) = compound.list("mixed").expect("mixed list") else {
-            panic!("a mixed list wraps its elements in compounds");
+        // A mixed list wraps its elements in compounds keyed "", as `NbtOps` does.
+        let Some(NbtList::Compound(mixed)) = compound.list("mixed") else {
+            panic!("mixed list");
         };
         assert_eq!(
             mixed[0].string("").map(|s| s.to_string()).as_deref(),

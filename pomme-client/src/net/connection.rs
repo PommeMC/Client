@@ -450,8 +450,6 @@ async fn config_sequence(
 
     let mut registry_holder = RegistryHolder::default();
     let mut received_registry_data = false;
-    // Whether we claimed any pack, and so have to fill in the entries the
-    // server sends without data.
     let mut selected_known_packs = false;
 
     // Vanilla sends brand and client information once, from the login
@@ -981,16 +979,10 @@ mod tests {
     fn filled_biome_entries_carry_their_climate() {
         use azalea_registry::identifier::Identifier;
 
-        let biome_registry = Identifier::new("minecraft:worldgen/biome");
-        let sent: Vec<(Identifier, Option<simdnbt::owned::NbtCompound>)> =
-            pomme_protocol::known_packs::registries(NATIVE.protocol)
-                .into_iter()
-                .find(|(registry, _)| *registry == "worldgen/biome")
-                .expect("embedded biomes")
-                .1
-                .iter()
-                .map(|(id, _)| (Identifier::new(format!("minecraft:{id}")), None))
-                .collect();
+        use crate::net::known_packs::{data_less_entries, fill_known_entries};
+
+        let registry = Identifier::new("minecraft:worldgen/biome");
+        let sent = data_less_entries("worldgen/biome");
         let plains_id = sent
             .iter()
             .position(|(id, _)| id.path() == "plains")
@@ -998,12 +990,11 @@ mod tests {
 
         let mut holder = azalea_core::registry_holder::RegistryHolder::default();
         holder.append(
-            biome_registry.clone(),
-            super::super::known_packs::fill_known_entries(&biome_registry, sent).unwrap(),
+            registry.clone(),
+            fill_known_entries(&registry, sent).unwrap(),
         );
 
-        let climate = extract_biome_climate(&holder);
-        let plains = &climate[&plains_id];
+        let plains = &extract_biome_climate(&holder)[&plains_id];
         assert_eq!(plains.temperature, 0.8);
         assert_eq!(plains.downfall, 0.4);
     }

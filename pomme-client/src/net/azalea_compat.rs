@@ -3156,20 +3156,13 @@ fn translate_tag_query_763() {
 /// after it. Claiming the pack is only safe while this holds.
 #[test]
 fn embedded_known_pack_elements_deserialize_through_azalea() {
-    let protocol = pomme_protocol::version::NATIVE.protocol;
-    for (registry, elements) in pomme_protocol::known_packs::registries(protocol) {
+    use crate::net::known_packs::{data_less_entries, fill_known_entries};
+
+    for (registry, elements) in pomme_protocol::KnownPackTable::native().registries() {
         let registry_id = Identifier::new(format!("minecraft:{registry}"));
-        // What the server sends for a pack the client claimed: ids, no data.
-        let sent: Vec<(Identifier, Option<simdnbt::owned::NbtCompound>)> = elements
-            .iter()
-            .map(|(id, _)| (Identifier::new(format!("minecraft:{id}")), None))
-            .collect();
-        let filled = crate::net::known_packs::fill_known_entries(&registry_id, sent)
-            .unwrap_or_else(|e| panic!("{registry}: {e}"));
-        assert!(
-            filled.iter().all(|(_, data)| data.is_some()),
-            "{registry}: an entry was left without data",
-        );
+        let sent = data_less_entries(registry);
+        let filled =
+            fill_known_entries(&registry_id, sent).unwrap_or_else(|e| panic!("{registry}: {e}"));
 
         let mut holder = azalea_core::registry_holder::RegistryHolder::default();
         holder.append(registry_id.clone(), filled);
@@ -3178,7 +3171,7 @@ fn embedded_known_pack_elements_deserialize_through_azalea() {
             "enchantment" => holder.enchantment.map.len(),
             _ => holder.extra[&registry_id].map.len(),
         };
-        assert_eq!(kept, elements.len(), "{registry}: entries were dropped");
+        assert_eq!(kept, elements.count(), "{registry}: entries were dropped");
 
         // The values have to survive the JSON -> NBT conversion too, not just
         // the deserialize: `dimension_info` reads these two off the holder.
@@ -3199,18 +3192,12 @@ fn select_known_packs_reply_is_byte_exact() {
         KnownPack, ServerboundSelectKnownPacks,
     };
 
-    let offered = vec![
-        KnownPack {
-            namespace: "minecraft".to_owned(),
-            id: "core".to_owned(),
-            version: pomme_protocol::version::NATIVE.name.to_owned(),
-        },
-        KnownPack {
-            namespace: "pomme".to_owned(),
-            id: "core".to_owned(),
-            version: pomme_protocol::version::NATIVE.name.to_owned(),
-        },
-    ];
+    let core_of = |namespace: &str| KnownPack {
+        namespace: namespace.to_owned(),
+        id: "core".to_owned(),
+        version: pomme_protocol::version::NATIVE.name.to_owned(),
+    };
+    let offered = vec![core_of("minecraft"), core_of("pomme")];
     let known_packs = crate::net::known_packs::select_packs(&offered);
     assert_eq!(known_packs, offered[..1]);
 

@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use crate::Error;
+use crate::{Error, resolve_protocol_number};
 
 /// Vanilla `BuiltInPackSource.CORE_PACK_INFO` plus the feature packs under
 /// `data/minecraft/datapacks/`, all `KnownPack.vanilla(id)` (namespace
@@ -68,6 +68,7 @@ const BIOME_NETWORK_FIELDS: [&str; 6] = [
 ];
 
 pub fn generate(root: &Path, version: &str, out_path: &str) -> Result<(), Error> {
+    let protocol = resolve_protocol_number(&root.join("decompiled"), None)?;
     let data_root = root.join("extracted/data").join(VANILLA_NAMESPACE);
     if !data_root.is_dir() {
         return Err(format!("{data_root:?}: no extracted data directory").into());
@@ -122,6 +123,7 @@ pub fn generate(root: &Path, version: &str, out_path: &str) -> Result<(), Error>
 
     let file = serde_json::json!({
         "version": version,
+        "protocol": protocol,
         "namespace": VANILLA_NAMESPACE,
         "packs": packs,
         "registries": registries,
