@@ -4,7 +4,6 @@ use azalea_block::BlockState;
 use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
 use azalea_core::direction::Direction;
 use azalea_core::position::BlockPos;
-use azalea_entity::dimensions::EntityDimensions;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
     AttributeModifiers, Consumable, EquipmentSlotGroup, Food, ItemUseAnimation,
@@ -17,14 +16,14 @@ use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerA
 use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
 use azalea_protocol::packets::game::s_use_item::ServerboundUseItem;
 use azalea_protocol::packets::game::s_use_item_on::{BlockHit, ServerboundUseItemOn};
-use azalea_registry::builtin::{Attribute, BlockKind, EntityKind, ItemKind};
+use azalea_registry::builtin::{Attribute, BlockKind, ItemKind};
 use glam::{DVec3, Vec3, dvec3};
 use pomme_protocol::wire;
 
 use crate::app::input::{self, InputState};
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
-use crate::entity::EntityStore;
 use crate::entity::components::{LookDirection, Position};
+use crate::entity::{EntityStore, living_entity_dimensions};
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
@@ -33,7 +32,7 @@ use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::held_item::UseAnim;
 use crate::world::block::registry::BlockRegistry;
 use crate::world::block::sound::block_sounds;
-use crate::world::block::{has_collision, is_air};
+use crate::world::block::{has_collision, is_air, outline_shape_position_delta};
 use crate::world::chunk::ChunkStore;
 
 const REACH: f32 = 4.5;
@@ -1510,7 +1509,11 @@ pub fn raycast(
                 z: bz,
             };
             let outline = block_shape::outline_shape(state);
-            if let Some((hit_point, face)) = clip_shape(origin, reach_end, block_pos, outline) {
+            let offset = dvec3(bx as f64, by as f64, bz as f64)
+                + outline_shape_position_delta(state, bx, bz);
+            if let Some((hit_point, face)) =
+                clip_shape_at_offset(origin, reach_end, offset, outline)
+            {
                 return Some(BlockHitResult {
                     block_pos,
                     face,
@@ -1545,21 +1548,7 @@ fn nearest_entity_hit(from: DVec3, to: DVec3, entities: &EntityStore) -> Option<
     let mut nearest_dist_sq = f64::MAX;
     let mut nearest = None;
     for (&entity_id, entity) in &entities.living {
-        let mut dims = EntityDimensions::from(entity.entity_type);
-        if entity.is_baby {
-            // `Squid.BABY_DIMENSIONS` is an explicit 0.5x0.5, not the
-            // generic half scale.
-            if matches!(
-                entity.entity_type,
-                EntityKind::Squid | EntityKind::GlowSquid
-            ) {
-                dims.width = 0.5;
-                dims.height = 0.5;
-            } else {
-                dims.width *= 0.5;
-                dims.height *= 0.5;
-            }
-        }
+        let dims = living_entity_dimensions(entity);
         let aabb = dims.make_bounding_box(entity.position.into());
 
         let (location, dist_sq) = if aabb.contains(from_v) {
@@ -1596,16 +1585,30 @@ const INSIDE_PROBE_FRACTION: f64 = 0.001;
 /// never hit, so the caller walks on to the next block. Vanilla's
 /// degenerate-ray guard is dropped; `raycast` always passes a scaled unit
 /// direction.
+#[cfg(test)]
 fn clip_shape(
     from: DVec3,
     to: DVec3,
     block_pos: BlockPos,
     boxes: &[LocalBox],
 ) -> Option<(DVec3, Direction)> {
+    clip_shape_at_offset(
+        from,
+        to,
+        dvec3(block_pos.x as f64, block_pos.y as f64, block_pos.z as f64),
+        boxes,
+    )
+}
+
+fn clip_shape_at_offset(
+    from: DVec3,
+    to: DVec3,
+    offset: DVec3,
+    boxes: &[LocalBox],
+) -> Option<(DVec3, Direction)> {
     if boxes.is_empty() {
         return None;
     }
-    let offset = dvec3(block_pos.x as f64, block_pos.y as f64, block_pos.z as f64);
     let ray = to - from;
     let probe = from + ray * INSIDE_PROBE_FRACTION;
 
@@ -1815,6 +1818,23 @@ mod tests {
             rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn ray_clip_respects_block_position_shape_offset() {
+        let shape: [LocalBox; 1] = [[0.4, 0.0, 0.4, 0.6, 1.0, 0.6]];
+        let from = dvec3(-1.0, 0.5, 0.75);
+        let to = dvec3(2.0, 0.5, 0.75);
+
+        assert!(
+            clip_shape_at_offset(from, to, DVec3::ZERO, &shape).is_none(),
+            "unshifted shape should miss this ray"
+        );
+        let shifted = dvec3(0.0, 0.0, 0.25);
+        assert!(
+            clip_shape_at_offset(from, to, shifted, &shape).is_some(),
+            "the same ray should hit after the vanilla XZ position offset"
+        );
     }
 
     #[test]
