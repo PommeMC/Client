@@ -3,7 +3,9 @@ use std::path::Path;
 
 use azalea_block::BlockState;
 use azalea_inventory::ItemStackData;
-use azalea_inventory::components::{DyedColor, FireworkExplosion, MapColor, PotionContents};
+use azalea_inventory::components::{
+    CustomModelData, DyedColor, FireworkExplosion, MapColor, PotionContents,
+};
 use azalea_registry::Registry as AzaleaRegistry;
 use azalea_registry::builtin::{MobEffect, Potion};
 use serde::{Deserialize, Serialize};
@@ -179,24 +181,28 @@ impl BlockRegistry {
         self.flat_item_texture_keys.get(name).map(Vec::as_slice)
     }
 
-    /// Evaluate the stock item definition's tint sources for this stack.
-    /// Stock Vanilla 26.2 uses at most two tint entries per item model. Legal
-    /// resource-pack models can declare more; those extra slots currently
-    /// render untinted rather than aliasing either supported palette entry.
-    pub fn item_tint_palette(&self, name: &str, stack: Option<&ItemStackData>) -> [u32; 2] {
-        let mut palette = [0xFFFFFF; 2];
-        if let Some(sources) = self.item_tint_sources.get(name) {
-            for (slot, source) in palette.iter_mut().zip(sources.iter()) {
-                *slot = evaluate_item_tint(source, stack);
-            }
-        }
-        palette
+    /// Evaluate the selected item model's tint-source list for this stack.
+    /// Vanilla keeps the full list, and model-face `tintindex` values address
+    /// it directly, so resource-pack entries must not be truncated or shifted.
+    pub fn item_tint_palette(
+        &self,
+        name: &str,
+        stack: Option<&ItemStackData>,
+        team_color: Option<u32>,
+    ) -> Vec<u32> {
+        self.item_tint_sources
+            .get(name)
+            .map(|sources| {
+                sources
+                    .iter()
+                    .map(|source| evaluate_item_tint(source, stack, team_color))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn item_tint_count(&self, name: &str) -> usize {
-        self.item_tint_sources
-            .get(name)
-            .map_or(0, |sources| sources.len().min(2))
+        self.item_tint_sources.get(name).map_or(0, Vec::len)
     }
 
     pub fn get_item_ground_transform(&self, name: &str) -> Option<glam::Mat4> {
@@ -294,7 +300,11 @@ impl BlockRegistry {
     }
 }
 
-fn evaluate_item_tint(source: &model::ItemTintSource, stack: Option<&ItemStackData>) -> u32 {
+fn evaluate_item_tint(
+    source: &model::ItemTintSource,
+    stack: Option<&ItemStackData>,
+    team_color: Option<u32>,
+) -> u32 {
     match *source {
         model::ItemTintSource::Constant(color) | model::ItemTintSource::Grass { color } => color,
         model::ItemTintSource::Dye { default } => stack
@@ -313,6 +323,12 @@ fn evaluate_item_tint(source: &model::ItemTintSource, stack: Option<&ItemStackDa
             .and_then(|stack| stack.get_component::<MapColor>())
             .map(|color| color.color as u32 & 0x00FF_FFFF)
             .unwrap_or(default),
+        model::ItemTintSource::CustomModelData { index, default } => stack
+            .and_then(|stack| stack.get_component::<CustomModelData>())
+            .and_then(|data| data.colors.get(index).copied())
+            .map(|color| color as u32 & 0x00FF_FFFF)
+            .unwrap_or(default),
+        model::ItemTintSource::Team { default } => team_color.unwrap_or(default),
     }
 }
 
@@ -460,5 +476,55 @@ fn save_cache(path: &Path, textures: &HashMap<String, FaceTextures>) {
         && let Err(e) = std::fs::write(path, json)
     {
         tracing::warn!("Failed to write block cache: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use azalea_inventory::ItemStack;
+    use azalea_inventory::components::CustomModelData;
+    use azalea_registry::builtin::ItemKind;
+
+    use super::*;
+
+    #[test]
+    fn custom_model_data_tint_uses_requested_color_index_and_default() {
+        let stack = ItemStack::from(ItemKind::Stone).with_component(CustomModelData {
+            floats: vec![],
+            flags: vec![],
+            strings: vec![],
+            colors: vec![0x112233, 0x445566, 0x778899],
+        });
+        let stack = stack.as_present().unwrap();
+
+        assert_eq!(
+            evaluate_item_tint(
+                &model::ItemTintSource::CustomModelData {
+                    index: 1,
+                    default: 0xABCDEF,
+                },
+                Some(stack),
+                None,
+            ),
+            0x445566
+        );
+        assert_eq!(
+            evaluate_item_tint(
+                &model::ItemTintSource::CustomModelData {
+                    index: 9,
+                    default: 0xABCDEF,
+                },
+                Some(stack),
+                None,
+            ),
+            0xABCDEF
+        );
+    }
+
+    #[test]
+    fn team_tint_uses_owner_team_color_or_default() {
+        let source = model::ItemTintSource::Team { default: 0x123456 };
+        assert_eq!(evaluate_item_tint(&source, None, Some(0xABCDEF)), 0xABCDEF);
+        assert_eq!(evaluate_item_tint(&source, None, None), 0x123456);
     }
 }

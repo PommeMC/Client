@@ -16,7 +16,7 @@ use crate::renderer::pipelines::item_entity::{
 pub struct HeldItemInfo {
     pub name: String,
     pub light: f32,
-    pub item_tints: [u32; 2],
+    pub item_tints: Vec<u32>,
     pub has_3d_model: bool,
 }
 
@@ -59,6 +59,8 @@ impl HeldItemPipeline {
     #[allow(clippy::too_many_arguments)]
     pub fn update_and_draw(
         &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
         cmd: vk::CommandBuffer,
         frame: usize,
         aspect: f32,
@@ -85,6 +87,9 @@ impl HeldItemPipeline {
         };
         let model = arm * display.to_matrix();
 
+        self.shared
+            .begin_tint_frame(device, allocator, frame, item.item_tints.len());
+        let tint_range = self.shared.push_tints(frame, &item.item_tints);
         self.shared.bind(cmd, frame, self.pipeline);
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
         push_model_light(
@@ -92,7 +97,7 @@ impl HeldItemPipeline {
             self.shared.pipeline_layout,
             &model,
             item.light,
-            item.item_tints,
+            tint_range,
         );
         cmd.draw(vertex_count, 1, 0, 0);
     }

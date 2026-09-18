@@ -108,6 +108,7 @@ enum RenderMode<'a> {
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: Option<pipelines::held_item::HeldItemInfo>,
+        player_team_color: Option<u32>,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
@@ -1080,6 +1081,7 @@ impl Renderer {
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: Option<(String, f32, azalea_inventory::ItemStackData)>,
+        player_team_color: Option<u32>,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
@@ -1097,7 +1099,9 @@ impl Renderer {
         // Refresh the far plane before this frame's view/projection and fog.
         self.camera.set_render_distance(render_distance);
         let held_item = held_item.map(|(name, light, stack)| {
-            let item_tints = self.registry.item_tint_palette(&name, Some(&stack));
+            let item_tints =
+                self.registry
+                    .item_tint_palette(&name, Some(&stack), player_team_color);
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
             pipelines::held_item::HeldItemInfo {
                 name,
@@ -1124,6 +1128,7 @@ impl Renderer {
                 swing_progress,
                 use_anim,
                 held_item,
+                player_team_color,
                 destroy_info,
                 show_chunk_borders,
                 sky,
@@ -1523,6 +1528,12 @@ impl Renderer {
             },
         ];
 
+        let player_team_color = match &mode {
+            RenderMode::World {
+                player_team_color, ..
+            } => *player_team_color,
+            RenderMode::MainMenu { .. } => None,
+        };
         let menu_elements: &mut [MenuElement] = match &mut mode {
             RenderMode::World { overlay, .. } => overlay.as_mut_slice(),
             RenderMode::MainMenu { elements, .. } => elements.as_mut_slice(),
@@ -1531,13 +1542,21 @@ impl Renderer {
             if let MenuElement::ItemIcon {
                 item_name,
                 item_stack,
+                use_player_team,
                 item_tints,
                 ..
             } = elem
             {
-                *item_tints = self
-                    .registry
-                    .item_tint_palette(item_name, item_stack.as_ref());
+                let owner_team_color = if *use_player_team {
+                    player_team_color
+                } else {
+                    None
+                };
+                *item_tints = self.registry.item_tint_palette(
+                    item_name,
+                    item_stack.as_ref(),
+                    owner_team_color,
+                );
             }
         }
 
@@ -1568,7 +1587,7 @@ impl Renderer {
                 .set_atlas_px(self.gui_item_atlas.atlas_px());
         }
 
-        let mut unique_items: HashMap<String, (String, [u32; 2])> = HashMap::new();
+        let mut unique_items: HashMap<String, (String, Vec<u32>)> = HashMap::new();
         for elem in menu_elements.iter() {
             if let MenuElement::ItemIcon {
                 item_name,
@@ -1576,10 +1595,10 @@ impl Renderer {
                 ..
             } = elem
             {
-                let key = pipelines::menu_overlay::item_icon_atlas_key(item_name, *item_tints);
+                let key = pipelines::menu_overlay::item_icon_atlas_key(item_name, item_tints);
                 unique_items
                     .entry(key)
-                    .or_insert_with(|| (item_name.clone(), *item_tints));
+                    .or_insert_with(|| (item_name.clone(), item_tints.clone()));
             }
         }
         let unique_keys: HashSet<String> = unique_items.keys().cloned().collect();
@@ -1595,7 +1614,7 @@ impl Renderer {
         struct BakeJob {
             slot: pipelines::gui_item_atlas::Slot,
             name: String,
-            item_tints: [u32; 2],
+            item_tints: Vec<u32>,
             is_block: bool,
             needs_clear: bool,
         }
@@ -1608,7 +1627,7 @@ impl Renderer {
                     bake_list.push(BakeJob {
                         slot,
                         name: name.clone(),
-                        item_tints: *item_tints,
+                        item_tints: item_tints.clone(),
                         is_block: self.registry.get_item_model(name).is_some(),
                         needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
                     });
@@ -1617,7 +1636,14 @@ impl Renderer {
         }
         if !bake_list.is_empty() {
             self.gui_item_atlas.begin_bake_pass(cmd);
-            self.gui_item_pipeline.bind_for_bake_pass(cmd);
+            let required_tint_colors = bake_list.iter().map(|job| job.item_tints.len()).sum();
+            self.gui_item_pipeline.bind_for_bake_pass(
+                &self.ctx.device,
+                &self.ctx.allocator,
+                cmd,
+                frame,
+                required_tint_colors,
+            );
             for job in &bake_list {
                 if job.needs_clear {
                     self.gui_item_atlas.clear_slot_color(cmd, &job.slot);
@@ -1626,13 +1652,14 @@ impl Renderer {
                 let (sx, sy) = self.gui_item_atlas.slot_origin_pixels(&job.slot);
                 self.gui_item_pipeline.bake_to_slot(
                     cmd,
+                    frame,
                     &self.item_entity_pipeline,
                     sx,
                     sy,
                     self.gui_item_atlas.slot_px(),
                     &job.name,
                     job.is_block,
-                    job.item_tints,
+                    &job.item_tints,
                 );
             }
             self.gui_item_atlas.end_bake_pass(cmd);
@@ -1680,6 +1707,7 @@ impl Renderer {
                 swing_progress,
                 use_anim,
                 held_item,
+                player_team_color: _,
                 destroy_info,
                 show_chunk_borders,
                 sky,
@@ -1748,8 +1776,14 @@ impl Renderer {
                 self.block_entity_pipeline
                     .draw(cmd, frame, anchor, block_entities);
 
-                self.item_entity_pipeline
-                    .draw(cmd, frame, item_entities, &self.registry);
+                self.item_entity_pipeline.draw(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    cmd,
+                    frame,
+                    item_entities,
+                    &self.registry,
+                );
 
                 // Break particles draw after entities but before translucent
                 // water: they write depth, and pomme's water doesn't, so this
@@ -1817,6 +1851,8 @@ impl Renderer {
                     // hand; a held item renders alone.
                     match held_item {
                         Some(item) => self.held_item_pipeline.update_and_draw(
+                            &self.ctx.device,
+                            &self.ctx.allocator,
                             cmd,
                             frame,
                             aspect,

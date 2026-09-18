@@ -22,6 +22,7 @@ struct ItemVertex {
     tex_coords: [f32; 2],
     light_tint: u32,
     normal: [i8; 4],
+    tint_index: u32,
 }
 
 impl ItemVertex {
@@ -35,7 +36,7 @@ impl ItemVertex {
         }
     }
 
-    fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 4] {
+    fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 5] {
         [
             vk::VertexInputAttributeDescription {
                 location: 0,
@@ -60,6 +61,12 @@ impl ItemVertex {
                 binding: 0,
                 format: vk::Format::R8G8B8A8Snorm,
                 offset: 24,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 4,
+                binding: 0,
+                format: vk::Format::R32Uint,
+                offset: 28,
             },
         ]
     }
@@ -106,18 +113,159 @@ struct MeshEntry {
     bounds_max: glam::Vec3,
 }
 
-/// Descriptor layouts, per-frame camera UBOs, and atlas set shared by the
-/// pipelines that draw item meshes with the item_entity shaders.
+#[derive(Clone, Copy, Default)]
+pub(super) struct ItemTintRange {
+    pub base: u32,
+    pub count: u32,
+}
+
+pub(super) struct TintPaletteArena {
+    sets: Vec<vk::DescriptorSet>,
+    buffers: Vec<vk::Buffer>,
+    allocations: Vec<Option<Allocation>>,
+    capacities: Vec<usize>,
+    cursors: Vec<usize>,
+    label: String,
+}
+
+impl TintPaletteArena {
+    pub(super) fn new(
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        descriptor_pool: vk::DescriptorPool,
+        layout: vk::DescriptorSetLayout,
+        label: &str,
+    ) -> Self {
+        let layouts = [layout; MAX_FRAMES_IN_FLIGHT];
+        let alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: layouts.len() as u32,
+            set_layouts: layouts.as_ptr(),
+            ..Default::default()
+        };
+        let mut sets = vec![vk::DescriptorSet::null(); layouts.len()];
+        device
+            .allocate_descriptor_sets(&alloc_info, &mut sets)
+            .unwrap_or_else(|_| panic!("failed to allocate {label} tint sets"));
+
+        let mut arena = Self {
+            sets,
+            buffers: vec![vk::Buffer::null(); MAX_FRAMES_IN_FLIGHT],
+            allocations: (0..MAX_FRAMES_IN_FLIGHT).map(|_| None).collect(),
+            capacities: vec![0; MAX_FRAMES_IN_FLIGHT],
+            cursors: vec![0; MAX_FRAMES_IN_FLIGHT],
+            label: label.to_string(),
+        };
+        for frame in 0..MAX_FRAMES_IN_FLIGHT {
+            arena.ensure_capacity(device, allocator, frame, 1);
+        }
+        arena
+    }
+
+    fn ensure_capacity(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        frame: usize,
+        required: usize,
+    ) {
+        if self.capacities[frame] >= required.max(1) {
+            return;
+        }
+        let capacity = required.max(1).next_power_of_two();
+        if self.buffers[frame] != vk::Buffer::null() {
+            device.destroy_buffer(self.buffers[frame], None);
+            if let Some(allocation) = self.allocations[frame].take() {
+                allocator.lock().unwrap().free(allocation).ok();
+            }
+        }
+        let (buffer, allocation) = util::create_host_buffer(
+            device,
+            allocator,
+            (capacity * size_of::<u32>()) as u64,
+            vk::BufferUsageFlags::StorageBuffer,
+            &format!("{}_tints_{frame}", self.label),
+        );
+        let buffer_info = vk::DescriptorBufferInfo {
+            buffer,
+            offset: 0,
+            range: (capacity * size_of::<u32>()) as u64,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: self.sets[frame],
+            dst_binding: 0,
+            descriptor_type: vk::DescriptorType::StorageBuffer,
+            descriptor_count: 1,
+            buffer_info: &buffer_info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
+        self.buffers[frame] = buffer;
+        self.allocations[frame] = Some(allocation);
+        self.capacities[frame] = capacity;
+    }
+
+    pub(super) fn begin_frame(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        frame: usize,
+        required_colors: usize,
+    ) {
+        self.ensure_capacity(device, allocator, frame, required_colors.max(1));
+        self.cursors[frame] = 0;
+    }
+
+    pub(super) fn push(&mut self, frame: usize, colors: &[u32]) -> ItemTintRange {
+        if colors.is_empty() {
+            return ItemTintRange::default();
+        }
+        let base = self.cursors[frame];
+        let end = base + colors.len();
+        debug_assert!(end <= self.capacities[frame]);
+        let allocation = self.allocations[frame]
+            .as_mut()
+            .expect("tint buffer allocated");
+        let bytes = bytemuck::cast_slice(colors);
+        let offset = base * size_of::<u32>();
+        allocation.mapped_slice_mut().unwrap()[offset..offset + bytes.len()].copy_from_slice(bytes);
+        self.cursors[frame] = end;
+        ItemTintRange {
+            base: base as u32,
+            count: colors.len() as u32,
+        }
+    }
+
+    pub(super) fn set(&self, frame: usize) -> vk::DescriptorSet {
+        self.sets[frame]
+    }
+
+    pub(super) fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        for frame in 0..MAX_FRAMES_IN_FLIGHT {
+            if self.buffers[frame] != vk::Buffer::null() {
+                device.destroy_buffer(self.buffers[frame], None);
+            }
+            if let Some(allocation) = self.allocations[frame].take() {
+                allocator.lock().unwrap().free(allocation).ok();
+            }
+        }
+    }
+}
+
+/// Descriptor layouts, per-frame camera UBOs, atlas set, and tint palette
+/// storage shared by pipelines that draw item meshes with the item shaders.
 pub(super) struct ItemPipelineShared {
     pub pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
     atlas_layout: vk::DescriptorSetLayout,
+    tint_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     camera_sets: Vec<vk::DescriptorSet>,
     atlas_set: vk::DescriptorSet,
     atlas_sampler: vk::Sampler,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Option<Allocation>>,
+    tint_arena: TintPaletteArena,
 }
 
 fn write_atlas_descriptor(
@@ -159,6 +307,11 @@ impl ItemPipelineShared {
             vk::DescriptorType::CombinedImageSampler,
             vk::ShaderStageFlags::Fragment,
         );
+        let tint_layout = util::create_descriptor_set_layout(
+            device,
+            vk::DescriptorType::StorageBuffer,
+            vk::ShaderStageFlags::Vertex,
+        );
 
         let push_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
@@ -167,7 +320,7 @@ impl ItemPipelineShared {
             // mat3 normal matrix. Vulkan guarantees at least 128 push bytes.
             size: 128,
         };
-        let layouts = [camera_layout, atlas_layout];
+        let layouts = [camera_layout, atlas_layout, tint_layout];
         let layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
             set_layouts: layouts.as_ptr(),
@@ -188,9 +341,13 @@ impl ItemPipelineShared {
                 ty: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
             },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::StorageBuffer,
+                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
+            },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + 1,
+            max_sets: (MAX_FRAMES_IN_FLIGHT * 2 + 1) as u32,
             pool_size_count: pool_sizes.len() as u32,
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
@@ -255,16 +412,20 @@ impl ItemPipelineShared {
             camera_allocations.push(Some(alloc));
         }
 
+        let tint_arena =
+            TintPaletteArena::new(device, allocator, descriptor_pool, tint_layout, label);
         let this = Self {
             pipeline_layout,
             camera_layout,
             atlas_layout,
+            tint_layout,
             descriptor_pool,
             camera_sets,
             atlas_set,
             atlas_sampler,
             camera_buffers,
             camera_allocations,
+            tint_arena,
         };
         this.rebind_atlas(device, atlas);
         this
@@ -287,9 +448,28 @@ impl ItemPipelineShared {
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
             0,
-            &[self.camera_sets[frame], self.atlas_set],
+            &[
+                self.camera_sets[frame],
+                self.atlas_set,
+                self.tint_arena.set(frame),
+            ],
             &[],
         );
+    }
+
+    pub(super) fn begin_tint_frame(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        frame: usize,
+        required_colors: usize,
+    ) {
+        self.tint_arena
+            .begin_frame(device, allocator, frame, required_colors);
+    }
+
+    pub(super) fn push_tints(&mut self, frame: usize, colors: &[u32]) -> ItemTintRange {
+        self.tint_arena.push(frame, colors)
     }
 
     pub(super) fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -300,11 +480,13 @@ impl ItemPipelineShared {
             }
         }
 
+        self.tint_arena.destroy(device, allocator);
         device.destroy_sampler(self.atlas_sampler, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
         device.destroy_descriptor_set_layout(self.atlas_layout, None);
+        device.destroy_descriptor_set_layout(self.tint_layout, None);
     }
 }
 
@@ -313,7 +495,7 @@ pub(super) fn push_model_light(
     layout: vk::PipelineLayout,
     model: &Mat4,
     light: f32,
-    item_tints: [u32; 2],
+    item_tints: ItemTintRange,
 ) {
     let mvp_data = model.to_cols_array();
     cmd.push_constants(
@@ -328,11 +510,12 @@ pub(super) fn push_model_light(
         64,
         bytemuck::bytes_of(&light),
     );
+    let tint_range = [item_tints.base, item_tints.count];
     cmd.push_constants(
         layout,
         vk::ShaderStageFlags::Vertex,
         72,
-        bytemuck::bytes_of(&item_tints),
+        bytemuck::bytes_of(&tint_range),
     );
 }
 
@@ -498,7 +681,9 @@ impl ItemEntityPipeline {
     /// Cutout meshes first, then translucent ones, as vanilla's item sheets
     /// are ordered.
     pub fn draw(
-        &self,
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
         cmd: vk::CommandBuffer,
         frame: usize,
         items: &[ItemRenderInfo],
@@ -508,9 +693,23 @@ impl ItemEntityPipeline {
             return;
         }
 
+        // Dropped item entities are not LivingEntity owners in vanilla, so a
+        // `team` tint source falls back to the JSON default here.
+        let palettes: Vec<Vec<u32>> = items
+            .iter()
+            .map(|item| registry.item_tint_palette(&item.item_name, item.item_stack.as_ref(), None))
+            .collect();
+        let required_colors = palettes.iter().map(Vec::len).sum();
+        self.shared
+            .begin_tint_frame(device, allocator, frame, required_colors);
+        let tint_ranges: Vec<_> = palettes
+            .iter()
+            .map(|palette| self.shared.push_tints(frame, palette))
+            .collect();
+
         for (pipeline, translucent) in [(self.cutout, false), (self.translucent, true)] {
             let mut bound = false;
-            for item in items {
+            for (item, tint_range) in items.iter().zip(tint_ranges.iter().copied()) {
                 let Some(mesh) = self.meshes.get(&item.item_name) else {
                     continue;
                 };
@@ -527,7 +726,7 @@ impl ItemEntityPipeline {
                     self.shared.pipeline_layout,
                     &item.model_matrix,
                     item.light,
-                    registry.item_tint_palette(&item.item_name, item.item_stack.as_ref()),
+                    tint_range,
                 );
                 push_world_lighting(
                     cmd,
@@ -593,15 +792,10 @@ fn cardinal_normal(positions: &[[f32; 3]; 4]) -> glam::Vec3 {
     glam::Vec3::from_array(direction.offset().map(|v| v as f32))
 }
 
-fn item_tint_marker(index: u32) -> u32 {
-    debug_assert!(index < 2);
-    // ItemVertex is R8G8B8A8_UNORM: byte 0 is light, bytes 1..=3 are tint.
-    // Reserve tint RGB (0, index+1, 0) as a shader-side tint-index marker.
-    ((index + 1) & 0xFF) << 16
-}
+const NO_ITEM_TINT: u32 = u32::MAX;
 
-fn supported_item_tint_marker(index: u32) -> Option<u32> {
-    (index < 2).then(|| item_tint_marker(index))
+fn tint_index_or_none(index: Option<u32>) -> u32 {
+    index.unwrap_or(NO_ITEM_TINT)
 }
 
 fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
@@ -610,10 +804,7 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
         let region = uv_map.get_region(&quad.texture);
         let u_span = region.u_max - region.u_min;
         let v_span = region.v_max - region.v_min;
-        let tint = quad
-            .tint_index
-            .and_then(supported_item_tint_marker)
-            .unwrap_or(crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED);
+        let tint_index = tint_index_or_none(quad.tint_index);
         let normal = pack_normal(cardinal_normal(&quad.positions));
 
         for i in [0, 1, 2, 2, 3, 0] {
@@ -627,8 +818,12 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
                 // Held/GUI item rendering still consumes the baked shade byte.
                 // The dropped-item world shader ignores it and instead uses
                 // the baked cardinal normal, matching vanilla's item shader.
-                light_tint: crate::renderer::chunk::mesher::pack_light_tint(quad.shade_light, tint),
+                light_tint: crate::renderer::chunk::mesher::pack_light_tint(
+                    quad.shade_light,
+                    crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+                ),
                 normal,
+                tint_index,
             });
         }
     }
@@ -662,9 +857,7 @@ fn build_extruded_item_mask(
     let v_span = region.v_max - region.v_min;
     let z_min = 7.5 / 16.0 - 0.5;
     let z_max = 8.5 / 16.0 - 0.5;
-    let tint = tint_index
-        .and_then(supported_item_tint_marker)
-        .unwrap_or(crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED);
+    let tint_index = tint_index_or_none(tint_index);
 
     let front = [
         [-0.5, -0.5, z_max],
@@ -686,8 +879,12 @@ fn build_extruded_item_mask(
         vertices.push(ItemVertex {
             position: front[i],
             tex_coords: front_uvs[i],
-            light_tint: crate::renderer::chunk::mesher::pack_light_tint(1.0, tint),
+            light_tint: crate::renderer::chunk::mesher::pack_light_tint(
+                1.0,
+                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+            ),
             normal: pack_normal(glam::Vec3::Z),
+            tint_index,
         });
     }
 
@@ -716,8 +913,12 @@ fn build_extruded_item_mask(
         vertices.push(ItemVertex {
             position: back[i],
             tex_coords: back_uvs[i],
-            light_tint: crate::renderer::chunk::mesher::pack_light_tint(1.0, tint),
+            light_tint: crate::renderer::chunk::mesher::pack_light_tint(
+                1.0,
+                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+            ),
             normal: pack_normal(glam::Vec3::NEG_Z),
+            tint_index,
         });
     }
 
@@ -752,7 +953,7 @@ fn build_extruded_item_mask(
                     z_max,
                     [[u0, v0], [u0, v1], [u1, v1], [u1, v0]],
                     0.8,
-                    tint,
+                    tint_index,
                 );
             }
             if bottom_exposed {
@@ -766,7 +967,7 @@ fn build_extruded_item_mask(
                     z_max,
                     [[u1, v1], [u1, v0], [u0, v0], [u0, v1]],
                     0.8,
-                    tint,
+                    tint_index,
                 );
             }
             if left_exposed {
@@ -780,7 +981,7 @@ fn build_extruded_item_mask(
                     z_max,
                     [[u1, v1], [u0, v1], [u0, v0], [u1, v0]],
                     0.8,
-                    tint,
+                    tint_index,
                 );
             }
             if right_exposed {
@@ -794,7 +995,7 @@ fn build_extruded_item_mask(
                     z_max,
                     [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
                     0.8,
-                    tint,
+                    tint_index,
                 );
             }
         }
@@ -814,7 +1015,7 @@ fn push_side_quad(
     z1: f32,
     uvs: [[f32; 2]; 4],
     light: f32,
-    tint: u32,
+    tint_index: u32,
 ) {
     let positions = [[x0, y0, z0], [x0, y0, z1], [x1, y1, z1], [x1, y1, z0]];
     let normal = pack_normal(cardinal_normal(&positions));
@@ -822,8 +1023,12 @@ fn push_side_quad(
         vertices.push(ItemVertex {
             position: positions[i],
             tex_coords: uvs[i],
-            light_tint: crate::renderer::chunk::mesher::pack_light_tint(light, tint),
+            light_tint: crate::renderer::chunk::mesher::pack_light_tint(
+                light,
+                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+            ),
             normal,
+            tint_index,
         });
     }
 }
@@ -838,9 +1043,7 @@ fn build_flat_quad(region: AtlasRegion, tint_index: Option<u32>) -> Vec<ItemVert
         [h, h, 0.0],
         [-h, h, 0.0],
     ];
-    let tint = tint_index
-        .and_then(supported_item_tint_marker)
-        .unwrap_or(crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED);
+    let tint_index = tint_index_or_none(tint_index);
     let uvs = [
         [region.u_min, region.v_max],
         [region.u_max, region.v_max],
@@ -855,8 +1058,12 @@ fn build_flat_quad(region: AtlasRegion, tint_index: Option<u32>) -> Vec<ItemVert
         .map(|(p, uv)| ItemVertex {
             position: *p,
             tex_coords: *uv,
-            light_tint: crate::renderer::chunk::mesher::pack_light_tint(1.0, tint),
+            light_tint: crate::renderer::chunk::mesher::pack_light_tint(
+                1.0,
+                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
+            ),
             normal: pack_normal(glam::Vec3::Z),
+            tint_index,
         })
         .collect()
 }
@@ -1146,42 +1353,34 @@ mod tests {
     }
 
     #[test]
-    fn item_tint_marker_encodes_palette_index_without_looking_white() {
-        let first = crate::renderer::chunk::mesher::pack_light_tint(1.0, item_tint_marker(0));
-        let second = crate::renderer::chunk::mesher::pack_light_tint(1.0, item_tint_marker(1));
-        assert_eq!(first.to_le_bytes(), [255, 0, 1, 0]);
-        assert_eq!(second.to_le_bytes(), [255, 0, 2, 0]);
-    }
-
-    #[test]
-    fn generated_item_layer_marks_its_tint_index() {
+    fn generated_item_layer_preserves_arbitrary_tint_index() {
         let mask = SpriteAlphaMask {
             width: 1,
             height: 1,
             frames: vec![vec![true]],
         };
-        let vertices = build_extruded_item_mask(&mask, unit_region(), Some(1));
+        let vertices = build_extruded_item_mask(&mask, unit_region(), Some(37));
         assert!(!vertices.is_empty());
+        assert!(vertices.iter().all(|vertex| vertex.tint_index == 37));
         assert!(
             vertices
                 .iter()
-                .all(|vertex| vertex.light_tint.to_le_bytes()[1..] == [0, 2, 0])
+                .all(|vertex| { vertex.light_tint.to_le_bytes()[1..] == [255, 255, 255] })
         );
     }
 
     #[test]
-    fn unsupported_item_tint_indices_render_untinted_instead_of_aliasing_slot_one() {
+    fn untinted_item_vertices_use_tint_index_sentinel() {
         let mask = SpriteAlphaMask {
             width: 1,
             height: 1,
             frames: vec![vec![true]],
         };
-        let vertices = build_extruded_item_mask(&mask, unit_region(), Some(2));
-        assert!(!vertices.is_empty());
+        let vertices = build_extruded_item_mask(&mask, unit_region(), None);
         assert!(
             vertices
                 .iter()
-                .all(|vertex| vertex.light_tint.to_le_bytes()[1..] == [255, 255, 255])
+                .all(|vertex| vertex.tint_index == NO_ITEM_TINT)
         );
     }
 

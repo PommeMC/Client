@@ -936,7 +936,7 @@ impl MenuOverlayPipeline {
                     tint,
                     ..
                 } => {
-                    let atlas_key = item_icon_atlas_key(item_name, *item_tints);
+                    let atlas_key = item_icon_atlas_key(item_name, item_tints);
                     if let Some(uv) = item_atlas_uvs.get(&atlas_key) {
                         push_quad(
                             &mut vertices,
@@ -1715,8 +1715,14 @@ impl TooltipLine {
     }
 }
 
-pub fn item_icon_atlas_key(item_name: &str, item_tints: [u32; 2]) -> String {
-    format!("{item_name}#{:06x}-{:06x}", item_tints[0], item_tints[1])
+pub fn item_icon_atlas_key(item_name: &str, item_tints: &[u32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut key = format!("{item_name}#");
+    for color in item_tints {
+        let _ = write!(key, "{color:06x}-");
+    }
+    key
 }
 
 #[allow(dead_code)]
@@ -1798,7 +1804,10 @@ pub enum MenuElement {
         h: f32,
         item_name: String,
         item_stack: Option<azalea_inventory::ItemStackData>,
-        item_tints: [u32; 2],
+        /// Vanilla GUI `item(...)` supplies the local LivingEntity owner;
+        /// `fakeItem(...)` supplies none. Team tint evaluation depends on this.
+        use_player_team: bool,
+        item_tints: Vec<u32>,
         tint: [f32; 4],
     },
     McText {

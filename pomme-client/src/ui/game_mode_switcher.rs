@@ -132,7 +132,8 @@ pub fn build_game_mode_switcher(
             h: 16.0 * gs,
             item_name: (*item).into(),
             item_stack: None,
-            item_tints: [0xFFFFFF; 2],
+            use_player_team: true,
+            item_tints: Vec::new(),
             tint: WHITE,
         });
         if mouse_moved && common::hit_test(cursor, [x, y0, SLOT_AREA * gs, SLOT_AREA * gs]) {

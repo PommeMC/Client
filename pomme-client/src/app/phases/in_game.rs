@@ -3000,6 +3000,7 @@ pub fn update_game(
         swing_progress,
         use_anim,
         held_item,
+        game.scoreboard.member_team_color(&core.user.username),
         destroy_info,
         game.show_chunk_borders,
         sky,

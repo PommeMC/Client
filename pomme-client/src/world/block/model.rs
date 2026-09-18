@@ -480,8 +480,9 @@ pub struct BakedItemModels {
     pub tint_sources: HashMap<String, Vec<ItemTintSource>>,
 }
 
-/// Vanilla item-model tint sources used by stock 26.2 item definitions.
-/// Colors are stored as RGB (`0xRRGGBB`); item rendering adds opacity.
+/// Vanilla 26.2 item-model tint sources. Colors are stored as RGB
+/// (`0xRRGGBB`); item rendering supplies opaque alpha like vanilla's
+/// `ItemTintSource.calculate` implementations.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ItemTintSource {
     Constant(u32),
@@ -490,6 +491,8 @@ pub enum ItemTintSource {
     Firework { default: u32 },
     Potion { default: u32 },
     MapColor { default: u32 },
+    CustomModelData { index: usize, default: u32 },
+    Team { default: u32 },
 }
 
 /// Every `minecraft/items/*.json` name across the jar and the active packs,
@@ -590,10 +593,20 @@ fn parse_item_tint_sources(
                 "map_color" => ItemTintSource::MapColor {
                     default: rgb_value(value.get("default"), 0x7F7F7F),
                 },
+                "custom_model_data" => ItemTintSource::CustomModelData {
+                    index: value
+                        .get("index")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as usize,
+                    default: rgb_value(value.get("default"), 0xFFFFFF),
+                },
+                "team" => ItemTintSource::Team {
+                    default: rgb_value(value.get("default"), 0xFFFFFF),
+                },
                 other => {
-                    // Preserve the palette slot even for resource-pack tint
-                    // source types that Pomme does not evaluate yet. Dropping
-                    // an entry would shift every later face tint index.
+                    // Preserve the palette slot even for a future/unknown tint
+                    // source type. Dropping an entry would shift every later
+                    // face tint index.
                     tracing::warn!("Unsupported item tint source type {other}");
                     ItemTintSource::Constant(0xFFFFFF)
                 }
@@ -708,12 +721,6 @@ pub fn bake_item_models(
             ground_transforms.insert(item_name.to_string(), transform);
         }
         if !item_tints.is_empty() {
-            if item_tints.len() > 2 {
-                tracing::warn!(
-                    "{item_name}: {} item tint slots declared; Pomme currently renders only the first two",
-                    item_tints.len()
-                );
-            }
             tint_sources.insert(item_name.to_string(), item_tints);
         }
         if let Some(mut baked) = merged {
@@ -2101,6 +2108,33 @@ mod tests {
                 ItemTintSource::Dye { default: 0x654321 }
             ]
         );
+    }
+
+    #[test]
+    fn item_tint_parser_keeps_arbitrary_palette_length_and_all_26_2_codecs() {
+        let values = vec![
+            serde_json::json!({"type": "minecraft:constant", "value": 0x010203}),
+            serde_json::json!({"type": "minecraft:dye", "default": 0x111213}),
+            serde_json::json!({"type": "minecraft:firework", "default": 0x212223}),
+            serde_json::json!({"type": "minecraft:potion", "default": 0x313233}),
+            serde_json::json!({"type": "minecraft:map_color", "default": 0x414243}),
+            serde_json::json!({
+                "type": "minecraft:custom_model_data",
+                "index": 7,
+                "default": 0x515253
+            }),
+            serde_json::json!({"type": "minecraft:team", "default": 0x616263}),
+        ];
+        let tints = parse_item_tint_sources(&values, None);
+        assert_eq!(tints.len(), values.len());
+        assert_eq!(
+            tints[5],
+            ItemTintSource::CustomModelData {
+                index: 7,
+                default: 0x515253
+            }
+        );
+        assert_eq!(tints[6], ItemTintSource::Team { default: 0x616263 });
     }
 
     #[test]

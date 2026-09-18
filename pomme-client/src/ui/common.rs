@@ -415,7 +415,8 @@ pub fn push_item_icon(
         h: size,
         item_name: item_resource_name(data.kind),
         item_stack: Some(data.clone()),
-        item_tints: [0xFFFFFF; 2],
+        use_player_team: true,
+        item_tints: Vec::new(),
         tint: WHITE,
     });
     if data.count > 1 {
