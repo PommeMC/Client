@@ -34,7 +34,7 @@ use pipelines::chunk::ChunkPipeline;
 use pipelines::clouds::CloudPipeline;
 use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
 use pipelines::hand::HandPipeline;
-use pipelines::menu_overlay::{FontGpuLimits, MenuElement, MenuOverlayPipeline};
+use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
@@ -52,7 +52,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
-use crate::ui::font::{FontOptions, FontSources};
+use crate::ui::font::FontSources;
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
@@ -192,10 +192,8 @@ impl Renderer {
         let FontSources {
             jar_assets_dir,
             asset_index,
-            packs,
-            options: font_options,
+            ..
         } = font_sources;
-        let resource_packs = packs.expect("renderer startup requires a resource-pack manager");
         let size = window.inner_size();
 
         let registry_handle = {
@@ -219,11 +217,11 @@ impl Renderer {
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
-        let device_properties = ctx.physical_device.get_properties();
-        let font_gpu_limits = FontGpuLimits {
-            max_dimension: device_properties.limits.max_image_dimension2_d,
-            max_layers: device_properties.limits.max_image_array_layers,
-        };
+        let font_layer_limit = ctx
+            .physical_device
+            .get_properties()
+            .limits
+            .max_image_array_layers;
 
         let mut menu_pipeline = MenuOverlayPipeline::new(
             &ctx.device,
@@ -231,13 +229,8 @@ impl Renderer {
             ctx.command_pool,
             swapchain_state.render_pass,
             &ctx.allocator,
-            FontSources {
-                jar_assets_dir,
-                asset_index,
-                packs: Some(resource_packs),
-                options: font_options,
-            },
-            font_gpu_limits,
+            font_sources,
+            font_layer_limit,
         )
         .map_err(RendererError::Font)?;
 
@@ -1173,7 +1166,6 @@ impl Renderer {
         &mut self,
         game_dir: &Path,
         packs: &crate::resource_pack::ResourcePackManager,
-        font_options: FontOptions,
     ) {
         self.ctx.device.wait_idle().unwrap();
 
@@ -1222,11 +1214,6 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
-        let device_properties = self.ctx.physical_device.get_properties();
-        let font_gpu_limits = FontGpuLimits {
-            max_dimension: device_properties.limits.max_image_dimension2_d,
-            max_layers: device_properties.limits.max_image_array_layers,
-        };
         if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -1235,10 +1222,8 @@ impl Renderer {
             FontSources {
                 jar_assets_dir: &self.jar_assets_dir,
                 asset_index: &self.asset_index,
-                packs: Some(packs),
-                options: font_options,
+                packs,
             },
-            font_gpu_limits,
         ) {
             tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
         }

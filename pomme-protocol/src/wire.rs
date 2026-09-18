@@ -8,7 +8,7 @@ use crate::packets::{Direction, PacketTable, Phase};
 
 const MAIN_HAND: u32 = 0;
 
-fn game_serverbound_id(name: &str) -> u32 {
+pub fn game_serverbound_id(name: &str) -> u32 {
     PacketTable::native()
         .id(Phase::Game, Direction::Serverbound, name)
         .unwrap_or_else(|| panic!("{name} missing from packet table"))

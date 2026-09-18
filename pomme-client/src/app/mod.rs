@@ -1,5 +1,6 @@
 pub mod core;
 pub mod input;
+pub mod level_load;
 pub mod phases;
 pub mod state_slot;
 
@@ -231,8 +232,7 @@ impl ApplicationHandler for App {
                     crate::ui::font::FontSources {
                         jar_assets_dir: &self.core.data_dirs.jar_assets_dir,
                         asset_index: &self.core.asset_index,
-                        packs: Some(&self.core.resource_packs),
-                        options: crate::ui::font::FontOptions::default(),
+                        packs: &self.core.resource_packs,
                     },
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,

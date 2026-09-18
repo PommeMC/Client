@@ -107,13 +107,13 @@ struct ChatLine {
     spans: Vec<TextSpan>,
     received: Instant,
     signature: Option<[u8; 256]>,
-    /// Lazily wrapped display lines (vanilla `trimmedMessages`). The wrap width
-    /// and scale-1 font metrics never change, so the cache never invalidates.
+    /// Lazily wrapped display lines (vanilla `trimmedMessages`), kept like
+    /// vanilla's, which only re-wraps when a chat option changes.
     wrapped: OnceCell<Vec<Vec<TextSpan>>>,
 }
 
 impl ChatLine {
-    fn wrapped(&self, width0: &dyn Fn(&str) -> f32) -> &[Vec<TextSpan>] {
+    fn wrapped(&self, width0: &dyn Fn(&[TextSpan]) -> f32) -> &[Vec<TextSpan>] {
         self.wrapped
             .get_or_init(|| wrap_spans(&self.spans, CHAT_WIDTH, width0))
     }
@@ -566,6 +566,7 @@ impl ChatState {
         screen_h: f32,
         gs: f32,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
+        spans_width_fn: common::SpansWidthFn<'_>,
     ) {
         let now = Instant::now();
         let fs = common::FONT_SIZE * gs;
@@ -577,7 +578,7 @@ impl ChatState {
         let chat_bottom = screen_h - BOTTOM_MARGIN * gs;
         // Measure wrapping at gui-scale 1 so wrap points stay fixed when the
         // gui scale changes (vanilla wraps in gui-space, then scales).
-        let width0 = |s: &str| text_width_fn(s, common::FONT_SIZE);
+        let width0 = |spans: &[TextSpan]| spans_width_fn(spans, common::FONT_SIZE);
 
         // Clamp the scroll to the wrapped backlog (vanilla scrollChat clamps
         // against `trimmedMessages`).
@@ -775,52 +776,29 @@ fn line_alpha(age_secs: f32) -> f32 {
     t * t
 }
 
+/// A span's formatting, carried per character with its text left empty.
 #[derive(Clone, PartialEq)]
-struct CharStyle {
-    color: [f32; 4],
-    bold: bool,
-    italic: bool,
-    strikethrough: bool,
-    underline: bool,
-    obfuscated: bool,
-    shadow_color: Option<[f32; 4]>,
-    font: Option<String>,
-    inline_object: Option<crate::ui::text::InlineObject>,
-    component_style: Option<std::sync::Arc<crate::chat_component::ResolvedStyle>>,
-}
+struct CharStyle(TextSpan);
 
 type StyledLine = Vec<(char, CharStyle)>;
-
-fn styled_text(chars: &[(char, CharStyle)]) -> String {
-    chars.iter().map(|(c, _)| *c).collect()
-}
 
 /// Greedy word-wrap of styled text to `max_w` gui-space units, preserving each
 /// character's color/style and hard-breaking any single word wider than the
 /// line. Returns one `Vec<TextSpan>` per display line. Mirrors vanilla
-/// `Font.split` over a `FormattedText`. `width0` measures text width at
-/// gui-scale 1.
+/// `Font.split` over a `FormattedText`. `width0` measures styled spans at
+/// gui-scale 1, so fonts, bold and inline objects count like vanilla
+/// `StringSplitter`.
 pub(crate) fn wrap_spans(
     spans: &[TextSpan],
     max_w: f32,
-    width0: &dyn Fn(&str) -> f32,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
 ) -> Vec<Vec<TextSpan>> {
+    let width = |chars: &[(char, CharStyle)]| width0(&merge_chars(chars));
     // Split into whitespace-delimited words, keeping each character's style.
     let mut words: Vec<StyledLine> = Vec::new();
     let mut word: StyledLine = Vec::new();
     for s in spans {
-        let style = CharStyle {
-            color: s.color,
-            bold: s.bold,
-            italic: s.italic,
-            strikethrough: s.strikethrough,
-            underline: s.underline,
-            obfuscated: s.obfuscated,
-            shadow_color: s.shadow_color,
-            font: s.font.clone(),
-            inline_object: s.inline_object.clone(),
-            component_style: s.component_style.clone(),
-        };
+        let style = CharStyle(s.with_text(String::new()));
         for ch in s.text.chars() {
             if ch.is_whitespace() {
                 if !word.is_empty() {
@@ -842,15 +820,17 @@ pub(crate) fn wrap_spans(
     let mut cur: StyledLine = Vec::new();
     for w in words {
         if !cur.is_empty() {
-            if width0(&format!("{} {}", styled_text(&cur), styled_text(&w))) <= max_w {
-                cur.push((' ', w[0].1.clone()));
-                cur.extend(w);
+            let mut joined = cur.clone();
+            joined.push((' ', w[0].1.clone()));
+            joined.extend(w.iter().cloned());
+            if width(&joined) <= max_w {
+                cur = joined;
                 continue;
             }
             lines.push(std::mem::take(&mut cur));
         }
         // cur is empty here: start a fresh line, hard-breaking an oversized word.
-        if width0(&styled_text(&w)) <= max_w {
+        if width(&w) <= max_w {
             cur = w;
         } else {
             let (broken, rem) = hard_break_word(&w, max_w, width0);
@@ -870,17 +850,16 @@ pub(crate) fn wrap_spans(
 fn hard_break_word(
     word: &[(char, CharStyle)],
     max_w: f32,
-    width0: &dyn Fn(&str) -> f32,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
 ) -> (Vec<StyledLine>, StyledLine) {
     let mut out: Vec<StyledLine> = Vec::new();
     let mut piece: StyledLine = Vec::new();
-    for (ch, st) in word {
-        let mut test = styled_text(&piece);
-        test.push(*ch);
-        if width0(&test) > max_w && !piece.is_empty() {
-            out.push(std::mem::take(&mut piece));
+    for entry in word {
+        piece.push(entry.clone());
+        if width0(&merge_chars(&piece)) > max_w && piece.len() > 1 {
+            let last = piece.pop().expect("piece has the new char");
+            out.push(std::mem::replace(&mut piece, vec![last]));
         }
-        piece.push((*ch, st.clone()));
     }
     (out, piece)
 }
@@ -894,19 +873,7 @@ fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
         if last_style.as_ref() == Some(st) {
             spans.last_mut().unwrap().text.push(*ch);
         } else {
-            spans.push(TextSpan {
-                text: ch.to_string(),
-                color: st.color,
-                bold: st.bold,
-                italic: st.italic,
-                strikethrough: st.strikethrough,
-                underline: st.underline,
-                obfuscated: st.obfuscated,
-                shadow_color: st.shadow_color,
-                font: st.font.clone(),
-                inline_object: st.inline_object.clone(),
-                component_style: st.component_style.clone(),
-            });
+            spans.push(st.0.with_text(ch.to_string()));
             last_style = Some(st.clone());
         }
     }
@@ -923,6 +890,14 @@ mod tests {
 
     fn line_text(line: &[TextSpan]) -> String {
         line.iter().map(|s| s.text.clone()).collect()
+    }
+
+    /// 10 units per char, 20 when bold.
+    fn width(spans: &[TextSpan]) -> f32 {
+        spans
+            .iter()
+            .map(|s| s.text.chars().count() as f32 * if s.bold { 20.0 } else { 10.0 })
+            .sum()
     }
 
     #[test]
@@ -951,8 +926,7 @@ mod tests {
 
     #[test]
     fn wrap_spans_wraps_on_width_and_keeps_color() {
-        // Each char is 10 units wide; lines fit 5 chars.
-        let width = |s: &str| s.chars().count() as f32 * 10.0;
+        // Lines fit 5 plain chars.
         let red = [1.0, 0.0, 0.0, 1.0];
         let green = [0.0, 1.0, 0.0, 1.0];
         let lines = wrap_spans(&[span("aa", red), span(" bb cc", green)], 50.0, &width);
@@ -968,7 +942,6 @@ mod tests {
 
     #[test]
     fn wrap_spans_hard_breaks_long_word() {
-        let width = |s: &str| s.chars().count() as f32 * 10.0;
         let lines = wrap_spans(&[span("aaaaaaa", [1.0; 4])], 30.0, &width);
         let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
         assert_eq!(texts, vec!["aaa", "aaa", "a"]);
@@ -976,10 +949,18 @@ mod tests {
 
     #[test]
     fn wrap_spans_empty_is_one_blank_line() {
-        let width = |s: &str| s.chars().count() as f32 * 10.0;
         let lines = wrap_spans(&[], 50.0, &width);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].is_empty());
+    }
+
+    #[test]
+    fn wrap_spans_measures_styled_width() {
+        let mut bold = span(" bb", [1.0; 4]);
+        bold.bold = true;
+        let lines = wrap_spans(&[span("aa", [1.0; 4]), bold], 50.0, &width);
+        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        assert_eq!(texts, vec!["aa", "bb"]);
     }
 
     fn set_input(chat: &mut ChatState, input: &str) {
