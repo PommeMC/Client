@@ -377,7 +377,12 @@ impl InputState {
 
                     // Same order as Escape: modal, then suggestions, then chat.
                     if game.chat.is_open() {
-                        should_apply_cursor_grab |= game.chat.handle_escape();
+                        let in_bed = game.chat.is_in_bed();
+                        let closed = game.chat.handle_escape();
+                        if closed && in_bed {
+                            game.stop_sleeping_requested = true;
+                        }
+                        should_apply_cursor_grab |= closed;
                     }
 
                     self.recent_actions.remove(&Action::Close);
