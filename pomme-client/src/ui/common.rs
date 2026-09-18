@@ -429,26 +429,7 @@ pub fn push_item_icon(
         item_name: item_resource_name(data.kind),
         tint: WHITE,
     });
-    if let Some((width, color)) = crate::ui::bundle::item_bar(data) {
-        let bar_x = x + 2.0 * scale;
-        let bar_y = y + 13.0 * scale;
-        elements.push(MenuElement::Rect {
-            x: bar_x,
-            y: bar_y,
-            w: 13.0 * scale,
-            h: 2.0 * scale,
-            corner_radius: 0.0,
-            color: [0.0, 0.0, 0.0, 1.0],
-        });
-        elements.push(MenuElement::Rect {
-            x: bar_x,
-            y: bar_y,
-            w: width as f32 * scale,
-            h: scale,
-            corner_radius: 0.0,
-            color,
-        });
-    }
+    crate::ui::bundle::push_item_bar(elements, x, y, scale, data);
     if data.count > 1 {
         push_item_count(elements, x, y, size, scale, data.count);
     }

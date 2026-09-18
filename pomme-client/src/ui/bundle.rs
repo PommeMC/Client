@@ -71,6 +71,36 @@ pub fn item_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
     Some((width, color))
 }
 
+pub fn push_item_bar(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    scale: f32,
+    data: &ItemStackData,
+) {
+    let Some((width, color)) = item_bar(data) else {
+        return;
+    };
+    let bar_x = x + 2.0 * scale;
+    let bar_y = y + 13.0 * scale;
+    elements.push(MenuElement::Rect {
+        x: bar_x,
+        y: bar_y,
+        w: 13.0 * scale,
+        h: 2.0 * scale,
+        corner_radius: 0.0,
+        color: [0.0, 0.0, 0.0, 1.0],
+    });
+    elements.push(MenuElement::Rect {
+        x: bar_x,
+        y: bar_y,
+        w: width as f32 * scale,
+        h: scale,
+        corner_radius: 0.0,
+        color,
+    });
+}
+
 pub fn push_selected_icon(
     elements: &mut Vec<MenuElement>,
     data: &ItemStackData,
@@ -120,6 +150,9 @@ pub fn push_selected_icon(
         selected_data.kind,
     )));
     elements.push(icon(format!("__pomme_{bundle_name}_open_front")));
+    // The GUI model changes while an item is selected, but vanilla's bundle
+    // fullness bar is an item decoration and remains visible above that model.
+    push_item_bar(elements, x, y, w / 16.0, data);
 }
 
 pub fn tooltip_visible(data: &ItemStackData) -> bool {
