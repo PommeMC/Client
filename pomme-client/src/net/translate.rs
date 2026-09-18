@@ -363,7 +363,7 @@ pub struct Translation {
 struct ConfigIds {
     /// Wire-version clientbound id -> native id; `None` drops the frame.
     inbound: Box<[Option<u32>]>,
-    /// Latest serverbound id -> wire-version id; `None` suppresses.
+    /// Native serverbound id -> wire-version id; `None` suppresses.
     outbound: Box<[Option<u32>]>,
     /// Native-space `registry_data` on wire versions at or below 765, whose
     /// form is one packet holding every registry as a single NBT map.
@@ -373,7 +373,7 @@ struct ConfigIds {
     v764: Option<ConfigIds764>,
 }
 
-/// Latest config-space ids for the 764 payload rewrites.
+/// Native config-space ids for the 764 payload rewrites.
 struct ConfigIds764 {
     disconnect_id: u32,
     resource_pack_push_id: u32,
@@ -387,7 +387,7 @@ struct GameIds {
     /// (no native equivalent — none exist for 1.21.11/1.21.10, kept for
     /// safety).
     inbound: Box<[Option<u32>]>,
-    /// Latest serverbound id -> wire-version id; `None` suppresses the
+    /// Native serverbound id -> wire-version id; `None` suppresses the
     /// frame (the packet doesn't exist on the older version).
     outbound: Box<[Option<u32>]>,
     /// The wire version's `EntityDataSerializers` interleave (the
@@ -424,7 +424,7 @@ struct GameIds {
     /// The rewrites 1.20.2 introduced, for wire version 763. Its presence
     /// also flags the named NBT roots, which every walker below reads.
     v763: Option<Ids763>,
-    /// Latest serverbound ids whose packet is knowingly absent on this wire
+    /// Native serverbound ids whose packet is knowingly absent on this wire
     /// version (`client_tick_end`, `player_loaded`, the pick pair); suppressed
     /// quietly.
     quiet_suppressed: Box<[u32]>,
@@ -449,7 +449,7 @@ struct Ids774 {
     interact_old_id: u32,
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocols at or below
+/// Native-space dispatch ids for the frame rewrites protocols at or below
 /// 768 need.
 struct Ids768 {
     level_particles_id: u32,
@@ -495,7 +495,7 @@ impl Ids767 {
     }
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocol 766 needs.
+/// Native-space dispatch ids for the frame rewrites protocol 766 needs.
 struct Ids766 {
     projectile_power_id: u32,
     /// Serverbound `use_item`: native + wire ids for the rotation strip.
@@ -509,7 +509,7 @@ impl Ids766 {
     }
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocol 765 needs.
+/// Native-space dispatch ids for the frame rewrites protocol 765 needs.
 struct Ids765 {
     container_set_content_id: u32,
     set_equipment_id: u32,
@@ -552,7 +552,7 @@ impl Ids765 {
     }
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocol 764 needs:
+/// Native-space dispatch ids for the frame rewrites protocol 764 needs:
 /// the pre-1.20.3 JSON text components (`component_pass`), the scoreboard
 /// rework, and the unsplit resource_pack packet.
 struct Ids764 {
@@ -628,11 +628,11 @@ impl Ids764 {
     }
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocol 769 needs.
+/// Native-space dispatch ids for the frame rewrites protocol 769 needs.
 struct Ids769 {
     player_chat_id: u32,
     update_advancements_id: u32,
-    /// Latest-space serverbound `container_click` id and the wire
+    /// Native-space serverbound `container_click` id and the wire
     /// version's, for the hashed-stack rewrite.
     container_click_id: u32,
     container_click_old_id: u32,
@@ -655,7 +655,7 @@ struct Ids770 {
     player_command_old_id: u32,
 }
 
-/// Latest-space dispatch ids for the frame rewrites only protocols at or
+/// Native-space dispatch ids for the frame rewrites only protocols at or
 /// below 772 need (the layouts 1.21.9 changed). Its presence also flags the
 /// pre-1.21.9 entity-data serializer set and `profile` component layout.
 struct Ids772 {
@@ -727,7 +727,7 @@ impl Ids777 {
     }
 }
 
-/// Latest-space dispatch ids for the frame rewrites protocol 763 needs, plus
+/// Native-space dispatch ids for the frame rewrites protocol 763 needs, plus
 /// the wire ids and entity type the `add_player` rewrite synthesizes with.
 struct Ids763 {
     respawn_id: u32,
@@ -769,8 +769,7 @@ pub fn joinable(protocol: i32) -> bool {
 }
 
 /// The translation for the wire version negotiated with the current server,
-/// or `None` when the client speaks it natively (the native version, or one
-/// outside `TRANSLATED`, which connects untranslated as before).
+/// or `None` for the native version.
 pub fn active() -> Option<&'static Translation> {
     let protocol = crate::version::session_protocol();
     if protocol == NATIVE.protocol {
@@ -927,7 +926,7 @@ impl Translation {
             return Vec::new();
         };
         let Some(id) = ids.inbound.get(wire_id as usize).copied().flatten() else {
-            tracing::debug!("Dropping inbound config packet {wire_id} with no latest id");
+            tracing::debug!("Dropping inbound config packet {wire_id} with no native id");
             return Vec::new();
         };
         if ids.split_registry_data == Some(id) {
@@ -1013,11 +1012,11 @@ impl Translation {
         }
         let id = match &self.game_ids {
             Some(ids) => {
-                let Some(latest) = ids.inbound.get(wire_id as usize).copied().flatten() else {
-                    tracing::debug!("Dropping inbound game packet {wire_id} with no latest id");
+                let Some(native) = ids.inbound.get(wire_id as usize).copied().flatten() else {
+                    tracing::debug!("Dropping inbound game packet {wire_id} with no native id");
                     return None;
                 };
-                latest
+                native
             }
             None => wire_id,
         };
@@ -3329,7 +3328,7 @@ fn translate_entity_data(
     Some(out)
 }
 
-/// Latest-registry component ids whose payloads the stack walker can advance
+/// Native-registry component ids whose payloads the stack walker can advance
 /// past (26.2 `DataComponents` registration order; anchored in
 /// `component_id_anchors` in `azalea_compat`). Matching happens after the
 /// remap, so one set of ids serves every wire version.

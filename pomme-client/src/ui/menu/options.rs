@@ -1036,7 +1036,7 @@ impl MainMenu {
                 "UI:" => self.ui_volume = v,
                 _ => continue,
             }
-            self.save_settings();
+            self.settings_dirty = true;
         }
 
         if header_footer {

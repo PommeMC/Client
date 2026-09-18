@@ -139,8 +139,11 @@ pub async fn connect_to_server(
             super::resolve::connect(&server_addr, ClientIntention::Login).await?
         }
         Transport::Memory(end) => {
-            // An integrated server speaks the native protocol, so there is
+            // The integrated server speaks the native protocol, so there is
             // nothing to probe and translation stays inert for the session.
+            #[cfg(feature = "singleplayer")]
+            const _: () =
+                assert!(pomme_singleplayer::PROTOCOL == pomme_protocol::version::NATIVE.protocol);
             adopt_wire_protocol(pomme_protocol::version::NATIVE.protocol);
             let mut conn = Conn::from_memory(end);
             super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
@@ -447,6 +450,7 @@ async fn config_sequence(
 
     let mut registry_holder = RegistryHolder::default();
     let mut received_registry_data = false;
+    let mut selected_known_packs = false;
 
     // Vanilla sends brand and client information once, from the login
     // listener; a reconfiguration sends neither.
@@ -533,21 +537,28 @@ async fn config_sequence(
         match packet {
             ClientboundConfigPacket::RegistryData(p) => {
                 received_registry_data = true;
-                registry_holder.append(p.registry_id, p.entries);
+                // The server omits the data of every entry the pack we claimed
+                // carries, so fill those in before azalea drops them.
+                let entries = if selected_known_packs {
+                    super::known_packs::fill_known_entries(&p.registry_id, p.entries)
+                        .map_err(ConnectionError::Disconnected)?
+                } else {
+                    p.entries
+                };
+                registry_holder.append(p.registry_id, entries);
             }
             ClientboundConfigPacket::UpdateTags(_) => {
                 tracing::debug!("Received tags");
             }
-            ClientboundConfigPacket::SelectKnownPacks(_) => {
-                // Claiming no known packs forces the server to send NBT for
-                // every registry entry; `variant_index` (handler.rs) relies on
-                // that to equate registry-map position with protocol id.
+            ClientboundConfigPacket::SelectKnownPacks(p) => {
+                // Vanilla `handleSelectKnownPacks`: claim the offered packs we
+                // have ourselves, so the server can skip their registry data.
+                let known_packs = super::known_packs::select_packs(&p.known_packs);
+                selected_known_packs = !known_packs.is_empty();
                 write_config_packet(
                     conn,
                     ServerboundConfigPacket::SelectKnownPacks(
-                        s_select_known_packs::ServerboundSelectKnownPacks {
-                            known_packs: vec![],
-                        },
+                        s_select_known_packs::ServerboundSelectKnownPacks { known_packs },
                     ),
                 )
                 .await?;
@@ -888,7 +899,7 @@ fn serialize_frame<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug
         .map_err(|e| ConnectionError::Write(std::io::Error::other(e)))
 }
 
-/// Writes one latest-layout frame, translating it for older wire versions.
+/// Writes one native-layout frame, translating it for other wire versions.
 async fn write_game_frame(
     writer: &mut RawWriter,
     translation: Option<&super::translate::Translation>,
@@ -904,7 +915,7 @@ async fn write_game_frame(
     Ok(())
 }
 
-/// Writes one latest-layout configuration packet, translating it for older
+/// Writes one native-layout configuration packet, translating it for other
 /// wire versions (765 down: id remap plus suppression of packets the wire
 /// version lacks).
 async fn write_config_packet(
@@ -958,14 +969,39 @@ mod tests {
 
     use super::*;
 
+    /// A server that accepts pomme's known-pack claim sends the biomes as ids
+    /// alone; the climate the mesher colours with then comes entirely from the
+    /// embedded elements.
+    #[test]
+    fn filled_biome_entries_carry_their_climate() {
+        use azalea_registry::identifier::Identifier;
+
+        let holder = crate::net::known_packs::filled_holder("worldgen/biome");
+        let plains_id = holder.extra[&Identifier::new("minecraft:worldgen/biome")]
+            .map
+            .get_index_of(&Identifier::new("minecraft:plains"))
+            .expect("plains biome") as u32;
+
+        let plains = &extract_biome_climate(&holder)[&plains_id];
+        assert_eq!(plains.temperature, 0.8);
+        assert_eq!(plains.downfall, 0.4);
+    }
+
     /// 762 (1.19.4) is not a supported version at all, so it never gains a
     /// wire translation; 775 has one.
     #[test]
     fn resolve_wire_gates_unjoinable_versions() {
         let native = NATIVE.protocol;
+        // Launched as the native version.
         assert_eq!(resolve_wire(Some(775), native), Ok(775));
         assert_eq!(resolve_wire(Some(762), native), Ok(native));
         assert_eq!(resolve_wire(None, native), Ok(native));
+        // Launched as the newest listed version, which need not be native.
+        let latest = pomme_protocol::version::LATEST.protocol;
+        assert_eq!(resolve_wire(Some(native), latest), Ok(native));
+        if crate::net::translate::joinable(latest) {
+            assert_eq!(resolve_wire(None, latest), Ok(latest));
+        }
         // An untranslated launched version is refused whatever the probe
         // yielded, unless the server itself speaks a joinable protocol.
         assert_eq!(resolve_wire(None, 762), Err(762));

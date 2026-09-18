@@ -4,6 +4,7 @@ pub mod commands;
 pub mod conn;
 pub mod connection;
 pub mod handler;
+pub mod known_packs;
 pub mod resolve;
 pub mod sender;
 pub mod stream;

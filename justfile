@@ -32,6 +32,8 @@ client-release *args: openal
 client-build *args: openal
     @cargo build -p pomme-client {{ args }}
 
+# TODO: CI also runs the client's clippy and tests with --no-default-features; mirror it here.
+
 client-pre-pr:
     @cargo fmt -p pomme-client -- --check
     @cargo fmt -p pomme-protocol -- --check
@@ -51,12 +53,18 @@ protogen version="26.2":
 registrygen version="26.2":
     @cargo run -p protogen -- registries reference/{{ version }} {{ version }} pomme-protocol/src/data/registries-{{ version }}.json
 
+# Regenerate a version's known-pack table from the extracted reference data.
+knownpackgen version="26.2":
+    @cargo run -p protogen -- knownpacks reference/{{ version }} {{ version }} pomme-protocol/src/data/known-packs-{{ version }}.json
+
 # Regenerate a version's block-state table from the data-generator report.
 blockgen version="26.2":
     @cargo run -p blockgen -- blocks reference/{{ version }}/generated/reports/blocks.json {{ version }} pomme-client/src/world/block/data/blocks-{{ version }}.json
 
 # JDK 25 bin dir for stategen; override with `just jdk=<path> stategen`.
 jdk := "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"
+
+# TODO: Windows only (javac.exe, ';' classpath separator); make portable.
 
 # Regenerate a version's per-state property table by running vanilla's own code
 # (tools/stategen/StateDump.java) against the reference server jar, then

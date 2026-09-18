@@ -54,23 +54,16 @@ struct PhaseFile {
 }
 
 impl PacketTable {
-    /// The table for the version the client speaks natively. Parsed once
-    /// from the embedded JSON; panics on malformed data (a generator bug,
-    /// caught at first use / in tests rather than emitting wrong ids).
+    /// The table for the version the client speaks natively.
     pub fn native() -> &'static PacketTable {
-        static TABLE: OnceLock<PacketTable> = OnceLock::new();
-        TABLE.get_or_init(|| {
-            Self::parse(include_str!("data/protocol-26.2.json"), NATIVE)
-                .expect("embedded 26.2 packet table")
-        })
+        Self::for_protocol(NATIVE.protocol).expect("native packet table is embedded")
     }
 
     /// The table for a launchable protocol number, or `None` for versions
-    /// without an embedded table.
+    /// without an embedded table. Parsed once from the embedded JSON; panics
+    /// on malformed data (a generator bug, caught at first use / in tests
+    /// rather than emitting wrong ids).
     pub fn for_protocol(protocol: i32) -> Option<&'static PacketTable> {
-        if protocol == NATIVE.protocol {
-            return Some(Self::native());
-        }
         static TABLES: [OnceLock<PacketTable>; EMBEDDED.len()] =
             [const { OnceLock::new() }; EMBEDDED.len()];
         crate::version::embedded_get(protocol, &TABLES, |e| {
@@ -182,17 +175,40 @@ mod tests {
             })
     }
 
+    /// The `(id, name)` pairs the table defines in one phase and direction.
+    fn names(t: &PacketTable, phase: Phase, dir: Direction) -> impl Iterator<Item = (u32, &str)> {
+        (0..).map_while(move |id| t.name_of(phase, dir, id).map(|name| (id, name)))
+    }
+
     /// Visits every `(phase, direction, id, name)` the table defines.
     fn for_each_name(t: &PacketTable, mut f: impl FnMut(Phase, Direction, u32, &str)) {
         for phase in PHASES {
             for dir in DIRECTIONS {
-                let mut id = 0;
-                while let Some(name) = t.name_of(phase, dir, id) {
+                for (id, name) in names(t, phase, dir) {
                     f(phase, dir, id, name);
-                    id += 1;
                 }
             }
         }
+    }
+
+    /// Asserts every packet `from` has in the phase/direction sits at
+    /// `shift(id)` in `to` (`None`: absent), returning `from`'s packet count.
+    fn assert_shifted(
+        from: &PacketTable,
+        to: &PacketTable,
+        phase: Phase,
+        dir: Direction,
+        shift: impl Fn(u32) -> Option<u32>,
+    ) -> u32 {
+        names(from, phase, dir)
+            .inspect(|&(id, name)| {
+                assert_eq!(
+                    to.id(phase, dir, name),
+                    shift(id),
+                    "{phase:?} {dir:?} {name}"
+                );
+            })
+            .count() as u32
     }
 
     /// Asserts every id `t` has in the phase/direction resolves to the same
@@ -205,15 +221,7 @@ mod tests {
         dir: Direction,
         equal: bool,
     ) {
-        let mut id = 0;
-        while let Some(name) = t.name_of(phase, dir, id) {
-            assert_eq!(
-                Some(name),
-                other.name_of(phase, dir, id),
-                "{phase:?} {dir:?} {id}"
-            );
-            id += 1;
-        }
+        let id = assert_shifted(t, other, phase, dir, Some);
         if equal {
             assert_eq!(
                 other.name_of(phase, dir, id),
@@ -320,7 +328,8 @@ mod tests {
     /// `add_transient_block` (37), `post_effects` (configuration 10, game 83)
     /// and `swing_animation` (123) clientbound and replaced serverbound
     /// `swing` (63) with `punch` (46); every other id moves by the insertions
-    /// before it, and the remaining phases are identical to 26.2.
+    /// before it, and the remaining phases are identical to 26.2. Those ids
+    /// are 26.3's; the shift thresholds below are 26.2's.
     #[test]
     fn anchors_26_3() {
         let t = PacketTable::for_protocol(777).unwrap();
@@ -331,49 +340,43 @@ mod tests {
         assert_eq!(cb("add_transient_block"), Some(37));
         assert_eq!(cb("post_effects"), Some(83));
         assert_eq!(cb("swing_animation"), Some(123));
-        assert_eq!(cb("respawn"), Some(84));
-        assert_eq!(cb("show_dialog"), Some(143));
-        assert_eq!(t.name_of(Phase::Game, Direction::Clientbound, 144), None);
         let sb = |name| t.id(Phase::Game, Direction::Serverbound, name);
         assert_eq!(sb("punch"), Some(46));
         assert_eq!(sb("swing"), None);
-        assert_eq!(sb("spectator_action"), Some(63));
-        assert_eq!(t.name_of(Phase::Game, Direction::Serverbound, 69), None);
-        let config = |name| t.id(Phase::Configuration, Direction::Clientbound, name);
-        assert_eq!(config("post_effects"), Some(10));
-        assert_eq!(config("code_of_conduct"), Some(20));
+        assert_eq!(
+            t.id(Phase::Configuration, Direction::Clientbound, "post_effects"),
+            Some(10)
+        );
 
-        let shifted = |phase, dir, shift: fn(u32) -> Option<u32>| {
-            let mut id = 0;
-            while let Some(name) = native.name_of(phase, dir, id) {
-                assert_eq!(
-                    t.id(phase, dir, name),
-                    shift(id),
-                    "{phase:?} {dir:?} {name}"
-                );
-                id += 1;
+        for phase in PHASES {
+            for dir in DIRECTIONS {
+                let (shift, net_added): (fn(u32) -> Option<u32>, u32) = match (phase, dir) {
+                    (Phase::Game, Direction::Clientbound) => (
+                        |id| {
+                            Some(
+                                id + u32::from(id >= 37)
+                                    + u32::from(id >= 82)
+                                    + u32::from(id >= 121),
+                            )
+                        },
+                        3,
+                    ),
+                    (Phase::Game, Direction::Serverbound) => (
+                        |id| match id {
+                            46..=62 => Some(id + 1),
+                            63 => None,
+                            _ => Some(id),
+                        },
+                        0,
+                    ),
+                    (Phase::Configuration, Direction::Clientbound) => {
+                        (|id| Some(id + u32::from(id >= 10)), 1)
+                    }
+                    _ => (Some, 0),
+                };
+                let end = assert_shifted(native, t, phase, dir, shift) + net_added;
+                assert_eq!(t.name_of(phase, dir, end), None, "{phase:?} {dir:?}");
             }
-        };
-        shifted(Phase::Game, Direction::Clientbound, |id| {
-            Some(id + u32::from(id >= 37) + u32::from(id >= 82) + u32::from(id >= 121))
-        });
-        shifted(Phase::Game, Direction::Serverbound, |id| match id {
-            46..=62 => Some(id + 1),
-            63 => None,
-            _ => Some(id),
-        });
-        shifted(Phase::Configuration, Direction::Clientbound, |id| {
-            Some(id + u32::from(id >= 10))
-        });
-        for (phase, dir) in [
-            (Phase::Handshake, Direction::Serverbound),
-            (Phase::Status, Direction::Serverbound),
-            (Phase::Status, Direction::Clientbound),
-            (Phase::Login, Direction::Serverbound),
-            (Phase::Login, Direction::Clientbound),
-            (Phase::Configuration, Direction::Serverbound),
-        ] {
-            assert_prefix(t, native, phase, dir, true);
         }
     }
 
@@ -1068,7 +1071,7 @@ mod tests {
     /// `MovePlayerPacket.Pos` once produced `move_player_packet._pos`.
     #[test]
     fn embedded_names_are_well_formed() {
-        for embedded in &EMBEDDED {
+        for embedded in EMBEDDED {
             let t = PacketTable::for_protocol(embedded.version.protocol).unwrap();
             for_each_name(t, |phase, dir, id, name| {
                 assert!(
@@ -1125,7 +1128,7 @@ mod tests {
             PacketTable::for_protocol(NATIVE.protocol).unwrap(),
             PacketTable::native()
         ));
-        for e in &EMBEDDED {
+        for e in EMBEDDED {
             let protocol = e.version.protocol;
             assert_eq!(
                 PacketTable::for_protocol(protocol)
@@ -1145,11 +1148,7 @@ mod tests {
     #[test]
     fn counts_26_2() {
         let t = PacketTable::native();
-        let count = |phase, dir| {
-            (0..)
-                .take_while(|&i| t.name_of(phase, dir, i).is_some())
-                .count()
-        };
+        let count = |phase, dir| names(t, phase, dir).count();
         use Direction::{Clientbound, Serverbound};
         assert_eq!(count(Phase::Handshake, Serverbound), 1);
         assert_eq!(count(Phase::Handshake, Clientbound), 0);

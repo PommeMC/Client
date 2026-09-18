@@ -1180,9 +1180,9 @@ fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id
     };
     let order_pos = |name: &str| order.iter().position(|p| *p == name).map(|i| i as u32);
     let fallback = order_pos(default).unwrap_or(0);
-    // Position == protocol id only holds because pomme answers
-    // SelectKnownPacks with an empty list (connection.rs), forcing the server
-    // to send NBT for every entry (azalea shift_removes NBT-less ones).
+    // Position == protocol id only holds while every entry carries NBT
+    // (azalea shift_removes NBT-less ones). Entries the server skips for a
+    // pack pomme claimed are filled in first (`net::known_packs`).
     let Some((ident, nbt)) = registry_holder
         .extra
         .get(&azalea_registry::identifier::Identifier::new(registry))

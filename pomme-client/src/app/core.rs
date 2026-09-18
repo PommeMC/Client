@@ -435,9 +435,11 @@ impl AppCore {
     ) {
         game.interaction
             .stop_destroying_for_screen(&connection.packet_tx);
-        // Minecraft.setScreen(DeathScreen) replaces the current screen.
+        // Minecraft.setScreen(DeathScreen) replaces the current screen, which
+        // runs the options screen's removed() and saves.
         game.paused = false;
         game.options_from_game = false;
+        self.menu.flush_settings();
         game.close_menu();
         game.close_creative_inventory();
         game.chat.close();

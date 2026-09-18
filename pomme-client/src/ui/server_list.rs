@@ -28,7 +28,7 @@ pub struct ServerEntry {
 pub enum Compat {
     /// The version the client speaks natively: joined without translation.
     Native,
-    /// An older protocol with embedded translation data: joinable, with the
+    /// Another protocol with embedded translation data: joinable, with the
     /// wire translated on the fly.
     Translated,
     /// A protocol without translation data: a join would be refused.
@@ -76,6 +76,8 @@ impl ServerList {
     }
 
     pub fn save(&self) {
+        // TODO: use crate::util::write_atomic (vanilla ServerList.save goes
+        // through a temp file + Util.safeReplaceFile).
         if let Ok(json) = serde_json::to_string_pretty(&self.servers)
             && let Err(e) = std::fs::write(&self.path, json)
         {
