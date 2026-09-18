@@ -594,9 +594,14 @@ fn cardinal_normal(positions: &[[f32; 3]; 4]) -> glam::Vec3 {
 }
 
 fn item_tint_marker(index: u32) -> u32 {
+    debug_assert!(index < 2);
     // ItemVertex is R8G8B8A8_UNORM: byte 0 is light, bytes 1..=3 are tint.
     // Reserve tint RGB (0, index+1, 0) as a shader-side tint-index marker.
-    ((index.min(254) + 1) & 0xFF) << 16
+    ((index + 1) & 0xFF) << 16
+}
+
+fn supported_item_tint_marker(index: u32) -> Option<u32> {
+    (index < 2).then(|| item_tint_marker(index))
 }
 
 fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
@@ -605,10 +610,10 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
         let region = uv_map.get_region(&quad.texture);
         let u_span = region.u_max - region.u_min;
         let v_span = region.v_max - region.v_min;
-        let tint = quad.item_tint_index.map_or(
-            crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
-            item_tint_marker,
-        );
+        let tint = quad
+            .tint_index
+            .and_then(supported_item_tint_marker)
+            .unwrap_or(crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED);
         let normal = pack_normal(cardinal_normal(&quad.positions));
 
         for i in [0, 1, 2, 2, 3, 0] {
@@ -657,10 +662,9 @@ fn build_extruded_item_mask(
     let v_span = region.v_max - region.v_min;
     let z_min = 7.5 / 16.0 - 0.5;
     let z_max = 8.5 / 16.0 - 0.5;
-    let tint = tint_index.map_or(
-        crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
-        item_tint_marker,
-    );
+    let tint = tint_index
+        .and_then(supported_item_tint_marker)
+        .unwrap_or(crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED);
 
     let front = [
         [-0.5, -0.5, z_max],
@@ -834,10 +838,9 @@ fn build_flat_quad(region: AtlasRegion, tint_index: Option<u32>) -> Vec<ItemVert
         [h, h, 0.0],
         [-h, h, 0.0],
     ];
-    let tint = tint_index.map_or(
-        crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED,
-        item_tint_marker,
-    );
+    let tint = tint_index
+        .and_then(supported_item_tint_marker)
+        .unwrap_or(crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED);
     let uvs = [
         [region.u_min, region.v_max],
         [region.u_max, region.v_max],
@@ -1163,6 +1166,22 @@ mod tests {
             vertices
                 .iter()
                 .all(|vertex| vertex.light_tint.to_le_bytes()[1..] == [0, 2, 0])
+        );
+    }
+
+    #[test]
+    fn unsupported_item_tint_indices_render_untinted_instead_of_aliasing_slot_one() {
+        let mask = SpriteAlphaMask {
+            width: 1,
+            height: 1,
+            frames: vec![vec![true]],
+        };
+        let vertices = build_extruded_item_mask(&mask, unit_region(), Some(2));
+        assert!(!vertices.is_empty());
+        assert!(
+            vertices
+                .iter()
+                .all(|vertex| vertex.light_tint.to_le_bytes()[1..] == [255, 255, 255])
         );
     }
 

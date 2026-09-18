@@ -16,7 +16,7 @@ use crate::renderer::ParticleQuad;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::renderer::chunk::mesher::{
     BiomeClimate, Colormap, blend_color, dry_foliage_color, foliage_color, grass_color,
-    world_brightness,
+    tint_sample_y, world_brightness,
 };
 use crate::renderer::pipelines::particle::MAX_PARTICLE_QUADS as MAX_PARTICLES;
 use crate::world::block::registry::{BlockRegistry, Tint};
@@ -344,7 +344,7 @@ impl ParticleStore {
                 Tint::Redstone => crate::world::block::redstone_wire_rgb(state),
                 Tint::Stem => crate::world::block::stem_rgb(state),
                 Tint::Constant(color) => crate::renderer::chunk::mesher::int_to_rgb(color as i32),
-                _ => self.blend_tint(faces.tint, pos, chunks, biome_climate),
+                _ => self.blend_tint(faces.tint, state, pos, chunks, biome_climate),
             };
             for (c, t) in color.iter_mut().zip(tint) {
                 *c *= t;
@@ -493,17 +493,19 @@ impl ParticleStore {
         }
     }
 
-    /// The block's biome tint averaged over the vanilla 5x5 biome blend.
+    /// The block's biome tint using vanilla's default blend radius.
     fn blend_tint(
         &self,
         tint: Tint,
+        state: BlockState,
         pos: BlockPos,
         chunks: &ChunkStore,
         biome_climate: &HashMap<u32, BiomeClimate>,
     ) -> [f32; 3] {
+        let sample_y = tint_sample_y(tint, state, pos.y);
         blend_color(pos.x, pos.z, |x, z| {
             let climate = biome_climate
-                .get(&chunks.biome_id(x, pos.y, z))
+                .get(&chunks.biome_id(x, sample_y, z))
                 .copied()
                 .unwrap_or_default();
             match tint {

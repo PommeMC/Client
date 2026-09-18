@@ -315,7 +315,7 @@ pub struct BakedQuad {
     /// Raw vanilla face `tintindex`. Terrain resolves this through `tint`,
     /// while item models use it to index the `ItemTintSource` palette from
     /// their item definition.
-    pub item_tint_index: Option<u32>,
+    pub tint_index: Option<u32>,
     /// The default table's shade, for GUI and held items.
     pub shade_light: f32,
     /// The face terrain shades this quad as, `None` for `shade: false`.
@@ -681,8 +681,8 @@ pub fn bake_item_models(
                 continue;
             };
             for quad in &mut baked.quads {
-                if let Some(index) = quad.item_tint_index {
-                    quad.item_tint_index =
+                if let Some(index) = quad.tint_index {
+                    quad.tint_index =
                         (index < part_tints.len() as u32).then_some(tint_base + index);
                 }
             }
@@ -708,6 +708,12 @@ pub fn bake_item_models(
             ground_transforms.insert(item_name.to_string(), transform);
         }
         if !item_tints.is_empty() {
+            if item_tints.len() > 2 {
+                tracing::warn!(
+                    "{item_name}: {} item tint slots declared; Pomme currently renders only the first two",
+                    item_tints.len()
+                );
+            }
             tint_sources.insert(item_name.to_string(), item_tints);
         }
         if let Some(mut baked) = merged {
@@ -946,7 +952,7 @@ fn add_chest_cube(
             texture: texture.to_string(),
             cullface: None,
             tint: super::registry::Tint::None,
-            item_tint_index: None,
+            tint_index: None,
             shade_light: spec.shade,
             shade_face: None,
         });
@@ -1480,7 +1486,7 @@ fn bake_resolved_model(
                 texture: texture_name,
                 cullface,
                 tint: quad_tint,
-                item_tint_index: face_def
+                tint_index: face_def
                     .tint_index
                     .and_then(|index| u32::try_from(index).ok()),
                 shade_light: shade_face.map_or(1.0, |face| face.shade_light()),
@@ -1792,7 +1798,7 @@ fn is_non_occluding(block_name: &str) -> bool {
 fn apply_block_tints(model: &mut BakedModel, block_name: &str) {
     for quad in &mut model.quads {
         quad.tint = quad
-            .item_tint_index
+            .tint_index
             .map_or(Tint::None, |index| determine_tint(block_name, index));
     }
 }
@@ -1898,7 +1904,7 @@ mod tests {
     }
 
     #[test]
-    fn baked_quad_preserves_raw_item_tint_index() {
+    fn baked_quad_preserves_raw_tint_index() {
         let face = FaceDef {
             uv: Some([0.0, 0.0, 16.0, 16.0]),
             texture: "all".to_string(),
@@ -1918,7 +1924,7 @@ mod tests {
             ground_transform: Mat4::IDENTITY,
         };
         let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
-        assert_eq!(baked.quads[0].item_tint_index, Some(1));
+        assert_eq!(baked.quads[0].tint_index, Some(1));
     }
 
     /// Every face must show the full-tile texture upright at rotation 0 and
@@ -2048,7 +2054,7 @@ mod tests {
                     texture: "fern".to_string(),
                     cullface: None,
                     tint: Tint::None,
-                    item_tint_index: Some(0),
+                    tint_index: Some(0),
                     shade_light: 1.0,
                     shade_face: None,
                 },
@@ -2058,7 +2064,7 @@ mod tests {
                     texture: "fern_overlay".to_string(),
                     cullface: None,
                     tint: Tint::None,
-                    item_tint_index: None,
+                    tint_index: None,
                     shade_light: 1.0,
                     shade_face: None,
                 },

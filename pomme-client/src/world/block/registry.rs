@@ -180,7 +180,9 @@ impl BlockRegistry {
     }
 
     /// Evaluate the stock item definition's tint sources for this stack.
-    /// Vanilla 26.2 uses at most two tint entries per item model.
+    /// Stock Vanilla 26.2 uses at most two tint entries per item model. Legal
+    /// resource-pack models can declare more; those extra slots currently
+    /// render untinted rather than aliasing either supported palette entry.
     pub fn item_tint_palette(&self, name: &str, stack: Option<&ItemStackData>) -> [u32; 2] {
         let mut palette = [0xFFFFFF; 2];
         if let Some(sources) = self.item_tint_sources.get(name) {

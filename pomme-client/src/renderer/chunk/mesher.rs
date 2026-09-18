@@ -290,6 +290,16 @@ impl Default for BiomeClimate {
     }
 }
 
+pub(crate) fn tint_sample_y(tint: Tint, state: BlockState, y: i32) -> i32 {
+    if tint == Tint::DoubleGrass
+        && crate::world::block::block_properties(state).get("half") == Some("upper")
+    {
+        y - 1
+    } else {
+        y
+    }
+}
+
 fn tint_color(
     tint: Tint,
     snapshot: &ChunkStoreSnapshot,
@@ -298,21 +308,13 @@ fn tint_color(
     y: i32,
     z: i32,
 ) -> u32 {
+    let sample_y = tint_sample_y(tint, state, y);
     let color = match tint {
         Tint::None => return PACKED_WHITE_SHIFTED,
-        Tint::Grass => snapshot.grass_tint(x, y, z),
-        Tint::DoubleGrass => {
-            let sample_y =
-                if crate::world::block::block_properties(state).get("half") == Some("upper") {
-                    y - 1
-                } else {
-                    y
-                };
-            snapshot.grass_tint(x, sample_y, z)
-        }
-        Tint::Foliage => snapshot.foliage_tint(x, y, z),
-        Tint::DryFoliage => snapshot.dry_foliage_tint(x, y, z),
-        Tint::Water => snapshot.water_tint(x, y, z),
+        Tint::Grass | Tint::DoubleGrass => snapshot.grass_tint(x, sample_y, z),
+        Tint::Foliage => snapshot.foliage_tint(x, sample_y, z),
+        Tint::DryFoliage => snapshot.dry_foliage_tint(x, sample_y, z),
+        Tint::Water => snapshot.water_tint(x, sample_y, z),
         Tint::Constant(color) => int_to_rgb(color as i32),
         Tint::Redstone => crate::world::block::redstone_wire_rgb(state),
         Tint::Stem => crate::world::block::stem_rgb(state),
@@ -385,21 +387,33 @@ pub fn dry_foliage_color(climate: &BiomeClimate, colormap: &Colormap) -> [f32; 3
         .unwrap_or_else(|| colormap.lookup(climate.temperature, climate.downfall))
 }
 
-/// Average a biome color over the vanilla 5x5 horizontal blend
-/// (`BiomeColors` with the default blend radius of 2).
-pub fn blend_color(x: i32, z: i32, mut color_at: impl FnMut(i32, i32) -> [f32; 3]) -> [f32; 3] {
-    const RADIUS: i32 = 2;
-    const COUNT: f32 = ((RADIUS * 2 + 1) * (RADIUS * 2 + 1)) as f32;
-    let mut sum = [0.0f32; 3];
-    for dz in -RADIUS..=RADIUS {
-        for dx in -RADIUS..=RADIUS {
-            let c = color_at(x + dx, z + dz);
-            for (s, v) in sum.iter_mut().zip(c) {
-                *s += v;
+/// Vanilla's default biome-blend radius. Pomme does not expose the graphics
+/// option yet, so tint rendering uses the vanilla default while matching
+/// `ClientLevel.calculateBlockTint`'s integer-channel averaging exactly.
+pub const DEFAULT_BIOME_BLEND_RADIUS: i32 = 2;
+
+pub fn blend_color(x: i32, z: i32, color_at: impl FnMut(i32, i32) -> [f32; 3]) -> [f32; 3] {
+    blend_color_with_radius(x, z, DEFAULT_BIOME_BLEND_RADIUS, color_at)
+}
+
+fn blend_color_with_radius(
+    x: i32,
+    z: i32,
+    radius: i32,
+    mut color_at: impl FnMut(i32, i32) -> [f32; 3],
+) -> [f32; 3] {
+    let radius = radius.max(0);
+    let count = ((radius * 2 + 1) * (radius * 2 + 1)) as u32;
+    let mut sum = [0_u32; 3];
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            let color = color_at(x + dx, z + dz);
+            for (total, channel) in sum.iter_mut().zip(color) {
+                *total += u32::from(to_u8(channel));
             }
         }
     }
-    sum.map(|s| s / COUNT)
+    sum.map(|total| (total / count) as f32 / 255.0)
 }
 
 fn apply_grass_modifier(modifier: GrassColorModifier, base: [f32; 3], x: i32, z: i32) -> [f32; 3] {
@@ -2276,5 +2290,30 @@ mod terrain_uv_tests {
         let a = unpack_sprite_uv(pack_sprite_uv(0.25));
         let b = unpack_sprite_uv(pack_sprite_uv(1.25));
         assert!((wrapped(a) - wrapped(b)).abs() <= 1.0 / 4095.0);
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::{blend_color_with_radius, tint_sample_y};
+    use crate::world::block::registry::Tint;
+
+    #[test]
+    fn biome_blend_matches_vanilla_integer_channel_division() {
+        let color = blend_color_with_radius(0, 0, 1, |x, z| {
+            let red = if x == 0 && z == 0 { 16 } else { 17 };
+            [red as f32 / 255.0, 0.0, 0.0]
+        });
+        assert_eq!(color, [16.0 / 255.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn double_grass_upper_half_samples_the_lower_block_y() {
+        crate::world::block::init("26.2");
+        let lower = crate::world::block::find_state("tall_grass", &[("half", "lower")]);
+        let upper = crate::world::block::find_state("tall_grass", &[("half", "upper")]);
+        assert_eq!(tint_sample_y(Tint::DoubleGrass, lower, 64), 64);
+        assert_eq!(tint_sample_y(Tint::DoubleGrass, upper, 64), 63);
+        assert_eq!(tint_sample_y(Tint::Grass, upper, 64), 64);
     }
 }
