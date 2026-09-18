@@ -1273,27 +1273,26 @@ impl MenuOverlayPipeline {
                 items,
                 selected,
                 fullness,
-                scale,
+                item_scale,
+                font_scale,
                 screen_w,
                 screen_h,
             } = elem
                 && let Some(ref gm) = self.mc_glyph_map
             {
-                let gs = *scale;
+                let gs = *item_scale;
+                let fs = *font_scale;
                 let shown =
                     crate::ui::bundle::shown_count(&azalea_inventory::components::BundleContents {
                         items: items.clone(),
                     });
-                let rows = if items.is_empty() {
-                    1
-                } else {
-                    items.len().min(12).div_ceil(4)
-                };
+                let rows = items.len().min(12).div_ceil(4);
                 let content_w = 96.0 * gs;
+                let empty_lines = if items.is_empty() { 2.0 } else { 0.0 };
                 let content_h = if items.is_empty() {
-                    34.0 * gs
+                    empty_lines * 9.0 * gs + 21.0 * gs
                 } else {
-                    (rows as f32 * 24.0 + 17.0) * gs
+                    (rows as f32 * 24.0 + 21.0) * gs
                 };
                 let mut left = *x + 12.0;
                 let mut top = *y - 12.0;
@@ -1303,14 +1302,19 @@ impl MenuOverlayPipeline {
                 if top + content_h > *screen_h {
                     top = (*screen_h - content_h - 4.0).max(4.0);
                 }
-                let pad = 4.0 * gs;
-                let bg_x = left - pad;
-                let bg_y = top - pad;
-                let bg_w = content_w + pad * 2.0;
-                let bg_h = content_h + pad * 2.0;
+                let px = gs;
+                // Tooltip sprites include their own 9px border. Match the shared tooltip
+                // renderer: content sits 15 GUI pixels inside the outer nine-slice.
+                let padding = 3.0 * px;
+                let margin = 9.0 * px;
+                let inset = padding + margin;
+                let bg_x = left - inset;
+                let bg_y = top - inset;
+                let bg_w = content_w + 2.0 * padding + 2.0 * margin;
+                let bg_h = content_h + 2.0 * padding + 2.0 * margin;
                 let white = [1.0f32; 4];
                 if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
-                    push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, 9.0 * gs, white);
+                    push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, margin, white);
                 }
                 if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
                     push_nine_slice(
@@ -1320,7 +1324,7 @@ impl MenuOverlayPipeline {
                         bg_w,
                         bg_h,
                         frame,
-                        10.0 * gs,
+                        10.0 * px,
                         white,
                     );
                 }
@@ -1336,7 +1340,7 @@ impl MenuOverlayPipeline {
                             text.to_string(),
                             [0.6667, 0.6667, 0.6667, 1.0],
                         )],
-                        8.0 * gs,
+                        fs,
                         true,
                     );
                 } else {
@@ -1354,13 +1358,15 @@ impl MenuOverlayPipeline {
                                     .skip(shown_items.len())
                                     .map(|s| s.count())
                                     .sum();
+                                let hidden_text = format!("+{hidden}");
+                                let hidden_w = self.mc_text_width(&hidden_text, fs);
                                 push_mc_text(
                                     &mut vertices,
                                     gm,
-                                    draw_x + 12.0 * gs,
+                                    draw_x + 12.0 * gs - hidden_w / 2.0,
                                     draw_y + 10.0 * gs,
-                                    &[TextSpan::new(format!("+{hidden}"), white)],
-                                    8.0 * gs,
+                                    &[TextSpan::new(hidden_text, white)],
+                                    fs,
                                     true,
                                 );
                                 continue;
@@ -1413,13 +1419,15 @@ impl MenuOverlayPipeline {
                                     );
                                 }
                                 if data.count > 1 {
+                                    let count_text = data.count.to_string();
+                                    let count_w = self.mc_text_width(&count_text, fs);
                                     push_mc_text(
                                         &mut vertices,
                                         gm,
-                                        draw_x + 20.0 * gs,
-                                        draw_y + 14.0 * gs,
-                                        &[TextSpan::new(data.count.to_string(), white)],
-                                        8.0 * gs,
+                                        draw_x + 21.0 * gs - count_w,
+                                        draw_y + 13.0 * gs,
+                                        &[TextSpan::new(count_text, white)],
+                                        fs,
                                         true,
                                     );
                                 }
@@ -1455,18 +1463,25 @@ impl MenuOverlayPipeline {
                             &items[*selected as usize]
                     {
                         let name = crate::ui::common::item_display_name(data);
+                        let name_w = self.mc_text_width(&name, fs);
                         push_mc_text(
                             &mut vertices,
                             gm,
-                            left + content_w / 2.0,
+                            left + content_w / 2.0 - name_w / 2.0,
                             top - 12.0 * gs,
                             &[TextSpan::new(name, white)],
-                            8.0 * gs,
+                            fs,
                             true,
                         );
                     }
                 }
-                let bar_y = top + content_h - 13.0 * gs;
+                let description_h = if items.is_empty() {
+                    empty_lines * 9.0 * gs
+                } else {
+                    0.0
+                };
+                let grid_h = rows as f32 * 24.0 * gs;
+                let bar_y = top + description_h.max(grid_h) + 4.0 * gs;
                 let fill = ((*fullness * 94.0).floor() as i32).clamp(0, 94) as f32;
                 let fill_id = if *fullness >= 1.0 {
                     SpriteId::BundleProgressFull
@@ -1522,13 +1537,14 @@ impl MenuOverlayPipeline {
                     None
                 };
                 if let Some(label) = label {
+                    let label_w = self.mc_text_width(label, fs);
                     push_mc_text(
                         &mut vertices,
                         gm,
-                        left + 48.0 * gs,
+                        left + 48.0 * gs - label_w / 2.0,
                         bar_y + 3.0 * gs,
                         &[TextSpan::new(label.to_string(), white)],
-                        8.0 * gs,
+                        fs,
                         true,
                     );
                 }
@@ -2152,7 +2168,8 @@ pub enum MenuElement {
         items: Vec<azalea_inventory::ItemStack>,
         selected: i32,
         fullness: f32,
-        scale: f32,
+        item_scale: f32,
+        font_scale: f32,
         screen_w: f32,
         screen_h: f32,
     },

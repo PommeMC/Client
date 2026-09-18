@@ -91,6 +91,7 @@ struct ServerVerifiedState {
 struct ActiveUse {
     kind: ItemKind,
     anim: ItemUseAnimation,
+    bundle: bool,
     sound: SoundRef,
     has_particles: bool,
     /// Atlas key for the crumb particles, e.g. `item/cooked_beef`.
@@ -777,6 +778,25 @@ impl InteractionState {
             x_rot: look.x_rot_deg(),
         }));
 
+        // BundleItem is a 200-tick continuous use with the BUNDLE animation.
+        // The server owns content ejection; locally we must still enter the
+        // using-item state so held-input/release and first-person animation
+        // match vanilla.
+        if crate::ui::bundle::contents(stack).is_some() {
+            self.using_item = Some(ActiveUse {
+                kind: stack.kind,
+                anim: ItemUseAnimation::None,
+                bundle: true,
+                sound: SoundRef::event("item.bundle.drop_contents"),
+                has_particles: false,
+                texture: format!("item/{}", item_resource_name(stack.kind)),
+                use_effects: UseEffects::default(),
+                duration: 200,
+                remaining: 200,
+            });
+            return true;
+        }
+
         let Some(consumable) = stack_component::<Consumable>(stack) else {
             return true;
         };
@@ -793,6 +813,7 @@ impl InteractionState {
         let active = ActiveUse {
             kind: stack.kind,
             anim: consumable.animation,
+            bundle: false,
             sound: SoundRef::resolve(&consumable.sound),
             has_particles: consumable.has_consume_particles,
             texture: format!("item/{}", item_resource_name(stack.kind)),
@@ -901,10 +922,11 @@ impl InteractionState {
             self.using_item = None;
             return;
         }
-        // `Consumable.shouldEmitParticlesAndSounds`.
+        // `Consumable.shouldEmitParticlesAndSounds`; bundle use has no local
+        // consume particles/sounds (its server-side ejection has bundle sounds).
         let elapsed = active.duration - active.remaining;
         let wait = (active.duration as f32 * CONSUME_EFFECTS_START_FRACTION) as i32;
-        if elapsed > wait && active.remaining % CONSUME_EFFECTS_INTERVAL == 0 {
+        if !active.bundle && elapsed > wait && active.remaining % CONSUME_EFFECTS_INTERVAL == 0 {
             emit_consume_effects(
                 active,
                 5,
@@ -1715,6 +1737,7 @@ mod tests {
         state.using_item = Some(ActiveUse {
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
+            bundle: false,
             sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
             texture: "item/apple".to_string(),
@@ -1740,6 +1763,7 @@ mod tests {
         state.using_item = Some(ActiveUse {
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
+            bundle: false,
             sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
             texture: "item/apple".to_string(),

@@ -161,6 +161,9 @@ pub struct GameState {
     /// bundle selected index is intentionally not serialized in the item
     /// component.
     pub bundle_selection: Option<(i32, u16, i32)>,
+    /// Fractional wheel accumulation for bundle selection, matching vanilla's
+    /// `ScrollWheelHandler` instead of treating every touchpad pixel as a step.
+    pub bundle_scroll_accum: f32,
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
     pub chat: ChatState,
@@ -398,6 +401,7 @@ impl GameState {
             inv_drag: None,
             inv_last_click: None,
             bundle_selection: None,
+            bundle_scroll_accum: 0.0,
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
             chat: {
                 let mut chat = ChatState::new();
@@ -3016,13 +3020,22 @@ pub fn update_game(
                 crate::ui::bundle::NO_SELECTION,
             );
             game.bundle_selection = None;
+            game.bundle_scroll_accum = 0.0;
         }
         if let (Some(slot), Some(contents)) = (hovered, hovered_bundle.as_ref()) {
             let current = game
                 .bundle_selection
                 .filter(|(m, s, _)| *m == menu_id && *s == slot)
                 .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, selected)| selected);
-            let wheel = input.scroll.signum() as i32;
+            if input.scroll != 0.0
+                && game.bundle_scroll_accum != 0.0
+                && input.scroll.signum() != game.bundle_scroll_accum.signum()
+            {
+                game.bundle_scroll_accum = 0.0;
+            }
+            game.bundle_scroll_accum += input.scroll;
+            let wheel = game.bundle_scroll_accum.trunc() as i32;
+            game.bundle_scroll_accum -= wheel as f32;
             let next = crate::ui::bundle::next_selection(
                 wheel,
                 current,

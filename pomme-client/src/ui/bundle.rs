@@ -1,4 +1,4 @@
-use azalea_inventory::components::{Bees, BundleContents};
+use azalea_inventory::components::{Bees, BundleContents, TooltipDisplay};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::{ItemStack, ItemStackData};
 
@@ -50,7 +50,25 @@ fn item_weight(data: &ItemStackData) -> f32 {
     {
         return 1.0;
     }
-    1.0 / data.kind.max_stack_size().max(1) as f32
+    let max_stack = data
+        .get_component::<azalea_inventory::components::MaxStackSize>()
+        .map_or_else(|| data.kind.max_stack_size(), |size| size.count);
+    1.0 / max_stack.max(1) as f32
+}
+
+pub fn item_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
+    let contents = contents(data)?;
+    let weight = fullness(&contents);
+    if weight <= 0.0 {
+        return None;
+    }
+    let width = (1 + (weight * 12.0).floor() as i32).min(13);
+    let color = if weight >= 1.0 {
+        [1.0, 0.33, 0.33, 1.0]
+    } else {
+        [0.44, 0.53, 1.0, 1.0]
+    };
+    Some((width, color))
 }
 
 pub fn push_selected_icon(
@@ -104,6 +122,16 @@ pub fn push_selected_icon(
     elements.push(icon(format!("__pomme_{bundle_name}_open_front")));
 }
 
+pub fn tooltip_visible(data: &ItemStackData) -> bool {
+    let Some(display) = data.get_component::<TooltipDisplay>() else {
+        return true;
+    };
+    !display.hide_tooltip
+        && !display
+            .hidden_components
+            .contains(&azalea_registry::builtin::DataComponentKind::BundleContents)
+}
+
 pub fn push_tooltip(
     elements: &mut Vec<MenuElement>,
     data: &ItemStackData,
@@ -113,6 +141,9 @@ pub fn push_tooltip(
     screen_h: f32,
     gui_scale: f32,
 ) {
+    if !tooltip_visible(data) {
+        return;
+    }
     let Some(contents) = contents(data) else {
         return;
     };
@@ -122,7 +153,8 @@ pub fn push_tooltip(
         items: contents.items.clone(),
         selected,
         fullness: fullness(&contents),
-        scale: gui_scale,
+        item_scale: gui_scale,
+        font_scale: crate::ui::common::FONT_SIZE * gui_scale,
         screen_w,
         screen_h,
     });
@@ -143,6 +175,38 @@ mod tests {
             };
             assert_eq!(shown_count(&contents), expected, "count {count}");
         }
+    }
+
+    #[test]
+    fn item_bar_matches_vanilla_bundle_width_and_colors() {
+        let bundle = |count| {
+            ItemStack::new(ItemKind::Bundle, 1)
+                .with_component(BundleContents {
+                    items: vec![ItemStack::from(ItemStackData::new(ItemKind::Stone, count))],
+                })
+                .as_present()
+                .expect("bundle stack should be present")
+                .clone()
+        };
+        let quarter = bundle(16);
+        let (width, color) = item_bar(&quarter).expect("non-empty bundle has a bar");
+        assert_eq!(width, 4);
+        assert_eq!(color, [0.44, 0.53, 1.0, 1.0]);
+
+        let full = bundle(64);
+        let (width, color) = item_bar(&full).expect("full bundle has a bar");
+        assert_eq!(width, 13);
+        assert_eq!(color, [1.0, 0.33, 0.33, 1.0]);
+    }
+
+    #[test]
+    fn stack_specific_max_stack_size_controls_weight() {
+        let custom = ItemStack::new(ItemKind::Stone, 1)
+            .with_component(azalea_inventory::components::MaxStackSize { count: 4 })
+            .as_present()
+            .expect("stone stack should be present")
+            .clone();
+        assert_eq!(item_weight(&custom), 0.25);
     }
 
     #[test]
