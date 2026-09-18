@@ -148,6 +148,11 @@ impl RegistryTable {
     pub fn name_of(&self, reg: ClientRegistry, id: u32) -> Option<&str> {
         self.names(reg).get(id as usize).map(String::as_str)
     }
+
+    pub fn id_of(&self, reg: ClientRegistry, name: &str) -> Option<u32> {
+        let id = self.names(reg).iter().position(|n| n == name)?;
+        Some(id as u32)
+    }
 }
 
 /// Directed id remaps between two versions' registries, matched by entry

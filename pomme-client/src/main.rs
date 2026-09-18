@@ -10,6 +10,7 @@ mod assets;
 mod attribute;
 mod audio;
 mod benchmark;
+mod chat_component;
 mod dirs;
 mod discord;
 mod entity;

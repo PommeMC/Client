@@ -53,6 +53,10 @@ protogen version="26.2":
 registrygen version="26.2":
     @cargo run -p protogen -- registries reference/{{ version }} {{ version }} pomme-protocol/src/data/registries-{{ version }}.json
 
+# Regenerate a version's known-pack table from the extracted reference data.
+knownpackgen version="26.2":
+    @cargo run -p protogen -- knownpacks reference/{{ version }} {{ version }} pomme-protocol/src/data/known-packs-{{ version }}.json
+
 # Regenerate a version's block-state table from the data-generator report.
 blockgen version="26.2":
     @cargo run -p blockgen -- blocks reference/{{ version }}/generated/reports/blocks.json {{ version }} pomme-client/src/world/block/data/blocks-{{ version }}.json

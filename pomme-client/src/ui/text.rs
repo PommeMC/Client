@@ -1,11 +1,14 @@
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use azalea_chat::FormattedText;
 use azalea_chat::style::Style;
 
+use crate::chat_component::{Component, ResolvedStyle};
+
 /// A styled run of text (color plus formatting flags). The shared span type for
 /// rendering rich chat and server-MOTD text.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextSpan {
     pub text: String,
     pub color: [f32; 4],
@@ -16,6 +19,9 @@ pub struct TextSpan {
     /// Render with the Standard Galactic Alphabet glyphs (the `minecraft:alt`
     /// font used for enchantment gibberish).
     pub sga: bool,
+    /// Resolved component style (click, hover, insertion) of native chat
+    /// text; `None` for azalea-decoded text.
+    pub component_style: Option<Arc<ResolvedStyle>>,
 }
 
 impl TextSpan {
@@ -29,6 +35,15 @@ impl TextSpan {
             strikethrough: false,
             underline: false,
             sga: false,
+            component_style: None,
+        }
+    }
+
+    /// This span's formatting applied to `text`.
+    pub fn with_text(&self, text: String) -> Self {
+        Self {
+            text,
+            ..self.clone()
         }
     }
 }
@@ -42,7 +57,27 @@ pub fn with_alpha(spans: &[TextSpan], alpha: f32) -> Vec<TextSpan> {
     spans
 }
 
-/// Flatten a `FormattedText` component into styled spans for rendering.
+/// Flatten a native component into styled spans, keeping each run's resolved
+/// style.
+pub fn format_component_spans(component: &Component, base_color: [f32; 4]) -> Vec<TextSpan> {
+    let mut spans = Vec::new();
+    component.visit_text(&ResolvedStyle::default(), &mut |text, style| {
+        let color = style.color.map(rgb24).unwrap_or(base_color);
+        spans.push(TextSpan {
+            text: text.to_owned(),
+            color,
+            bold: style.bold,
+            italic: style.italic,
+            strikethrough: style.strikethrough,
+            underline: style.underlined,
+            sga: font_is_alt(style),
+            component_style: Some(Arc::new(style.clone())),
+        });
+    });
+    spans
+}
+
+/// Flatten an azalea `FormattedText` component into styled spans for rendering.
 ///
 /// `base_color` applies wherever the component carries no explicit color,
 /// mirroring vanilla `drawString`'s color argument.
@@ -75,6 +110,7 @@ pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<Text
                     strikethrough,
                     underline,
                     sga: false,
+                    component_style: None,
                 });
             }
             String::new()
@@ -94,16 +130,64 @@ pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<Text
     result
 }
 
+fn font_is_alt(style: &ResolvedStyle) -> bool {
+    style.font.as_ref().is_some_and(|font| match font {
+        serde_json::Value::String(id) => id == "minecraft:alt" || id == "alt",
+        serde_json::Value::Object(map) => map
+            .get("id")
+            .or_else(|| map.get("font"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| id == "minecraft:alt" || id == "alt"),
+        _ => false,
+    })
+}
+
+fn rgb24(value: u32) -> [f32; 4] {
+    [
+        ((value >> 16) & 0xff) as f32 / 255.0,
+        ((value >> 8) & 0xff) as f32 / 255.0,
+        (value & 0xff) as f32 / 255.0,
+        1.0,
+    ]
+}
+
 fn style_to_rgba(style: &Style, base_color: [f32; 4]) -> [f32; 4] {
     if let Some(color) = &style.color {
         let v = color.value;
-        [
-            ((v >> 16) & 0xFF) as f32 / 255.0,
-            ((v >> 8) & 0xFF) as f32 / 255.0,
-            (v & 0xFF) as f32 / 255.0,
-            1.0,
-        ]
+        rgb24(v)
     } else {
         base_color
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat_component::{ClickEvent, HoverEvent};
+
+    #[test]
+    fn native_spans_retain_resolved_interactions() {
+        let component = Component::from_value(&serde_json::json!({
+            "text": "parent ",
+            "color": "gray",
+            "click_event": {"action": "copy_to_clipboard", "value": "copied"},
+            "extra": [{
+                "text": "child",
+                "color": "gold",
+                "hover_event": {"action": "show_text", "value": {"text": "tooltip"}}
+            }]
+        }))
+        .unwrap();
+        let spans = format_component_spans(&component, [1.0; 4]);
+        assert_eq!(spans.len(), 2);
+        let parent = spans[0].component_style.as_ref().unwrap();
+        assert_eq!(
+            parent.click_event,
+            Some(ClickEvent::CopyToClipboard("copied".into()))
+        );
+        let child = spans[1].component_style.as_ref().unwrap();
+        assert_eq!(child.color, Some(0xffaa00));
+        assert_eq!(child.click_event, parent.click_event);
+        assert!(matches!(child.hover_event, Some(HoverEvent::Text(_))));
     }
 }

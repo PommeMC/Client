@@ -21,6 +21,7 @@ use crate::attribute::{
 };
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
+use crate::net::chunk_batch::ChunkBatchSizeCalculator;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
@@ -146,6 +147,7 @@ pub fn handle_game_packet(
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
+    batch_size_calculator: &mut ChunkBatchSizeCalculator,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
@@ -264,12 +266,8 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z });
         }
         ClientboundGamePacket::PlayerPosition(p) => {
-            sender.send(ServerboundGamePacket::AcceptTeleportation(
-                azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation {
-                    id: p.id,
-                },
-            ));
             let _ = event_tx.try_send(NetworkEvent::PlayerPosition {
+                id: p.id,
                 change: p.change.clone(),
                 relative: p.relative.clone(),
             });
@@ -279,15 +277,17 @@ pub fn handle_game_packet(
                 azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive { id: p.id },
             ));
         }
+        ClientboundGamePacket::ChunkBatchStart(_) => {
+            batch_size_calculator.on_batch_start();
+        }
         ClientboundGamePacket::ChunkBatchFinished(p) => {
-            let desired = (p.batch_size as f32).max(25.0);
-            tracing::trace!(
-                "ChunkBatchFinished: batch_size={}, responding with desired={desired}",
-                p.batch_size
-            );
+            // Answered on the network thread: vanilla's
+            // `handleChunkBatchFinished` is one of the few handlers it doesn't
+            // defer to the main thread.
+            batch_size_calculator.on_batch_finished(p.batch_size);
             sender.send(ServerboundGamePacket::ChunkBatchReceived(
                 azalea_protocol::packets::game::s_chunk_batch_received::ServerboundChunkBatchReceived {
-                    desired_chunks_per_tick: desired,
+                    desired_chunks_per_tick: batch_size_calculator.desired_chunks_per_tick(),
                 },
             ));
         }
@@ -391,16 +391,6 @@ pub fn handle_game_packet(
                 flying_speed: p.flying_speed,
                 walking_speed: p.walking_speed,
             });
-        }
-        ClientboundGamePacket::SystemChat(p) => {
-            if p.overlay {
-                send_action_bar(event_tx, &p.content);
-            } else {
-                send_chat(event_tx, &p.content);
-            }
-        }
-        ClientboundGamePacket::SetActionBarText(p) => {
-            send_action_bar(event_tx, &p.text);
         }
         ClientboundGamePacket::BossEvent(p) => {
             use azalea_protocol::packets::game::c_boss_event::Operation;
@@ -605,12 +595,6 @@ pub fn handle_game_packet(
                 }
             }
         }
-        ClientboundGamePacket::PlayerChat(p) => {
-            send_chat(event_tx, &p.message());
-        }
-        ClientboundGamePacket::DisguisedChat(p) => {
-            send_chat(event_tx, &p.message);
-        }
         ClientboundGamePacket::BlockUpdate(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockUpdate {
                 pos: p.pos,
@@ -658,6 +642,9 @@ pub fn handle_game_packet(
                         game_mode: p.param as u8,
                         previous: None,
                     });
+                }
+                EventType::WaitForLevelChunks => {
+                    let _ = event_tx.try_send(NetworkEvent::LevelChunksLoadStart);
                 }
                 EventType::StartRaining
                 | EventType::StopRaining
@@ -1145,18 +1132,6 @@ pub fn handle_game_packet(
     }
 }
 
-fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
-    tracing::info!("Chat: {text}");
-    let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
-}
-
-fn send_action_bar(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
-}
-
 fn send_scoreboard_team(
     event_tx: &Sender<NetworkEvent>,
     name: &str,
@@ -1258,9 +1233,9 @@ fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id
     };
     let order_pos = |name: &str| order.iter().position(|p| *p == name).map(|i| i as u32);
     let fallback = order_pos(default).unwrap_or(0);
-    // Position == protocol id only holds because pomme answers
-    // SelectKnownPacks with an empty list (connection.rs), forcing the server
-    // to send NBT for every entry (azalea shift_removes NBT-less ones).
+    // Position == protocol id only holds while every entry carries NBT
+    // (azalea shift_removes NBT-less ones). Entries the server skips for a
+    // pack pomme claimed are filled in first (`net::known_packs`).
     let Some((ident, nbt)) = registry_holder
         .extra
         .get(&azalea_registry::identifier::Identifier::new(registry))
@@ -1321,7 +1296,18 @@ fn send_entity_moved(
 
 /// Consume packets that azalea's 26.2 codecs cannot represent correctly
 /// before the typed decode runs. Returns whether the packet was consumed.
-pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bool {
+pub fn handle_raw_game_packet(
+    raw: &[u8],
+    event_tx: &Sender<NetworkEvent>,
+    chat_types: &super::chat::ChatTypeRegistry,
+) -> bool {
+    if let Some(result) = super::chat::handle_raw_chat_packet(raw, event_tx, chat_types) {
+        if let Err(e) = result {
+            tracing::warn!("Skipping malformed chat packet: {e}");
+        }
+        return true;
+    }
+
     let mut cur = std::io::Cursor::new(raw);
     let Ok(packet_id) = u32::azalea_read_var(&mut cur) else {
         return false;
@@ -1597,6 +1583,7 @@ mod tests {
                 &event_tx,
                 &registries,
                 &command_tree,
+                &mut ChunkBatchSizeCalculator::default(),
             );
         };
 
@@ -1636,7 +1623,11 @@ mod tests {
         7_u64.azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw_game_packet(
+            &raw,
+            &tx,
+            &crate::net::chat::ChatTypeRegistry::default(),
+        ));
         match rx.recv().unwrap() {
             NetworkEvent::PlaySound { category, pos, .. } => {
                 assert_eq!(category, 10);
@@ -1658,7 +1649,11 @@ mod tests {
         9_u64.azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw_game_packet(
+            &raw,
+            &tx,
+            &crate::net::chat::ChatTypeRegistry::default(),
+        ));
         match rx.recv().unwrap() {
             NetworkEvent::PlayEntitySound {
                 category,
@@ -1714,7 +1709,11 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(&raw, &tx));
+        assert!(handle_raw_game_packet(
+            &raw,
+            &tx,
+            &crate::net::chat::ChatTypeRegistry::default(),
+        ));
         match rx.recv().unwrap() {
             NetworkEvent::StopSound { sound_id, category } => {
                 assert_eq!(category, Some(10));

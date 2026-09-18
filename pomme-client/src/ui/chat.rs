@@ -594,14 +594,9 @@ fn line_alpha(age_secs: f32) -> f32 {
     t * t
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct CharStyle {
-    color: [f32; 4],
-    bold: bool,
-    italic: bool,
-    strikethrough: bool,
-    underline: bool,
-}
+/// A span's formatting, carried per character with its text left empty.
+#[derive(Clone, PartialEq)]
+struct CharStyle(TextSpan);
 
 type StyledLine = Vec<(char, CharStyle)>;
 
@@ -623,20 +618,14 @@ pub(crate) fn wrap_spans(
     let mut words: Vec<StyledLine> = Vec::new();
     let mut word: StyledLine = Vec::new();
     for s in spans {
-        let style = CharStyle {
-            color: s.color,
-            bold: s.bold,
-            italic: s.italic,
-            strikethrough: s.strikethrough,
-            underline: s.underline,
-        };
+        let style = CharStyle(s.with_text(String::new()));
         for ch in s.text.chars() {
             if ch.is_whitespace() {
                 if !word.is_empty() {
                     words.push(std::mem::take(&mut word));
                 }
             } else {
-                word.push((ch, style));
+                word.push((ch, style.clone()));
             }
         }
     }
@@ -652,7 +641,7 @@ pub(crate) fn wrap_spans(
     for w in words {
         if !cur.is_empty() {
             if width0(&format!("{} {}", styled_text(&cur), styled_text(&w))) <= max_w {
-                cur.push((' ', w[0].1));
+                cur.push((' ', w[0].1.clone()));
                 cur.extend(w);
                 continue;
             }
@@ -683,13 +672,13 @@ fn hard_break_word(
 ) -> (Vec<StyledLine>, StyledLine) {
     let mut out: Vec<StyledLine> = Vec::new();
     let mut piece: StyledLine = Vec::new();
-    for &(ch, st) in word {
+    for (ch, st) in word {
         let mut test = styled_text(&piece);
-        test.push(ch);
+        test.push(*ch);
         if width0(&test) > max_w && !piece.is_empty() {
             out.push(std::mem::take(&mut piece));
         }
-        piece.push((ch, st));
+        piece.push((*ch, st.clone()));
     }
     (out, piece)
 }
@@ -699,20 +688,12 @@ fn hard_break_word(
 fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
     let mut spans: Vec<TextSpan> = Vec::new();
     let mut last_style: Option<CharStyle> = None;
-    for &(ch, st) in chars {
-        if last_style == Some(st) {
-            spans.last_mut().unwrap().text.push(ch);
+    for (ch, st) in chars {
+        if last_style.as_ref() == Some(st) {
+            spans.last_mut().unwrap().text.push(*ch);
         } else {
-            spans.push(TextSpan {
-                text: ch.to_string(),
-                color: st.color,
-                bold: st.bold,
-                italic: st.italic,
-                strikethrough: st.strikethrough,
-                underline: st.underline,
-                sga: false,
-            });
-            last_style = Some(st);
+            spans.push(st.0.with_text(ch.to_string()));
+            last_style = Some(st.clone());
         }
     }
     spans
