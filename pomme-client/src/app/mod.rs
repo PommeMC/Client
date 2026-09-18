@@ -462,6 +462,9 @@ impl ApplicationHandler for App {
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
+                                            if game.chat.is_in_bed() {
+                                                game.stop_sleeping_requested = true;
+                                            }
                                             game.chat.close();
                                             self.core
                                                 .input
