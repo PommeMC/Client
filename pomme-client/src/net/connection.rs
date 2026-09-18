@@ -778,13 +778,12 @@ async fn game_loop(
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                super::chat::encode_outbound_message(&msg, timestamp)
-            };
-            let frame = match frame {
-                Ok(frame) => frame,
-                Err(e) => {
-                    tracing::warn!("Not sending invalid chat input: {e}");
-                    continue;
+                match super::chat::encode_outbound_message(&msg, timestamp) {
+                    Ok(frame) => frame,
+                    Err(e) => {
+                        tracing::warn!("Not sending invalid chat input: {e}");
+                        continue;
+                    }
                 }
             };
             if chat_outbound_tx.send(Outbound::Raw(frame)).is_err() {

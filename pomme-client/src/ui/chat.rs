@@ -594,16 +594,9 @@ fn line_alpha(age_secs: f32) -> f32 {
     t * t
 }
 
+/// A span's formatting, carried per character with its text left empty.
 #[derive(Clone, PartialEq)]
-struct CharStyle {
-    color: [f32; 4],
-    bold: bool,
-    italic: bool,
-    strikethrough: bool,
-    underline: bool,
-    sga: bool,
-    component_style: Option<std::sync::Arc<crate::chat_component::ResolvedStyle>>,
-}
+struct CharStyle(TextSpan);
 
 type StyledLine = Vec<(char, CharStyle)>;
 
@@ -625,15 +618,7 @@ pub(crate) fn wrap_spans(
     let mut words: Vec<StyledLine> = Vec::new();
     let mut word: StyledLine = Vec::new();
     for s in spans {
-        let style = CharStyle {
-            color: s.color,
-            bold: s.bold,
-            italic: s.italic,
-            strikethrough: s.strikethrough,
-            underline: s.underline,
-            sga: s.sga,
-            component_style: s.component_style.clone(),
-        };
+        let style = CharStyle(s.with_text(String::new()));
         for ch in s.text.chars() {
             if ch.is_whitespace() {
                 if !word.is_empty() {
@@ -707,16 +692,7 @@ fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
         if last_style.as_ref() == Some(st) {
             spans.last_mut().unwrap().text.push(*ch);
         } else {
-            spans.push(TextSpan {
-                text: ch.to_string(),
-                color: st.color,
-                bold: st.bold,
-                italic: st.italic,
-                strikethrough: st.strikethrough,
-                underline: st.underline,
-                sga: st.sga,
-                component_style: st.component_style.clone(),
-            });
+            spans.push(st.0.with_text(ch.to_string()));
             last_style = Some(st.clone());
         }
     }

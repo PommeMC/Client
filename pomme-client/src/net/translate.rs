@@ -658,9 +658,8 @@ impl Ids764 {
 struct Ids769 {
     player_chat_id: u32,
     update_advancements_id: u32,
-    /// 1.21.5 appended a checksum byte to the last-seen update carried by
-    /// serverbound chat messages. Older servers stop after the acknowledged
-    /// bitset, so the native frame needs that trailing byte removed.
+    /// Native-space serverbound `chat` id and the wire version's, for the
+    /// last-seen checksum strip.
     chat_id: u32,
     chat_old_id: u32,
     /// Native-space serverbound `container_click` id and the wire
@@ -2186,9 +2185,8 @@ fn translate_creative_slot_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     }
 }
 
-/// 1.21.4 and older stop the serverbound chat packet after the 20-bit
-/// acknowledged-message set. 1.21.5 appended a checksum byte there, so strip
-/// that latest-only trailer while remapping the packet id.
+/// Serverbound `chat` for 1.21.4 and older: drops the trailing last-seen
+/// checksum byte 1.21.5 added.
 fn translate_chat_769(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     let Some((&_checksum, body)) = payload.split_last() else {
         return Vec::new();

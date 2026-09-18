@@ -8,7 +8,7 @@ use crate::chat_component::{Component, ResolvedStyle};
 
 /// A styled run of text (color plus formatting flags). The shared span type for
 /// rendering rich chat and server-MOTD text.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextSpan {
     pub text: String,
     pub color: [f32; 4],
@@ -19,10 +19,8 @@ pub struct TextSpan {
     /// Render with the Standard Galactic Alphabet glyphs (the `minecraft:alt`
     /// font used for enchantment gibberish).
     pub sga: bool,
-    /// Fully-resolved Vanilla component style for native chat text. This is
-    /// retained through wrapping so later hit-testing can implement click,
-    /// hover and insertion semantics without reconstructing component trees.
-    /// Legacy/non-chat Azalea text has no native component metadata yet.
+    /// Resolved component style (click, hover, insertion) of native chat
+    /// text; `None` for azalea-decoded text.
     pub component_style: Option<Arc<ResolvedStyle>>,
 }
 
@@ -40,6 +38,14 @@ impl TextSpan {
             component_style: None,
         }
     }
+
+    /// This span's formatting applied to `text`.
+    pub fn with_text(&self, text: String) -> Self {
+        Self {
+            text,
+            ..self.clone()
+        }
+    }
 }
 
 /// The spans with every alpha multiplied by `alpha` (for fade effects).
@@ -51,8 +57,8 @@ pub fn with_alpha(spans: &[TextSpan], alpha: f32) -> Vec<TextSpan> {
     spans
 }
 
-/// Flatten a Pomme-native Vanilla component into styled spans while retaining
-/// its resolved interaction metadata.
+/// Flatten a native component into styled spans, keeping each run's resolved
+/// style.
 pub fn format_component_spans(component: &Component, base_color: [f32; 4]) -> Vec<TextSpan> {
     let mut spans = Vec::new();
     component.visit_text(&ResolvedStyle::default(), &mut |text, style| {
@@ -71,10 +77,7 @@ pub fn format_component_spans(component: &Component, base_color: [f32; 4]) -> Ve
     spans
 }
 
-/// Flatten an Azalea `FormattedText` component into styled spans for rendering.
-///
-/// This remains for non-chat UI packets during the incremental Azalea removal.
-/// Native game chat uses [`format_component_spans`] instead.
+/// Flatten an azalea `FormattedText` component into styled spans for rendering.
 ///
 /// `base_color` applies wherever the component carries no explicit color,
 /// mirroring vanilla `drawString`'s color argument.

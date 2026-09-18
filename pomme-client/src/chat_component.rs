@@ -1,16 +1,9 @@
 use std::fmt;
 
 use serde_json::{Map, Value};
-#[cfg(test)]
-use simdnbt::owned::NbtTag;
 
-/// Pomme-owned representation of a Vanilla text component.
-///
-/// This deliberately models the component/style data before it reaches the UI
-/// instead of routing through `azalea_chat::FormattedText`.  Vanilla 26.2's
-/// component NBT contains interaction data that Azalea currently drops while
-/// decoding (notably hover events), so preserving it here is required for chat
-/// hit-testing/tooltips to be possible at all.
+/// A vanilla text component, decoded by pomme because azalea's decoder drops
+/// hover events.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Component {
     pub content: Content,
@@ -35,12 +28,9 @@ pub enum Content {
         pattern: String,
         separator: Option<Box<Component>>,
     },
-    /// Server-side NBT components are normally resolved before reaching a
-    /// client. Keep the full encoded form for parity/debugging if one arrives.
+    /// Unresolved NBT contents (servers resolve these before sending).
     Nbt(Value),
-    /// 26.2 object components can render sprites. Keep the full payload and an
-    /// optional textual fallback; the chat renderer currently consumes the
-    /// fallback while a future object renderer can use `value` losslessly.
+    /// Sprite/player object contents as their raw codec value.
     Object {
         value: Value,
         fallback: Option<Box<Component>>,
@@ -67,9 +57,7 @@ pub struct Style {
     pub click_event: Option<ClickEvent>,
     pub hover_event: Option<HoverEvent>,
     pub insertion: Option<String>,
-    /// `FontDescription` became richer than a resource-location string in
-    /// recent Vanilla versions. Keep its codec value intact rather than
-    /// narrowing it prematurely.
+    /// Raw `FontDescription` codec value.
     pub font: Option<Value>,
 }
 
@@ -102,12 +90,9 @@ pub enum ClickEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HoverEvent {
     Text(Box<Component>),
-    /// Preserve the complete `ItemStackTemplate` codec value. Pomme's item
-    /// tooltip renderer can interpret this later without another protocol
-    /// decode or lossy conversion.
+    /// Raw `ItemStackTemplate` codec value.
     Item(Value),
-    /// Preserve entity type/UUID/name payload exactly. The tooltip layer can
-    /// decode the pieces it needs when it gains `show_entity` rendering.
+    /// Raw entity type/UUID/name codec value.
     Entity(Value),
 }
 
@@ -123,31 +108,24 @@ impl fmt::Display for ComponentError {
 impl std::error::Error for ComponentError {}
 
 impl Component {
-    pub fn text(text: impl Into<String>) -> Self {
+    fn new(content: Content) -> Self {
         Self {
-            content: Content::Text(text.into()),
+            content,
             style: Style::default(),
             siblings: Vec::new(),
         }
+    }
+
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::new(Content::Text(text.into()))
     }
 
     pub fn translate(key: impl Into<String>, args: Vec<Argument>) -> Self {
-        Self {
-            content: Content::Translate {
-                key: key.into(),
-                fallback: None,
-                args,
-            },
-            style: Style::default(),
-            siblings: Vec::new(),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn from_nbt_tag(tag: &NbtTag) -> Result<Self, ComponentError> {
-        let value = serde_json::to_value(tag)
-            .map_err(|e| ComponentError(format!("component NBT is not serializable: {e}")))?;
-        Self::from_value(&value)
+        Self::new(Content::Translate {
+            key: key.into(),
+            fallback: None,
+            args,
+        })
     }
 
     pub fn from_value(value: &Value) -> Result<Self, ComponentError> {
@@ -157,15 +135,10 @@ impl Component {
                 let (first, rest) = values
                     .split_first()
                     .ok_or_else(|| ComponentError("component list cannot be empty".into()))?;
-                // Vanilla copies the first component and appends the remaining
-                // list entries to it. That means the first component's style
-                // is inherited by later entries, just like ordinary siblings.
+                // Vanilla `createFromList`: later entries become siblings of
+                // the first, inheriting its style.
                 let mut root = Self::from_value(first)?;
-                root.siblings.extend(
-                    rest.iter()
-                        .map(Self::from_value)
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
+                root.siblings.extend(Self::list(rest)?);
                 Ok(root)
             }
             Value::Object(map) => Self::from_object(map),
@@ -173,6 +146,17 @@ impl Component {
                 "component must be a string, object, or list, got {value}"
             ))),
         }
+    }
+
+    fn list(values: &[Value]) -> Result<Vec<Self>, ComponentError> {
+        values.iter().map(Self::from_value).collect()
+    }
+
+    fn optional(map: &Map<String, Value>, key: &str) -> Result<Option<Box<Self>>, ComponentError> {
+        map.get(key)
+            .map(Self::from_value)
+            .transpose()
+            .map(|c| c.map(Box::new))
     }
 
     fn from_object(map: &Map<String, Value>) -> Result<Self, ComponentError> {
@@ -188,7 +172,7 @@ impl Component {
                 Some(Value::Array(values)) => values
                     .iter()
                     .map(parse_argument)
-                    .collect::<Result<Vec<_>, _>>()?,
+                    .collect::<Result<_, _>>()?,
                 Some(_) => return Err(ComponentError("component `with` must be a list".into())),
                 None => Vec::new(),
             };
@@ -200,24 +184,20 @@ impl Component {
         } else if let Some(value) = map.get("keybind") {
             Content::Keybind(value_as_string(value, "keybind")?)
         } else if let Some(Value::Object(score)) = map.get("score") {
+            let field = |key: &str| {
+                score
+                    .get(key)
+                    .ok_or_else(|| ComponentError(format!("score component has no `{key}`")))
+                    .and_then(|v| value_as_string(v, key))
+            };
             Content::Score {
-                name: score
-                    .get("name")
-                    .ok_or_else(|| ComponentError("score component has no `name`".into()))
-                    .and_then(|v| value_as_string(v, "score.name"))?,
-                objective: score
-                    .get("objective")
-                    .ok_or_else(|| ComponentError("score component has no `objective`".into()))
-                    .and_then(|v| value_as_string(v, "score.objective"))?,
+                name: field("name")?,
+                objective: field("objective")?,
             }
         } else if let Some(value) = map.get("selector") {
             Content::Selector {
                 pattern: value_as_string(value, "selector")?,
-                separator: map
-                    .get("separator")
-                    .map(Self::from_value)
-                    .transpose()?
-                    .map(Box::new),
+                separator: Self::optional(map, "separator")?,
             }
         } else if map.contains_key("nbt") {
             Content::Nbt(Value::Object(map.clone()))
@@ -225,15 +205,10 @@ impl Component {
             || map.contains_key("sprite")
             || map.contains_key("player")
         {
+            // The fuzzy form may omit the `object` discriminator.
             Content::Object {
-                // Keep the complete object-info codec value. In compact/fuzzy
-                // form there may be no explicit `object` discriminator.
                 value: Value::Object(map.clone()),
-                fallback: map
-                    .get("fallback")
-                    .map(Self::from_value)
-                    .transpose()?
-                    .map(Box::new),
+                fallback: Self::optional(map, "fallback")?,
             }
         } else {
             return Err(ComponentError(format!(
@@ -243,10 +218,7 @@ impl Component {
         };
 
         let siblings = match map.get("extra") {
-            Some(Value::Array(values)) => values
-                .iter()
-                .map(Self::from_value)
-                .collect::<Result<Vec<_>, _>>()?,
+            Some(Value::Array(values)) => Self::list(values)?,
             Some(value) => vec![Self::from_value(value)?],
             None => Vec::new(),
         };
@@ -258,10 +230,8 @@ impl Component {
         })
     }
 
-    /// Traverse visible component text with Vanilla style inheritance.
-    ///
-    /// The callback receives each textual run and its fully-resolved style.
-    /// Translation arguments that are components keep their own nested styles.
+    /// Visits each text run with its resolved style (vanilla
+    /// `FormattedText.visit` with style inheritance).
     pub fn visit_text(
         &self,
         parent: &ResolvedStyle,
@@ -291,17 +261,15 @@ impl Component {
                 let text = crate::lang::translate(key).unwrap_or(key);
                 emit(text, style, visitor);
             }
-            // Score/NBT components should be server-resolved before crossing
-            // the client boundary. Selector intentionally renders its source
-            // when unresolved in Vanilla.
+            // Unresolved score/NBT contents render nothing; an unresolved
+            // selector renders its source, as in vanilla.
             Content::Score { .. } | Content::Nbt(_) => {}
             Content::Selector { pattern, .. } => emit(pattern, style, visitor),
             Content::Object { fallback, .. } => {
                 if let Some(fallback) = fallback {
                     fallback.visit_text(style, visitor);
                 } else {
-                    // U+FFFC is Vanilla's object-replacement placeholder.
-                    emit("\u{fffc}", style, visitor);
+                    emit("\u{fffc}", style, visitor); // object placeholder
                 }
             }
         }
@@ -326,23 +294,16 @@ impl Style {
     fn from_object(map: &Map<String, Value>) -> Result<Self, ComponentError> {
         Ok(Self {
             color: map.get("color").and_then(parse_color),
-            shadow_color: map
-                .get("shadow_color")
-                .or_else(|| map.get("shadowColor"))
-                .and_then(value_as_u32),
+            shadow_color: either(map, "shadow_color", "shadowColor").and_then(value_as_u32),
             bold: bool_field(map, "bold")?,
             italic: bool_field(map, "italic")?,
             underlined: bool_field(map, "underlined")?,
             strikethrough: bool_field(map, "strikethrough")?,
             obfuscated: bool_field(map, "obfuscated")?,
-            click_event: map
-                .get("click_event")
-                .or_else(|| map.get("clickEvent"))
+            click_event: either(map, "click_event", "clickEvent")
                 .map(parse_click_event)
                 .transpose()?,
-            hover_event: map
-                .get("hover_event")
-                .or_else(|| map.get("hoverEvent"))
+            hover_event: either(map, "hover_event", "hoverEvent")
                 .map(parse_hover_event)
                 .transpose()?,
             insertion: map
@@ -384,9 +345,7 @@ fn parse_argument(value: &Value) -> Result<Argument, ComponentError> {
         && let Some(wrapped) = map.get("")
         && !matches!(wrapped, Value::Array(_) | Value::Object(_))
     {
-        // NbtOps wraps primitives when a heterogeneous list cannot otherwise
-        // represent them. Vanilla's component codec unwraps this empty-key
-        // compound when decoding translation arguments.
+        // NbtOps wraps primitives in heterogeneous lists as `{"": value}`.
         return parse_primitive_argument(wrapped);
     }
 
@@ -466,9 +425,7 @@ fn visit_translation(
             }
             cursor = end;
         } else {
-            // Vanilla falls back to the untranslated template when the format
-            // is invalid; preserving the percent literally is the closest
-            // useful behavior while keeping the rest of the component alive.
+            // TODO: vanilla renders the whole raw template on any format error.
             emit("%", style, visitor);
             cursor = percent + 1;
         }
@@ -494,40 +451,43 @@ fn emit(text: &str, style: &ResolvedStyle, visitor: &mut impl FnMut(&str, &Resol
     }
 }
 
-fn parse_click_event(value: &Value) -> Result<ClickEvent, ComponentError> {
+/// An event's object and its `action`.
+fn event_action<'a>(
+    value: &'a Value,
+    kind: &str,
+) -> Result<(&'a Map<String, Value>, &'a str), ComponentError> {
     let map = value
         .as_object()
-        .ok_or_else(|| ComponentError("click event must be an object".into()))?;
+        .ok_or_else(|| ComponentError(format!("{kind} event must be an object")))?;
     let action = map
         .get("action")
         .and_then(Value::as_str)
-        .ok_or_else(|| ComponentError("click event has no `action`".into()))?;
-    let legacy = map.get("value");
+        .ok_or_else(|| ComponentError(format!("{kind} event has no `action`")))?;
+    Ok((map, action))
+}
+
+fn parse_click_event(value: &Value) -> Result<ClickEvent, ComponentError> {
+    let (map, action) = event_action(value, "click")?;
+    // Pre-1.21.5 click events carry every payload in `value`.
+    let field = |modern: &str| map.get(modern).or_else(|| map.get("value"));
+    let missing = |modern: &str| ComponentError(format!("{action} click event has no `{modern}`"));
     let string = |modern: &str| {
-        map.get(modern)
-            .or(legacy)
+        field(modern)
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .ok_or_else(|| ComponentError(format!("{action} click event has no `{modern}`")))
+            .ok_or_else(|| missing(modern))
     };
     match action {
         "open_url" => Ok(ClickEvent::OpenUrl(string("url")?)),
         "run_command" => Ok(ClickEvent::RunCommand(string("command")?)),
         "suggest_command" => Ok(ClickEvent::SuggestCommand(string("command")?)),
         "show_dialog" => Ok(ClickEvent::ShowDialog(
-            map.get("dialog")
-                .or(legacy)
-                .cloned()
-                .ok_or_else(|| ComponentError("show_dialog click event has no `dialog`".into()))?,
+            field("dialog").cloned().ok_or_else(|| missing("dialog"))?,
         )),
         "change_page" => {
-            let page = map
-                .get("page")
-                .or(legacy)
+            let page = field("page")
                 .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
-                .ok_or_else(|| {
-                    ComponentError("change_page click event has no valid `page`".into())
-                })?;
+                .ok_or_else(|| missing("page"))?;
             Ok(ClickEvent::ChangePage(page as i32))
         }
         "copy_to_clipboard" => Ok(ClickEvent::CopyToClipboard(string("value")?)),
@@ -535,7 +495,7 @@ fn parse_click_event(value: &Value) -> Result<ClickEvent, ComponentError> {
             id: map
                 .get("id")
                 .and_then(Value::as_str)
-                .ok_or_else(|| ComponentError("custom click event has no `id`".into()))?
+                .ok_or_else(|| missing("id"))?
                 .to_owned(),
             payload: map.get("payload").cloned(),
         }),
@@ -547,17 +507,8 @@ fn parse_click_event(value: &Value) -> Result<ClickEvent, ComponentError> {
 }
 
 fn parse_hover_event(value: &Value) -> Result<HoverEvent, ComponentError> {
-    let map = value
-        .as_object()
-        .ok_or_else(|| ComponentError("hover event must be an object".into()))?;
-    let action = map
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ComponentError("hover event has no `action`".into()))?;
-    let payload = map
-        .get("value")
-        .or_else(|| map.get("contents"))
-        .unwrap_or(value);
+    let (map, action) = event_action(value, "hover")?;
+    let payload = either(map, "value", "contents").unwrap_or(value);
     match action {
         "show_text" => Ok(HoverEvent::Text(Box::new(Component::from_value(payload)?))),
         "show_item" => Ok(HoverEvent::Item(payload.clone())),
@@ -574,6 +525,11 @@ fn bool_field(map: &Map<String, Value>, key: &str) -> Result<Option<bool>, Compo
         Some(Value::Number(value)) => Ok(value.as_i64().map(|v| v != 0)),
         Some(_) => Err(ComponentError(format!("style `{key}` must be boolean"))),
     }
+}
+
+/// `key`, falling back to its legacy spelling.
+fn either<'a>(map: &'a Map<String, Value>, key: &str, legacy: &str) -> Option<&'a Value> {
+    map.get(key).or_else(|| map.get(legacy))
 }
 
 fn value_as_string(value: &Value, field: &str) -> Result<String, ComponentError> {
@@ -621,9 +577,17 @@ fn parse_color(value: &Value) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use simdnbt::owned::NbtCompound;
+    use simdnbt::owned::{NbtCompound, NbtTag};
 
     use super::*;
+
+    fn runs(component: &Component) -> Vec<(String, ResolvedStyle)> {
+        let mut runs = Vec::new();
+        component.visit_text(&ResolvedStyle::default(), &mut |text, style| {
+            runs.push((text.to_owned(), style.clone()));
+        });
+        runs
+    }
 
     #[test]
     fn nbt_style_keeps_interaction_metadata() {
@@ -646,7 +610,8 @@ mod tests {
         root.insert("click_event", NbtTag::Compound(click));
         root.insert("hover_event", NbtTag::Compound(hover));
 
-        let component = Component::from_nbt_tag(&NbtTag::Compound(root)).unwrap();
+        let value = serde_json::to_value(NbtTag::Compound(root)).unwrap();
+        let component = Component::from_value(&value).unwrap();
         assert_eq!(component.style.color, Some(0xffaa00));
         assert_eq!(component.style.bold, Some(true));
         assert_eq!(component.style.insertion.as_deref(), Some("Steve"));
@@ -692,10 +657,7 @@ mod tests {
         }))
         .unwrap();
 
-        let mut runs = Vec::new();
-        component.visit_text(&ResolvedStyle::default(), &mut |text, style| {
-            runs.push((text.to_owned(), style.clone()));
-        });
+        let runs = runs(&component);
         assert_eq!(
             runs.iter().map(|r| r.0.as_str()).collect::<String>(),
             "<Alice> hello"
@@ -735,10 +697,7 @@ mod tests {
             {"text":"B"}
         ]))
         .unwrap();
-        let mut runs = Vec::new();
-        component.visit_text(&ResolvedStyle::default(), &mut |text, style| {
-            runs.push((text.to_owned(), style.clone()));
-        });
+        let runs = runs(&component);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].1.color, Some(0xff5555));
         assert_eq!(runs[1].1.color, Some(0xff5555));
