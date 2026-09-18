@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use crate::assets::{AssetIndex, resolve_asset_path_with_packs, resource_stack_paths};
+use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_packs, resource_stack_paths};
 use crate::resource_pack::ResourcePackManager;
 
 #[cfg(feature = "ttf-fonts")]
@@ -573,29 +573,20 @@ struct LoadContext<'a> {
     missing: Arc<GlyphInfo>,
 }
 
-fn normalize_resource_id(id: &str) -> Result<String, String> {
-    let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
-    if path.contains(':') {
-        return Err(format!(
-            "resource location `{id}` has more than one namespace separator"
-        ));
-    }
-    let asset_key = format!("{namespace}/{path}");
-    if !crate::assets::valid_asset_key(&asset_key) {
-        return Err(format!("invalid Minecraft resource location `{id}`"));
-    }
-    Ok(format!("{namespace}:{path}"))
-}
-
 /// The asset key of resource `id` under `prefix` (`Identifier.withPrefix`).
 fn asset_key(id: &str, prefix: &str) -> Result<String, String> {
-    let id = normalize_resource_id(id)?;
-    let (namespace, path) = id.split_once(':').expect("validated resource id");
+    let AssetId { namespace, path } = AssetId::parse(id);
     let key = format!("{namespace}/{prefix}{path}");
     if !crate::assets::valid_asset_key(&key) {
-        return Err(format!("invalid Minecraft resource `{prefix}{id}`"));
+        return Err(format!("invalid Minecraft resource location `{id}`"));
     }
     Ok(key)
+}
+
+fn normalize_resource_id(id: &str) -> Result<String, String> {
+    asset_key(id, "")?;
+    let AssetId { namespace, path } = AssetId::parse(id);
+    Ok(format!("{namespace}:{path}"))
 }
 
 fn font_asset_key(id: &str) -> Result<String, String> {
@@ -1162,20 +1153,24 @@ fn load_bitmap_provider(
     Ok(LoadedProvider { glyphs })
 }
 
+/// Byte offset of pixel (`dx`, `dy`) of a glyph placed at `placement`.
+fn atlas_offset(placement: (u32, u32, u32), dx: u32, dy: u32, bytes_per_pixel: usize) -> usize {
+    let (layer, x, y) = placement;
+    let size = GLYPH_ATLAS_SIZE as usize;
+    ((layer as usize * size + (y + dy) as usize) * size + (x + dx) as usize) * bytes_per_pixel
+}
+
 fn blit_bitmap_cell_rgba(
     atlas: &mut [u8],
     placement: (u32, u32, u32),
     image: &image::RgbaImage,
     source: (u32, u32, u32, u32),
 ) {
-    let (layer, dst_x, dst_y) = placement;
     let (src_x, src_y, width, height) = source;
-    let size = GLYPH_ATLAS_SIZE;
-    let layer_base = (layer * size * size * 4) as usize;
     for row in 0..height {
         for col in 0..width {
             let pixel = image.get_pixel(src_x + col, src_y + row).0;
-            let offset = layer_base + ((((dst_y + row) * size) + dst_x + col) * 4) as usize;
+            let offset = atlas_offset(placement, col, row, 4);
             atlas[offset..offset + 4].copy_from_slice(&pixel);
         }
     }
@@ -1383,13 +1378,10 @@ fn blit_r8_bitmap(
     dimensions: (u32, u32),
     bitmap: &[u8],
 ) {
-    let (layer, dst_x, dst_y) = placement;
     let (width, height) = dimensions;
-    let size = GLYPH_ATLAS_SIZE;
-    let layer_base = (layer * size * size) as usize;
     for row in 0..height {
         let src = row as usize * width as usize;
-        let dst = layer_base + (((dst_y + row) * size) + dst_x) as usize;
+        let dst = atlas_offset(placement, 0, row, 1);
         atlas[dst..dst + width as usize].copy_from_slice(&bitmap[src..src + width as usize]);
     }
 }
@@ -1555,17 +1547,12 @@ fn unihex_glyph_info(placement: (u32, u32, u32), glyph: &UnihexGlyph) -> GlyphIn
 }
 
 fn blit_unihex_glyph(atlas: &mut [u8], placement: (u32, u32, u32), glyph: &UnihexGlyph) {
-    let (layer, dst_x, dst_y) = placement;
-    let size = GLYPH_ATLAS_SIZE;
-    let layer_base = (layer * size * size) as usize;
     for (row_index, &row) in glyph.rows.iter().enumerate() {
         for column in 0..glyph.pixel_width() {
             let bit = u32::from(glyph.left) + column;
             let on = bit < 32 && (row & (1u32 << (31 - bit))) != 0;
-            let offset =
-                layer_base + (((dst_y + row_index as u32) * size) + dst_x + column) as usize;
             // Clear unset bits too: a rolled-back provider may have drawn here.
-            atlas[offset] = if on { 255 } else { 0 };
+            atlas[atlas_offset(placement, column, row_index as u32, 1)] = if on { 255 } else { 0 };
         }
     }
 }
@@ -1574,13 +1561,10 @@ fn blit_unihex_glyph(atlas: &mut [u8], placement: (u32, u32, u32), glyph: &Unihe
 /// interior, advance 6.
 fn append_missing_glyph(atlas: &mut [u8], placement: (u32, u32, u32)) -> GlyphInfo {
     let (atlas_layer, atlas_x, atlas_y) = placement;
-    let size = GLYPH_ATLAS_SIZE;
-    let layer_base = (atlas_layer * size * size) as usize;
     for y in 0..8u32 {
         for x in 0..5u32 {
             let edge = x == 0 || x == 4 || y == 0 || y == 7;
-            let offset = layer_base + (((atlas_y + y) * size) + atlas_x + x) as usize;
-            atlas[offset] = if edge { 255 } else { 0 };
+            atlas[atlas_offset(placement, x, y, 1)] = if edge { 255 } else { 0 };
         }
     }
     GlyphInfo {
@@ -1938,7 +1922,7 @@ mod tests {
         .unwrap();
         let glyph = &loaded.glyphs[&'A'];
         assert_eq!(glyph.advance, 9.0, "last 8px-wide cell must win");
-        let offset = ((glyph.atlas_y * GLYPH_ATLAS_SIZE + glyph.atlas_x) * 4) as usize;
+        let offset = atlas_offset((glyph.atlas_layer, glyph.atlas_x, glyph.atlas_y), 0, 0, 4);
         assert_eq!(&atlas.pixels[offset..offset + 4], &[0, 0, 255, 255]);
     }
 
@@ -2115,9 +2099,12 @@ mod tests {
         assert_eq!(map.glyph('B', Some("example:wrapper")).advance, 7.0);
         let colored = map.glyph('X', Some("example:color"));
         assert!(colored.colored);
-        let offset = (colored.atlas_layer * GLYPH_ATLAS_SIZE * GLYPH_ATLAS_SIZE * 4
-            + (colored.atlas_y * GLYPH_ATLAS_SIZE + colored.atlas_x) * 4)
-            as usize;
+        let offset = atlas_offset(
+            (colored.atlas_layer, colored.atlas_x, colored.atlas_y),
+            0,
+            0,
+            4,
+        );
         assert_eq!(&pixels.color[offset..offset + 4], &[10, 20, 30, 255]);
 
         let (reloaded, _) = load(&ResourcePackManager::new(&fixture.root.join("instance")));
