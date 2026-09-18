@@ -9,7 +9,7 @@ use pyronyx::vk;
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{packing, shader, util};
-use crate::ui::font::{FontSources, GlyphMap};
+use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
 use crate::ui::text::TextSpan;
 
 const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
@@ -229,18 +229,10 @@ pub struct MenuOverlayPipeline {
     sprite_staging_allocation: Option<Allocation>,
     sprite_atlas: SpriteAtlas,
     item_placeholder: Option<TextureResources>,
-    mc_font_image: vk::Image,
-    mc_font_view: vk::ImageView,
-    mc_font_sampler: vk::Sampler,
-    mc_font_allocation: Option<Allocation>,
-    mc_font_staging_buffer: vk::Buffer,
-    mc_font_staging_allocation: Option<Allocation>,
-    mc_font_color_image: vk::Image,
-    mc_font_color_view: vk::ImageView,
-    mc_font_color_sampler: vk::Sampler,
-    mc_font_color_allocation: Option<Allocation>,
-    mc_font_color_staging_buffer: vk::Buffer,
-    mc_font_color_staging_allocation: Option<Allocation>,
+    mc_font: TextureResources,
+    mc_font_color: TextureResources,
+    /// Glyph atlas layer cap from the device, reused on reload.
+    font_layer_limit: u32,
     mc_glyph_map: Option<GlyphMap>,
     obfuscation_rng: ObfuscationRng,
     vertex_buffer: vk::Buffer,
@@ -272,7 +264,7 @@ impl MenuOverlayPipeline {
         render_pass: vk::RenderPass,
         allocator: &Arc<Mutex<Allocator>>,
         font_sources: FontSources<'_>,
-        font_gpu_limits: FontGpuLimits,
+        font_layer_limit: u32,
     ) -> Result<Self, String> {
         let atlas = build_font_atlas();
 
@@ -442,106 +434,21 @@ impl MenuOverlayPipeline {
             staging_alloc: Some(item_staging_alloc),
         });
 
-        let mc_glyph_map = GlyphMap::load(font_sources);
-        crate::lang::load(font_sources.jar_assets_dir);
-
-        let gray_upload = if let Some(ref gm) = mc_glyph_map {
-            let (width, height, layers) = gm.dimensions();
-            FontTextureUpload {
-                pixels: gm.raw_pixels(),
-                extent: util::ImageArrayExtent {
-                    width,
-                    height,
-                    layers,
-                },
-                format: vk::Format::R8Unorm,
-                image_name: "mc_font_atlas",
-                staging_name: "mc_font_staging",
-            }
-        } else {
-            FontTextureUpload {
-                pixels: &[0u8],
-                extent: util::ImageArrayExtent {
-                    width: 1,
-                    height: 1,
-                    layers: 1,
-                },
-                format: vk::Format::R8Unorm,
-                image_name: "mc_font_dummy",
-                staging_name: "mc_font_dummy_staging",
-            }
-        };
-        let gray_resources = create_font_texture_resources(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            font_gpu_limits,
-            gray_upload,
-        )?;
-
-        let color_upload = if let Some(ref gm) = mc_glyph_map
-            && !gm.colored_raw_pixels().is_empty()
-        {
-            let (width, height, layers) = gm.colored_dimensions();
-            FontTextureUpload {
-                pixels: gm.colored_raw_pixels(),
-                extent: util::ImageArrayExtent {
-                    width,
-                    height,
-                    layers,
-                },
-                format: MC_FONT_COLOR_FORMAT,
-                image_name: "mc_font_color_atlas",
-                staging_name: "mc_font_color_staging",
-            }
-        } else {
-            FontTextureUpload {
-                pixels: &[0u8, 0, 0, 0],
-                extent: util::ImageArrayExtent {
-                    width: 1,
-                    height: 1,
-                    layers: 1,
-                },
-                format: MC_FONT_COLOR_FORMAT,
-                image_name: "mc_font_color_dummy",
-                staging_name: "mc_font_color_dummy_staging",
-            }
-        };
-        let color_resources = match create_font_texture_resources(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            font_gpu_limits,
-            color_upload,
-        ) {
-            Ok(resources) => resources,
+        let (mc_glyph_map, glyph_pixels) = match GlyphMap::load(font_sources, font_layer_limit) {
+            Ok((map, pixels)) => (Some(map), Some(pixels)),
             Err(error) => {
-                let mut gray_resources = gray_resources;
-                let mut alloc = allocator
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                destroy_texture_resources(device, &mut alloc, &mut gray_resources);
-                return Err(error);
+                tracing::warn!("Minecraft fonts unavailable: {error}");
+                (None, None)
             }
         };
-        let TextureResources {
-            sampler: mc_font_sampler,
-            image: mc_font_image,
-            view: mc_font_view,
-            image_alloc: mc_font_alloc,
-            staging_buffer: mc_font_staging_buffer,
-            staging_alloc: mc_font_staging_alloc,
-        } = gray_resources;
-        let TextureResources {
-            sampler: mc_font_color_sampler,
-            image: mc_font_color_image,
-            view: mc_font_color_view,
-            image_alloc: mc_font_color_alloc,
-            staging_buffer: mc_font_color_staging_buffer,
-            staging_alloc: mc_font_color_staging_alloc,
-        } = color_resources;
+        crate::lang::load(font_sources.jar_assets_dir);
+        let (mc_font, mc_font_color) = create_font_textures(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            glyph_pixels.as_ref(),
+        )?;
 
         let font_img_info = vk::DescriptorImageInfo {
             sampler: font_sampler,
@@ -558,16 +465,8 @@ impl MenuOverlayPipeline {
             image_view: item_view,
             image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
         };
-        let mc_font_img_info = vk::DescriptorImageInfo {
-            sampler: mc_font_sampler,
-            image_view: mc_font_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let mc_font_color_img_info = vk::DescriptorImageInfo {
-            sampler: mc_font_color_sampler,
-            image_view: mc_font_color_view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
+        let mc_font_img_info = mc_font.image_info();
+        let mc_font_color_img_info = mc_font_color.image_info();
 
         let (favicon_image, favicon_view, favicon_alloc) = util::create_gpu_image_with_format(
             device,
@@ -703,18 +602,9 @@ impl MenuOverlayPipeline {
             sprite_staging_allocation: sprite_staging_alloc,
             sprite_atlas: sprite_atlas_data,
             item_placeholder,
-            mc_font_image,
-            mc_font_view,
-            mc_font_sampler,
-            mc_font_allocation: mc_font_alloc,
-            mc_font_staging_buffer,
-            mc_font_staging_allocation: mc_font_staging_alloc,
-            mc_font_color_image,
-            mc_font_color_view,
-            mc_font_color_sampler,
-            mc_font_color_allocation: mc_font_color_alloc,
-            mc_font_color_staging_buffer,
-            mc_font_color_staging_allocation: mc_font_color_staging_alloc,
+            mc_font,
+            mc_font_color,
+            font_layer_limit,
             mc_glyph_map,
             obfuscation_rng: ObfuscationRng::new(obfuscation_seed),
             vertex_buffer,
@@ -739,6 +629,8 @@ impl MenuOverlayPipeline {
         })
     }
 
+    /// Rebuilds the glyph atlases from the current pack stack. Call with the
+    /// device idle: the old textures are destroyed right away.
     pub fn reload_minecraft_fonts(
         &mut self,
         device: &vk::Device,
@@ -746,143 +638,35 @@ impl MenuOverlayPipeline {
         command_pool: vk::CommandPool,
         allocator: &Arc<Mutex<Allocator>>,
         font_sources: FontSources<'_>,
-        font_gpu_limits: FontGpuLimits,
     ) -> Result<(), String> {
-        let new_map = GlyphMap::load_required(font_sources)?;
-        let (gray_width, gray_height, gray_layers) = new_map.dimensions();
-        let gray_upload = FontTextureUpload {
-            pixels: new_map.raw_pixels(),
-            extent: util::ImageArrayExtent {
-                width: gray_width,
-                height: gray_height,
-                layers: gray_layers,
-            },
-            format: vk::Format::R8Unorm,
-            image_name: "mc_font_atlas_reload",
-            staging_name: "mc_font_staging_reload",
-        };
-        let mut gray_resources = create_font_texture_resources(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            font_gpu_limits,
-            gray_upload,
-        )?;
-
-        let color_upload = if !new_map.colored_raw_pixels().is_empty() {
-            let (width, height, layers) = new_map.colored_dimensions();
-            FontTextureUpload {
-                pixels: new_map.colored_raw_pixels(),
-                extent: util::ImageArrayExtent {
-                    width,
-                    height,
-                    layers,
-                },
-                format: MC_FONT_COLOR_FORMAT,
-                image_name: "mc_font_color_atlas_reload",
-                staging_name: "mc_font_color_staging_reload",
-            }
-        } else {
-            FontTextureUpload {
-                pixels: &[0u8, 0, 0, 0],
-                extent: util::ImageArrayExtent {
-                    width: 1,
-                    height: 1,
-                    layers: 1,
-                },
-                format: MC_FONT_COLOR_FORMAT,
-                image_name: "mc_font_color_dummy_reload",
-                staging_name: "mc_font_color_dummy_staging_reload",
-            }
-        };
-        let mut color_resources = match create_font_texture_resources(
-            device,
-            queue,
-            command_pool,
-            allocator,
-            font_gpu_limits,
-            color_upload,
-        ) {
-            Ok(resources) => resources,
-            Err(error) => {
-                let mut alloc = allocator
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                destroy_texture_resources(device, &mut alloc, &mut gray_resources);
-                return Err(error);
-            }
-        };
-
-        // Acquire every fallible dependency before publishing descriptors.
-        // After this lock succeeds, the descriptor/resource/glyph-map swap is
-        // a single no-fail transaction.
-        let mut alloc = allocator
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut old = TextureResources {
-            sampler: self.mc_font_sampler,
-            image: self.mc_font_image,
-            view: self.mc_font_view,
-            image_alloc: self.mc_font_allocation.take(),
-            staging_buffer: self.mc_font_staging_buffer,
-            staging_alloc: self.mc_font_staging_allocation.take(),
-        };
-        let mut old_color = TextureResources {
-            sampler: self.mc_font_color_sampler,
-            image: self.mc_font_color_image,
-            view: self.mc_font_color_view,
-            image_alloc: self.mc_font_color_allocation.take(),
-            staging_buffer: self.mc_font_color_staging_buffer,
-            staging_alloc: self.mc_font_color_staging_allocation.take(),
-        };
-
-        let image_info = vk::DescriptorImageInfo {
-            sampler: gray_resources.sampler,
-            image_view: gray_resources.view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let color_image_info = vk::DescriptorImageInfo {
-            sampler: color_resources.sampler,
-            image_view: color_resources.view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let writes = [
-            vk::WriteDescriptorSet {
+        let (glyph_map, pixels) = GlyphMap::load(font_sources, self.font_layer_limit)?;
+        let (gray, color) =
+            create_font_textures(device, queue, command_pool, allocator, Some(&pixels))?;
+        let gray_info = gray.image_info();
+        let color_info = color.image_info();
+        let writes =
+            [(3, &gray_info), (8, &color_info)].map(|(binding, info)| vk::WriteDescriptorSet {
                 dst_set: self.tex_set,
-                dst_binding: 3,
+                dst_binding: binding,
                 descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: &image_info,
+                image_info: info,
                 ..Default::default()
-            },
-            vk::WriteDescriptorSet {
-                dst_set: self.tex_set,
-                dst_binding: 8,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                image_info: &color_image_info,
-                ..Default::default()
-            },
-        ];
+            });
         device.update_descriptor_sets(&writes, &[]);
-        destroy_texture_resources(device, &mut alloc, &mut old);
-        destroy_texture_resources(device, &mut alloc, &mut old_color);
-        drop(alloc);
 
-        self.mc_font_image = gray_resources.image;
-        self.mc_font_view = gray_resources.view;
-        self.mc_font_sampler = gray_resources.sampler;
-        self.mc_font_allocation = gray_resources.image_alloc.take();
-        self.mc_font_staging_buffer = gray_resources.staging_buffer;
-        self.mc_font_staging_allocation = gray_resources.staging_alloc.take();
-        self.mc_font_color_image = color_resources.image;
-        self.mc_font_color_view = color_resources.view;
-        self.mc_font_color_sampler = color_resources.sampler;
-        self.mc_font_color_allocation = color_resources.image_alloc.take();
-        self.mc_font_color_staging_buffer = color_resources.staging_buffer;
-        self.mc_font_color_staging_allocation = color_resources.staging_alloc.take();
-        self.mc_glyph_map = Some(new_map);
+        let mut alloc = util::lock_allocator(allocator);
+        destroy_texture_resources(
+            device,
+            &mut alloc,
+            &mut std::mem::replace(&mut self.mc_font, gray),
+        );
+        destroy_texture_resources(
+            device,
+            &mut alloc,
+            &mut std::mem::replace(&mut self.mc_font_color, color),
+        );
+        self.mc_glyph_map = Some(glyph_map);
         Ok(())
     }
 
@@ -1004,11 +788,7 @@ impl MenuOverlayPipeline {
                         let span = TextSpan::new(text.clone(), *color);
                         push_mc_text(
                             &mut vertices,
-                            McTextSources {
-                                gm,
-                                dynamic_regions: &self.favicon_regions,
-                                sprite_atlas: &self.sprite_atlas,
-                            },
+                            self.text_sources(gm),
                             &[span],
                             McTextDraw {
                                 x: start_x,
@@ -1031,11 +811,7 @@ impl MenuOverlayPipeline {
                         let span = TextSpan::new(text.clone(), *color);
                         push_mc_text(
                             &mut vertices,
-                            McTextSources {
-                                gm,
-                                dynamic_regions: &self.favicon_regions,
-                                sprite_atlas: &self.sprite_atlas,
-                            },
+                            self.text_sources(gm),
                             &[span],
                             McTextDraw {
                                 x: *x,
@@ -1062,11 +838,7 @@ impl MenuOverlayPipeline {
                     if let Some(ref gm) = self.mc_glyph_map {
                         push_mc_text(
                             &mut vertices,
-                            McTextSources {
-                                gm,
-                                dynamic_regions: &self.favicon_regions,
-                                sprite_atlas: &self.sprite_atlas,
-                            },
+                            self.text_sources(gm),
                             spans,
                             McTextDraw {
                                 x: start_x,
@@ -1205,11 +977,7 @@ impl MenuOverlayPipeline {
                         };
                         push_mc_text(
                             &mut vertices,
-                            McTextSources {
-                                gm,
-                                dynamic_regions: &self.favicon_regions,
-                                sprite_atlas: &self.sprite_atlas,
-                            },
+                            self.text_sources(gm),
                             spans,
                             McTextDraw {
                                 x: start_x,
@@ -1234,11 +1002,7 @@ impl MenuOverlayPipeline {
                         let start = vertices.len();
                         push_mc_text(
                             &mut vertices,
-                            McTextSources {
-                                gm,
-                                dynamic_regions: &self.favicon_regions,
-                                sprite_atlas: &self.sprite_atlas,
-                            },
+                            self.text_sources(gm),
                             spans,
                             McTextDraw {
                                 x: *x,
@@ -1450,13 +1214,9 @@ impl MenuOverlayPipeline {
 
                 let content_w = lines
                     .iter()
-                    .map(|l| self.mc_text_width(l, *scale).ceil())
+                    .map(|l| (self.mc_text_width(l, *scale) + px).ceil())
                     .fold(0.0f32, f32::max);
-                let content_h = if lines.len() == 1 {
-                    *scale
-                } else {
-                    lines.len() as f32 * line_h
-                };
+                let content_h = lines.len() as f32 * line_h - 2.0 * px;
 
                 let mut text_x = *x + 12.0;
                 let mut text_y = *y - 12.0;
@@ -1467,10 +1227,10 @@ impl MenuOverlayPipeline {
                     text_y = *screen_h - content_h - 3.0;
                 }
 
-                let bg_x = text_x - padding - margin;
-                let bg_y = text_y - padding - margin;
-                let bg_w = content_w + (padding + margin) * 2.0;
-                let bg_h = content_h + (padding + margin) * 2.0;
+                let bg_x = text_x - padding - margin - padding;
+                let bg_y = text_y - padding - margin - padding;
+                let bg_w = content_w + (padding + margin + padding) * 2.0;
+                let bg_h = content_h + (padding + margin + padding) * 2.0;
                 let bg_border = margin;
                 let frame_border = 10.0 * px;
 
@@ -1493,14 +1253,10 @@ impl MenuOverlayPipeline {
 
                 for (i, line) in lines.iter().enumerate() {
                     let span = TextSpan::new(line.clone(), white);
-                    let line_y = text_y + i as f32 * line_h + if i > 0 { 2.0 * px } else { 0.0 };
+                    let line_y = text_y + i as f32 * line_h;
                     push_mc_text(
                         &mut vertices,
-                        McTextSources {
-                            gm,
-                            dynamic_regions: &self.favicon_regions,
-                            sprite_atlas: &self.sprite_atlas,
-                        },
+                        self.text_sources(gm),
                         &[span],
                         McTextDraw {
                             x: text_x,
@@ -1529,14 +1285,10 @@ impl MenuOverlayPipeline {
 
                 let line_widths: Vec<f32> = lines
                     .iter()
-                    .map(|l| self.spans_width(&l.spans, *scale).ceil())
+                    .map(|l| (self.spans_width(&l.spans, *scale) + px).ceil())
                     .collect();
                 let content_w = line_widths.iter().copied().fold(0.0f32, f32::max);
-                let content_h = if lines.len() == 1 {
-                    *scale
-                } else {
-                    lines.len() as f32 * line_h
-                };
+                let content_h = lines.len() as f32 * line_h - 2.0 * px;
 
                 let mut text_x = *x + 12.0;
                 let mut text_y = *y - 12.0;
@@ -1547,10 +1299,10 @@ impl MenuOverlayPipeline {
                     text_y = *screen_h - content_h - 3.0;
                 }
 
-                let bg_x = text_x - padding - margin;
-                let bg_y = text_y - padding - margin;
-                let bg_w = content_w + (padding + margin) * 2.0;
-                let bg_h = content_h + (padding + margin) * 2.0;
+                let bg_x = text_x - padding - margin - padding;
+                let bg_y = text_y - padding - margin - padding;
+                let bg_w = content_w + (padding + margin + padding) * 2.0;
+                let bg_h = content_h + (padding + margin + padding) * 2.0;
                 let bg_border = margin;
                 let frame_border = 10.0 * px;
                 let white = [1.0f32; 4];
@@ -1577,14 +1329,10 @@ impl MenuOverlayPipeline {
                     } else {
                         text_x
                     };
-                    let line_y = text_y + i as f32 * line_h + if i > 0 { 2.0 * px } else { 0.0 };
+                    let line_y = text_y + i as f32 * line_h;
                     push_mc_text(
                         &mut vertices,
-                        McTextSources {
-                            gm,
-                            dynamic_regions: &self.favicon_regions,
-                            sprite_atlas: &self.sprite_atlas,
-                        },
+                        self.text_sources(gm),
                         &line.spans,
                         McTextDraw {
                             x: line_x,
@@ -1676,6 +1424,8 @@ impl MenuOverlayPipeline {
                 default_scissor
             };
             cmd.set_scissor(0, &[rect]);
+            // TODO: clamp to `written`; past MAX_VERTICES this draws vertices
+            // that were never uploaded.
             cmd.draw(op.count, 1, vertex_base + op.start, 0);
         }
         cmd.set_scissor(0, &[default_scissor]);
@@ -1830,36 +1580,36 @@ impl MenuOverlayPipeline {
         let Some(ref gm) = self.mc_glyph_map else {
             return 0.0;
         };
-        let px_scale = scale / gm.cell_h as f32;
-        let raw: f32 = text
-            .chars()
-            .map(|ch| glyph_advance(gm, ch, font) * px_scale)
-            .sum();
-        raw.ceil()
+        (run_advance(gm, text, font, false, false) * scale / gm.cell_h as f32).ceil()
     }
 
-    /// Width of a multi-span line, honoring each span's font and the extra
-    /// per-glyph advance of bold text.
+    /// Width of a multi-span line, honoring each span's font, bold and inline
+    /// objects.
     pub fn spans_width(&self, spans: &[TextSpan], scale: f32) -> f32 {
         let Some(ref gm) = self.mc_glyph_map else {
             return 0.0;
         };
-        let px_scale = scale / gm.cell_h as f32;
         let raw: f32 = spans
             .iter()
-            .flat_map(|s| {
-                s.text.chars().map(move |ch| {
-                    if ch == '\u{fffc}' && s.inline_object.is_some() {
-                        8.0 + if s.bold { 1.0 } else { 0.0 }
-                    } else {
-                        let glyph = gm.glyph(ch, s.font.as_deref());
-                        glyph.advance + if s.bold { glyph.bold_offset } else { 0.0 }
-                    }
-                })
+            .map(|s| {
+                run_advance(
+                    gm,
+                    &s.text,
+                    s.font.as_deref(),
+                    s.bold,
+                    s.inline_object.is_some(),
+                )
             })
-            .sum::<f32>()
-            * px_scale;
-        raw.ceil()
+            .sum();
+        (raw * scale / gm.cell_h as f32).ceil()
+    }
+
+    fn text_sources<'a>(&'a self, gm: &'a GlyphMap) -> McTextSources<'a> {
+        McTextSources {
+            gm,
+            dynamic_regions: &self.favicon_regions,
+            sprite_atlas: &self.sprite_atlas,
+        }
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
@@ -1909,30 +1659,8 @@ impl MenuOverlayPipeline {
         if let Some(mut res) = self.item_placeholder.take() {
             destroy_texture_resources(device, &mut alloc, &mut res);
         }
-        destroy_texture_resources(
-            device,
-            &mut alloc,
-            &mut TextureResources {
-                sampler: self.mc_font_sampler,
-                image: self.mc_font_image,
-                view: self.mc_font_view,
-                image_alloc: self.mc_font_allocation.take(),
-                staging_buffer: self.mc_font_staging_buffer,
-                staging_alloc: self.mc_font_staging_allocation.take(),
-            },
-        );
-        destroy_texture_resources(
-            device,
-            &mut alloc,
-            &mut TextureResources {
-                sampler: self.mc_font_color_sampler,
-                image: self.mc_font_color_image,
-                view: self.mc_font_color_view,
-                image_alloc: self.mc_font_color_allocation.take(),
-                staging_buffer: self.mc_font_color_staging_buffer,
-                staging_alloc: self.mc_font_color_staging_allocation.take(),
-            },
-        );
+        destroy_texture_resources(device, &mut alloc, &mut self.mc_font);
+        destroy_texture_resources(device, &mut alloc, &mut self.mc_font_color);
 
         device.destroy_sampler(self.favicon_sampler, None);
         device.destroy_image_view(self.favicon_view, None);
@@ -3799,56 +3527,80 @@ fn load_single_texture(
     (image, view, allocation)
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct FontGpuLimits {
-    pub max_dimension: u32,
-    pub max_layers: u32,
-}
-
-const MC_FONT_COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Unorm;
+const MC_FONT_COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8Srgb;
 
 struct FontTextureUpload<'a> {
     pixels: &'a [u8],
     extent: util::ImageArrayExtent,
     format: vk::Format,
-    image_name: &'static str,
-    staging_name: &'static str,
+    name: &'static str,
 }
 
-fn create_font_texture_resources(
+/// Uploads the gray (R8) and colored glyph atlases, with 1x1 placeholders when
+/// there are no fonts or no colored glyphs.
+fn create_font_textures(
     device: &vk::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
-    limits: FontGpuLimits,
+    pixels: Option<&GlyphAtlasPixels>,
+) -> Result<(TextureResources, TextureResources), String> {
+    let extent = |layers| util::ImageArrayExtent {
+        width: GLYPH_ATLAS_SIZE,
+        height: GLYPH_ATLAS_SIZE,
+        layers,
+    };
+    let placeholder = util::ImageArrayExtent {
+        width: 1,
+        height: 1,
+        layers: 1,
+    };
+    let gray = match pixels {
+        Some(p) => (p.gray.as_slice(), extent(p.gray_layers)),
+        None => (&[0u8][..], placeholder),
+    };
+    let color = match pixels {
+        Some(p) if p.color_layers > 0 => (p.color.as_slice(), extent(p.color_layers)),
+        _ => (&[0u8; 4][..], placeholder),
+    };
+    let upload = |(pixels, extent), format, name| {
+        create_font_texture(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            FontTextureUpload {
+                pixels,
+                extent,
+                format,
+                name,
+            },
+        )
+    };
+    let mut gray = upload(gray, vk::Format::R8Unorm, "mc_font_atlas")?;
+    match upload(color, MC_FONT_COLOR_FORMAT, "mc_font_color_atlas") {
+        Ok(color) => Ok((gray, color)),
+        Err(error) => {
+            destroy_texture_resources(device, &mut util::lock_allocator(allocator), &mut gray);
+            Err(error)
+        }
+    }
+}
+
+fn create_font_texture(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
     upload: FontTextureUpload<'_>,
 ) -> Result<TextureResources, String> {
-    if upload.extent.width == 0
-        || upload.extent.height == 0
-        || upload.extent.layers == 0
-        || upload.extent.width > limits.max_dimension
-        || upload.extent.height > limits.max_dimension
-        || upload.extent.layers > limits.max_layers
-    {
-        return Err(format!(
-            "font texture {}x{}x{} exceeds device limit {}x{} layers",
-            upload.extent.width,
-            upload.extent.height,
-            upload.extent.layers,
-            limits.max_dimension,
-            limits.max_layers
-        ));
-    }
-
-    let sampler = util::create_nearest_sampler_fallible(device)?;
-    let (image, view, allocation) = match util::create_gpu_image_array_with_format(
+    let sampler = util::try_create_nearest_sampler(device, 1)?;
+    let (image, view, image_alloc) = match util::create_gpu_image_array_with_format(
         device,
         allocator,
-        upload.extent.width,
-        upload.extent.height,
-        upload.extent.layers,
+        upload.extent,
         upload.format,
-        upload.image_name,
+        upload.name,
     ) {
         Ok(resources) => resources,
         Err(error) => {
@@ -3856,59 +3608,45 @@ fn create_font_texture_resources(
             return Err(error);
         }
     };
-    let (staging_buffer, staging_allocation) = match util::create_font_staging_buffer(
-        device,
-        allocator,
-        upload.pixels,
-        upload.staging_name,
-    ) {
-        Ok(resources) => resources,
-        Err(error) => {
-            device.destroy_image_view(view, None);
-            device.destroy_image(image, None);
-            let mut alloc = allocator
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ = alloc.free(allocation);
-            device.destroy_sampler(sampler, None);
-            return Err(error);
-        }
-    };
-    let mut resources = TextureResources {
+    let mut texture = TextureResources {
         sampler,
         image,
         view,
-        image_alloc: Some(allocation),
-        staging_buffer,
-        staging_alloc: Some(staging_allocation),
+        image_alloc: Some(image_alloc),
+        staging_buffer: vk::Buffer::null(),
+        staging_alloc: None,
     };
-    let upload_result = match upload.format {
-        vk::Format::R8Unorm => util::upload_r8_image_array(
+    let bytes_per_pixel = if upload.format == vk::Format::R8Unorm {
+        1
+    } else {
+        4
+    };
+    let uploaded = util::try_create_mapped_buffer(
+        device,
+        allocator,
+        upload.pixels,
+        vk::BufferUsageFlags::TransferSrc,
+        upload.name,
+    )
+    .and_then(|(staging, staging_alloc)| {
+        let result = util::upload_image_array(
             device,
             queue,
             command_pool,
-            staging_buffer,
+            staging,
             image,
             upload.extent,
-        ),
-        MC_FONT_COLOR_FORMAT => util::upload_rgba8_image_array(
-            device,
-            queue,
-            command_pool,
-            staging_buffer,
-            image,
-            upload.extent,
-        ),
-        other => Err(format!("unsupported font atlas format {other:?}")),
-    };
-    if let Err(error) = upload_result {
-        let mut alloc = allocator
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        destroy_texture_resources(device, &mut alloc, &mut resources);
+            bytes_per_pixel,
+        );
+        device.destroy_buffer(staging, None);
+        let _ = util::lock_allocator(allocator).free(staging_alloc);
+        result
+    });
+    if let Err(error) = uploaded {
+        destroy_texture_resources(device, &mut util::lock_allocator(allocator), &mut texture);
         return Err(error);
     }
-    Ok(resources)
+    Ok(texture)
 }
 
 struct TextureResources {
@@ -3918,6 +3656,16 @@ struct TextureResources {
     image_alloc: Option<Allocation>,
     staging_buffer: vk::Buffer,
     staging_alloc: Option<Allocation>,
+}
+
+impl TextureResources {
+    fn image_info(&self) -> vk::DescriptorImageInfo {
+        vk::DescriptorImageInfo {
+            sampler: self.sampler,
+            image_view: self.view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        }
+    }
 }
 
 fn destroy_texture_resources(
@@ -4080,29 +3828,6 @@ fn push_rect(
     radius: f32,
     color: [f32; 4],
 ) {
-    if radius <= 0.0 {
-        // Vanilla `GuiGraphics.fill` is a hard integer quad. Do not run these
-        // through the rounded-rect SDF: even at radius 0 that shader softens
-        // every edge and adds a border band, which produces seams between
-        // adjacent chat rows and changes translucent fill opacity.
-        let a = color[3];
-        push_quad(
-            verts,
-            x,
-            y,
-            w,
-            h,
-            0.0,
-            0.0,
-            1.0,
-            1.0,
-            [color[0] * a, color[1] * a, color[2] * a, a],
-            10.0,
-            [0.0, 0.0],
-            0.0,
-        );
-        return;
-    }
     push_quad(
         verts,
         x,
@@ -4147,7 +3872,7 @@ fn push_gradient_rect(
         [1.0, 1.0],
         [0.0, 1.0],
     ];
-    let mut colors = [
+    let colors = [
         color_top,
         color_top,
         color_bottom,
@@ -4155,23 +3880,12 @@ fn push_gradient_rect(
         color_bottom,
         color_bottom,
     ];
-    let mode = if radius <= 0.0 {
-        for color in &mut colors {
-            let a = color[3];
-            color[0] *= a;
-            color[1] *= a;
-            color[2] *= a;
-        }
-        10.0
-    } else {
-        0.0
-    };
     for i in 0..6 {
         verts.push(Vertex {
             pos: positions[i],
             uv: uvs[i],
             color: colors[i],
-            mode,
+            mode: 0.0,
             rect_size: [w, h],
             corner_radius: radius,
         });
@@ -4300,16 +4014,10 @@ fn push_nine_slice(
     }
 }
 
-/// A glyph's horizontal advance in font-texture pixels.
-fn glyph_advance(gm: &GlyphMap, ch: char, font: Option<&str>) -> f32 {
-    gm.glyph(ch, font).advance
-}
-
-/// Vanilla's obfuscated style swaps a non-space glyph for a random glyph from
-/// the same font whose advance matches the original. `Font` owns one
-/// `RandomSource` and consumes one bounded random value for every obfuscated
-/// glyph it prepares, so keep equivalent persistent LegacyRandomSource state
-/// on the menu renderer instead of hashing time/position.
+/// Vanilla's obfuscated style swaps a non-space glyph for a random glyph of the
+/// same width. `Font` owns one `RandomSource` and draws one bounded value per
+/// obfuscated glyph, so keep equivalent persistent LegacyRandomSource state on
+/// the renderer.
 #[derive(Clone, Copy)]
 struct ObfuscationRng {
     seed: u64,
@@ -4351,25 +4059,6 @@ impl ObfuscationRng {
     }
 }
 
-fn obfuscated_char(
-    gm: &GlyphMap,
-    original: char,
-    font: Option<&str>,
-    rng: &mut ObfuscationRng,
-) -> char {
-    if original == ' ' {
-        return original;
-    }
-    let target_advance = gm.glyph(original, font).advance.ceil() as u32;
-    let Some(candidates) = gm.obfuscation_bucket(target_advance, font) else {
-        return original;
-    };
-    candidates
-        .get(rng.next_int(candidates.len()))
-        .copied()
-        .unwrap_or(original)
-}
-
 #[derive(Clone, Copy)]
 struct McTextSources<'a> {
     gm: &'a GlyphMap,
@@ -4383,6 +4072,62 @@ struct McTextDraw {
     y: f32,
     scale: f32,
     drop_shadow: bool,
+}
+
+/// Advance of an inline object glyph in font pixels (vanilla
+/// `PlainTextRenderable` is 8 wide).
+fn inline_object_advance(bold: bool) -> f32 {
+    8.0 + if bold { 1.0 } else { 0.0 }
+}
+
+/// Summed advance of `text` in font pixels.
+fn run_advance(
+    gm: &GlyphMap,
+    text: &str,
+    font: Option<&str>,
+    bold: bool,
+    inline_objects: bool,
+) -> f32 {
+    text.chars()
+        .map(|ch| {
+            if ch == '\u{fffc}' && inline_objects {
+                inline_object_advance(bold)
+            } else {
+                let glyph = gm.glyph(ch, font);
+                glyph.advance + if bold { glyph.bold_offset } else { 0.0 }
+            }
+        })
+        .sum()
+}
+
+/// An underline or strikethrough quad. Adjacent glyphs' effects that abut
+/// with the same colors are merged into one quad.
+struct McEffect {
+    rect: [f32; 4],
+    color: [f32; 4],
+    shadow_color: Option<[f32; 4]>,
+}
+
+fn add_mc_effect(
+    effects: &mut Vec<McEffect>,
+    rect: [f32; 4],
+    color: [f32; 4],
+    shadow_color: Option<[f32; 4]>,
+) {
+    if let Some(last) = effects.last_mut()
+        && last.rect[2] == rect[0]
+        && last.rect[1] == rect[1]
+        && last.color == color
+        && last.shadow_color == shadow_color
+    {
+        last.rect[2] = rect[2];
+        return;
+    }
+    effects.push(McEffect {
+        rect,
+        color,
+        shadow_color,
+    });
 }
 
 fn push_mc_text(
@@ -4403,55 +4148,58 @@ fn push_mc_text(
         dynamic_regions,
         sprite_atlas,
     } = sources;
-    let (tex_w, tex_h, _) = gm.dimensions();
-    let inv_w = 1.0 / tex_w as f32;
-    let inv_h = 1.0 / tex_h as f32;
     let px_scale = scale / gm.cell_h as f32;
-    let glyph_h = scale;
 
     let mut cx = x;
     let mut cy = y;
     let mut line = 0u32;
+    // Vanilla draws every glyph before the effects.
+    let mut strikethroughs = Vec::new();
+    let mut underlines = Vec::new();
 
-    for span in spans {
+    'spans: for span in spans {
         let mut span_position = 0u64;
-        let shadow_color = span.shadow_color.map_or(
-            [
-                span.color[0] * 0.25,
-                span.color[1] * 0.25,
-                span.color[2] * 0.25,
-                span.color[3],
-            ],
-            |mut explicit| {
-                // Vanilla multiplies an explicit shadow's alpha by the current
-                // text alpha (chat fading/opacity) while retaining its RGB.
+        let font = span.font.as_deref();
+        // Vanilla `PreparedTextBuilder.getShadowColor`: an explicit style
+        // shadow always draws (alpha scaled by the text's); the default 25%
+        // shadow only with drop shadow.
+        let shadow_color = match span.shadow_color {
+            Some(mut explicit) => {
                 explicit[3] *= span.color[3];
-                explicit
-            },
-        );
+                Some(explicit)
+            }
+            None => drop_shadow.then(|| {
+                [
+                    span.color[0] * 0.25,
+                    span.color[1] * 0.25,
+                    span.color[2] * 0.25,
+                    span.color[3],
+                ]
+            }),
+        };
 
         for ch in span.text.chars() {
             if ch == '\n' {
                 cx = x;
                 line += 1;
                 span_position = 0;
-                cy = y + line as f32 * (glyph_h + 2.0 * px_scale);
+                cy = y + line as f32 * (scale + 2.0 * px_scale);
                 if line >= 2 {
-                    return;
+                    break 'spans;
                 }
                 continue;
             }
 
-            if ch == '\u{fffc}'
+            let effect_x0 = if span_position == 0 {
+                cx - px_scale
+            } else {
+                cx
+            };
+            span_position = span_position.wrapping_add(1);
+            let advance = if ch == '\u{fffc}'
                 && let Some(object) = span.inline_object.as_ref()
             {
                 let glyph_w = 8.0 * px_scale;
-                let advance = glyph_w + if span.bold { px_scale } else { 0.0 };
-                let effect_x0 = if span_position == 0 {
-                    cx - px_scale
-                } else {
-                    cx
-                };
                 let sx = cx.round();
                 let sy = (cy - px_scale).round();
                 let key = object.atlas_key();
@@ -4459,261 +4207,182 @@ fn push_mc_text(
                     crate::ui::text::InlineObject::Player { .. } => SpriteId::SteveHead,
                     crate::ui::text::InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
                 };
-                if drop_shadow {
+                let mut draw_object = |dx: f32, color: [f32; 4]| {
                     push_atlas_image(
                         verts,
                         dynamic_regions,
                         sprite_atlas,
                         &key,
                         fallback,
-                        sx + px_scale,
-                        sy + px_scale,
+                        sx + dx,
+                        sy + dx,
                         glyph_w,
-                        shadow_color,
+                        color,
                     );
+                };
+                if let Some(shadow_color) = shadow_color {
+                    draw_object(px_scale, shadow_color);
                 }
-                push_atlas_image(
-                    verts,
-                    dynamic_regions,
-                    sprite_atlas,
-                    &key,
-                    fallback,
-                    sx,
-                    sy,
-                    glyph_w,
-                    span.color,
-                );
-                if span.strikethrough {
-                    push_mc_effect(
-                        verts,
-                        [
-                            effect_x0,
-                            cy + 3.5 * px_scale,
-                            cx + advance,
-                            cy + 4.5 * px_scale,
-                        ],
-                        span.color,
-                        shadow_color,
-                        px_scale,
-                        drop_shadow,
-                    );
-                }
-                if span.underline {
-                    push_mc_effect(
-                        verts,
-                        [
-                            effect_x0,
-                            cy + 8.0 * px_scale,
-                            cx + advance,
-                            cy + 9.0 * px_scale,
-                        ],
-                        span.color,
-                        shadow_color,
-                        px_scale,
-                        drop_shadow,
-                    );
-                }
-                cx += advance;
-                span_position = span_position.wrapping_add(1);
-                continue;
-            }
-
-            let position = span_position;
-            let rendered_ch = if span.obfuscated && ch != ' ' {
-                obfuscated_char(gm, ch, span.font.as_deref(), obfuscation_rng)
+                draw_object(0.0, span.color);
+                inline_object_advance(span.bold) * px_scale
             } else {
-                ch
+                let gi = if span.obfuscated && ch != ' ' {
+                    let width = gm.glyph(ch, font).advance.ceil() as i32;
+                    gm.random_glyph(width, font, |len| obfuscation_rng.next_int(len))
+                } else {
+                    gm.glyph(ch, font)
+                };
+                push_mc_glyph_quads(verts, gi, [cx, cy], px_scale, span, shadow_color);
+                (gi.advance + if span.bold { gi.bold_offset } else { 0.0 }) * px_scale
             };
-            span_position = span_position.wrapping_add(1);
-            let gi = gm.glyph(rendered_ch, span.font.as_deref());
-            let glyph_w = gi.draw_w * px_scale;
-            let glyph_draw_h = gi.draw_h * px_scale;
-            let glyph_y_off = gi.top * px_scale;
 
-            let u0 = gi.atlas_x as f32 * inv_w;
-            let v0 = gi.atlas_y as f32 * inv_h;
-            let u1 = (gi.atlas_x + gi.pixel_w) as f32 * inv_w;
-            let v1 = (gi.atlas_y + gi.pixel_h) as f32 * inv_h;
-
-            let italic_offset = if span.italic { px_scale } else { 0.0 };
-
-            let sx = (cx + gi.left * px_scale).round();
-            let sy = (cy + glyph_y_off).round();
-
-            let glyph_shadow_offset = gi.shadow_offset * px_scale;
-            let glyph_bold_offset = gi.bold_offset * px_scale;
-
-            if gi.pixel_w > 0 && gi.pixel_h > 0 && drop_shadow {
-                push_mc_glyph(
-                    verts,
-                    sx + glyph_shadow_offset,
-                    sy + glyph_shadow_offset,
-                    glyph_w.round(),
-                    glyph_draw_h.round(),
-                    gi.atlas_layer,
-                    u0,
-                    v0,
-                    u1,
-                    v1,
-                    gi.colored,
-                    shadow_color,
-                    italic_offset,
-                );
-                if span.bold {
-                    push_mc_glyph(
-                        verts,
-                        sx + glyph_shadow_offset + glyph_bold_offset,
-                        sy + glyph_shadow_offset,
-                        glyph_w.round(),
-                        glyph_draw_h.round(),
-                        gi.atlas_layer,
-                        u0,
-                        v0,
-                        u1,
-                        v1,
-                        gi.colored,
-                        shadow_color,
-                        italic_offset,
-                    );
-                }
-            }
-
-            if gi.pixel_w > 0 && gi.pixel_h > 0 {
-                push_mc_glyph(
-                    verts,
-                    sx,
-                    sy,
-                    glyph_w.round(),
-                    glyph_draw_h.round(),
-                    gi.atlas_layer,
-                    u0,
-                    v0,
-                    u1,
-                    v1,
-                    gi.colored,
-                    span.color,
-                    italic_offset,
-                );
-                if span.bold {
-                    push_mc_glyph(
-                        verts,
-                        sx + glyph_bold_offset,
-                        sy,
-                        glyph_w.round(),
-                        glyph_draw_h.round(),
-                        gi.atlas_layer,
-                        u0,
-                        v0,
-                        u1,
-                        v1,
-                        gi.colored,
-                        span.color,
-                        italic_offset,
-                    );
-                }
-            }
-
-            let advance = glyph_advance(gm, rendered_ch, span.font.as_deref()) * px_scale
-                + if span.bold { glyph_bold_offset } else { 0.0 };
-            let effect_x0 = if position == 0 { cx - px_scale } else { cx };
             if span.strikethrough {
-                push_mc_effect(
-                    verts,
-                    [
-                        effect_x0,
-                        cy + 3.5 * px_scale,
-                        cx + advance,
-                        cy + 4.5 * px_scale,
-                    ],
-                    span.color,
-                    shadow_color,
-                    px_scale,
-                    drop_shadow,
-                );
+                let rect = [
+                    effect_x0,
+                    cy + 3.5 * px_scale,
+                    cx + advance,
+                    cy + 4.5 * px_scale,
+                ];
+                add_mc_effect(&mut strikethroughs, rect, span.color, shadow_color);
             }
             if span.underline {
-                push_mc_effect(
-                    verts,
-                    [
-                        effect_x0,
-                        cy + 8.0 * px_scale,
-                        cx + advance,
-                        cy + 9.0 * px_scale,
-                    ],
-                    span.color,
-                    shadow_color,
-                    px_scale,
-                    drop_shadow,
-                );
+                let rect = [
+                    effect_x0,
+                    cy + 8.0 * px_scale,
+                    cx + advance,
+                    cy + 9.0 * px_scale,
+                ];
+                add_mc_effect(&mut underlines, rect, span.color, shadow_color);
             }
-
             cx += advance;
         }
     }
+
+    for effect in strikethroughs.iter().chain(&underlines) {
+        push_mc_effect(verts, effect, px_scale);
+    }
 }
 
-fn push_mc_effect(
+/// Vanilla `BakedSheetGlyph.renderChar`: the shadow copy, then the glyph, each
+/// doubled at the bold offset.
+fn push_mc_glyph_quads(
     verts: &mut Vec<Vertex>,
-    rect: [f32; 4],
-    color: [f32; 4],
-    shadow_color: [f32; 4],
-    shadow_offset: f32,
-    drop_shadow: bool,
+    gi: &GlyphInfo,
+    origin: [f32; 2],
+    px_scale: f32,
+    span: &TextSpan,
+    shadow_color: Option<[f32; 4]>,
 ) {
-    let [x0, y0, x1, y1] = rect;
-    let w = (x1 - x0).max(0.0);
-    let h = (y1 - y0).max(0.0);
+    if gi.pixel_w == 0 || gi.pixel_h == 0 {
+        return;
+    }
+    let inv = 1.0 / GLYPH_ATLAS_SIZE as f32;
+    // `BakedSheetGlyph.render` shears each edge by 1 - 0.25 * its y.
+    let shear = if span.italic {
+        [
+            (1.0 - 0.25 * gi.top) * px_scale,
+            (1.0 - 0.25 * (gi.top + gi.draw_h)) * px_scale,
+        ]
+    } else {
+        [0.0, 0.0]
+    };
+    let quad = GlyphQuad {
+        w: (gi.draw_w * px_scale).round(),
+        h: (gi.draw_h * px_scale).round(),
+        layer: gi.atlas_layer,
+        uv: [
+            gi.atlas_x as f32 * inv,
+            gi.atlas_y as f32 * inv,
+            (gi.atlas_x + gi.pixel_w) as f32 * inv,
+            (gi.atlas_y + gi.pixel_h) as f32 * inv,
+        ],
+        colored: gi.colored,
+        shear,
+    };
+    let sx = (origin[0] + gi.left * px_scale).round();
+    let sy = (origin[1] + gi.top * px_scale).round();
+    let bold = span.bold.then_some(gi.bold_offset * px_scale);
+    let mut draw = |offset: f32, color: [f32; 4]| {
+        push_mc_glyph(verts, &quad, sx + offset, sy + offset, color);
+        if let Some(bold) = bold {
+            push_mc_glyph(verts, &quad, sx + offset + bold, sy + offset, color);
+        }
+    };
+    if let Some(shadow_color) = shadow_color {
+        draw(gi.shadow_offset * px_scale, shadow_color);
+    }
+    draw(0.0, span.color);
+}
+
+fn push_mc_effect(verts: &mut Vec<Vertex>, effect: &McEffect, shadow_offset: f32) {
+    let [x0, y0, x1, y1] = effect.rect;
+    let (w, h) = (x1 - x0, y1 - y0);
     if w <= 0.0 || h <= 0.0 {
         return;
     }
-    if drop_shadow {
-        push_rect(
+    if let Some(shadow_color) = effect.shadow_color {
+        push_mc_fill(
             verts,
             x0 + shadow_offset,
             y0 + shadow_offset,
             w,
             h,
-            0.0,
-            mc_effect_color(shadow_color),
+            shadow_color,
         );
     }
-    push_rect(verts, x0, y0, w, h, 0.0, mc_effect_color(color));
+    push_mc_fill(verts, x0, y0, w, h, effect.color);
 }
 
-fn mc_effect_color(mut color: [f32; 4]) -> [f32; 4] {
-    // Minecraft font glyphs are converted from gamma-space style colors to
-    // linear RGB in the fragment shader before the sRGB framebuffer write.
-    // Decoration effects use hard quads, so perform the same conversion here
-    // or their 25%-RGB drop shadow becomes visibly too bright/"3D".
-    color[0] = color[0].powf(2.2);
-    color[1] = color[1].powf(2.2);
-    color[2] = color[2].powf(2.2);
-    color
+/// A hard-edged fill (vanilla effects are plain quads, not the rounded-rect
+/// SDF). Glyph colors are linearized in the shader; this quad goes through the
+/// plain premultiplied mode, so convert here.
+fn push_mc_fill(verts: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+    let a = color[3];
+    let linear = |c: f32| c.powf(2.2) * a;
+    push_quad(
+        verts,
+        x,
+        y,
+        w,
+        h,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        [linear(color[0]), linear(color[1]), linear(color[2]), a],
+        10.0,
+        [0.0, 0.0],
+        0.0,
+    );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_mc_glyph(
-    verts: &mut Vec<Vertex>,
-    x: f32,
-    y: f32,
+#[derive(Clone, Copy)]
+struct GlyphQuad {
     w: f32,
     h: f32,
     layer: u32,
-    u0: f32,
-    v0: f32,
-    u1: f32,
-    v1: f32,
+    uv: [f32; 4],
     colored: bool,
-    color: [f32; 4],
-    italic_offset: f32,
-) {
+    /// Italic x offset of the top and bottom edges.
+    shear: [f32; 2],
+}
+
+fn push_mc_glyph(verts: &mut Vec<Vertex>, quad: &GlyphQuad, x: f32, y: f32, color: [f32; 4]) {
+    let GlyphQuad {
+        w,
+        h,
+        layer,
+        uv: [u0, v0, u1, v1],
+        colored,
+        shear: [top, bottom],
+    } = *quad;
     let positions = [
-        [x + italic_offset, y],
-        [x + w + italic_offset, y],
-        [x, y + h],
-        [x + w + italic_offset, y],
-        [x + w, y + h],
-        [x, y + h],
+        [x + top, y],
+        [x + w + top, y],
+        [x + bottom, y + h],
+        [x + w + top, y],
+        [x + w + bottom, y + h],
+        [x + bottom, y + h],
     ];
     let uvs = [[u0, v0], [u1, v0], [u0, v1], [u1, v0], [u1, v1], [u0, v1]];
     for i in 0..6 {
@@ -4915,8 +4584,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn colored_minecraft_font_atlas_uses_vanilla_unorm_format() {
-        assert_eq!(MC_FONT_COLOR_FORMAT, vk::Format::R8G8B8A8Unorm);
+    fn abutting_effects_merge_into_one_quad() {
+        let mut effects = Vec::new();
+        add_mc_effect(&mut effects, [0.0, 8.0, 6.0, 9.0], [1.0; 4], None);
+        add_mc_effect(&mut effects, [6.0, 8.0, 12.0, 9.0], [1.0; 4], None);
+        add_mc_effect(&mut effects, [12.0, 8.0, 18.0, 9.0], [0.5; 4], None);
+        assert_eq!(effects.len(), 2);
+        assert_eq!(effects[0].rect, [0.0, 8.0, 12.0, 9.0]);
+    }
+
+    #[test]
+    fn italic_shear_matches_baked_sheet_glyph() {
+        // An ASCII glyph spans y 0..8: vanilla shears the top edge by +1 and
+        // the bottom by -1.
+        let glyph = GlyphInfo {
+            atlas_layer: 0,
+            colored: false,
+            atlas_x: 0,
+            atlas_y: 0,
+            pixel_w: 5,
+            pixel_h: 8,
+            draw_w: 5.0,
+            draw_h: 8.0,
+            left: 0.0,
+            top: 0.0,
+            advance: 6.0,
+            bold_offset: 1.0,
+            shadow_offset: 1.0,
+        };
+        let mut span = TextSpan::new("A".into(), [1.0; 4]);
+        span.italic = true;
+        let mut verts = Vec::new();
+        push_mc_glyph_quads(&mut verts, &glyph, [0.0, 0.0], 1.0, &span, None);
+        assert_eq!(verts.len(), 6);
+        assert_eq!(verts[0].pos, [1.0, 0.0]);
+        assert_eq!(verts[2].pos, [-1.0, 8.0]);
     }
 
     #[test]

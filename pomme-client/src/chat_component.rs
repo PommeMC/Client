@@ -74,8 +74,7 @@ pub struct ResolvedStyle {
     pub hover_event: Option<HoverEvent>,
     pub insertion: Option<String>,
     pub font: Option<Value>,
-    /// Object contents temporarily replace the current font with a special
-    /// sprite/player glyph provider for their U+FFFC placeholder.
+    /// Raw object info drawn for a U+FFFC placeholder.
     pub inline_object: Option<Value>,
 }
 
@@ -451,60 +450,14 @@ fn visit_argument(
     }
 }
 
+/// Vanilla `KeyMapping.createNameSupplier`: the bound key's name, or the
+/// translated id for an unknown mapping.
 fn keybind_display_name(key: &str) -> String {
-    if let Some((translation, fallback)) = crate::app::input::keybind_translation(key) {
-        return crate::lang::translate(translation)
-            .unwrap_or(fallback)
-            .to_owned();
+    match crate::app::input::keybind_label(key) {
+        Some((translation, fallback)) => crate::lang::translate(translation).unwrap_or(fallback),
+        None => crate::lang::translate(key).unwrap_or(key),
     }
-
-    let (translation, fallback) = match key {
-        "key.friends" => ("key.keyboard.o", "O"),
-        "key.socialInteractions" => ("key.keyboard.p", "P"),
-        "key.screenshot" => ("key.keyboard.f2", "F2"),
-        "key.smoothCamera" | "key.spectatorOutlines" => ("key.keyboard.unknown", "Unknown"),
-        "key.fullscreen" => ("key.keyboard.f11", "F11"),
-        "key.advancements" => ("key.keyboard.l", "L"),
-        "key.quickActions" => ("key.keyboard.g", "G"),
-        "key.toggleGui" => ("key.keyboard.f1", "F1"),
-        "key.toggleSpectatorShaderEffects" => ("key.keyboard.f4", "F4"),
-        "key.saveToolbarActivator" => ("key.keyboard.c", "C"),
-        "key.loadToolbarActivator" => ("key.keyboard.x", "X"),
-        "key.debug.overlay" | "key.debug.modifier" => ("key.keyboard.f3", "F3"),
-        "key.debug.crash" | "key.debug.copyLocation" => ("key.keyboard.c", "C"),
-        "key.debug.reloadChunk" => ("key.keyboard.a", "A"),
-        "key.debug.showHitboxes" => ("key.keyboard.b", "B"),
-        "key.debug.clearChat" => ("key.keyboard.d", "D"),
-        "key.debug.showChunkBorders" => ("key.keyboard.g", "G"),
-        "key.debug.showAdvancedTooltips" => ("key.keyboard.h", "H"),
-        "key.debug.copyRecreateCommand" => ("key.keyboard.i", "I"),
-        "key.debug.spectate" => ("key.keyboard.n", "N"),
-        "key.debug.switchGameMode" => ("key.keyboard.f4", "F4"),
-        "key.debug.debugOptions" => ("key.keyboard.f6", "F6"),
-        "key.debug.focusPause" => ("key.keyboard.p", "P"),
-        "key.debug.dumpDynamicTextures" => ("key.keyboard.s", "S"),
-        "key.debug.reloadResourcePacks" => ("key.keyboard.t", "T"),
-        "key.debug.profiling" => ("key.keyboard.l", "L"),
-        "key.debug.dumpVersion" => ("key.keyboard.v", "V"),
-        "key.debug.profilingChart" => ("key.keyboard.1", "1"),
-        "key.debug.fpsCharts" => ("key.keyboard.2", "2"),
-        "key.debug.networkCharts" => ("key.keyboard.3", "3"),
-        "key.debug.lightmapTexture" => ("key.keyboard.4", "4"),
-        _ => {
-            if let Some(slot) = key.strip_prefix("key.hotbar.")
-                && matches!(slot, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
-            {
-                let translation = format!("key.keyboard.{slot}");
-                return crate::lang::translate(&translation)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| slot.to_owned());
-            }
-            return crate::lang::translate(key).unwrap_or(key).to_owned();
-        }
-    };
-    crate::lang::translate(translation)
-        .unwrap_or(fallback)
-        .to_owned()
+    .to_owned()
 }
 
 fn emit(text: &str, style: &ResolvedStyle, visitor: &mut impl FnMut(&str, &ResolvedStyle)) {

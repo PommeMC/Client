@@ -114,7 +114,11 @@ pub fn format_component_spans(component: &Component, base_color: [f32; 4]) -> Ve
             underline: style.underlined,
             obfuscated: style.obfuscated,
             shadow_color: style.shadow_color.map(argb32),
-            font: font_resource_id(style),
+            font: style
+                .font
+                .as_ref()
+                .and_then(serde_json::Value::as_str)
+                .map(font_id),
             inline_object: style.inline_object.as_ref().and_then(parse_inline_object),
             component_style: Some(Arc::new(style.clone())),
         });
@@ -146,6 +150,7 @@ pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<Text
                 let italic = s.and_then(|s| s.italic).unwrap_or(false);
                 let strikethrough = s.and_then(|s| s.strikethrough).unwrap_or(false);
                 let underline = s.and_then(|s| s.underlined).unwrap_or(false);
+                let obfuscated = s.and_then(|s| s.obfuscated).unwrap_or(false);
 
                 spans.borrow_mut().push(TextSpan {
                     text: t.to_string(),
@@ -154,9 +159,9 @@ pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<Text
                     italic,
                     strikethrough,
                     underline,
-                    obfuscated: false,
-                    shadow_color: None,
-                    font: None,
+                    obfuscated,
+                    shadow_color: s.and_then(|s| s.shadow_color).map(argb32),
+                    font: s.and_then(|s| s.font.as_deref()).map(font_id),
                     inline_object: None,
                     component_style: None,
                 });
@@ -180,11 +185,10 @@ pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<Text
 
 fn parse_inline_object(value: &serde_json::Value) -> Option<InlineObject> {
     let map = value.as_object()?;
-    let kind = map
-        .get("object")
-        .and_then(serde_json::Value::as_str)
-        .map(|value| value.strip_prefix("minecraft:").unwrap_or(value));
-    if kind == Some("atlas") || map.contains_key("sprite") {
+    // Vanilla `ObjectInfos` keys the discriminator by plain name; the fuzzy
+    // form omits it.
+    let kind = map.get("object").and_then(serde_json::Value::as_str);
+    if kind == Some("atlas") || kind.is_none() && map.contains_key("sprite") {
         let sprite = map.get("sprite")?.as_str()?.to_owned();
         let atlas = map
             .get("atlas")
@@ -193,7 +197,7 @@ fn parse_inline_object(value: &serde_json::Value) -> Option<InlineObject> {
             .to_owned();
         return Some(InlineObject::AtlasSprite { atlas, sprite });
     }
-    if kind == Some("player") || map.contains_key("player") {
+    if kind == Some("player") || kind.is_none() && map.contains_key("player") {
         let player = map.get("player")?;
         let (uuid, name, textures) = parse_player_profile(player);
         return Some(InlineObject::Player {
@@ -270,32 +274,17 @@ fn find_textures_property(value: &serde_json::Value) -> Option<String> {
     })
 }
 
-fn font_resource_id(style: &ResolvedStyle) -> Option<String> {
-    let id = match style.font.as_ref()? {
-        serde_json::Value::String(id) => id.as_str(),
-        // Keep accepting the richer object shape used by Pomme's transitional
-        // component representation, even though ordinary 26.2 Style.font is a
-        // resource Identifier codec.
-        serde_json::Value::Object(map) => map
-            .get("id")
-            .or_else(|| map.get("font"))
-            .and_then(serde_json::Value::as_str)?,
-        _ => return None,
-    };
-    Some(if id.contains(':') {
+/// A `Style.font` identifier with its namespace made explicit.
+fn font_id(id: &str) -> String {
+    if id.contains(':') {
         id.to_owned()
     } else {
         format!("minecraft:{id}")
-    })
+    }
 }
 
 fn rgb24(value: u32) -> [f32; 4] {
-    [
-        ((value >> 16) & 0xff) as f32 / 255.0,
-        ((value >> 8) & 0xff) as f32 / 255.0,
-        (value & 0xff) as f32 / 255.0,
-        1.0,
-    ]
+    argb32(value | 0xff00_0000)
 }
 
 fn argb32(value: u32) -> [f32; 4] {
@@ -318,13 +307,15 @@ fn style_to_rgba(style: &Style, base_color: [f32; 4]) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use super::*;
     use crate::chat_component::{ClickEvent, HoverEvent};
 
     #[test]
     fn native_object_span_keeps_special_glyph_metadata() {
         let component = Component::from_value(&serde_json::json!({
-            "object": "minecraft:atlas",
+            "object": "atlas",
             "atlas": "minecraft:blocks",
             "sprite": "minecraft:block/stone"
         }))
@@ -344,7 +335,7 @@ mod tests {
     #[test]
     fn native_player_object_accepts_int_array_uuid_and_hat_flag() {
         let component = Component::from_value(&serde_json::json!({
-            "object": "minecraft:player",
+            "object": "player",
             "player": {
                 "id": [0x00112233_i64, 0x44556677, -2003195205, -857870593],
                 "name": "Alex"
@@ -365,6 +356,34 @@ mod tests {
             uuid.map(|uuid| uuid.to_string()),
             Some("00112233-4455-6677-8899-aabbccddeeff".into())
         );
+    }
+
+    #[test]
+    fn namespaced_object_discriminator_is_rejected() {
+        let component = Component::from_value(&serde_json::json!({
+            "object": "minecraft:atlas",
+            "sprite": "minecraft:block/stone"
+        }))
+        .unwrap();
+        assert_eq!(
+            format_component_spans(&component, [1.0; 4])[0].inline_object,
+            None
+        );
+    }
+
+    #[test]
+    fn azalea_spans_keep_obfuscated_shadow_and_font() {
+        let text = FormattedText::deserialize(&serde_json::json!({
+            "text": "abc",
+            "obfuscated": true,
+            "shadow_color": 0x80ff_0000_u32,
+            "font": "alt"
+        }))
+        .unwrap();
+        let span = &format_text_spans(&text, [1.0; 4])[0];
+        assert!(span.obfuscated);
+        assert_eq!(span.shadow_color, Some([1.0, 0.0, 0.0, 128.0 / 255.0]));
+        assert_eq!(span.font.as_deref(), Some("minecraft:alt"));
     }
 
     #[test]
