@@ -605,7 +605,9 @@ impl ApplicationHandler for App {
                     AppPhase::InGame { game, .. }
                         if game.dialog_open()
                             || game.options_from_game
-                            || game.creative_inventory_open =>
+                            || game.creative_inventory_open
+                            || game.inventory_open
+                            || game.open_container.is_some() =>
                     {
                         self.core.input.on_menu_scroll(scroll);
                     }

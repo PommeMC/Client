@@ -611,6 +611,32 @@ pub fn bake_item_models(
         }
     }
 
+    // Bundle's GUI-selected state is a vanilla special renderer: open-back,
+    // selected nested item, open-front. Bake those ordinary model layers under
+    // private per-color keys so the menu renderer can compose them at runtime.
+    for bundle in item_definition_names(jar_assets_dir, packs)
+        .into_iter()
+        .filter(|name| name == "bundle" || name.ends_with("_bundle"))
+    {
+        for suffix in ["open_back", "open_front"] {
+            let key = format!("__pomme_{bundle}_{suffix}");
+            let path = format!("item/{bundle}_{suffix}");
+            let resolved =
+                resolve_model(&path, jar_assets_dir, asset_index, &mut model_cache, packs);
+            if resolved.elements.is_empty() {
+                if let Some(value) = resolved.textures.get("layer0")
+                    && let Some(texture) = texture_to_name(value)
+                {
+                    flat_item_textures.insert(texture.clone());
+                    flat_keys.insert(key, texture);
+                }
+            } else if let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, Tint::None) {
+                apply_gui_lambert(&mut baked.quads, BLOCK_GUI_ROTATION_DEG);
+                item_models.insert(key, baked);
+            }
+        }
+    }
+
     item_models.insert("chest".to_string(), bake_chest_item_model());
     ground_transforms.insert("chest".to_string(), default_block_ground_transform());
     flat_keys.remove("chest");
@@ -1835,10 +1861,11 @@ mod tests {
         assert!(parse_item_transformation(&axis_angle).is_none());
     }
 
-    /// Non-composite trees (bundles' select/condition) keep the old
-    /// first-model-string behavior.
+    /// Dynamic trees still retain a representative fallback for contexts that
+    /// do not evaluate the runtime property (the GUI bundle path is composed
+    /// separately by the menu renderer).
     #[test]
-    fn select_item_falls_back_to_first_model() {
+    fn select_item_retains_representative_fallback() {
         let json: serde_json::Value = serde_json::from_str(
             r#"{
                 "model": {

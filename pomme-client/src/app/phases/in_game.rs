@@ -157,6 +157,10 @@ pub struct GameState {
     pub inv_drag: Option<(azalea_inventory::operations::QuickCraftKind, Vec<u16>)>,
     /// Last survival left click (slot, time) for double-click detection.
     pub inv_last_click: Option<(u16, Instant)>,
+    /// Client-local bundle selection (menu id, slot, content index). Vanilla's
+    /// bundle selected index is intentionally not serialized in the item
+    /// component.
+    pub bundle_selection: Option<(i32, u16, i32)>,
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
     pub chat: ChatState,
@@ -393,6 +397,7 @@ impl GameState {
             container_was_open: None,
             inv_drag: None,
             inv_last_click: None,
+            bundle_selection: None,
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
             chat: {
                 let mut chat = ChatState::new();
@@ -1688,6 +1693,16 @@ fn apply_render_distance(
 /// Predict each container click locally (instant UI + drag preview), then send
 /// the predicted diff as `HashedStack`es so the server suppresses corrections
 /// when the prediction is right (vanilla lockstep).
+fn send_bundle_selection(sender: &crate::net::sender::PacketSender, slot: u16, selected: i32) {
+    use azalea_protocol::packets::game::s_bundle_item_selected::ServerboundBundleItemSelected;
+    sender.send(ServerboundGamePacket::BundleItemSelected(
+        ServerboundBundleItemSelected {
+            slot_id: i32::from(slot),
+            selected_item_index: selected as u32,
+        },
+    ));
+}
+
 fn send_container_clicks(
     game: &mut GameState,
     connection: &ConnectionHandle,
@@ -2826,6 +2841,7 @@ pub fn update_game(
             swap_offhand: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
             throw: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyQ),
             throw_all: core.input.ctrl_held(),
+            scroll: core.input.consume_menu_scroll(),
         };
         // The anvil rename field consumes this frame's typing; a changed
         // accepted name goes to the server (vanilla `onNameChanged`).
@@ -2843,7 +2859,7 @@ pub fn update_game(
                     name,
                 }));
         }
-        let (clicked_outside, ops) = if let Some(container) = &game.open_container {
+        let (clicked_outside, ops, hovered) = if let Some(container) = &game.open_container {
             let result = match container.screen {
                 ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
                     &mut elements,
@@ -2959,7 +2975,7 @@ pub fn update_game(
                         },
                     ));
             }
-            (result.clicked_outside, result.ops)
+            (result.clicked_outside, result.ops, result.hovered)
         } else {
             let result = crate::ui::inventory::build_inventory(
                 &mut elements,
@@ -2974,9 +2990,83 @@ pub fn update_game(
                 gs,
             );
             player_preview = Some(result.player_preview);
-            (result.clicked_outside, result.ops)
+            (result.clicked_outside, result.ops, result.hovered)
         };
         close_inventory = clicked_outside;
+
+        let menu_id = game.open_container.as_ref().map_or(0, |c| c.id);
+        let hovered_item = game
+            .open_container
+            .as_ref()
+            .and_then(|c| hovered.and_then(|slot| c.slots.get(slot as usize)))
+            .or_else(|| hovered.map(|slot| game.player.inventory.slot(slot as usize)));
+        let hovered_bundle = hovered_item.and_then(|stack| match stack {
+            azalea_inventory::ItemStack::Present(data) => {
+                crate::ui::bundle::contents(data).map(|c| c.into_owned())
+            }
+            azalea_inventory::ItemStack::Empty => None,
+        });
+
+        if let Some((old_menu, old_slot, _)) = game.bundle_selection
+            && (Some(old_slot) != hovered || old_menu != menu_id || hovered_bundle.is_none())
+        {
+            send_bundle_selection(
+                &connection.packet_tx,
+                old_slot,
+                crate::ui::bundle::NO_SELECTION,
+            );
+            game.bundle_selection = None;
+        }
+        if let (Some(slot), Some(contents)) = (hovered, hovered_bundle.as_ref()) {
+            let current = game
+                .bundle_selection
+                .filter(|(m, s, _)| *m == menu_id && *s == slot)
+                .map_or(crate::ui::bundle::NO_SELECTION, |(_, _, selected)| selected);
+            let wheel = input.scroll.signum() as i32;
+            let next = crate::ui::bundle::next_selection(
+                wheel,
+                current,
+                crate::ui::bundle::shown_count(contents),
+            );
+            if next != current {
+                send_bundle_selection(&connection.packet_tx, slot, next);
+                game.bundle_selection = Some((menu_id, slot, next));
+            }
+            if let Some(azalea_inventory::ItemStack::Present(data)) = hovered_item {
+                crate::ui::bundle::push_selected_icon(
+                    &mut elements,
+                    data,
+                    next,
+                    core.input.cursor_pos(),
+                );
+                crate::ui::bundle::push_tooltip(
+                    &mut elements,
+                    data,
+                    next,
+                    core.input.cursor_pos(),
+                    sw,
+                    sh,
+                    gs,
+                );
+            }
+        }
+        let clears_selected = game.bundle_selection.is_some_and(|(_, selected_slot, _)| {
+            ops.iter().any(|op| match op {
+                azalea_inventory::operations::ClickOperation::QuickMove(click) => match click {
+                    azalea_inventory::operations::QuickMoveClick::Left { slot }
+                    | azalea_inventory::operations::QuickMoveClick::Right { slot } => {
+                        *slot == selected_slot
+                    }
+                },
+                azalea_inventory::operations::ClickOperation::Swap(click) => {
+                    click.source_slot == selected_slot
+                }
+                _ => false,
+            })
+        });
+        if clears_selected && let Some((_, slot, _)) = game.bundle_selection.take() {
+            send_bundle_selection(&connection.packet_tx, slot, crate::ui::bundle::NO_SELECTION);
+        }
         send_container_clicks(game, connection, ops);
         core.input.clear_just_pressed_actions();
     }

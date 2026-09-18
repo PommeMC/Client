@@ -720,7 +720,9 @@ impl MenuOverlayPipeline {
         for elem in elements {
             if matches!(
                 elem,
-                MenuElement::Tooltip { .. } | MenuElement::TooltipLines { .. }
+                MenuElement::Tooltip { .. }
+                    | MenuElement::TooltipLines { .. }
+                    | MenuElement::BundleTooltip { .. }
             ) {
                 deferred_tooltips.push(elem);
                 continue;
@@ -1262,6 +1264,272 @@ impl MenuOverlayPipeline {
                             drop_shadow: true,
                         },
                         &mut obfuscation_rng,
+                    );
+                }
+            }
+            if let MenuElement::BundleTooltip {
+                x,
+                y,
+                items,
+                selected,
+                fullness,
+                scale,
+                screen_w,
+                screen_h,
+            } = elem
+                && let Some(ref gm) = self.mc_glyph_map
+            {
+                let gs = *scale;
+                let shown =
+                    crate::ui::bundle::shown_count(&azalea_inventory::components::BundleContents {
+                        items: items.clone(),
+                    });
+                let rows = if items.is_empty() {
+                    1
+                } else {
+                    items.len().min(12).div_ceil(4)
+                };
+                let content_w = 96.0 * gs;
+                let content_h = if items.is_empty() {
+                    34.0 * gs
+                } else {
+                    (rows as f32 * 24.0 + 17.0) * gs
+                };
+                let mut left = *x + 12.0;
+                let mut top = *y - 12.0;
+                if left + content_w > *screen_w {
+                    left = (*x - 24.0 - content_w).max(4.0);
+                }
+                if top + content_h > *screen_h {
+                    top = (*screen_h - content_h - 4.0).max(4.0);
+                }
+                let pad = 4.0 * gs;
+                let bg_x = left - pad;
+                let bg_y = top - pad;
+                let bg_w = content_w + pad * 2.0;
+                let bg_h = content_h + pad * 2.0;
+                let white = [1.0f32; 4];
+                if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
+                    push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, 9.0 * gs, white);
+                }
+                if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame) {
+                    push_nine_slice(
+                        &mut vertices,
+                        bg_x,
+                        bg_y,
+                        bg_w,
+                        bg_h,
+                        frame,
+                        10.0 * gs,
+                        white,
+                    );
+                }
+                if items.is_empty() {
+                    let text = crate::lang::translate("item.minecraft.bundle.empty.description")
+                        .unwrap_or("Bundle is empty");
+                    push_mc_text(
+                        &mut vertices,
+                        gm,
+                        left,
+                        top,
+                        &[TextSpan::new(
+                            text.to_string(),
+                            [0.6667, 0.6667, 0.6667, 1.0],
+                        )],
+                        8.0 * gs,
+                        true,
+                    );
+                } else {
+                    let shown_items = &items[..shown.min(items.len())];
+                    let overflow = items.len() > 12;
+                    let grid_y = top + rows as f32 * 24.0 * gs;
+                    let mut slot_number = 1usize;
+                    for row in 1..=rows {
+                        for col in 1..=4usize {
+                            let draw_x = left + content_w - col as f32 * 24.0 * gs;
+                            let draw_y = grid_y - row as f32 * 24.0 * gs;
+                            if overflow && col == 1 && row == 1 {
+                                let hidden: i32 = items
+                                    .iter()
+                                    .skip(shown_items.len())
+                                    .map(|s| s.count())
+                                    .sum();
+                                push_mc_text(
+                                    &mut vertices,
+                                    gm,
+                                    draw_x + 12.0 * gs,
+                                    draw_y + 10.0 * gs,
+                                    &[TextSpan::new(format!("+{hidden}"), white)],
+                                    8.0 * gs,
+                                    true,
+                                );
+                                continue;
+                            }
+                            if slot_number > shown_items.len() {
+                                continue;
+                            }
+                            let visual = shown_items.len() - slot_number;
+                            let highlighted = visual as i32 == *selected;
+                            let back = if highlighted {
+                                SpriteId::BundleSlotHighlightBack
+                            } else {
+                                SpriteId::BundleSlotBackground
+                            };
+                            if let Some(region) = self.sprite_atlas.regions.get(&back) {
+                                push_quad(
+                                    &mut vertices,
+                                    draw_x,
+                                    draw_y,
+                                    24.0 * gs,
+                                    24.0 * gs,
+                                    region.u0,
+                                    region.v0,
+                                    region.u1,
+                                    region.v1,
+                                    white,
+                                    2.0,
+                                    [0.0, 0.0],
+                                    0.0,
+                                );
+                            }
+                            if let azalea_inventory::ItemStack::Present(data) = &shown_items[visual]
+                            {
+                                let name = crate::player::inventory::item_resource_name(data.kind);
+                                if let Some(uv) = item_atlas_uvs.get(&name) {
+                                    push_quad(
+                                        &mut vertices,
+                                        draw_x + 4.0 * gs,
+                                        draw_y + 4.0 * gs,
+                                        16.0 * gs,
+                                        16.0 * gs,
+                                        uv[0],
+                                        uv[1],
+                                        uv[2],
+                                        uv[3],
+                                        white,
+                                        3.0,
+                                        [0.0, 0.0],
+                                        0.0,
+                                    );
+                                }
+                                if data.count > 1 {
+                                    push_mc_text(
+                                        &mut vertices,
+                                        gm,
+                                        draw_x + 20.0 * gs,
+                                        draw_y + 14.0 * gs,
+                                        &[TextSpan::new(data.count.to_string(), white)],
+                                        8.0 * gs,
+                                        true,
+                                    );
+                                }
+                            }
+                            if highlighted
+                                && let Some(region) = self
+                                    .sprite_atlas
+                                    .regions
+                                    .get(&SpriteId::BundleSlotHighlightFront)
+                            {
+                                push_quad(
+                                    &mut vertices,
+                                    draw_x,
+                                    draw_y,
+                                    24.0 * gs,
+                                    24.0 * gs,
+                                    region.u0,
+                                    region.v0,
+                                    region.u1,
+                                    region.v1,
+                                    white,
+                                    4.0,
+                                    [0.0, 0.0],
+                                    0.0,
+                                );
+                            }
+                            slot_number += 1;
+                        }
+                    }
+                    if *selected >= 0
+                        && (*selected as usize) < items.len()
+                        && let azalea_inventory::ItemStack::Present(data) =
+                            &items[*selected as usize]
+                    {
+                        let name = crate::ui::common::item_display_name(data);
+                        push_mc_text(
+                            &mut vertices,
+                            gm,
+                            left + content_w / 2.0,
+                            top - 12.0 * gs,
+                            &[TextSpan::new(name, white)],
+                            8.0 * gs,
+                            true,
+                        );
+                    }
+                }
+                let bar_y = top + content_h - 13.0 * gs;
+                let fill = ((*fullness * 94.0).floor() as i32).clamp(0, 94) as f32;
+                let fill_id = if *fullness >= 1.0 {
+                    SpriteId::BundleProgressFull
+                } else {
+                    SpriteId::BundleProgressFill
+                };
+                if fill > 0.0
+                    && let Some(region) = self.sprite_atlas.regions.get(&fill_id)
+                {
+                    let frac = fill / 94.0;
+                    push_quad(
+                        &mut vertices,
+                        left + gs,
+                        bar_y,
+                        fill * gs,
+                        13.0 * gs,
+                        region.u0,
+                        region.v0,
+                        region.u0 + (region.u1 - region.u0) * frac,
+                        region.v1,
+                        white,
+                        2.0,
+                        [0.0, 0.0],
+                        0.0,
+                    );
+                }
+                if let Some(region) = self
+                    .sprite_atlas
+                    .regions
+                    .get(&SpriteId::BundleProgressBorder)
+                {
+                    push_quad(
+                        &mut vertices,
+                        left,
+                        bar_y,
+                        96.0 * gs,
+                        13.0 * gs,
+                        region.u0,
+                        region.v0,
+                        region.u1,
+                        region.v1,
+                        white,
+                        3.0,
+                        [0.0, 0.0],
+                        0.0,
+                    );
+                }
+                let label = if *fullness <= 0.0 {
+                    crate::lang::translate("item.minecraft.bundle.empty")
+                } else if *fullness >= 1.0 {
+                    crate::lang::translate("item.minecraft.bundle.full")
+                } else {
+                    None
+                };
+                if let Some(label) = label {
+                    push_mc_text(
+                        &mut vertices,
+                        gm,
+                        left + 48.0 * gs,
+                        bar_y + 3.0 * gs,
+                        &[TextSpan::new(label.to_string(), white)],
+                        8.0 * gs,
+                        true,
                     );
                 }
             }
@@ -1878,6 +2146,16 @@ pub enum MenuElement {
         screen_w: f32,
         screen_h: f32,
     },
+    BundleTooltip {
+        x: f32,
+        y: f32,
+        items: Vec<azalea_inventory::ItemStack>,
+        selected: i32,
+        fullness: f32,
+        scale: f32,
+        screen_w: f32,
+        screen_h: f32,
+    },
     TooltipLines {
         x: f32,
         y: f32,
@@ -2088,6 +2366,12 @@ pub enum SpriteId {
     HeaderSeparator,
     FooterSeparator,
     MenuBackground,
+    BundleProgressBorder,
+    BundleProgressFill,
+    BundleProgressFull,
+    BundleSlotBackground,
+    BundleSlotHighlightBack,
+    BundleSlotHighlightFront,
     TooltipBackground,
     TooltipFrame,
     Scroller,
@@ -2696,6 +2980,36 @@ fn build_sprite_atlas(
         (
             SpriteId::MenuBackground,
             "minecraft/textures/gui/inworld_menu_background.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleProgressBorder,
+            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_border.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleProgressFill,
+            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_fill.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleProgressFull,
+            "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_full.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleSlotBackground,
+            "minecraft/textures/gui/sprites/container/bundle/slot_background.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleSlotHighlightBack,
+            "minecraft/textures/gui/sprites/container/bundle/slot_highlight_back.png",
+            0.0,
+        ),
+        (
+            SpriteId::BundleSlotHighlightFront,
+            "minecraft/textures/gui/sprites/container/bundle/slot_highlight_front.png",
             0.0,
         ),
         (
