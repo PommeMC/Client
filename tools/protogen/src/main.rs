@@ -17,17 +17,23 @@
 //! `<reference-root>/generated/reports/registries.json`, for building
 //! cross-version id remaps.
 //!
+//! The `knownpacks` mode emits the packs the client can claim in
+//! `select_known_packs` and the synchronized-registry elements they carry,
+//! read from `<reference-root>/extracted/data/minecraft`.
+//!
 //! The protocol number is parsed from `SharedConstants.getProtocolVersion()`;
 //! `--protocol` overrides it (and is required if the method body isn't a bare
 //! integer literal). The parser hard-fails on anything it can't resolve
 //! rather than emit silently-wrong data.
+
+mod known_packs;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-type Error = Box<dyn std::error::Error>;
+pub type Error = Box<dyn std::error::Error>;
 
 /// (JSON key, `<Phase>Protocols.java` path, has a clientbound template).
 const PHASES: [(&str, &str, bool); 5] = [
@@ -47,17 +53,19 @@ const FIRST_CONFIGURATION_PROTOCOL: i32 = 764;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("registries") {
+    type Mode = fn(&Path, &str, &str) -> Result<(), Error>;
+    let modes: [(&str, Mode); 2] = [
+        ("registries", generate_registries),
+        ("knownpacks", known_packs::generate),
+    ];
+    if let Some((name, mode)) = modes
+        .iter()
+        .find(|(name, _)| args.first().map(String::as_str) == Some(name))
+    {
         return match args.as_slice() {
-            [_, root, version, out] => match generate_registries(Path::new(root), version, out) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("protogen: {e}");
-                    ExitCode::FAILURE
-                }
-            },
+            [_, root, version, out] => exit_code(mode(Path::new(root), version, out)),
             _ => {
-                eprintln!("usage: protogen registries <reference-root> <version> <out.json>");
+                eprintln!("usage: protogen {name} <reference-root> <version> <out.json>");
                 ExitCode::FAILURE
             }
         };
@@ -76,7 +84,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match generate(Path::new(root), version, out, protocol_override) {
+    exit_code(generate(Path::new(root), version, out, protocol_override))
+}
+
+fn exit_code(result: Result<(), Error>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("protogen: {e}");
@@ -283,15 +295,24 @@ fn generate(
 }
 
 /// The static registries whose numeric ids reach the client over the wire
-/// and can shift between versions; the remap layer covers exactly these.
-const CLIENT_REGISTRIES: [&str; 8] = [
+/// and can shift between versions, whether remapped or only named for decoding.
+const CLIENT_REGISTRIES: [&str; 17] = [
     "attribute",
     "block_entity_type",
+    "command_argument_type",
+    "consume_effect_type",
     "data_component_type",
+    "debug_subscription",
     "entity_type",
     "game_event",
     "item",
+    "menu",
+    "number_format_type",
     "particle_type",
+    "position_source_type",
+    "recipe_display",
+    "recipe_serializer",
+    "slot_display",
     "sound_event",
 ];
 
@@ -323,9 +344,8 @@ fn generate_registries(root: &Path, version: &str, out_path: &str) -> Result<(),
                     .get("protocol_id")
                     .and_then(|id| id.as_u64())
                     .ok_or_else(|| format!("{name}: {key} has no protocol_id"))?;
-                let key = key
-                    .strip_prefix("minecraft:")
-                    .ok_or_else(|| format!("{name}: non-minecraft entry {key}"))?;
+                // As `Identifier.toShortString`: other namespaces (brigadier:) stay.
+                let key = key.strip_prefix("minecraft:").unwrap_or(key);
                 Ok((key, id))
             })
             .collect::<Result<_, Error>>()?;

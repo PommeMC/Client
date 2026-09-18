@@ -54,6 +54,9 @@ pub(crate) struct EmbeddedVersion {
     pub version: ProtocolVersion,
     pub packets: &'static str,
     pub registries: &'static str,
+    /// The data packs this version's client can claim in
+    /// `select_known_packs`; `None` until the table is generated for it.
+    pub known_packs: Option<&'static str>,
 }
 
 pub(crate) const EMBEDDED: &[EmbeddedVersion] = &[
@@ -61,76 +64,91 @@ pub(crate) const EMBEDDED: &[EmbeddedVersion] = &[
         version: v("26.3", 777),
         packets: include_str!("data/protocol-26.3.json"),
         registries: include_str!("data/registries-26.3.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: NATIVE,
         packets: include_str!("data/protocol-26.2.json"),
         registries: include_str!("data/registries-26.2.json"),
+        known_packs: Some(include_str!("data/known-packs-26.2.json")),
     },
     EmbeddedVersion {
         version: v("26.1", 775),
         packets: include_str!("data/protocol-26.1.json"),
         registries: include_str!("data/registries-26.1.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.21.11", 774),
         packets: include_str!("data/protocol-1.21.11.json"),
         registries: include_str!("data/registries-1.21.11.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.21.10", 773),
         packets: include_str!("data/protocol-1.21.10.json"),
         registries: include_str!("data/registries-1.21.10.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.21.8", 772),
         packets: include_str!("data/protocol-1.21.8.json"),
         registries: include_str!("data/registries-1.21.8.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.21.6", 771),
         packets: include_str!("data/protocol-1.21.6.json"),
         registries: include_str!("data/registries-1.21.6.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.21.5", 770),
         packets: include_str!("data/protocol-1.21.5.json"),
         registries: include_str!("data/registries-1.21.5.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.21.4", 769),
         packets: include_str!("data/protocol-1.21.4.json"),
         registries: include_str!("data/registries-1.21.4.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.21.3", 768),
         packets: include_str!("data/protocol-1.21.3.json"),
         registries: include_str!("data/registries-1.21.3.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.21.1", 767),
         packets: include_str!("data/protocol-1.21.1.json"),
         registries: include_str!("data/registries-1.21.1.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.20.6", 766),
         packets: include_str!("data/protocol-1.20.6.json"),
         registries: include_str!("data/registries-1.20.6.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.20.4", 765),
         packets: include_str!("data/protocol-1.20.4.json"),
         registries: include_str!("data/registries-1.20.4.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.20.2", 764),
         packets: include_str!("data/protocol-1.20.2.json"),
         registries: include_str!("data/registries-1.20.2.json"),
+        known_packs: None,
     },
     EmbeddedVersion {
         version: v("1.20.1", 763),
         packets: include_str!("data/protocol-1.20.1.json"),
         registries: include_str!("data/registries-1.20.1.json"),
+        known_packs: None,
     },
 ];
 

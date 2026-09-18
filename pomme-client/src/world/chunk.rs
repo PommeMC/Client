@@ -31,6 +31,14 @@ pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 5] {
     ]
 }
 
+/// `pos` and the eight columns around it: what vanilla requires to be loaded
+/// and lit before a section in the middle one may first compile
+/// (`SectionUpdateTracker.hasAllNeighbors`). The smaller set a mesh samples is
+/// `mesh_neighborhood`.
+pub(crate) fn column_neighborhood(pos: ChunkPos) -> impl Iterator<Item = ChunkPos> {
+    (-1..=1).flat_map(move |dx| (-1..=1).map(move |dz| ChunkPos::new(pos.x + dx, pos.z + dz)))
+}
+
 #[derive(Error, Debug)]
 pub enum ChunkError {
     #[error("failed to parse chunk data: {0}")]
@@ -326,4 +334,23 @@ pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i3
         y: local_y,
         z: local_z,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn column_neighborhood_is_the_full_three_by_three() {
+        let columns: Vec<_> = column_neighborhood(ChunkPos::new(4, -2)).collect();
+        assert_eq!(columns.len(), 9);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                assert!(
+                    columns.contains(&ChunkPos::new(4 + dx, -2 + dz)),
+                    "{dx},{dz}"
+                );
+            }
+        }
+    }
 }

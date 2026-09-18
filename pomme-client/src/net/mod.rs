@@ -1,10 +1,12 @@
 #[cfg(test)]
 mod azalea_compat;
 mod chat;
+pub mod chunk_batch;
 pub mod commands;
 pub mod conn;
 pub mod connection;
 pub mod handler;
+pub mod known_packs;
 pub mod resolve;
 pub mod sender;
 pub mod stream;
@@ -59,6 +61,8 @@ pub enum NetworkEvent {
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
     },
+    /// `LEVEL_CHUNKS_LOAD_START`: the server has started sending the level.
+    LevelChunksLoadStart,
     DimensionInfo {
         height: u32,
         min_y: i32,
@@ -84,6 +88,8 @@ pub enum NetworkEvent {
         z: i32,
     },
     PlayerPosition {
+        /// Teleport id to acknowledge.
+        id: u32,
         change: azalea_protocol::common::movements::PositionMoveRotation,
         relative: azalea_protocol::common::movements::RelativeMovements,
     },
