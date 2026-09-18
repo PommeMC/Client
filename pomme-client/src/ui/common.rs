@@ -1,4 +1,4 @@
-use azalea_inventory::components::{CustomName, ItemName};
+use azalea_inventory::components::{CustomName, Damage, ItemName, MaxDamage, Unbreakable};
 use azalea_inventory::{ItemStack, ItemStackData};
 
 use crate::benchmark::UploadStatus;
@@ -340,7 +340,7 @@ pub fn push_item_count(
     let fs = FONT_SIZE * gs;
     elements.push(MenuElement::Text {
         x: x + size + gs - text_w,
-        y: y + size - fs,
+        y: y + size - fs + gs,
         text,
         scale: fs,
         color: WHITE,
@@ -399,7 +399,7 @@ pub fn push_slot(
     hovered
 }
 
-/// Draws an item icon (and its stack count when > 1) at the given position.
+/// Draws an item icon and the vanilla item decorations Pomme supports.
 pub fn push_item_icon(
     elements: &mut Vec<MenuElement>,
     x: f32,
@@ -416,9 +416,88 @@ pub fn push_item_icon(
         item_name: item_resource_name(data.kind),
         tint: WHITE,
     });
+    push_item_durability(elements, x, y, scale, data);
     if data.count > 1 {
         push_item_count(elements, x, y, size, scale, data.count);
     }
+}
+
+fn push_item_durability(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    scale: f32,
+    data: &ItemStackData,
+) {
+    let Some((width, color)) = durability_bar(data) else {
+        return;
+    };
+
+    let bar_x = x + 2.0 * scale;
+    let bar_y = y + 13.0 * scale;
+    elements.push(MenuElement::Rect {
+        x: bar_x,
+        y: bar_y,
+        w: 13.0 * scale,
+        h: 2.0 * scale,
+        corner_radius: 0.0,
+        color: [0.0, 0.0, 0.0, 1.0],
+    });
+    elements.push(MenuElement::Rect {
+        x: bar_x,
+        y: bar_y,
+        w: width as f32 * scale,
+        h: scale,
+        corner_radius: 0.0,
+        color,
+    });
+}
+
+/// Vanilla `Item` durability bar metrics for a damageable stack.
+fn durability_bar(data: &ItemStackData) -> Option<(i32, [f32; 4])> {
+    if data.get_component::<Unbreakable>().is_some() {
+        return None;
+    }
+    let max_damage = data.get_component::<MaxDamage>()?.amount;
+    let damage = data.get_component::<Damage>()?.amount;
+    if max_damage <= 0 {
+        return None;
+    }
+
+    // ItemStack#getDamageValue clamps the component before Item's bar math.
+    let damage = damage.clamp(0, max_damage);
+    if damage == 0 {
+        return None;
+    }
+
+    let width = (13.0 - damage as f32 * 13.0 / max_damage as f32)
+        .round()
+        .clamp(0.0, 13.0) as i32;
+    let health = ((max_damage as f32 - damage as f32) / max_damage as f32).max(0.0);
+    Some((width, durability_color(health)))
+}
+
+fn durability_color(health: f32) -> [f32; 4] {
+    // Item#getBarColor calls Mth.hsvToRgb(health / 3, 1, 1). Keep vanilla's
+    // float operation order and channel truncation so boundary colours match.
+    let hue = health / 3.0;
+    let scaled_hue = hue * 6.0;
+    let sector = scaled_hue as i32 % 6;
+    let fraction = scaled_hue - sector as f32;
+    let p = 0.0;
+    let q = 1.0 - fraction;
+    let t = fraction;
+    let (red, green, blue) = match sector {
+        0 => (1.0, t, p),
+        1 => (q, 1.0, p),
+        2 => (p, 1.0, t),
+        3 => (p, q, 1.0),
+        4 => (t, p, 1.0),
+        5 => (1.0, p, q),
+        _ => unreachable!("durability hue must remain in the vanilla HSV range"),
+    };
+    let channel = |value: f32| ((value * 255.0) as i32).clamp(0, 255) as f32 / 255.0;
+    [channel(red), channel(green), channel(blue), 1.0]
 }
 
 /// Measures rendered text width in framebuffer px at the given font size.
@@ -656,4 +735,93 @@ pub struct SliderResult {
     pub hovered: bool,
     pub dragging: bool,
     pub new_value: Option<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use azalea_inventory::components::{Damage, MaxDamage, Unbreakable};
+    use azalea_inventory::{ItemStack, ItemStackData};
+    use azalea_registry::builtin::ItemKind;
+
+    use super::{MenuElement, durability_bar, push_item_count, push_item_icon};
+
+    fn damaged_pickaxe(damage: i32) -> ItemStackData {
+        ItemStack::new(ItemKind::IronPickaxe, 1)
+            .with_component(Damage { amount: damage })
+            .as_present()
+            .expect("pickaxe stack should be present")
+            .clone()
+    }
+
+    #[test]
+    fn item_count_uses_vanilla_y_coordinate() {
+        let mut elements = Vec::new();
+        push_item_count(&mut elements, 10.0, 20.0, 32.0, 2.0, 64);
+
+        let MenuElement::Text { x, y, .. } = &elements[0] else {
+            panic!("item count should render as text");
+        };
+        assert_eq!(*x, 20.0);
+        assert_eq!(*y, 38.0);
+    }
+
+    #[test]
+    fn durability_bar_matches_vanilla_visibility_width_and_color() {
+        let pristine = ItemStackData::new(ItemKind::IronPickaxe, 1);
+        let max_damage = pristine
+            .get_component::<MaxDamage>()
+            .expect("iron pickaxe should have max damage")
+            .amount;
+        assert!(durability_bar(&pristine).is_none());
+
+        let halfway = damaged_pickaxe(max_damage / 2);
+        let (width, color) = durability_bar(&halfway).expect("damaged item should show a bar");
+        assert_eq!(width, 7);
+        assert_eq!(color, [1.0, 1.0, 0.0, 1.0]);
+
+        let broken = damaged_pickaxe(max_damage);
+        let (width, color) = durability_bar(&broken).expect("fully damaged item still has a bar");
+        assert_eq!(width, 0);
+        assert_eq!(color, [1.0, 0.0, 0.0, 1.0]);
+
+        let unbreakable = ItemStack::new(ItemKind::IronPickaxe, 1)
+            .with_component(Damage { amount: 1 })
+            .with_component(Unbreakable)
+            .as_present()
+            .expect("pickaxe stack should be present")
+            .clone();
+        assert!(durability_bar(&unbreakable).is_none());
+    }
+
+    #[test]
+    fn item_icon_places_vanilla_durability_rectangles() {
+        let pristine = ItemStackData::new(ItemKind::IronPickaxe, 1);
+        let max_damage = pristine
+            .get_component::<MaxDamage>()
+            .expect("iron pickaxe should have max damage")
+            .amount;
+        let data = damaged_pickaxe(max_damage / 2);
+        let mut elements = Vec::new();
+
+        push_item_icon(&mut elements, 10.0, 20.0, 32.0, 2.0, &data);
+
+        assert_eq!(elements.len(), 3);
+        let MenuElement::Rect {
+            x, y, w, h, color, ..
+        } = &elements[1]
+        else {
+            panic!("durability background should be a rectangle");
+        };
+        assert_eq!((*x, *y, *w, *h), (14.0, 46.0, 26.0, 4.0));
+        assert_eq!(*color, [0.0, 0.0, 0.0, 1.0]);
+
+        let MenuElement::Rect {
+            x, y, w, h, color, ..
+        } = &elements[2]
+        else {
+            panic!("durability fill should be a rectangle");
+        };
+        assert_eq!((*x, *y, *w, *h), (14.0, 46.0, 14.0, 2.0));
+        assert_eq!(*color, [1.0, 1.0, 0.0, 1.0]);
+    }
 }
