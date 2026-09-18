@@ -9,7 +9,6 @@ pub mod creative_inventory;
 pub mod creative_tab_data;
 pub mod death;
 pub mod enchantment;
-#[allow(dead_code)]
 pub mod font;
 pub mod friends;
 pub mod furnace;

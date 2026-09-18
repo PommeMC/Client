@@ -10,6 +10,7 @@ use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use glam::FloatExt as _;
 
 use crate::app::core::{AppCore, PlayerInputState};
+use crate::app::level_load::LevelLoadTracker;
 use crate::app::phases::Gfx;
 use crate::app::{TICK_RATE, input};
 use crate::audio::{CATEGORY_AMBIENT, CATEGORY_PLAYERS, SoundRef};
@@ -113,7 +114,12 @@ pub struct GameState {
     /// Entity ids whose shared `DATA_SILENT` flag is currently true.
     pub silent_entities: HashSet<i32>,
     pub position_set: bool,
-    pub player_loaded_sent: bool,
+    /// Vanilla `ClientPacketListener.levelLoadTracker`: present from login or
+    /// respawn until the level is ready and `player_loaded` has been sent.
+    pub level_load: Option<LevelLoadTracker>,
+    /// Vanilla `ClientPacketListener.clientLoaded`. While false, the local
+    /// player doesn't tick and sends no movement.
+    pub client_loaded: bool,
     pub player: LocalPlayer,
     /// Bubble index the pop sound last played for, so each pop fires once.
     pub last_bubble_pop_sound_played: i32,
@@ -273,6 +279,10 @@ pub struct GameState {
     /// Per-section cave-cull visibility (vanilla `VisibilitySet`), keyed like
     /// `section_gen`. Fed by mesh results; consumed by the occlusion walk.
     pub section_vis: HashMap<(ChunkPos, i32), VisibilitySet>,
+    /// Per-column bitmask of sections whose mesh is finished and, if it had
+    /// any geometry, uploaded — vanilla's "not `UNCOMPILED`", where an empty
+    /// mesh counts too. The level load gate waits on the camera's bit.
+    pub compiled: HashMap<ChunkPos, u32>,
     /// Highest upload epoch each `section_vis` entry was set from; mirrors the
     /// buffer's per-section geometry gate so a stale bulk can't re-stale an
     /// edited section's visibility.
@@ -333,7 +343,8 @@ impl GameState {
             entity_positions: HashMap::new(),
             silent_entities: HashSet::new(),
             position_set: false,
-            player_loaded_sent: false,
+            level_load: None,
+            client_loaded: false,
             options_from_game: false,
             last_render_distance: render_distance,
             last_chat_visibility: chat_options.visibility,
@@ -441,6 +452,7 @@ impl GameState {
             section_gen: HashMap::new(),
             next_section_gen: 0,
             section_vis: HashMap::new(),
+            compiled: HashMap::new(),
             section_vis_epoch: HashMap::new(),
             vis_tiers: HashMap::new(),
             vis_valid: false,
@@ -934,9 +946,109 @@ impl GameState {
         self.next_section_gen
     }
 
-    /// Adopt a mesh's per-section visibility sets, epoch-guarded so a stale
-    /// result can't overwrite a newer edit's visibility.
-    fn apply_mesh_visibility(&mut self, mesh: &mut ChunkMeshData) {
+    /// Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
+    /// upload them in one coalesced GPU transfer (one fence wait, not one per
+    /// mesh) to avoid the streaming stutter from per-mesh `queue.wait_idle`.
+    /// Shared with the loading phase, which streams the spawn chunks in before
+    /// the game phase takes over.
+    pub fn drain_and_upload_meshes(&mut self, renderer: &mut Renderer) {
+        let drain_start = std::time::Instant::now();
+        let results: Vec<_> = self.mesh_dispatcher.drain_results().collect();
+        let mut batch = Vec::with_capacity(results.len());
+        for mut mesh in results {
+            // Stale meshes count too: worker time spent is worker time spent.
+            if let Some(bench) = &mut self.chunk_load_bench {
+                bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
+            }
+            // Drop a mesh built from an out-of-date snapshot. A mesh for a chunk
+            // that has since unloaded is always stale (uploading it would resurrect
+            // a column nothing cleans up). Edits (priority lane, single section)
+            // are keyed per section so editing one section never drops a sibling's
+            // in-flight result; bulk loads keep the column key.
+            let stale = self.chunk_store.get_chunk(&mesh.pos).is_none()
+                || if mesh.timing.is_some() {
+                    mesh.replaced.clone().any(|si| {
+                        self.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen)
+                    })
+                } else {
+                    mesh.content_gen < self.content_gen.get(&mesh.pos).copied().unwrap_or(0)
+                };
+            if stale {
+                self.mesh_dispatcher.recycle(mesh);
+                continue;
+            }
+            if let Some(t) = &mesh.timing {
+                let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
+                tracing::debug!(
+                    "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
+                    mesh.pos.x,
+                    mesh.pos.z,
+                    ms(t.started_at - t.enqueued_at),
+                    ms(t.meshed_at - t.started_at),
+                    ms(t.meshed_at.elapsed()),
+                    ms(t.enqueued_at.elapsed()),
+                );
+            }
+            // Taken before the upload so the mesh can move into the batch; the
+            // upload reports back what it had to drop.
+            self.apply_mesh_bookkeeping(&mut mesh);
+            batch.push(mesh);
+        }
+        self.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
+        let upload_start = std::time::Instant::now();
+        let dropped = renderer.upload_chunk_meshes(&batch);
+        self.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
+        self.clear_dropped_meshed(dropped);
+        // Return the uploaded meshes' buffers to the worker pool for reuse.
+        for mesh in batch {
+            self.mesh_dispatcher.recycle(mesh);
+        }
+    }
+
+    /// Vanilla `SectionUpdateTracker.hasAllNeighbors` plus
+    /// `LevelRenderer.isSectionCompiledAndVisible`: the section holding
+    /// `camera_block` may only have compiled once its column's whole 3x3
+    /// neighbourhood was loaded and lit, and it must have a mesh — an empty one
+    /// counts, as vanilla's empty `CompiledSectionMesh` does.
+    pub fn camera_section_ready(&self, camera_block: glam::IVec3) -> bool {
+        let column = ChunkPos::new(camera_block.x >> 4, camera_block.z >> 4);
+        let neighbourhood_lit = crate::world::chunk::column_neighborhood(column).all(|p| {
+            self.chunk_store.get_chunk(&p).is_some()
+                && self.light_engine.light_on_in_column((p.x, p.z))
+        });
+        let section = (camera_block.y - self.chunk_store.min_y()) >> 4;
+        let compiled = self
+            .compiled
+            .get(&column)
+            .is_some_and(|mask| mask & section_bit(section) != 0);
+        neighbourhood_lit && compiled
+    }
+
+    /// Vanilla `ClientPacketListener.handleLogin`/`handleRespawn`: clear the
+    /// loaded flag and start waiting for the new level.
+    pub fn start_level_load(&mut self) {
+        self.client_loaded = false;
+        // TODO: vanilla gives a newly created singleplayer world a 500ms close
+        // delay (`Minecraft.doWorldLoad`); Pomme can't tell a fresh world from
+        // an opened one yet.
+        let mut tracker = LevelLoadTracker::start_client_load(
+            std::time::Duration::ZERO,
+            std::time::Instant::now(),
+        );
+        // 1.20.1 and 1.20.2 have no LEVEL_CHUNKS_LOAD_START game event (1.20.4
+        // added it), so nothing would ever move the tracker on; those clients
+        // had the level from the login packet.
+        if crate::version::session_protocol() < 765 {
+            tracker.loading_packets_received();
+        }
+        self.level_load = Some(tracker);
+    }
+
+    /// Adopt a finished mesh's CPU-side state: its per-section visibility sets,
+    /// epoch-guarded so a stale result can't overwrite a newer edit's
+    /// visibility, and the sections it compiled. The upload can still drop a
+    /// section afterwards, which `clear_dropped_meshed` takes back out.
+    fn apply_mesh_bookkeeping(&mut self, mesh: &mut ChunkMeshData) {
         let pos = mesh.pos;
         for (si, vis) in std::mem::take(&mut mesh.visibility) {
             let e = self.section_vis_epoch.entry((pos, si)).or_insert(0);
@@ -945,16 +1057,20 @@ impl GameState {
                 self.section_vis.insert((pos, si), vis);
             }
         }
+        *self.compiled.entry(pos).or_default() |= section_bits(mesh.replaced.clone());
     }
 
     /// Sections dropped on pool exhaustion were retired from the buffer; clear
-    /// their meshed bit so the next rescan re-enqueues them.
+    /// their meshed bit so the next rescan re-enqueues them, and their compiled
+    /// bit, since nothing of them reached the GPU.
     fn clear_dropped_meshed(&mut self, dropped: Vec<(ChunkPos, Vec<i32>)>) {
         for (pos, sections) in dropped {
+            let retired = section_bits(sections);
             if let Some(m) = self.meshed.get_mut(&pos) {
-                for si in sections {
-                    m.mask &= !(1u32 << si);
-                }
+                m.mask &= !retired;
+            }
+            if let Some(mask) = self.compiled.get_mut(&pos) {
+                *mask &= !retired;
             }
         }
     }
@@ -962,7 +1078,7 @@ impl GameState {
     /// Upload a finished mesh and apply its bookkeeping. The sync edit path;
     /// the frame drain batches uploads instead.
     fn apply_mesh_upload(&mut self, renderer: &mut Renderer, mut mesh: ChunkMeshData) {
-        self.apply_mesh_visibility(&mut mesh);
+        self.apply_mesh_bookkeeping(&mut mesh);
         let dropped = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
         self.clear_dropped_meshed(dropped);
         self.mesh_dispatcher.recycle(mesh);
@@ -1101,6 +1217,11 @@ impl GameState {
             // Mesh the whole column once, then nothing until a lod/content change.
             // Occlusion gates drawing, not meshing, so off-screen and hidden
             // sections still mesh (the queue orders the backlog nearest-first).
+            // TODO: vanilla won't schedule a section's first compile until its
+            // 3x3 column neighbourhood is loaded and lit
+            // (`LevelExtractor.java:155` / `SectionUpdateTracker.hasAllNeighbors`);
+            // we mesh against missing neighbours as air and repair the borders
+            // when their light bumps `content_gen`.
             let to_mesh = match self.meshed.get(&pos) {
                 Some(m) if m.lod == lod && m.content_gen == content_gen => full & !m.mask,
                 _ => full,
@@ -1158,6 +1279,19 @@ fn column_frustum_tier(
     } else {
         2
     }
+}
+
+/// Bit for one section index, 0 outside a column's 32 addressable sections (a
+/// camera outside build height resolves to such an index).
+fn section_bit(si: i32) -> u32 {
+    if (0..32).contains(&si) { 1u32 << si } else { 0 }
+}
+
+/// The bits for several section indices.
+fn section_bits(indices: impl IntoIterator<Item = i32>) -> u32 {
+    indices
+        .into_iter()
+        .fold(0u32, |mask, si| mask | section_bit(si))
 }
 
 /// Full mask for an `n`-section column (bits `0..n` set).
@@ -1237,12 +1371,9 @@ fn handle_chat_ui_action(
             handle_unattended_command(&command, connection, game);
         }
         ChatUiAction::RunCommandUnsigned(command) => {
-            match crate::net::chat::encode_outbound_command(&command) {
-                Ok(frame) => connection.packet_tx.send_raw(frame),
-                Err(error) => tracing::warn!(
-                    "Could not encode confirmed unattended command {command:?}: {error}"
-                ),
-            }
+            connection
+                .packet_tx
+                .send_raw(crate::net::chat::encode_outbound_command(&command));
         }
         ChatUiAction::Custom { id, payload } => {
             match crate::net::chat::encode_outbound_custom_click_action(&id, payload.as_ref()) {
@@ -1277,12 +1408,9 @@ fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game:
         });
     match check {
         UnattendedCommandCheck::NoIssues => {
-            match crate::net::chat::encode_outbound_command(command) {
-                Ok(frame) => connection.packet_tx.send_raw(frame),
-                Err(error) => {
-                    tracing::warn!("Could not encode unattended command {command:?}: {error}")
-                }
-            }
+            connection
+                .packet_tx
+                .send_raw(crate::net::chat::encode_outbound_command(command));
         }
         UnattendedCommandCheck::SignatureRequired => {
             // Vanilla never signs a server-provided click command silently.
@@ -1624,60 +1752,7 @@ pub fn update_game(
         connection.packet_tx.mark_chat_processed(signature, shown);
     }
 
-    // Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
-    // upload them in one coalesced GPU transfer (one fence wait, not one per
-    // mesh) to avoid the streaming stutter from per-mesh `queue.wait_idle`.
-    let drain_start = std::time::Instant::now();
-    let results: Vec<_> = game.mesh_dispatcher.drain_results().collect();
-    let mut batch = Vec::with_capacity(results.len());
-    for mut mesh in results {
-        // Stale meshes count too: worker time spent is worker time spent.
-        if let Some(bench) = &mut game.chunk_load_bench {
-            bench.record_mesh(mesh.queue_ms, mesh.mesh_ms);
-        }
-        // Drop a mesh built from an out-of-date snapshot. A mesh for a chunk
-        // that has since unloaded is always stale (uploading it would resurrect
-        // a column nothing cleans up). Edits (priority lane, single section)
-        // are keyed per section so editing one section never drops a sibling's
-        // in-flight result; bulk loads keep the column key.
-        let stale = game.chunk_store.get_chunk(&mesh.pos).is_none()
-            || if mesh.timing.is_some() {
-                mesh.replaced.clone().any(|si| {
-                    game.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen)
-                })
-            } else {
-                mesh.content_gen < game.content_gen.get(&mesh.pos).copied().unwrap_or(0)
-            };
-        if stale {
-            game.mesh_dispatcher.recycle(mesh);
-            continue;
-        }
-        if let Some(t) = &mesh.timing {
-            let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
-            tracing::debug!(
-                "edit remesh [{}, {}]: queue {:.1}ms + mesh {:.1}ms + drain {:.1}ms = {:.1}ms",
-                mesh.pos.x,
-                mesh.pos.z,
-                ms(t.started_at - t.enqueued_at),
-                ms(t.meshed_at - t.started_at),
-                ms(t.meshed_at.elapsed()),
-                ms(t.enqueued_at.elapsed()),
-            );
-        }
-        // Visibility updates are independent of the GPU upload; apply them now so
-        // the mesh can move into the upload batch.
-        game.apply_mesh_visibility(&mut mesh);
-        batch.push(mesh);
-    }
-    game.last_update_phases.mesh_drain_ms = drain_start.elapsed().as_secs_f32() * 1000.0;
-    let upload_start = std::time::Instant::now();
-    let dropped = gfx.renderer.upload_chunk_meshes(&batch);
-    game.last_update_phases.upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
-    game.clear_dropped_meshed(dropped);
-    // Return the uploaded meshes' buffers to the worker pool for reuse.
-    for mesh in batch {
-        game.mesh_dispatcher.recycle(mesh);
-    }
+    game.drain_and_upload_meshes(&mut gfx.renderer);
 
     game.mesh_dispatcher
         .set_camera_position(*game.player.position);
@@ -1700,6 +1775,10 @@ pub fn update_game(
     core.tick_accumulator += dt;
     while core.tick_accumulator >= TICK_RATE {
         game.tick_count = game.tick_count.wrapping_add(1);
+        // Vanilla `Minecraft.tick` order: `gameMode.tick` drives the connection
+        // tick (and so the level load tracker) before the level's entities,
+        // i.e. before the local player moves or sends anything.
+        AppCore::tick_level_load(&gfx.renderer, connection, game);
         // Vanilla Gui.tick falls back from dead health alone when no screen is
         // open, so death UI/auto-respawn must not depend on PlayerCombatKill.
         let has_screen = game.death_screen_open
@@ -1717,7 +1796,9 @@ pub fn update_game(
         }
         let local_player_was_removed = game.dead && game.player.death_animation_finished();
         core.tick_physics(&mut gfx.renderer, connection, game);
-        if !local_player_was_removed {
+        // `LocalPlayer.tick` returns before `super.tick()` until the client has
+        // loaded, so the player's own baseTick state waits with it.
+        if game.client_loaded && !local_player_was_removed {
             // LivingEntity.baseTick hurt/effects and Player.tick sleep state still
             // run on the tick-20 removal tick, then stop with future entity ticks.
             game.player.tick_hurt();
@@ -1765,6 +1846,7 @@ pub fn update_game(
             // prioritized while the screen is open.
             game.xp_display_start_tick = game.tick_count as i64;
         }
+        AppCore::send_client_tick_end(connection);
         core.tick_accumulator -= TICK_RATE;
     }
 
@@ -2856,8 +2938,8 @@ pub fn update_game(
         core.audio.play_ui_sound(event, 1.0, 1.0);
     }
     if !benchmark_running && !game.hide_gui {
-        game.toasts.build(&mut elements, sw, gs, &|t, s| {
-            gfx.renderer.menu_text_width(t, s)
+        game.toasts.build(&mut elements, sw, gs, &|spans, s| {
+            gfx.renderer.menu_spans_width(spans, s)
         });
     }
 
@@ -4082,7 +4164,19 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::has_red_overlay;
+    use super::{has_red_overlay, section_bit, section_bits};
+
+    #[test]
+    fn section_bits_cover_the_indices_and_ignore_the_rest() {
+        assert_eq!(section_bits(0..3), 0b111);
+        assert_eq!(section_bits(0..0), 0);
+        assert_eq!(section_bits([2, 5]), 0b100100);
+        // A camera outside build height resolves to a section index no column
+        // has; it must read as "not compiled", not shift out of range.
+        assert_eq!(section_bit(-1), 0);
+        assert_eq!(section_bit(32), 0);
+        assert_eq!(section_bits(-3..-2), 0);
+    }
 
     #[test]
     fn red_overlay_matches_vanilla_hurt_and_death_timers() {

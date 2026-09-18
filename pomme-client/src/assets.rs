@@ -90,14 +90,16 @@ pub fn resource_stack_paths(
         tracing::warn!("Rejecting invalid Minecraft asset key {asset_key:?}");
         return Vec::new();
     }
-    let mut stack = Vec::new();
-    let jar = jar_assets_dir.join(asset_key);
-    if jar.is_file() {
-        stack.push(jar);
-    }
-    if let Some(path) = asset_index.as_ref().and_then(|idx| idx.resolve(asset_key)) {
-        stack.push(path);
-    }
+    // The jar and the asset index are one built-in pack: index first, like
+    // `resolve_asset_path_with_packs`.
+    let builtin = asset_index
+        .as_ref()
+        .and_then(|idx| idx.resolve(asset_key))
+        .or_else(|| {
+            let jar = jar_assets_dir.join(asset_key);
+            jar.is_file().then_some(jar)
+        });
+    let mut stack: Vec<_> = builtin.into_iter().collect();
     if let Some(packs) = packs {
         for root in packs.active_pack_dirs() {
             let path = root.join("assets").join(asset_key);

@@ -542,7 +542,7 @@ impl ToastState {
         elements: &mut Vec<MenuElement>,
         screen_w: f32,
         gs: f32,
-        text_width_fn: &dyn Fn(&str, f32) -> f32,
+        spans_width_fn: crate::ui::common::SpansWidthFn<'_>,
     ) {
         for inst in &self.visible {
             if inst.finished {
@@ -560,7 +560,7 @@ impl ToastState {
                     ox,
                     oy,
                     gs,
-                    text_width_fn,
+                    spans_width_fn,
                 ),
                 ToastKind::Recipe(r) => build_recipe(r, elements, ox, oy, gs),
                 ToastKind::Tutorial(t) => build_tutorial(t, elements, ox, oy, gs),
@@ -677,7 +677,7 @@ fn build_advancement(
     ox: f32,
     oy: f32,
     gs: f32,
-    text_width_fn: &dyn Fn(&str, f32) -> f32,
+    spans_width_fn: crate::ui::common::SpansWidthFn<'_>,
 ) {
     push_background(
         elements,
@@ -687,9 +687,11 @@ fn build_advancement(
         SLOT_HEIGHT,
         gs,
     );
-    let lines = toast
-        .title_lines
-        .get_or_init(|| wrap_spans(&toast.title, 125.0, &|s| text_width_fn(s, FONT_SIZE)));
+    let lines = toast.title_lines.get_or_init(|| {
+        wrap_spans(&toast.title, 125.0, &|spans| {
+            spans_width_fn(spans, FONT_SIZE)
+        })
+    });
     let x = ox + 30.0 * gs;
     if lines.len() == 1 {
         push_text(
