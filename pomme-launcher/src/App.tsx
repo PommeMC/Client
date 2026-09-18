@@ -86,13 +86,19 @@ function App() {
   );
 
   useEffect(() => {
-    commands.getAllAccounts().then((accs) => {
-      if (accs.length > 0) {
-        setAccounts(accs);
-        setActiveIndex(0);
-        loadSkin(accs[0].uuid);
-      }
-    });
+    Promise.all([commands.getAllAccounts(), commands.loadLauncherSettings()]).then(
+      ([accs, settings]) => {
+        if (accs.length > 0) {
+          const savedIndex = settings.selectedAccountUuid
+            ? accs.findIndex((acc) => acc.uuid === settings.selectedAccountUuid)
+            : -1;
+          const selectedIndex = savedIndex >= 0 ? savedIndex : 0;
+          setAccounts(accs);
+          setActiveIndex(selectedIndex);
+          loadSkin(accs[selectedIndex].uuid);
+        }
+      },
+    );
     commands.getPatchNotes(6).then((res) => {
       if (res.ok) setNews(res.value);
       else console.error("Failed to fetch news:", res.error);
@@ -137,6 +143,7 @@ function App() {
         return [...filtered, acc];
       });
       setActiveIndex(accounts.filter((a) => a.uuid !== acc.uuid).length);
+      void launcherSettings.setSelectedAccountUuid(acc.uuid);
       loadSkin(acc.uuid);
       setStatus(`Signed in as ${acc.username}`);
     } else {
@@ -146,6 +153,7 @@ function App() {
     setAuthUrl(null);
   }, [
     accounts,
+    launcherSettings,
     loadSkin,
     setAccountDropdownOpen,
     setAccounts,
@@ -160,21 +168,24 @@ function App() {
       setActiveIndex(index);
       setAccountDropdownOpen(false);
       if (accounts[index]) {
+        void launcherSettings.setSelectedAccountUuid(accounts[index].uuid);
         loadSkin(accounts[index].uuid);
       }
     },
-    [accounts, loadSkin, setAccountDropdownOpen, setActiveIndex],
+    [accounts, launcherSettings, loadSkin, setAccountDropdownOpen, setActiveIndex],
   );
 
   const removeAccount = useCallback(
     (uuid: string) => {
       commands.removeAccount(uuid).catch((e) => console.error("Failed to remove account:", e));
-      setAccounts((prev) => prev.filter((a) => a.uuid !== uuid));
+      const remainingAccounts = accounts.filter((a) => a.uuid !== uuid);
+      setAccounts(remainingAccounts);
       setActiveIndex(0);
+      void launcherSettings.setSelectedAccountUuid(remainingAccounts[0]?.uuid ?? null);
       setAccountDropdownOpen(false);
       setSkinUrl(null);
     },
-    [setAccountDropdownOpen, setAccounts, setActiveIndex, setSkinUrl],
+    [accounts, launcherSettings, setAccountDropdownOpen, setAccounts, setActiveIndex, setSkinUrl],
   );
 
   const ensureAssets = useCallback(
