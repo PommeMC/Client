@@ -36,28 +36,20 @@ impl<'a> AssetId<'a> {
 }
 
 pub(crate) fn valid_asset_key(asset_key: &str) -> bool {
+    // `Identifier` namespace and path characters; only the path allows `/`.
+    let allowed = |text: &str, extra: &[u8]| {
+        text.bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || extra.contains(&byte))
+    };
     let Some((namespace, path)) = asset_key.split_once('/') else {
         return false;
     };
-    if namespace.is_empty()
-        || matches!(namespace, "." | "..")
-        || !namespace.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(&byte)
-        })
-    {
-        return false;
-    }
-    if path.is_empty()
-        || path.contains('\\')
-        || !path.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"/._-".contains(&byte)
-        })
-    {
-        return false;
-    }
-    !path
-        .split('/')
-        .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    !matches!(namespace, "" | "." | "..")
+        && allowed(namespace, b"_.-")
+        && allowed(path, b"/._-")
+        && !path
+            .split('/')
+            .any(|component| matches!(component, "" | "." | ".."))
 }
 
 /// Pomme's brand mark, embedded rather than resolved from the vanilla asset
@@ -86,20 +78,12 @@ pub fn resource_stack_paths(
     asset_key: &str,
     packs: Option<&ResourcePackManager>,
 ) -> Vec<PathBuf> {
-    if !valid_asset_key(asset_key) {
-        tracing::warn!("Rejecting invalid Minecraft asset key {asset_key:?}");
+    if !checked_asset_key(asset_key) {
         return Vec::new();
     }
-    // The jar and the asset index are one built-in pack: index first, like
-    // `resolve_asset_path_with_packs`.
-    let builtin = asset_index
-        .as_ref()
-        .and_then(|idx| idx.resolve(asset_key))
-        .or_else(|| {
-            let jar = jar_assets_dir.join(asset_key);
-            jar.is_file().then_some(jar)
-        });
-    let mut stack: Vec<_> = builtin.into_iter().collect();
+    let mut stack: Vec<_> = builtin_asset(jar_assets_dir, asset_index, asset_key)
+        .into_iter()
+        .collect();
     if let Some(packs) = packs {
         for root in packs.active_pack_dirs() {
             let path = root.join("assets").join(asset_key);
@@ -117,19 +101,36 @@ pub fn resolve_asset_path_with_packs(
     asset_key: &str,
     packs: Option<&ResourcePackManager>,
 ) -> PathBuf {
-    if !valid_asset_key(asset_key) {
-        tracing::warn!("Rejecting invalid Minecraft asset key {asset_key:?}");
+    if !checked_asset_key(asset_key) {
         return jar_assets_dir.join("__invalid_asset_key__");
     }
-    if let Some(packs) = packs
-        && let Some(path) = packs.resolve_asset(asset_key)
-    {
-        return path;
+    packs
+        .and_then(|packs| packs.resolve_asset(asset_key))
+        .or_else(|| builtin_asset(jar_assets_dir, asset_index, asset_key))
+        .unwrap_or_else(|| jar_assets_dir.join(asset_key))
+}
+
+fn checked_asset_key(asset_key: &str) -> bool {
+    let valid = valid_asset_key(asset_key);
+    if !valid {
+        tracing::warn!("Rejecting invalid Minecraft asset key {asset_key:?}");
     }
-    if let Some(path) = asset_index.as_ref().and_then(|idx| idx.resolve(asset_key)) {
-        return path;
-    }
-    jar_assets_dir.join(asset_key)
+    valid
+}
+
+/// The jar and the asset index are one built-in pack, the index first.
+fn builtin_asset(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    asset_key: &str,
+) -> Option<PathBuf> {
+    asset_index
+        .as_ref()
+        .and_then(|idx| idx.resolve(asset_key))
+        .or_else(|| {
+            let jar = jar_assets_dir.join(asset_key);
+            jar.is_file().then_some(jar)
+        })
 }
 
 #[derive(Clone)]

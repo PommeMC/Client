@@ -276,11 +276,8 @@ fn find_textures_property(value: &serde_json::Value) -> Option<String> {
 
 /// A `Style.font` identifier with its namespace made explicit.
 fn font_id(id: &str) -> String {
-    if id.contains(':') {
-        id.to_owned()
-    } else {
-        format!("minecraft:{id}")
-    }
+    let crate::assets::AssetId { namespace, path } = crate::assets::AssetId::parse(id);
+    format!("{namespace}:{path}")
 }
 
 fn rgb24(value: u32) -> [f32; 4] {
