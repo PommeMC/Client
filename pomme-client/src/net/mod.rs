@@ -84,6 +84,7 @@ pub enum NetworkEvent {
         z: i32,
     },
     PlayerPosition {
+        id: u32,
         change: azalea_protocol::common::movements::PositionMoveRotation,
         relative: azalea_protocol::common::movements::RelativeMovements,
     },

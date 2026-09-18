@@ -730,7 +730,11 @@ impl AppCore {
                     game.chunk_store
                         .set_center(azalea_core::position::ChunkPos::new(x, z));
                 }
-                NetworkEvent::PlayerPosition { change, relative } => {
+                NetworkEvent::PlayerPosition {
+                    id,
+                    change,
+                    relative,
+                } => {
                     fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
                         if is_relative { base + value } else { value }
                     }
@@ -799,6 +803,11 @@ impl AppCore {
                         );
                     }
 
+                    // Vanilla handleMovePlayer: accept once the pose is
+                    // applied, then echo it (a 26.3 wire folds the two).
+                    connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
+                        azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation { id },
+                    ));
                     connection.packet_tx.send(ServerboundGamePacket::MovePlayerPosRot(
                         azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
                             pos: new_position.into(),
@@ -1986,7 +1995,7 @@ impl AppCore {
                         .inventory
                         .remove_from_selected(self.input.selected_slot(), whole_stack)
                     {
-                        crate::player::interaction::send_swing(&connection.packet_tx);
+                        crate::player::interaction::send_use_swing(&connection.packet_tx);
                     }
                 }
             }

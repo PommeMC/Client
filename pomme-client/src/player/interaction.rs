@@ -277,12 +277,23 @@ impl InteractionState {
         self.o_attack_anim + diff * partial_tick
     }
 
-    fn swing(&mut self, sender: &PacketSender) {
+    fn start_swing(&mut self) {
         if !self.swinging || self.swing_time >= SWING_DURATION / 2 || self.swing_time < 0 {
             self.swing_time = -1;
             self.swinging = true;
         }
+    }
+
+    /// An attack or mining swing, always reported to the server.
+    fn swing(&mut self, sender: &PacketSender) {
+        self.start_swing();
         send_swing(sender);
+    }
+
+    /// A swing from using an item or entity; see [`send_use_swing`].
+    fn swing_use(&mut self, sender: &PacketSender) {
+        self.start_swing();
+        send_use_swing(sender);
     }
 
     fn update_swing(&mut self) {
@@ -685,7 +696,7 @@ impl InteractionState {
                 hit.location - hit.entity_pos,
                 sneaking,
             ));
-            self.swing(sender);
+            self.swing_use(sender);
             return true;
         }
 
@@ -714,7 +725,7 @@ impl InteractionState {
                 }
             }
             if place_block.is_some() {
-                self.swing(sender);
+                self.swing_use(sender);
                 self.predict_place(
                     hit,
                     place_block,
@@ -1648,6 +1659,14 @@ fn send_action(
             seq,
         },
     ));
+}
+
+/// Reports a swing from using an item, block or entity where the wire
+/// version does (`Translation::reports_use_swings`).
+pub(crate) fn send_use_swing(sender: &PacketSender) {
+    if crate::net::translate::active().is_none_or(|t| t.reports_use_swings()) {
+        send_swing(sender);
+    }
 }
 
 pub(crate) fn send_swing(sender: &PacketSender) {

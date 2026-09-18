@@ -173,12 +173,8 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z });
         }
         ClientboundGamePacket::PlayerPosition(p) => {
-            sender.send(ServerboundGamePacket::AcceptTeleportation(
-                azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation {
-                    id: p.id,
-                },
-            ));
             let _ = event_tx.try_send(NetworkEvent::PlayerPosition {
+                id: p.id,
                 change: p.change.clone(),
                 relative: p.relative.clone(),
             });
