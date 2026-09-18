@@ -229,8 +229,11 @@ impl ApplicationHandler for App {
 
                 let mut renderer = match Renderer::new(
                     Arc::clone(&window),
-                    &self.core.data_dirs.jar_assets_dir,
-                    &self.core.asset_index,
+                    crate::ui::font::FontSources {
+                        jar_assets_dir: &self.core.data_dirs.jar_assets_dir,
+                        asset_index: &self.core.asset_index,
+                        packs: &self.core.resource_packs,
+                    },
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
                     &self.core.menu.theme().panorama_dir(&self.core.data_dirs),

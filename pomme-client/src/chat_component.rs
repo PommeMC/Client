@@ -74,6 +74,8 @@ pub struct ResolvedStyle {
     pub hover_event: Option<HoverEvent>,
     pub insertion: Option<String>,
     pub font: Option<Value>,
+    /// Raw object info drawn for a U+FFFC placeholder.
+    pub inline_object: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -258,18 +260,20 @@ impl Component {
                 visit_translation(template, args, style, visitor);
             }
             Content::Keybind(key) => {
-                let text = crate::lang::translate(key).unwrap_or(key);
-                emit(text, style, visitor);
+                let text = keybind_display_name(key);
+                emit(&text, style, visitor);
             }
             // Unresolved score/NBT contents render nothing; an unresolved
             // selector renders its source, as in vanilla.
             Content::Score { .. } | Content::Nbt(_) => {}
             Content::Selector { pattern, .. } => emit(pattern, style, visitor),
-            Content::Object { fallback, .. } => {
+            Content::Object { value, fallback } => {
                 if let Some(fallback) = fallback {
                     fallback.visit_text(style, visitor);
                 } else {
-                    emit("\u{fffc}", style, visitor); // object placeholder
+                    let mut object_style = style.clone();
+                    object_style.inline_object = Some(value.clone());
+                    emit("\u{fffc}", &object_style, visitor);
                 }
             }
         }
@@ -335,6 +339,7 @@ impl ResolvedStyle {
                 .or_else(|| self.hover_event.clone()),
             insertion: child.insertion.clone().or_else(|| self.insertion.clone()),
             font: child.font.clone().or_else(|| self.font.clone()),
+            inline_object: self.inline_object.clone(),
         }
     }
 }
@@ -443,6 +448,16 @@ fn visit_argument(
         Argument::String(v) => emit(v, style, visitor),
         Argument::Component(v) => v.visit_text(style, visitor),
     }
+}
+
+/// Vanilla `KeyMapping.createNameSupplier`: the bound key's name, or the
+/// translated id for an unknown mapping.
+fn keybind_display_name(key: &str) -> String {
+    match crate::app::input::keybind_label(key) {
+        Some((translation, fallback)) => crate::lang::translate(translation).unwrap_or(fallback),
+        None => crate::lang::translate(key).unwrap_or(key),
+    }
+    .to_owned()
 }
 
 fn emit(text: &str, style: &ResolvedStyle, visitor: &mut impl FnMut(&str, &ResolvedStyle)) {

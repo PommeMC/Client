@@ -52,6 +52,7 @@ use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
+use crate::ui::font::FontSources;
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]
@@ -61,6 +62,9 @@ pub enum RendererError {
 
     #[error("vulkan error: {0}")]
     Vulkan(#[from] vk::Error),
+
+    #[error("failed to initialize Minecraft fonts: {0}")]
+    Font(String),
 }
 
 #[derive(Clone, Copy)]
@@ -180,12 +184,16 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(
         window: Arc<Window>,
-        jar_assets_dir: &Path,
-        asset_index: &Option<AssetIndex>,
+        font_sources: FontSources<'_>,
         game_dir: &Path,
         vsync: bool,
         panorama_dir: &Path,
     ) -> Result<Self, RendererError> {
+        let FontSources {
+            jar_assets_dir,
+            asset_index,
+            ..
+        } = font_sources;
         let size = window.inner_size();
 
         let registry_handle = {
@@ -209,6 +217,11 @@ impl Renderer {
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
+        let font_layer_limit = ctx
+            .physical_device
+            .get_properties()
+            .limits
+            .max_image_array_layers;
 
         let mut menu_pipeline = MenuOverlayPipeline::new(
             &ctx.device,
@@ -216,9 +229,10 @@ impl Renderer {
             ctx.command_pool,
             swapchain_state.render_pass,
             &ctx.allocator,
-            jar_assets_dir,
-            asset_index,
-        );
+            font_sources,
+            font_layer_limit,
+        )
+        .map_err(RendererError::Font)?;
 
         let sw = size.width.max(1) as f32;
         let sh = size.height.max(1) as f32;
@@ -1200,6 +1214,19 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            FontSources {
+                jar_assets_dir: &self.jar_assets_dir,
+                asset_index: &self.asset_index,
+                packs,
+            },
+        ) {
+            tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
+        }
 
         warm_item_meshes(
             &self.ctx.device,

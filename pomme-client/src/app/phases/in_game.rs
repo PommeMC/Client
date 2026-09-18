@@ -2691,9 +2691,14 @@ pub fn update_game(
     // F1 hides the closed-chat overlay; an open chat is a screen and renders
     // regardless (vanilla Hud.extractChat vs ChatScreen).
     if !game.hide_gui || game.chat.is_open() {
-        game.chat.build(&mut elements, sw, sh, gs, &|t, s| {
-            gfx.renderer.menu_text_width(t, s)
-        });
+        game.chat.build(
+            &mut elements,
+            sw,
+            sh,
+            gs,
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+            &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+        );
     }
 
     // Subtitles draw above chat and the tab list; toasts stay on top
@@ -2724,8 +2729,8 @@ pub fn update_game(
         core.audio.play_ui_sound(event, 1.0, 1.0);
     }
     if !benchmark_running && !game.hide_gui {
-        game.toasts.build(&mut elements, sw, gs, &|t, s| {
-            gfx.renderer.menu_text_width(t, s)
+        game.toasts.build(&mut elements, sw, gs, &|spans, s| {
+            gfx.renderer.menu_spans_width(spans, s)
         });
     }
 
