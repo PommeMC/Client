@@ -150,6 +150,7 @@ pub fn push_tooltip(
     elements.push(MenuElement::BundleTooltip {
         x: cursor.0,
         y: cursor.1,
+        title: crate::ui::common::item_display_name(data),
         items: contents.items.clone(),
         selected,
         fullness: fullness(&contents),
@@ -174,6 +175,19 @@ mod tests {
                 items: (0..count).map(|_| stack()).collect(),
             };
             assert_eq!(shown_count(&contents), expected, "count {count}");
+        }
+    }
+
+    #[test]
+    fn ordinary_stackable_items_have_vanilla_bundle_weight() {
+        for (kind, count, expected) in [
+            (ItemKind::Bread, 2, 2.0 / 64.0),
+            (ItemKind::HayBlock, 4, 4.0 / 64.0),
+        ] {
+            let contents = BundleContents {
+                items: vec![ItemStack::from(ItemStackData::new(kind, count))],
+            };
+            assert_eq!(fullness(&contents), expected, "{kind:?} x{count}");
         }
     }
 

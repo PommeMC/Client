@@ -1270,6 +1270,7 @@ impl MenuOverlayPipeline {
             if let MenuElement::BundleTooltip {
                 x,
                 y,
+                title,
                 items,
                 selected,
                 fullness,
@@ -1288,12 +1289,23 @@ impl MenuOverlayPipeline {
                     });
                 let rows = items.len().min(12).div_ceil(4);
                 let content_w = 96.0 * gs;
-                let empty_lines = if items.is_empty() { 2.0 } else { 0.0 };
-                let content_h = if items.is_empty() {
-                    empty_lines * 9.0 * gs + 21.0 * gs
+                let empty_description =
+                    crate::lang::translate("item.minecraft.bundle.empty.description")
+                        .unwrap_or("Can hold a mixed stack of items");
+                let empty_lines = if items.is_empty() {
+                    wrap_plain_text(empty_description, 96.0 * gs, |text| {
+                        self.mc_text_width(text, fs)
+                    })
+                } else {
+                    Vec::new()
+                };
+                let title_h = 11.0 * gs; // first tooltip component gets vanilla's 2px gap
+                let image_h = if items.is_empty() {
+                    empty_lines.len() as f32 * 9.0 * gs + 21.0 * gs
                 } else {
                     (rows as f32 * 24.0 + 21.0) * gs
                 };
+                let content_h = title_h + image_h;
                 let mut left = *x + 12.0;
                 let mut top = *y - 12.0;
                 if left + content_w > *screen_w {
@@ -1313,6 +1325,16 @@ impl MenuOverlayPipeline {
                 let bg_w = content_w + 2.0 * padding + 2.0 * margin;
                 let bg_h = content_h + 2.0 * padding + 2.0 * margin;
                 let white = [1.0f32; 4];
+                push_mc_text(
+                    &mut vertices,
+                    gm,
+                    left,
+                    top,
+                    &[TextSpan::new(title.clone(), white)],
+                    fs,
+                    true,
+                );
+                let top = top + title_h;
                 if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
                     push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, margin, white);
                 }
@@ -1329,20 +1351,17 @@ impl MenuOverlayPipeline {
                     );
                 }
                 if items.is_empty() {
-                    let text = crate::lang::translate("item.minecraft.bundle.empty.description")
-                        .unwrap_or("Bundle is empty");
-                    push_mc_text(
-                        &mut vertices,
-                        gm,
-                        left,
-                        top,
-                        &[TextSpan::new(
-                            text.to_string(),
-                            [0.6667, 0.6667, 0.6667, 1.0],
-                        )],
-                        fs,
-                        true,
-                    );
+                    for (line_no, text) in empty_lines.iter().enumerate() {
+                        push_mc_text(
+                            &mut vertices,
+                            gm,
+                            left,
+                            top + line_no as f32 * 9.0 * gs,
+                            &[TextSpan::new(text.clone(), [0.6667, 0.6667, 0.6667, 1.0])],
+                            fs,
+                            true,
+                        );
+                    }
                 } else {
                     let shown_items = &items[..shown.min(items.len())];
                     let overflow = items.len() > 12;
@@ -1476,7 +1495,7 @@ impl MenuOverlayPipeline {
                     }
                 }
                 let description_h = if items.is_empty() {
-                    empty_lines * 9.0 * gs
+                    empty_lines.len() as f32 * 9.0 * gs
                 } else {
                     0.0
                 };
@@ -1491,21 +1510,15 @@ impl MenuOverlayPipeline {
                 if fill > 0.0
                     && let Some(region) = self.sprite_atlas.regions.get(&fill_id)
                 {
-                    let frac = fill / 94.0;
-                    push_quad(
+                    push_nine_slice(
                         &mut vertices,
                         left + gs,
                         bar_y,
                         fill * gs,
                         13.0 * gs,
-                        region.u0,
-                        region.v0,
-                        region.u0 + (region.u1 - region.u0) * frac,
-                        region.v1,
+                        region,
+                        2.0 * gs,
                         white,
-                        2.0,
-                        [0.0, 0.0],
-                        0.0,
                     );
                 }
                 if let Some(region) = self
@@ -1513,20 +1526,15 @@ impl MenuOverlayPipeline {
                     .regions
                     .get(&SpriteId::BundleProgressBorder)
                 {
-                    push_quad(
+                    push_nine_slice(
                         &mut vertices,
                         left,
                         bar_y,
                         96.0 * gs,
                         13.0 * gs,
-                        region.u0,
-                        region.v0,
-                        region.u1,
-                        region.v1,
+                        region,
+                        2.0 * gs,
                         white,
-                        3.0,
-                        [0.0, 0.0],
-                        0.0,
                     );
                 }
                 let label = if *fullness <= 0.0 {
@@ -2165,6 +2173,7 @@ pub enum MenuElement {
     BundleTooltip {
         x: f32,
         y: f32,
+        title: String,
         items: Vec<azalea_inventory::ItemStack>,
         selected: i32,
         fullness: f32,
@@ -3002,17 +3011,17 @@ fn build_sprite_atlas(
         (
             SpriteId::BundleProgressBorder,
             "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_border.png",
-            0.0,
+            2.0,
         ),
         (
             SpriteId::BundleProgressFill,
             "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_fill.png",
-            0.0,
+            2.0,
         ),
         (
             SpriteId::BundleProgressFull,
             "minecraft/textures/gui/sprites/container/bundle/bundle_progressbar_full.png",
-            0.0,
+            2.0,
         ),
         (
             SpriteId::BundleSlotBackground,
@@ -4541,6 +4550,32 @@ fn add_mc_effect(
         color,
         shadow_color,
     });
+}
+
+/// A glyph's horizontal advance in font-texture pixels.
+fn wrap_plain_text<F>(text: &str, max_width: f32, mut width: F) -> Vec<String>
+where
+    F: FnMut(&str) -> f32,
+{
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if !current.is_empty() && width(&candidate) > max_width {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn push_mc_text(
