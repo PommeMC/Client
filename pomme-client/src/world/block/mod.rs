@@ -3,9 +3,10 @@ pub mod registry;
 pub mod sound;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock, RwLock, RwLockReadGuard};
 
 use azalea_block::BlockState;
+use glam::{DVec3, dvec3};
 
 use crate::physics::block_shape::{LocalBox, compute_outline, compute_shape};
 
@@ -124,13 +125,38 @@ struct BlockData {
     properties: PropMap,
     behavior: BlockBehavior,
     /// Collision shape; see `block_shape::partial_shape` for the encoding.
-    shape: Option<Box<[LocalBox]>>,
+    /// Generated vanilla shapes are deduplicated and shared across states.
+    shape: Option<&'static [LocalBox]>,
     /// Outline shape (vanilla `getShape`) where it differs from `shape`; `None`
     /// means the two agree and the collision shape doubles as the outline.
-    outline: Option<Box<[LocalBox]>>,
+    outline: Option<&'static [LocalBox]>,
     is_air: bool,
     /// Vanilla `hasCollision` (`BlockBehaviour.Properties.noCollision()`).
     collides: bool,
+    /// Vanilla `BlockState.blocksMotion()`, consumed by the follow-up fluid
+    /// movement parity branch.
+    #[allow(dead_code)]
+    blocks_motion: bool,
+    /// Vanilla cached `BlockState.isSolid()` / `legacySolid`, consumed by the
+    /// follow-up fluid renderer branch.
+    #[allow(dead_code)]
+    legacy_solid: bool,
+    /// Vanilla cached `BlockState.canBeReplaced()` property, consumed by the
+    /// follow-up interaction prediction branch.
+    #[allow(dead_code)]
+    replaceable: bool,
+    /// Packed Direction ordinal bits for
+    /// `BlockState.isFaceSturdy(..., SupportType.FULL)`; consumed by collision
+    /// and fluid renderer follow-ups.
+    #[allow(dead_code)]
+    full_face_sturdy: u8,
+    /// Whether vanilla's logical collision/outline shape applies the state's
+    /// positional offset. `None` is for older generated tables that predate
+    /// these probes and retain the historical registration-based fallback.
+    #[allow(dead_code)]
+    collision_shape_uses_offset: Option<bool>,
+    #[allow(dead_code)]
+    outline_shape_uses_offset: Option<bool>,
     fluid: Fluid,
     light: LightProps,
 }
@@ -166,6 +192,10 @@ struct StateFile {
     state_count: u32,
     /// Deduped face masks as 64-hex-char strings (16 rows of 4 chars).
     masks: Vec<String>,
+    /// Deduped exact vanilla collision/outline shapes. Older generated tables
+    /// omit this field and continue using the hand-computed fallback.
+    #[serde(default)]
+    shapes: Vec<Vec<f64>>,
     blocks: Vec<StateEntry>,
 }
 
@@ -182,8 +212,109 @@ struct StateEntry {
     u: ScalarOrPerState,
     /// `hasCollision`; block-level in vanilla, so always a scalar.
     c: u8,
+    /// Vanilla `BlockState.blocksMotion()`. Exact generated state tables carry
+    /// `m/l/v/t` together; legacy embedded tables omit all four and are loaded
+    /// only through the explicit compatibility mode below.
+    #[serde(default)]
+    m: Option<ScalarOrPerState>,
+    /// Vanilla cached `BlockState.isSolid()` / `legacySolid`.
+    #[serde(default)]
+    l: Option<ScalarOrPerState>,
+    /// Vanilla cached `BlockState.canBeReplaced()` property.
+    #[serde(default)]
+    v: Option<ScalarOrPerState>,
+    /// Packed Direction ordinal bits for full-face sturdiness.
+    #[serde(default)]
+    t: Option<ScalarOrPerState>,
+    /// Whether the generated logical collision/outline shape is translated by
+    /// BlockState.getOffset(pos). Older tables omit these and retain the old
+    /// registration-based runtime fallback.
+    #[serde(default)]
+    co: Option<ScalarOrPerState>,
+    #[serde(default)]
+    oo: Option<ScalarOrPerState>,
+    /// Collision and outline shape dictionary indices. Absent from older
+    /// generated tables, which fall back to the native shape code below.
+    #[serde(default)]
+    s: Option<ScalarOrPerStateU32>,
+    #[serde(default)]
+    r: Option<ScalarOrPerStateU32>,
     #[serde(default)]
     f: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StateSemanticsMode {
+    Generated,
+    LegacyCompatibility,
+}
+
+fn state_semantics_mode(state_file: &StateFile) -> StateSemanticsMode {
+    let mut mode = None;
+    for entry in &state_file.blocks {
+        let present = [
+            entry.m.is_some(),
+            entry.l.is_some(),
+            entry.v.is_some(),
+            entry.t.is_some(),
+        ];
+        let entry_mode = if present.iter().all(|&value| value) {
+            StateSemanticsMode::Generated
+        } else if present.iter().all(|&value| !value) {
+            StateSemanticsMode::LegacyCompatibility
+        } else {
+            panic!(
+                "{}: movement/placement/support state semantics are partially generated",
+                entry.name
+            );
+        };
+        if let Some(expected) = mode {
+            assert_eq!(
+                expected, entry_mode,
+                "{}: state table mixes generated and legacy compatibility semantics",
+                state_file.version
+            );
+        } else {
+            mode = Some(entry_mode);
+        }
+    }
+    mode.expect("state table must contain blocks")
+}
+
+fn resolve_state_semantics(
+    mode: StateSemanticsMode,
+    entry: &StateEntry,
+    offset: usize,
+    collides: bool,
+    is_air: bool,
+) -> (bool, bool, bool, u8) {
+    match mode {
+        StateSemanticsMode::Generated => (
+            entry
+                .m
+                .as_ref()
+                .expect("generated blocksMotion")
+                .get(offset)
+                != 0,
+            entry.l.as_ref().expect("generated legacySolid").get(offset) != 0,
+            entry.v.as_ref().expect("generated replaceable").get(offset) != 0,
+            entry
+                .t
+                .as_ref()
+                .expect("generated full-face sturdy")
+                .get(offset),
+        ),
+        StateSemanticsMode::LegacyCompatibility => {
+            // Historical embedded state files predate these vanilla probes.
+            // Keep their old runtime behavior explicitly, but do not present
+            // these values as generated or authoritative for those versions.
+            let blocks_motion = collides;
+            let legacy_solid = blocks_motion;
+            let replaceable = is_air;
+            let full_face_sturdy = if collides { 0x3f } else { 0 };
+            (blocks_motion, legacy_solid, replaceable, full_face_sturdy)
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -195,6 +326,22 @@ enum ScalarOrPerState {
 
 impl ScalarOrPerState {
     fn get(&self, offset: usize) -> u8 {
+        match self {
+            Self::One(v) => *v,
+            Self::Many(vs) => vs[offset],
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ScalarOrPerStateU32 {
+    One(u32),
+    Many(Vec<u32>),
+}
+
+impl ScalarOrPerStateU32 {
+    fn get(&self, offset: usize) -> u32 {
         match self {
             Self::One(v) => *v,
             Self::Many(vs) => vs[offset],
@@ -262,6 +409,25 @@ static BLOCK_TABLES: [OnceLock<Vec<BlockData>>; BLOCK_DATA.len()] =
 const NATIVE_SLOT: usize = 0;
 static ACTIVE_TABLE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(NATIVE_SLOT);
+
+/// Server-provided block tags, resolved into Pomme's native block resource
+/// names. Vanilla sends these during configuration and may replace them after
+/// a datapack reload.
+#[derive(Debug, Default)]
+pub struct BlockTags {
+    tags: HashMap<String, HashSet<&'static str>>,
+}
+
+impl BlockTags {
+    pub fn contains(&self, tag: &str, block: &str) -> bool {
+        self.tags
+            .get(tag)
+            .is_some_and(|blocks| blocks.contains(block))
+    }
+}
+
+static BLOCK_TAGS: LazyLock<RwLock<BlockTags>> =
+    LazyLock::new(|| RwLock::new(BlockTags::default()));
 
 /// Vanilla getFluidState overrides on blocks without a `waterlogged` property.
 const IMPLICIT_WATER: [&str; 4] = ["seagrass", "tall_seagrass", "kelp", "kelp_plant"];
@@ -338,6 +504,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
         file.blocks.len(),
         "state data block count mismatch"
     );
+    let semantics_mode = state_semantics_mode(&state_file);
     let masks: &'static [FaceMask] = Vec::leak(
         state_file
             .masks
@@ -345,6 +512,17 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
             .map(|hex| decode_face_mask(hex))
             .collect(),
     );
+    let generated_shapes: Option<Vec<&'static [LocalBox]>> = if state_file.shapes.is_empty() {
+        None
+    } else {
+        Some(
+            state_file
+                .shapes
+                .iter()
+                .map(|coords| decode_block_shape(coords))
+                .collect(),
+        )
+    };
     // The same handful of 6-mask tuples repeats across thousands of states;
     // dedupe them into leaked statics so each state stores one pointer.
     let mut tuples: HashMap<[u32; 6], &'static [FaceMask; 6]> = HashMap::new();
@@ -409,8 +587,43 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
             }
             let properties = PropMap::from_pairs(pairs);
             let fluid = state_fluid(name, &properties);
-            let shape = compute_shape(name, &properties).map(Vec::into_boxed_slice);
-            let outline = compute_outline(name, &properties).map(Vec::into_boxed_slice);
+            let (blocks_motion, legacy_solid, replaceable, full_face_sturdy) =
+                resolve_state_semantics(
+                    semantics_mode,
+                    state_entry,
+                    offset as usize,
+                    collides,
+                    is_air,
+                );
+            let collision_shape_uses_offset = state_entry
+                .co
+                .as_ref()
+                .map(|values| values.get(offset as usize) != 0);
+            let outline_shape_uses_offset = state_entry
+                .oo
+                .as_ref()
+                .map(|values| values.get(offset as usize) != 0);
+            let (shape, outline) = match (
+                generated_shapes.as_ref(),
+                state_entry.s.as_ref(),
+                state_entry.r.as_ref(),
+            ) {
+                (Some(shapes), Some(collision), Some(outline)) => {
+                    let collision = shapes[collision.get(offset as usize) as usize];
+                    let outline = shapes[outline.get(offset as usize) as usize];
+                    (
+                        (!is_full_cube_shape(collision)).then_some(collision),
+                        (outline != collision).then_some(outline),
+                    )
+                }
+                (None, None, None) => (
+                    compute_shape(name, &properties)
+                        .map(|boxes| Box::leak(boxes.into_boxed_slice()) as &'static [LocalBox]),
+                    compute_outline(name, &properties)
+                        .map(|boxes| Box::leak(boxes.into_boxed_slice()) as &'static [LocalBox]),
+                ),
+                _ => panic!("{}: incomplete generated block-shape fields", block.name),
+            };
             let light = LightProps {
                 emission: state_entry.e.get(offset as usize),
                 dampening: state_entry.d.get(offset as usize),
@@ -427,6 +640,12 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                 outline,
                 is_air,
                 collides,
+                blocks_motion,
+                legacy_solid,
+                replaceable,
+                full_face_sturdy,
+                collision_shape_uses_offset,
+                outline_shape_uses_offset,
                 fluid,
                 light,
             });
@@ -440,6 +659,35 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
         file.version
     );
     table
+}
+
+fn decode_block_shape(coords: &[f64]) -> &'static [LocalBox] {
+    assert_eq!(
+        coords.len() % 6,
+        0,
+        "block shape coordinate count must be a multiple of 6"
+    );
+    let boxes: Vec<LocalBox> = coords
+        .as_chunks::<6>()
+        .0
+        .iter()
+        .map(|c| {
+            assert!(
+                c.iter().all(|v| v.is_finite()),
+                "non-finite block shape coordinate"
+            );
+            assert!(
+                c[0] <= c[3] && c[1] <= c[4] && c[2] <= c[5],
+                "inverted block shape box"
+            );
+            [c[0], c[1], c[2], c[3], c[4], c[5]]
+        })
+        .collect();
+    Box::leak(boxes.into_boxed_slice())
+}
+
+fn is_full_cube_shape(shape: &[LocalBox]) -> bool {
+    shape == [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]
 }
 
 fn decode_face_mask(hex: &str) -> FaceMask {
@@ -520,6 +768,129 @@ fn table() -> &'static Vec<BlockData> {
         .expect("world::block::init must be called before use")
 }
 
+/// Built-in block registry order for the active protocol. Pomme's generated
+/// state table is grouped by block in registry order, so collapsing adjacent
+/// states yields the registry id -> resource-name mapping used by UpdateTags.
+fn block_registry_names() -> Vec<&'static str> {
+    let mut names = Vec::new();
+    let mut previous = None;
+    for data in table() {
+        if previous != Some(data.id) {
+            names.push(data.id);
+            previous = Some(data.id);
+        }
+    }
+    names
+}
+
+/// Resolves a built-in block registry id in an arbitrary supported protocol
+/// without switching the active world's block-state table.
+pub(crate) fn block_registry_name(protocol: i32, registry_id: u32) -> Option<&'static str> {
+    let slot = prewarm_protocol(protocol);
+    let table = BLOCK_TABLES[slot]
+        .get()
+        .expect("prewarm_protocol initializes block table");
+    let mut previous = None;
+    let mut index = 0u32;
+    for data in table {
+        if previous != Some(data.id) {
+            if index == registry_id {
+                return Some(data.id);
+            }
+            index += 1;
+            previous = Some(data.id);
+        }
+    }
+    None
+}
+
+/// Resolves a built-in block resource name to its registry id in an arbitrary
+/// supported protocol, without switching the active world's block-state table.
+pub(crate) fn block_registry_id(protocol: i32, name: &str) -> Option<u32> {
+    let slot = prewarm_protocol(protocol);
+    let table = BLOCK_TABLES[slot]
+        .get()
+        .expect("prewarm_protocol initializes block table");
+    let mut previous = None;
+    let mut index = 0u32;
+    for data in table {
+        if previous != Some(data.id) {
+            if data.id == name {
+                return Some(index);
+            }
+            index += 1;
+            previous = Some(data.id);
+        }
+    }
+    None
+}
+
+fn resolve_block_tags(
+    raw_tags: Vec<(String, Vec<i32>)>,
+    registry_names: &[&'static str],
+) -> BlockTags {
+    let mut tags = HashMap::with_capacity(raw_tags.len());
+    for (name, elements) in raw_tags {
+        let mut blocks = HashSet::with_capacity(elements.len());
+        for id in elements {
+            let Ok(index) = usize::try_from(id) else {
+                tracing::warn!("ignoring negative block registry id {id} in tag {name}");
+                continue;
+            };
+            let Some(&block) = registry_names.get(index) else {
+                tracing::warn!(
+                    "ignoring out-of-range block registry id {id} in tag {name} ({} blocks)",
+                    registry_names.len()
+                );
+                continue;
+            };
+            blocks.insert(block);
+        }
+        tags.insert(name, blocks);
+    }
+    BlockTags { tags }
+}
+
+/// Replaces the active server's block tags from `ClientboundUpdateTags`.
+/// Element ids are built-in block registry ids, not block-state ids.
+pub fn replace_block_tags(raw_tags: Vec<(String, Vec<i32>)>) {
+    let resolved = resolve_block_tags(raw_tags, &block_registry_names());
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") = resolved;
+}
+
+pub fn block_tags() -> RwLockReadGuard<'static, BlockTags> {
+    BLOCK_TAGS.read().expect("block tag lock poisoned")
+}
+
+pub fn clear_block_tags() {
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") = BlockTags::default();
+}
+
+#[cfg(test)]
+pub(crate) fn block_tags_for_test(entries: &[(&str, &[&str])]) -> BlockTags {
+    let registry_names = block_registry_names();
+    let mut tags = HashMap::new();
+    for (tag, block_names) in entries {
+        let blocks = block_names
+            .iter()
+            .map(|name| {
+                registry_names
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate == name)
+                    .unwrap_or_else(|| panic!("unknown block {name}"))
+            })
+            .collect();
+        tags.insert(format!("minecraft:{tag}"), blocks);
+    }
+    BlockTags { tags }
+}
+
+#[cfg(test)]
+pub(crate) fn replace_block_tags_for_test(entries: &[(&str, &[&str])]) {
+    *BLOCK_TAGS.write().expect("block tag lock poisoned") = block_tags_for_test(entries);
+}
+
 fn block_data(state: BlockState) -> &'static BlockData {
     static UNKNOWN: std::sync::LazyLock<BlockData> = std::sync::LazyLock::new(|| BlockData {
         id: "unknown",
@@ -529,6 +900,12 @@ fn block_data(state: BlockState) -> &'static BlockData {
         outline: None,
         is_air: false,
         collides: true,
+        blocks_motion: true,
+        legacy_solid: true,
+        replaceable: false,
+        full_face_sturdy: 0x3f,
+        collision_shape_uses_offset: None,
+        outline_shape_uses_offset: None,
         fluid: NO_FLUID,
         light: BEDROCK_LIGHT,
     });
@@ -570,6 +947,36 @@ pub fn block_behavior(state: BlockState) -> &'static BlockBehavior {
     &block_data(state).behavior
 }
 
+/// Vanilla `BlockBehaviour` movement friction. Only five 26.2 blocks override
+/// the default 0.6 value; keeping this native avoids depending on Azalea's
+/// version-lagging block metadata.
+pub fn movement_friction(state: BlockState) -> f32 {
+    match block_id(state) {
+        "ice" | "packed_ice" | "frosted_ice" => 0.98,
+        "blue_ice" => 0.989,
+        "slime_block" => 0.8,
+        _ => 0.6,
+    }
+}
+
+/// Vanilla `BlockBehaviour.speedFactor`. In 26.2 only soul sand and honey
+/// override the default for ordinary player movement.
+pub fn movement_speed_factor(state: BlockState) -> f32 {
+    match block_id(state) {
+        "soul_sand" | "honey_block" => 0.4,
+        _ => 1.0,
+    }
+}
+
+/// Vanilla `BlockBehaviour.jumpFactor` for the player's ground jump.
+pub fn movement_jump_factor(state: BlockState) -> f32 {
+    if block_id(state) == "honey_block" {
+        0.5
+    } else {
+        1.0
+    }
+}
+
 /// Vanilla `RedStoneWireBlock.getColorForPower`: dust tint for the state's
 /// `power` value.
 pub fn redstone_wire_rgb(state: BlockState) -> [f32; 3] {
@@ -599,12 +1006,151 @@ pub fn has_collision(state: BlockState) -> bool {
     block_data(state).collides
 }
 
+/// Vanilla `BlockState.blocksMotion()`, distinct from collision and occlusion.
+pub fn blocks_motion(state: BlockState) -> bool {
+    block_data(state).blocks_motion
+}
+
+/// Vanilla cached `BlockState.isSolid()` / `legacySolid`.
+#[allow(dead_code)]
+pub fn is_solid(state: BlockState) -> bool {
+    block_data(state).legacy_solid
+}
+
+/// Vanilla cached `BlockState.canBeReplaced()` property. Context-sensitive
+/// overrides are handled by higher-level placement code when needed.
+#[allow(dead_code)]
+pub fn is_replaceable(state: BlockState) -> bool {
+    block_data(state).replaceable
+}
+
+/// Vanilla `BlockState.isFaceSturdy(..., SupportType.FULL)` for a Direction
+/// ordinal (DOWN, UP, NORTH, SOUTH, WEST, EAST).
+pub fn is_full_face_sturdy(state: BlockState, direction: usize) -> bool {
+    direction < 6 && (block_data(state).full_face_sturdy & (1 << direction)) != 0
+}
+
 pub fn fluid(state: BlockState) -> Fluid {
     block_data(state).fluid
 }
 
 pub(crate) fn block_shape(state: BlockState) -> Option<&'static [LocalBox]> {
-    block_data(state).shape.as_deref()
+    block_data(state).shape
+}
+
+#[allow(dead_code)]
+pub(crate) fn collision_shape_uses_position_offset(state: BlockState) -> Option<bool> {
+    block_data(state).collision_shape_uses_offset
+}
+
+#[allow(dead_code)]
+pub(crate) fn outline_shape_uses_position_offset(state: BlockState) -> Option<bool> {
+    block_data(state).outline_shape_uses_offset
+}
+
+#[allow(dead_code)]
+fn vanilla_position_seed(x: i32, z: i32) -> i64 {
+    // Vanilla `Mth.getSeed(x, 0, z)`: the X multiplication is an i32
+    // operation before widening, and the later products wrap signed 64-bit.
+    let seed = i64::from(x.wrapping_mul(3_129_871)) ^ i64::from(z).wrapping_mul(116_129_781);
+    seed.wrapping_mul(seed)
+        .wrapping_mul(42_317_861)
+        .wrapping_add(seed.wrapping_mul(11))
+        >> 16
+}
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum PositionOffsetKind {
+    Xz,
+    Xyz,
+}
+
+#[allow(dead_code)]
+fn position_offset(
+    x: i32,
+    z: i32,
+    kind: PositionOffsetKind,
+    max_horizontal: f32,
+    max_vertical: f32,
+) -> DVec3 {
+    let seed = vanilla_position_seed(x, z);
+    let raw_x = (f64::from((seed & 0xF) as f32 / 15.0_f32) - 0.5) * 0.5;
+    let raw_z = (f64::from(((seed >> 8) & 0xF) as f32 / 15.0_f32) - 0.5) * 0.5;
+    let max = f64::from(max_horizontal);
+    let y = match kind {
+        PositionOffsetKind::Xz => 0.0,
+        PositionOffsetKind::Xyz => {
+            (f64::from(((seed >> 4) & 0xF) as f32 / 15.0_f32) - 1.0) * f64::from(max_vertical)
+        }
+    };
+    dvec3(raw_x.clamp(-max, max), y, raw_z.clamp(-max, max))
+}
+
+#[allow(dead_code)]
+fn position_offset_parameters(block: &str) -> Option<(PositionOffsetKind, f32, f32)> {
+    let default_xz = || (PositionOffsetKind::Xz, 0.25_f32, 0.2_f32);
+    let default_xyz = || (PositionOffsetKind::Xyz, 0.25_f32, 0.2_f32);
+    match block {
+        // Blocks.java registrations using BlockBehaviour.OffsetType.XYZ.
+        "short_grass" | "fern" | "short_dry_grass" | "tall_dry_grass" => Some(default_xyz()),
+        // SmallDripleafBlock overrides getMaxVerticalOffset() to 0.1f.
+        "small_dripleaf" => Some((PositionOffsetKind::Xyz, 0.25_f32, 0.1_f32)),
+
+        // SpeleothemBlock overrides max horizontal offset to SHAPE_BASE.min(X)
+        // = 2/16 = 0.125. SulfurSpike inherits the same behavior.
+        "pointed_dripstone" | "sulfur_spike" => Some((PositionOffsetKind::Xz, 0.125_f32, 0.2_f32)),
+
+        // Blocks.java registrations using BlockBehaviour.OffsetType.XZ.
+        "mangrove_propagule" | "tall_seagrass" | "dandelion" | "golden_dandelion"
+        | "torchflower" | "poppy" | "blue_orchid" | "allium" | "azure_bluet" | "red_tulip"
+        | "orange_tulip" | "white_tulip" | "pink_tulip" | "oxeye_daisy" | "cornflower"
+        | "wither_rose" | "lily_of_the_valley" | "sunflower" | "lilac" | "rose_bush" | "peony"
+        | "tall_grass" | "large_fern" | "pitcher_plant" | "bamboo_sapling" | "bamboo"
+        | "warped_roots" | "nether_sprouts" | "crimson_roots" | "hanging_roots"
+        | "open_eyeblossom" | "closed_eyeblossom" => Some(default_xz()),
+        _ => None,
+    }
+}
+
+/// Vanilla block model/shape position offset at the requested world position.
+/// This is the raw registered block offset, not adjusted for generated shapes
+/// that were sampled at `BlockPos.ZERO`.
+#[allow(dead_code)]
+pub(crate) fn block_position_offset(state: BlockState, x: i32, z: i32) -> DVec3 {
+    let Some((kind, max_horizontal, max_vertical)) = position_offset_parameters(block_id(state))
+    else {
+        return DVec3::ZERO;
+    };
+    position_offset(x, z, kind, max_horizontal, max_vertical)
+}
+
+#[allow(dead_code)]
+fn generated_shape_position_delta(state: BlockState, x: i32, z: i32) -> DVec3 {
+    let actual = block_position_offset(state, x, z);
+    if actual == DVec3::ZERO {
+        return DVec3::ZERO;
+    }
+    // Generated vanilla shapes were dumped at BlockPos.ZERO, so they already
+    // contain ZERO's offset. Runtime consumers apply only the delta to the
+    // requested position, including Y for OffsetType.XYZ.
+    actual - block_position_offset(state, 0, 0)
+}
+
+#[allow(dead_code)]
+pub(crate) fn collision_shape_position_delta(state: BlockState, x: i32, z: i32) -> DVec3 {
+    match collision_shape_uses_position_offset(state) {
+        Some(false) => DVec3::ZERO,
+        Some(true) | None => generated_shape_position_delta(state, x, z),
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn outline_shape_position_delta(state: BlockState, x: i32, z: i32) -> DVec3 {
+    match outline_shape_uses_position_offset(state) {
+        Some(false) => DVec3::ZERO,
+        Some(true) | None => generated_shape_position_delta(state, x, z),
+    }
 }
 
 /// Outline shape for interaction raycasts (vanilla `getShape`), falling back to
@@ -612,7 +1158,7 @@ pub(crate) fn block_shape(state: BlockState) -> Option<&'static [LocalBox]> {
 /// slice is a block the pick ray passes through.
 pub(crate) fn block_outline(state: BlockState) -> Option<&'static [LocalBox]> {
     let data = block_data(state);
-    data.outline.as_deref().or(data.shape.as_deref())
+    data.outline.or(data.shape)
 }
 
 /// Baked light properties for a state (vanilla `BlockStateBase` light cache).
@@ -696,6 +1242,31 @@ mod tests {
     }
 
     #[test]
+    fn block_tag_registry_ids_resolve_to_native_block_names() {
+        setup();
+        let names = block_registry_names();
+        let stone_id = names
+            .iter()
+            .position(|name| *name == "stone")
+            .expect("stone registry id") as i32;
+        let dirt_id = names
+            .iter()
+            .position(|name| *name == "dirt")
+            .expect("dirt registry id") as i32;
+        let tags = resolve_block_tags(
+            vec![(
+                "minecraft:mineable/pickaxe".to_owned(),
+                vec![stone_id, -1, i32::MAX],
+            )],
+            &names,
+        );
+
+        assert!(tags.contains("minecraft:mineable/pickaxe", "stone"));
+        assert!(!tags.contains("minecraft:mineable/pickaxe", "dirt"));
+        assert_ne!(stone_id, dirt_id);
+    }
+
+    #[test]
     fn redstone_wire_colors() {
         setup();
         let unpowered = find_state("redstone_wire", &[("power", "0")]);
@@ -734,6 +1305,88 @@ mod tests {
     }
 
     #[test]
+    fn movement_block_properties_match_vanilla_26_2_overrides() {
+        setup();
+        assert_eq!(movement_friction(find_state("stone", &[])), 0.6);
+        assert_eq!(movement_friction(find_state("ice", &[])), 0.98);
+        assert_eq!(movement_friction(find_state("blue_ice", &[])), 0.989);
+        assert_eq!(movement_friction(find_state("slime_block", &[])), 0.8);
+        assert_eq!(movement_speed_factor(find_state("soul_sand", &[])), 0.4);
+        assert_eq!(movement_speed_factor(find_state("honey_block", &[])), 0.4);
+        assert_eq!(movement_jump_factor(find_state("honey_block", &[])), 0.5);
+        assert_eq!(movement_jump_factor(find_state("stone", &[])), 1.0);
+    }
+
+    #[test]
+    fn legacy_solid_is_distinct_from_blocks_motion_for_vanilla_exceptions() {
+        setup();
+        for name in ["cobweb", "bamboo_sapling"] {
+            let state = find_state(name, &[]);
+            assert!(is_solid(state), "{name} is legacy-solid in vanilla 26.2");
+            assert!(
+                !blocks_motion(state),
+                "{name} must not be treated as motion-blocking"
+            );
+        }
+    }
+
+    #[test]
+    fn vanilla_position_offsets_respect_generated_shape_usage() {
+        setup();
+
+        let bamboo = find_state("bamboo", &[]);
+        let bamboo_delta = generated_shape_position_delta(bamboo, 5, -7);
+        assert_eq!(bamboo_delta.x.to_bits(), 0x3fc9_9999_a000_0000_u64);
+        assert_eq!(bamboo_delta.y, 0.0);
+        assert_eq!(bamboo_delta.z.to_bits(), 0x3fd7_7777_8000_0000_u64);
+
+        let dandelion = find_state("dandelion", &[]);
+        assert_eq!(
+            generated_shape_position_delta(dandelion, 5, -7),
+            bamboo_delta
+        );
+        assert_eq!(
+            collision_shape_position_delta(dandelion, 5, -7),
+            DVec3::ZERO
+        );
+        assert_eq!(outline_shape_position_delta(dandelion, 5, -7), bamboo_delta);
+
+        let short_grass = find_state("short_grass", &[]);
+        let xyz_delta = generated_shape_position_delta(short_grass, 5, -7);
+        assert_eq!(xyz_delta.x.to_bits(), 0x3fc9_9999_a000_0000_u64);
+        assert_eq!(xyz_delta.y.to_bits(), 0x3f8b_4e81_d3a0_6d40_u64);
+        assert_eq!(xyz_delta.z.to_bits(), 0x3fd7_7777_8000_0000_u64);
+        assert_eq!(
+            collision_shape_position_delta(short_grass, 5, -7),
+            DVec3::ZERO
+        );
+        assert_eq!(
+            outline_shape_position_delta(short_grass, 5, -7),
+            DVec3::ZERO
+        );
+
+        let tall_grass = find_state("tall_grass", &[("half", "lower")]);
+        assert_ne!(block_position_offset(tall_grass, 5, -7), DVec3::ZERO);
+        assert_eq!(
+            collision_shape_position_delta(tall_grass, 5, -7),
+            DVec3::ZERO
+        );
+        assert_eq!(outline_shape_position_delta(tall_grass, 5, -7), DVec3::ZERO);
+
+        let dripstone = find_state(
+            "pointed_dripstone",
+            &[
+                ("thickness", "tip"),
+                ("vertical_direction", "up"),
+                ("waterlogged", "false"),
+            ],
+        );
+        let delta = generated_shape_position_delta(dripstone, 12345, -54321);
+        assert_eq!(delta.x, 0.0);
+        assert_eq!(delta.z.to_bits(), 0x3fb3_3333_4000_0000_u64);
+    }
+
+    #[test]
     fn collision_flags() {
         setup();
         // Oracles from reference/26.2/decompiled Blocks.java noCollision sites.
@@ -743,6 +1396,108 @@ mod tests {
         assert!(!has_collision(find_state("oak_button", &[])));
         assert!(has_collision(find_state("stone", &[])));
         assert!(has_collision(find_state("oak_fence", &[])));
+    }
+
+    #[test]
+    fn generated_26_2_collision_shapes_cover_state_derived_families() {
+        setup();
+
+        // Fence collision rises to 1.5 blocks while its interaction outline is
+        // only one block tall. This was previously a full-cube fallback.
+        let fence = find_state(
+            "oak_fence",
+            &[
+                ("north", "false"),
+                ("east", "false"),
+                ("south", "false"),
+                ("west", "false"),
+                ("waterlogged", "false"),
+            ],
+        );
+        assert_eq!(
+            block_shape(fence),
+            Some(&[[0.375, 0.0, 0.375, 0.625, 1.5, 0.625]][..])
+        );
+        assert_eq!(
+            block_outline(fence),
+            Some(&[[0.375, 0.0, 0.375, 0.625, 1.0, 0.625]][..])
+        );
+
+        let closed_door = find_state(
+            "oak_door",
+            &[
+                ("facing", "north"),
+                ("half", "lower"),
+                ("hinge", "left"),
+                ("open", "false"),
+                ("powered", "false"),
+            ],
+        );
+        assert_eq!(
+            block_shape(closed_door),
+            Some(&[[0.0, 0.0, 0.8125, 1.0, 1.0, 1.0]][..])
+        );
+        let open_door = find_state(
+            "oak_door",
+            &[
+                ("facing", "north"),
+                ("half", "lower"),
+                ("hinge", "left"),
+                ("open", "true"),
+                ("powered", "false"),
+            ],
+        );
+        assert_eq!(
+            block_shape(open_door),
+            Some(&[[0.0, 0.0, 0.0, 0.1875, 1.0, 1.0]][..])
+        );
+
+        let trapdoor = find_state(
+            "oak_trapdoor",
+            &[
+                ("facing", "north"),
+                ("half", "bottom"),
+                ("open", "false"),
+                ("powered", "false"),
+                ("waterlogged", "false"),
+            ],
+        );
+        assert_eq!(
+            block_shape(trapdoor),
+            Some(&[[0.0, 0.0, 0.0, 1.0, 0.1875, 1.0]][..])
+        );
+
+        let chest = find_state(
+            "chest",
+            &[
+                ("facing", "north"),
+                ("type", "single"),
+                ("waterlogged", "false"),
+            ],
+        );
+        assert_eq!(
+            block_shape(chest),
+            Some(&[[0.0625, 0.0, 0.0625, 0.9375, 0.875, 0.9375]][..])
+        );
+
+        let cake = find_state("cake", &[("bites", "0")]);
+        assert_eq!(
+            block_shape(cake),
+            Some(&[[0.0625, 0.0, 0.0625, 0.9375, 0.5, 0.9375]][..])
+        );
+
+        // Hollow container shapes prove we retain multi-box geometry rather
+        // than replacing complex blocks with a bounding cube.
+        let cauldron = block_shape(find_state("cauldron", &[])).unwrap();
+        assert!(cauldron.len() > 4);
+        assert!(!is_full_cube_shape(cauldron));
+        let hopper = block_shape(find_state(
+            "hopper",
+            &[("facing", "down"), ("enabled", "true")],
+        ))
+        .unwrap();
+        assert!(hopper.len() > 4);
+        assert!(!is_full_cube_shape(hopper));
     }
 
     #[test]
@@ -839,9 +1594,9 @@ mod tests {
         assert!(!shape_occludes(bottom, bottom, NORTH));
     }
 
-    /// Oracles from reference/26.2/decompiled: `SnowLayerBlock` is the only
-    /// shape here whose `getShape` and `getCollisionShape` disagree, and
-    /// `LiquidBlock`/`BubbleColumnBlock` return `Shapes.empty()`.
+    /// Oracles from reference/26.2/decompiled. Generated 26.2 data preserves
+    /// vanilla `getShape` separately from `getCollisionShape` wherever they
+    /// differ (snow, fences/walls, lecterns, etc.).
     #[test]
     fn outline_shapes() {
         setup();
@@ -884,6 +1639,24 @@ mod tests {
 
     /// Builds every embedded table so the block/light cross-checks fire for
     /// all versions, not just the one `setup` activates.
+    #[test]
+    fn state_semantics_modes_are_explicit_per_embedded_table() {
+        for data in BLOCK_DATA {
+            let state_file: StateFile = serde_json::from_str(data.state).unwrap();
+            let expected = if state_file.version == "26.2" {
+                StateSemanticsMode::Generated
+            } else {
+                StateSemanticsMode::LegacyCompatibility
+            };
+            assert_eq!(
+                state_semantics_mode(&state_file),
+                expected,
+                "unexpected movement/placement/support semantics mode for {}",
+                state_file.version
+            );
+        }
+    }
+
     #[test]
     fn all_tables_build() {
         for data in BLOCK_DATA {
