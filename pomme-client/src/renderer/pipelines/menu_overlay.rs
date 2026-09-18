@@ -779,26 +779,23 @@ impl MenuOverlayPipeline {
                     color,
                     centered,
                 } => {
-                    if let Some(ref gm) = self.mc_glyph_map {
-                        let start_x = if *centered {
-                            *x - self.mc_text_width(text, *scale) / 2.0
-                        } else {
-                            *x
-                        };
-                        let span = TextSpan::new(text.clone(), *color);
-                        push_mc_text(
-                            &mut vertices,
-                            self.text_sources(gm),
-                            &[span],
-                            McTextDraw {
-                                x: start_x,
-                                y: *y,
-                                scale: *scale,
-                                drop_shadow: true,
-                            },
-                            &mut obfuscation_rng,
-                        );
-                    }
+                    let start_x = if *centered {
+                        *x - self.mc_text_width(text, *scale) / 2.0
+                    } else {
+                        *x
+                    };
+                    let span = TextSpan::new(text.clone(), *color);
+                    self.push_text(
+                        &mut vertices,
+                        &[span],
+                        McTextDraw {
+                            x: start_x,
+                            y: *y,
+                            scale: *scale,
+                            drop_shadow: true,
+                        },
+                        &mut obfuscation_rng,
+                    );
                 }
                 MenuElement::TextFlat {
                     x,
@@ -807,21 +804,18 @@ impl MenuOverlayPipeline {
                     scale,
                     color,
                 } => {
-                    if let Some(ref gm) = self.mc_glyph_map {
-                        let span = TextSpan::new(text.clone(), *color);
-                        push_mc_text(
-                            &mut vertices,
-                            self.text_sources(gm),
-                            &[span],
-                            McTextDraw {
-                                x: *x,
-                                y: *y,
-                                scale: *scale,
-                                drop_shadow: false,
-                            },
-                            &mut obfuscation_rng,
-                        );
-                    }
+                    let span = TextSpan::new(text.clone(), *color);
+                    self.push_text(
+                        &mut vertices,
+                        &[span],
+                        McTextDraw {
+                            x: *x,
+                            y: *y,
+                            scale: *scale,
+                            drop_shadow: false,
+                        },
+                        &mut obfuscation_rng,
+                    );
                 }
                 MenuElement::TextSpans {
                     x,
@@ -835,20 +829,17 @@ impl MenuOverlayPipeline {
                     } else {
                         *x
                     };
-                    if let Some(ref gm) = self.mc_glyph_map {
-                        push_mc_text(
-                            &mut vertices,
-                            self.text_sources(gm),
-                            spans,
-                            McTextDraw {
-                                x: start_x,
-                                y: *y,
-                                scale: *scale,
-                                drop_shadow: true,
-                            },
-                            &mut obfuscation_rng,
-                        );
-                    }
+                    self.push_text(
+                        &mut vertices,
+                        spans,
+                        McTextDraw {
+                            x: start_x,
+                            y: *y,
+                            scale: *scale,
+                            drop_shadow: true,
+                        },
+                        &mut obfuscation_rng,
+                    );
                 }
                 MenuElement::Icon {
                     x,
@@ -969,25 +960,22 @@ impl MenuOverlayPipeline {
                     centered,
                     shadow,
                 } => {
-                    if let Some(ref gm) = self.mc_glyph_map {
-                        let start_x = if *centered {
-                            *x - self.spans_width(spans, *scale) / 2.0
-                        } else {
-                            *x
-                        };
-                        push_mc_text(
-                            &mut vertices,
-                            self.text_sources(gm),
-                            spans,
-                            McTextDraw {
-                                x: start_x,
-                                y: *y,
-                                scale: *scale,
-                                drop_shadow: *shadow,
-                            },
-                            &mut obfuscation_rng,
-                        );
-                    }
+                    let start_x = if *centered {
+                        *x - self.spans_width(spans, *scale) / 2.0
+                    } else {
+                        *x
+                    };
+                    self.push_text(
+                        &mut vertices,
+                        spans,
+                        McTextDraw {
+                            x: start_x,
+                            y: *y,
+                            scale: *scale,
+                            drop_shadow: *shadow,
+                        },
+                        &mut obfuscation_rng,
+                    );
                 }
                 MenuElement::McTextRotated {
                     x,
@@ -998,22 +986,19 @@ impl MenuOverlayPipeline {
                     scale,
                     shadow,
                 } => {
-                    if let Some(ref gm) = self.mc_glyph_map {
-                        let start = vertices.len();
-                        push_mc_text(
-                            &mut vertices,
-                            self.text_sources(gm),
-                            spans,
-                            McTextDraw {
-                                x: *x,
-                                y: *y,
-                                scale: *scale,
-                                drop_shadow: *shadow,
-                            },
-                            &mut obfuscation_rng,
-                        );
-                        rotate_verts(&mut vertices[start..], *pivot, *rotation);
-                    }
+                    let start = vertices.len();
+                    self.push_text(
+                        &mut vertices,
+                        spans,
+                        McTextDraw {
+                            x: *x,
+                            y: *y,
+                            scale: *scale,
+                            drop_shadow: *shadow,
+                        },
+                        &mut obfuscation_rng,
+                    );
+                    rotate_verts(&mut vertices[start..], *pivot, *rotation);
                 }
                 MenuElement::GradientRect {
                     x,
@@ -1254,9 +1239,8 @@ impl MenuOverlayPipeline {
                 for (i, line) in lines.iter().enumerate() {
                     let span = TextSpan::new(line.clone(), white);
                     let line_y = text_y + i as f32 * line_h;
-                    push_mc_text(
+                    self.push_text(
                         &mut vertices,
-                        self.text_sources(gm),
                         &[span],
                         McTextDraw {
                             x: text_x,
@@ -1330,9 +1314,8 @@ impl MenuOverlayPipeline {
                         text_x
                     };
                     let line_y = text_y + i as f32 * line_h;
-                    push_mc_text(
+                    self.push_text(
                         &mut vertices,
-                        self.text_sources(gm),
                         &line.spans,
                         McTextDraw {
                             x: line_x,
@@ -1604,11 +1587,21 @@ impl MenuOverlayPipeline {
         (raw * scale / gm.cell_h as f32).ceil()
     }
 
-    fn text_sources<'a>(&'a self, gm: &'a GlyphMap) -> McTextSources<'a> {
-        McTextSources {
-            gm,
-            dynamic_regions: &self.favicon_regions,
-            sprite_atlas: &self.sprite_atlas,
+    /// Pushes Minecraft-font text; nothing when no fonts loaded.
+    fn push_text(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        spans: &[TextSpan],
+        draw: McTextDraw,
+        obfuscation_rng: &mut ObfuscationRng,
+    ) {
+        if let Some(gm) = &self.mc_glyph_map {
+            let sources = McTextSources {
+                gm,
+                dynamic_regions: &self.favicon_regions,
+                sprite_atlas: &self.sprite_atlas,
+            };
+            push_mc_text(vertices, sources, spans, draw, obfuscation_rng);
         }
     }
 
@@ -4014,10 +4007,8 @@ fn push_nine_slice(
     }
 }
 
-/// Vanilla's obfuscated style swaps a non-space glyph for a random glyph of the
-/// same width. `Font` owns one `RandomSource` and draws one bounded value per
-/// obfuscated glyph, so keep equivalent persistent LegacyRandomSource state on
-/// the renderer.
+/// Vanilla `Font`'s persistent `RandomSource` (LegacyRandomSource), drawn once
+/// per obfuscated glyph.
 #[derive(Clone, Copy)]
 struct ObfuscationRng {
     seed: u64,
@@ -4333,9 +4324,8 @@ fn push_mc_effect(verts: &mut Vec<Vertex>, effect: &McEffect, shadow_offset: f32
     push_mc_fill(verts, x0, y0, w, h, effect.color);
 }
 
-/// A hard-edged fill (vanilla effects are plain quads, not the rounded-rect
-/// SDF). Glyph colors are linearized in the shader; this quad goes through the
-/// plain premultiplied mode, so convert here.
+/// A hard-edged effect quad in the premultiplied mode, linearized here as the
+/// shader does for glyphs.
 fn push_mc_fill(verts: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
     let a = color[3];
     let linear = |c: f32| c.powf(2.2) * a;
