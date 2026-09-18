@@ -1147,11 +1147,12 @@ impl Translation {
             }
         } else if v775.is_some_and(|v| id == v.set_player_team_id) {
             translate_team(id, payload, v769)
-        } else if self.recipe_display_protocol && id == self.recipe_book_add_id {
+        } else if v777.is_none() && self.recipe_display_protocol && id == self.recipe_book_add_id {
             translate_recipe_book_add(id, payload, self.to_native, self.recipe_old_profile)
-        } else if self.recipe_display_protocol && id == self.update_recipes_id {
+        } else if v777.is_none() && self.recipe_display_protocol && id == self.update_recipes_id {
             translate_update_recipes(id, payload, self.to_native, self.recipe_old_profile)
-        } else if self.recipe_display_protocol && id == self.place_ghost_recipe_id {
+        } else if v777.is_none() && self.recipe_display_protocol && id == self.place_ghost_recipe_id
+        {
             translate_place_ghost_recipe(id, payload, self.to_native, self.recipe_old_profile)
         } else if let Some(ids) = &self.game_ids {
             // Pre-1.20.2 wire NBT carries an empty root name the native
