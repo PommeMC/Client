@@ -1483,13 +1483,52 @@ impl MenuOverlayPipeline {
                         && let azalea_inventory::ItemStack::Present(data) =
                             &items[*selected as usize]
                     {
+                        // Vanilla ClientBundleTooltip calls graphics.tooltip for the
+                        // selected stack name: it is a second framed tooltip positioned
+                        // 15px above the bundle image, not text drawn inside this frame.
                         let name = crate::ui::common::item_display_name(data);
                         let name_w = self.mc_text_width(&name, fs);
+                        let selected_x = left + content_w / 2.0 - 12.0 * gs - name_w / 2.0;
+                        let selected_y = top - 15.0 * gs;
+                        let selected_padding = 3.0 * gs;
+                        let selected_margin = 9.0 * gs;
+                        let selected_inset = selected_padding + selected_margin;
+                        let selected_bg_x = selected_x - selected_inset;
+                        let selected_bg_y = selected_y - selected_inset;
+                        let selected_bg_w = name_w + 2.0 * selected_inset;
+                        let selected_bg_h = 9.0 * gs + 2.0 * selected_inset;
+                        if let Some(bg) =
+                            self.sprite_atlas.regions.get(&SpriteId::TooltipBackground)
+                        {
+                            push_nine_slice(
+                                &mut vertices,
+                                selected_bg_x,
+                                selected_bg_y,
+                                selected_bg_w,
+                                selected_bg_h,
+                                bg,
+                                selected_margin,
+                                white,
+                            );
+                        }
+                        if let Some(frame) = self.sprite_atlas.regions.get(&SpriteId::TooltipFrame)
+                        {
+                            push_nine_slice(
+                                &mut vertices,
+                                selected_bg_x,
+                                selected_bg_y,
+                                selected_bg_w,
+                                selected_bg_h,
+                                frame,
+                                10.0 * gs,
+                                white,
+                            );
+                        }
                         push_mc_text(
                             &mut vertices,
                             gm,
-                            left + content_w / 2.0 - name_w / 2.0,
-                            top - 12.0 * gs,
+                            selected_x,
+                            selected_y,
                             &[TextSpan::new(name, white)],
                             fs,
                             true,

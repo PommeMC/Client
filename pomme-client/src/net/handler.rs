@@ -216,23 +216,31 @@ pub fn handle_game_packet(
             ));
         }
         ClientboundGamePacket::ContainerSetContent(p) => {
+            let mut items = p.items.clone();
+            let mut carried = p.carried_item.clone();
+            for stack in &mut items {
+                super::bundle_codec::normalize_26_2_templates(stack);
+            }
+            super::bundle_codec::normalize_26_2_templates(&mut carried);
             let _ = event_tx.try_send(NetworkEvent::ContainerContent {
                 container_id: p.container_id,
-                items: p.items.clone(),
-                carried: p.carried_item.clone(),
+                items,
+                carried,
                 state_id: p.state_id,
             });
         }
         ClientboundGamePacket::SetCursorItem(p) => {
-            let _ = event_tx.try_send(NetworkEvent::CursorItem {
-                item: p.contents.clone(),
-            });
+            let mut item = p.contents.clone();
+            super::bundle_codec::normalize_26_2_templates(&mut item);
+            let _ = event_tx.try_send(NetworkEvent::CursorItem { item });
         }
         ClientboundGamePacket::ContainerSetSlot(p) => {
+            let mut item = p.item_stack.clone();
+            super::bundle_codec::normalize_26_2_templates(&mut item);
             let _ = event_tx.try_send(NetworkEvent::ContainerSlot {
                 container_id: p.container_id,
                 index: p.slot,
-                item: p.item_stack.clone(),
+                item,
                 state_id: p.state_id,
             });
         }

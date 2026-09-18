@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod azalea_compat;
+mod bundle_codec;
 pub(crate) mod chat;
 pub(crate) mod chat_security;
 pub mod chunk_batch;
