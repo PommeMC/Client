@@ -337,26 +337,6 @@ pub struct MultipartEntry {
     pub quads: Vec<BakedQuad>,
 }
 
-const FOLIAGE_TINTED: &[&str] = &[
-    "oak_leaves",
-    "dark_oak_leaves",
-    "jungle_leaves",
-    "acacia_leaves",
-    "mangrove_leaves",
-    "vine",
-];
-
-const DRY_FOLIAGE_TINTED: &[&str] = &["leaf_litter"];
-
-const GRASS_TINTED: &[&str] = &[
-    "grass_block",
-    "grass",
-    "short_grass",
-    "tall_grass",
-    "fern",
-    "large_fern",
-];
-
 pub fn load_all_block_textures(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
@@ -410,7 +390,6 @@ pub fn bake_all_models(
         packs,
         |block_name, blockstate| {
             total += 1;
-            let block_tint = determine_tint(block_name);
             let mut variants_map: HashMap<String, BakedModel> = HashMap::new();
 
             if let Some(variants) = &blockstate.variants {
@@ -424,8 +403,9 @@ pub fn bake_all_models(
                         packs,
                     );
                     if let Some(mut baked) =
-                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
+                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)
                     {
+                        apply_block_tints(&mut baked, block_name);
                         if is_non_occluding(block_name) {
                             baked.occludes = false;
                         }
@@ -443,9 +423,10 @@ pub fn bake_all_models(
                         &mut model_cache,
                         packs,
                     );
-                    if let Some(baked) =
-                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
+                    if let Some(mut baked) =
+                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)
                     {
+                        apply_block_tints(&mut baked, block_name);
                         let when = parse_when_condition(&case.when);
                         entries.push(MultipartEntry {
                             when,
@@ -1726,7 +1707,7 @@ fn face_textures_base(
         get("west"),
     );
 
-    let tint = determine_tint(block_name);
+    let tint = determine_tint(block_name, 0);
 
     if let (Some(up), Some(down), Some(north), Some(south), Some(east), Some(west)) =
         (up, down, north, south, east, west)
@@ -1808,20 +1789,43 @@ fn is_non_occluding(block_name: &str) -> bool {
         || matches!(block_name, "glass" | "tinted_glass" | "ice" | "frosted_ice")
 }
 
-fn determine_tint(block_name: &str) -> Tint {
-    if block_name == "redstone_wire" {
-        Tint::Redstone
-    } else if GRASS_TINTED.contains(&block_name) {
-        Tint::Grass
-    } else if DRY_FOLIAGE_TINTED.contains(&block_name) {
-        Tint::DryFoliage
-    } else if FOLIAGE_TINTED.contains(&block_name) || block_name.ends_with("_leaves") {
-        // TODO: spruce_leaves and birch_leaves use fixed constant colors in
-        // vanilla (BlockColors), not biome foliage; the `_leaves` suffix rule
-        // mistints them.
-        Tint::Foliage
-    } else {
-        Tint::None
+fn apply_block_tints(model: &mut BakedModel, block_name: &str) {
+    for quad in &mut model.quads {
+        quad.tint = quad
+            .item_tint_index
+            .map_or(Tint::None, |index| determine_tint(block_name, index));
+    }
+}
+
+/// Vanilla 26.2 `BlockColors.createDefault`, indexed by model `tintindex`.
+///
+/// Most blocks use layer 0. Pink petals and wildflowers intentionally register
+/// a blank layer 0 and grass on layer 1, so tint selection must be per quad.
+fn determine_tint(block_name: &str, tint_index: u32) -> Tint {
+    match (block_name, tint_index) {
+        ("redstone_wire", 0) => Tint::Redstone,
+
+        ("large_fern" | "tall_grass", 0) => Tint::DoubleGrass,
+        ("fern" | "short_grass" | "potted_fern" | "bush" | "grass_block" | "sugar_cane", 0) => {
+            Tint::Grass
+        }
+        ("pink_petals" | "wildflowers", 1) => Tint::Grass,
+
+        ("spruce_leaves", 0) => Tint::Constant(0x619961),
+        ("birch_leaves", 0) => Tint::Constant(0x80A755),
+        (
+            "oak_leaves" | "jungle_leaves" | "acacia_leaves" | "dark_oak_leaves" | "vine"
+            | "mangrove_leaves",
+            0,
+        ) => Tint::Foliage,
+        ("leaf_litter", 0) => Tint::DryFoliage,
+
+        ("water_cauldron", 0) => Tint::Water,
+        ("attached_melon_stem" | "attached_pumpkin_stem", 0) => Tint::Constant(0xE0C71C),
+        ("melon_stem" | "pumpkin_stem", 0) => Tint::Stem,
+        ("lily_pad", 0) => Tint::Constant(0x208030),
+
+        _ => Tint::None,
     }
 }
 
@@ -2008,6 +2012,64 @@ mod tests {
         assert_eq!(parts[1].path, "block/red_bed_foot");
         let moved = parts[1].transform.unwrap().transform_point3(Vec3::ZERO);
         assert!((moved - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn vanilla_block_tint_sources_match_26_2_registration() {
+        assert_eq!(determine_tint("fern", 0), Tint::Grass);
+        assert_eq!(determine_tint("bush", 0), Tint::Grass);
+        assert_eq!(determine_tint("large_fern", 0), Tint::DoubleGrass);
+        assert_eq!(determine_tint("tall_grass", 0), Tint::DoubleGrass);
+        assert_eq!(determine_tint("pink_petals", 0), Tint::None);
+        assert_eq!(determine_tint("pink_petals", 1), Tint::Grass);
+        assert_eq!(determine_tint("spruce_leaves", 0), Tint::Constant(0x619961));
+        assert_eq!(determine_tint("birch_leaves", 0), Tint::Constant(0x80A755));
+        assert_eq!(determine_tint("oak_leaves", 0), Tint::Foliage);
+        assert_eq!(determine_tint("leaf_litter", 0), Tint::DryFoliage);
+        assert_eq!(determine_tint("water_cauldron", 0), Tint::Water);
+        assert_eq!(determine_tint("redstone_wire", 0), Tint::Redstone);
+        assert_eq!(determine_tint("sugar_cane", 0), Tint::Grass);
+        assert_eq!(
+            determine_tint("attached_melon_stem", 0),
+            Tint::Constant(0xE0C71C)
+        );
+        assert_eq!(determine_tint("melon_stem", 0), Tint::Stem);
+        assert_eq!(determine_tint("lily_pad", 0), Tint::Constant(0x208030));
+        assert_eq!(determine_tint("stone", 0), Tint::None);
+    }
+
+    #[test]
+    fn block_tint_is_applied_only_to_tintindexed_quads() {
+        let mut model = BakedModel {
+            quads: vec![
+                BakedQuad {
+                    positions: [[0.0; 3]; 4],
+                    uvs: [[0.0; 2]; 4],
+                    texture: "fern".to_string(),
+                    cullface: None,
+                    tint: Tint::None,
+                    item_tint_index: Some(0),
+                    shade_light: 1.0,
+                    shade_face: None,
+                },
+                BakedQuad {
+                    positions: [[0.0; 3]; 4],
+                    uvs: [[0.0; 2]; 4],
+                    texture: "fern_overlay".to_string(),
+                    cullface: None,
+                    tint: Tint::None,
+                    item_tint_index: None,
+                    shade_light: 1.0,
+                    shade_face: None,
+                },
+            ],
+            is_full_cube: false,
+            occludes: false,
+        };
+
+        apply_block_tints(&mut model, "fern");
+        assert_eq!(model.quads[0].tint, Tint::Grass);
+        assert_eq!(model.quads[1].tint, Tint::None);
     }
 
     #[test]

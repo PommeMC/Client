@@ -273,6 +273,7 @@ pub struct BiomeClimate {
     pub grass_color_modifier: GrassColorModifier,
     pub foliage_color_override: Option<[f32; 3]>,
     pub dry_foliage_color_override: Option<[f32; 3]>,
+    pub water_color: [f32; 3],
 }
 
 impl Default for BiomeClimate {
@@ -284,28 +285,39 @@ impl Default for BiomeClimate {
             grass_color_modifier: GrassColorModifier::None,
             foliage_color_override: None,
             dry_foliage_color_override: None,
+            water_color: int_to_rgb(0x3F76E4),
         }
     }
 }
 
-/// For paths `Tint::Redstone` can't reach (redstone wire always has multipart
-/// quads): greedy meshing and plain cubes.
-const NO_REDSTONE: fn() -> [f32; 3] = || [1.0; 3];
-
 fn tint_color(
     tint: Tint,
-    grass: [f32; 3],
-    foliage: [f32; 3],
-    dry_foliage: [f32; 3],
-    redstone: impl FnOnce() -> [f32; 3],
+    snapshot: &ChunkStoreSnapshot,
+    state: BlockState,
+    x: i32,
+    y: i32,
+    z: i32,
 ) -> u32 {
-    match tint {
-        Tint::None => PACKED_WHITE_SHIFTED,
-        Tint::Grass => pack_tint_shifted(grass),
-        Tint::Foliage => pack_tint_shifted(foliage),
-        Tint::DryFoliage => pack_tint_shifted(dry_foliage),
-        Tint::Redstone => pack_tint_shifted(redstone()),
-    }
+    let color = match tint {
+        Tint::None => return PACKED_WHITE_SHIFTED,
+        Tint::Grass => snapshot.grass_tint(x, y, z),
+        Tint::DoubleGrass => {
+            let sample_y =
+                if crate::world::block::block_properties(state).get("half") == Some("upper") {
+                    y - 1
+                } else {
+                    y
+                };
+            snapshot.grass_tint(x, sample_y, z)
+        }
+        Tint::Foliage => snapshot.foliage_tint(x, y, z),
+        Tint::DryFoliage => snapshot.dry_foliage_tint(x, y, z),
+        Tint::Water => snapshot.water_tint(x, y, z),
+        Tint::Constant(color) => int_to_rgb(color as i32),
+        Tint::Redstone => crate::world::block::redstone_wire_rgb(state),
+        Tint::Stem => crate::world::block::stem_rgb(state),
+    };
+    pack_tint_shifted(color)
 }
 
 const MAX_MESH_UPLOADS_PER_FRAME: usize = 32;
@@ -1210,6 +1222,10 @@ impl ChunkStoreSnapshot {
         dry_foliage_color(&self.climate_at(x, y, z), &self.dry_foliage_colormap)
     }
 
+    fn water_color_at(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        self.climate_at(x, y, z).water_color
+    }
+
     fn grass_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
         blend_color(x, z, |bx, bz| self.grass_color_at(bx, y, bz))
     }
@@ -1220,6 +1236,10 @@ impl ChunkStoreSnapshot {
 
     fn dry_foliage_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
         blend_color(x, z, |bx, bz| self.dry_foliage_color_at(bx, y, bz))
+    }
+
+    fn water_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        blend_color(x, z, |bx, bz| self.water_color_at(bx, y, bz))
     }
 
     fn get_light(&self, x: i32, y: i32, z: i32) -> f32 {
@@ -1396,12 +1416,14 @@ fn greedy_mesh_section(
             let [x0, _, z0] = verts_uvs[0].0;
             let block_x = x0 as i32 + world_x;
             let block_z = z0 as i32 + world_z;
+            let state = snapshot.get_block_state(block_x, section_y, block_z);
             let tint = tint_color(
                 info.textures.tint,
-                snapshot.grass_tint(block_x, section_y, block_z),
-                snapshot.foliage_tint(block_x, section_y, block_z),
-                snapshot.dry_foliage_tint(block_x, section_y, block_z),
-                NO_REDSTONE,
+                snapshot,
+                state,
+                block_x,
+                section_y,
+                block_z,
             );
 
             let ao = quad.ao_levels();
@@ -1588,7 +1610,7 @@ fn mesh_chunk_snapshot(
                     );
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
-                        sink, block_pos, textures, snapshot, registry, uv_map, bx, by, bz,
+                        sink, block_pos, state, textures, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else {
                     let id = crate::world::block::block_id(state);
@@ -1669,13 +1691,7 @@ fn emit_baked_model(
         }
 
         let region = uv_map.get_region(&quad.texture);
-        let tint = tint_color(
-            quad.tint,
-            snapshot.grass_tint(bx, by, bz),
-            snapshot.foliage_tint(bx, by, bz),
-            snapshot.dry_foliage_tint(bx, by, bz),
-            || crate::world::block::redstone_wire_rgb(state),
-        );
+        let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, registry, bx, by, bz, dir, quad.shade_face)
         } else {
@@ -1697,6 +1713,7 @@ fn emit_baked_model(
 fn emit_cube_faces(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
+    state: BlockState,
     textures: &crate::world::block::registry::FaceTextures,
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -1705,13 +1722,7 @@ fn emit_cube_faces(
     by: i32,
     bz: i32,
 ) {
-    let tint = tint_color(
-        textures.tint,
-        snapshot.grass_tint(bx, by, bz),
-        snapshot.foliage_tint(bx, by, bz),
-        snapshot.dry_foliage_tint(bx, by, bz),
-        NO_REDSTONE,
-    );
+    let tint = tint_color(textures.tint, snapshot, state, bx, by, bz);
 
     for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
         let offset = dir.offset();
@@ -1810,18 +1821,12 @@ fn block_face_tex_tint(
     match classify_block(state) {
         BlockKind::Water => (
             uv_map.get_region("water_still"),
-            pack_tint_shifted([0.247, 0.463, 0.894]),
+            pack_tint_shifted(snapshot.water_tint(bx, by, bz)),
         ),
         BlockKind::Lava => (uv_map.get_region("lava_still"), PACKED_WHITE_SHIFTED),
         _ => {
             if let Some(textures) = registry.get_textures(state) {
-                let tint = tint_color(
-                    textures.tint,
-                    snapshot.grass_tint(bx, by, bz),
-                    snapshot.foliage_tint(bx, by, bz),
-                    snapshot.dry_foliage_tint(bx, by, bz),
-                    NO_REDSTONE,
-                );
+                let tint = tint_color(textures.tint, snapshot, state, bx, by, bz);
                 let tex_name = match dir {
                     Direction::Up => &textures.top,
                     Direction::Down => &textures.bottom,
@@ -1937,13 +1942,7 @@ fn emit_multipart(
         }
 
         let region = uv_map.get_region(&quad.texture);
-        let tint = tint_color(
-            quad.tint,
-            snapshot.grass_tint(bx, by, bz),
-            snapshot.foliage_tint(bx, by, bz),
-            snapshot.dry_foliage_tint(bx, by, bz),
-            || crate::world::block::redstone_wire_rgb(state),
-        );
+        let tint = tint_color(quad.tint, snapshot, state, bx, by, bz);
         emit_face(
             sink,
             block_pos,

@@ -8,7 +8,7 @@ use azalea_registry::Registry as AzaleaRegistry;
 use azalea_registry::builtin::{MobEffect, Potion};
 use serde::{Deserialize, Serialize};
 
-pub const BLOCK_CACHE_FILE: &str = "block_cache_v3.json";
+pub const BLOCK_CACHE_FILE: &str = "block_cache_v4.json";
 
 use super::model;
 use super::model::BakedModel;
@@ -18,10 +18,18 @@ use crate::assets::AssetIndex;
 pub enum Tint {
     None,
     Grass,
+    /// Tall grass and large fern sample the lower block's biome for their upper
+    /// half.
+    DoubleGrass,
     Foliage,
     DryFoliage,
+    Water,
+    /// Fixed vanilla block tint color (`0xRRGGBB`).
+    Constant(u32),
     /// Power-level color, resolved at mesh time from the state's `power`.
     Redstone,
+    /// Age-dependent melon/pumpkin stem color.
+    Stem,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
