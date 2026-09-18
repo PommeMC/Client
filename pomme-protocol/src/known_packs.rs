@@ -8,9 +8,6 @@
 //! its own copy of the pack — the jar's `data/<ns>/<registry>/<id>.json`, read
 //! through `NetworkRegistryLoadTask`. These tables are that copy, generated
 //! from the extracted reference by `tools/protogen knownpacks`.
-//!
-//! Only versions with a table can claim anything; the rest answer with an
-//! empty list and get full registry data.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

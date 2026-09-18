@@ -3156,20 +3156,12 @@ fn translate_tag_query_763() {
 /// after it. Claiming the pack is only safe while this holds.
 #[test]
 fn embedded_known_pack_elements_deserialize_through_azalea() {
-    use crate::net::known_packs::{data_less_entries, fill_known_entries};
-
     for (registry, elements) in pomme_protocol::KnownPackTable::native().registries() {
-        let registry_id = Identifier::new(format!("minecraft:{registry}"));
-        let sent = data_less_entries(registry);
-        let filled =
-            fill_known_entries(&registry_id, sent).unwrap_or_else(|e| panic!("{registry}: {e}"));
-
-        let mut holder = azalea_core::registry_holder::RegistryHolder::default();
-        holder.append(registry_id.clone(), filled);
+        let holder = crate::net::known_packs::filled_holder(registry);
         let kept = match registry {
             "dimension_type" => holder.dimension_type.map.len(),
             "enchantment" => holder.enchantment.map.len(),
-            _ => holder.extra[&registry_id].map.len(),
+            _ => holder.extra.values().map(|r| r.map.len()).sum(),
         };
         assert_eq!(kept, elements.count(), "{registry}: entries were dropped");
 

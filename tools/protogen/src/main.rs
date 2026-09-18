@@ -53,32 +53,19 @@ const FIRST_CONFIGURATION_PROTOCOL: i32 = 764;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("registries") {
+    type Mode = fn(&Path, &str, &str) -> Result<(), Error>;
+    let modes: [(&str, Mode); 2] = [
+        ("registries", generate_registries),
+        ("knownpacks", known_packs::generate),
+    ];
+    if let Some((name, mode)) = modes
+        .iter()
+        .find(|(name, _)| args.first().map(String::as_str) == Some(name))
+    {
         return match args.as_slice() {
-            [_, root, version, out] => match generate_registries(Path::new(root), version, out) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("protogen: {e}");
-                    ExitCode::FAILURE
-                }
-            },
+            [_, root, version, out] => exit_code(mode(Path::new(root), version, out)),
             _ => {
-                eprintln!("usage: protogen registries <reference-root> <version> <out.json>");
-                ExitCode::FAILURE
-            }
-        };
-    }
-    if args.first().map(String::as_str) == Some("knownpacks") {
-        return match args.as_slice() {
-            [_, root, version, out] => match known_packs::generate(Path::new(root), version, out) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("protogen: {e}");
-                    ExitCode::FAILURE
-                }
-            },
-            _ => {
-                eprintln!("usage: protogen knownpacks <reference-root> <version> <out.json>");
+                eprintln!("usage: protogen {name} <reference-root> <version> <out.json>");
                 ExitCode::FAILURE
             }
         };
@@ -97,7 +84,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match generate(Path::new(root), version, out, protocol_override) {
+    exit_code(generate(Path::new(root), version, out, protocol_override))
+}
+
+fn exit_code(result: Result<(), Error>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("protogen: {e}");

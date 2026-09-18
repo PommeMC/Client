@@ -1,13 +1,7 @@
-//! Generates a version's known-pack table: the packs the client can claim in
-//! `select_known_packs`, plus the element data of every synchronized registry
-//! they carry.
-//!
-//! When the client claims a pack, the server sends that pack's registry
-//! entries with no NBT (`RegistrySynchronization.packRegistry`) and the client
-//! fills them from its own copy of the pack's files
-//! (`NetworkRegistryLoadTask`, reading `data/<ns>/<registry>/<id>.json` through
-//! `FileToIdConverter.registry`). Pomme has no jar to read, so the elements are
-//! generated from the extracted reference and embedded.
+//! Generates a version's known-pack table (see pomme-protocol's
+//! `known_packs`): the packs the client can claim in `select_known_packs`,
+//! plus the element data of every synchronized registry they carry, read from
+//! the extracted `data/<ns>/<registry>/<id>.json` files.
 
 use std::path::Path;
 
@@ -54,10 +48,11 @@ const SYNCHRONIZED_REGISTRIES: [&str; 29] = [
     "timeline",
 ];
 
-/// `Biome.NETWORK_CODEC` reads only the climate settings, the positional
+/// `Biome.NETWORK_CODEC` reads only the climate settings, the syncable
 /// attributes and the special effects; the worldgen and spawner halves of the
 /// file belong to `DIRECT_CODEC` and never reach a client. Dropping them takes
-/// the biome data from ~240KB to ~20KB.
+/// the biome data from ~240KB to ~20KB. The attributes stay unfiltered, as
+/// pomme reads none of them.
 const BIOME_NETWORK_FIELDS: [&str; 6] = [
     "has_precipitation",
     "temperature",
@@ -83,6 +78,27 @@ pub fn generate(root: &Path, version: &str, out_path: &str) -> Result<(), Error>
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         feature_packs.sort();
+        // A claimed pack's synchronized elements arrive without data, but
+        // only core's are embedded, so a feature pack carrying any would be
+        // filled wrong or not at all.
+        for pack in &feature_packs {
+            let pack_data = datapacks.join(pack).join("data");
+            if !pack_data.is_dir() {
+                continue;
+            }
+            for namespace in std::fs::read_dir(&pack_data)? {
+                let namespace = namespace?;
+                for registry in SYNCHRONIZED_REGISTRIES {
+                    if namespace.path().join(registry).is_dir() {
+                        return Err(format!(
+                            "{pack} carries {}:{registry} elements; claiming it needs per-pack tables",
+                            namespace.file_name().to_string_lossy()
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
         packs.extend(feature_packs.into_iter().map(serde_json::Value::from));
     }
 

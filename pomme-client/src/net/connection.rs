@@ -553,9 +553,6 @@ async fn config_sequence(
             ClientboundConfigPacket::SelectKnownPacks(p) => {
                 // Vanilla `handleSelectKnownPacks`: claim the offered packs we
                 // have ourselves, so the server can skip their registry data.
-                // Anything we don't claim arrives with its NBT, which is what
-                // `variant_index` (handler.rs) needs to equate registry-map
-                // position with protocol id.
                 let known_packs = super::known_packs::select_packs(&p.known_packs);
                 selected_known_packs = !known_packs.is_empty();
                 write_config_packet(
@@ -979,20 +976,11 @@ mod tests {
     fn filled_biome_entries_carry_their_climate() {
         use azalea_registry::identifier::Identifier;
 
-        use crate::net::known_packs::{data_less_entries, fill_known_entries};
-
-        let registry = Identifier::new("minecraft:worldgen/biome");
-        let sent = data_less_entries("worldgen/biome");
-        let plains_id = sent
-            .iter()
-            .position(|(id, _)| id.path() == "plains")
+        let holder = crate::net::known_packs::filled_holder("worldgen/biome");
+        let plains_id = holder.extra[&Identifier::new("minecraft:worldgen/biome")]
+            .map
+            .get_index_of(&Identifier::new("minecraft:plains"))
             .expect("plains biome") as u32;
-
-        let mut holder = azalea_core::registry_holder::RegistryHolder::default();
-        holder.append(
-            registry.clone(),
-            fill_known_entries(&registry, sent).unwrap(),
-        );
 
         let plains = &extract_biome_climate(&holder)[&plains_id];
         assert_eq!(plains.temperature, 0.8);
