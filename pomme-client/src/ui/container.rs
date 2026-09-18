@@ -140,7 +140,23 @@ pub fn push_panel(
     panel_h: f32,
     sprite: SpriteId,
 ) -> Panel {
-    let panel = push_backdrop(elements, screen_w, screen_h, gs, 176.0, panel_h);
+    push_panel_offset(elements, screen_w, screen_h, gs, panel_h, sprite, 0.0)
+}
+
+/// Container panel with a horizontal GUI-unit offset from the normal centered
+/// position. Vanilla recipe-book screens shift the main 176-wide panel by 77
+/// GUI units when the book is open on a wide screen.
+pub fn push_panel_offset(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    panel_h: f32,
+    sprite: SpriteId,
+    x_offset: f32,
+) -> Panel {
+    let mut panel = push_backdrop(elements, screen_w, screen_h, gs, 176.0, panel_h);
+    panel.ox += x_offset * panel.scale;
     panel.image(elements, sprite, 0.0, 0.0, 176.0, panel_h);
     panel
 }
@@ -162,32 +178,6 @@ pub fn push_clipped_sprite(
     });
     panel.image(elements, sprite, rect[0], rect[1], rect[2], rect[3]);
     elements.push(MenuElement::ScissorPop);
-}
-
-/// The (inert) recipe book toggle at GUI-unit position.
-pub fn push_recipe_book_button(
-    elements: &mut Vec<MenuElement>,
-    panel: &Panel,
-    cursor: (f32, f32),
-    x: f32,
-    y: f32,
-) {
-    let bx = panel.ox + x * panel.scale;
-    let by = panel.oy + y * panel.scale;
-    let w = 20.0 * panel.scale;
-    let h = 18.0 * panel.scale;
-    elements.push(MenuElement::Image {
-        x: bx,
-        y: by,
-        w,
-        h,
-        sprite: if hit_test(cursor, [bx, by, w, h]) {
-            SpriteId::RecipeBookButtonHighlighted
-        } else {
-            SpriteId::RecipeBookButton
-        },
-        tint: WHITE,
-    });
 }
 
 /// Per-frame slot drawing context: positions slots in GUI units, substitutes

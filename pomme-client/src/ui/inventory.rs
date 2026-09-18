@@ -5,8 +5,7 @@ use azalea_inventory::operations::ClickOperation;
 
 use super::common::SLOT_STRIDE;
 use super::container::{
-    ContainerInput, DragState, SlotCtx, push_cursor_stack, push_panel, push_recipe_book_button,
-    resolve_gesture,
+    ContainerInput, DragState, SlotCtx, push_cursor_stack, push_panel_offset, resolve_gesture,
 };
 use crate::player::inventory::{self, Inventory};
 use crate::player::menu_click::ContainerKind;
@@ -48,14 +47,16 @@ pub fn build_inventory(
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
+    x_offset: f32,
 ) -> InventoryResult {
-    let panel = push_panel(
+    let panel = push_panel_offset(
         elements,
         screen_w,
         screen_h,
         gs,
         166.0,
         SpriteId::InventoryBackground,
+        x_offset,
     );
     panel.label(elements, 97.0, 6.0, "Crafting");
 
@@ -114,7 +115,6 @@ pub fn build_inventory(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 
-    push_recipe_book_button(elements, &panel, cursor, 104.0, 61.0);
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
 
     let (ops, clicked_outside) = resolve_gesture(

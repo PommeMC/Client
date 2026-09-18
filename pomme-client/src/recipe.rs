@@ -179,17 +179,26 @@ pub struct GhostRecipe {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ItemTags {
     tags: HashMap<String, HashSet<u32>>,
+    ordered: HashMap<String, Vec<u32>>,
 }
 
 #[allow(dead_code)]
 impl ItemTags {
     pub fn from_entries(entries: impl IntoIterator<Item = (String, Vec<u32>)>) -> Self {
-        Self {
-            tags: entries
-                .into_iter()
-                .map(|(name, items)| (name, items.into_iter().collect()))
-                .collect(),
+        let mut tags = HashMap::new();
+        let mut ordered = HashMap::new();
+        for (name, items) in entries {
+            let mut seen = HashSet::new();
+            let mut sequence = Vec::new();
+            for item in items {
+                if seen.insert(item) {
+                    sequence.push(item);
+                }
+            }
+            tags.insert(name.clone(), seen);
+            ordered.insert(name, sequence);
         }
+        Self { tags, ordered }
     }
 
     pub fn contains(&self, tag: &str, item: u32) -> bool {
@@ -200,6 +209,10 @@ impl ItemTags {
 
     pub fn get(&self, tag: &str) -> Option<&HashSet<u32>> {
         self.tags.get(tag)
+    }
+
+    pub fn ordered(&self, tag: &str) -> Option<&[u32]> {
+        self.ordered.get(tag).map(Vec::as_slice)
     }
 
     pub fn len(&self) -> usize {
@@ -300,10 +313,11 @@ mod tests {
 
     #[test]
     fn item_tags_are_resolved_sets() {
-        let tags = ItemTags::from_entries([("minecraft:planks".into(), vec![1, 2, 2])]);
+        let tags = ItemTags::from_entries([("minecraft:planks".into(), vec![2, 1, 2])]);
         assert_eq!(tags.len(), 1);
         assert!(tags.contains("minecraft:planks", 1));
         assert!(tags.contains("minecraft:planks", 2));
         assert!(!tags.contains("minecraft:planks", 3));
+        assert_eq!(tags.ordered("minecraft:planks"), Some(&[2, 1][..]));
     }
 }
