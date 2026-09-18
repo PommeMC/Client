@@ -135,11 +135,10 @@ impl InteractionState {
         Self {
             target: None,
             seq: 0,
-            // Vanilla inits `carriedIndex` to 0 and relies on the server also
-            // defaulting to slot 0; we init to a sentinel so the first
-            // interaction always sends the slot, syncing the server even if its
-            // default isn't assumed to match.
-            carried_slot: u8::MAX,
+            // Vanilla `MultiPlayerGameMode.carriedIndex` starts at 0, the slot
+            // a fresh inventory selects, so a join sends nothing until it
+            // changes.
+            carried_slot: 0,
             last_teleport_seq: 0,
             pending_predictions: HashMap::new(),
             is_destroying: false,
