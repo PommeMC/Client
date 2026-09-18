@@ -5,6 +5,7 @@
 //! out of sync, see `handler::handle_raw_game_packet`) — so a failure means
 //! "investigate which side is wrong", with in-game behavior as tiebreaker.
 
+use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::sound::CustomSound;
 use azalea_protocol::packets::ProtocolPacket;
@@ -558,52 +559,608 @@ fn remap_add_entity_26_1() {
     assert_eq!(p.entity_type, EntityKind::Tadpole);
 }
 
-/// azalea's typed encoder always writes 26.2 component-type ids, so a
-/// creative stack whose patch touches a shifted id (78+, where 26.2 inserted
-/// `sulfur_cube_content`) is cleared wholesale outbound; unshifted
-/// components survive.
+/// 26.1's packet ids match 26.2, but its data-component registry shifts at
+/// `sulfur_cube_content`. Keep latest semantic kinds through typed encoding,
+/// then remap removal ids in the raw creative frame.
 #[test]
-fn strip_creative_components_26_1() {
+fn creative_components_26_1_remap_shifted_ids() {
     use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
     use azalea_protocol::packets::game::ServerboundGamePacket;
     use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
     use azalea_registry::builtin::{DataComponentKind, ItemKind};
+    use pomme_protocol::{ClientRegistry, RegistryTable};
 
-    let remap = |kind: DataComponentKind| {
-        let mut patch = DataComponentPatch::default();
-        // A removal marker carries no typed value, making it the safe way to
-        // put an arbitrary kind in the otherwise-opaque patch.
-        unsafe { patch.unchecked_insert_component(kind, None) };
-        let mut packet =
-            ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
-                slot_num: 36,
-                item_stack: ItemStack::Present(ItemStackData {
-                    kind: ItemKind::Stone,
-                    count: 1,
-                    component_patch: patch,
-                }),
-            });
-        translation_for(775).remap_outbound(&mut packet);
-        let ServerboundGamePacket::SetCreativeModeSlot(p) = packet else {
-            unreachable!()
-        };
-        let ItemStack::Present(data) = p.item_stack else {
-            panic!("stack cleared");
-        };
-        data.component_patch
+    let mut patch = DataComponentPatch::default();
+    unsafe {
+        patch.unchecked_insert_component(DataComponentKind::MaxStackSize, None);
+        patch.unchecked_insert_component(DataComponentKind::Lock, None);
+    }
+    let mut packet = ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
+        slot_num: 36,
+        item_stack: ItemStack::Present(ItemStackData {
+            kind: ItemKind::Stone,
+            count: 1,
+            component_patch: patch,
+        }),
+    });
+
+    let translation = translation_for(775);
+    translation.remap_outbound(&mut packet);
+    let ServerboundGamePacket::SetCreativeModeSlot(p) = &packet else {
+        unreachable!()
     };
+    let ItemStack::Present(data) = &p.item_stack else {
+        panic!("stack cleared");
+    };
+    assert_eq!(data.component_patch.iter().count(), 2);
 
-    // max_stack_size (id 1) is numbered the same in 26.1: kept.
-    assert_eq!(remap(DataComponentKind::MaxStackSize).iter().count(), 1);
-    // lock (79 in 26.2, 78 in 26.1) is shifted: the patch is cleared.
-    assert_eq!(remap(DataComponentKind::Lock).iter().count(), 0);
+    let latest = azalea_protocol::write::serialize_packet(&packet).unwrap();
+    let frames = translation.translate_outbound_game_frame(latest.to_vec());
+    assert_eq!(frames.len(), 1);
+    let frame = &frames[0];
+    let mut pos = 0;
+    assert_eq!(
+        wire::read_varint(frame, &mut pos),
+        Some(old_id(
+            775,
+            Direction::Serverbound,
+            "set_creative_mode_slot"
+        ))
+    );
+    pos += 2; // slot
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(1)); // count
+    assert!(wire::read_varint(frame, &mut pos).is_some()); // item id
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(0)); // additions
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(2)); // removals
+
+    let table = RegistryTable::for_protocol(775).unwrap();
+    let mut removed = [
+        wire::read_varint(frame, &mut pos).unwrap(),
+        wire::read_varint(frame, &mut pos).unwrap(),
+    ];
+    removed.sort_unstable();
+    let mut expected = [
+        registry_id(table, ClientRegistry::DataComponentType, "max_stack_size"),
+        registry_id(table, ClientRegistry::DataComponentType, "lock"),
+    ];
+    expected.sort_unstable();
+    assert_eq!(removed, expected);
+    assert_eq!(pos, frame.len());
 }
 
-/// 26.1's game ids match 26.2, so its frames pass through without the id
-/// remap or the outbound reroute; 1.21.11's diverge, so they don't.
+#[test]
+fn creative_nested_stacks_775_use_template_and_stream_patch_framing() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let protocol = 775;
+    let native = RegistryTable::native();
+    let target = RegistryTable::for_protocol(protocol).unwrap();
+    let native_packet = PacketTable::native()
+        .id(
+            Phase::Game,
+            Direction::Serverbound,
+            "set_creative_mode_slot",
+        )
+        .unwrap();
+    let native_dripstone = registry_id(native, ClientRegistry::Item, "dripstone_block");
+    let target_dripstone = registry_id(target, ClientRegistry::Item, "dripstone_block");
+    let native_lock = registry_id(native, ClientRegistry::DataComponentType, "lock");
+    let target_lock = registry_id(target, ClientRegistry::DataComponentType, "lock");
+    assert_ne!(native_dripstone, target_dripstone);
+    assert_ne!(native_lock, target_lock);
+
+    for component in [
+        "use_remainder",
+        "charged_projectiles",
+        "bundle_contents",
+        "container",
+    ] {
+        let mut frame = Vec::new();
+        wire::write_varint(&mut frame, native_packet);
+        frame.extend_from_slice(&36u16.to_be_bytes());
+        wire::write_varint(&mut frame, 1); // outer ordinary ItemStack count
+        wire::write_varint(
+            &mut frame,
+            registry_id(native, ClientRegistry::Item, "stone"),
+        );
+        wire::write_varint(&mut frame, 1); // one outer addition
+        wire::write_varint(&mut frame, 0); // no outer removals
+        wire::write_varint(
+            &mut frame,
+            registry_id(native, ClientRegistry::DataComponentType, component),
+        );
+
+        // Pinned Azalea's native component payload is still ordinary ItemStack.
+        if component != "use_remainder" {
+            wire::write_varint(&mut frame, 1); // one nested stack
+        }
+        wire::write_varint(&mut frame, 1); // nested ordinary stack count
+        wire::write_varint(&mut frame, native_dripstone);
+        wire::write_varint(&mut frame, 1); // nested additions
+        wire::write_varint(&mut frame, 0); // nested removals
+        wire::write_varint(&mut frame, native_lock);
+        write_utf(&mut frame, "pomme:nested_key");
+
+        let translated = translation_for(protocol).translate_outbound_game_frame(frame);
+        assert_eq!(translated.len(), 1, "{component}");
+        let out = &translated[0];
+        let mut pos = 0;
+        assert_eq!(
+            wire::read_varint(out, &mut pos),
+            Some(old_id(
+                protocol,
+                Direction::Serverbound,
+                "set_creative_mode_slot"
+            )),
+            "{component}"
+        );
+        pos += 2; // slot
+        assert_eq!(wire::read_varint(out, &mut pos), Some(1));
+        assert_eq!(
+            wire::read_varint(out, &mut pos),
+            Some(registry_id(target, ClientRegistry::Item, "stone"))
+        );
+        assert_eq!(wire::read_varint(out, &mut pos), Some(1));
+        assert_eq!(wire::read_varint(out, &mut pos), Some(0));
+        assert_eq!(
+            wire::read_varint(out, &mut pos),
+            Some(registry_id(
+                target,
+                ClientRegistry::DataComponentType,
+                component
+            ))
+        );
+        let payload_len = wire::read_varint(out, &mut pos).unwrap() as usize;
+        let payload_end = pos + payload_len;
+
+        if component != "use_remainder" {
+            assert_eq!(wire::read_varint(out, &mut pos), Some(1)); // list size
+        }
+        if component == "container" {
+            assert_eq!(out[pos], 1); // Optional<ItemStackTemplate>::Some
+            pos += 1;
+        }
+        // Mojang 26.1 ItemStackTemplate order is item, count, patch.
+        assert_eq!(wire::read_varint(out, &mut pos), Some(target_dripstone));
+        assert_eq!(wire::read_varint(out, &mut pos), Some(1));
+        assert_eq!(wire::read_varint(out, &mut pos), Some(1)); // nested additions
+        assert_eq!(wire::read_varint(out, &mut pos), Some(0)); // nested removals
+        assert_eq!(wire::read_varint(out, &mut pos), Some(target_lock));
+        // Nested DataComponentPatch.STREAM_CODEC has no per-value length prefix.
+        let len = wire::read_varint(out, &mut pos).unwrap() as usize;
+        assert_eq!(&out[pos..pos + len], b"pomme:nested_key");
+        pos += len;
+        assert_eq!(pos, payload_end, "{component}");
+        assert_eq!(pos, out.len(), "{component}");
+    }
+}
+
+#[test]
+fn creative_container_775_empty_slot_writes_optional_none() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let protocol = 775;
+    let native = RegistryTable::native();
+    let target = RegistryTable::for_protocol(protocol).unwrap();
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        PacketTable::native()
+            .id(
+                Phase::Game,
+                Direction::Serverbound,
+                "set_creative_mode_slot",
+            )
+            .unwrap(),
+    );
+    frame.extend_from_slice(&36u16.to_be_bytes());
+    wire::write_varint(&mut frame, 1); // outer stack count
+    wire::write_varint(
+        &mut frame,
+        registry_id(native, ClientRegistry::Item, "stone"),
+    );
+    wire::write_varint(&mut frame, 1); // outer additions
+    wire::write_varint(&mut frame, 0); // outer removals
+    wire::write_varint(
+        &mut frame,
+        registry_id(native, ClientRegistry::DataComponentType, "container"),
+    );
+    wire::write_varint(&mut frame, 1); // one container slot
+    wire::write_varint(&mut frame, 0); // pinned Azalea ItemStack::Empty
+
+    let translated = translation_for(protocol).translate_outbound_game_frame(frame);
+    assert_eq!(translated.len(), 1);
+    let out = &translated[0];
+    let mut pos = 0;
+    assert_eq!(
+        wire::read_varint(out, &mut pos),
+        Some(old_id(
+            protocol,
+            Direction::Serverbound,
+            "set_creative_mode_slot"
+        ))
+    );
+    pos += 2;
+    assert_eq!(wire::read_varint(out, &mut pos), Some(1));
+    assert!(wire::read_varint(out, &mut pos).is_some());
+    assert_eq!(wire::read_varint(out, &mut pos), Some(1));
+    assert_eq!(wire::read_varint(out, &mut pos), Some(0));
+    assert_eq!(
+        wire::read_varint(out, &mut pos),
+        Some(registry_id(
+            target,
+            ClientRegistry::DataComponentType,
+            "container"
+        ))
+    );
+    let payload_len = wire::read_varint(out, &mut pos).unwrap() as usize;
+    let payload_end = pos + payload_len;
+    assert_eq!(wire::read_varint(out, &mut pos), Some(1)); // one slot
+    assert_eq!(out[pos], 0); // Optional<ItemStackTemplate>::None
+    pos += 1;
+    assert_eq!(pos, payload_end);
+    assert_eq!(pos, out.len());
+}
+
+#[test]
+fn creative_tooltip_display_775_remaps_hidden_component_ids() {
+    use azalea_inventory::components::{DataComponentUnion, TooltipDisplay};
+    use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
+    use azalea_protocol::packets::game::ServerboundGamePacket;
+    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+    use azalea_registry::builtin::{DataComponentKind, ItemKind};
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let mut patch = DataComponentPatch::default();
+    unsafe {
+        patch.unchecked_insert_component(
+            DataComponentKind::TooltipDisplay,
+            Some(DataComponentUnion::from(TooltipDisplay {
+                hide_tooltip: false,
+                hidden_components: vec![DataComponentKind::Lock],
+            })),
+        );
+    }
+    let mut packet = ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
+        slot_num: 36,
+        item_stack: ItemStack::Present(ItemStackData {
+            kind: ItemKind::Stone,
+            count: 1,
+            component_patch: patch,
+        }),
+    });
+
+    let protocol = 775;
+    let translation = translation_for(protocol);
+    translation.remap_outbound(&mut packet);
+    let native = azalea_protocol::write::serialize_packet(&packet).unwrap();
+    let frames = translation.translate_outbound_game_frame(native.to_vec());
+    assert_eq!(frames.len(), 1);
+    let frame = &frames[0];
+    let target = RegistryTable::for_protocol(protocol).unwrap();
+    let mut pos = 0;
+    assert_eq!(
+        wire::read_varint(frame, &mut pos),
+        Some(old_id(
+            protocol,
+            Direction::Serverbound,
+            "set_creative_mode_slot"
+        ))
+    );
+    pos += 2;
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(1));
+    assert!(wire::read_varint(frame, &mut pos).is_some());
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(1));
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(0));
+    assert_eq!(
+        wire::read_varint(frame, &mut pos),
+        Some(registry_id(
+            target,
+            ClientRegistry::DataComponentType,
+            "tooltip_display"
+        ))
+    );
+    let payload_len = wire::read_varint(frame, &mut pos).unwrap() as usize;
+    let payload_end = pos + payload_len;
+    assert_eq!(frame[pos], 0); // hideTooltip=false
+    pos += 1;
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(1));
+    assert_eq!(
+        wire::read_varint(frame, &mut pos),
+        Some(registry_id(
+            target,
+            ClientRegistry::DataComponentType,
+            "lock"
+        ))
+    );
+    assert_eq!(pos, payload_end);
+    assert_eq!(pos, frame.len());
+}
+
+#[test]
+fn creative_tool_774_remaps_direct_block_ids() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let protocol = 774;
+    let latest = RegistryTable::native();
+    let target = RegistryTable::for_protocol(protocol).unwrap();
+    let (block_name, latest_block, target_block) = (0..10_000u32)
+        .find_map(|latest_id| {
+            let name = crate::world::block::block_registry_name(776, latest_id)?;
+            let target_id = crate::world::block::block_registry_id(protocol, name)?;
+            (target_id != latest_id).then_some((name, latest_id, target_id))
+        })
+        .expect("a block registry shift between 1.21.11 and 26.2");
+
+    let mut frame = Vec::new();
+    wire::write_varint(
+        &mut frame,
+        PacketTable::native()
+            .id(
+                Phase::Game,
+                Direction::Serverbound,
+                "set_creative_mode_slot",
+            )
+            .unwrap(),
+    );
+    frame.extend_from_slice(&36u16.to_be_bytes());
+    wire::write_varint(&mut frame, 1); // stack count
+    wire::write_varint(
+        &mut frame,
+        registry_id(target, ClientRegistry::Item, "iron_pickaxe"),
+    );
+    wire::write_varint(&mut frame, 1); // one addition
+    wire::write_varint(&mut frame, 0); // no removals
+    wire::write_varint(
+        &mut frame,
+        registry_id(latest, ClientRegistry::DataComponentType, "tool"),
+    );
+    wire::write_varint(&mut frame, 1); // one Tool rule
+    wire::write_varint(&mut frame, 2); // direct HolderSet with one block
+    wire::write_varint(&mut frame, latest_block);
+    frame.push(1); // speed present
+    frame.extend_from_slice(&9.0f32.to_be_bytes());
+    frame.push(1); // correctForDrops present
+    frame.push(1);
+    frame.extend_from_slice(&1.0f32.to_be_bytes()); // defaultMiningSpeed
+    wire::write_varint(&mut frame, 1); // damagePerBlock
+    frame.push(0); // canDestroyBlocksInCreative
+
+    let translated = translation_for(protocol).translate_outbound_game_frame(frame);
+    assert_eq!(translated.len(), 1);
+    let out = &translated[0];
+    let mut pos = 0;
+    assert_eq!(
+        wire::read_varint(out, &mut pos),
+        Some(old_id(
+            protocol,
+            Direction::Serverbound,
+            "set_creative_mode_slot"
+        ))
+    );
+    pos += 2;
+    assert_eq!(wire::read_varint(out, &mut pos), Some(1));
+    assert_eq!(
+        wire::read_varint(out, &mut pos),
+        Some(registry_id(target, ClientRegistry::Item, "iron_pickaxe"))
+    );
+    assert_eq!(wire::read_varint(out, &mut pos), Some(1));
+    assert_eq!(wire::read_varint(out, &mut pos), Some(0));
+    assert_eq!(
+        wire::read_varint(out, &mut pos),
+        Some(registry_id(
+            target,
+            ClientRegistry::DataComponentType,
+            "tool"
+        ))
+    );
+    let payload_len = wire::read_varint(out, &mut pos).unwrap() as usize;
+    let payload_end = pos + payload_len;
+    assert_eq!(wire::read_varint(out, &mut pos), Some(1));
+    assert_eq!(wire::read_varint(out, &mut pos), Some(2));
+    assert_eq!(wire::read_varint(out, &mut pos), Some(target_block));
+    assert_ne!(latest_block, target_block, "{block_name}");
+    pos = payload_end;
+    assert_eq!(pos, out.len());
+}
+
+#[test]
+fn creative_attribute_modifiers_771_remap_embedded_attribute_id() {
+    use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
+    use azalea_inventory::components::{
+        AttributeModifier, AttributeModifierDisplay, AttributeModifiers, AttributeModifiersEntry,
+        DataComponentUnion, EquipmentSlotGroup,
+    };
+    use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
+    use azalea_protocol::packets::game::ServerboundGamePacket;
+    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+    use azalea_registry::builtin::{Attribute, DataComponentKind, ItemKind};
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let mut patch = DataComponentPatch::default();
+    unsafe {
+        patch.unchecked_insert_component(
+            DataComponentKind::AttributeModifiers,
+            Some(DataComponentUnion::from(AttributeModifiers {
+                modifiers: vec![AttributeModifiersEntry {
+                    kind: Attribute::AttackSpeed,
+                    modifier: AttributeModifier {
+                        id: Identifier::new("minecraft:test_speed"),
+                        amount: 2.0,
+                        operation: AttributeModifierOperation::AddValue,
+                    },
+                    slot: EquipmentSlotGroup::Any,
+                    display: AttributeModifierDisplay::Default,
+                }],
+            })),
+        );
+    }
+    let mut packet = ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
+        slot_num: 36,
+        item_stack: ItemStack::Present(ItemStackData {
+            kind: ItemKind::Stone,
+            count: 1,
+            component_patch: patch,
+        }),
+    });
+
+    let protocol = 771;
+    let translation = translation_for(protocol);
+    translation.remap_outbound(&mut packet);
+    let latest = azalea_protocol::write::serialize_packet(&packet).unwrap();
+    let frames = translation.translate_outbound_game_frame(latest.to_vec());
+    assert_eq!(frames.len(), 1);
+
+    let frame = &frames[0];
+    let mut pos = 0;
+    assert_eq!(
+        wire::read_varint(frame, &mut pos),
+        Some(old_id(
+            protocol,
+            Direction::Serverbound,
+            "set_creative_mode_slot"
+        ))
+    );
+    pos += 2; // slot
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(1)); // stack count
+    assert!(wire::read_varint(frame, &mut pos).is_some()); // item id
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(1)); // additions
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(0)); // removals
+
+    let table = RegistryTable::for_protocol(protocol).unwrap();
+    assert_eq!(
+        wire::read_varint(frame, &mut pos),
+        Some(registry_id(
+            table,
+            ClientRegistry::DataComponentType,
+            "attribute_modifiers"
+        ))
+    );
+    let payload_len = wire::read_varint(frame, &mut pos).unwrap() as usize;
+    let payload_end = pos + payload_len;
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(1)); // one modifier
+    assert_eq!(
+        wire::read_varint(frame, &mut pos),
+        Some(registry_id(
+            table,
+            ClientRegistry::Attribute,
+            "attack_speed"
+        ))
+    );
+    pos = payload_end;
+    assert_eq!(pos, frame.len());
+}
+
+#[test]
+fn creative_slot_766_scrubs_private_mining_metadata() {
+    use std::collections::HashMap;
+
+    use azalea_inventory::components::{CustomData, DataComponentUnion, Enchantments};
+    use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
+    use azalea_protocol::packets::game::ServerboundGamePacket;
+    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+    use azalea_registry::DataRegistry;
+    use azalea_registry::builtin::{DataComponentKind, ItemKind};
+    use simdnbt::owned::{Nbt, NbtCompound};
+
+    let mut compound = NbtCompound::new();
+    compound.insert("pomme:legacy_efficiency", 4i32);
+    compound.insert("pomme:legacy_aqua_affinity", 1i8);
+    compound.insert("server:real_value", 42i32);
+    let mut patch = DataComponentPatch::default();
+    unsafe {
+        patch.unchecked_insert_component(
+            DataComponentKind::CustomData,
+            Some(DataComponentUnion::from(CustomData {
+                nbt: Nbt::new("".into(), compound),
+            })),
+        );
+        patch.unchecked_insert_component(
+            DataComponentKind::Enchantments,
+            Some(DataComponentUnion::from(Enchantments {
+                levels: HashMap::from([(azalea_registry::data::Enchantment::new_raw(20), 3)]),
+            })),
+        );
+    }
+    let mut packet = ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
+        slot_num: 36,
+        item_stack: ItemStack::Present(ItemStackData {
+            kind: ItemKind::Stone,
+            count: 1,
+            component_patch: patch,
+        }),
+    });
+
+    let translation = translation_for(766);
+    translation.remap_outbound(&mut packet);
+    let ServerboundGamePacket::SetCreativeModeSlot(p) = &packet else {
+        unreachable!()
+    };
+    let ItemStack::Present(data) = &p.item_stack else {
+        panic!("stack cleared");
+    };
+    let custom = data
+        .component_patch
+        .get::<CustomData>()
+        .expect("server custom data should survive");
+    assert_eq!(custom.nbt.int("server:real_value"), Some(42));
+    assert_eq!(custom.nbt.int("pomme:legacy_efficiency"), None);
+    assert_eq!(custom.nbt.byte("pomme:legacy_aqua_affinity"), None);
+    assert!(data.component_patch.get::<Enchantments>().is_some());
+
+    let latest = azalea_protocol::write::serialize_packet(&packet).unwrap();
+    let frames = translation.translate_outbound_game_frame(latest.to_vec());
+    assert_eq!(frames.len(), 1);
+    let frame = &frames[0];
+    let mut pos = 0;
+    assert_eq!(
+        wire::read_varint(frame, &mut pos),
+        Some(old_id(
+            766,
+            Direction::Serverbound,
+            "set_creative_mode_slot"
+        ))
+    );
+    assert_eq!(&frame[pos..pos + 2], &36i16.to_be_bytes());
+    pos += 2;
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(1)); // count
+    assert!(wire::read_varint(frame, &mut pos).is_some()); // old item id
+    let added = wire::read_varint(frame, &mut pos).expect("added component count");
+    assert_eq!(wire::read_varint(frame, &mut pos), Some(0)); // removals
+
+    let mut saw_custom = false;
+    let mut saw_enchantments = false;
+    let mut cursor = std::io::Cursor::new(&frame[pos..]);
+    for _ in 0..added {
+        let component = u32::azalea_read_var(&mut cursor).unwrap();
+        match component {
+            0 => {
+                let nbt = simdnbt::owned::read_unnamed(&mut cursor).unwrap();
+                let simdnbt::owned::Nbt::Some(root) = nbt else {
+                    panic!("missing custom_data compound");
+                };
+                let custom = root.as_compound();
+                assert_eq!(custom.int("server:real_value"), Some(42));
+                assert_eq!(custom.int("pomme:legacy_efficiency"), None);
+                assert_eq!(custom.byte("pomme:legacy_aqua_affinity"), None);
+                saw_custom = true;
+            }
+            9 => {
+                assert_eq!(u32::azalea_read_var(&mut cursor).unwrap(), 1);
+                assert_eq!(u32::azalea_read_var(&mut cursor).unwrap(), 20);
+                assert_eq!(i32::azalea_read_var(&mut cursor).unwrap(), 3);
+                assert_eq!(u8::azalea_read(&mut cursor).unwrap(), 1); // showInTooltip
+                saw_enchantments = true;
+            }
+            other => panic!("unexpected protocol-766 component {other}"),
+        }
+    }
+    assert!(saw_custom && saw_enchantments);
+}
+
 #[test]
 fn outbound_translation_gating() {
-    assert!(!translation_for(775).translates_outbound());
+    assert!(translation_for(775).translates_outbound());
     assert!(translation_for(774).translates_outbound());
 }
 
@@ -1778,7 +2335,7 @@ fn translate_update_attributes_766() {
     old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
     wire::write_varint(&mut old, 0); // operation
 
-    let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(766, old) else {
+    let ClientboundGamePacket::UpdateAttributes(p) = translate_decode_and_remap(766, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.values.len(), 1);
@@ -1793,6 +2350,1150 @@ fn translate_update_attributes_766() {
         modifier.id.to_string(),
         format!("minecraft:{}", "ab".repeat(16))
     );
+}
+
+/// 1.20.6's enchantments component used the old static enchantment registry.
+/// The translator extracts mining-relevant levels into latest custom_data so
+/// the legacy mining formula never depends on those old numeric ids.
+#[test]
+fn translate_enchanted_stack_766() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let table = RegistryTable::for_protocol(766).expect("1.20.6 registry table");
+    let iron_pickaxe = registry_id(table, ClientRegistry::Item, "iron_pickaxe");
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(766, Direction::Clientbound, "container_set_content"),
+    );
+    old.push(1); // container id
+    wire::write_varint(&mut old, 2); // state id
+    wire::write_varint(&mut old, 1); // one slot
+    wire::write_varint(&mut old, 1); // stack count
+    wire::write_varint(&mut old, iron_pickaxe);
+    wire::write_varint(&mut old, 1); // one added component
+    wire::write_varint(&mut old, 0); // no removals
+    wire::write_varint(&mut old, 9); // 1.20.6 enchantments component
+    wire::write_varint(&mut old, 3); // three enchantments
+    wire::write_varint(&mut old, 20); // efficiency
+    wire::write_varint(&mut old, 3); // level III
+    wire::write_varint(&mut old, 6); // aqua affinity
+    wire::write_varint(&mut old, 1); // level I
+    wire::write_varint(&mut old, 33); // channeling (shifts to 34 after Lunge)
+    wire::write_varint(&mut old, 1); // level I
+    old.push(1); // showInTooltip
+    wire::write_varint(&mut old, 0); // carried item empty
+
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(766, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    assert_eq!(data.kind, azalea_registry::builtin::ItemKind::IronPickaxe);
+    let custom = data
+        .component_patch
+        .get::<azalea_inventory::components::CustomData>()
+        .expect("legacy mining metadata");
+    assert_eq!(custom.nbt.int("pomme:legacy_efficiency"), Some(3));
+    assert_eq!(custom.nbt.byte("pomme:legacy_aqua_affinity"), Some(1));
+
+    use azalea_registry::DataRegistry;
+    let enchantments = data
+        .component_patch
+        .get::<azalea_inventory::components::Enchantments>()
+        .expect("translated enchantments component");
+    let mut levels = enchantments
+        .levels
+        .iter()
+        .map(|(kind, level)| (kind.protocol_id(), *level))
+        .collect::<Vec<_>>();
+    levels.sort_unstable();
+    assert_eq!(levels, vec![(6, 1), (20, 3), (34, 1)]);
+}
+
+#[test]
+fn translate_stack_766_skips_unsupported_tool_value_without_dropping_packet() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let table = RegistryTable::for_protocol(766).expect("1.20.6 registry table");
+    let iron_pickaxe = registry_id(table, ClientRegistry::Item, "iron_pickaxe");
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(766, Direction::Clientbound, "container_set_content"),
+    );
+    old.push(1);
+    wire::write_varint(&mut old, 2);
+    wire::write_varint(&mut old, 1);
+    wire::write_varint(&mut old, 1);
+    wire::write_varint(&mut old, iron_pickaxe);
+    wire::write_varint(&mut old, 2); // Tool + damage
+    wire::write_varint(&mut old, 0);
+    wire::write_varint(&mut old, 22); // 1.20.6 Tool
+    wire::write_varint(&mut old, 1); // one Tool rule
+    wire::write_varint(&mut old, 0); // named HolderSet
+    write_utf(&mut old, "minecraft:mineable/pickaxe");
+    old.push(1); // speed present
+    old.extend_from_slice(&6.0f32.to_be_bytes());
+    old.push(1); // correctForDrops present
+    old.push(1); // true
+    old.extend_from_slice(&1.0f32.to_be_bytes()); // defaultMiningSpeed
+    wire::write_varint(&mut old, 1); // damagePerBlock
+    wire::write_varint(&mut old, 3); // damage component follows Tool
+    wire::write_varint(&mut old, 7);
+    wire::write_varint(&mut old, 0); // carried item empty
+
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(766, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    assert_eq!(data.kind, azalea_registry::builtin::ItemKind::IronPickaxe);
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7)
+    );
+    assert!(
+        data.component_patch
+            .get::<azalea_inventory::components::Tool>()
+            .is_none()
+    );
+}
+
+#[test]
+fn translate_stack_766_old_only_unit_components_do_not_drop_packet() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let table = RegistryTable::for_protocol(766).expect("1.20.6 registry table");
+    let stone = registry_id(table, ClientRegistry::Item, "stone");
+    for component in [14u32, 15, 21] {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(766, Direction::Clientbound, "container_set_content"),
+        );
+        old.push(1); // container id
+        wire::write_varint(&mut old, 2); // state id
+        wire::write_varint(&mut old, 1); // one slot
+        wire::write_varint(&mut old, 1); // stack count
+        wire::write_varint(&mut old, stone);
+        wire::write_varint(&mut old, 2); // marker + damage
+        wire::write_varint(&mut old, 0); // no removals
+        wire::write_varint(&mut old, component); // zero-byte old-only unit payload
+        wire::write_varint(&mut old, 3); // damage
+        wire::write_varint(&mut old, 7);
+        wire::write_varint(&mut old, 0); // carried item empty
+
+        let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(766, old)
+        else {
+            panic!("wrong packet for old-only component {component}");
+        };
+        let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+            panic!("empty stack for old-only component {component}");
+        };
+        assert_eq!(
+            data.component_patch
+                .get::<azalea_inventory::components::Damage>()
+                .map(|damage| damage.amount),
+            Some(7),
+            "old-only component {component}"
+        );
+    }
+}
+
+#[test]
+fn translate_stack_766_old_only_removal_keeps_mapped_removal() {
+    use azalea_registry::builtin::DataComponentKind;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let table = RegistryTable::for_protocol(766).expect("1.20.6 registry table");
+    let stone = registry_id(table, ClientRegistry::Item, "stone");
+    for component in [14u32, 15, 21] {
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(766, Direction::Clientbound, "container_set_content"),
+        );
+        old.push(1);
+        wire::write_varint(&mut old, 2);
+        wire::write_varint(&mut old, 1);
+        wire::write_varint(&mut old, 1);
+        wire::write_varint(&mut old, stone);
+        wire::write_varint(&mut old, 0); // no additions
+        wire::write_varint(&mut old, 2); // old-only + damage removals
+        wire::write_varint(&mut old, component);
+        wire::write_varint(&mut old, 3); // damage
+        wire::write_varint(&mut old, 0); // carried item empty
+
+        let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(766, old)
+        else {
+            panic!("wrong packet for old-only removal {component}");
+        };
+        let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+            panic!("empty stack for old-only removal {component}");
+        };
+        let components: Vec<_> = data.component_patch.iter().collect();
+        assert_eq!(components.len(), 1, "old-only component {component}");
+        assert_eq!(components[0].0, DataComponentKind::Damage);
+        assert!(components[0].1.is_none());
+    }
+}
+
+#[test]
+fn translate_stack_766_tool_removal_suppresses_native_default() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let table = RegistryTable::for_protocol(766).expect("1.20.6 registry table");
+    let iron_pickaxe = registry_id(table, ClientRegistry::Item, "iron_pickaxe");
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(766, Direction::Clientbound, "container_set_content"),
+    );
+    old.push(1);
+    wire::write_varint(&mut old, 2);
+    wire::write_varint(&mut old, 1);
+    wire::write_varint(&mut old, 1);
+    wire::write_varint(&mut old, iron_pickaxe);
+    wire::write_varint(&mut old, 0);
+    wire::write_varint(&mut old, 1); // one removed component
+    wire::write_varint(&mut old, 22); // 1.20.6 Tool removal
+    wire::write_varint(&mut old, 0); // carried item empty
+
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(766, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    assert!(crate::tool::stack_tool(data, 766).is_none());
+}
+
+fn write_component_tool_stack_767_773(protocol: i32, direct: bool, removal: bool) -> Vec<u8> {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let table = RegistryTable::for_protocol(protocol).expect("embedded registry table");
+    let iron_pickaxe = registry_id(table, ClientRegistry::Item, "iron_pickaxe");
+    let tool = registry_id(table, ClientRegistry::DataComponentType, "tool");
+    let damage = registry_id(table, ClientRegistry::DataComponentType, "damage");
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(protocol, Direction::Clientbound, "container_set_content"),
+    );
+    if protocol == 767 {
+        old.push(1); // byte container id through 1.21.1
+    } else {
+        wire::write_varint(&mut old, 1);
+    }
+    wire::write_varint(&mut old, 2); // state id
+    wire::write_varint(&mut old, 1); // one slot
+    wire::write_varint(&mut old, 1); // stack count
+    wire::write_varint(&mut old, iron_pickaxe);
+    if removal {
+        wire::write_varint(&mut old, 0);
+        wire::write_varint(&mut old, 1);
+        wire::write_varint(&mut old, tool);
+    } else {
+        wire::write_varint(&mut old, 2); // Tool + damage
+        wire::write_varint(&mut old, 0);
+        wire::write_varint(&mut old, tool);
+        wire::write_varint(&mut old, 1); // one Tool rule
+        if direct {
+            wire::write_varint(&mut old, 2); // direct HolderSet: len + 1
+            wire::write_varint(&mut old, 1); // one block holder id
+        } else {
+            wire::write_varint(&mut old, 0); // named HolderSet
+            write_utf(&mut old, "minecraft:mineable/pickaxe");
+        }
+        old.push(1); // speed present
+        old.extend_from_slice(&6.0f32.to_be_bytes());
+        old.push(1); // correctForDrops present
+        old.push(1); // true
+        old.extend_from_slice(&1.0f32.to_be_bytes());
+        wire::write_varint(&mut old, 1); // damagePerBlock
+        if protocol >= 770 {
+            old.push(1); // canDestroyBlocksInCreative, added in 1.21.5
+        }
+        wire::write_varint(&mut old, damage);
+        wire::write_varint(&mut old, 7);
+    }
+    wire::write_varint(&mut old, 0); // carried item empty
+    old
+}
+
+#[test]
+fn translate_tool_components_767_773_are_safe() {
+    for protocol in 767..=773 {
+        for direct in [false, true] {
+            let old = write_component_tool_stack_767_773(protocol, direct, false);
+            let ClientboundGamePacket::ContainerSetContent(p) =
+                translate_decode_and_remap(protocol, old)
+            else {
+                panic!("wrong packet for protocol {protocol}");
+            };
+            let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+                panic!("empty stack for protocol {protocol}");
+            };
+            assert_eq!(
+                data.component_patch
+                    .get::<azalea_inventory::components::Damage>()
+                    .map(|damage| damage.amount),
+                Some(7),
+                "protocol {protocol}, direct={direct}"
+            );
+            assert!(
+                crate::tool::stack_tool(data, protocol).is_some(),
+                "unsupported Tool value should fall back to native default on protocol {protocol}"
+            );
+        }
+
+        let old = write_component_tool_stack_767_773(protocol, false, true);
+        let ClientboundGamePacket::ContainerSetContent(p) =
+            translate_decode_and_remap(protocol, old)
+        else {
+            panic!("wrong removal packet for protocol {protocol}");
+        };
+        let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+            panic!("empty removal stack for protocol {protocol}");
+        };
+        assert!(
+            crate::tool::stack_tool(data, protocol).is_none(),
+            "Tool removal must suppress the native default on protocol {protocol}"
+        );
+    }
+}
+
+#[test]
+fn translate_tool_component_774_preserves_value() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let protocol = 774;
+    let table = RegistryTable::for_protocol(protocol).expect("embedded registry table");
+    let iron_pickaxe = registry_id(table, ClientRegistry::Item, "iron_pickaxe");
+    let tool = registry_id(table, ClientRegistry::DataComponentType, "tool");
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(protocol, Direction::Clientbound, "container_set_content"),
+    );
+    wire::write_varint(&mut old, 1); // container id
+    wire::write_varint(&mut old, 2); // state id
+    wire::write_varint(&mut old, 1); // one slot
+    wire::write_varint(&mut old, 1); // stack count
+    wire::write_varint(&mut old, iron_pickaxe);
+    wire::write_varint(&mut old, 1); // one added component
+    wire::write_varint(&mut old, 0); // no removals
+    wire::write_varint(&mut old, tool);
+    wire::write_varint(&mut old, 0); // no Tool rules
+    old.extend_from_slice(&9.0f32.to_be_bytes());
+    wire::write_varint(&mut old, 2); // damagePerBlock
+    old.push(0); // canDestroyBlocksInCreative
+    wire::write_varint(&mut old, 0); // carried item empty
+
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(protocol, old)
+    else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    let tool = crate::tool::stack_tool(data, protocol).expect("Tool value preserved");
+    assert_eq!(tool.default_mining_speed, 9.0);
+    assert_eq!(tool.damage_per_block, 2);
+    assert!(!tool.can_destroy_blocks_in_creative);
+}
+
+#[test]
+fn creative_components_767_774_preserve_patch_and_wire_framing() {
+    use azalea_inventory::components::{CustomData, Damage, DataComponentUnion};
+    use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
+    use azalea_protocol::packets::game::ServerboundGamePacket;
+    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+    use azalea_registry::builtin::{DataComponentKind, ItemKind};
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+    use simdnbt::owned::{Nbt, NbtCompound};
+
+    for protocol in [767, 769, 770, 773, 774] {
+        let mut compound = NbtCompound::new();
+        compound.insert("server:real_value", 42i32);
+        let mut patch = DataComponentPatch::default();
+        unsafe {
+            patch.unchecked_insert_component(
+                DataComponentKind::CustomData,
+                Some(DataComponentUnion::from(CustomData {
+                    nbt: Nbt::new("".into(), compound),
+                })),
+            );
+            patch.unchecked_insert_component(
+                DataComponentKind::Damage,
+                Some(DataComponentUnion::from(Damage { amount: 7 })),
+            );
+            patch.unchecked_insert_component(DataComponentKind::Tool, None);
+        }
+        let mut packet =
+            ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
+                slot_num: 36,
+                item_stack: ItemStack::Present(ItemStackData {
+                    kind: ItemKind::IronPickaxe,
+                    count: 1,
+                    component_patch: patch,
+                }),
+            });
+
+        let translation = translation_for(protocol);
+        translation.remap_outbound(&mut packet);
+        let ServerboundGamePacket::SetCreativeModeSlot(p) = &packet else {
+            unreachable!()
+        };
+        let ItemStack::Present(data) = &p.item_stack else {
+            panic!("stack cleared for protocol {protocol}");
+        };
+        assert_eq!(data.component_patch.iter().count(), 3);
+
+        let latest = azalea_protocol::write::serialize_packet(&packet).unwrap();
+        let frames = translation.translate_outbound_game_frame(latest.to_vec());
+        assert_eq!(frames.len(), 1, "protocol {protocol}");
+        let frame = &frames[0];
+        let mut pos = 0;
+        assert_eq!(
+            wire::read_varint(frame, &mut pos),
+            Some(old_id(
+                protocol,
+                Direction::Serverbound,
+                "set_creative_mode_slot"
+            ))
+        );
+        assert_eq!(&frame[pos..pos + 2], &36u16.to_be_bytes());
+        pos += 2;
+        assert_eq!(wire::read_varint(frame, &mut pos), Some(1));
+        assert!(wire::read_varint(frame, &mut pos).is_some());
+        assert_eq!(wire::read_varint(frame, &mut pos), Some(2));
+        assert_eq!(wire::read_varint(frame, &mut pos), Some(1));
+
+        let table = RegistryTable::for_protocol(protocol).expect("registry table");
+        let custom_id = registry_id(table, ClientRegistry::DataComponentType, "custom_data");
+        let damage_id = registry_id(table, ClientRegistry::DataComponentType, "damage");
+        let tool_id = registry_id(table, ClientRegistry::DataComponentType, "tool");
+        let mut seen_custom = false;
+        let mut seen_damage = false;
+        for _ in 0..2 {
+            let component = wire::read_varint(frame, &mut pos).unwrap();
+            let value = if protocol >= 770 {
+                let len = wire::read_varint(frame, &mut pos).unwrap() as usize;
+                let slice = &frame[pos..pos + len];
+                pos += len;
+                slice
+            } else {
+                &frame[pos..]
+            };
+            if component == custom_id {
+                let mut cur = std::io::Cursor::new(value);
+                let nbt = simdnbt::owned::read_unnamed(&mut cur).unwrap();
+                let simdnbt::owned::Nbt::Some(root) = nbt else {
+                    panic!("missing custom_data for protocol {protocol}");
+                };
+                assert_eq!(root.as_compound().int("server:real_value"), Some(42));
+                if protocol < 770 {
+                    pos += cur.position() as usize;
+                }
+                seen_custom = true;
+            } else if component == damage_id {
+                let mut cur = std::io::Cursor::new(value);
+                assert_eq!(i32::azalea_read_var(&mut cur).unwrap(), 7);
+                if protocol < 770 {
+                    pos += cur.position() as usize;
+                }
+                seen_damage = true;
+            } else {
+                panic!("unexpected component {component} on protocol {protocol}");
+            }
+        }
+        assert!(seen_custom && seen_damage, "protocol {protocol}");
+        assert_eq!(wire::read_varint(frame, &mut pos), Some(tool_id));
+        assert_eq!(pos, frame.len(), "protocol {protocol}");
+    }
+}
+
+fn write_component_stack_with_following_damage(
+    protocol: i32,
+    component_name: &str,
+    component_payload: impl FnOnce(&mut Vec<u8>),
+) -> Vec<u8> {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let table = RegistryTable::for_protocol(protocol).expect("embedded registry table");
+    let stone = registry_id(table, ClientRegistry::Item, "stone");
+    let component = registry_id(table, ClientRegistry::DataComponentType, component_name);
+    let damage = registry_id(table, ClientRegistry::DataComponentType, "damage");
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(protocol, Direction::Clientbound, "container_set_content"),
+    );
+    if protocol == 767 {
+        old.push(1);
+    } else {
+        wire::write_varint(&mut old, 1);
+    }
+    wire::write_varint(&mut old, 2);
+    wire::write_varint(&mut old, 1);
+    wire::write_varint(&mut old, 1);
+    wire::write_varint(&mut old, stone);
+    wire::write_varint(&mut old, 2);
+    wire::write_varint(&mut old, 0);
+    wire::write_varint(&mut old, component);
+    component_payload(&mut old);
+    wire::write_varint(&mut old, damage);
+    wire::write_varint(&mut old, 7);
+    wire::write_varint(&mut old, 0);
+    old
+}
+
+#[test]
+fn translate_old_only_unit_components_drop_without_losing_patch() {
+    for (protocol, component) in [
+        (767, "hide_additional_tooltip"),
+        (767, "hide_tooltip"),
+        (767, "fire_resistant"),
+        (768, "hide_additional_tooltip"),
+        (768, "hide_tooltip"),
+        (769, "hide_additional_tooltip"),
+        (769, "hide_tooltip"),
+    ] {
+        let old = write_component_stack_with_following_damage(protocol, component, |_| {});
+        assert_trailing_damage(protocol, old);
+    }
+}
+
+#[test]
+fn translate_old_only_component_removal_does_not_drop_mapped_removal() {
+    use azalea_registry::builtin::DataComponentKind;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    for (protocol, old_only) in [
+        (767, "hide_tooltip"),
+        (767, "fire_resistant"),
+        (768, "hide_additional_tooltip"),
+        (769, "hide_tooltip"),
+    ] {
+        let table = RegistryTable::for_protocol(protocol).unwrap();
+        let stone = registry_id(table, ClientRegistry::Item, "stone");
+        let old_only = registry_id(table, ClientRegistry::DataComponentType, old_only);
+        let damage = registry_id(table, ClientRegistry::DataComponentType, "damage");
+        let mut old = Vec::new();
+        wire::write_varint(
+            &mut old,
+            old_id(protocol, Direction::Clientbound, "container_set_content"),
+        );
+        if protocol == 767 {
+            old.push(1);
+        } else {
+            wire::write_varint(&mut old, 1);
+        }
+        wire::write_varint(&mut old, 2); // state id
+        wire::write_varint(&mut old, 1); // one item
+        wire::write_varint(&mut old, 1); // stack count
+        wire::write_varint(&mut old, stone);
+        wire::write_varint(&mut old, 0); // no additions
+        wire::write_varint(&mut old, 2); // two removals
+        wire::write_varint(&mut old, old_only);
+        wire::write_varint(&mut old, damage);
+        wire::write_varint(&mut old, 0); // carried stack empty
+
+        let ClientboundGamePacket::ContainerSetContent(p) =
+            translate_decode_and_remap(protocol, old)
+        else {
+            panic!("wrong packet for protocol {protocol}");
+        };
+        let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+            panic!("empty stack for protocol {protocol}");
+        };
+        let components: Vec<_> = data.component_patch.iter().collect();
+        assert_eq!(components.len(), 1, "protocol {protocol}");
+        assert_eq!(
+            components[0].0,
+            DataComponentKind::Damage,
+            "protocol {protocol}"
+        );
+        assert!(components[0].1.is_none(), "protocol {protocol}");
+    }
+}
+
+#[test]
+fn translate_food_767_consumes_nested_effects_without_losing_alignment() {
+    let old = write_component_stack_with_following_damage(767, "food", |old| {
+        wire::write_varint(old, 4); // nutrition
+        old.extend_from_slice(&0.3f32.to_be_bytes());
+        old.push(1); // canAlwaysEat
+        old.extend_from_slice(&1.6f32.to_be_bytes());
+        wire::write_varint(old, 0); // usingConvertsTo = empty ItemStack
+        wire::write_varint(old, 1); // one PossibleEffect
+        wire::write_varint(old, 1); // MobEffect holder id
+        wire::write_varint(old, 2); // amplifier
+        wire::write_varint(old, 100); // duration
+        old.extend_from_slice(&[0, 1, 1, 0]); // ambient, visible, showIcon, no hidden effect
+        old.extend_from_slice(&0.5f32.to_be_bytes()); // probability
+    });
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(767, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    assert!(
+        data.component_patch
+            .get::<azalea_inventory::components::Food>()
+            .is_none()
+    );
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7)
+    );
+}
+
+#[test]
+fn translate_attribute_modifiers_770_has_no_legacy_tooltip_byte() {
+    let old = write_component_stack_with_following_damage(770, "attribute_modifiers", |old| {
+        wire::write_varint(old, 0); // zero entries; no showInTooltip on 1.21.5
+    });
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(770, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7)
+    );
+}
+
+#[test]
+fn translate_food_768_uses_current_three_field_layout() {
+    let old = write_component_stack_with_following_damage(768, "food", |old| {
+        wire::write_varint(old, 4);
+        old.extend_from_slice(&0.3f32.to_be_bytes());
+        old.push(1);
+    });
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(768, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    let food = data
+        .component_patch
+        .get::<azalea_inventory::components::Food>()
+        .expect("1.21.3 food preserved");
+    assert_eq!(food.nutrition, 4);
+    assert_eq!(food.saturation, 0.3);
+    assert!(food.can_always_eat);
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7)
+    );
+}
+
+#[test]
+fn translate_attribute_modifiers_771_remaps_embedded_attribute_id() {
+    let old = write_component_stack_with_following_damage(771, "attribute_modifiers", |old| {
+        wire::write_varint(old, 1); // one entry
+        wire::write_varint(old, 4); // 1.21.6 attack_speed; 26.2 id is 5
+        write_utf(old, "minecraft:test_speed");
+        old.extend_from_slice(&2.0f64.to_be_bytes());
+        wire::write_varint(old, 0); // operation add_value
+        wire::write_varint(old, 0); // slot group
+        wire::write_varint(old, 0); // display = default
+    });
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(771, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    let modifiers = data
+        .component_patch
+        .get::<azalea_inventory::components::AttributeModifiers>()
+        .expect("attribute modifiers preserved");
+    assert_eq!(modifiers.modifiers.len(), 1);
+    assert_eq!(
+        modifiers.modifiers[0].kind,
+        azalea_registry::builtin::Attribute::AttackSpeed
+    );
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7)
+    );
+}
+
+#[test]
+fn translate_old_custom_model_data_drops_only_that_component() {
+    for protocol in [767, 768] {
+        let old =
+            write_component_stack_with_following_damage(protocol, "custom_model_data", |old| {
+                wire::write_varint(old, 123);
+            });
+        let ClientboundGamePacket::ContainerSetContent(p) =
+            translate_decode_and_remap(protocol, old)
+        else {
+            panic!("wrong packet for protocol {protocol}");
+        };
+        let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+            panic!("empty stack for protocol {protocol}");
+        };
+        assert!(
+            data.component_patch
+                .get::<azalea_inventory::components::CustomModelData>()
+                .is_none()
+        );
+        assert_eq!(
+            data.component_patch
+                .get::<azalea_inventory::components::Damage>()
+                .map(|damage| damage.amount),
+            Some(7)
+        );
+    }
+}
+
+#[test]
+fn translate_potion_contents_767_drops_only_that_component() {
+    let old = write_component_stack_with_following_damage(767, "potion_contents", |old| {
+        old.push(0); // potion absent
+        old.push(0); // custom color absent
+        wire::write_varint(old, 0); // no custom effects
+    });
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(767, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    assert!(
+        data.component_patch
+            .get::<azalea_inventory::components::PotionContents>()
+            .is_none()
+    );
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7)
+    );
+}
+
+#[test]
+fn translate_equippable_historical_shapes_stay_aligned() {
+    for protocol in [768, 770, 771, 774, 775] {
+        let old = write_component_stack_with_following_damage(protocol, "equippable", |old| {
+            wire::write_varint(old, 0); // mainhand slot
+            wire::write_varint(old, 0); // raw equip-sound registry id
+            old.push(0); // model/asset absent
+            old.push(0); // camera overlay absent
+            old.push(0); // allowed entities absent
+            old.extend_from_slice(&[0, 0, 0]); // dispensable, swappable, damageOnHurt
+            if protocol >= 770 {
+                old.push(0); // equipOnInteract
+            }
+            if protocol >= 771 {
+                old.push(0); // canBeSheared
+                wire::write_varint(old, 0); // shearing sound registry id
+            }
+        });
+        assert_trailing_damage(protocol, old);
+    }
+}
+
+#[test]
+fn translate_jukebox_769_consumes_resource_key_and_tooltip() {
+    let old = write_component_stack_with_following_damage(769, "jukebox_playable", |old| {
+        old.push(0); // EitherHolder ResourceKey branch
+        write_utf(old, "minecraft:13");
+        old.push(0); // showInTooltip
+    });
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(769, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7)
+    );
+}
+
+fn write_holder_set(out: &mut Vec<u8>, direct: bool, named: &str) {
+    if direct {
+        wire::write_varint(out, 2); // one direct holder => len + 1
+        wire::write_varint(out, 1); // raw registry holder id
+    } else {
+        wire::write_varint(out, 0);
+        write_utf(out, named);
+    }
+}
+
+fn assert_trailing_damage(protocol: i32, old: Vec<u8>) {
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(protocol, old)
+    else {
+        panic!("wrong packet for protocol {protocol}");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack for protocol {protocol}");
+    };
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7),
+        "protocol {protocol}"
+    );
+}
+
+#[test]
+fn translate_blocks_attacks_bypass_tag_keys_stay_aligned() {
+    for protocol in [770, 774] {
+        let old = write_component_stack_with_following_damage(protocol, "blocks_attacks", |old| {
+            old.extend_from_slice(&0.0f32.to_be_bytes());
+            old.extend_from_slice(&1.0f32.to_be_bytes());
+            wire::write_varint(old, 0); // damage reductions
+            old.extend_from_slice(&1.0f32.to_be_bytes());
+            old.extend_from_slice(&0.0f32.to_be_bytes());
+            old.extend_from_slice(&1.0f32.to_be_bytes());
+            old.push(1); // bypassedBy present
+            write_utf(old, "minecraft:bypasses_shield"); // historical TagKey
+            old.extend_from_slice(&[0, 0]); // no block/disabled sounds
+        });
+        assert_trailing_damage(protocol, old);
+    }
+}
+
+#[test]
+fn translate_blocks_attacks_reduction_holder_sets_stay_aligned() {
+    for protocol in [770, 774] {
+        for direct in [false, true] {
+            let old =
+                write_component_stack_with_following_damage(protocol, "blocks_attacks", |old| {
+                    old.extend_from_slice(&0.0f32.to_be_bytes());
+                    old.extend_from_slice(&1.0f32.to_be_bytes());
+                    wire::write_varint(old, 1); // one damage reduction
+                    old.extend_from_slice(&90.0f32.to_be_bytes());
+                    old.push(1); // DamageReduction.type present
+                    write_holder_set(old, direct, "minecraft:is_projectile");
+                    old.extend_from_slice(&0.0f32.to_be_bytes());
+                    old.extend_from_slice(&1.0f32.to_be_bytes());
+                    old.extend_from_slice(&1.0f32.to_be_bytes());
+                    old.extend_from_slice(&0.0f32.to_be_bytes());
+                    old.extend_from_slice(&1.0f32.to_be_bytes());
+                    old.push(0); // bypassedBy absent
+                    old.extend_from_slice(&[0, 0]); // no block/disabled sounds
+                });
+            assert_trailing_damage(protocol, old);
+        }
+    }
+}
+
+#[test]
+fn translate_damage_resistant_tag_keys_stay_aligned() {
+    for protocol in [768, 774] {
+        let old =
+            write_component_stack_with_following_damage(protocol, "damage_resistant", |old| {
+                write_utf(old, "minecraft:is_fire");
+            });
+        assert_trailing_damage(protocol, old);
+    }
+}
+
+#[test]
+fn translate_banner_pattern_tag_keys_stay_aligned() {
+    for protocol in [770, 774] {
+        let old = write_component_stack_with_following_damage(
+            protocol,
+            "provides_banner_patterns",
+            |old| write_utf(old, "minecraft:pattern_item/flower"),
+        );
+        assert_trailing_damage(protocol, old);
+    }
+}
+
+#[test]
+fn translate_either_registry_components_stay_aligned() {
+    for (protocol, component) in [
+        (770, "chicken/variant"),
+        (774, "chicken/variant"),
+        (774, "damage_type"),
+        (774, "zombie_nautilus/variant"),
+    ] {
+        for registry_arm in [false, true] {
+            let old = write_component_stack_with_following_damage(protocol, component, |old| {
+                if registry_arm {
+                    old.push(1); // EitherHolder holder branch
+                    wire::write_varint(old, 1); // raw holderRegistry id
+                } else {
+                    old.push(0); // resource-key branch
+                    write_utf(old, "minecraft:test_variant");
+                }
+            });
+            assert_trailing_damage(protocol, old);
+        }
+    }
+}
+
+#[test]
+fn historical_nested_stack_components_remap_nested_component_ids() {
+    use azalea_registry::builtin::ItemKind;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    fn assert_lock(stack: &azalea_inventory::ItemStack) {
+        let azalea_inventory::ItemStack::Present(data) = stack else {
+            panic!("nested stack empty");
+        };
+        assert_eq!(data.kind, ItemKind::DripstoneBlock);
+        assert_eq!(
+            data.component_patch
+                .get::<azalea_inventory::components::Lock>()
+                .map(|lock| lock.key.as_str()),
+            Some("pomme:nested_key")
+        );
+    }
+
+    let protocol = 775;
+    let table = RegistryTable::for_protocol(protocol).expect("registry table");
+    let dripstone = registry_id(table, ClientRegistry::Item, "dripstone_block");
+    let lock = registry_id(table, ClientRegistry::DataComponentType, "lock");
+    assert_ne!(
+        dripstone,
+        registry_id(
+            RegistryTable::native(),
+            ClientRegistry::Item,
+            "dripstone_block"
+        )
+    );
+    for component in [
+        "use_remainder",
+        "charged_projectiles",
+        "bundle_contents",
+        "container",
+    ] {
+        let old = write_component_stack_with_following_damage(protocol, component, |old| {
+            if component != "use_remainder" {
+                wire::write_varint(old, 1); // one nested template
+            }
+            if component == "container" {
+                old.push(1); // Optional<ItemStackTemplate>::Some
+            }
+            // Mojang 26.1 ItemStackTemplate: item, count, ordinary component patch.
+            wire::write_varint(old, dripstone);
+            wire::write_varint(old, 1);
+            wire::write_varint(old, 1); // one nested added component
+            wire::write_varint(old, 0); // no nested removals
+            wire::write_varint(old, lock);
+            write_utf(old, "pomme:nested_key");
+        });
+        let ClientboundGamePacket::ContainerSetContent(p) =
+            translate_decode_and_remap(protocol, old)
+        else {
+            panic!("wrong packet for {component}");
+        };
+        let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+            panic!("outer stack empty for {component}");
+        };
+        match component {
+            "use_remainder" => assert_lock(
+                &data
+                    .component_patch
+                    .get::<azalea_inventory::components::UseRemainder>()
+                    .expect("use_remainder preserved")
+                    .convert_into,
+            ),
+            "charged_projectiles" => assert_lock(
+                &data
+                    .component_patch
+                    .get::<azalea_inventory::components::ChargedProjectiles>()
+                    .expect("charged_projectiles preserved")
+                    .items[0],
+            ),
+            "bundle_contents" => assert_lock(
+                &data
+                    .component_patch
+                    .get::<azalea_inventory::components::BundleContents>()
+                    .expect("bundle_contents preserved")
+                    .items[0],
+            ),
+            "container" => assert_lock(
+                &data
+                    .component_patch
+                    .get::<azalea_inventory::components::Container>()
+                    .expect("container preserved")
+                    .items[0],
+            ),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            data.component_patch
+                .get::<azalea_inventory::components::Damage>()
+                .map(|damage| damage.amount),
+            Some(7)
+        );
+    }
+}
+
+#[test]
+fn translate_container_775_optional_empty_slot_becomes_empty_itemstack() {
+    let protocol = 775;
+    let old = write_component_stack_with_following_damage(protocol, "container", |old| {
+        wire::write_varint(old, 1); // one slot
+        old.push(0); // Optional<ItemStackTemplate>::None
+    });
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(protocol, old)
+    else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("outer stack empty");
+    };
+    let container = data
+        .component_patch
+        .get::<azalea_inventory::components::Container>()
+        .expect("container preserved");
+    assert_eq!(container.items.len(), 1);
+    assert!(matches!(
+        container.items[0],
+        azalea_inventory::ItemStack::Empty
+    ));
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7)
+    );
+}
+
+#[test]
+fn translate_tooltip_display_775_remaps_hidden_component_ids() {
+    use azalea_registry::builtin::DataComponentKind;
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+
+    let table = RegistryTable::for_protocol(775).unwrap();
+    let lock = registry_id(table, ClientRegistry::DataComponentType, "lock");
+    assert_ne!(
+        lock,
+        registry_id(
+            RegistryTable::native(),
+            ClientRegistry::DataComponentType,
+            "lock"
+        )
+    );
+    let old = write_component_stack_with_following_damage(775, "tooltip_display", |old| {
+        old.push(0); // hideTooltip=false
+        wire::write_varint(old, 1); // one hidden component
+        wire::write_varint(old, lock);
+    });
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(775, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    let tooltip = data
+        .component_patch
+        .get::<azalea_inventory::components::TooltipDisplay>()
+        .expect("tooltip_display preserved");
+    assert!(!tooltip.hide_tooltip);
+    assert_eq!(tooltip.hidden_components, vec![DataComponentKind::Lock]);
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7)
+    );
+}
+
+#[test]
+fn translate_component_ids_775_before_latest_decode() {
+    let old = write_component_stack_with_following_damage(775, "lock", |old| {
+        write_utf(old, "pomme:test_key");
+    });
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(775, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Lock>()
+            .map(|lock| lock.key.as_str()),
+        Some("pomme:test_key")
+    );
+    assert_eq!(
+        data.component_patch
+            .get::<azalea_inventory::components::Damage>()
+            .map(|damage| damage.amount),
+        Some(7)
+    );
+}
+
+#[test]
+fn translate_stack_766_does_not_trust_server_private_mining_keys() {
+    use pomme_protocol::{ClientRegistry, RegistryTable};
+    use simdnbt::owned::{Nbt, NbtCompound};
+
+    let table = RegistryTable::for_protocol(766).expect("1.20.6 registry table");
+    let iron_pickaxe = registry_id(table, ClientRegistry::Item, "iron_pickaxe");
+    let mut custom = NbtCompound::new();
+    custom.insert("pomme:legacy_efficiency", 99i32);
+    custom.insert("pomme:legacy_aqua_affinity", 1i8);
+    custom.insert("server:real_value", 42i32);
+
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(766, Direction::Clientbound, "container_set_content"),
+    );
+    old.push(1);
+    wire::write_varint(&mut old, 2);
+    wire::write_varint(&mut old, 1);
+    wire::write_varint(&mut old, 1);
+    wire::write_varint(&mut old, iron_pickaxe);
+    wire::write_varint(&mut old, 1);
+    wire::write_varint(&mut old, 0);
+    wire::write_varint(&mut old, 0); // custom_data
+    Nbt::new("".into(), custom).azalea_write(&mut old).unwrap();
+    wire::write_varint(&mut old, 0); // carried item empty
+
+    let ClientboundGamePacket::ContainerSetContent(p) = translate_decode_and_remap(766, old) else {
+        panic!("wrong packet");
+    };
+    let azalea_inventory::ItemStack::Present(data) = &p.items[0] else {
+        panic!("empty stack");
+    };
+    let custom = data
+        .component_patch
+        .get::<azalea_inventory::components::CustomData>()
+        .expect("custom_data preserved");
+    assert_eq!(custom.nbt.int("server:real_value"), Some(42));
+    assert_eq!(custom.nbt.int("pomme:legacy_efficiency"), None);
+    assert_eq!(custom.nbt.byte("pomme:legacy_aqua_affinity"), None);
 }
 
 /// 1.21 collapsed `projectile_power`'s acceleration vector into its
@@ -1833,9 +3534,9 @@ fn translate_use_item_766() {
     );
 }
 
-/// A 1.20.4 optional item (`bool + item + i8 count + NBT`) translates bare
-/// through `container_set_content` (whose trailing carried stack survives);
-/// the NBT drops.
+/// A 1.20.4 optional item (`bool + item + i8 count + NBT`) keeps its legacy
+/// NBT in latest `custom_data` through `container_set_content`; the trailing
+/// carried stack survives too.
 #[test]
 fn translate_container_set_content_765() {
     let mut old = Vec::new();
@@ -1861,7 +3562,11 @@ fn translate_container_set_content_765() {
     };
     assert_eq!(data.kind, azalea_registry::builtin::ItemKind::Stone);
     assert_eq!(data.count, 3);
-    assert_eq!(data.component_patch.iter().count(), 0);
+    let custom = data
+        .component_patch
+        .get::<azalea_inventory::components::CustomData>()
+        .expect("legacy NBT preserved as custom_data");
+    assert_eq!(custom.nbt.byte("d"), Some(5));
     assert!(matches!(p.carried_item, azalea_inventory::ItemStack::Empty));
 }
 
@@ -1973,7 +3678,7 @@ fn translate_update_attributes_765() {
     old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
     old.push(0); // operation
 
-    let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(765, old) else {
+    let ClientboundGamePacket::UpdateAttributes(p) = translate_decode_and_remap(765, old) else {
         panic!("wrong packet");
     };
     assert_eq!(p.values.len(), 1);
@@ -2797,7 +4502,8 @@ fn translate_update_attributes_old_versions() {
         old.extend_from_slice(&4.0f64.to_be_bytes()); // amount
         wire::write_varint(&mut old, 0); // operation
 
-        let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(protocol, old) else {
+        let ClientboundGamePacket::UpdateAttributes(p) = translate_decode_and_remap(protocol, old)
+        else {
             panic!("wrong packet for {protocol}");
         };
         assert_eq!(p.values[0].attribute, Attribute::MaxHealth, "{protocol}");

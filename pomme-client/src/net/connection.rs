@@ -87,6 +87,7 @@ impl Drop for ConnectionHandle {
         // The session is over: restore the launched version's wire protocol
         // and block table so nothing stale leaks into the next one.
         crate::version::clear_session_protocol();
+        crate::world::block::clear_block_tags();
         crate::world::block::set_active_protocol(crate::version::selected_protocol());
     }
 }
@@ -308,9 +309,10 @@ async fn negotiate_wire_version(
     Ok(())
 }
 
-/// Speaks `wire` for the rest of the session. The translation layer and the
-/// block-state tables both key off it, so they always move together.
+/// Speaks `wire` for the rest of the session. The translation layer, block
+/// tags, and block-state tables all key off it, so they always move together.
 fn adopt_wire_protocol(wire: i32) {
+    crate::world::block::clear_block_tags();
     crate::version::set_session_protocol(wire);
     crate::world::block::set_active_protocol(wire);
 }
@@ -538,8 +540,11 @@ async fn config_sequence(
                 received_registry_data = true;
                 registry_holder.append(p.registry_id, p.entries);
             }
-            ClientboundConfigPacket::UpdateTags(_) => {
-                tracing::debug!("Received tags");
+            ClientboundConfigPacket::UpdateTags(p) => {
+                if let Some(tags) = super::block_tags_from_packet(&p.tags) {
+                    tracing::debug!("Received {} block tags", tags.len());
+                    let _ = event_tx.send(NetworkEvent::BlockTags { tags });
+                }
             }
             ClientboundConfigPacket::SelectKnownPacks(_) => {
                 // Claiming no known packs forces the server to send NBT for
@@ -847,8 +852,11 @@ async fn game_loop(
                 if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
                     // Vanilla clears the client level before acknowledging
                     // (ClientPacketListener.handleConfigurationStart); chat
-                    // survives the transition.
-                    let _ = event_tx.try_send(NetworkEvent::Reconfiguring);
+                    // survives the transition. Block tags belong to the
+                    // server's configuration snapshot, so do not let the old
+                    // datapack set affect gameplay while the new config loads.
+                    crate::world::block::clear_block_tags();
+                    let _ = event_tx.send(NetworkEvent::Reconfiguring);
                     let ack = ServerboundGamePacket::ConfigurationAcknowledged(
                         azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
                     );

@@ -1970,8 +1970,7 @@ pub fn update_game(
         // full charge, and the weapon is slow enough to matter (delay > 5).
         // TODO: vanilla also skips it when the active item's ATTACK_RANGE
         // component says the hit is out of range (spears).
-        let held = game.player.inventory.held_stack(core.input.selected_slot());
-        let delay = crate::player::interaction::attack_strength_delay(held);
+        let delay = crate::player::interaction::attack_strength_delay(&game.player.attributes);
         let scale = game.interaction.attack_strength_scale(delay);
         let show_full = scale >= 1.0
             && delay > 5.0
