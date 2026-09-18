@@ -4143,3 +4143,19 @@ fn translate_recipe_display_777() {
         panic!("wrong packet");
     };
 }
+
+/// The level-load gate's `LEVEL_CHUNKS_LOAD_START` (game event 13, unchanged
+/// in 26.3's `ClientboundGameEventPacket`) reaches the handler on a 777 wire.
+#[test]
+fn translate_game_event_777() {
+    use azalea_protocol::packets::game::c_game_event::EventType;
+
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(777, Direction::Clientbound, "game_event"));
+    old.push(13);
+    old.extend_from_slice(&0f32.to_be_bytes());
+    let ClientboundGamePacket::GameEvent(p) = translate_and_decode(777, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.event, EventType::WaitForLevelChunks);
+}

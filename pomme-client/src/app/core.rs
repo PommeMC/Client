@@ -1932,9 +1932,9 @@ impl AppCore {
         tracker.tick_client_load(
             now,
             &ReadyInputs {
-                player_outside_build_height: outside_build_height(
-                    game.player.position.y.floor() as i32
-                ),
+                // 26.3's `isLevelReady` checks only the camera's height.
+                player_outside_build_height: crate::version::session_protocol() < 777
+                    && outside_build_height(game.player.position.y.floor() as i32),
                 camera_outside_build_height: outside_build_height(camera_block.y),
                 spectator: crate::player::is_spectator(game.player.game_mode),
                 alive: !game.dead,
