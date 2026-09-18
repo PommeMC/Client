@@ -14,6 +14,7 @@ use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
+use crate::net::chunk_batch::ChunkBatchSizeCalculator;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
@@ -55,6 +56,7 @@ pub fn handle_game_packet(
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
+    batch_size_calculator: &mut ChunkBatchSizeCalculator,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
@@ -184,15 +186,17 @@ pub fn handle_game_packet(
                 azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive { id: p.id },
             ));
         }
+        ClientboundGamePacket::ChunkBatchStart(_) => {
+            batch_size_calculator.on_batch_start();
+        }
         ClientboundGamePacket::ChunkBatchFinished(p) => {
-            let desired = (p.batch_size as f32).max(25.0);
-            tracing::trace!(
-                "ChunkBatchFinished: batch_size={}, responding with desired={desired}",
-                p.batch_size
-            );
+            // Vanilla answers from how long the batch took per chunk, and does
+            // it here on the network thread: `handleChunkBatchFinished` is one
+            // of the few handlers it doesn't defer to the main thread.
+            batch_size_calculator.on_batch_finished(p.batch_size);
             sender.send(ServerboundGamePacket::ChunkBatchReceived(
                 azalea_protocol::packets::game::s_chunk_batch_received::ServerboundChunkBatchReceived {
-                    desired_chunks_per_tick: desired,
+                    desired_chunks_per_tick: batch_size_calculator.desired_chunks_per_tick(),
                 },
             ));
         }
@@ -581,6 +585,12 @@ pub fn handle_game_packet(
                         game_mode: p.param as u8,
                         previous: None,
                     });
+                }
+                // Vanilla `handleGameEvent` hands LEVEL_CHUNKS_LOAD_START to
+                // the level load tracker, which only then starts waiting for
+                // the player's own chunk.
+                EventType::WaitForLevelChunks => {
+                    let _ = event_tx.try_send(NetworkEvent::LevelChunksLoadStart);
                 }
                 EventType::StartRaining
                 | EventType::StopRaining
@@ -1515,6 +1525,7 @@ mod tests {
                 &event_tx,
                 &registries,
                 &command_tree,
+                &mut ChunkBatchSizeCalculator::default(),
             );
         };
 

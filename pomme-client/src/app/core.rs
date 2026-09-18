@@ -13,6 +13,7 @@ use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window};
 
 use crate::app::input::{Action, InputState, STICK_MOVEMENT_THRESHOLD};
+use crate::app::level_load::ReadyInputs;
 use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
 use crate::app::{POSITION_SEND_INTERVAL, POSITION_THRESHOLD_SQ};
@@ -647,6 +648,11 @@ impl AppCore {
                         tracing::warn!("Unexpected NetworkEvent::Connected, skipping");
                     }
                 }
+                NetworkEvent::LevelChunksLoadStart => {
+                    if let Some(tracker) = &mut game.level_load {
+                        tracker.loading_packets_received();
+                    }
+                }
                 NetworkEvent::BiomeColors { colors } => {
                     tracing::info!("Received {} biome climate entries", colors.len());
                     game.biome_climate = Arc::new(colors);
@@ -668,7 +674,6 @@ impl AppCore {
                     game.light_engine =
                         crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
                     game.position_set = false;
-                    game.player_loaded_sent = false;
                     // Login/respawn recreate vanilla's LocalPlayer, resetting
                     // the XP display sentinel; waypoints persist.
                     game.xp_display_start_tick = i64::MIN;
@@ -679,6 +684,13 @@ impl AppCore {
                     game.player.reset_hurt_state();
 
                     renderer.clear_chunk_meshes();
+                    // The meshes went with the old level, so their bookkeeping
+                    // has to go too, or the new level's camera section reads as
+                    // already meshed.
+                    game.section_vis.clear();
+                    game.section_vis_epoch.clear();
+                    game.meshed.clear();
+                    game.compiled.clear();
                     game.mesh_dispatcher = renderer.create_mesh_dispatcher(
                         Arc::clone(&game.biome_climate),
                         None,
@@ -717,6 +729,7 @@ impl AppCore {
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
                     game.content_gen.remove(&pos);
                     game.meshed.remove(&pos);
+                    game.compiled.remove(&pos);
                     game.vis_mask.remove(&pos);
                     game.vis_tiers.remove(&pos);
                     game.section_gen.retain(|(p, _), _| *p != pos);
@@ -791,7 +804,10 @@ impl AppCore {
                             to_chunk_coord(new_position.z),
                         ));
 
-                    renderer.reset_camera(new_position, new_look_dir);
+                    // The camera is the eye, as `sync_camera_pos` keeps it
+                    // every frame; the feet would seed it a block and a half
+                    // low until the first in-game frame.
+                    renderer.reset_camera(game.player.eye_pos(), new_look_dir);
 
                     if !game.position_set {
                         game.position_set = true;
@@ -803,8 +819,9 @@ impl AppCore {
                         );
                     }
 
-                    // Vanilla handleMovePlayer: accept once the pose is
-                    // applied, then echo it (a 26.3 wire folds the two).
+                    // Vanilla `handleMovePlayer` sends the acknowledgement and
+                    // this echo back to back once the pose is applied (a 26.3
+                    // wire folds the two).
                     connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
                         azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation { id },
                     ));
@@ -1682,6 +1699,7 @@ impl AppCore {
                     // app-wide input state, so a reconnect would otherwise
                     // report the last session's slot.
                     self.input.set_selected_slot(0);
+                    game.start_level_load();
                 }
                 NetworkEvent::PlayerScore { entity_id, score } => {
                     if entity_id == game.player.entity_id {
@@ -1708,6 +1726,7 @@ impl AppCore {
                     // models the max-health base, so it remains unchanged here.
                     let _ = keep_attribute_modifiers;
                     game.dead = false;
+                    game.start_level_load();
                     game.player.reset_for_respawn(keep_entity_data);
                     game.interaction.reset_player_transients_for_respawn();
                     // A fresh LocalPlayer gets a fresh KeyboardInput and packet
@@ -1886,6 +1905,71 @@ impl AppCore {
         disconnect_reason
     }
 
+    /// Vanilla `ClientPacketListener.tick`'s level-load half: advance the
+    /// tracker, and the first tick the level is ready send `player_loaded`
+    /// (`notifyPlayerLoaded`) and drop the tracker. Runs at the start of every
+    /// client tick, in the loading phase as well as in game, so a respawn or a
+    /// dimension change waits and reports again.
+    pub fn tick_level_load(
+        renderer: &Renderer,
+        connection: &ConnectionHandle,
+        game: &mut GameState,
+    ) {
+        // Taken for the tick so the readiness inputs can borrow `game`; put
+        // back below unless the level is ready, which is vanilla clearing
+        // `levelLoadTracker`.
+        let Some(mut tracker) = game.level_load.take() else {
+            return;
+        };
+        let now = Instant::now();
+
+        let min_y = game.chunk_store.min_y();
+        let max_y = min_y + game.chunk_store.height() as i32 - 1;
+        let outside_build_height = |y: i32| y < min_y || y > max_y;
+        // Vanilla reads `gameRenderer.mainCamera().blockPosition()`.
+        let camera_block = renderer.camera_render_position().floor().as_ivec3();
+
+        tracker.tick_client_load(
+            now,
+            &ReadyInputs {
+                player_outside_build_height: outside_build_height(
+                    game.player.position.y.floor() as i32
+                ),
+                camera_outside_build_height: outside_build_height(camera_block.y),
+                spectator: crate::player::is_spectator(game.player.game_mode),
+                alive: !game.dead,
+                // Until the server's first position the camera sits at the
+                // origin, whose section says nothing about where we spawn.
+                player_section_ready: game.position_set && game.camera_section_ready(camera_block),
+            },
+        );
+
+        if !tracker.is_level_ready(now) {
+            game.level_load = Some(tracker);
+            return;
+        }
+
+        game.client_loaded = true;
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::PlayerLoaded(
+                azalea_protocol::packets::game::s_player_loaded::ServerboundPlayerLoaded,
+            ));
+    }
+
+    /// Marks the end of the client tick (1.21.2+). Must be the last packet of
+    /// the tick: servers and anti-cheat batch our movement between these to
+    /// tick-align it, so omitting it makes them reject/rubber-band movement.
+    /// Vanilla `Minecraft.tick` sends it for every tick a level exists,
+    /// including the ones spent on the loading screen.
+    pub fn send_client_tick_end(connection: &ConnectionHandle) {
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::ClientTickEnd(
+                s_client_tick_end::ServerboundClientTickEnd,
+            ));
+    }
+
     pub fn tick_physics(
         &mut self,
         renderer: &mut Renderer,
@@ -1918,6 +2002,15 @@ impl AppCore {
             game.player.position,
             game.server_simulation_distance,
         );
+
+        // Vanilla `LocalPlayer.tick` returns immediately until the client has
+        // loaded: no physics, no interaction, and no input, sprint or movement
+        // packets while the level is still coming in.
+        if !game.client_loaded {
+            self.input.clear_click_counts();
+            self.input.clear_just_pressed_actions();
+            return;
+        }
 
         // LocalPlayer.tickDeath removes the client player at tick 20; from then
         // on ClientLevel.tickEntities skips it entirely.
@@ -2180,15 +2273,6 @@ impl AppCore {
         if input_live {
             self.input.clear_just_pressed_actions();
         }
-
-        // Marks the end of the client tick (1.21.2+). Must be the last packet of
-        // the tick: servers and anti-cheat batch our movement between these to
-        // tick-align it, so omitting it makes them reject/rubber-band movement.
-        connection
-            .packet_tx
-            .send(ServerboundGamePacket::ClientTickEnd(
-                s_client_tick_end::ServerboundClientTickEnd,
-            ));
     }
 
     // Vanilla onUpdateAbilities: report a locally toggled `flying` to the

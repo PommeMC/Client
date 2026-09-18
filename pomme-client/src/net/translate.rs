@@ -273,6 +273,9 @@
 //!   reply drops its UUID and clamps post-1.20.2 action values
 //! - everything else — items, registry_data, spawn info, login, chunks,
 //!   serializer order — matches 1.20.4 exactly (the diff is tiny)
+//! - the `LEVEL_CHUNKS_LOAD_START` game event (13) doesn't exist yet (1.20.4
+//!   added it), so the level load tracker treats the level as started at login
+//!   instead of waiting for it (see `AppCore::tick_level_load`)
 //!
 //! 1.20.1 -> 26.2 wire changes (all of 1.20.2's plus; 1.20 shares them):
 //! - there is no configuration phase, so the join sends no `login_acknowledged`
