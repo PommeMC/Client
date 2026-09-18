@@ -38,143 +38,19 @@ pub fn create_gpu_image_with_format(
 pub fn create_gpu_image_array_with_format(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,
-    width: u32,
-    height: u32,
-    layers: u32,
+    extent: ImageArrayExtent,
     format: vk::Format,
     name: &str,
 ) -> Result<(vk::Image, vk::ImageView, Allocation), String> {
-    let usage = vk::ImageUsageFlags::TransferDst | vk::ImageUsageFlags::Sampled;
-    let image_info = vk::ImageCreateInfo {
-        image_type: vk::ImageType::Type2D,
+    try_create_gpu_image(
+        device,
+        allocator,
+        extent,
         format,
-        extent: vk::Extent3D {
-            width,
-            height,
-            depth: 1,
-        },
-        mip_levels: 1,
-        array_layers: layers,
-        samples: vk::SampleCountFlags::Type1,
-        tiling: vk::ImageTiling::Optimal,
-        usage,
-        ..Default::default()
-    };
-    let image = device
-        .create_image(&image_info, None)
-        .map_err(|error| format!("failed to create font array image: {error}"))?;
-    let mem_reqs = device.get_image_memory_requirements(image);
-    let allocation = {
-        let mut alloc = allocator
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match alloc.allocate(&AllocationCreateDesc {
-            name,
-            requirements: mem_reqs,
-            location: MemoryLocation::GpuOnly,
-            linear: false,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        }) {
-            Ok(allocation) => allocation,
-            Err(error) => {
-                device.destroy_image(image, None);
-                return Err(format!(
-                    "failed to allocate font array image memory: {error}"
-                ));
-            }
-        }
-    };
-    if let Err(error) =
-        unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset()) }
-    {
-        let mut alloc = allocator
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = alloc.free(allocation);
-        device.destroy_image(image, None);
-        return Err(format!("failed to bind font array image memory: {error}"));
-    }
-    let view_info = vk::ImageViewCreateInfo {
-        image,
-        view_type: vk::ImageViewType::Type2DArray,
-        format,
-        subresource_range: vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::Color,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: layers,
-        },
-        ..Default::default()
-    };
-    let view = match device.create_image_view(&view_info, None) {
-        Ok(view) => view,
-        Err(error) => {
-            let mut alloc = allocator
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ = alloc.free(allocation);
-            device.destroy_image(image, None);
-            return Err(format!("failed to create font array image view: {error}"));
-        }
-    };
-    Ok((image, view, allocation))
-}
-
-pub fn create_font_staging_buffer(
-    device: &vk::Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    data: &[u8],
-    name: &str,
-) -> Result<(vk::Buffer, Allocation), String> {
-    let buffer_info = vk::BufferCreateInfo {
-        size: data.len() as u64,
-        usage: vk::BufferUsageFlags::TransferSrc,
-        sharing_mode: vk::SharingMode::Exclusive,
-        ..Default::default()
-    };
-    let buffer = device
-        .create_buffer(&buffer_info, None)
-        .map_err(|error| format!("failed to create font staging buffer: {error}"))?;
-    let mem_reqs = device.get_buffer_memory_requirements(buffer);
-    let mut allocation = {
-        let mut alloc = allocator
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match alloc.allocate(&AllocationCreateDesc {
-            name,
-            requirements: mem_reqs,
-            location: MemoryLocation::CpuToGpu,
-            linear: true,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        }) {
-            Ok(allocation) => allocation,
-            Err(error) => {
-                device.destroy_buffer(buffer, None);
-                return Err(format!("failed to allocate font staging memory: {error}"));
-            }
-        }
-    };
-    if let Err(error) =
-        unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }
-    {
-        let mut alloc = allocator
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = alloc.free(allocation);
-        device.destroy_buffer(buffer, None);
-        return Err(format!("failed to bind font staging memory: {error}"));
-    }
-    let Some(mapped) = allocation.mapped_slice_mut() else {
-        let mut alloc = allocator
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = alloc.free(allocation);
-        device.destroy_buffer(buffer, None);
-        return Err("font staging allocation is not mapped".into());
-    };
-    mapped[..data.len()].copy_from_slice(data);
-    Ok((buffer, allocation))
+        1,
+        vk::ImageViewType::Type2DArray,
+        name,
+    )
 }
 
 fn create_gpu_image_core(
@@ -186,65 +62,104 @@ fn create_gpu_image_core(
     mip_levels: u32,
     name: &str,
 ) -> (vk::Image, vk::ImageView, Allocation, u32) {
-    let usage = vk::ImageUsageFlags::TransferDst | vk::ImageUsageFlags::Sampled;
+    let extent = ImageArrayExtent {
+        width,
+        height,
+        layers: 1,
+    };
+    let (image, view, allocation) = try_create_gpu_image(
+        device,
+        allocator,
+        extent,
+        format,
+        mip_levels,
+        vk::ImageViewType::Type2D,
+        name,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    (image, view, allocation, mip_levels)
+}
 
+pub(crate) fn lock_allocator(
+    allocator: &Arc<Mutex<Allocator>>,
+) -> std::sync::MutexGuard<'_, Allocator> {
+    allocator
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn try_create_gpu_image(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    extent: ImageArrayExtent,
+    format: vk::Format,
+    mip_levels: u32,
+    view_type: vk::ImageViewType,
+    name: &str,
+) -> Result<(vk::Image, vk::ImageView, Allocation), String> {
     let image_info = vk::ImageCreateInfo {
         image_type: vk::ImageType::Type2D,
         format,
         extent: vk::Extent3D {
-            width,
-            height,
+            width: extent.width,
+            height: extent.height,
             depth: 1,
         },
         mip_levels,
-        array_layers: 1,
+        array_layers: extent.layers,
         samples: vk::SampleCountFlags::Type1,
         tiling: vk::ImageTiling::Optimal,
-        usage,
+        usage: vk::ImageUsageFlags::TransferDst | vk::ImageUsageFlags::Sampled,
         ..Default::default()
     };
-
     let image = device
         .create_image(&image_info, None)
-        .expect("failed to create image");
-    let mem_reqs = device.get_image_memory_requirements(image);
-
-    let allocation = allocator
-        .lock()
-        .unwrap()
-        .allocate(&AllocationCreateDesc {
-            name,
-            requirements: mem_reqs,
-            location: MemoryLocation::GpuOnly,
-            linear: false,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        })
-        .expect("failed to allocate image memory");
-
-    unsafe {
-        device
-            .bind_image_memory(image, allocation.memory(), allocation.offset())
-            .expect("failed to bind image memory");
+        .map_err(|error| format!("failed to create image {name}: {error}"))?;
+    let allocation = match lock_allocator(allocator).allocate(&AllocationCreateDesc {
+        name,
+        requirements: device.get_image_memory_requirements(image),
+        location: MemoryLocation::GpuOnly,
+        linear: false,
+        allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+    }) {
+        Ok(allocation) => allocation,
+        Err(error) => {
+            device.destroy_image(image, None);
+            return Err(format!(
+                "failed to allocate image memory for {name}: {error}"
+            ));
+        }
+    };
+    let release = |allocation: Allocation| {
+        let _ = lock_allocator(allocator).free(allocation);
+        device.destroy_image(image, None);
+    };
+    if let Err(error) =
+        unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset()) }
+    {
+        release(allocation);
+        return Err(format!("failed to bind image memory for {name}: {error}"));
     }
-
     let view_info = vk::ImageViewCreateInfo {
         image,
-        view_type: vk::ImageViewType::Type2D,
+        view_type,
         format,
         subresource_range: vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::Color,
             base_mip_level: 0,
             level_count: mip_levels,
             base_array_layer: 0,
-            layer_count: 1,
+            layer_count: extent.layers,
         },
         ..Default::default()
     };
-    let view = device
-        .create_image_view(&view_info, None)
-        .expect("failed to create image view");
-
-    (image, view, allocation, mip_levels)
+    match device.create_image_view(&view_info, None) {
+        Ok(view) => Ok((image, view, allocation)),
+        Err(error) => {
+            release(allocation);
+            Err(format!("failed to create image view for {name}: {error}"))
+        }
+    }
 }
 
 pub fn create_mapped_buffer(
@@ -254,39 +169,57 @@ pub fn create_mapped_buffer(
     usage: vk::BufferUsageFlags,
     name: &str,
 ) -> (vk::Buffer, Allocation) {
+    try_create_mapped_buffer(device, allocator, data, usage, name)
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+pub fn try_create_mapped_buffer(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    data: &[u8],
+    usage: vk::BufferUsageFlags,
+    name: &str,
+) -> Result<(vk::Buffer, Allocation), String> {
     let buffer_info = vk::BufferCreateInfo {
         size: data.len() as u64,
         usage,
         sharing_mode: vk::SharingMode::Exclusive,
         ..Default::default()
     };
-
     let buffer = device
         .create_buffer(&buffer_info, None)
-        .expect("failed to create buffer");
-    let mem_reqs = device.get_buffer_memory_requirements(buffer);
-
-    let mut allocation = allocator
-        .lock()
-        .unwrap()
-        .allocate(&AllocationCreateDesc {
-            name,
-            requirements: mem_reqs,
-            location: MemoryLocation::CpuToGpu,
-            linear: true,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        })
-        .expect("failed to allocate buffer memory");
-
-    unsafe {
-        device
-            .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
-            .expect("failed to bind buffer memory");
+        .map_err(|error| format!("failed to create buffer {name}: {error}"))?;
+    let mut allocation = match lock_allocator(allocator).allocate(&AllocationCreateDesc {
+        name,
+        requirements: device.get_buffer_memory_requirements(buffer),
+        location: MemoryLocation::CpuToGpu,
+        linear: true,
+        allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+    }) {
+        Ok(allocation) => allocation,
+        Err(error) => {
+            device.destroy_buffer(buffer, None);
+            return Err(format!(
+                "failed to allocate buffer memory for {name}: {error}"
+            ));
+        }
+    };
+    let filled =
+        unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }
+            .map_err(|error| format!("failed to bind buffer memory for {name}: {error}"))
+            .and_then(|()| {
+                let mapped = allocation
+                    .mapped_slice_mut()
+                    .ok_or_else(|| format!("buffer {name} is not host-mapped"))?;
+                mapped[..data.len()].copy_from_slice(data);
+                Ok(())
+            });
+    if let Err(error) = filled {
+        let _ = lock_allocator(allocator).free(allocation);
+        device.destroy_buffer(buffer, None);
+        return Err(error);
     }
-
-    allocation.mapped_slice_mut().unwrap()[..data.len()].copy_from_slice(data);
-
-    (buffer, allocation)
+    Ok((buffer, allocation))
 }
 
 pub fn create_staging_buffer(
@@ -423,45 +356,7 @@ pub struct ImageArrayExtent {
     pub layers: u32,
 }
 
-pub fn upload_r8_image_array(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    staging_buffer: vk::Buffer,
-    image: vk::Image,
-    extent: ImageArrayExtent,
-) -> Result<(), String> {
-    upload_image_array(
-        device,
-        queue,
-        command_pool,
-        staging_buffer,
-        image,
-        extent,
-        1,
-    )
-}
-
-pub fn upload_rgba8_image_array(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    staging_buffer: vk::Buffer,
-    image: vk::Image,
-    extent: ImageArrayExtent,
-) -> Result<(), String> {
-    upload_image_array(
-        device,
-        queue,
-        command_pool,
-        staging_buffer,
-        image,
-        extent,
-        4,
-    )
-}
-
-fn upload_image_array(
+pub fn upload_image_array(
     device: &vk::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
@@ -476,7 +371,7 @@ fn upload_image_array(
         layers,
     } = extent;
     let layer_bytes = u64::from(width) * u64::from(height) * bytes_per_pixel;
-    submit_one_time_fallible(device, queue, command_pool, |cmd| {
+    try_submit_one_time(device, queue, command_pool, |cmd| {
         let range = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::Color,
             base_mip_level: 0,
@@ -548,7 +443,17 @@ fn upload_image_array(
     })
 }
 
-fn submit_one_time_fallible<F: FnOnce(&vk::CommandBuffer)>(
+pub fn submit_one_time<F: FnOnce(&vk::CommandBuffer)>(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    record: F,
+) {
+    try_submit_one_time(device, queue, command_pool, record)
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+fn try_submit_one_time<F: FnOnce(&vk::CommandBuffer)>(
     device: &vk::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
@@ -562,78 +467,36 @@ fn submit_one_time_fallible<F: FnOnce(&vk::CommandBuffer)>(
     };
     let mut cmd = vk::CommandBuffer::null();
     unsafe { device.allocate_command_buffers(&alloc_info, std::slice::from_mut(&mut cmd)) }
-        .map_err(|error| format!("failed to allocate font upload command buffer: {error}"))?;
+        .map_err(|error| format!("failed to allocate one-time command buffer: {error}"))?;
     let begin_info = vk::CommandBufferBeginInfo {
         flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
         ..Default::default()
     };
-    if let Err(error) = cmd.begin(&begin_info) {
-        device.free_command_buffers(command_pool, &[cmd.handle()]);
-        return Err(format!(
-            "failed to begin font upload command buffer: {error}"
-        ));
-    }
-    record(&cmd);
-    if let Err(error) = cmd.end() {
-        device.free_command_buffers(command_pool, &[cmd.handle()]);
-        return Err(format!("failed to end font upload command buffer: {error}"));
-    }
-    let submit_info = vk::SubmitInfo {
-        command_buffer_count: 1,
-        command_buffers: &cmd.handle(),
-        ..Default::default()
-    };
-    if let Err(error) = queue.submit(&[submit_info], vk::Fence::null()) {
-        device.free_command_buffers(command_pool, &[cmd.handle()]);
-        return Err(format!("failed to submit font upload: {error}"));
-    }
-    if let Err(error) = queue.wait_idle() {
-        device.free_command_buffers(command_pool, &[cmd.handle()]);
-        return Err(format!("failed to wait for font upload: {error}"));
-    }
+    let result = cmd
+        .begin(&begin_info)
+        .map_err(|error| format!("failed to begin one-time command buffer: {error}"))
+        .and_then(|()| {
+            record(&cmd);
+            cmd.end()
+                .map_err(|error| format!("failed to end one-time command buffer: {error}"))
+        })
+        .and_then(|()| {
+            let submit_info = vk::SubmitInfo {
+                command_buffer_count: 1,
+                command_buffers: &cmd.handle(),
+                ..Default::default()
+            };
+            queue
+                .submit(&[submit_info], vk::Fence::null())
+                .map_err(|error| format!("failed to submit one-time command buffer: {error}"))
+        })
+        .and_then(|()| {
+            queue
+                .wait_idle()
+                .map_err(|error| format!("failed to wait for one-time command buffer: {error}"))
+        });
     device.free_command_buffers(command_pool, &[cmd.handle()]);
-    Ok(())
-}
-
-pub fn submit_one_time<F: FnOnce(&vk::CommandBuffer)>(
-    device: &vk::Device,
-    queue: vk::Queue,
-    command_pool: vk::CommandPool,
-    record: F,
-) {
-    let alloc_info = vk::CommandBufferAllocateInfo {
-        command_pool,
-        level: vk::CommandBufferLevel::Primary,
-        command_buffer_count: 1,
-        ..Default::default()
-    };
-    let mut cmd = vk::CommandBuffer::null();
-    unsafe { device.allocate_command_buffers(&alloc_info, std::slice::from_mut(&mut cmd)) }
-        .expect("failed to allocate one-time command buffer");
-
-    let begin_info = vk::CommandBufferBeginInfo {
-        flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
-        ..Default::default()
-    };
-    cmd.begin(&begin_info)
-        .expect("failed to begin command buffer");
-
-    record(&cmd);
-
-    cmd.end().expect("failed to end command buffer");
-
-    let submit_info = vk::SubmitInfo {
-        command_buffer_count: 1,
-        command_buffers: &cmd.handle(),
-        ..Default::default()
-    };
-    queue
-        .submit(&[submit_info], vk::Fence::null())
-        .expect("failed to submit one-time command buffer");
-    queue
-        .wait_idle()
-        .expect("failed to wait for one-time command buffer");
-    device.free_command_buffers(command_pool, &[cmd.handle()]);
+    result
 }
 
 pub fn transition_image_to_shader_read(
@@ -750,20 +613,6 @@ pub const DEPTH_SUBRESOURCE_RANGE: vk::ImageSubresourceRange = vk::ImageSubresou
     base_array_layer: 0,
     layer_count: 1,
 };
-
-pub fn create_nearest_sampler_fallible(device: &vk::Device) -> Result<vk::Sampler, String> {
-    let info = vk::SamplerCreateInfo {
-        mag_filter: vk::Filter::Nearest,
-        min_filter: vk::Filter::Nearest,
-        address_mode_u: vk::SamplerAddressMode::ClampToEdge,
-        address_mode_v: vk::SamplerAddressMode::ClampToEdge,
-        address_mode_w: vk::SamplerAddressMode::ClampToEdge,
-        ..Default::default()
-    };
-    device
-        .create_sampler(&info, None)
-        .map_err(|error| format!("failed to create font sampler: {error}"))
-}
 
 pub unsafe fn create_nearest_sampler(device: &vk::Device) -> vk::Sampler {
     unsafe { create_nearest_sampler_mipmapped(device, 1) }
@@ -986,6 +835,13 @@ pub unsafe fn create_nearest_sampler_mipmapped(
     device: &vk::Device,
     mip_levels: u32,
 ) -> vk::Sampler {
+    try_create_nearest_sampler(device, mip_levels).unwrap_or_else(|error| panic!("{error}"))
+}
+
+pub fn try_create_nearest_sampler(
+    device: &vk::Device,
+    mip_levels: u32,
+) -> Result<vk::Sampler, String> {
     let mipmap_mode = if mip_levels > 1 {
         vk::SamplerMipmapMode::Linear
     } else {
@@ -1006,7 +862,7 @@ pub unsafe fn create_nearest_sampler_mipmapped(
 
     device
         .create_sampler(&info, None)
-        .expect("failed to create nearest sampler")
+        .map_err(|error| format!("failed to create nearest sampler: {error}"))
 }
 
 // The code below is extracted from ash-rs/ash under the MIT license;

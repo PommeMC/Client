@@ -452,17 +452,8 @@ fn wrap_motd_spans(
 
     for span in spans {
         let make_span = |text: String| TextSpan {
-            text,
-            color: span.color,
-            bold: span.bold,
-            italic: span.italic,
-            strikethrough: span.strikethrough,
-            underline: span.underline,
-            obfuscated: span.obfuscated,
-            shadow_color: span.shadow_color,
-            font: span.font.clone(),
             inline_object: None,
-            component_style: span.component_style.clone(),
+            ..span.with_text(text)
         };
 
         for part in span.text.split_inclusive([' ', '\n']) {

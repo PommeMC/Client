@@ -64,8 +64,10 @@ void main() {
     }
 
     if (v_mode > 5.5) {
+        // The tint is gamma-space like glyph colors; linearize it the same way.
         vec4 tex = texture(favicon_tex, v_uv);
-        out_color = vec4(tex.rgb * v_color.rgb * tex.a * v_color.a, tex.a * v_color.a);
+        vec3 tint = pow(v_color.rgb, vec3(2.2));
+        out_color = vec4(tex.rgb * tint * tex.a * v_color.a, tex.a * v_color.a);
         return;
     }
 
@@ -93,7 +95,8 @@ void main() {
 
     if (v_mode > 3.5) {
         vec3 linear_color = pow(v_color.rgb, vec3(2.2));
-        if (v_mode > 4.0) {
+        // Colored glyphs are mode 4.25, gray 4.0.
+        if (v_mode > 4.125) {
             vec4 tex = texture(mc_font_color_tex, vec3(v_uv, v_rect_size.x));
             out_color = vec4(tex.rgb * linear_color * tex.a * v_color.a, tex.a * v_color.a);
         } else {
