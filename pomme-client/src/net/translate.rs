@@ -142,6 +142,8 @@
 //! - chunk heightmaps were a network-NBT compound of named long arrays; 1.21.5
 //!   packed them into a (type id, long array) list
 //! - `player_chat` gained a leading `globalIndex` varint; zero is synthesized
+//! - serverbound `chat`'s last-seen update gained a trailing checksum byte in
+//!   1.21.5; it is stripped
 //! - `update_advancements` gained a trailing `showAdvancements` bool; true is
 //!   synthesized
 //! - team `Parameters` carried nametag visibility and collision rule as

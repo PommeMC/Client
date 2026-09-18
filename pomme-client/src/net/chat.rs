@@ -18,12 +18,26 @@ use crate::ui::text::format_component_spans;
 
 #[derive(Clone, Debug, Default)]
 pub struct ChatTypeRegistry {
-    entries: Vec<NbtCompound>,
+    /// Chat decorations by protocol id, parsed once per registry sync.
+    decorations: Vec<Result<ChatDecoration, String>>,
 }
 
 impl ChatTypeRegistry {
     pub fn from_entries(entries: Vec<NbtCompound>) -> Self {
-        Self { entries }
+        Self {
+            decorations: entries
+                .iter()
+                .enumerate()
+                .map(|(id, nbt)| registry_decoration(id as u32, nbt))
+                .collect(),
+        }
+    }
+
+    fn decoration(&self, protocol_id: u32) -> Result<ChatDecoration, String> {
+        self.decorations
+            .get(protocol_id as usize)
+            .ok_or_else(|| format!("unknown chat_type registry id {protocol_id}"))?
+            .clone()
     }
 }
 
@@ -55,9 +69,6 @@ enum FilterMask {
     Partial(Vec<u64>),
 }
 
-/// Returns `None` when this is not a chat packet. Chat packets are always
-/// consumed, including malformed ones (reported through the `Err`) so a bad
-/// payload never falls through to Azalea's lossy component decoder.
 pub fn encode_outbound_message(message: &str, timestamp_millis: u64) -> Result<Vec<u8>, String> {
     if message.chars().count() > 256 {
         return Err("chat message exceeds 256 characters".into());
@@ -87,6 +98,9 @@ pub fn encode_outbound_command(command: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Returns `None` when this is not a chat packet. Chat packets are always
+/// consumed, including malformed ones (reported through the `Err`) so a bad
+/// payload never falls through to Azalea's lossy component decoder.
 pub fn handle_raw_chat_packet(
     raw: &[u8],
     event_tx: &Sender<NetworkEvent>,
@@ -241,7 +255,7 @@ fn read_bound_chat_type(
         let _narration = read_direct_decoration(raw, pos)?;
         chat
     } else {
-        registry_decoration(chat_types, holder - 1)?
+        chat_types.decoration(holder - 1)?
     };
     let name = read_component(raw, pos)?;
     let target_name = if read_bool(raw, pos)? {
@@ -258,19 +272,14 @@ fn read_bound_chat_type(
 
 fn read_direct_decoration(raw: &[u8], pos: &mut usize) -> Result<ChatDecoration, String> {
     let translation_key = read_string(raw, pos, 32767, "chat_type.translation_key")?;
-    let count = read_varint_req(raw, pos, "chat_type.parameters.count")? as usize;
-    if count > 3 {
-        return Err(format!(
-            "chat type has {count} decoration parameters (max 3)"
-        ));
-    }
-    let mut parameters = Vec::with_capacity(count);
+    let count = read_varint_req(raw, pos, "chat_type.parameters.count")?;
+    let mut parameters = Vec::new();
     for _ in 0..count {
+        // `Parameter.BY_ID` maps out-of-range ids to SENDER (`ZERO`).
         parameters.push(match read_varint_req(raw, pos, "chat_type.parameter")? {
-            0 => DecorationParameter::Sender,
             1 => DecorationParameter::Target,
             2 => DecorationParameter::Content,
-            value => return Err(format!("unknown chat decoration parameter {value}")),
+            _ => DecorationParameter::Sender,
         });
     }
     let style_value = read_nbt_value(raw, pos)?;
@@ -287,14 +296,7 @@ fn read_direct_decoration(raw: &[u8], pos: &mut usize) -> Result<ChatDecoration,
     })
 }
 
-fn registry_decoration(
-    chat_types: &ChatTypeRegistry,
-    protocol_id: u32,
-) -> Result<ChatDecoration, String> {
-    let nbt = chat_types
-        .entries
-        .get(protocol_id as usize)
-        .ok_or_else(|| format!("unknown chat_type registry id {protocol_id}"))?;
+fn registry_decoration(protocol_id: u32, nbt: &NbtCompound) -> Result<ChatDecoration, String> {
     let root = serde_json::to_value(NbtTag::Compound(nbt.clone()))
         .map_err(|e| format!("could not inspect chat_type registry value: {e}"))?;
     let chat = root
@@ -931,5 +933,75 @@ mod tests {
             filtered.component_style.as_ref().unwrap().hover_event,
             Some(HoverEvent::Text(_))
         ));
+    }
+
+    #[test]
+    fn action_bar_and_overlay_system_chat_reach_the_action_bar() {
+        let table = PacketTable::native();
+        let mut action_bar = Vec::new();
+        write_varint(
+            &mut action_bar,
+            table
+                .id(Phase::Game, Direction::Clientbound, "set_action_bar_text")
+                .unwrap(),
+        );
+        write_component(&mut action_bar, text_component("bar"));
+        let mut overlay = Vec::new();
+        write_varint(
+            &mut overlay,
+            table
+                .id(Phase::Game, Direction::Clientbound, "system_chat")
+                .unwrap(),
+        );
+        write_component(&mut overlay, text_component("bar"));
+        overlay.push(1); // overlay
+
+        for raw in [action_bar, overlay] {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            handle_raw_chat_packet(&raw, &tx, &ChatTypeRegistry::default())
+                .unwrap()
+                .unwrap();
+            let NetworkEvent::ActionBar { spans } = rx.recv().unwrap() else {
+                panic!("expected action bar event");
+            };
+            assert_eq!(
+                spans.iter().map(|s| s.text.as_str()).collect::<String>(),
+                "bar"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_chat_type_parameters_are_unbounded_and_default_to_sender() {
+        let id = PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, "disguised_chat")
+            .unwrap();
+        let mut raw = Vec::new();
+        write_varint(&mut raw, id);
+        write_component(&mut raw, text_component("hi"));
+        write_varint(&mut raw, 0); // direct holder
+        for _ in 0..2 {
+            // Chat decoration, then narration decoration.
+            write_string(&mut raw, "%s %s %s %s");
+            write_varint(&mut raw, 4);
+            for parameter in [0, 2, 1, 9] {
+                write_varint(&mut raw, parameter);
+            }
+            write_component(&mut raw, NbtCompound::new()); // empty style
+        }
+        write_component(&mut raw, text_component("Alice"));
+        raw.push(0); // no target name
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        handle_raw_chat_packet(&raw, &tx, &ChatTypeRegistry::default())
+            .unwrap()
+            .unwrap();
+        let NetworkEvent::ChatMessage { spans } = rx.recv().unwrap() else {
+            panic!("expected chat event");
+        };
+        assert_eq!(
+            spans.iter().map(|s| s.text.as_str()).collect::<String>(),
+            "Alice hi  Alice"
+        );
     }
 }

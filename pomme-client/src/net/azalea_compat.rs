@@ -132,6 +132,44 @@ fn packet_ids_match_azalea() {
         table_id(Direction::Clientbound, "recipe_book_add")
     );
 
+    // `net::chat` decodes and encodes these itself; only the ids are shared.
+    use azalea_protocol::packets::game::{
+        c_set_action_bar_text, c_system_chat, s_chat, s_chat_command,
+    };
+
+    let system_chat = ClientboundGamePacket::SystemChat(c_system_chat::ClientboundSystemChat {
+        content: azalea_chat::FormattedText::default(),
+        overlay: false,
+    });
+    assert_eq!(
+        system_chat.id(),
+        table_id(Direction::Clientbound, "system_chat")
+    );
+    let action_bar = ClientboundGamePacket::SetActionBarText(
+        c_set_action_bar_text::ClientboundSetActionBarText {
+            text: azalea_chat::FormattedText::default(),
+        },
+    );
+    assert_eq!(
+        action_bar.id(),
+        table_id(Direction::Clientbound, "set_action_bar_text")
+    );
+    let chat = ServerboundGamePacket::Chat(s_chat::ServerboundChat {
+        message: String::new(),
+        timestamp: 0,
+        salt: 0,
+        signature: None,
+        last_seen_messages: Default::default(),
+    });
+    assert_eq!(chat.id(), table_id(Direction::Serverbound, "chat"));
+    let chat_command = ServerboundGamePacket::ChatCommand(s_chat_command::ServerboundChatCommand {
+        command: String::new(),
+    });
+    assert_eq!(
+        chat_command.id(),
+        table_id(Direction::Serverbound, "chat_command")
+    );
+
     use azalea_protocol::packets::game::{
         c_clear_titles, c_set_subtitle_text, c_set_title_text, c_set_titles_animation,
     };
