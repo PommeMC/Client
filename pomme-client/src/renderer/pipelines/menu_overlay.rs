@@ -2078,6 +2078,8 @@ pub enum SpriteId {
     SlotHighlightFront,
     RecipeBookButton,
     RecipeBookButtonHighlighted,
+    WidgetTextField,
+    WidgetTextFieldHighlighted,
     RecipeBookBackground,
     RecipeBookTab,
     RecipeBookTabSelected,
@@ -2675,6 +2677,16 @@ fn build_sprite_atlas(
             SpriteId::RecipeBookButtonHighlighted,
             "minecraft/textures/gui/sprites/recipe_book/button_highlighted.png",
             0.0,
+        ),
+        (
+            SpriteId::WidgetTextField,
+            "minecraft/textures/gui/sprites/widget/text_field.png",
+            1.0,
+        ),
+        (
+            SpriteId::WidgetTextFieldHighlighted,
+            "minecraft/textures/gui/sprites/widget/text_field_highlighted.png",
+            1.0,
         ),
         (
             SpriteId::RecipeBookTab,
