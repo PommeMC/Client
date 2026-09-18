@@ -83,7 +83,7 @@ mod tests {
         let expected = (INITIAL_NANOS_PER_CHUNK + clamped) / 2.0;
         assert_eq!(
             calc.desired_chunks_per_tick(),
-            (7_000_000.0 / expected) as f32
+            (NANOS_PER_TICK_BUDGET / expected) as f32
         );
     }
 
@@ -94,7 +94,10 @@ mod tests {
             ..Default::default()
         };
         calc.on_batch_finished(0);
-        assert_eq!(calc.desired_chunks_per_tick(), 3.5);
+        assert_eq!(
+            calc.desired_chunks_per_tick(),
+            ChunkBatchSizeCalculator::default().desired_chunks_per_tick()
+        );
     }
 
     #[test]

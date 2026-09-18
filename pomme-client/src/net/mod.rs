@@ -87,8 +87,7 @@ pub enum NetworkEvent {
         z: i32,
     },
     PlayerPosition {
-        /// Teleport id to acknowledge. Vanilla answers on the main thread,
-        /// from `handleMovePlayer`, so the ack and its echo stay together.
+        /// Teleport id to acknowledge.
         id: u32,
         change: azalea_protocol::common::movements::PositionMoveRotation,
         relative: azalea_protocol::common::movements::RelativeMovements,

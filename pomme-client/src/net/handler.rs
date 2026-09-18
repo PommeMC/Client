@@ -190,9 +190,9 @@ pub fn handle_game_packet(
             batch_size_calculator.on_batch_start();
         }
         ClientboundGamePacket::ChunkBatchFinished(p) => {
-            // Vanilla answers from how long the batch took per chunk, and does
-            // it here on the network thread: `handleChunkBatchFinished` is one
-            // of the few handlers it doesn't defer to the main thread.
+            // Answered on the network thread: vanilla's
+            // `handleChunkBatchFinished` is one of the few handlers it doesn't
+            // defer to the main thread.
             batch_size_calculator.on_batch_finished(p.batch_size);
             sender.send(ServerboundGamePacket::ChunkBatchReceived(
                 azalea_protocol::packets::game::s_chunk_batch_received::ServerboundChunkBatchReceived {
@@ -586,9 +586,6 @@ pub fn handle_game_packet(
                         previous: None,
                     });
                 }
-                // Vanilla `handleGameEvent` hands LEVEL_CHUNKS_LOAD_START to
-                // the level load tracker, which only then starts waiting for
-                // the player's own chunk.
                 EventType::WaitForLevelChunks => {
                     let _ = event_tx.try_send(NetworkEvent::LevelChunksLoadStart);
                 }
