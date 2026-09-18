@@ -7,6 +7,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod app;
 mod args;
 mod assets;
+mod attribute;
 mod audio;
 mod benchmark;
 mod dirs;
@@ -24,6 +25,7 @@ mod resource_pack;
 mod singleplayer;
 #[cfg(test)]
 mod test_util;
+mod tool;
 mod ui;
 mod user;
 mod util;
