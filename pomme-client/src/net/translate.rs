@@ -142,6 +142,8 @@
 //! - chunk heightmaps were a network-NBT compound of named long arrays; 1.21.5
 //!   packed them into a (type id, long array) list
 //! - `player_chat` gained a leading `globalIndex` varint; zero is synthesized
+//! - serverbound `chat`'s last-seen update gained a trailing checksum byte in
+//!   1.21.5; it is stripped
 //! - `update_advancements` gained a trailing `showAdvancements` bool; true is
 //!   synthesized
 //! - team `Parameters` carried nametag visibility and collision rule as
@@ -656,6 +658,10 @@ impl Ids764 {
 struct Ids769 {
     player_chat_id: u32,
     update_advancements_id: u32,
+    /// Native-space serverbound `chat` id and the wire version's, for the
+    /// last-seen checksum strip.
+    chat_id: u32,
+    chat_old_id: u32,
     /// Native-space serverbound `container_click` id and the wire
     /// version's, for the hashed-stack rewrite.
     container_click_id: u32,
@@ -1273,10 +1279,13 @@ impl Translation {
                 return translate_chat_command_765(v765.chat_command_old_id, &frame[pos..]);
             }
         }
-        if let Some(v769) = &ids.v769
-            && id == v769.container_click_id
-        {
-            return translate_container_click(v769.container_click_old_id, &frame[pos..]);
+        if let Some(v769) = &ids.v769 {
+            if id == v769.chat_id {
+                return translate_chat_769(v769.chat_old_id, &frame[pos..]);
+            }
+            if id == v769.container_click_id {
+                return translate_container_click(v769.container_click_old_id, &frame[pos..]);
+            }
         }
         if let Some(v766) = &ids.v766
             && id == v766.use_item_id
@@ -1573,6 +1582,8 @@ impl GameIds {
             v769: (protocol <= 769).then(|| Ids769 {
                 player_chat_id: id(Clientbound, "player_chat"),
                 update_advancements_id: id(Clientbound, "update_advancements"),
+                chat_id: id(Serverbound, "chat"),
+                chat_old_id: required_id(table, Phase::Game, Serverbound, "chat"),
                 container_click_id: id(Serverbound, "container_click"),
                 container_click_old_id: required_id(
                     table,
@@ -2172,6 +2183,18 @@ fn translate_creative_slot_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
         Some(out) => vec![out],
         None => Vec::new(),
     }
+}
+
+/// Serverbound `chat` for 1.21.4 and older: drops the trailing last-seen
+/// checksum byte 1.21.5 added.
+fn translate_chat_769(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+    let Some((&_checksum, body)) = payload.split_last() else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(body.len() + 5);
+    wire::write_varint(&mut out, old_id);
+    out.extend_from_slice(body);
+    vec![out]
 }
 
 /// The 1.20.4 `chat_command`, which is always the signed form: empty

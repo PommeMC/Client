@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod azalea_compat;
+mod chat;
 pub mod chunk_batch;
 pub mod commands;
 pub mod conn;
