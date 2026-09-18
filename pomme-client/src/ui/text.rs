@@ -41,7 +41,7 @@ impl InlineObject {
 
 /// A styled run of text (color plus formatting flags). The shared span type for
 /// rendering rich chat and server-MOTD text.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextSpan {
     pub text: String,
     pub color: [f32; 4],
@@ -49,24 +49,17 @@ pub struct TextSpan {
     pub italic: bool,
     pub strikethrough: bool,
     pub underline: bool,
-    /// Vanilla's obfuscated style. The renderer replaces each non-space glyph
-    /// with a changing glyph of the same advance, preserving layout.
+    /// Obfuscated style: each non-space glyph is swapped for a random glyph
+    /// of the same advance.
     pub obfuscated: bool,
-    /// Explicit ARGB shadow color from the component style, if present.
-    /// `None` uses Vanilla's default 25%-RGB text shadow when shadow rendering
-    /// is enabled by the caller.
+    /// Explicit shadow color; `None` uses the default 25% shadow.
     pub shadow_color: Option<[f32; 4]>,
-    /// Explicit resource font ID. `None` is Vanilla's `minecraft:default`.
-    /// Keeping the ID intact lets resource-pack/custom fonts reach the actual
-    /// font set instead of collapsing everything except `minecraft:alt` back
-    /// to the default glyphs.
+    /// Resource font id; `None` is `minecraft:default`.
     pub font: Option<String>,
-    /// Vanilla 26.2 object-content glyph associated with this U+FFFC run.
+    /// Object glyph drawn for this span's U+FFFC.
     pub inline_object: Option<InlineObject>,
-    /// Fully-resolved Vanilla component style for native chat text. This is
-    /// retained through wrapping so later hit-testing can implement click,
-    /// hover and insertion semantics without reconstructing component trees.
-    /// Legacy/non-chat Azalea text has no native component metadata yet.
+    /// Resolved component style (click, hover, insertion) of native chat
+    /// text; `None` for azalea-decoded text.
     pub component_style: Option<Arc<ResolvedStyle>>,
 }
 
@@ -87,6 +80,14 @@ impl TextSpan {
             component_style: None,
         }
     }
+
+    /// This span's formatting applied to `text`.
+    pub fn with_text(&self, text: String) -> Self {
+        Self {
+            text,
+            ..self.clone()
+        }
+    }
 }
 
 /// The spans with every alpha multiplied by `alpha` (for fade effects).
@@ -98,8 +99,8 @@ pub fn with_alpha(spans: &[TextSpan], alpha: f32) -> Vec<TextSpan> {
     spans
 }
 
-/// Flatten a Pomme-native Vanilla component into styled spans while retaining
-/// its resolved interaction metadata.
+/// Flatten a native component into styled spans, keeping each run's resolved
+/// style.
 pub fn format_component_spans(component: &Component, base_color: [f32; 4]) -> Vec<TextSpan> {
     let mut spans = Vec::new();
     component.visit_text(&ResolvedStyle::default(), &mut |text, style| {
@@ -121,10 +122,7 @@ pub fn format_component_spans(component: &Component, base_color: [f32; 4]) -> Ve
     spans
 }
 
-/// Flatten an Azalea `FormattedText` component into styled spans for rendering.
-///
-/// This remains for non-chat UI packets during the incremental Azalea removal.
-/// Native game chat uses [`format_component_spans`] instead.
+/// Flatten an azalea `FormattedText` component into styled spans for rendering.
 ///
 /// `base_color` applies wherever the component carries no explicit color,
 /// mirroring vanilla `drawString`'s color argument.

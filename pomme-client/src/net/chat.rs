@@ -1,13 +1,11 @@
-//! Pomme-owned inbound game-chat decoding.
-//!
-//! Game frames reach this module after protocol-version translation but before
-//! Azalea's typed packet decoder. That ordering is intentional: Azalea's 26.2
-//! text-component decoder drops hover-event data, so chat components must be
-//! decoded here if Pomme is going to support Vanilla interaction semantics.
+//! Pomme-owned game-chat encoding and decoding. Inbound frames arrive after
+//! version translation and before azalea's typed decode, whose 26.2 component
+//! decoder drops hover events.
 
 use std::io::Cursor;
 
 use crossbeam_channel::Sender;
+use pomme_protocol::wire::{game_serverbound_id, read_varint, write_varint};
 use pomme_protocol::{Direction, PacketTable, Phase};
 use serde_json::Value;
 use simdnbt::owned::{NbtCompound, NbtTag};
@@ -18,12 +16,26 @@ use crate::ui::text::format_component_spans;
 
 #[derive(Clone, Debug, Default)]
 pub struct ChatTypeRegistry {
-    entries: Vec<NbtCompound>,
+    /// Chat decorations by protocol id, parsed once per registry sync.
+    decorations: Vec<Result<ChatDecoration, String>>,
 }
 
 impl ChatTypeRegistry {
     pub fn from_entries(entries: Vec<NbtCompound>) -> Self {
-        Self { entries }
+        Self {
+            decorations: entries
+                .iter()
+                .enumerate()
+                .map(|(id, nbt)| registry_decoration(id as u32, nbt))
+                .collect(),
+        }
+    }
+
+    fn decoration(&self, protocol_id: u32) -> Result<ChatDecoration, String> {
+        self.decorations
+            .get(protocol_id as usize)
+            .ok_or_else(|| format!("unknown chat_type registry id {protocol_id}"))?
+            .clone()
     }
 }
 
@@ -55,38 +67,32 @@ enum FilterMask {
     Partial(Vec<u64>),
 }
 
-/// Returns `None` when this is not a chat packet. Chat packets are always
-/// consumed, including malformed ones (reported through the `Err`) so a bad
-/// payload never falls through to Azalea's lossy component decoder.
 pub fn encode_outbound_message(message: &str, timestamp_millis: u64) -> Result<Vec<u8>, String> {
     if message.chars().count() > 256 {
         return Err("chat message exceeds 256 characters".into());
     }
-    let id = PacketTable::native()
-        .id(Phase::Game, Direction::Serverbound, "chat")
-        .ok_or_else(|| "native protocol has no serverbound chat packet".to_owned())?;
     let mut out = Vec::with_capacity(message.len() + 32);
-    pomme_protocol::wire::write_varint(&mut out, id);
+    write_varint(&mut out, game_serverbound_id("chat"));
     write_wire_string(&mut out, message);
     out.extend_from_slice(&timestamp_millis.to_be_bytes());
     out.extend_from_slice(&0u64.to_be_bytes()); // salt
     out.push(0); // no signature
-    pomme_protocol::wire::write_varint(&mut out, 0); // last-seen offset
+    write_varint(&mut out, 0); // last-seen offset
     out.extend_from_slice(&[0; 3]); // 20 acknowledged bits
-    out.push(0); // ignore last-seen checksum
+    out.push(0); // last-seen checksum
     Ok(out)
 }
 
-pub fn encode_outbound_command(command: &str) -> Result<Vec<u8>, String> {
-    let id = PacketTable::native()
-        .id(Phase::Game, Direction::Serverbound, "chat_command")
-        .ok_or_else(|| "native protocol has no serverbound chat_command packet".to_owned())?;
+pub fn encode_outbound_command(command: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(command.len() + 6);
-    pomme_protocol::wire::write_varint(&mut out, id);
+    write_varint(&mut out, game_serverbound_id("chat_command"));
     write_wire_string(&mut out, command);
-    Ok(out)
+    out
 }
 
+/// Returns `None` when this is not a chat packet. Chat packets are always
+/// consumed, including malformed ones (reported through the `Err`) so a bad
+/// payload never falls through to Azalea's lossy component decoder.
 pub fn handle_raw_chat_packet(
     raw: &[u8],
     event_tx: &Sender<NetworkEvent>,
@@ -236,12 +242,10 @@ fn read_bound_chat_type(
     let holder = read_varint_req(raw, pos, "chat_type.holder")?;
     let decoration = if holder == 0 {
         let chat = read_direct_decoration(raw, pos)?;
-        // The holder also carries narration decoration. It is not currently
-        // consumed by Pomme's narrator, but must be parsed to stay aligned.
-        let _narration = read_direct_decoration(raw, pos)?;
+        read_direct_decoration(raw, pos)?; // narration, unused
         chat
     } else {
-        registry_decoration(chat_types, holder - 1)?
+        chat_types.decoration(holder - 1)?
     };
     let name = read_component(raw, pos)?;
     let target_name = if read_bool(raw, pos)? {
@@ -258,19 +262,14 @@ fn read_bound_chat_type(
 
 fn read_direct_decoration(raw: &[u8], pos: &mut usize) -> Result<ChatDecoration, String> {
     let translation_key = read_string(raw, pos, 32767, "chat_type.translation_key")?;
-    let count = read_varint_req(raw, pos, "chat_type.parameters.count")? as usize;
-    if count > 3 {
-        return Err(format!(
-            "chat type has {count} decoration parameters (max 3)"
-        ));
-    }
-    let mut parameters = Vec::with_capacity(count);
+    let count = read_varint_req(raw, pos, "chat_type.parameters.count")?;
+    let mut parameters = Vec::new();
     for _ in 0..count {
+        // `Parameter.BY_ID` maps out-of-range ids to SENDER (`ZERO`).
         parameters.push(match read_varint_req(raw, pos, "chat_type.parameter")? {
-            0 => DecorationParameter::Sender,
             1 => DecorationParameter::Target,
             2 => DecorationParameter::Content,
-            value => return Err(format!("unknown chat decoration parameter {value}")),
+            _ => DecorationParameter::Sender,
         });
     }
     let style_value = read_nbt_value(raw, pos)?;
@@ -287,29 +286,23 @@ fn read_direct_decoration(raw: &[u8], pos: &mut usize) -> Result<ChatDecoration,
     })
 }
 
-fn registry_decoration(
-    chat_types: &ChatTypeRegistry,
-    protocol_id: u32,
-) -> Result<ChatDecoration, String> {
-    let nbt = chat_types
-        .entries
-        .get(protocol_id as usize)
-        .ok_or_else(|| format!("unknown chat_type registry id {protocol_id}"))?;
+fn registry_decoration(protocol_id: u32, nbt: &NbtCompound) -> Result<ChatDecoration, String> {
+    let missing = |field: &str| format!("chat_type registry id {protocol_id} has no {field}");
     let root = serde_json::to_value(NbtTag::Compound(nbt.clone()))
         .map_err(|e| format!("could not inspect chat_type registry value: {e}"))?;
     let chat = root
         .get("chat")
         .and_then(Value::as_object)
-        .ok_or_else(|| format!("chat_type registry id {protocol_id} has no chat decoration"))?;
+        .ok_or_else(|| missing("chat decoration"))?;
     let translation_key = chat
         .get("translation_key")
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("chat_type registry id {protocol_id} has no translation_key"))?
+        .ok_or_else(|| missing("translation_key"))?
         .to_owned();
     let parameter_values = chat
         .get("parameters")
         .and_then(Value::as_array)
-        .ok_or_else(|| format!("chat_type registry id {protocol_id} has no parameters"))?;
+        .ok_or_else(|| missing("parameters"))?;
     let mut parameters = Vec::with_capacity(parameter_values.len());
     for value in parameter_values {
         parameters.push(match value.as_str() {
@@ -401,7 +394,7 @@ fn read_nbt_value(raw: &[u8], pos: &mut usize) -> Result<Value, String> {
 }
 
 fn write_wire_string(out: &mut Vec<u8>, value: &str) {
-    pomme_protocol::wire::write_varint(out, value.len() as u32);
+    write_varint(out, value.len() as u32);
     out.extend_from_slice(value.as_bytes());
 }
 
@@ -436,10 +429,6 @@ fn read_varint_req(raw: &[u8], pos: &mut usize, field: &str) -> Result<u32, Stri
     read_varint(raw, pos).ok_or_else(|| format!("truncated/invalid varint for {field}"))
 }
 
-fn read_varint(raw: &[u8], pos: &mut usize) -> Option<u32> {
-    pomme_protocol::wire::read_varint(raw, pos)
-}
-
 fn skip(raw: &[u8], pos: &mut usize, len: usize, field: &str) -> Result<(), String> {
     take(raw, pos, len, field).map(|_| ())
 }
@@ -465,27 +454,35 @@ fn ensure_end(raw: &[u8], pos: usize, packet: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use pomme_protocol::version::{NATIVE, VERSIONS};
     use simdnbt::owned::{NbtCompound, NbtList};
 
+    use super::super::translate::{Translation, joinable};
     use super::*;
+    use crate::chat_component::ClickEvent;
+    use crate::ui::text::TextSpan;
 
-    fn write_varint(out: &mut Vec<u8>, value: u32) {
-        pomme_protocol::wire::write_varint(out, value);
+    fn native_id(name: &str) -> u32 {
+        PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, name)
+            .unwrap()
     }
 
     fn write_component(out: &mut Vec<u8>, compound: NbtCompound) {
         NbtTag::Compound(compound).write(out);
     }
 
-    fn write_string(out: &mut Vec<u8>, value: &str) {
-        write_varint(out, value.len() as u32);
-        out.extend_from_slice(value.as_bytes());
-    }
-
     fn text_component(text: &str) -> NbtCompound {
         let mut component = NbtCompound::new();
         component.insert("text", text);
         component
+    }
+
+    fn show_text_hover(text: &str) -> NbtTag {
+        let mut hover = NbtCompound::new();
+        hover.insert("action", "show_text");
+        hover.insert("value", NbtTag::Compound(text_component(text)));
+        NbtTag::Compound(hover)
     }
 
     fn test_chat_registries(template: &str) -> ChatTypeRegistry {
@@ -514,175 +511,84 @@ mod tests {
         out.push(0); // no target name
     }
 
-    #[test]
-    fn outbound_message_matches_native_vanilla_layout() {
-        let raw = encode_outbound_message("hello", 1234).unwrap();
-        let mut pos = 0;
-        let id = read_varint(&raw, &mut pos).unwrap();
-        assert_eq!(
-            id,
-            PacketTable::native()
-                .id(Phase::Game, Direction::Serverbound, "chat")
-                .unwrap()
-        );
-        assert_eq!(
-            read_string(&raw, &mut pos, 256, "message").unwrap(),
-            "hello"
-        );
-        assert_eq!(
-            u64::from_be_bytes(
-                take(&raw, &mut pos, 8, "timestamp")
-                    .unwrap()
-                    .try_into()
-                    .unwrap()
-            ),
-            1234
-        );
-        assert_eq!(take(&raw, &mut pos, 8, "salt").unwrap(), &[0; 8]);
-        assert!(!read_bool(&raw, &mut pos).unwrap());
-        assert_eq!(read_varint(&raw, &mut pos), Some(0));
-        assert_eq!(take(&raw, &mut pos, 3, "acknowledged").unwrap(), &[0; 3]);
-        assert_eq!(take(&raw, &mut pos, 1, "checksum").unwrap(), &[0]);
-        assert_eq!(pos, raw.len());
-    }
-
-    #[test]
-    fn outbound_message_translates_cleanly_to_1_20_1_layout() {
-        let raw = encode_outbound_message("hello 1.20.1", 1234).unwrap();
-        let translated = super::super::translate::Translation::for_protocol(763)
-            .unwrap()
-            .translate_outbound_game_frame(raw);
-        assert_eq!(translated.len(), 1);
-
-        let old = &translated[0];
-        let mut pos = 0;
-        assert_eq!(
-            read_varint(old, &mut pos),
-            PacketTable::for_protocol(763)
-                .unwrap()
-                .id(Phase::Game, Direction::Serverbound, "chat")
-        );
-        assert_eq!(
-            read_string(old, &mut pos, 256, "message").unwrap(),
-            "hello 1.20.1"
-        );
-        assert_eq!(
-            u64::from_be_bytes(
-                take(old, &mut pos, 8, "timestamp")
-                    .unwrap()
-                    .try_into()
-                    .unwrap()
-            ),
-            1234
-        );
-        assert_eq!(take(old, &mut pos, 8, "salt").unwrap(), &[0; 8]);
-        assert!(!read_bool(old, &mut pos).unwrap());
-        assert_eq!(read_varint(old, &mut pos), Some(0));
-        assert_eq!(take(old, &mut pos, 3, "acknowledged").unwrap(), &[0; 3]);
-        // 1.21.4 and older have no trailing last-seen checksum byte.
-        assert_eq!(pos, old.len());
-    }
-
-    #[test]
-    fn outbound_command_uses_raw_native_frame_and_old_version_translator() {
-        let raw = encode_outbound_command("say hi").unwrap();
-        let mut pos = 0;
-        assert_eq!(
-            read_varint(&raw, &mut pos),
-            PacketTable::native().id(Phase::Game, Direction::Serverbound, "chat_command")
-        );
-        assert_eq!(
-            read_string(&raw, &mut pos, 32767, "command").unwrap(),
-            "say hi"
-        );
-        assert_eq!(pos, raw.len());
-
-        let translated = super::super::translate::Translation::for_protocol(765)
-            .unwrap()
-            .translate_outbound_game_frame(raw);
-        assert_eq!(translated.len(), 1);
-        assert!(translated[0].len() > pos + 20);
-    }
-
-    #[test]
-    fn system_chat_round_trips_every_supported_protocol() {
-        let mut protocols = pomme_protocol::version::VERSIONS
+    fn joinable_protocols() -> Vec<i32> {
+        let mut protocols: Vec<i32> = VERSIONS
             .iter()
-            .filter(|version| super::super::translate::joinable(version.protocol))
             .map(|version| version.protocol)
-            .collect::<Vec<_>>();
+            .filter(|&protocol| joinable(protocol))
+            .collect();
         protocols.sort_unstable();
         protocols.dedup();
+        protocols
+    }
 
-        for protocol in protocols {
-            let table = PacketTable::for_protocol(protocol).unwrap_or_else(PacketTable::native);
-            let id = table
-                .id(Phase::Game, Direction::Clientbound, "system_chat")
-                .unwrap();
-            let mut wire = Vec::new();
-            write_varint(&mut wire, id);
-            if protocol <= 764 {
-                write_string(
-                    &mut wire,
-                    &serde_json::json!({
-                        "text": format!("hello-{protocol}"),
-                        "color": "aqua"
-                    })
-                    .to_string(),
-                );
-            } else {
-                let mut component = text_component(&format!("hello-{protocol}"));
-                component.insert("color", "aqua");
-                write_component(&mut wire, component);
-            }
-            wire.push(0);
-
-            let native = if protocol == pomme_protocol::version::NATIVE.protocol {
-                wire.into_boxed_slice()
-            } else {
-                super::super::translate::Translation::for_protocol(protocol)
-                    .unwrap()
-                    .translate_game_frame(wire.into_boxed_slice())
-                    .unwrap_or_else(|| {
-                        panic!("system chat did not translate from protocol {protocol}")
-                    })
-            };
-            let (tx, rx) = crossbeam_channel::bounded(1);
-            handle_raw_chat_packet(&native, &tx, &ChatTypeRegistry::default())
-                .unwrap()
-                .unwrap_or_else(|e| {
-                    panic!("native chat decode failed for protocol {protocol}: {e}")
-                });
-            let NetworkEvent::ChatMessage { spans } = rx.recv().unwrap() else {
-                panic!("expected chat event for protocol {protocol}");
-            };
-            assert_eq!(
-                spans.iter().map(|s| s.text.as_str()).collect::<String>(),
-                format!("hello-{protocol}")
-            );
-            assert_eq!(
-                spans[0].component_style.as_ref().unwrap().color,
-                Some(0x55ffff)
-            );
+    fn translate_inbound(protocol: i32, frame: Vec<u8>) -> Box<[u8]> {
+        if protocol == NATIVE.protocol {
+            return frame.into_boxed_slice();
         }
+        Translation::for_protocol(protocol)
+            .unwrap()
+            .translate_game_frame(frame.into_boxed_slice())
+            .unwrap_or_else(|| panic!("frame did not translate from protocol {protocol}"))
+    }
+
+    fn decode(raw: &[u8], chat_types: &ChatTypeRegistry) -> NetworkEvent {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        handle_raw_chat_packet(raw, &tx, chat_types)
+            .expect("not a chat packet")
+            .unwrap_or_else(|e| panic!("chat decode failed: {e}"));
+        rx.recv().unwrap()
+    }
+
+    fn decode_chat(raw: &[u8], chat_types: &ChatTypeRegistry) -> Vec<TextSpan> {
+        let NetworkEvent::ChatMessage { spans } = decode(raw, chat_types) else {
+            panic!("expected chat event");
+        };
+        spans
+    }
+
+    fn plain(spans: &[TextSpan]) -> String {
+        spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    fn style_of<'a>(spans: &'a [TextSpan], text: &str) -> &'a crate::chat_component::ResolvedStyle {
+        spans
+            .iter()
+            .find(|s| s.text == text)
+            .and_then(|s| s.component_style.as_deref())
+            .unwrap_or_else(|| panic!("no styled span {text:?}"))
+    }
+
+    #[test]
+    fn outbound_message_layout() {
+        let mut expected = vec![game_serverbound_id("chat") as u8, 5];
+        expected.extend_from_slice(b"hello");
+        expected.extend_from_slice(&1234u64.to_be_bytes());
+        // Salt, no signature, last-seen offset, 20 acknowledged bits, checksum.
+        expected.extend_from_slice(&[0; 8 + 1 + 1 + 3 + 1]);
+        assert_eq!(encode_outbound_message("hello", 1234).unwrap(), expected);
+    }
+
+    #[test]
+    fn outbound_command_layout() {
+        let mut expected = vec![game_serverbound_id("chat_command") as u8, 6];
+        expected.extend_from_slice(b"say hi");
+        assert_eq!(encode_outbound_command("say hi"), expected);
+    }
+
+    #[test]
+    fn outbound_message_rejects_vanilla_length_overflow() {
+        assert!(encode_outbound_message(&"x".repeat(257), 0).is_err());
     }
 
     #[test]
     fn outbound_message_translates_every_supported_protocol() {
-        let mut protocols = pomme_protocol::version::VERSIONS
-            .iter()
-            .filter(|version| super::super::translate::joinable(version.protocol))
-            .map(|version| version.protocol)
-            .collect::<Vec<_>>();
-        protocols.sort_unstable();
-        protocols.dedup();
-
-        for protocol in protocols {
+        for protocol in joinable_protocols() {
             let native = encode_outbound_message("cross-version", 99).unwrap();
-            let frames = if protocol == pomme_protocol::version::NATIVE.protocol {
+            let frames = if protocol == NATIVE.protocol {
                 vec![native]
             } else {
-                super::super::translate::Translation::for_protocol(protocol)
+                Translation::for_protocol(protocol)
                     .unwrap()
                     .translate_outbound_game_frame(native)
             };
@@ -704,6 +610,7 @@ mod tests {
             assert!(!read_bool(frame, &mut pos).unwrap(), "protocol {protocol}");
             assert_eq!(read_varint(frame, &mut pos), Some(0), "protocol {protocol}");
             skip(frame, &mut pos, 3, "acknowledged").unwrap();
+            // 1.21.4 and older have no trailing last-seen checksum byte.
             if protocol >= 770 {
                 skip(frame, &mut pos, 1, "checksum").unwrap();
             }
@@ -712,204 +619,150 @@ mod tests {
     }
 
     #[test]
-    fn outbound_message_rejects_vanilla_length_overflow() {
-        assert!(encode_outbound_message(&"x".repeat(257), 0).is_err());
+    fn system_chat_round_trips_every_supported_protocol() {
+        for protocol in joinable_protocols() {
+            let table = PacketTable::for_protocol(protocol).unwrap_or_else(PacketTable::native);
+            let mut wire = Vec::new();
+            write_varint(
+                &mut wire,
+                table
+                    .id(Phase::Game, Direction::Clientbound, "system_chat")
+                    .unwrap(),
+            );
+            let text = format!("hello-{protocol}");
+            if protocol <= 764 {
+                let json = serde_json::json!({"text": text, "color": "aqua"});
+                write_wire_string(&mut wire, &json.to_string());
+            } else {
+                let mut component = text_component(&text);
+                component.insert("color", "aqua");
+                write_component(&mut wire, component);
+            }
+            wire.push(0); // not overlay
+
+            let spans = decode_chat(
+                &translate_inbound(protocol, wire),
+                &ChatTypeRegistry::default(),
+            );
+            assert_eq!(plain(&spans), text);
+            assert_eq!(style_of(&spans, &text).color, Some(0x55ffff));
+        }
     }
 
     #[test]
-    fn system_chat_from_1_20_1_translates_into_native_component_path() {
-        let old_id = PacketTable::for_protocol(763)
-            .unwrap()
-            .id(Phase::Game, Direction::Clientbound, "system_chat")
-            .unwrap();
+    fn system_chat_from_1_20_1_keeps_legacy_hover() {
+        let mut old = Vec::new();
+        write_varint(
+            &mut old,
+            PacketTable::for_protocol(763)
+                .unwrap()
+                .id(Phase::Game, Direction::Clientbound, "system_chat")
+                .unwrap(),
+        );
         let json = serde_json::json!({
             "text": "Old server",
             "color": "gold",
-            "hoverEvent": {
-                "action": "show_text",
-                "contents": {"text": "1.20.1 tooltip"}
-            }
-        })
-        .to_string();
-        let mut old = Vec::new();
-        write_varint(&mut old, old_id);
-        write_string(&mut old, &json);
+            "hoverEvent": {"action": "show_text", "contents": {"text": "1.20.1 tooltip"}}
+        });
+        write_wire_string(&mut old, &json.to_string());
         old.push(0); // not overlay
 
-        let native = super::super::translate::Translation::for_protocol(763)
-            .unwrap()
-            .translate_game_frame(old.into_boxed_slice())
-            .expect("1.20.1 system chat should translate");
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        handle_raw_chat_packet(&native, &tx, &ChatTypeRegistry::default())
-            .unwrap()
-            .unwrap();
-        let NetworkEvent::ChatMessage { spans } = rx.recv().unwrap() else {
-            panic!("expected chat event");
-        };
-        assert_eq!(
-            spans.iter().map(|s| s.text.as_str()).collect::<String>(),
-            "Old server"
-        );
-        let style = spans[0].component_style.as_ref().unwrap();
+        let spans = decode_chat(&translate_inbound(763, old), &ChatTypeRegistry::default());
+        let style = style_of(&spans, "Old server");
         assert_eq!(style.color, Some(0xffaa00));
         assert!(matches!(style.hover_event, Some(HoverEvent::Text(_))));
     }
 
     #[test]
     fn disguised_chat_from_1_20_1_translates_chat_type_and_components() {
-        let old_id = PacketTable::for_protocol(763)
-            .unwrap()
-            .id(Phase::Game, Direction::Clientbound, "disguised_chat")
-            .unwrap();
+        let mut old = Vec::new();
+        write_varint(
+            &mut old,
+            PacketTable::for_protocol(763)
+                .unwrap()
+                .id(Phase::Game, Direction::Clientbound, "disguised_chat")
+                .unwrap(),
+        );
         let content = serde_json::json!({
             "text": "Legacy hello",
             "clickEvent": {"action": "copy_to_clipboard", "value": "legacy"}
-        })
-        .to_string();
-        let sender = serde_json::json!({"text": "Alice"}).to_string();
-
-        let mut old = Vec::new();
-        write_varint(&mut old, old_id);
-        write_string(&mut old, &content);
+        });
+        write_wire_string(&mut old, &content.to_string());
         write_varint(&mut old, 0); // direct chat_type registry id before holders
-        write_string(&mut old, &sender);
+        write_wire_string(&mut old, &serde_json::json!({"text": "Alice"}).to_string());
         old.push(0); // no target name
 
-        let native = super::super::translate::Translation::for_protocol(763)
-            .unwrap()
-            .translate_game_frame(old.into_boxed_slice())
-            .expect("1.20.1 disguised chat should translate");
-        let registries = test_chat_registries("<%s> %s");
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        handle_raw_chat_packet(&native, &tx, &registries)
-            .unwrap()
-            .unwrap();
-        let NetworkEvent::ChatMessage { spans } = rx.recv().unwrap() else {
-            panic!("expected chat event");
-        };
-        assert_eq!(
-            spans.iter().map(|s| s.text.as_str()).collect::<String>(),
-            "<Alice> Legacy hello"
+        let spans = decode_chat(
+            &translate_inbound(763, old),
+            &test_chat_registries("<%s> %s"),
         );
-        let content_span = spans.iter().find(|s| s.text == "Legacy hello").unwrap();
-        assert!(matches!(
-            content_span.component_style.as_ref().unwrap().click_event,
-            Some(crate::chat_component::ClickEvent::CopyToClipboard(ref value)) if value == "legacy"
-        ));
+        assert_eq!(plain(&spans), "<Alice> Legacy hello");
+        assert_eq!(
+            style_of(&spans, "Legacy hello").click_event,
+            Some(ClickEvent::CopyToClipboard("legacy".into()))
+        );
     }
 
     #[test]
     fn system_chat_decodes_hover_before_azalea() {
-        let id = PacketTable::native()
-            .id(Phase::Game, Direction::Clientbound, "system_chat")
-            .unwrap();
-        let mut root = NbtCompound::new();
-        root.insert("text", "Click me");
-        let mut hover_text = NbtCompound::new();
-        hover_text.insert("text", "Tooltip");
-        let mut hover = NbtCompound::new();
-        hover.insert("action", "show_text");
-        hover.insert("value", NbtTag::Compound(hover_text));
-        root.insert("hover_event", NbtTag::Compound(hover));
-
+        let mut root = text_component("Click me");
+        root.insert("hover_event", show_text_hover("Tooltip"));
         let mut raw = Vec::new();
-        write_varint(&mut raw, id);
+        write_varint(&mut raw, native_id("system_chat"));
         write_component(&mut raw, root);
-        raw.push(0);
+        raw.push(0); // not overlay
 
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        let result = handle_raw_chat_packet(&raw, &tx, &ChatTypeRegistry::default()).unwrap();
-        result.unwrap();
-        let NetworkEvent::ChatMessage { spans } = rx.recv().unwrap() else {
-            panic!("expected chat event");
-        };
-        let style = spans[0].component_style.as_ref().unwrap();
-        assert!(matches!(style.hover_event, Some(HoverEvent::Text(_))));
+        let spans = decode_chat(&raw, &ChatTypeRegistry::default());
+        assert!(matches!(
+            style_of(&spans, "Click me").hover_event,
+            Some(HoverEvent::Text(_))
+        ));
     }
 
     #[test]
-    fn disguised_chat_uses_registry_decoration_without_azalea_component_decode() {
-        let id = PacketTable::native()
-            .id(Phase::Game, Direction::Clientbound, "disguised_chat")
-            .unwrap();
+    fn disguised_chat_uses_registry_decoration() {
         let mut content = text_component("Hello");
         let mut click = NbtCompound::new();
         click.insert("action", "copy_to_clipboard");
         click.insert("value", "hello");
         content.insert("click_event", NbtTag::Compound(click));
-
         let mut raw = Vec::new();
-        write_varint(&mut raw, id);
+        write_varint(&mut raw, native_id("disguised_chat"));
         write_component(&mut raw, content);
         write_bound_chat_type(&mut raw, "Alice");
 
-        let registries = test_chat_registries("<%s> %s");
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        handle_raw_chat_packet(&raw, &tx, &registries)
-            .unwrap()
-            .unwrap();
-        let NetworkEvent::ChatMessage { spans } = rx.recv().unwrap() else {
-            panic!("expected chat event");
-        };
+        let spans = decode_chat(&raw, &test_chat_registries("<%s> %s"));
+        assert_eq!(plain(&spans), "<Alice> Hello");
+        let style = style_of(&spans, "Hello");
         assert_eq!(
-            spans.iter().map(|s| s.text.as_str()).collect::<String>(),
-            "<Alice> Hello"
+            style.click_event,
+            Some(ClickEvent::CopyToClipboard("hello".into()))
         );
-        let content_span = spans.iter().find(|s| s.text == "Hello").unwrap();
-        assert!(matches!(
-            content_span.component_style.as_ref().unwrap().click_event,
-            Some(crate::chat_component::ClickEvent::CopyToClipboard(ref value)) if value == "hello"
-        ));
-        assert_eq!(
-            content_span.component_style.as_ref().unwrap().color,
-            Some(0xaaaaaa)
-        );
+        assert_eq!(style.color, Some(0xaaaaaa));
     }
 
     #[test]
-    fn player_chat_packet_layout_preserves_unsigned_component_interactions() {
-        let id = PacketTable::native()
-            .id(Phase::Game, Direction::Clientbound, "player_chat")
-            .unwrap();
+    fn player_chat_layout_preserves_unsigned_component_interactions() {
         let mut unsigned = text_component("Decorated");
-        let mut hover_text = NbtCompound::new();
-        hover_text.insert("text", "Unsigned tooltip");
-        let mut hover = NbtCompound::new();
-        hover.insert("action", "show_text");
-        hover.insert("value", NbtTag::Compound(hover_text));
-        unsigned.insert("hover_event", NbtTag::Compound(hover));
-
+        unsigned.insert("hover_event", show_text_hover("Unsigned tooltip"));
         let mut raw = Vec::new();
-        write_varint(&mut raw, id);
+        write_varint(&mut raw, native_id("player_chat"));
         write_varint(&mut raw, 0); // global index
         raw.extend_from_slice(&[0; 16]); // sender UUID
         write_varint(&mut raw, 0); // message index
         raw.push(0); // no signature
-        write_string(&mut raw, "signed body");
-        raw.extend_from_slice(&0u64.to_be_bytes()); // timestamp
-        raw.extend_from_slice(&0u64.to_be_bytes()); // salt
+        write_wire_string(&mut raw, "signed body");
+        raw.extend_from_slice(&[0; 16]); // timestamp, salt
         write_varint(&mut raw, 0); // last-seen signatures
         raw.push(1); // unsigned content present
         write_component(&mut raw, unsigned);
         write_varint(&mut raw, 0); // pass-through filter
         write_bound_chat_type(&mut raw, "Alice");
 
-        let registries = test_chat_registries("<%s> %s");
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        handle_raw_chat_packet(&raw, &tx, &registries)
-            .unwrap()
-            .unwrap();
-        let NetworkEvent::ChatMessage { spans } = rx.recv().unwrap() else {
-            panic!("expected chat event");
-        };
-        assert_eq!(
-            spans.iter().map(|s| s.text.as_str()).collect::<String>(),
-            "<Alice> Decorated"
-        );
-        let content_span = spans.iter().find(|s| s.text == "Decorated").unwrap();
+        let spans = decode_chat(&raw, &test_chat_registries("<%s> %s"));
+        assert_eq!(plain(&spans), "<Alice> Decorated");
         assert!(matches!(
-            content_span.component_style.as_ref().unwrap().hover_event,
+            style_of(&spans, "Decorated").hover_event,
             Some(HoverEvent::Text(_))
         ));
     }
@@ -918,18 +771,50 @@ mod tests {
     fn partial_filter_builds_dark_gray_hoverable_hashes() {
         let component = filtered_component("abcdef", &[0b001100]);
         let spans = format_component_spans(&component, [1.0; 4]);
-        assert_eq!(
-            spans.iter().map(|s| s.text.as_str()).collect::<String>(),
-            "ab##ef"
-        );
-        let filtered = spans.iter().find(|s| s.text == "##").unwrap();
-        assert_eq!(
-            filtered.component_style.as_ref().unwrap().color,
-            Some(0x555555)
-        );
-        assert!(matches!(
-            filtered.component_style.as_ref().unwrap().hover_event,
-            Some(HoverEvent::Text(_))
-        ));
+        assert_eq!(plain(&spans), "ab##ef");
+        let filtered = style_of(&spans, "##");
+        assert_eq!(filtered.color, Some(0x555555));
+        assert!(matches!(filtered.hover_event, Some(HoverEvent::Text(_))));
+    }
+
+    #[test]
+    fn action_bar_and_overlay_system_chat_reach_the_action_bar() {
+        let mut action_bar = Vec::new();
+        write_varint(&mut action_bar, native_id("set_action_bar_text"));
+        write_component(&mut action_bar, text_component("bar"));
+        let mut overlay = Vec::new();
+        write_varint(&mut overlay, native_id("system_chat"));
+        write_component(&mut overlay, text_component("bar"));
+        overlay.push(1); // overlay
+
+        for raw in [action_bar, overlay] {
+            let NetworkEvent::ActionBar { spans } = decode(&raw, &ChatTypeRegistry::default())
+            else {
+                panic!("expected action bar event");
+            };
+            assert_eq!(plain(&spans), "bar");
+        }
+    }
+
+    #[test]
+    fn direct_chat_type_parameters_are_unbounded_and_default_to_sender() {
+        let mut raw = Vec::new();
+        write_varint(&mut raw, native_id("disguised_chat"));
+        write_component(&mut raw, text_component("hi"));
+        write_varint(&mut raw, 0); // direct holder
+        for _ in 0..2 {
+            // Chat decoration, then narration decoration.
+            write_wire_string(&mut raw, "%s %s %s %s");
+            write_varint(&mut raw, 4);
+            for parameter in [0, 2, 1, 9] {
+                write_varint(&mut raw, parameter);
+            }
+            write_component(&mut raw, NbtCompound::new()); // empty style
+        }
+        write_component(&mut raw, text_component("Alice"));
+        raw.push(0); // no target name
+
+        let spans = decode_chat(&raw, &ChatTypeRegistry::default());
+        assert_eq!(plain(&spans), "Alice hi  Alice");
     }
 }

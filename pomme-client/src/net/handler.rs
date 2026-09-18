@@ -14,6 +14,7 @@ use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
+use crate::net::chunk_batch::ChunkBatchSizeCalculator;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::entity_renderer::{
     CAT_VARIANT_ORDER, CHICKEN_VARIANT_ORDER, COW_VARIANT_ORDER, WOLF_VARIANT_ORDER,
@@ -55,6 +56,7 @@ pub fn handle_game_packet(
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
+    batch_size_calculator: &mut ChunkBatchSizeCalculator,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
@@ -173,12 +175,8 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z });
         }
         ClientboundGamePacket::PlayerPosition(p) => {
-            sender.send(ServerboundGamePacket::AcceptTeleportation(
-                azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation {
-                    id: p.id,
-                },
-            ));
             let _ = event_tx.try_send(NetworkEvent::PlayerPosition {
+                id: p.id,
                 change: p.change.clone(),
                 relative: p.relative.clone(),
             });
@@ -188,15 +186,17 @@ pub fn handle_game_packet(
                 azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive { id: p.id },
             ));
         }
+        ClientboundGamePacket::ChunkBatchStart(_) => {
+            batch_size_calculator.on_batch_start();
+        }
         ClientboundGamePacket::ChunkBatchFinished(p) => {
-            let desired = (p.batch_size as f32).max(25.0);
-            tracing::trace!(
-                "ChunkBatchFinished: batch_size={}, responding with desired={desired}",
-                p.batch_size
-            );
+            // Answered on the network thread: vanilla's
+            // `handleChunkBatchFinished` is one of the few handlers it doesn't
+            // defer to the main thread.
+            batch_size_calculator.on_batch_finished(p.batch_size);
             sender.send(ServerboundGamePacket::ChunkBatchReceived(
                 azalea_protocol::packets::game::s_chunk_batch_received::ServerboundChunkBatchReceived {
-                    desired_chunks_per_tick: desired,
+                    desired_chunks_per_tick: batch_size_calculator.desired_chunks_per_tick(),
                 },
             ));
         }
@@ -569,6 +569,9 @@ pub fn handle_game_packet(
                         game_mode: p.param as u8,
                         previous: None,
                     });
+                }
+                EventType::WaitForLevelChunks => {
+                    let _ = event_tx.try_send(NetworkEvent::LevelChunksLoadStart);
                 }
                 EventType::StartRaining
                 | EventType::StopRaining
@@ -1152,9 +1155,9 @@ fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id
     };
     let order_pos = |name: &str| order.iter().position(|p| *p == name).map(|i| i as u32);
     let fallback = order_pos(default).unwrap_or(0);
-    // Position == protocol id only holds because pomme answers
-    // SelectKnownPacks with an empty list (connection.rs), forcing the server
-    // to send NBT for every entry (azalea shift_removes NBT-less ones).
+    // Position == protocol id only holds while every entry carries NBT
+    // (azalea shift_removes NBT-less ones). Entries the server skips for a
+    // pack pomme claimed are filled in first (`net::known_packs`).
     let Some((ident, nbt)) = registry_holder
         .extra
         .get(&azalea_registry::identifier::Identifier::new(registry))
@@ -1502,6 +1505,7 @@ mod tests {
                 &event_tx,
                 &registries,
                 &command_tree,
+                &mut ChunkBatchSizeCalculator::default(),
             );
         };
 

@@ -594,19 +594,9 @@ fn line_alpha(age_secs: f32) -> f32 {
     t * t
 }
 
+/// A span's formatting, carried per character with its text left empty.
 #[derive(Clone, PartialEq)]
-struct CharStyle {
-    color: [f32; 4],
-    bold: bool,
-    italic: bool,
-    strikethrough: bool,
-    underline: bool,
-    obfuscated: bool,
-    shadow_color: Option<[f32; 4]>,
-    font: Option<String>,
-    inline_object: Option<crate::ui::text::InlineObject>,
-    component_style: Option<std::sync::Arc<crate::chat_component::ResolvedStyle>>,
-}
+struct CharStyle(TextSpan);
 
 type StyledLine = Vec<(char, CharStyle)>;
 
@@ -628,18 +618,7 @@ pub(crate) fn wrap_spans(
     let mut words: Vec<StyledLine> = Vec::new();
     let mut word: StyledLine = Vec::new();
     for s in spans {
-        let style = CharStyle {
-            color: s.color,
-            bold: s.bold,
-            italic: s.italic,
-            strikethrough: s.strikethrough,
-            underline: s.underline,
-            obfuscated: s.obfuscated,
-            shadow_color: s.shadow_color,
-            font: s.font.clone(),
-            inline_object: s.inline_object.clone(),
-            component_style: s.component_style.clone(),
-        };
+        let style = CharStyle(s.with_text(String::new()));
         for ch in s.text.chars() {
             if ch.is_whitespace() {
                 if !word.is_empty() {
@@ -713,19 +692,7 @@ fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
         if last_style.as_ref() == Some(st) {
             spans.last_mut().unwrap().text.push(*ch);
         } else {
-            spans.push(TextSpan {
-                text: ch.to_string(),
-                color: st.color,
-                bold: st.bold,
-                italic: st.italic,
-                strikethrough: st.strikethrough,
-                underline: st.underline,
-                obfuscated: st.obfuscated,
-                shadow_color: st.shadow_color,
-                font: st.font.clone(),
-                inline_object: st.inline_object.clone(),
-                component_style: st.component_style.clone(),
-            });
+            spans.push(st.0.with_text(ch.to_string()));
             last_style = Some(st.clone());
         }
     }
