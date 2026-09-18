@@ -375,6 +375,13 @@ pub struct Translation {
     /// Handled outside [`GameIds`]: the attribute ids need remapping even on
     /// a version whose packet ids all match the native (26.1).
     update_attributes_id: u32,
+    /// Recipe bodies carry static-registry ids that still need remapping when
+    /// packet ids are otherwise native-identical (notably 26.1).
+    recipe_book_add_id: u32,
+    update_recipes_id: u32,
+    place_ghost_recipe_id: u32,
+    recipe_display_protocol: bool,
+    recipe_old_profile: bool,
     /// Game-phase packet-id translation and the rewrites tied to it; `None`
     /// when the wire version's ids match the native (26.1).
     game_ids: Option<GameIds>,
@@ -873,6 +880,11 @@ impl Translation {
                 set_player_team_id: id(Phase::Game, "set_player_team"),
             }),
             update_attributes_id: id(Phase::Game, "update_attributes"),
+            recipe_book_add_id: id(Phase::Game, "recipe_book_add"),
+            update_recipes_id: id(Phase::Game, "update_recipes"),
+            place_ghost_recipe_id: id(Phase::Game, "place_ghost_recipe"),
+            recipe_display_protocol: protocol >= 768,
+            recipe_old_profile: protocol <= 772,
             game_ids: GameIds::build(protocol, table, native),
             config_ids: ConfigIds::build(protocol, table, native),
             no_config_phase: table
@@ -1135,6 +1147,12 @@ impl Translation {
             }
         } else if v775.is_some_and(|v| id == v.set_player_team_id) {
             translate_team(id, payload, v769)
+        } else if self.recipe_display_protocol && id == self.recipe_book_add_id {
+            translate_recipe_book_add(id, payload, self.to_native, self.recipe_old_profile)
+        } else if self.recipe_display_protocol && id == self.update_recipes_id {
+            translate_update_recipes(id, payload, self.to_native, self.recipe_old_profile)
+        } else if self.recipe_display_protocol && id == self.place_ghost_recipe_id {
+            translate_place_ghost_recipe(id, payload, self.to_native, self.recipe_old_profile)
         } else if let Some(ids) = &self.game_ids {
             // Pre-1.20.2 wire NBT carries an empty root name the native
             // version's readers don't expect.
@@ -1341,6 +1359,13 @@ impl Translation {
     /// `level_particles` path; `None` drops the particle.
     pub fn remap_particle(&self, id: u32) -> Option<u32> {
         self.to_native.remap(ClientRegistry::ParticleType, id)
+    }
+
+    /// Native-version item id for a source-version item id. Used by decoded
+    /// configuration/game tag payloads, whose element ids are not covered by
+    /// the packet-id translation layer.
+    pub fn remap_item_to_native(&self, id: u32) -> Option<u32> {
+        self.to_native.remap(ClientRegistry::Item, id)
     }
 
     /// Remaps a decoded packet's static-registry ids into the native
@@ -3456,6 +3481,33 @@ fn translate_item_stack(
     }
     let item = u32::azalea_read_var(cur).ok()?;
     wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+    translate_data_component_patch(cur, out, remaps, old_profile)
+}
+
+/// Recipe displays use `ItemStackTemplate`, whose wire order is item id,
+/// count, component patch (unlike normal `ItemStack`, which starts with the
+/// count sentinel). Keep this leaf separate so recipe translation never
+/// reuses the incompatible normal-stack decoder.
+fn translate_item_stack_template(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+    old_profile: bool,
+) -> Option<()> {
+    let item = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+    let count_at = cur.position() as usize;
+    i32::azalea_read_var(cur).ok()?;
+    out.extend_from_slice(&cur.get_ref()[count_at..cur.position() as usize]);
+    translate_data_component_patch(cur, out, remaps, old_profile)
+}
+
+fn translate_data_component_patch(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+    old_profile: bool,
+) -> Option<()> {
     let added_at = cur.position() as usize;
     let added = u32::azalea_read_var(cur).ok()?;
     out.extend_from_slice(&cur.get_ref()[added_at..cur.position() as usize]);
@@ -4159,6 +4211,232 @@ fn translate_explode(
     translate_sound_holder(&mut cur, &mut out, remaps)?;
     out.push(0); // no block particles
     Some(out)
+}
+
+/// Normalizes post-1.21.2 recipe-book entries into 26.2's static-registry
+/// id space before azalea parses them. The recipe-display registry itself is
+/// stable across these versions, but slot-display, item and component ids
+/// are not (1.21.11's `item` slot is id 2; 26.2 id 2 means
+/// `with_any_potion`).
+fn translate_recipe_book_add(
+    id: u32,
+    payload: &[u8],
+    remaps: &RegistryRemaps,
+    old_profile: bool,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+
+    let entries = copy_varint(&mut cur, &mut out)?;
+    for _ in 0..entries {
+        copy_varint(&mut cur, &mut out)?; // RecipeDisplayId
+        translate_recipe_display(&mut cur, &mut out, remaps, old_profile)?;
+        copy_varint(&mut cur, &mut out)?; // OptionalInt wire sentinel
+        copy_varint(&mut cur, &mut out)?; // RecipeBookCategory
+        copy_optional(&mut cur, &mut out, |cur, out| {
+            let requirements = copy_varint(cur, out)?;
+            for _ in 0..requirements {
+                translate_recipe_ingredient(cur, out, remaps)?;
+            }
+            Some(())
+        })?;
+        copy_bytes(&mut cur, &mut out, 1)?; // entry flags
+    }
+    copy_bytes(&mut cur, &mut out, 1)?; // replace
+    (cur.position() as usize == payload.len()).then_some(out)
+}
+
+/// Normalizes the post-1.21.2 recipe property sets and stonecutter entries.
+fn translate_update_recipes(
+    id: u32,
+    payload: &[u8],
+    remaps: &RegistryRemaps,
+    old_profile: bool,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+
+    let property_sets = copy_varint(&mut cur, &mut out)?;
+    for _ in 0..property_sets {
+        copy_utf(&mut cur, &mut out)?;
+        let items = copy_varint(&mut cur, &mut out)?;
+        for _ in 0..items {
+            let item = u32::azalea_read_var(&mut cur).ok()?;
+            wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, item)?);
+        }
+    }
+
+    let stonecutter = copy_varint(&mut cur, &mut out)?;
+    for _ in 0..stonecutter {
+        translate_recipe_ingredient(&mut cur, &mut out, remaps)?;
+        translate_slot_display(&mut cur, &mut out, remaps, old_profile)?;
+    }
+    (cur.position() as usize == payload.len()).then_some(out)
+}
+
+fn translate_place_ghost_recipe(
+    id: u32,
+    payload: &[u8],
+    remaps: &RegistryRemaps,
+    old_profile: bool,
+) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    wire::write_varint(&mut out, id);
+    copy_varint(&mut cur, &mut out)?; // container id
+    translate_recipe_display(&mut cur, &mut out, remaps, old_profile)?;
+    (cur.position() as usize == payload.len()).then_some(out)
+}
+
+fn translate_recipe_display(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+    old_profile: bool,
+) -> Option<()> {
+    let source = u32::azalea_read_var(cur).ok()?;
+    let display = remaps.remap(ClientRegistry::RecipeDisplay, source)?;
+    wire::write_varint(out, display);
+    match display {
+        0 => {
+            // Shapeless: ingredient displays, result, crafting station.
+            translate_slot_display_vec(cur, out, remaps, old_profile)?;
+            translate_slot_display(cur, out, remaps, old_profile)?;
+            translate_slot_display(cur, out, remaps, old_profile)
+        }
+        1 => {
+            // Shaped: width, height, ingredient displays, result, station.
+            copy_varint(cur, out)?;
+            copy_varint(cur, out)?;
+            translate_slot_display_vec(cur, out, remaps, old_profile)?;
+            translate_slot_display(cur, out, remaps, old_profile)?;
+            translate_slot_display(cur, out, remaps, old_profile)
+        }
+        2 => {
+            // Furnace: ingredient, fuel, result, station, duration, xp.
+            for _ in 0..4 {
+                translate_slot_display(cur, out, remaps, old_profile)?;
+            }
+            copy_varint(cur, out)?;
+            copy_bytes(cur, out, 4)
+        }
+        3 => {
+            // Stonecutter: input, result, station.
+            for _ in 0..3 {
+                translate_slot_display(cur, out, remaps, old_profile)?;
+            }
+            Some(())
+        }
+        4 => {
+            // Smithing: template, base, addition, result, station.
+            for _ in 0..5 {
+                translate_slot_display(cur, out, remaps, old_profile)?;
+            }
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+fn translate_slot_display_vec(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+    old_profile: bool,
+) -> Option<()> {
+    let len = copy_varint(cur, out)?;
+    for _ in 0..len {
+        translate_slot_display(cur, out, remaps, old_profile)?;
+    }
+    Some(())
+}
+
+fn translate_slot_display(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+    old_profile: bool,
+) -> Option<()> {
+    let source = u32::azalea_read_var(cur).ok()?;
+    let display = remaps.remap(ClientRegistry::SlotDisplay, source)?;
+    wire::write_varint(out, display);
+    match display {
+        0 | 1 => Some(()),                                          // empty, any_fuel
+        2 => translate_slot_display(cur, out, remaps, old_profile), // with_any_potion
+        3 => {
+            // only_with_component
+            translate_slot_display(cur, out, remaps, old_profile)?;
+            let component = u32::azalea_read_var(cur).ok()?;
+            wire::write_varint(
+                out,
+                remaps.remap(ClientRegistry::DataComponentType, component)?,
+            );
+            Some(())
+        }
+        4 => {
+            let item = u32::azalea_read_var(cur).ok()?;
+            wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+            Some(())
+        }
+        5 => {
+            // Recipe displays carry ItemStackTemplate (item, count, patch),
+            // not normal ItemStack (count, item, patch).
+            translate_item_stack_template(cur, out, remaps, old_profile)
+        }
+        6 => copy_utf(cur, out), // tag resource location
+        7 => {
+            translate_slot_display(cur, out, remaps, old_profile)?;
+            translate_slot_display(cur, out, remaps, old_profile)
+        }
+        8 => {
+            translate_slot_display(cur, out, remaps, old_profile)?;
+            translate_slot_display(cur, out, remaps, old_profile)?;
+            translate_trim_pattern_holder(cur, out)
+        }
+        9 => {
+            translate_slot_display(cur, out, remaps, old_profile)?;
+            translate_slot_display(cur, out, remaps, old_profile)
+        }
+        10 => translate_slot_display_vec(cur, out, remaps, old_profile),
+        _ => None,
+    }
+}
+
+/// One recipe `HolderSet<Item>`: zero means a named item tag; otherwise the
+/// wire value is direct-count + 1, followed by that many item registry ids.
+fn translate_trim_pattern_holder(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
+    let holder = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, holder);
+    if holder != 0 {
+        // Registry references use the connection's dynamic trim-pattern
+        // registry directly; there is no static client remap to apply.
+        return Some(());
+    }
+
+    copy_utf(cur, out)?; // asset id
+    let description_at = cur.position() as usize;
+    azalea_chat::FormattedText::azalea_read(cur).ok()?;
+    out.extend_from_slice(&cur.get_ref()[description_at..cur.position() as usize]);
+    copy_bytes(cur, out, 1) // decal
+}
+
+fn translate_recipe_ingredient(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let encoded = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, encoded);
+    if encoded == 0 {
+        return copy_utf(cur, out);
+    }
+    for _ in 0..encoded - 1 {
+        let item = u32::azalea_read_var(cur).ok()?;
+        wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+    }
+    Some(())
 }
 
 fn remap_with<T: Registry>(remaps: &RegistryRemaps, reg: ClientRegistry, value: &mut T) -> bool {
@@ -5065,5 +5343,97 @@ fn skip_nbt_payload(cur: &mut Cursor<&[u8]>, tag: u8, depth: u32) -> Option<()> 
             advance(cur, usize::try_from(n).ok()?.checked_mul(8)?)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod recipe_translation_tests {
+    use super::*;
+
+    #[test]
+    fn recipe_book_add_remaps_1_21_11_slot_and_item_ids() {
+        let remaps = RegistryRemaps::to_native(774).expect("1.21.11 registry remap");
+        let id = required_id(
+            PacketTable::native(),
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        );
+
+        // One shapeless recipe. In 1.21.11 slot-display id 2 is `item` and
+        // item id 26 is `dripstone_block`; in 26.2 those ids are 4 and 53.
+        let payload = [
+            1, // entries
+            5, // recipe display id
+            0, // shapeless recipe-display type
+            1, // ingredient display count
+            2, 26, // old item slot-display + old dripstone_block id
+            2, 26, // result
+            0,  // empty crafting station
+            0,  // OptionalInt group = empty
+            0,  // crafting_building_blocks category
+            0,  // no crafting requirements
+            3,  // notification + highlight
+            0,  // replace = false
+        ];
+
+        let translated = translate_recipe_book_add(id, &payload, remaps, false).unwrap();
+        let mut pos = 0;
+        assert_eq!(wire::read_varint(&translated, &mut pos), Some(id));
+        assert_eq!(
+            &translated[pos..],
+            [
+                1, // entries
+                5, // recipe display id
+                0, // shapeless
+                1, // ingredient display count
+                4, 53, // native item slot-display + native dripstone_block
+                4, 53, // result
+                0,  // crafting station
+                0,  // group
+                0,  // category
+                0,  // requirements
+                3,  // flags
+                0,  // replace
+            ]
+        );
+    }
+
+    #[test]
+    fn recipe_book_add_remaps_26_1_even_without_game_id_translation() {
+        let translation = Translation::for_protocol(775).expect("26.1 translation");
+        assert!(translation.game_ids.is_none());
+        let id = required_id(
+            PacketTable::native(),
+            Phase::Game,
+            Direction::Clientbound,
+            "recipe_book_add",
+        );
+
+        let payload = [
+            1, // entries
+            5, // recipe display id
+            0, // shapeless
+            1, // ingredient display count
+            4, 26, // item slot + 26.1 dripstone_block
+            4, 26, // result
+            0,  // empty crafting station
+            0,  // group
+            0,  // category
+            0,  // requirements
+            0,  // flags
+            0,  // replace
+        ];
+        let mut frame = Vec::new();
+        wire::write_varint(&mut frame, id);
+        frame.extend_from_slice(&payload);
+
+        let translated = translation
+            .translate_game_frame(frame.into_boxed_slice())
+            .expect("translated recipe frame");
+        let mut pos = 0;
+        assert_eq!(wire::read_varint(&translated, &mut pos), Some(id));
+        assert_eq!(translated[pos + 5], 53); // first remapped dripstone_block
+        assert_eq!(translated[pos + 7], 53); // result dripstone_block
     }
 }

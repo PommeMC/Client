@@ -59,6 +59,53 @@ pub fn encode_pick_item_from_entity(entity_id: i32, include_data: bool) -> Vec<u
     buf
 }
 
+/// Vanilla 26.2 `ServerboundPlaceRecipePacket`: container id, recipe display
+/// id, then whether Shift requested the maximum craftable amount.
+pub fn encode_place_recipe(
+    container_id: i32,
+    recipe_display_id: u32,
+    use_max_items: bool,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("place_recipe"));
+    write_varint(&mut buf, container_id as u32);
+    write_varint(&mut buf, recipe_display_id);
+    buf.push(use_max_items as u8);
+    buf
+}
+
+/// Vanilla `RecipeBookType` enum order used by the settings packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RecipeBookType {
+    Crafting = 0,
+    Furnace = 1,
+    BlastFurnace = 2,
+    Smoker = 3,
+}
+
+/// Vanilla 26.2 `ServerboundRecipeBookChangeSettingsPacket`.
+pub fn encode_recipe_book_change_settings(
+    kind: RecipeBookType,
+    open: bool,
+    filtering: bool,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("recipe_book_change_settings"));
+    write_varint(&mut buf, kind as u32);
+    buf.push(open as u8);
+    buf.push(filtering as u8);
+    buf
+}
+
+/// Vanilla 26.2 `ServerboundRecipeBookSeenRecipePacket`.
+pub fn encode_recipe_book_seen_recipe(recipe_display_id: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_varint(&mut buf, game_serverbound_id("recipe_book_seen_recipe"));
+    write_varint(&mut buf, recipe_display_id);
+    buf
+}
+
 /// Reads one varint, advancing `pos`; `None` on truncation or overlong data.
 pub fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u32> {
     let mut v = 0u32;
@@ -190,6 +237,17 @@ mod tests {
             encode_pick_item_from_entity(300, true),
             [0x25, 0xac, 0x02, 1]
         );
+    }
+
+    #[test]
+    fn recipe_book_packet_layouts() {
+        // Packet ids come from the native 26.2 serverbound table.
+        assert_eq!(encode_place_recipe(7, 300, true), [0x27, 7, 0xac, 0x02, 1]);
+        assert_eq!(
+            encode_recipe_book_change_settings(RecipeBookType::BlastFurnace, true, false),
+            [0x2e, 2, 1, 0]
+        );
+        assert_eq!(encode_recipe_book_seen_recipe(300), [0x2f, 0xac, 0x02]);
     }
 
     #[test]

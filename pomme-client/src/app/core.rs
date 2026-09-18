@@ -1466,6 +1466,9 @@ impl AppCore {
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;
                 }
+                NetworkEvent::ItemTags(tags) => {
+                    game.recipe_book.item_tags = tags;
+                }
                 NetworkEvent::ContainerSlot {
                     container_id,
                     index,
@@ -1669,6 +1672,21 @@ impl AppCore {
                 }
                 NetworkEvent::AdvancementsUpdate(update) => {
                     game.toasts.apply_advancements(*update);
+                }
+                NetworkEvent::RecipeBookAdd { entries, replace } => {
+                    game.recipe_book.apply_add(entries, replace);
+                }
+                NetworkEvent::RecipeBookRemove { ids } => {
+                    game.recipe_book.remove(ids);
+                }
+                NetworkEvent::RecipeBookSettings(settings) => {
+                    game.recipe_book.settings = settings;
+                }
+                NetworkEvent::RecipeData(data) => {
+                    game.recipe_book.data = data;
+                }
+                NetworkEvent::GhostRecipe(ghost) => {
+                    game.recipe_book.ghost_recipe = Some(*ghost);
                 }
                 NetworkEvent::RecipeToastAdd { entries } => {
                     game.toasts.add_recipes(entries);

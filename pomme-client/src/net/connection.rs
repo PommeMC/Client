@@ -587,6 +587,9 @@ async fn config_sequence(
                 if let Some(tags) = dialog_tags(&p.tags) {
                     received_dialog_tags = Some(tags);
                 }
+                let _ = event_tx.try_send(NetworkEvent::ItemTags(super::recipe_wire::item_tags(
+                    &p.tags,
+                )));
             }
             ClientboundConfigPacket::SelectKnownPacks(p) => {
                 // Vanilla `handleSelectKnownPacks`: claim the offered packs we

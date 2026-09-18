@@ -159,6 +159,9 @@ pub struct GameState {
     pub inv_last_click: Option<(u16, Instant)>,
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
+    /// Per-session recipe book, recipe container, ghost placement, and item
+    /// tags.
+    pub recipe_book: crate::recipe::RecipeBookState,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
@@ -394,6 +397,7 @@ impl GameState {
             inv_drag: None,
             inv_last_click: None,
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
+            recipe_book: crate::recipe::RecipeBookState::default(),
             chat: {
                 let mut chat = ChatState::new();
                 chat.set_options(chat_options);
