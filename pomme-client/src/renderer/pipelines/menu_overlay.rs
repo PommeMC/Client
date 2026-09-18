@@ -1488,8 +1488,21 @@ impl MenuOverlayPipeline {
                         // 15px above the bundle image, not text drawn inside this frame.
                         let name = crate::ui::common::item_display_name(data);
                         let name_w = self.mc_text_width(&name, fs);
-                        let selected_x = left + content_w / 2.0 - 12.0 * gs - name_w / 2.0;
-                        let selected_y = top - 15.0 * gs;
+                        // These are the coordinates passed to vanilla's `graphics.tooltip`,
+                        // not the final text origin. DefaultTooltipPositioner then applies
+                        // (+12, -12) and clamps the resulting tooltip to the screen.
+                        let anchor_x = left + content_w / 2.0 - 12.0 * gs - name_w / 2.0;
+                        let anchor_y = top - 15.0 * gs;
+                        let mut selected_x = anchor_x + 12.0 * gs;
+                        let mut selected_y = anchor_y - 12.0 * gs;
+                        if selected_x + name_w > *screen_w {
+                            selected_x = (selected_x - 24.0 * gs - name_w).max(4.0 * gs);
+                        }
+                        // A single text component has vanilla tooltip height 7 (9 - 2).
+                        let selected_content_h = 7.0 * gs;
+                        if selected_y + selected_content_h + 3.0 * gs > *screen_h {
+                            selected_y = *screen_h - selected_content_h - 3.0 * gs;
+                        }
                         let selected_padding = 3.0 * gs;
                         let selected_margin = 9.0 * gs;
                         let selected_inset = selected_padding + selected_margin;
