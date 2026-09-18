@@ -116,26 +116,37 @@ pub fn push_selected_icon(
     let Some(ItemStack::Present(selected_data)) = contents.items.get(selected as usize) else {
         return;
     };
-    let Some((x, y, w, h)) = elements.iter().rev().find_map(|element| match element {
-        MenuElement::ItemIcon {
-            x,
-            y,
-            w,
-            h,
-            item_name,
-            ..
-        } if cursor.0 >= *x
-            && cursor.0 <= *x + *w
-            && cursor.1 >= *y
-            && cursor.1 <= *y + *h
-            && item_name.ends_with("bundle") =>
-        {
-            Some((*x, *y, *w, *h))
-        }
-        _ => None,
-    }) else {
+    let Some((icon_index, x, y, w, h)) =
+        elements
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, element)| match element {
+                MenuElement::ItemIcon {
+                    x,
+                    y,
+                    w,
+                    h,
+                    item_name,
+                    ..
+                } if cursor.0 >= *x
+                    && cursor.0 <= *x + *w
+                    && cursor.1 >= *y
+                    && cursor.1 <= *y + *h
+                    && item_name.ends_with("bundle") =>
+                {
+                    Some((index, *x, *y, *w, *h))
+                }
+                _ => None,
+            })
+    else {
         return;
     };
+    // Vanilla's selected GUI model *replaces* the closed bundle model. Pomme's
+    // dynamic composition used to append the open layers, leaving opaque pixels
+    // from the closed icon visible through transparent areas of some selected
+    // item models. Remove the closed model before emitting the composite.
+    elements.remove(icon_index);
     let bundle_name = crate::player::inventory::item_resource_name(data.kind);
     let icon = |item_name: String| MenuElement::ItemIcon {
         x,
