@@ -1325,16 +1325,6 @@ impl MenuOverlayPipeline {
                 let bg_w = content_w + 2.0 * padding + 2.0 * margin;
                 let bg_h = content_h + 2.0 * padding + 2.0 * margin;
                 let white = [1.0f32; 4];
-                push_mc_text(
-                    &mut vertices,
-                    gm,
-                    left,
-                    top,
-                    &[TextSpan::new(title.clone(), white)],
-                    fs,
-                    true,
-                );
-                let top = top + title_h;
                 if let Some(bg) = self.sprite_atlas.regions.get(&SpriteId::TooltipBackground) {
                     push_nine_slice(&mut vertices, bg_x, bg_y, bg_w, bg_h, bg, margin, white);
                 }
@@ -1350,6 +1340,18 @@ impl MenuOverlayPipeline {
                         white,
                     );
                 }
+                // Tooltip text/components render after the background/frame. Drawing the
+                // title before the nine-slice darkened it through the translucent background.
+                push_mc_text(
+                    &mut vertices,
+                    gm,
+                    left,
+                    top,
+                    &[TextSpan::new(title.clone(), white)],
+                    fs,
+                    true,
+                );
+                let top = top + title_h;
                 if items.is_empty() {
                     for (line_no, text) in empty_lines.iter().enumerate() {
                         push_mc_text(

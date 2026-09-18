@@ -7,7 +7,35 @@ use crate::renderer::pipelines::menu_overlay::MenuElement;
 pub const NO_SELECTION: i32 = -1;
 
 pub fn contents(data: &ItemStackData) -> Option<std::borrow::Cow<'_, BundleContents>> {
-    data.get_component::<BundleContents>()
+    let raw = data.get_component::<BundleContents>()?;
+    if raw.items.is_empty() {
+        return Some(raw);
+    }
+    // Vanilla 26.2 changed BundleContents from ItemStack.STREAM_CODEC to
+    // ItemStackTemplate.STREAM_CODEC. The pinned Azalea 26.2 component still
+    // declares Vec<ItemStack>, whose codec reads `count, item, patch`; a
+    // template is `item, count, patch`. That is exactly why bread (item id
+    // 981) appeared as "981 granite" (count 2 -> item id 2), and hay (532)
+    // as "532 diorite" (count 4 -> item id 4). Reconstruct the template
+    // semantics at the Pomme boundary until Azalea exposes ItemStackTemplate.
+    Some(std::borrow::Cow::Owned(BundleContents {
+        items: raw.items.iter().map(normalize_template_stack).collect(),
+    }))
+}
+
+fn normalize_template_stack(stack: &ItemStack) -> ItemStack {
+    let ItemStack::Present(raw) = stack else {
+        return ItemStack::Empty;
+    };
+    use azalea_registry::Registry;
+    let Some(kind) = azalea_registry::builtin::ItemKind::from_u32(raw.count as u32) else {
+        return ItemStack::Empty;
+    };
+    ItemStack::from(ItemStackData {
+        count: raw.kind.to_u32() as i32,
+        kind,
+        component_patch: raw.component_patch.clone(),
+    })
 }
 
 pub fn shown_count(contents: &BundleContents) -> usize {
@@ -41,7 +69,7 @@ pub fn fullness(contents: &BundleContents) -> f32 {
 }
 
 fn item_weight(data: &ItemStackData) -> f32 {
-    if let Some(nested) = data.get_component::<BundleContents>() {
+    if let Some(nested) = contents(data) {
         return fullness(&nested) + 1.0 / 16.0;
     }
     if data
@@ -179,6 +207,30 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_26_2_item_stack_template_field_order() {
+        use azalea_registry::Registry;
+        for (expected_kind, expected_count) in [(ItemKind::Bread, 2), (ItemKind::HayBlock, 4)] {
+            let raw = ItemStack::from(ItemStackData::new(
+                ItemKind::from_u32(expected_count as u32).unwrap(),
+                expected_kind.to_u32() as i32,
+            ));
+            let normalized = normalize_template_stack(&raw);
+            let data = normalized.as_present().unwrap();
+            assert_eq!(data.kind, expected_kind);
+            assert_eq!(data.count, expected_count);
+        }
+    }
+
+    #[test]
+    fn native_item_registry_ids_match_bundle_payload_examples() {
+        use azalea_registry::Registry;
+        assert_eq!(ItemKind::Bread.to_u32(), 981);
+        assert_eq!(ItemKind::HayBlock.to_u32(), 532);
+        assert_eq!(ItemKind::Granite.to_u32(), 2);
+        assert_eq!(ItemKind::Diorite.to_u32(), 4);
+    }
+
+    #[test]
     fn ordinary_stackable_items_have_vanilla_bundle_weight() {
         for (kind, count, expected) in [
             (ItemKind::Bread, 2, 2.0 / 64.0),
@@ -194,9 +246,14 @@ mod tests {
     #[test]
     fn item_bar_matches_vanilla_bundle_width_and_colors() {
         let bundle = |count| {
+            use azalea_registry::Registry;
+            let wire_item = ItemStackData::new(
+                ItemKind::from_u32(count as u32).expect("count is a valid raw item id"),
+                ItemKind::Stone.to_u32() as i32,
+            );
             ItemStack::new(ItemKind::Bundle, 1)
                 .with_component(BundleContents {
-                    items: vec![ItemStack::from(ItemStackData::new(ItemKind::Stone, count))],
+                    items: vec![ItemStack::from(wire_item)],
                 })
                 .as_present()
                 .expect("bundle stack should be present")
