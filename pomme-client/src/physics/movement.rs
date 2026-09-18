@@ -11,9 +11,10 @@ use super::collision::{
 };
 use crate::app::input::{self, InputState};
 use crate::entity::components::Velocity;
-use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT};
+use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT, is_spectator};
 use crate::world::block::{
-    FluidKind, fluid, movement_friction, movement_jump_factor, movement_speed_factor,
+    BlockTags, FluidKind, block_id, block_properties, block_tags, fluid, movement_friction,
+    movement_jump_factor, movement_speed_factor,
 };
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
@@ -59,6 +60,8 @@ const FLY_TOGGLE_WINDOW: u32 = 7;
 // Mth.equal(double, double) widens the float EPSILON constant to double.
 const MTH_EQUAL_EPSILON: f64 = 1.0e-5_f32 as f64;
 const MINOR_COLLISION_ANGLE: f64 = 0.139_626_339_077_949_52;
+const CLIMB_UP_VELOCITY: f64 = 0.2;
+const CLIMB_MAX_FALL_SPEED: f32 = 0.15;
 const DEG_TO_RAD: f32 = std::f32::consts::PI / 180.0_f32;
 const SIN_SCALE: f64 = 10_430.378_350_470_453;
 
@@ -307,6 +310,67 @@ fn jump_from_ground(
     }
 }
 
+fn is_climbable_state(state: azalea_block::BlockState, tags: &BlockTags) -> bool {
+    tags.contains("minecraft:climbable", block_id(state))
+}
+
+fn trapdoor_usable_as_ladder(
+    trapdoor: azalea_block::BlockState,
+    below: azalea_block::BlockState,
+) -> bool {
+    if !block_id(trapdoor).ends_with("_trapdoor")
+        || block_properties(trapdoor).get("open") != Some("true")
+        || block_id(below) != "ladder"
+    {
+        return false;
+    }
+
+    block_properties(trapdoor).get("facing") == block_properties(below).get("facing")
+}
+
+fn on_climbable_state(
+    player: &LocalPlayer,
+    chunk_store: &ChunkStore,
+) -> Option<azalea_block::BlockState> {
+    if player.flying || is_spectator(player.game_mode) {
+        return None;
+    }
+
+    let x = player.position.x.floor() as i32;
+    let y = player.position.y.floor() as i32;
+    let z = player.position.z.floor() as i32;
+    let state = chunk_store.get_block_state(x, y, z);
+    if is_climbable_state(state, &block_tags()) {
+        return Some(state);
+    }
+
+    let below = chunk_store.get_block_state(x, y - 1, z);
+    trapdoor_usable_as_ladder(state, below).then_some(state)
+}
+
+fn apply_climbable_velocity(
+    player: &mut LocalPlayer,
+    state: azalea_block::BlockState,
+    suppress_slide: bool,
+) {
+    player.fall_distance = 0.0;
+    let max = f64::from(CLIMB_MAX_FALL_SPEED);
+    player.velocity.x = player.velocity.x.clamp(-max, max);
+    player.velocity.z = player.velocity.z.clamp(-max, max);
+    player.velocity.y = player.velocity.y.max(-max);
+
+    if player.velocity.y < 0.0 && block_id(state) != "scaffolding" && suppress_slide {
+        player.velocity.y = 0.0;
+    }
+}
+
+fn handle_on_climbable(player: &mut LocalPlayer, chunk_store: &ChunkStore, suppress_slide: bool) {
+    let Some(state) = on_climbable_state(player, chunk_store) else {
+        return;
+    };
+    apply_climbable_velocity(player, state, suppress_slide);
+}
+
 fn tick_land(
     player: &mut LocalPlayer,
     input: &InputState,
@@ -332,7 +396,19 @@ fn tick_land(
     player.velocity.x += move_x;
     player.velocity.z += move_z;
 
+    handle_on_climbable(
+        player,
+        world.chunks,
+        input.performing_action(input::Action::Sneak),
+    );
+
     apply_collision(player, input, world, forward, strafe, sin_y_rot, cos_y_rot);
+
+    if (player.horizontal_collision || input.performing_action(input::Action::Jump))
+        && on_climbable_state(player, world.chunks).is_some()
+    {
+        player.velocity.y = CLIMB_UP_VELOCITY;
+    }
 
     // LivingEntity.checkFallDamage runs from Entity.move after the position and
     // collision flags have been updated. When travelInAir began dry, vanilla
@@ -422,6 +498,10 @@ fn tick_water(
     player.velocity.z += move_z;
 
     apply_collision(player, input, world, forward, strafe, sin_y_rot, cos_y_rot);
+
+    if player.horizontal_collision && on_climbable_state(player, world.chunks).is_some() {
+        player.velocity.y = CLIMB_UP_VELOCITY;
+    }
 
     let slow_down = if player.sprinting {
         WATER_HORIZONTAL_DRAG_SPRINT
@@ -1201,6 +1281,28 @@ mod tests {
         chunks
     }
 
+    fn set_open_trapdoor_ladder(chunks: &ChunkStore, waterlogged: bool) {
+        chunks.set_block_state(
+            8,
+            64,
+            8,
+            crate::world::block::find_state(
+                "oak_trapdoor",
+                &[
+                    ("open", "true"),
+                    ("facing", "north"),
+                    ("waterlogged", if waterlogged { "true" } else { "false" }),
+                ],
+            ),
+        );
+        chunks.set_block_state(
+            8,
+            63,
+            8,
+            crate::world::block::find_state("ladder", &[("facing", "north")]),
+        );
+    }
+
     #[test]
     fn player_width_stops_at_negative_two_block_face() {
         let block = Aabb::block(0, 0, -2);
@@ -1247,6 +1349,158 @@ mod tests {
         assert_eq!((GRAVITY / 16.0).to_bits(), 0x3f747ae147ae147b);
         assert_eq!(MTH_EQUAL_EPSILON.to_bits(), 0x3ee4f8b580000000);
         assert_eq!(MINOR_COLLISION_ANGLE.to_bits(), 0x3fc1df46a0000000);
+    }
+
+    #[test]
+    fn climbable_membership_comes_from_synchronized_tags() {
+        crate::world::block::init("26.2");
+        let tags = crate::world::block::block_tags_for_test(&[("climbable", &["stone"])]);
+        let stone = crate::world::block::find_state("stone", &[]);
+        let ladder = crate::world::block::find_state("ladder", &[("facing", "north")]);
+
+        assert!(is_climbable_state(stone, &tags));
+        assert!(!is_climbable_state(ladder, &tags));
+    }
+
+    #[test]
+    fn open_matching_trapdoor_continues_ladder() {
+        crate::world::block::init("26.2");
+        let north_ladder = crate::world::block::find_state("ladder", &[("facing", "north")]);
+        let south_ladder = crate::world::block::find_state("ladder", &[("facing", "south")]);
+        let open_north = crate::world::block::find_state(
+            "oak_trapdoor",
+            &[("open", "true"), ("facing", "north")],
+        );
+        let open_south = crate::world::block::find_state(
+            "oak_trapdoor",
+            &[("open", "true"), ("facing", "south")],
+        );
+        let closed_north = crate::world::block::find_state(
+            "oak_trapdoor",
+            &[("open", "false"), ("facing", "north")],
+        );
+
+        assert!(trapdoor_usable_as_ladder(open_north, north_ladder));
+        assert!(!trapdoor_usable_as_ladder(open_north, south_ladder));
+        assert!(!trapdoor_usable_as_ladder(open_south, north_ladder));
+        assert!(!trapdoor_usable_as_ladder(closed_north, north_ladder));
+        assert!(!trapdoor_usable_as_ladder(
+            open_north,
+            crate::world::block::find_state("stone", &[])
+        ));
+    }
+
+    #[test]
+    fn climbable_handling_clamps_velocity_and_resets_fall_distance() {
+        let chunks = loaded_test_store();
+        set_open_trapdoor_ladder(&chunks, false);
+
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(8.5, 64.5, 8.5).into();
+        player.velocity = Velocity::new(0.5, -0.7, -0.5);
+        player.fall_distance = 12.0;
+
+        handle_on_climbable(&mut player, &chunks, false);
+
+        let max = f64::from(CLIMB_MAX_FALL_SPEED);
+        assert_eq!(player.velocity, Velocity::new(max, -max, -max));
+        assert_eq!(player.fall_distance, 0.0);
+
+        player.velocity.y = -0.1;
+        handle_on_climbable(&mut player, &chunks, true);
+        assert_eq!(player.velocity.y, 0.0);
+    }
+
+    #[test]
+    fn scaffolding_does_not_suppress_downward_climbable_motion() {
+        crate::world::block::init("26.2");
+        let scaffolding = crate::world::block::find_state("scaffolding", &[("bottom", "false")]);
+        let mut player = LocalPlayer::new();
+        player.velocity.y = -0.4;
+
+        apply_climbable_velocity(&mut player, scaffolding, true);
+
+        assert_eq!(player.velocity.y, -f64::from(CLIMB_MAX_FALL_SPEED));
+    }
+
+    #[test]
+    fn flying_and_spectator_players_do_not_use_trapdoor_ladder_continuation() {
+        let chunks = loaded_test_store();
+        set_open_trapdoor_ladder(&chunks, false);
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(8.5, 64.5, 8.5).into();
+
+        player.flying = true;
+        assert!(on_climbable_state(&player, &chunks).is_none());
+
+        player.flying = false;
+        player.game_mode = 3;
+        assert!(on_climbable_state(&player, &chunks).is_none());
+
+        player.game_mode = 0;
+        assert!(on_climbable_state(&player, &chunks).is_some());
+    }
+
+    #[test]
+    fn land_travel_clamps_before_collision_then_applies_climb_impulse() {
+        let chunks = loaded_test_store();
+        set_open_trapdoor_ladder(&chunks, false);
+        chunks.set_block_state(9, 64, 8, crate::world::block::find_state("stone", &[]));
+
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(8.6, 64.5, 8.5).into();
+        player.velocity = Velocity::new(0.5, -0.7, -0.5);
+        player.fall_distance = 12.0;
+        let neutral = InputState::released();
+        let anim = BlockEntityAnimStore::default();
+
+        tick_land(
+            &mut player,
+            &neutral,
+            MovementWorld {
+                chunks: &chunks,
+                block_entity_anim: &anim,
+            },
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+
+        assert!(player.horizontal_collision);
+        assert!((player.position.z - (8.5 - f64::from(CLIMB_MAX_FALL_SPEED))).abs() < 1.0e-12);
+        let expected_y = (CLIMB_UP_VELOCITY - GRAVITY) * f64::from(VERTICAL_DRAG);
+        assert!((player.velocity.y - expected_y).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn water_travel_applies_post_collision_climb_impulse() {
+        let chunks = loaded_test_store();
+        set_open_trapdoor_ladder(&chunks, true);
+        chunks.set_block_state(9, 64, 8, crate::world::block::find_state("stone", &[]));
+
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(8.6, 64.0, 8.5).into();
+        player.velocity = Velocity::new(0.5, 0.0, 0.0);
+        let neutral = InputState::released();
+        let anim = BlockEntityAnimStore::default();
+
+        tick_water(
+            &mut player,
+            &neutral,
+            MovementWorld {
+                chunks: &chunks,
+                block_entity_anim: &anim,
+            },
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+
+        assert!(player.horizontal_collision);
+        let expected_y = CLIMB_UP_VELOCITY * f64::from(WATER_VERTICAL_DRAG) - GRAVITY / 16.0;
+        assert!((player.velocity.y - expected_y).abs() < 1.0e-12);
     }
 
     #[test]
