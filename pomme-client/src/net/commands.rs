@@ -52,6 +52,16 @@ pub struct SyntaxError {
     pub cursor: Option<usize>,
 }
 
+impl SyntaxError {
+    fn at(key: &'static str, cursor: usize) -> Self {
+        Self {
+            key,
+            args: Vec::new(),
+            cursor: Some(cursor),
+        }
+    }
+}
+
 /// One line of `CommandSuggestions.commandUsage` from the parse.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UsageLine {
@@ -163,11 +173,7 @@ impl TreeParse {
         } else {
             "command.unknown.argument"
         };
-        Some(SyntaxError {
-            key,
-            args: Vec::new(),
-            cursor: Some(self.cursor),
-        })
+        Some(SyntaxError::at(key, self.cursor))
     }
 
     /// `ArgumentVisitor.visitArguments` filtered to `MessageArgument`, 26.2's
@@ -399,11 +405,7 @@ impl CommandTree {
                     ArgCheck::Unknown(None) => {
                         uncertain.push(node);
                         // TODO: the unported parser's own message.
-                        errors.push(SyntaxError {
-                            key: "command.unknown.argument",
-                            args: Vec::new(),
-                            cursor: Some(cursor),
-                        });
+                        errors.push(SyntaxError::at("command.unknown.argument", cursor));
                         continue;
                     }
                 },
@@ -411,11 +413,7 @@ impl CommandTree {
                 NodeType::Root => continue,
             };
             if input.as_bytes().get(end).is_some_and(|&b| b != b' ') {
-                errors.push(SyntaxError {
-                    key: "command.expected.separator",
-                    args: Vec::new(),
-                    cursor: Some(end),
-                });
+                errors.push(SyntaxError::at("command.expected.separator", end));
                 continue;
             }
             let mut context = context.clone();
@@ -681,6 +679,12 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// `setCursor(start)`, then `createWithContext(reader)`.
+    fn error_at(&mut self, start: usize, key: &'static str, args: Vec<String>) -> SyntaxError {
+        self.cursor = start;
+        self.error(key, args)
+    }
+
     fn read_while(&mut self, allowed: impl Fn(char) -> bool) -> &'a str {
         let start = self.cursor;
         while let Some(c) = self.peek().filter(|&c| allowed(c)) {
@@ -696,10 +700,9 @@ impl<'a> Reader<'a> {
         if number.is_empty() {
             return Err(self.error(T::EXPECTED, Vec::new()));
         }
-        number.parse().map_err(|_| {
-            self.cursor = start;
-            self.error(T::INVALID, vec![number.to_owned()])
-        })
+        number
+            .parse()
+            .map_err(|_| self.error_at(start, T::INVALID, vec![number.to_owned()]))
     }
 
     fn read_unquoted(&mut self) -> &'a str {
@@ -741,8 +744,7 @@ impl<'a> Reader<'a> {
             return Err(self.error("parsing.bool.expected", Vec::new()));
         }
         if value != "true" && value != "false" {
-            self.cursor = start;
-            return Err(self.error("parsing.bool.invalid", vec![value]));
+            return Err(self.error_at(start, "parsing.bool.invalid", vec![value]));
         }
         Ok(())
     }
@@ -881,10 +883,7 @@ fn check_argument(parser: &BrigadierParser, input: &str, start: usize) -> ArgChe
                 return ArgCheck::Unknown(Some(r.cursor));
             }
             Ok(name) if (1..=16).contains(&name.encode_utf16().count()) => Ok(()),
-            Ok(_) => {
-                r.cursor = start;
-                Err(r.error("argument.entity.invalid", Vec::new()))
-            }
+            Ok(_) => Err(r.error_at(start, "argument.entity.invalid", Vec::new())),
             Err(error) => Err(error),
         },
         BrigadierParser::Vec3 | BrigadierParser::BlockPos if r.peek() == Some('^') => {
@@ -920,8 +919,7 @@ fn check_argument(parser: &BrigadierParser, input: &str, start: usize) -> ArgChe
             if matches!(name, "feet" | "eyes") {
                 Ok(())
             } else {
-                r.cursor = start;
-                Err(r.error("argument.anchor.invalid", vec![name.to_owned()]))
+                Err(r.error_at(start, "argument.anchor.invalid", vec![name.to_owned()]))
             }
         }
         _ => return ArgCheck::Unknown(word_end(input.as_bytes(), start)),
@@ -949,8 +947,7 @@ fn read_bounded<T: JavaNumber>(
     } else {
         return Ok(());
     };
-    r.cursor = start;
-    Err(r.error(key, vec![limit.java_string(), value.java_string()]))
+    Err(r.error_at(start, key, vec![limit.java_string(), value.java_string()]))
 }
 
 /// Java's `Math.round(float)`: halves round up, out-of-range saturates.
@@ -971,8 +968,7 @@ fn identifier(r: &mut Reader) -> Result<(), SyntaxError> {
     if namespace != ".." && !namespace.contains('/') && !path.contains(':') {
         return Ok(());
     }
-    r.cursor = start;
-    Err(r.error("argument.id.invalid", Vec::new()))
+    Err(r.error_at(start, "argument.id.invalid", Vec::new()))
 }
 
 /// `count` coordinates separated by single spaces, as `WorldCoordinates`,
@@ -986,8 +982,7 @@ fn coordinates(
     let start = r.cursor;
     for i in 0..count {
         if i > 0 && !r.eat(' ') {
-            r.cursor = start;
-            return Err(r.error(incomplete, Vec::new()));
+            return Err(r.error_at(start, incomplete, Vec::new()));
         }
         coordinate(r)?;
     }
@@ -1024,8 +1019,7 @@ fn local_coordinate(r: &mut Reader, start: usize) -> Result<(), SyntaxError> {
         return Err(r.error("argument.pos.missing.double", Vec::new()));
     }
     if !r.eat('^') {
-        r.cursor = start;
-        return Err(r.error("argument.pos.mixed", Vec::new()));
+        return Err(r.error_at(start, "argument.pos.mixed", Vec::new()));
     }
     if r.at_separator() {
         Ok(())
@@ -1204,15 +1198,7 @@ mod tests {
             literal("as", vec![7], false),
             BrigadierNodeStub {
                 redirect_node: Some(5),
-                ..argument(
-                    "targets",
-                    BrigadierParser::Entity(EntityParser {
-                        single: false,
-                        players_only: false,
-                    }),
-                    vec![],
-                    false,
-                )
+                ..argument("targets", entity(), vec![], false)
             },
             redirect("run", 0),
             literal("tp", vec![10], false),
@@ -1220,14 +1206,19 @@ mod tests {
         ])
     }
 
-    #[test]
-    fn literal_only_commands_are_unsigned() {
-        let t = tree(vec![
+    /// root -> time set day
+    fn time_set_day_tree() -> CommandTree {
+        tree(vec![
             root(vec![1]),
             literal("time", vec![2], false),
             literal("set", vec![3], false),
             literal("day", vec![], true),
-        ]);
+        ])
+    }
+
+    #[test]
+    fn literal_only_commands_are_unsigned() {
+        let t = time_set_day_tree();
         assert_eq!(t.root_child_names(), vec!["time".to_string()]);
         assert!(signed(&t, "time set day").is_empty());
         assert!(signed(&t, "nonexistent foo").is_empty());
@@ -1326,11 +1317,9 @@ mod tests {
 
     #[test]
     fn unattended_verifier_fails_closed_through_redirects_and_trailing_input() {
-        let mut alias = literal("alias", vec![], false);
-        alias.redirect_node = Some(2);
         let t = tree(vec![
             root(vec![1, 4]),
-            alias,
+            redirect("alias", 2),
             literal("target", vec![3], false),
             argument("message", BrigadierParser::Message, vec![], true),
             literal("plain", vec![], true),
@@ -1359,16 +1348,11 @@ mod tests {
         // permission rather than a parse error.
         let mut kill = literal("kill", vec![2], false);
         kill.is_restricted = true;
-        let targets = argument(
-            "targets",
-            BrigadierParser::Entity(EntityParser {
-                single: false,
-                players_only: false,
-            }),
-            vec![],
-            true,
-        );
-        let t = tree(vec![root(vec![1]), kill, targets]);
+        let t = tree(vec![
+            root(vec![1]),
+            kill,
+            argument("targets", entity(), vec![], true),
+        ]);
         assert_eq!(
             t.verify_unattended("kill @e[type=zombie]"),
             UnattendedCommandCheck::PermissionsRequired
@@ -1377,12 +1361,7 @@ mod tests {
 
     #[test]
     fn unattended_verifier_rejects_stray_whitespace() {
-        let t = tree(vec![
-            root(vec![1]),
-            literal("time", vec![2], false),
-            literal("set", vec![3], false),
-            literal("day", vec![], true),
-        ]);
+        let t = time_set_day_tree();
         for command in [
             " time set day",
             "time set day ",
@@ -1486,9 +1465,8 @@ mod tests {
 
     fn error(key: &'static str, args: &[&str], cursor: usize) -> SyntaxError {
         SyntaxError {
-            key,
             args: args.iter().map(|a| a.to_string()).collect(),
-            cursor: Some(cursor),
+            ..SyntaxError::at(key, cursor)
         }
     }
 

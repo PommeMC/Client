@@ -12,7 +12,9 @@ use winit::keyboard::KeyCode;
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window};
 
-use crate::app::input::{Action, InputState, STICK_MOVEMENT_THRESHOLD};
+use crate::app::input::{
+    Action, InputState, KEY_BACK, KEY_FORWARD, KEY_LEFT, KEY_RIGHT, STICK_MOVEMENT_THRESHOLD,
+};
 use crate::app::level_load::ReadyInputs;
 use crate::app::phases::in_game::GameState;
 use crate::app::phases::{ConnectionPhase, Gfx};
@@ -221,14 +223,10 @@ fn player_input_state(
     sprinting: bool,
 ) -> PlayerInputState {
     PlayerInputState {
-        forward: input.key_pressed(crate::app::input::KEY_FORWARD)
-            || analog_move.y > STICK_MOVEMENT_THRESHOLD,
-        backward: input.key_pressed(crate::app::input::KEY_BACK)
-            || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
-        left: input.key_pressed(crate::app::input::KEY_LEFT)
-            || analog_move.x > STICK_MOVEMENT_THRESHOLD,
-        right: input.key_pressed(crate::app::input::KEY_RIGHT)
-            || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
+        forward: input.key_pressed(KEY_FORWARD) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
+        backward: input.key_pressed(KEY_BACK) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
+        left: input.key_pressed(KEY_LEFT) || analog_move.x > STICK_MOVEMENT_THRESHOLD,
+        right: input.key_pressed(KEY_RIGHT) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
         jump: input.performing_action(Action::Jump),
         shift: input.performing_action(Action::Sneak),
         sprint: sprinting,
