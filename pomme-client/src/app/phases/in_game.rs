@@ -803,6 +803,13 @@ impl GameState {
         ]);
     }
 
+    /// Whether the chat options `ClientInformation` carries differ from the
+    /// last ones sent.
+    fn chat_information_changed(&self, chat_options: crate::ui::chat::ChatOptions) -> bool {
+        self.last_chat_visibility != chat_options.visibility
+            || self.last_chat_colors != chat_options.colors
+    }
+
     pub fn sync_client_information(
         &mut self,
         connection: &ConnectionHandle,
@@ -810,8 +817,7 @@ impl GameState {
         chat_options: crate::ui::chat::ChatOptions,
     ) {
         let render_changed = self.last_render_distance != render_distance;
-        let chat_changed = self.last_chat_visibility != chat_options.visibility
-            || self.last_chat_colors != chat_options.colors;
+        let chat_changed = self.chat_information_changed(chat_options);
         self.last_render_distance = render_distance;
         self.last_chat_visibility = chat_options.visibility;
         self.last_chat_colors = chat_options.colors;
@@ -1344,8 +1350,6 @@ enum ResultKind {
     ChunkLoad,
 }
 
-/// Carry out the button/dismiss action a benchmark result overlay reported,
-/// targeting the matching benchmark's result/upload fields.
 fn handle_chat_ui_action(
     action: ChatUiAction,
     core: &mut AppCore,
@@ -1407,8 +1411,11 @@ fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game:
         .map_or(UnattendedCommandCheck::ParseErrors, |tree| {
             tree.verify_unattended(command)
         });
-    match check {
-        UnattendedCommandCheck::NoIssues => {
+    match CommandConfirmationKind::for_check(check) {
+        Some(kind) => game
+            .chat
+            .request_command_confirmation(command.to_owned(), kind),
+        None => {
             connection
                 .packet_tx
                 .send_raw(crate::net::chat::encode_outbound_command(command));
@@ -1416,33 +1423,12 @@ fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game:
             // `removed` resets the scroll.
             game.chat.reset_chat_scroll();
         }
-        UnattendedCommandCheck::SignatureRequired => {
-            // Vanilla never signs a server-provided click command silently.
-            // Both current Pomme surfaces are existing screens, so acceptance
-            // copies the command to the clipboard rather than signing/sending.
-            game.chat.request_command_confirmation(
-                command.to_owned(),
-                CommandConfirmationKind::SignatureRequired,
-            );
-        }
-        UnattendedCommandCheck::PermissionsRequired => {
-            game.chat.request_command_confirmation(
-                command.to_owned(),
-                CommandConfirmationKind::PermissionsRequired,
-            );
-        }
-        UnattendedCommandCheck::ParseErrors => {
-            game.chat.request_command_confirmation(
-                command.to_owned(),
-                CommandConfirmationKind::ParseErrors,
-            );
-        }
     }
 }
 
 pub(crate) fn handle_server_dialog_action(
     action: crate::ui::server_dialog::ServerDialogAction,
-    _core: &mut AppCore,
+    core: &mut AppCore,
     connection: &ConnectionHandle,
     game: &mut GameState,
 ) {
@@ -1451,7 +1437,7 @@ pub(crate) fn handle_server_dialog_action(
     match action {
         ServerDialogAction::OpenUrl(url) => {
             if let Some(ChatUiAction::OpenUrl(url)) = game.chat.request_open_url(url) {
-                handle_chat_ui_action(ChatUiAction::OpenUrl(url), _core, connection, game);
+                handle_chat_ui_action(ChatUiAction::OpenUrl(url), core, connection, game);
             }
         }
         ServerDialogAction::RunCommand(command) => {
@@ -1474,6 +1460,8 @@ pub(crate) fn handle_server_dialog_action(
     }
 }
 
+/// Carry out the button/dismiss action a benchmark result overlay reported,
+/// targeting the matching benchmark's result/upload fields.
 fn apply_result_action(
     action: common::ResultAction,
     kind: ResultKind,
@@ -1751,6 +1739,7 @@ pub fn update_game(
     if let Some(reason) = disconnect_reason {
         return GameUpdateResult::Disconnected { reason };
     }
+
     game.chat.tick();
     for mark in game.chat.take_chat_marks() {
         connection.packet_tx.mark_chat(mark);
@@ -3394,8 +3383,7 @@ pub fn update_game(
 
     if game.options_from_game {
         if core.menu.render_distance != game.last_render_distance
-            || core.menu.chat_options.visibility != game.last_chat_visibility
-            || core.menu.chat_options.colors != game.last_chat_colors
+            || game.chat_information_changed(core.menu.chat_options)
         {
             game.sync_client_information(
                 connection,

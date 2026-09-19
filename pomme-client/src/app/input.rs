@@ -74,19 +74,19 @@ pub fn keybind_label(key: &str) -> Option<(&'static str, &'static str)> {
         "key.left" => ("key.keyboard.a", "A"),
         "key.back" => ("key.keyboard.s", "S"),
         "key.right" => ("key.keyboard.d", "D"),
-        "key.jump" => keycode_translation(Action::Jump.default_key()?)?,
-        "key.sneak" => keycode_translation(Action::Sneak.default_key()?)?,
-        "key.sprint" => keycode_translation(Action::Sprint.default_key()?)?,
-        "key.inventory" => keycode_translation(Action::ToggleInventory.default_key()?)?,
-        "key.swapOffhand" => keycode_translation(Action::SwapOffhand.default_key()?)?,
-        "key.drop" => keycode_translation(Action::DropItem.default_key()?)?,
+        "key.jump" => action_label(Action::Jump)?,
+        "key.sneak" => action_label(Action::Sneak)?,
+        "key.sprint" => action_label(Action::Sprint)?,
+        "key.inventory" => action_label(Action::ToggleInventory)?,
+        "key.swapOffhand" => action_label(Action::SwapOffhand)?,
+        "key.drop" => action_label(Action::DropItem)?,
         "key.use" => ("key.mouse.right", "Right Button"),
         "key.attack" => ("key.mouse.left", "Left Button"),
         "key.pickItem" | "key.spectatorHotbar" => ("key.mouse.middle", "Middle Button"),
-        "key.chat" => keycode_translation(Action::OpenChat.default_key()?)?,
-        "key.playerlist" => keycode_translation(Action::ViewPlayerList.default_key()?)?,
-        "key.command" => keycode_translation(Action::OpenCommands.default_key()?)?,
-        "key.togglePerspective" => keycode_translation(Action::ChangePerspective.default_key()?)?,
+        "key.chat" => action_label(Action::OpenChat)?,
+        "key.playerlist" => action_label(Action::ViewPlayerList)?,
+        "key.command" => action_label(Action::OpenCommands)?,
+        "key.togglePerspective" => action_label(Action::ChangePerspective)?,
         "key.friends" => ("key.keyboard.o", "O"),
         "key.socialInteractions" => ("key.keyboard.p", "P"),
         "key.screenshot" => ("key.keyboard.f2", "F2"),
@@ -129,6 +129,10 @@ pub fn keybind_label(key: &str) -> Option<(&'static str, &'static str)> {
         "key.debug.lightmapTexture" => ("key.keyboard.4", "4"),
         _ => return None,
     })
+}
+
+fn action_label(action: Action) -> Option<(&'static str, &'static str)> {
+    keycode_translation(action.default_key()?)
 }
 
 fn keycode_translation(key: KeyCode) -> Option<(&'static str, &'static str)> {
@@ -518,16 +522,13 @@ impl InputState {
     pub fn performing_action(&self, action: Action) -> bool {
         match action {
             Action::Jump => {
-                self.key_pressed(action.default_key().expect("jump has keyboard binding"))
-                    || self.gamepad_button_down(Button::South)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::South)
             }
             Action::Sneak => {
-                self.key_pressed(action.default_key().expect("sneak has keyboard binding"))
-                    || self.gamepad_button_down(Button::LeftThumb)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::LeftThumb)
             }
             Action::Sprint => {
-                self.key_pressed(action.default_key().expect("sprint has keyboard binding"))
-                    || self.gamepad_button_down(Button::West)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::West)
             }
             Action::Destroy => self.left_held() || self.gamepad_button_down(Button::RightTrigger2),
             Action::Use => self.right_held() || self.gamepad_button_down(Button::LeftTrigger2),
@@ -536,48 +537,31 @@ impl InputState {
                     || self.gamepad_button_down(Button::North)
             }
             Action::OpenMenu => {
-                self.key_pressed(action.default_key().expect("menu has keyboard binding"))
-                    || self.gamepad_button_down(Button::Start)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::Start)
             }
             Action::ViewPlayerList => {
-                self.key_pressed(
-                    action
-                        .default_key()
-                        .expect("player list has keyboard binding"),
-                ) || self.gamepad_button_down(Button::Select)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::Select)
             }
             Action::ChangePerspective => {
-                self.key_pressed(
-                    action
-                        .default_key()
-                        .expect("perspective has keyboard binding"),
-                ) || self.gamepad_button_down(Button::DPadUp)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::DPadUp)
             }
             Action::OpenChat => {
-                self.key_pressed(action.default_key().expect("chat has keyboard binding"))
-                    || self.gamepad_button_down(Button::DPadRight)
+                self.default_key_pressed(action) || self.gamepad_button_down(Button::DPadRight)
             }
-            Action::OpenCommands => self.key_pressed(
-                action
-                    .default_key()
-                    .expect("commands have keyboard binding"),
-            ),
+            Action::OpenCommands => self.default_key_pressed(action),
             // Controller-only; keyboard Escape closes via OpenMenu and the chat path.
             Action::Close => self.gamepad_button_down(Button::East),
             // Click-count driven (`consume_click`); held state only.
-            Action::DropItem => self.key_pressed(
-                action
-                    .default_key()
-                    .expect("drop item has keyboard binding"),
-            ),
-            Action::SwapOffhand => self.key_pressed(
-                action
-                    .default_key()
-                    .expect("swap offhand has keyboard binding"),
-            ),
+            Action::DropItem | Action::SwapOffhand => self.default_key_pressed(action),
             // Vanilla `key.spectatorHotbar` default: middle mouse.
             Action::SpectatorHotbar => self.middle_click.held,
         }
+    }
+
+    fn default_key_pressed(&self, action: Action) -> bool {
+        action
+            .default_key()
+            .is_some_and(|key| self.key_pressed(key))
     }
 
     pub fn action_just_pressed(&self, action: Action) -> bool {

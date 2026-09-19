@@ -13,7 +13,8 @@ use crate::chat_component::{
     Argument, ClickEvent, Component, HoverEvent, ResolvedStyle, normalize_identifier,
 };
 use crate::net::commands::{
-    CommandParse, CommandTokenKind, CommandTokenRange, CommandTree, SyntaxError, UsageLine,
+    CommandParse, CommandTokenKind, CommandTokenRange, CommandTree, SyntaxError,
+    UnattendedCommandCheck, UsageLine,
 };
 use crate::net::sender::ChatMark;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
@@ -21,7 +22,9 @@ use crate::ui::text::{
     TextSpan, format_component_spans, format_component_spans_with_parent, parse_uuid_value,
     with_alpha,
 };
-use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
+use crate::ui::text_edit::{
+    SystemClipboard, TextFieldState, TextInputEvent, truncate_to_utf16, utf16_len,
+};
 
 const MAX_MESSAGES: usize = 100;
 const CHAT_X: f32 = 4.0;
@@ -40,14 +43,29 @@ const SUGGEST_ROW_H: f32 = 12.0;
 const MAX_SUGGESTION_ROWS: usize = 10;
 const SUGGEST_BG_ALPHA: f32 = 208.0 / 255.0;
 
-/// Vanilla composites these black GUI fills in its gamma-space framebuffer.
-/// Pomme's Vulkan UI target is sRGB, whose fixed-function blending occurs in
-/// linear space, so the same numeric alpha would look noticeably lighter.
-/// Convert the gamma-space darkening factor to the equivalent linear-space
-/// alpha (the renderer uses the same 2.2 approximation for Vanilla's vignette).
+/// Vanilla blends its black GUI fills in a gamma-space framebuffer; Pomme's
+/// sRGB target blends in linear space, where the same alpha looks lighter.
+/// Converts to the equivalent linear alpha (the vignette's 2.2 approximation).
 fn vanilla_black_fill(alpha: f32) -> [f32; 4] {
     let alpha = alpha.clamp(0.0, 1.0);
     [0.0, 0.0, 0.0, 1.0 - (1.0 - alpha).powf(2.2)]
+}
+
+fn push_fill(elements: &mut Vec<MenuElement>, [x, y, w, h]: [f32; 4], color: [f32; 4]) {
+    elements.push(MenuElement::Rect {
+        x,
+        y,
+        w,
+        h,
+        corner_radius: 0.0,
+        color,
+    });
+}
+
+/// `component` with its style's color set to `rgb`.
+fn colored(mut component: Component, rgb: u32) -> Component {
+    component.style.color = Some(rgb);
+    component
 }
 const SUGGEST_TEXT: [f32; 4] = [0.667, 0.667, 0.667, 1.0];
 const SUGGEST_SELECTED: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
@@ -187,12 +205,8 @@ impl ChatOptions {
     }
 }
 
-#[derive(Clone)]
 struct ChatHitRegion {
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
+    rect: [f32; 4],
     style: Arc<ResolvedStyle>,
 }
 
@@ -230,9 +244,9 @@ impl ChatMessageTag {
             Self::NotSecure => Component::translate("chat.tag.not_secure", Vec::new()),
             Self::Modified { original } => {
                 let mut component = Component::translate("chat.tag.modified", Vec::new());
-                let mut old = Component::text(format!("\n{original}"));
-                old.style.color = Some(0xaaaaaa);
-                component.siblings.push(old);
+                component
+                    .siblings
+                    .push(colored(Component::text(format!("\n{original}")), 0xaaaaaa));
                 component
             }
             Self::Error => Component::translate("chat.tag.error", Vec::new()),
@@ -332,12 +346,11 @@ struct ChatLine {
 
 struct PendingChatLine {
     spans: Vec<TextSpan>,
-    /// Signature attached to the rendered message itself. Validation-error
-    /// markers intentionally have no display signature in Vanilla.
+    /// The shown line's signature; vanilla's validation-error markers have
+    /// none.
     signature: Option<[u8; 256]>,
-    /// Signature receipt to feed LastSeenMessagesTracker once this delayed
-    /// handler actually runs. This is separate from `signature` so a red
-    /// validation-error marker can acknowledge the invalid packet as hidden.
+    /// What the last-seen tracker acknowledges once the line is handled,
+    /// so a validation-error marker can ack the invalid packet as hidden.
     ack_signature: Option<[u8; 256]>,
     force_hidden_ack: bool,
     suppress_display: bool,
@@ -377,6 +390,17 @@ pub(crate) enum CommandConfirmationKind {
 }
 
 impl CommandConfirmationKind {
+    /// The confirmation vanilla asks for after `check`; `None` sends the
+    /// command as is.
+    pub(crate) fn for_check(check: UnattendedCommandCheck) -> Option<Self> {
+        match check {
+            UnattendedCommandCheck::NoIssues => None,
+            UnattendedCommandCheck::SignatureRequired => Some(Self::SignatureRequired),
+            UnattendedCommandCheck::PermissionsRequired => Some(Self::PermissionsRequired),
+            UnattendedCommandCheck::ParseErrors => Some(Self::ParseErrors),
+        }
+    }
+
     fn message_key(self) -> &'static str {
         match self {
             Self::SignatureRequired => "multiplayer.confirm_command.signature_required",
@@ -416,36 +440,34 @@ enum ChatModal {
 impl ChatModal {
     fn confirm_screen(&self) -> ConfirmScreen {
         match self {
-            Self::Link { url } => {
-                let mut warning = Component::translate("chat.link.warning", Vec::new());
-                warning.style.color = Some(0xffcccc);
-                ConfirmScreen {
-                    title: Component::translate("chat.link.confirm", Vec::new()),
-                    message: Component::text(url.clone()),
-                    warning: Some(warning),
-                    buttons: vec![
-                        ("gui.yes", CONFIRM_LINK_BUTTON_WIDTH),
-                        ("chat.copy", CONFIRM_LINK_BUTTON_WIDTH),
-                        ("gui.no", CONFIRM_LINK_BUTTON_WIDTH),
-                    ],
-                }
-            }
-            Self::Command(pending) => {
-                let mut command = Component::text(pending.command.clone());
-                command.style.color = Some(0xffff55);
-                ConfirmScreen {
-                    title: Component::translate("multiplayer.confirm_command.title", Vec::new()),
-                    message: Component::translate(
-                        pending.kind.message_key(),
-                        vec![Argument::Component(Box::new(command))],
-                    ),
-                    warning: None,
-                    buttons: vec![
-                        (pending.kind.accept_key(), CONFIRM_BUTTON_WIDTH),
-                        ("gui.back", CONFIRM_BUTTON_WIDTH),
-                    ],
-                }
-            }
+            Self::Link { url } => ConfirmScreen {
+                title: Component::translate("chat.link.confirm", Vec::new()),
+                message: Component::text(url.clone()),
+                warning: Some(colored(
+                    Component::translate("chat.link.warning", Vec::new()),
+                    0xffcccc,
+                )),
+                buttons: vec![
+                    ("gui.yes", CONFIRM_LINK_BUTTON_WIDTH),
+                    ("chat.copy", CONFIRM_LINK_BUTTON_WIDTH),
+                    ("gui.no", CONFIRM_LINK_BUTTON_WIDTH),
+                ],
+            },
+            Self::Command(pending) => ConfirmScreen {
+                title: Component::translate("multiplayer.confirm_command.title", Vec::new()),
+                message: Component::translate(
+                    pending.kind.message_key(),
+                    vec![Argument::Component(Box::new(colored(
+                        Component::text(pending.command.clone()),
+                        0xffff55,
+                    )))],
+                ),
+                warning: None,
+                buttons: vec![
+                    (pending.kind.accept_key(), CONFIRM_BUTTON_WIDTH),
+                    ("gui.back", CONFIRM_BUTTON_WIDTH),
+                ],
+            },
         }
     }
 }
@@ -495,12 +517,11 @@ pub struct ChatState {
     command_usage: Vec<Vec<TextSpan>>,
     /// The input byte the usage box is drawn from; `None` pins it to x = 0.
     command_usage_start: Option<usize>,
-    /// Request produced by the last recompute, drained once per frame by the
-    /// game loop and sent as `ServerboundCommandSuggestion`.
+    /// Drained once per frame by the game loop and sent as
+    /// `ServerboundCommandSuggestion`.
     outgoing_request: Option<(u32, String)>,
-    /// Exact physical-screen rectangles occupied by styled chat spans on the
-    /// previous/current rendered frame. Vanilla's active-text collector does
-    /// the same job for ChatScreen hover/click lookup.
+    /// Physical rectangles of styled chat spans as last drawn, for hover and
+    /// click lookup (vanilla's active-text collector).
     hit_regions: Vec<ChatHitRegion>,
     /// Physical rectangles of the visible command-suggestion rows.
     suggestion_regions: Vec<(usize, [f32; 4])>,
@@ -722,16 +743,21 @@ impl ChatState {
             self.mark_processed(pending.ack_signature, false);
             return false;
         }
-        let source = pending.source;
-        let signature = pending.signature;
-        let ack_signature = pending.ack_signature;
-        let force_hidden_ack = pending.force_hidden_ack;
+        let PendingChatLine {
+            spans,
+            signature,
+            ack_signature,
+            force_hidden_ack,
+            source,
+            tag,
+            ..
+        } = pending;
         self.messages.push_back(ChatLine {
-            spans: pending.spans,
+            spans,
             received: now,
             signature,
             source,
-            tag: pending.tag,
+            tag,
             wrapped: OnceCell::new(),
         });
         if self.messages.len() > MAX_MESSAGES {
@@ -853,7 +879,7 @@ impl ChatState {
         line.signature = None;
         line.source = ChatMessageSource::SystemServer;
         line.tag = Some(ChatMessageTag::System);
-        line.wrapped = OnceCell::new();
+        line.invalidate_wrap();
         None
     }
 
@@ -959,9 +985,7 @@ impl ChatState {
         self.input.set_focused(false);
         self.clear_suggestions();
         self.close_modal();
-        // Vanilla resets the chat scroll when the screen closes.
-        self.scroll_pos = 0;
-        self.new_message_since_scroll = false;
+        self.reset_chat_scroll();
     }
 
     /// Vanilla key priority while ChatScreen is open: a child/overlay consumes
@@ -1001,13 +1025,26 @@ impl ChatState {
         }
     }
 
+    /// The list's visible row count and furthest scroll offset.
+    fn suggestion_window(&self) -> (usize, usize) {
+        let visible = self.suggestions.len().min(MAX_SUGGESTION_ROWS);
+        (visible, self.suggestions.len() - visible)
+    }
+
+    /// The index of the suggestion row under `cursor`, as last drawn.
+    fn suggestion_at(&self, cursor: (f32, f32)) -> Option<usize> {
+        self.suggestion_regions
+            .iter()
+            .find(|(_, rect)| common::hit_test(cursor, *rect))
+            .map(|&(index, _)| index)
+    }
+
     fn keep_suggestion_visible(&mut self) {
         if self.suggestions.is_empty() {
             self.suggest_offset = 0;
             return;
         }
-        let visible = self.suggestions.len().min(MAX_SUGGESTION_ROWS);
-        let max_offset = self.suggestions.len().saturating_sub(visible);
+        let (visible, max_offset) = self.suggestion_window();
         if self.suggest_index < self.suggest_offset {
             self.suggest_offset = self.suggest_index.min(max_offset);
         } else if self.suggest_index >= self.suggest_offset + visible {
@@ -1023,14 +1060,8 @@ impl ChatState {
             return;
         }
         let step = delta.clamp(-1.0, 1.0);
-        if !self.suggestions.is_empty()
-            && self
-                .suggestion_regions
-                .iter()
-                .any(|(_, rect)| common::hit_test(cursor, *rect))
-        {
-            let visible = self.suggestions.len().min(MAX_SUGGESTION_ROWS);
-            let max_offset = self.suggestions.len().saturating_sub(visible);
+        if !self.suggestions.is_empty() && self.suggestion_at(cursor).is_some() {
+            let (_, max_offset) = self.suggestion_window();
             let next = (self.suggest_offset as f32 - step).trunc() as isize;
             self.suggest_offset = next.clamp(0, max_offset as isize) as usize;
             return;
@@ -1466,8 +1497,31 @@ impl ChatState {
     fn style_at(&self, cursor: (f32, f32)) -> Option<Arc<ResolvedStyle>> {
         self.hit_regions
             .iter()
-            .find(|r| cursor.0 >= r.x0 && cursor.0 < r.x1 && cursor.1 >= r.y0 && cursor.1 < r.y1)
-            .map(|r| r.style.clone())
+            .find(|region| common::hit_test(cursor, region.rect))
+            .map(|region| region.style.clone())
+    }
+
+    /// Records a hit region for each styled span of a line drawn from `x`.
+    fn push_hit_regions(
+        &mut self,
+        spans: &[TextSpan],
+        mut x: f32,
+        y: f32,
+        h: f32,
+        span_w: &dyn Fn(&TextSpan) -> f32,
+    ) {
+        for span in spans {
+            let w = span_w(span);
+            if let Some(style) = &span.component_style
+                && w > 0.0
+            {
+                self.hit_regions.push(ChatHitRegion {
+                    rect: [x, y, w, h],
+                    style: style.clone(),
+                });
+            }
+            x += w;
+        }
     }
 
     /// Whether the pointing-hand cursor applies: a hovered button
@@ -1486,13 +1540,7 @@ impl ChatState {
         if self
             .queue_region
             .is_some_and(|rect| common::hit_test(cursor, rect))
-        {
-            return true;
-        }
-        if self
-            .suggestion_regions
-            .iter()
-            .any(|(_, rect)| common::hit_test(cursor, *rect))
+            || self.suggestion_at(cursor).is_some()
         {
             return true;
         }
@@ -1521,13 +1569,8 @@ impl ChatState {
             return None;
         }
 
-        if let Some((idx, _)) = self
-            .suggestion_regions
-            .iter()
-            .find(|(_, rect)| common::hit_test(cursor, *rect))
-            .copied()
-        {
-            self.select_suggestion(idx as isize);
+        if let Some(index) = self.suggestion_at(cursor) {
+            self.select_suggestion(index as isize);
             self.use_suggestion(inner_w, width_fn, tree);
             return None;
         }
@@ -1606,20 +1649,17 @@ impl ChatState {
         let text_opacity = self.options.effective_text_opacity();
         let spacing = self.options.line_spacing.clamp(0.0, 1.0);
         let text_baseline_offset = (8.0 * (spacing + 1.0) - 4.0 * spacing).round();
-        // Vanilla scales the ChatComponent pose, then translates x by 4 in
-        // that local coordinate space. The -4 background start therefore
-        // lands exactly on screen x=0 at every chat scale.
+        // Vanilla translates x by 4 inside the scaled pose, so the -4
+        // background start lands on screen x=0 at every chat scale.
         let origin = CHAT_X * unit;
-        let bg_x = 0.0;
         let bg_w = (render_width + 12.0) * unit;
         let screen_gui_h = screen_h / gs;
         let chat_bottom = ((screen_gui_h - BOTTOM_MARGIN) / chat_scale).floor() * unit;
         let now = Instant::now();
-        // Measure wrapping at gui-scale 1 so wrap points stay fixed when the
-        // gui scale changes (vanilla wraps in gui-space, then scales). Use the
-        // actual styled-span width: bold/font changes affect Vanilla wrap
-        // points and must not be flattened to plain-string metrics.
+        // Wrap in gui units (gui scale 1), measuring styled runs: vanilla
+        // wraps before scaling, and bold/fonts move its wrap points.
         let width0 = |spans: &[TextSpan]| spans_width_fn(spans, common::FONT_SIZE);
+        let span_w = |span: &TextSpan| spans_width_fn(std::slice::from_ref(span), chat_fs);
 
         let lines_per_page = self.lines_per_page();
         let total_lines: usize = self
@@ -1677,25 +1717,20 @@ impl ChatState {
             }
         }
 
-        // Vanilla submits the visible chat-row backgrounds before the text
-        // render states. Keep text deferred until every row background has
-        // been emitted so glyphs whose provider geometry extends outside the
-        // normal 8px line box (notably accented/obfuscated glyphs) are not
-        // darkened by a neighboring row's translucent background.
+        // Vanilla submits every row background before the text, so glyphs
+        // reaching outside their 8px line box (accents, obfuscated) aren't
+        // darkened by a neighbouring row's background.
         let mut chat_text_elements = Vec::with_capacity(display.len());
         for (i, (line_spans, alpha, tag, end_of_entry, message_id)) in display.iter().enumerate() {
             let entry_bottom = chat_bottom - (i as f32) * lh;
             let entry_top = entry_bottom - lh;
             let bg_a = alpha * self.options.text_background_opacity.clamp(0.0, 1.0);
             if bg_a > 1e-5 {
-                elements.push(MenuElement::Rect {
-                    x: bg_x,
-                    y: entry_top,
-                    w: bg_w,
-                    h: lh,
-                    corner_radius: 0.0,
-                    color: vanilla_black_fill(bg_a),
-                });
+                push_fill(
+                    elements,
+                    [0.0, entry_top, bg_w, lh],
+                    vanilla_black_fill(bg_a),
+                );
             }
             let text_a = alpha * text_opacity;
             let text_top = entry_bottom - text_baseline_offset * unit;
@@ -1703,36 +1738,14 @@ impl ChatState {
                 let mut indicator = tag.indicator_color();
                 indicator[3] *= text_a;
                 let indicator_rect = [0.0, entry_top, 2.0 * unit, lh];
-                elements.push(MenuElement::Rect {
-                    x: indicator_rect[0],
-                    y: indicator_rect[1],
-                    w: indicator_rect[2],
-                    h: indicator_rect[3],
-                    corner_radius: 0.0,
-                    color: indicator,
-                });
+                push_fill(elements, indicator_rect, indicator);
                 // Only the focused (chat open) access shows tag tooltips.
                 if focused && common::hit_test(cursor, indicator_rect) {
                     push_tag_tooltip(elements, tag, cursor, screen_w, screen_h, gs, &width0);
                 }
             }
 
-            let mut span_x = origin;
-            for span in line_spans {
-                let span_w = spans_width_fn(std::slice::from_ref(span), chat_fs);
-                if let Some(style) = &span.component_style
-                    && span_w > 0.0
-                {
-                    self.hit_regions.push(ChatHitRegion {
-                        x0: span_x,
-                        y0: entry_top,
-                        x1: span_x + span_w,
-                        y1: entry_bottom,
-                        style: style.clone(),
-                    });
-                }
-                span_x += span_w;
-            }
+            self.push_hit_regions(line_spans, origin, entry_top, lh, &span_w);
 
             // Vanilla `handleTagIcon`: the background access draws no icon.
             if focused && let Some(tag @ ChatMessageTag::Modified { .. }) = tag {
@@ -1753,13 +1766,9 @@ impl ChatState {
                             if other_message_id != message_id {
                                 return false;
                             }
-                            let bottom = chat_bottom - line_idx as f32 * lh;
-                            let top = bottom - lh;
+                            let top = chat_bottom - line_idx as f32 * lh - lh;
                             let width = spans_width_fn(other_spans, chat_fs);
-                            cursor.0 >= origin
-                                && cursor.0 < origin + width
-                                && cursor.1 >= top
-                                && cursor.1 < bottom
+                            common::hit_test(cursor, [origin, top, width, lh])
                         },
                     );
                 if icon_hovered || message_hovered {
@@ -1790,16 +1799,15 @@ impl ChatState {
 
         if hud_visible && focused && self.options.visibility != ChatVisibilitySetting::Full {
             let restricted_y = chat_bottom - (display.len() as f32 + 1.0) * lh;
-            elements.push(MenuElement::Rect {
-                x: 2.0 * unit,
-                y: restricted_y,
-                w: (render_width + 10.0) * unit,
-                h: lh,
-                corner_radius: 0.0,
-                color: vanilla_black_fill(self.options.text_background_opacity),
-            });
-            let mut restricted = Component::translate("chat_screen.restricted", Vec::new());
-            restricted.style.color = Some(0xff5555);
+            push_fill(
+                elements,
+                [2.0 * unit, restricted_y, (render_width + 10.0) * unit, lh],
+                vanilla_black_fill(self.options.text_background_opacity),
+            );
+            let mut restricted = colored(
+                Component::translate("chat_screen.restricted", Vec::new()),
+                0xff5555,
+            );
             restricted.style.underlined = Some(true);
             restricted.style.click_event = Some(ClickEvent::Custom {
                 id: GO_TO_RESTRICTIONS_SCREEN.to_owned(),
@@ -1818,20 +1826,7 @@ impl ChatState {
                     &width0,
                 );
             }
-            let mut x = origin;
-            for span in &restricted_spans {
-                let width = spans_width_fn(std::slice::from_ref(span), chat_fs);
-                if let Some(style) = &span.component_style {
-                    self.hit_regions.push(ChatHitRegion {
-                        x0: x,
-                        y0: restricted_y,
-                        x1: x + width,
-                        y1: restricted_y + lh,
-                        style: style.clone(),
-                    });
-                }
-                x += width;
-            }
+            self.push_hit_regions(&restricted_spans, origin, restricted_y, lh, &span_w);
             elements.push(MenuElement::McText {
                 x: origin,
                 y: restricted_y + (entry_height - text_baseline_offset - 1.0) * unit,
@@ -1844,14 +1839,16 @@ impl ChatState {
 
         if hud_visible && !self.delayed_messages.is_empty() {
             let queue_count = self.delayed_messages.len();
-            elements.push(MenuElement::Rect {
-                x: 2.0 * unit,
-                y: chat_bottom,
-                w: (render_width + 6.0) * unit,
-                h: 9.0 * unit,
-                corner_radius: 0.0,
-                color: vanilla_black_fill(self.options.text_background_opacity),
-            });
+            push_fill(
+                elements,
+                [
+                    2.0 * unit,
+                    chat_bottom,
+                    (render_width + 6.0) * unit,
+                    9.0 * unit,
+                ],
+                vanilla_black_fill(self.options.text_background_opacity),
+            );
             let queue_component = Component::translate(
                 "chat.queue",
                 vec![Argument::Number(queue_count.to_string())],
@@ -1907,22 +1904,16 @@ impl ChatState {
                 common::rgb(0x3333aa)
             };
             let alpha = if offset > chat_bottom { 170.0 } else { 96.0 } / 255.0;
-            elements.push(MenuElement::Rect {
-                x,
-                y: bar_top,
-                w: 2.0 * unit,
-                h: bar_h,
-                corner_radius: 0.0,
-                color: [color[0], color[1], color[2], alpha],
-            });
-            elements.push(MenuElement::Rect {
-                x: x + unit,
-                y: bar_top,
-                w: unit,
-                h: bar_h,
-                corner_radius: 0.0,
-                color: [0.8, 0.8, 0.8, alpha],
-            });
+            push_fill(
+                elements,
+                [x, bar_top, 2.0 * unit, bar_h],
+                [color[0], color[1], color[2], alpha],
+            );
+            push_fill(
+                elements,
+                [x + unit, bar_top, unit, bar_h],
+                [0.8, 0.8, 0.8, alpha],
+            );
         }
 
         if focused {
@@ -1932,15 +1923,11 @@ impl ChatState {
             // the screen: fill(2, height-14, width-2, height-2).
             let bar_y = screen_h - 14.0 * gs;
             let text_y = bar_y + (input_h - ui_fs) / 2.0;
-
-            elements.push(MenuElement::Rect {
-                x: 2.0 * gs,
-                y: bar_y,
-                w: screen_w - 4.0 * gs,
-                h: input_h,
-                corner_radius: 0.0,
-                color: vanilla_black_fill(INPUT_BG_ALPHA),
-            });
+            push_fill(
+                elements,
+                [2.0 * gs, bar_y, screen_w - 4.0 * gs, input_h],
+                vanilla_black_fill(INPUT_BG_ALPHA),
+            );
 
             // ChatScreen's EditBox is independent of ChatComponent scale:
             // x=4, y=height-12, width=screenWidth-4 in GUI coordinates.
@@ -2027,14 +2014,14 @@ impl ChatState {
             .iter()
             .map(|s| gui_w(&s.text))
             .fold(0.0_f32, f32::max);
-        // `EditBox.getScreenX` over the list's original input.
-        let screen_x = INPUT_X
-            + self
-                .suggest_original
-                .get(..self.suggest_range.start)
-                .map_or(0.0, gui_w);
-        let x = screen_x.max(0.0).min(screen_w - max_w);
-        let height = self.suggestions.len().min(MAX_SUGGESTION_ROWS) as f32 * SUGGEST_ROW_H;
+        let x = input_screen_x(
+            &self.suggest_original,
+            self.suggest_range.start,
+            max_w,
+            screen_w,
+            gui_w,
+        );
+        let height = self.suggestion_window().0 as f32 * SUGGEST_ROW_H;
         // The unbordered input shifts the list one left.
         [x - 1.0, screen_h - 12.0 - 3.0 - height, max_w + 1.0, height]
     }
@@ -2051,20 +2038,12 @@ impl ChatState {
         gs: f32,
         gui_w: &dyn Fn(&str) -> f32,
     ) {
-        let count = self.suggestions.len();
-        let limit = count.min(MAX_SUGGESTION_ROWS);
-        self.suggest_offset = self.suggest_offset.min(count - limit);
+        let (limit, max_offset) = self.suggestion_window();
+        self.suggest_offset = self.suggest_offset.min(max_offset);
         let offset = self.suggest_offset;
         let [x, y, w, h] = self.suggestion_rect(screen_w / gs, screen_h / gs, gui_w);
-        let fill = |elements: &mut Vec<MenuElement>, x: f32, y: f32, w: f32, h: f32, color| {
-            elements.push(MenuElement::Rect {
-                x: x * gs,
-                y: y * gs,
-                w: w * gs,
-                h: h * gs,
-                corner_radius: 0.0,
-                color,
-            });
+        let fill = |elements: &mut Vec<MenuElement>, rect: [f32; 4], color| {
+            push_fill(elements, rect.map(|v| v * gs), color);
         };
         let bg = vanilla_black_fill(SUGGEST_BG_ALPHA);
         let mouse = ((cursor.0 / gs).floor(), (cursor.1 / gs).floor());
@@ -2073,14 +2052,14 @@ impl ChatState {
 
         // Dotted edges mark entries scrolled out above or below.
         let has_previous = offset > 0;
-        let has_next = count > offset + limit;
+        let has_next = offset < max_offset;
         if has_previous || has_next {
-            fill(elements, x, y - 1.0, w, 1.0, bg);
-            fill(elements, x, y + h, w, 1.0, bg);
+            fill(elements, [x, y - 1.0, w, 1.0], bg);
+            fill(elements, [x, y + h, w, 1.0], bg);
             for (dotted, edge_y) in [(has_previous, y - 1.0), (has_next, y + h)] {
                 if dotted {
                     for dot in (0..w as usize).step_by(2) {
-                        fill(elements, x + dot as f32, edge_y, 1.0, 1.0, common::WHITE);
+                        fill(elements, [x + dot as f32, edge_y, 1.0, 1.0], common::WHITE);
                     }
                 }
             }
@@ -2090,9 +2069,10 @@ impl ChatState {
         for row in 0..limit {
             let index = row + offset;
             let row_y = y + row as f32 * SUGGEST_ROW_H;
-            fill(elements, x, row_y, w, SUGGEST_ROW_H, bg);
+            let row_rect = [x, row_y, w, SUGGEST_ROW_H];
+            fill(elements, row_rect, bg);
             self.suggestion_regions
-                .push((index, [x * gs, row_y * gs, w * gs, SUGGEST_ROW_H * gs]));
+                .push((index, row_rect.map(|v| v * gs)));
             if mouse.0 > x && mouse.0 < x + w && mouse.1 > row_y && mouse.1 < row_y + SUGGEST_ROW_H
             {
                 if mouse_moved {
@@ -2139,19 +2119,15 @@ impl ChatState {
             .map(|line| spans_w(line))
             .fold(0.0_f32, f32::max);
         let x = self.command_usage_start.map_or(0.0, |start| {
-            let screen_x = INPUT_X + self.input.value().get(..start).map_or(0.0, gui_w);
-            screen_x.max(0.0).min(screen_w / gs - width)
+            input_screen_x(self.input.value(), start, width, screen_w / gs, gui_w)
         });
         for (index, spans) in lines.iter().enumerate() {
             let y = screen_h / gs - 27.0 - SUGGEST_ROW_H * index as f32;
-            elements.push(MenuElement::Rect {
-                x: (x - 1.0) * gs,
-                y: y * gs,
-                w: (width + 2.0) * gs,
-                h: SUGGEST_ROW_H * gs,
-                corner_radius: 0.0,
-                color: vanilla_black_fill(SUGGEST_BG_ALPHA),
-            });
+            push_fill(
+                elements,
+                [x - 1.0, y, width + 2.0, SUGGEST_ROW_H].map(|v| v * gs),
+                vanilla_black_fill(SUGGEST_BG_ALPHA),
+            );
             elements.push(MenuElement::McText {
                 x: x * gs,
                 y: (y + 2.0) * gs,
@@ -2471,9 +2447,11 @@ fn span_tooltip_lines(spans: Vec<TextSpan>) -> Vec<TooltipLine> {
             }
             first = false;
             if !part.is_empty() {
-                let mut piece = span.clone();
-                piece.text = part.to_owned();
-                lines.last_mut().unwrap().spans.push(piece);
+                lines
+                    .last_mut()
+                    .unwrap()
+                    .spans
+                    .push(span.with_text(part.to_owned()));
             }
         }
     }
@@ -2506,7 +2484,6 @@ fn entity_tooltip_lines(value: &serde_json::Value) -> Vec<TooltipLine> {
             vec![Argument::Component(Box::new(description))],
         )));
     }
-    // `UUIDUtil.LENIENT_CODEC`: an int array or a hyphenated string.
     if let Some(uuid) = map.get("uuid").and_then(parse_uuid_value) {
         lines.push(TooltipLine::new(uuid.to_string(), common::WHITE));
     }
@@ -2579,10 +2556,7 @@ fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipL
             common::WHITE,
         ))
     } else {
-        vec![TooltipLine::new(
-            default_name.to_owned(),
-            common::rgb(rarity_rgb),
-        )]
+        vec![TooltipLine::new(default_name, common::rgb(rarity_rgb))]
     };
 
     for component_name in ["enchantments", "stored_enchantments"] {
@@ -2766,7 +2740,7 @@ fn enchantment_tooltip_line(id: &str, level: i32) -> TooltipLine {
             | "vanishing_curse"
     );
     let text = if level == 1 && single_level {
-        name.to_owned()
+        name
     } else {
         let level_key = format!("enchantment.level.{level}");
         let level_text = crate::lang::translate(&level_key)
@@ -2782,6 +2756,19 @@ fn enchantment_tooltip_line(id: &str, level: i32) -> TooltipLine {
             common::rgb(0xaaaaaa)
         },
     )
+}
+
+/// Vanilla `EditBox.getScreenX` of byte `start` of `input`, in gui units,
+/// clamped so a `width`-wide box stays on screen.
+fn input_screen_x(
+    input: &str,
+    start: usize,
+    width: f32,
+    screen_w: f32,
+    gui_w: &dyn Fn(&str) -> f32,
+) -> f32 {
+    let screen_x = INPUT_X + input.get(..start).map_or(0.0, gui_w);
+    screen_x.max(0.0).min(screen_w - width)
 }
 
 /// Byte offset for a UTF-16 code-unit offset (Java's `StringRange` counts
@@ -2815,9 +2802,10 @@ fn last_word_index(text: &str) -> usize {
 
 /// ChatScreen's red commands/messages-not-allowed usage line.
 fn restricted_line(key: &str) -> Vec<TextSpan> {
-    let mut component = Component::translate(key, Vec::new());
-    component.style.color = Some(0xff5555);
-    format_component_spans(&component, common::WHITE)
+    format_component_spans(
+        &colored(Component::translate(key, Vec::new()), 0xff5555),
+        common::WHITE,
+    )
 }
 
 /// Vanilla `CommandSuggestions.getExceptionMessage` for a parse of the
@@ -2838,7 +2826,7 @@ fn syntax_error_component(input: &str, error: &SyntaxError) -> Component {
 fn parse_error_component(input: &str, cursor: usize, message: Component) -> Component {
     const CONTEXT_AMOUNT: usize = 10;
     let before = input.get(..cursor).unwrap_or(input);
-    let position: usize = before.chars().map(char::len_utf16).sum();
+    let position = utf16_len(before);
     let mut units = 0;
     let mut tail = before.len();
     for (i, c) in before.char_indices().rev() {
@@ -2918,19 +2906,16 @@ fn normalize_chat_message(s: &str) -> String {
         }
     }
     let collapsed = java_trim(&spaced);
-    let mut units = 0;
-    let mut out = String::with_capacity(collapsed.len());
-    for c in collapsed.chars() {
-        units += c.len_utf16();
-        if units > MAX_MESSAGE_LEN {
-            // Java's `substring` keeps a split pair's high surrogate, which
-            // encodes as `?`.
-            if units == MAX_MESSAGE_LEN + 1 && c.len_utf16() == 2 {
-                out.push('?');
-            }
-            break;
-        }
-        out.push(c);
+    let mut out = truncate_to_utf16(collapsed, MAX_MESSAGE_LEN);
+    // Java's `substring` keeps a split pair's high surrogate, which encodes
+    // as `?`.
+    if utf16_len(&out) == MAX_MESSAGE_LEN - 1
+        && collapsed[out.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.len_utf16() == 2)
+    {
+        out.push('?');
     }
     out
 }
@@ -3002,9 +2987,7 @@ fn slice_spans(spans: &[TextSpan], start: usize, end: usize) -> Vec<TextSpan> {
         let local_start = start.saturating_sub(span_start).min(span.text.len());
         let local_end = end.saturating_sub(span_start).min(span.text.len());
         if local_start < local_end {
-            let mut piece = span.clone();
-            piece.text = span.text[local_start..local_end].to_owned();
-            out.push(piece);
+            out.push(span.with_text(span.text[local_start..local_end].to_owned()));
         }
     }
     out
@@ -3033,20 +3016,17 @@ fn legacy_color(code: char) -> Option<[f32; 4]> {
     Some(common::rgb(rgb))
 }
 
-/// Vanilla's `StringDecomposer.iterateFormatted` pass over each component text
-/// segment. Legacy formatting never carries into the next TextSpan because
-/// each segment supplies its own style as both currentStyle and resetStyle.
+/// Vanilla `StringDecomposer.iterateFormatted` over each span: legacy codes
+/// never carry into the next span, whose own style is both the current and
+/// the reset style.
 fn legacy_format_spans(spans: &[TextSpan], colors_enabled: bool) -> Vec<TextSpan> {
     let mut out = Vec::new();
     for base in spans {
-        let mut current = base.clone();
-        current.text.clear();
+        let mut current = base.with_text(String::new());
         let mut buffer = String::new();
         let flush = |out: &mut Vec<TextSpan>, current: &TextSpan, buffer: &mut String| {
             if !buffer.is_empty() {
-                let mut span = current.clone();
-                span.text = std::mem::take(buffer);
-                out.push(span);
+                out.push(current.with_text(std::mem::take(buffer)));
             }
         };
 
@@ -3057,8 +3037,7 @@ fn legacy_format_spans(spans: &[TextSpan], colors_enabled: bool) -> Vec<TextSpan
                 continue;
             }
             let Some(code) = chars.next() else {
-                // A trailing section sign terminates Vanilla's formatted
-                // iterator without emitting the section sign itself.
+                // A trailing section sign ends the iteration, unemitted.
                 break;
             };
             let lower = code.to_ascii_lowercase();
@@ -3070,9 +3049,7 @@ fn legacy_format_spans(spans: &[TextSpan], colors_enabled: bool) -> Vec<TextSpan
             }
             flush(&mut out, &current, &mut buffer);
             if !colors_enabled {
-                // Chat Colors OFF strips only the legacy code. The component's
-                // ordinary Style is preserved and the stripped text is later
-                // rendered normally.
+                // Chat Colors off strips the code but keeps the base style.
                 continue;
             }
             if let Some(color) = legacy_color(lower) {
@@ -3090,10 +3067,7 @@ fn legacy_format_spans(spans: &[TextSpan], colors_enabled: bool) -> Vec<TextSpan
                 'm' => current.strikethrough = true,
                 'n' => current.underline = true,
                 'o' => current.italic = true,
-                'r' => {
-                    current = base.clone();
-                    current.text.clear();
-                }
+                'r' => current = base.with_text(String::new()),
                 _ => unreachable!(),
             }
         }
@@ -3111,11 +3085,8 @@ pub(crate) fn wrap_spans(
     max_w: f32,
     width0: &dyn Fn(&[TextSpan]) -> f32,
 ) -> Vec<Vec<TextSpan>> {
-    // Preserve every character's original style. Vanilla StringSplitter keeps
-    // styled spaces in-place and drops only the particular space selected as
-    // a line-break delimiter. Reconstructing separators from the following
-    // word moves styles across component boundaries (e.g. the C04 trailing
-    // underline/strike space appeared before the word instead of after it).
+    // Per-character styles: vanilla `StringSplitter` keeps styled spaces in
+    // place and drops only the space chosen as a line break.
     let mut chars: StyledLine = Vec::new();
     for s in spans {
         let style = CharStyle(s.with_text(String::new()));
@@ -3234,12 +3205,41 @@ mod tests {
         line.iter().map(|s| s.text.clone()).collect()
     }
 
+    fn uniform_width(spans: &[TextSpan], per_char: f32) -> f32 {
+        spans
+            .iter()
+            .map(|span| span.text.chars().count() as f32 * per_char)
+            .sum()
+    }
+
     /// 10 units per char, 20 when bold.
     fn width(spans: &[TextSpan]) -> f32 {
         spans
             .iter()
             .map(|s| s.text.chars().count() as f32 * if s.bold { 20.0 } else { 10.0 })
             .sum()
+    }
+
+    fn open_chat(method: ChatMethod, tree: Option<&CommandTree>) -> ChatState {
+        let mut chat = ChatState::new();
+        chat.open(method, tree);
+        chat
+    }
+
+    fn chat_with(options: ChatOptions) -> ChatState {
+        let mut chat = ChatState::new();
+        chat.set_options(options);
+        chat
+    }
+
+    /// A chat with a 5s delay whose last message just arrived.
+    fn delayed_chat() -> ChatState {
+        let mut chat = chat_with(ChatOptions {
+            delay_secs: 5.0,
+            ..Default::default()
+        });
+        chat.previous_message_time = Some(Instant::now());
+        chat
     }
 
     #[test]
@@ -3290,12 +3290,7 @@ mod tests {
         cursor: (f32, f32),
         clicked: bool,
     ) -> Option<ChatUiAction> {
-        let spans_width = |spans: &[TextSpan], _: f32| {
-            spans
-                .iter()
-                .map(|span| span.text.chars().count() as f32 * 6.0)
-                .sum()
-        };
+        let spans_width = |spans: &[TextSpan], _: f32| uniform_width(spans, 6.0);
         let mut elements = Vec::new();
         chat.build_modal_prompt(
             &mut elements,
@@ -3314,18 +3309,14 @@ mod tests {
 
     fn hit_region(style: ResolvedStyle) -> ChatHitRegion {
         ChatHitRegion {
-            x0: 0.0,
-            y0: 0.0,
-            x1: 10.0,
-            y1: 10.0,
+            rect: [0.0, 0.0, 10.0, 10.0],
             style: Arc::new(style),
         }
     }
 
     #[test]
     fn command_confirmation_is_modal_and_requires_explicit_acceptance() {
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Message, None);
+        let mut chat = open_chat(ChatMethod::Message, None);
         chat.request_command_confirmation(
             "unknown command".to_owned(),
             CommandConfirmationKind::ParseErrors,
@@ -3435,8 +3426,7 @@ mod tests {
 
     #[test]
     fn modal_blocks_chat_scroll_and_resets_it_on_open() {
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Message, None);
+        let mut chat = open_chat(ChatMethod::Message, None);
         chat.scroll_chat(5);
         chat.new_message_since_scroll = true;
         assert_eq!(chat.scroll_pos, 5);
@@ -3452,8 +3442,7 @@ mod tests {
 
     #[test]
     fn every_modal_button_shows_the_pointer() {
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Message, None);
+        let mut chat = open_chat(ChatMethod::Message, None);
         chat.request_command_confirmation(
             "say hi".to_owned(),
             CommandConfirmationKind::ParseErrors,
@@ -3469,8 +3458,7 @@ mod tests {
 
     #[test]
     fn shift_hover_over_insertion_shows_the_pointer() {
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Message, None);
+        let mut chat = open_chat(ChatMethod::Message, None);
         chat.hit_regions.push(hit_region(ResolvedStyle {
             insertion: Some("Steve".to_owned()),
             ..ResolvedStyle::default()
@@ -3481,8 +3469,7 @@ mod tests {
 
     #[test]
     fn expand_chat_queue_click_is_handled_locally() {
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Message, None);
+        let mut chat = open_chat(ChatMethod::Message, None);
         chat.delayed_messages.push_back(PendingChatLine {
             spans: vec![span("queued", common::WHITE)],
             signature: None,
@@ -3576,10 +3563,7 @@ mod tests {
         strike.strikethrough = true;
 
         let lines = wrap_spans(&[italic, underline, strike], 10_000.0, &|spans| {
-            spans
-                .iter()
-                .map(|span| span.text.chars().count() as f32)
-                .sum()
+            uniform_width(spans, 1.0)
         });
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].len(), 3);
@@ -3621,12 +3605,7 @@ mod tests {
     /// A frame of `chat` at gui scale 1, glyphs one unit per char per font px.
     fn build_elements(chat: &mut ChatState) -> Vec<MenuElement> {
         let text_width = |text: &str, scale: f32| text.chars().count() as f32 * scale;
-        let spans_width = |spans: &[TextSpan], scale: f32| {
-            spans
-                .iter()
-                .map(|span| span.text.chars().count() as f32 * scale)
-                .sum()
-        };
+        let spans_width = |spans: &[TextSpan], scale: f32| uniform_width(spans, scale);
         let mut elements = Vec::new();
         let action = chat.build(
             &mut elements,
@@ -3660,8 +3639,7 @@ mod tests {
 
     #[test]
     fn chat_scale_zero_draws_no_messages_or_hit_regions() {
-        let mut chat = ChatState::new();
-        chat.set_options(ChatOptions {
+        let mut chat = chat_with(ChatOptions {
             scale: 0.0,
             ..Default::default()
         });
@@ -3700,8 +3678,7 @@ mod tests {
 
     #[test]
     fn only_secure_hidden_arrival_acknowledges_as_not_shown() {
-        let mut chat = ChatState::new();
-        chat.set_options(ChatOptions {
+        let mut chat = chat_with(ChatOptions {
             only_secure: true,
             ..Default::default()
         });
@@ -4014,31 +3991,48 @@ mod tests {
         })
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Copy)]
     struct Keys {
-        events: Vec<TextInputEvent>,
         enter: bool,
         tab: bool,
-        shift: bool,
         up: bool,
         down: bool,
     }
 
-    const TAB: Keys = Keys {
-        events: Vec::new(),
+    const NO_KEYS: Keys = Keys {
         enter: false,
-        tab: true,
-        shift: false,
+        tab: false,
         up: false,
         down: false,
     };
+    const TAB: Keys = Keys {
+        tab: true,
+        ..NO_KEYS
+    };
+    const ENTER: Keys = Keys {
+        enter: true,
+        ..NO_KEYS
+    };
+    const UP: Keys = Keys {
+        up: true,
+        ..NO_KEYS
+    };
+    const DOWN: Keys = Keys {
+        down: true,
+        ..NO_KEYS
+    };
 
-    fn press(chat: &mut ChatState, keys: Keys, tree: &CommandTree) -> Option<String> {
+    fn input(
+        chat: &mut ChatState,
+        events: &[TextInputEvent],
+        keys: Keys,
+        tree: &CommandTree,
+    ) -> Option<String> {
         chat.handle_key_input(
-            &keys.events,
+            events,
             keys.enter,
             keys.tab,
-            keys.shift,
+            false,
             keys.up,
             keys.down,
             false,
@@ -4049,37 +4043,29 @@ mod tests {
         )
     }
 
-    fn type_text(chat: &mut ChatState, text: &str, tree: &CommandTree) {
-        let events = text.chars().map(TextInputEvent::Char).collect();
-        press(
-            chat,
-            Keys {
-                events,
-                ..Default::default()
-            },
-            tree,
-        );
+    fn press(chat: &mut ChatState, keys: Keys, tree: &CommandTree) -> Option<String> {
+        input(chat, &[], keys, tree)
     }
 
-    fn backspace() -> Keys {
-        Keys {
-            events: vec![TextInputEvent::Key {
-                code: winit::keyboard::KeyCode::Backspace,
-                mods: crate::ui::text_edit::KeyMods {
-                    shift: false,
-                    ctrl: false,
-                    alt: false,
-                    super_key: false,
-                },
-            }],
-            ..Default::default()
-        }
+    fn type_text(chat: &mut ChatState, text: &str, tree: &CommandTree) {
+        let events: Vec<_> = text.chars().map(TextInputEvent::Char).collect();
+        input(chat, &events, NO_KEYS, tree);
+    }
+
+    /// An unmodified press of `code`.
+    fn press_key(chat: &mut ChatState, code: winit::keyboard::KeyCode, tree: &CommandTree) {
+        let mods = crate::ui::text_edit::KeyMods {
+            shift: false,
+            ctrl: false,
+            alt: false,
+            super_key: false,
+        };
+        input(chat, &[TextInputEvent::Key { code, mods }], NO_KEYS, tree);
     }
 
     /// A chat reopened on the saved draft "draft".
     fn restored_draft_chat(tree: &CommandTree) -> ChatState {
-        let mut chat = ChatState::new();
-        chat.set_options(ChatOptions {
+        let mut chat = chat_with(ChatOptions {
             save_drafts: true,
             ..Default::default()
         });
@@ -4096,7 +4082,7 @@ mod tests {
     fn restored_draft_first_backspace_clears() {
         let tree = test_tree();
         let mut chat = restored_draft_chat(&tree);
-        press(&mut chat, backspace(), &tree);
+        press_key(&mut chat, winit::keyboard::KeyCode::Backspace, &tree);
         assert_eq!(chat.input.value(), "");
         assert!(!chat.is_restored_draft);
     }
@@ -4107,17 +4093,11 @@ mod tests {
         let wf = |_: &str| 0.0;
 
         let mut chat = restored_draft_chat(&tree);
-        chat.hit_regions.push(ChatHitRegion {
-            x0: 0.0,
-            y0: 0.0,
-            x1: 10.0,
-            y1: 10.0,
-            style: Arc::new(ResolvedStyle {
-                insertion: Some(" more".to_owned()),
-                click_event: Some(ClickEvent::SuggestCommand("/time set day".to_owned())),
-                ..ResolvedStyle::default()
-            }),
-        });
+        chat.hit_regions.push(hit_region(ResolvedStyle {
+            insertion: Some(" more".to_owned()),
+            click_event: Some(ClickEvent::SuggestCommand("/time set day".to_owned())),
+            ..ResolvedStyle::default()
+        }));
         chat.handle_click((5.0, 5.0), true, f32::MAX, &wf, Some(&tree));
         assert_eq!(chat.input.value(), "draft more");
         assert!(!chat.is_restored_draft);
@@ -4132,14 +4112,10 @@ mod tests {
         let mut chat = restored_draft_chat(&tree);
         chat.sent_history.push_back("hello".to_owned());
         chat.history_pos = 1;
-        let up = Keys {
-            up: true,
-            ..Default::default()
-        };
-        press(&mut chat, up, &tree);
+        press(&mut chat, UP, &tree);
         assert_eq!(chat.input.value(), "hello");
         assert!(!chat.is_restored_draft);
-        press(&mut chat, backspace(), &tree);
+        press_key(&mut chat, winit::keyboard::KeyCode::Backspace, &tree);
         assert_eq!(chat.input.value(), "hell");
     }
 
@@ -4157,8 +4133,7 @@ mod tests {
     fn exit_reasons_decide_the_draft() {
         let tree = test_tree();
         let closed_with = |reason, save_drafts, text: &str| {
-            let mut chat = ChatState::new();
-            chat.set_options(ChatOptions {
+            let mut chat = chat_with(ChatOptions {
                 save_drafts,
                 ..Default::default()
             });
@@ -4178,18 +4153,13 @@ mod tests {
     #[test]
     fn submit_closes_as_done() {
         let tree = test_tree();
-        let mut chat = ChatState::new();
-        chat.set_options(ChatOptions {
+        let mut chat = chat_with(ChatOptions {
             save_drafts: true,
             ..Default::default()
         });
         chat.open(ChatMethod::Message, Some(&tree));
         type_text(&mut chat, "hi  there", &tree);
-        let enter = Keys {
-            enter: true,
-            ..Default::default()
-        };
-        assert_eq!(press(&mut chat, enter, &tree).as_deref(), Some("hi there"));
+        assert_eq!(press(&mut chat, ENTER, &tree).as_deref(), Some("hi there"));
         assert!(!chat.is_open());
         assert_eq!(chat.latest_draft, None);
     }
@@ -4197,8 +4167,7 @@ mod tests {
     #[test]
     fn chat_settings_return_to_the_same_chat() {
         let tree = test_tree();
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Message, Some(&tree));
+        let mut chat = open_chat(ChatMethod::Message, Some(&tree));
         type_text(&mut chat, "unsent", &tree);
         chat.close_for_settings();
         assert!(!chat.is_open());
@@ -4216,8 +4185,7 @@ mod tests {
     #[test]
     fn open_computes_but_hides_suggestions() {
         let tree = test_tree();
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Command, Some(&tree));
+        let mut chat = open_chat(ChatMethod::Command, Some(&tree));
         assert!(chat.suggestions.is_empty());
         assert!(matches!(
             chat.pending_suggestions,
@@ -4244,18 +4212,10 @@ mod tests {
         assert!(!chat.handle_escape());
         assert!(chat.suggestions.is_empty());
 
-        let up = Keys {
-            up: true,
-            ..Default::default()
-        };
-        press(&mut chat, up, &tree);
+        press(&mut chat, UP, &tree);
         assert_eq!(chat.input.value(), "hello");
         assert!(!chat.allow_suggestions);
-        let down = Keys {
-            down: true,
-            ..Default::default()
-        };
-        press(&mut chat, down, &tree);
+        press(&mut chat, DOWN, &tree);
         assert_eq!(chat.input.value(), "/ti");
         assert!(chat.allow_suggestions);
         assert_eq!(texts(&chat.suggestions), vec!["time"]);
@@ -4264,8 +4224,7 @@ mod tests {
     #[test]
     fn tab_applies_then_cycles() {
         let tree = test_tree();
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Command, Some(&tree));
+        let mut chat = open_chat(ChatMethod::Command, Some(&tree));
         type_text(&mut chat, "g", &tree);
         assert_eq!(texts(&chat.suggestions), vec!["gamemode", "gamerule"]);
         press(&mut chat, TAB, &tree);
@@ -4282,14 +4241,9 @@ mod tests {
     #[test]
     fn arrow_selection_is_applied_by_the_next_tab() {
         let tree = test_tree();
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Command, Some(&tree));
+        let mut chat = open_chat(ChatMethod::Command, Some(&tree));
         type_text(&mut chat, "g", &tree);
-        let up = Keys {
-            up: true,
-            ..Default::default()
-        };
-        press(&mut chat, up, &tree);
+        press(&mut chat, UP, &tree);
         assert_eq!(chat.suggest_index, 1);
         press(&mut chat, TAB, &tree);
         assert_eq!(chat.input.value(), "/gamerule");
@@ -4299,8 +4253,7 @@ mod tests {
     fn suggestions_complete_and_apply_at_the_caret() {
         let tree = test_tree();
         let wf = |_: &str| 0.0;
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Message, Some(&tree));
+        let mut chat = open_chat(ChatMethod::Message, Some(&tree));
         set_input(&mut chat, "/ti day");
         chat.input.move_cursor_to(3, false, f32::MAX, &wf);
         chat.allow_suggestions = true;
@@ -4316,8 +4269,7 @@ mod tests {
     fn server_request_is_the_input_up_to_the_caret() {
         let tree = test_tree();
         let wf = |_: &str| 0.0;
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Message, Some(&tree));
+        let mut chat = open_chat(ChatMethod::Message, Some(&tree));
         set_input(&mut chat, "/gamemode cx");
         chat.input.move_cursor_to(11, false, f32::MAX, &wf);
         chat.update_command_info(Some(&tree));
@@ -4330,8 +4282,7 @@ mod tests {
     #[test]
     fn request_ids_count_up_and_reset_on_answer() {
         let tree = test_tree();
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Command, Some(&tree));
+        let mut chat = open_chat(ChatMethod::Command, Some(&tree));
         type_text(&mut chat, "gamemode ", &tree);
         assert_eq!(chat.take_suggestion_request().map(|r| r.0), Some(0));
         type_text(&mut chat, "t", &tree);
@@ -4349,8 +4300,7 @@ mod tests {
     #[test]
     fn usage_waits_for_completions_and_ignores_the_caret() {
         let tree = test_tree();
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Command, Some(&tree));
+        let mut chat = open_chat(ChatMethod::Command, Some(&tree));
         type_text(&mut chat, "gamemode ", &tree);
         // A server completion is pending: nothing shows yet.
         assert!(chat.command_usage.is_empty());
@@ -4359,19 +4309,7 @@ mod tests {
         assert_eq!(chat.command_usage_start, Some(10));
 
         // Moving the caret isn't an edit, so the lines stay.
-        let left = Keys {
-            events: vec![TextInputEvent::Key {
-                code: winit::keyboard::KeyCode::ArrowLeft,
-                mods: crate::ui::text_edit::KeyMods {
-                    shift: false,
-                    ctrl: false,
-                    alt: false,
-                    super_key: false,
-                },
-            }],
-            ..Default::default()
-        };
-        press(&mut chat, left, &tree);
+        press_key(&mut chat, winit::keyboard::KeyCode::ArrowLeft, &tree);
         assert_eq!(chat.input.cursor(), 9);
         assert_eq!(usage_texts(&chat), vec!["<gamemode>"]);
     }
@@ -4379,8 +4317,7 @@ mod tests {
     #[test]
     fn usage_lists_parse_errors_when_nothing_completes() {
         let tree = test_tree();
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Command, Some(&tree));
+        let mut chat = open_chat(ChatMethod::Command, Some(&tree));
         type_text(&mut chat, "gamemode x", &tree);
         let (id, _) = chat.take_suggestion_request().unwrap();
         chat.apply_server_suggestions(id, 10, Vec::new(), Some(&tree));
@@ -4405,8 +4342,7 @@ mod tests {
     #[test]
     fn escape_hides_the_list_then_closes() {
         let tree = test_tree();
-        let mut chat = ChatState::new();
-        chat.open(ChatMethod::Command, Some(&tree));
+        let mut chat = open_chat(ChatMethod::Command, Some(&tree));
         type_text(&mut chat, "t", &tree);
         assert!(!chat.suggestions.is_empty());
         assert!(!chat.handle_escape());
@@ -4420,18 +4356,13 @@ mod tests {
     fn commands_only_blocks_messages_and_message_commands() {
         let tree = test_tree();
         let submit = |text: &str| {
-            let mut chat = ChatState::new();
-            chat.set_options(ChatOptions {
+            let mut chat = chat_with(ChatOptions {
                 visibility: ChatVisibilitySetting::System,
                 ..Default::default()
             });
             chat.open(ChatMethod::Message, Some(&tree));
             type_text(&mut chat, text, &tree);
-            let enter = Keys {
-                enter: true,
-                ..Default::default()
-            };
-            let sent = press(&mut chat, enter, &tree);
+            let sent = press(&mut chat, ENTER, &tree);
             (sent, chat.is_open())
         };
         assert_eq!(submit("hello"), (None, true));
@@ -4568,13 +4499,7 @@ mod tests {
     fn legacy_formatting_matches_vanilla_segment_reset_rules() {
         let white = common::WHITE;
         let spans = legacy_format_spans(&[span("a§cb§lc§rd", white)], true);
-        assert_eq!(
-            spans
-                .iter()
-                .map(|span| span.text.as_str())
-                .collect::<String>(),
-            "abcd"
-        );
+        assert_eq!(line_text(&spans), "abcd");
         assert_eq!(spans.len(), 4);
         assert_eq!(spans[0].color, white);
         assert_eq!(spans[1].color, common::rgb(0xff5555));
@@ -4590,13 +4515,7 @@ mod tests {
         let mut base = span("a§cb§lc§rd", common::rgb(0x55ffff));
         base.italic = true;
         let spans = legacy_format_spans(&[base], false);
-        assert_eq!(
-            spans
-                .iter()
-                .map(|span| span.text.as_str())
-                .collect::<String>(),
-            "abcd"
-        );
+        assert_eq!(line_text(&spans), "abcd");
         assert!(spans.iter().all(|span| span.color == common::rgb(0x55ffff)));
         assert!(spans.iter().all(|span| span.italic));
         assert!(spans.iter().all(|span| !span.bold));
@@ -4628,13 +4547,7 @@ mod tests {
 
     #[test]
     fn delayed_player_chat_queues_and_accepts_one() {
-        let mut chat = ChatState::new();
-        let options = ChatOptions {
-            delay_secs: 5.0,
-            ..Default::default()
-        };
-        chat.set_options(options);
-        chat.previous_message_time = Some(Instant::now());
+        let mut chat = delayed_chat();
         chat.push_message_with_source(
             vec![span("queued", common::WHITE)],
             None,
@@ -4651,13 +4564,7 @@ mod tests {
 
     #[test]
     fn delayed_validation_error_acknowledges_invalid_signature_as_hidden() {
-        let mut chat = ChatState::new();
-        let options = ChatOptions {
-            delay_secs: 5.0,
-            ..Default::default()
-        };
-        chat.set_options(options);
-        chat.previous_message_time = Some(Instant::now());
+        let mut chat = delayed_chat();
         let signature = [0x7au8; 256];
         chat.push_validation_error(
             vec![span("validation error", common::rgb(0xff5555))],
@@ -4680,14 +4587,8 @@ mod tests {
 
     #[test]
     fn fully_filtered_signed_message_never_renders_and_acknowledges_hidden() {
-        let mut chat = ChatState::new();
-        let options = ChatOptions {
-            delay_secs: 5.0,
-            ..Default::default()
-        };
-        chat.set_options(options);
-        let previous = Instant::now();
-        chat.previous_message_time = Some(previous);
+        let mut chat = delayed_chat();
+        let previous = chat.previous_message_time;
         let signature = [0x33u8; 256];
         chat.push_fully_filtered(Some(signature));
         assert_eq!(chat.delayed_messages.len(), 1);
@@ -4695,7 +4596,7 @@ mod tests {
 
         chat.accept_next_delayed_message();
         assert!(chat.messages.is_empty());
-        assert_eq!(chat.previous_message_time, Some(previous));
+        assert_eq!(chat.previous_message_time, previous);
         assert_eq!(
             chat.take_chat_marks(),
             vec![ChatMark::Processed {
@@ -4736,12 +4637,7 @@ mod tests {
         let lines = item_tooltip_lines(&value, true);
         let text = lines
             .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.text.as_str())
-                    .collect::<String>()
-            })
+            .map(|line| line_text(&line.spans))
             .collect::<Vec<_>>();
         assert_eq!(text.first().map(String::as_str), Some("Blade"));
         assert!(text.iter().any(|line| line.contains("Sharpness")));

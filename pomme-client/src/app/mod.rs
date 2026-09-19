@@ -608,9 +608,8 @@ impl ApplicationHandler for App {
                     {
                         self.core.input.on_menu_scroll(scroll);
                     }
-                    // ChatScreen decides whether the completion popup or the
-                    // backlog consumes the wheel, and applies Shift's slower
-                    // scroll multiplier. Queue the raw delta for the frame.
+                    // Queued raw: ChatScreen routes it to the completion popup
+                    // or the backlog, with Shift's slower multiplier.
                     AppPhase::InGame { game, .. } if game.chat.is_open() => {
                         self.core.input.on_menu_scroll(scroll);
                     }
@@ -663,11 +662,9 @@ impl ApplicationHandler for App {
 
             WindowEvent::Focused(focused) => {
                 self.core.unfocused_since = (!focused).then(Instant::now);
-                // The window manager may release a locked/confined cursor when
-                // focus changes without telling Pomme. Mark the OS grab stale
-                // so a quick refocus (< pause-on-lost-focus delay) re-locks
-                // instead of leaving gameplay logically captured but the OS
-                // cursor actually free.
+                // The window manager may silently drop a cursor lock on focus
+                // change, so a quick refocus (under the pause-on-lost-focus
+                // delay) re-issues the grab.
                 self.core.invalidate_cursor_grab_state();
                 if focused {
                     match self.phase.get_mut() {
