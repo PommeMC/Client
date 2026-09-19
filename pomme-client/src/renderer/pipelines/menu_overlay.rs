@@ -2052,6 +2052,12 @@ pub enum SpriteId {
     TooltipFrame,
     Scroller,
     ScrollerBackground,
+    WarningButton,
+    WarningButtonHighlighted,
+    Checkbox,
+    CheckboxHighlighted,
+    CheckboxSelected,
+    CheckboxSelectedHighlighted,
     Ping1,
     Ping2,
     Ping3,
@@ -2671,6 +2677,38 @@ fn build_sprite_atlas(
             SpriteId::ScrollerBackground,
             "minecraft/textures/gui/sprites/widget/scroller_background.png",
             1.0,
+        ),
+        // `DialogScreen.WARNING_BUTTON_SPRITES` and `Checkbox`, all plain
+        // 20x20 blits.
+        (
+            SpriteId::WarningButton,
+            "minecraft/textures/gui/sprites/dialog/warning_button.png",
+            0.0,
+        ),
+        (
+            SpriteId::WarningButtonHighlighted,
+            "minecraft/textures/gui/sprites/dialog/warning_button_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::Checkbox,
+            "minecraft/textures/gui/sprites/widget/checkbox.png",
+            0.0,
+        ),
+        (
+            SpriteId::CheckboxHighlighted,
+            "minecraft/textures/gui/sprites/widget/checkbox_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::CheckboxSelected,
+            "minecraft/textures/gui/sprites/widget/checkbox_selected.png",
+            0.0,
+        ),
+        (
+            SpriteId::CheckboxSelectedHighlighted,
+            "minecraft/textures/gui/sprites/widget/checkbox_selected_highlighted.png",
+            0.0,
         ),
         (
             SpriteId::FriendsBackground,

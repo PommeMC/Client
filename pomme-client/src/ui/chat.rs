@@ -2430,7 +2430,7 @@ fn push_tag_tooltip(
 
 /// Vanilla `Font.split(component, max_width)` as tooltip lines, `max_width`
 /// in gui units.
-fn wrapped_tooltip_lines(
+pub(crate) fn wrapped_tooltip_lines(
     component: &Component,
     max_width: f32,
     width0: &dyn Fn(&[TextSpan]) -> f32,
@@ -2509,7 +2509,7 @@ fn entity_tooltip_lines(value: &serde_json::Value) -> Vec<TooltipLine> {
     lines
 }
 
-fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipLine> {
+pub(crate) fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipLine> {
     let Some(map) = value.as_object() else {
         return vec![TooltipLine::new(value.to_string(), common::WHITE)];
     };

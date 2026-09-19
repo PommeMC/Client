@@ -9,18 +9,50 @@ use crate::chat_component::{
     Argument, ClickEvent, Component, DialogHolder, java_float_text, normalize_identifier,
 };
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
-use crate::ui::chat::{
-    StyleHitRegion, component_tooltip_lines, push_hit_regions, style_at, wrap_spans,
-};
+use crate::ui::chat::{StyleHitRegion, push_hit_regions, style_at, wrap_spans};
 use crate::ui::common;
+use crate::ui::menu::helpers::push_scrollbar;
 use crate::ui::text::{TextSpan, format_component_spans};
-use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
+use crate::ui::text_edit::{MultilineField, SystemClipboard, TextFieldState, TextInputEvent};
 
+/// The body column's `LinearLayout.spacing` (`DialogScreen.init`).
 const BODY_SPACING: f32 = 10.0;
 const BUTTON_H: f32 = 20.0;
+/// `packControlsIntoColumns`' row and column spacing.
 const GRID_GAP: f32 = 2.0;
+/// `HeaderAndFooterLayout.DEFAULT_HEADER_AND_FOOTER_HEIGHT`.
 const HEADER_H: f32 = 33.0;
 const FOOTER_H: f32 = 33.0;
+/// `HeaderAndFooterLayout.CONTENT_MARGIN_TOP`.
+const CONTENT_MARGIN_TOP: f32 = 30.0;
+/// `ButtonListDialogScreen.FOOTER_MARGIN`, the footer with no exit button.
+const FOOTER_MARGIN: f32 = 5.0;
+/// `SimpleDialogScreen`'s footer row spacing.
+const FOOTER_SPACING: f32 = 8.0;
+/// The title row's spacing around the warning button, and its size.
+const HEADER_SPACING: f32 = 10.0;
+const WARNING_SIZE: f32 = 20.0;
+/// `Font.lineHeight`.
+const LINE_H: f32 = 9.0;
+/// `FocusableTextWidget.DEFAULT_PADDING`.
+const TEXT_PADDING: f32 = 4.0;
+/// `CommonLayouts.labeledElement`: a label line plus `LABEL_SPACING`.
+const LABEL_GAP: f32 = LINE_H + 4.0;
+/// `AbstractScrollArea.SCROLLBAR_WIDTH` and `ScrollableLayout`'s spacing,
+/// reserved on both sides so the content stays centred.
+const SCROLLBAR_W: f32 = 6.0;
+const SCROLLBAR_SPACING: f32 = 4.0;
+/// `AbstractScrollArea.SCROLLBAR_MIN_HEIGHT`.
+const SCROLLER_MIN_H: f32 = 32.0;
+/// `ScrollableLayout`'s `defaultSettings(10)`.
+const SCROLL_RATE: f32 = 10.0;
+/// `Checkbox.getBoxSize`, and the gap to its label.
+const CHECKBOX_SIZE: f32 = LINE_H + 8.0;
+const CHECKBOX_SPACING: f32 = 4.0;
+/// `Tooltip.create` splits at this width.
+const TOOLTIP_WRAP: f32 = 170.0;
+/// `EditBox.DEFAULT_TEXT_COLOR`.
+const EDIT_TEXT: [f32; 4] = common::rgb(0xe0e0e0);
 /// Vanilla `WaitingForResponseScreen.BUTTON_ACTIVE_AFTER`, in seconds.
 const BUTTON_ACTIVE_AFTER: f32 = 5.0;
 
@@ -198,7 +230,6 @@ enum DialogBody {
     Item {
         item: DialogItem,
         description: Option<(Component, f32)>,
-        #[allow(dead_code, reason = "the decorations land with the item rendering")]
         show_decorations: bool,
         show_tooltip: bool,
         width: f32,
@@ -211,13 +242,8 @@ enum DialogBody {
 #[derive(Clone, Debug)]
 struct DialogItem {
     id: String,
-    #[allow(
-        dead_code,
-        reason = "the count decoration lands with the item rendering"
-    )]
     count: i32,
     /// The whole `{id, count, components}` value, for `item_tooltip_lines`.
-    #[allow(dead_code, reason = "the real tooltip lands with the item rendering")]
     template: Value,
 }
 
@@ -225,6 +251,14 @@ impl DialogItem {
     /// The texture name `MenuElement::ItemIcon` keys on (`item_resource_name`).
     fn icon_name(&self) -> &str {
         self.id.strip_prefix("minecraft:").unwrap_or(&self.id)
+    }
+
+    fn count(&self) -> i32 {
+        self.count
+    }
+
+    fn template(&self) -> &Value {
+        &self.template
     }
 }
 
@@ -234,7 +268,7 @@ enum DialogInput {
         label: Component,
         label_visible: bool,
         width: f32,
-        field: TextFieldState,
+        field: TextField,
         multiline: Option<MultilineOptions>,
     },
     Boolean {
@@ -261,6 +295,29 @@ enum DialogInput {
         slider: f32,
         dragging: bool,
     },
+}
+
+/// The control `InputControlHandlers.TextInputHandler` builds: an `EditBox`,
+/// or a `MultiLineEditBox` when the input declares `multiline`.
+enum TextField {
+    Single(TextFieldState),
+    Multi(MultilineField),
+}
+
+impl TextField {
+    fn value(&self) -> &str {
+        match self {
+            Self::Single(field) => field.value(),
+            Self::Multi(field) => field.value(),
+        }
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        match self {
+            Self::Single(field) => field.set_focused(focused),
+            Self::Multi(field) => field.set_focused(focused),
+        }
+    }
 }
 
 /// `TextInput.MultilineOptions`.
@@ -404,6 +461,26 @@ fn option_id(entries: &[(String, Component)], selected: usize) -> String {
         .unwrap_or_default()
 }
 
+impl DialogKind {
+    /// Whether the dialog is a `ButtonListDialog`, whose buttons go in the
+    /// body and whose footer holds only the exit button.
+    fn is_button_list(&self) -> bool {
+        matches!(
+            self,
+            Self::MultiAction { .. } | Self::DialogList { .. } | Self::ServerLinks { .. }
+        )
+    }
+
+    fn columns(&self) -> usize {
+        match self {
+            Self::MultiAction { columns, .. }
+            | Self::DialogList { columns, .. }
+            | Self::ServerLinks { columns, .. } => *columns,
+            Self::Notice { .. } | Self::Confirmation { .. } => 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum DialogKind {
     Notice {
@@ -457,6 +534,28 @@ pub struct ServerDialogState {
     /// has carried it out: vanilla's `runAction` swaps the screen only where
     /// the click event activates one.
     pending_after: Option<AfterAction>,
+    /// The body's `ScrollableLayout` scroll amount, in GUI units.
+    scroll: f32,
+    scroll_max: f32,
+    /// Keyboard focus: an index into the ring the last build laid out.
+    focus: Option<usize>,
+    focus_ring: Vec<FocusTarget>,
+    /// A widget was pressed this frame (`AbstractButton.playDownSound`).
+    click_sound: bool,
+    /// The `CycleButton` the cursor was over when the frame was built.
+    wheel_target: Option<usize>,
+}
+
+/// Where keyboard focus can sit, in the order vanilla's Tab walks the screen
+/// (the warning button carries `setTabOrderGroup(-10)`, so it comes first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusTarget {
+    Warning,
+    Input(usize),
+    /// A button of the body's `packControlsIntoColumns` grid.
+    ListButton(usize),
+    /// A footer button: the main actions, or the exit button.
+    FooterButton(usize),
 }
 
 impl ServerDialogState {
@@ -488,6 +587,12 @@ impl ServerDialogState {
             server_links: server_links.to_vec(),
             dialog_list_labels,
             pending_after: None,
+            scroll: 0.0,
+            scroll_max: 0.0,
+            focus: None,
+            focus_ring: Vec::new(),
+            click_sound: false,
+            wheel_target: None,
         })
     }
 
@@ -509,62 +614,83 @@ impl ServerDialogState {
         let Some(index) = self.focused_text else {
             return;
         };
-        let Some(DialogInput::Text {
-            field,
-            multiline,
-            width,
-            ..
-        }) = dialog.inputs.get_mut(index)
-        else {
+        let Some(DialogInput::Text { field, width, .. }) = dialog.inputs.get_mut(index) else {
             self.focused_text = None;
             return;
         };
         let inner_w = (*width - 8.0) * gs;
-        // `MultiLineEditBox.setLineLimit`.
-        let max_lines = multiline
-            .and_then(|multiline| multiline.max_lines)
-            .map(|lines| lines.max(1) as usize);
         let mut clipboard = SystemClipboard;
         for event in events {
-            field.handle(event, &mut clipboard, inner_w, width_fn);
-            if let Some(max_lines) = max_lines {
-                let value = field.value();
-                if value.lines().count() > max_lines {
-                    let limited = value.lines().take(max_lines).collect::<Vec<_>>().join("\n");
-                    field.set_value(&limited, inner_w, width_fn);
+            match field {
+                TextField::Single(field) => {
+                    field.handle(event, &mut clipboard, inner_w, width_fn);
+                }
+                // The text area wraps on its own inner width, and both limits
+                // live in the field itself.
+                TextField::Multi(field) => {
+                    field.set_width(inner_w, width_fn);
+                    field.handle(event, &mut clipboard, width_fn);
                 }
             }
         }
     }
 
-    /// Wheel input over the dialog.
-    // TODO: vanilla scrolls the body's `ScrollableLayout`, and a `CycleButton`
-    // under the cursor takes the wheel itself; neither scrolls yet.
-    pub fn handle_scroll(&mut self, _cursor: (f32, f32), _delta: f32) {}
-
-    pub fn handle_tab(&mut self, reverse: bool) {
-        let DialogMode::Dialog(dialog) = &self.mode else {
-            return;
-        };
-        let text_indices: Vec<usize> = dialog
-            .inputs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, input)| matches!(input, DialogInput::Text { .. }).then_some(i))
-            .collect();
-        if text_indices.is_empty() {
+    /// Wheel input: the body's `ScrollableLayout` scrolls, unless a
+    /// `CycleButton` under the cursor takes the wheel itself.
+    pub fn handle_scroll(&mut self, cursor: (f32, f32), delta: f32) {
+        if let Some(index) = self.wheel_target.take()
+            && let DialogMode::Dialog(dialog) = &mut self.mode
+            && let Some(DialogInput::SingleOption {
+                entries, selected, ..
+            }) = dialog.inputs.get_mut(index)
+        {
+            // `CycleButton.mouseScrolled`.
+            let step = if delta > 0.0 { entries.len() - 1 } else { 1 };
+            *selected = (*selected + step) % entries.len().max(1);
             return;
         }
-        let current = self
-            .focused_text
-            .and_then(|focused| text_indices.iter().position(|i| *i == focused));
-        let next = match (current, reverse) {
-            (Some(i), false) => (i + 1) % text_indices.len(),
-            (Some(i), true) => (i + text_indices.len() - 1) % text_indices.len(),
-            (None, false) => 0,
-            (None, true) => text_indices.len() - 1,
+        let _ = cursor;
+        self.scroll = (self.scroll - delta * SCROLL_RATE).clamp(0.0, self.scroll_max);
+    }
+
+    /// One Tab step around the dialog's widgets (`ContainerEventHandler`).
+    pub fn handle_tab(&mut self, reverse: bool) {
+        if self.focus_ring.is_empty() {
+            return;
+        }
+        self.focus = Some(crate::ui::menu::helpers::step_ring(
+            self.focus,
+            self.focus_ring.len(),
+            reverse,
+        ));
+        self.sync_focused_text();
+    }
+
+    /// Keeps the typed-into text input in step with the focus ring.
+    fn sync_focused_text(&mut self) {
+        let focused = self
+            .focus
+            .and_then(|index| self.focus_ring.get(index).copied());
+        let DialogMode::Dialog(dialog) = &mut self.mode else {
+            return;
         };
-        self.focused_text = Some(text_indices[next]);
+        self.focused_text = match focused {
+            Some(FocusTarget::Input(index))
+                if matches!(dialog.inputs.get(index), Some(DialogInput::Text { .. })) =>
+            {
+                if let Some(DialogInput::Text { field, .. }) = dialog.inputs.get_mut(index) {
+                    field.set_focused(true);
+                }
+                Some(index)
+            }
+            _ => None,
+        };
+    }
+
+    /// Whether a widget was pressed since the last call
+    /// (`AbstractButton.playDownSound`).
+    pub fn take_click_sound(&mut self) -> bool {
+        std::mem::take(&mut self.click_sound)
     }
 
     pub fn handle_escape(&mut self) -> Option<ServerDialogAction> {
@@ -587,332 +713,194 @@ impl ServerDialogState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// `DialogScreen`: a `HeaderAndFooterLayout` whose contents are the body
+    /// column inside a `ScrollableLayout`. Laid out in vanilla's GUI units and
+    /// drawn at `gs` framebuffer pixels per unit.
     pub fn build(
         &mut self,
         elements: &mut Vec<MenuElement>,
         screen_w: f32,
         screen_h: f32,
         gs: f32,
-        cursor: (f32, f32),
-        clicked: bool,
-        mouse_held: bool,
+        input: WidgetInput,
         text_width_fn: &dyn Fn(&str, f32) -> f32,
         spans_width_fn: &dyn Fn(&[TextSpan], f32) -> f32,
     ) -> Option<ServerDialogAction> {
+        let m = Measure {
+            text: text_width_fn,
+            spans: spans_width_fn,
+        };
+        let w = screen_w / gs;
+        let h = screen_h / gs;
+        let cursor = (input.cursor.0 / gs, input.cursor.1 / gs);
+        let mut draw = Draw { gs, elements };
+        common::push_overlay(draw.elements, screen_w, screen_h, 0.5);
+
         if let DialogMode::Waiting { started } = &self.mode {
             let elapsed = started.elapsed().as_secs_f32();
-            common::push_overlay(elements, screen_w, screen_h, 0.5);
-            let fs = common::FONT_SIZE * gs;
-            let title = tr("gui.waitingForResponse.title", "Waiting for response...");
-            elements.push(MenuElement::Text {
-                x: screen_w / 2.0,
-                y: 24.0 * gs,
-                text: title,
-                scale: fs,
-                color: common::WHITE,
-                centered: true,
-            });
-            if elapsed >= 1.0 {
-                let active = elapsed >= BUTTON_ACTIVE_AFTER;
-                let seconds = (BUTTON_ACTIVE_AFTER - elapsed).ceil().max(0.0) as u32;
-                let label = if active {
-                    tr("gui.back", "Back")
-                } else {
-                    format!(
-                        "{} ({seconds})",
-                        tr("gui.waitingForResponse.button.inactive", "Back")
-                    )
-                };
-                let w = 200.0 * gs;
-                let h = 20.0 * gs;
-                let x = (screen_w - w) / 2.0;
-                let y = screen_h / 2.0 - h / 2.0;
-                let hovered =
-                    common::push_button(elements, cursor, x, y, w, h, gs, fs, &label, active);
-                if clicked && hovered {
-                    self.mode = DialogMode::Finished;
-                }
+            if build_waiting(draw, w, h, cursor, input.clicked, elapsed) {
+                self.click_sound = true;
+                self.mode = DialogMode::Finished;
             }
             return None;
         }
-
         let DialogMode::Dialog(dialog) = &mut self.mode else {
             return None;
         };
-        common::push_overlay(elements, screen_w, screen_h, 0.5);
-        let fs = common::FONT_SIZE * gs;
-        let cx = screen_w / 2.0;
-        let title_spans = format_component_spans(&dialog.title, common::WHITE);
-        elements.push(MenuElement::McText {
-            x: cx,
-            y: 13.0 * gs,
-            spans: title_spans,
-            scale: fs,
-            centered: true,
-            shadow: true,
-        });
 
-        // TODO: clicking vanilla's warning button opens `WarningScreen`
-        // (`DialogScreen.createWarningButton`); Pomme's only shows the tooltip.
-        let warning_x = (cx + 105.0 * gs).min(screen_w - 22.0 * gs);
-        let warning_rect = [warning_x, 8.0 * gs, 20.0 * gs, 20.0 * gs];
-        common::push_button(
-            elements,
-            cursor,
-            warning_rect[0],
-            warning_rect[1],
-            warning_rect[2],
-            warning_rect[3],
-            gs,
-            fs,
-            "!",
-            true,
-        );
-        if common::hit_test(cursor, warning_rect) {
-            common::push_tooltip_lines(
-                elements,
-                cursor,
-                screen_w,
-                screen_h,
-                gs,
-                component_tooltip_lines(&Component::translate(
-                    "menu.custom_screen_info.tooltip",
-                    Vec::new(),
-                )),
-            );
-        }
-
-        let content_top = HEADER_H * gs;
-        let content_bottom = screen_h - FOOTER_H * gs;
-        let mut y = content_top + 4.0 * gs;
-        let max_content_w = (screen_w / gs - 32.0).clamp(120.0, 420.0);
-
-        let mut body_hits = Vec::new();
-        for body in &dialog.bodies {
-            y += Self::render_body(
-                &mut body_hits,
-                elements,
-                body,
-                cx,
-                y,
-                max_content_w,
-                screen_w,
-                screen_h,
-                gs,
-                fs,
-                cursor,
-                spans_width_fn,
-            );
-            y += BODY_SPACING * gs;
-        }
-
-        for (index, input) in dialog.inputs.iter_mut().enumerate() {
-            let height = render_input(
-                elements,
-                input,
-                index,
-                &mut self.focused_text,
-                cx,
-                y,
-                gs,
-                fs,
-                cursor,
-                clicked,
-                mouse_held,
-                text_width_fn,
-            );
-            y += height + BODY_SPACING * gs;
-            if y > content_bottom - 24.0 * gs {
-                break;
-            }
-        }
-
-        let buttons = dialog_buttons(&dialog.kind, &self.server_links, &self.dialog_list_labels);
-        let columns = match &dialog.kind {
-            DialogKind::MultiAction { columns, .. }
-            | DialogKind::DialogList { columns, .. }
-            | DialogKind::ServerLinks { columns, .. } => (*columns).max(1),
-            DialogKind::Notice { .. } | DialogKind::Confirmation { .. } => buttons.len().max(1),
-        };
-        let button_rows = buttons.len().div_ceil(columns);
-        let grid_y = if matches!(
-            dialog.kind,
-            DialogKind::Notice { .. } | DialogKind::Confirmation { .. }
-        ) {
-            screen_h - 27.0 * gs
+        let (grid_buttons, footer_buttons) =
+            dialog_buttons(&dialog.kind, &self.server_links, &self.dialog_list_labels);
+        let footer_h = if dialog.kind.is_button_list() && footer_buttons.is_empty() {
+            FOOTER_MARGIN
         } else {
-            y.min(content_bottom - button_rows as f32 * (BUTTON_H + GRID_GAP) * gs)
+            FOOTER_H
         };
-        let mut clicked_action = None;
-        for (index, button) in buttons.iter().enumerate() {
-            let row = index / columns;
-            let col = index % columns;
-            let row_count = (buttons.len() - row * columns).min(columns);
-            let widths: Vec<f32> = buttons[row * columns..row * columns + row_count]
-                .iter()
-                .map(|button| button.width)
-                .collect();
-            let row_width =
-                widths.iter().sum::<f32>() + GRID_GAP * (row_count.saturating_sub(1)) as f32;
-            let mut x = cx - row_width * gs / 2.0;
-            for width in widths.iter().take(col) {
-                x += (*width + GRID_GAP) * gs;
-            }
-            let by = grid_y + row as f32 * (BUTTON_H + GRID_GAP) * gs;
-            let rect = [x, by, button.width * gs, BUTTON_H * gs];
-            let hovered = push_component_button(elements, cursor, rect, gs, fs, &button.label);
-            if hovered {
-                // TODO: vanilla `Tooltip.create` wraps at 170 (`wrapped_tooltip_lines`).
-                if let Some(tooltip) = &button.tooltip {
-                    common::push_tooltip_lines(
-                        elements,
-                        cursor,
-                        screen_w,
-                        screen_h,
-                        gs,
-                        component_tooltip_lines(tooltip),
-                    );
-                }
-                if clicked {
-                    clicked_action = Some(button.action.clone());
-                }
-            }
+
+        // `ScrollableLayout` around the body column, centred by the contents
+        // frame with the scrollbar reserved on both sides.
+        let children = measure_children(dialog, &grid_buttons, dialog.kind.columns(), &m);
+        let content_w = children.iter().map(|child| child.w).fold(0.0, f32::max);
+        let spacing = BODY_SPACING * children.len().saturating_sub(1) as f32;
+        let content_h = children.iter().map(|child| child.h).sum::<f32>() + spacing;
+        let reserve = SCROLLBAR_SPACING + SCROLLBAR_W;
+        let container_w = content_w + 2.0 * reserve;
+        let container_h = content_h.min((h - HEADER_H - footer_h).max(0.0));
+        let container_x = align_x(w, container_w);
+        let container_y = (HEADER_H + CONTENT_MARGIN_TOP).min(h - footer_h - container_h);
+        self.scroll_max = (content_h - container_h).max(0.0);
+        self.scroll = self.scroll.clamp(0.0, self.scroll_max);
+        let content_x = container_x + reserve;
+        let container = [container_x, container_y, container_w, container_h];
+
+        let mut focus = DialogFocus::new(self.focus, input);
+        let mut action = None;
+        let mut tooltip = None;
+        self.wheel_target = None;
+
+        // Header: the title row with its warning button, centred in the
+        // header frame (`DialogScreen.createTitleWithWarningButton`).
+        let title_spans = format_component_spans(&dialog.title, common::WHITE);
+        let title_w = m.spans_w(&title_spans);
+        let row_w = title_w + HEADER_SPACING + WARNING_SIZE;
+        let row_x = align_x(w, row_w);
+        let row_y = align_y(HEADER_H, WARNING_SIZE);
+        draw.spans(
+            row_x,
+            row_y + align_y(WARNING_SIZE, LINE_H),
+            title_spans,
+            false,
+        );
+        let (warning_x, warning_y) =
+            warning_button_position(row_x + title_w + HEADER_SPACING, row_y, w, h);
+        let warning_rect = [warning_x, warning_y, WARNING_SIZE, WARNING_SIZE];
+        let warning_hovered = common::hit_test(cursor, warning_rect);
+        let warning_focused = focus.claim(FocusTarget::Warning, warning_hovered);
+        draw.sprite(
+            warning_rect,
+            if warning_hovered || warning_focused {
+                SpriteId::WarningButtonHighlighted
+            } else {
+                SpriteId::WarningButton
+            },
+        );
+        if warning_hovered {
+            tooltip = Some(wrapped_tooltip(
+                &Component::translate("menu.custom_screen_info.tooltip", Vec::new()),
+                &m,
+            ));
+        }
+        if focus.pressed(warning_hovered, warning_focused) {
+            self.click_sound = true;
+            // TODO: vanilla opens `DialogScreen.WarningScreen`, which offers
+            // to disconnect; Pomme only shows the tooltip.
         }
 
-        if let Some(action) = clicked_action {
-            let after = self.after_action();
-            return self.finish_action(action.as_ref(), after);
-        }
-        if clicked
-            && let Some(click) =
-                style_at(&body_hits, cursor).and_then(|style| style.click_event.clone())
-        {
-            let after = self.after_action();
-            return self.finish_click(Some(click), after);
-        }
-        None
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_body(
-        body_hits: &mut Vec<StyleHitRegion>,
-        elements: &mut Vec<MenuElement>,
-        body: &DialogBody,
-        cx: f32,
-        y: f32,
-        max_content_w: f32,
-        screen_w: f32,
-        screen_h: f32,
-        gs: f32,
-        fs: f32,
-        cursor: (f32, f32),
-        spans_width_fn: &dyn Fn(&[TextSpan], f32) -> f32,
-    ) -> f32 {
-        match body {
-            DialogBody::Message { contents, width } => Self::render_component_body(
-                body_hits,
-                elements,
-                contents,
-                (*width).min(max_content_w),
-                cx,
-                y,
-                gs,
-                fs,
-                spans_width_fn,
-            ),
-            DialogBody::Item {
-                item,
-                description,
-                show_tooltip,
-                width,
-                height,
-                ..
-            } => {
-                let item_name = item.icon_name().to_owned();
-                let desc_width = description.as_ref().map_or(0.0, |(_, width)| *width);
-                let total_w = *width
-                    + if description.is_some() {
-                        2.0 + desc_width
-                    } else {
-                        0.0
-                    };
-                let x = cx - total_w * gs / 2.0;
-                elements.push(MenuElement::ItemIcon {
-                    x,
-                    y,
-                    w: width * gs,
-                    h: height * gs,
-                    item_name: item_name.clone(),
-                    tint: common::WHITE,
-                });
-                let item_rect = [x, y, width * gs, height * gs];
-                // TODO: vanilla shows the item's own tooltip
-                // (`item_tooltip_lines` builds it from `item.template`).
-                if *show_tooltip && common::hit_test(cursor, item_rect) {
-                    common::push_tooltip_lines(
-                        elements,
-                        cursor,
-                        screen_w,
-                        screen_h,
-                        gs,
-                        vec![TooltipLine::new(item_name, common::WHITE)],
-                    );
-                }
-                let mut h = *height * gs;
-                if let Some((description, desc_width)) = description {
-                    h = h.max(Self::render_component_body(
-                        body_hits,
-                        elements,
-                        description,
-                        *desc_width,
-                        x + (*width + 2.0 + *desc_width / 2.0) * gs,
-                        y,
-                        gs,
-                        fs,
-                        spans_width_fn,
-                    ));
-                }
-                h
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_component_body(
-        body_hits: &mut Vec<StyleHitRegion>,
-        elements: &mut Vec<MenuElement>,
-        component: &Component,
-        width: f32,
-        cx: f32,
-        y: f32,
-        gs: f32,
-        fs: f32,
-        spans_width_fn: &dyn Fn(&[TextSpan], f32) -> f32,
-    ) -> f32 {
-        let spans = format_component_spans(component, common::WHITE);
-        let lines = wrap_spans(&spans, width, &|line| {
-            spans_width_fn(line, common::FONT_SIZE)
+        // Body, clipped and scrolled by the container.
+        draw.elements.push(MenuElement::ScissorPush {
+            x: container_x * gs,
+            y: container_y * gs,
+            w: container_w * gs,
+            h: container_h * gs,
         });
-        let line_h = 10.0 * gs;
-        for (line_index, line) in lines.iter().enumerate() {
-            let x = cx - spans_width_fn(line, fs) / 2.0;
-            let ly = y + line_index as f32 * line_h;
-            push_hit_regions(body_hits, line, x, ly, line_h, &|span| {
-                spans_width_fn(std::slice::from_ref(span), fs)
-            });
-            elements.push(MenuElement::McText {
-                x,
-                y: ly,
-                spans: line.clone(),
-                scale: fs,
-                centered: false,
-                shadow: true,
-            });
+        let body_live = common::hit_test(cursor, container);
+        let mut y = container_y - self.scroll;
+        for child in &children {
+            let x = content_x + align_x(content_w, child.w);
+            let mut state = BodyState {
+                focused_text: &mut self.focused_text,
+                wheel_target: &mut self.wheel_target,
+                click_sound: &mut self.click_sound,
+                tooltip: &mut tooltip,
+            };
+            if let Some(reported) = draw_child(
+                draw.reborrow(),
+                child,
+                [x, y, child.w, child.h],
+                dialog,
+                &grid_buttons,
+                &mut focus,
+                &mut state,
+                DrawContext {
+                    input,
+                    cursor,
+                    live: body_live,
+                    measure: &m,
+                },
+            ) {
+                action = Some(reported);
+            }
+            y += child.h + BODY_SPACING;
         }
-        lines.len() as f32 * line_h
+        draw.elements.push(MenuElement::ScissorPop);
+        push_scrollbar(
+            draw.elements,
+            (container_x + container_w - SCROLLBAR_W) * gs,
+            container_y * gs,
+            container_h * gs,
+            content_h * gs,
+            self.scroll * gs,
+            gs,
+            SCROLLER_MIN_H * gs,
+        );
+
+        // Footer: the action row (`SimpleDialogScreen`) or the exit button.
+        let footer_w = footer_buttons.iter().map(|b| b.width).sum::<f32>()
+            + FOOTER_SPACING * footer_buttons.len().saturating_sub(1) as f32;
+        let mut footer_x = align_x(w, footer_w);
+        let footer_y = h - footer_h + align_y(footer_h, BUTTON_H);
+        for (index, button) in footer_buttons.iter().enumerate() {
+            let rect = [footer_x, footer_y, button.width, BUTTON_H];
+            let hovered = common::hit_test(cursor, rect);
+            let focused = focus.claim(FocusTarget::FooterButton(index), hovered);
+            draw.button(rect, &button.label, hovered || focused);
+            if hovered && let Some(text) = &button.tooltip {
+                tooltip = Some(wrapped_tooltip(text, &m));
+            }
+            if focus.pressed(hovered, focused) {
+                self.click_sound = true;
+                action = Some(BoundClick::Button(button.action.clone()));
+            }
+            footer_x += button.width + FOOTER_SPACING;
+        }
+
+        if let Some(lines) = tooltip {
+            common::push_tooltip_lines(draw.elements, input.cursor, screen_w, screen_h, gs, lines);
+        }
+        self.focus = focus.ctx.focus;
+        self.focus_ring = focus.ring;
+        match action {
+            Some(BoundClick::Button(action)) => {
+                let after = self.after_action();
+                self.finish_action(action.as_ref(), after)
+            }
+            Some(BoundClick::Style(click)) => {
+                let after = self.after_action();
+                self.finish_click(Some(click), after)
+            }
+            None => None,
+        }
     }
 
-    /// The dialog's own `after_action` (`DialogScreen.runAction`).
     fn after_action(&self) -> AfterAction {
         match &self.mode {
             DialogMode::Dialog(dialog) => dialog.after_action,
@@ -1456,19 +1444,33 @@ fn parse_input(node: &Node) -> Result<DialogInput, String> {
             if initial.encode_utf16().count() > max_length as usize {
                 return Err("default text length exceeds allowed size".to_owned());
             }
-            let mut field = TextFieldState::new(max_length as usize);
-            field.set_value(&initial, f32::MAX, &|_| 0.0);
+            let multiline = node
+                .field("multiline")
+                .as_ref()
+                .map(parse_multiline)
+                .transpose()?;
+            let field = match &multiline {
+                Some(multiline) => {
+                    let mut field = MultilineField::new(
+                        max_length as usize,
+                        multiline.max_lines.map(|lines| lines.max(1) as usize),
+                    );
+                    field.set_value(&initial, &|_| 0.0);
+                    TextField::Multi(field)
+                }
+                None => {
+                    let mut field = TextFieldState::new(max_length as usize);
+                    field.set_value(&initial, f32::MAX, &|_| 0.0);
+                    TextField::Single(field)
+                }
+            };
             Ok(DialogInput::Text {
                 key,
                 label: node.component_field("label")?,
                 label_visible: node.bool_or("label_visible", true),
                 width: node.width(200)?,
                 field,
-                multiline: node
-                    .field("multiline")
-                    .as_ref()
-                    .map(parse_multiline)
-                    .transpose()?,
+                multiline,
             })
         }
         "boolean" => Ok(DialogInput::Boolean {
@@ -1654,21 +1656,623 @@ fn cancel_action(kind: &DialogKind) -> Option<BoundAction> {
     }
 }
 
+/// The frame's pointer and keyboard state for the dialog's widgets.
+#[derive(Clone, Copy)]
+pub struct WidgetInput {
+    /// The cursor in framebuffer pixels.
+    pub cursor: (f32, f32),
+    pub clicked: bool,
+    pub held: bool,
+    pub shift: bool,
+    /// Enter or Space (`InputWithModifiers.isSelection`).
+    pub activate: bool,
+    pub advanced_tooltips: bool,
+}
+
+/// What a click reported, before the dialog's after-action runs.
+enum BoundClick {
+    Button(Option<BoundAction>),
+    /// A click event on a body message's text.
+    Style(ClickEvent),
+}
+
+/// Text measurement in GUI units (vanilla's `Font`).
+struct Measure<'a> {
+    text: &'a dyn Fn(&str, f32) -> f32,
+    spans: &'a dyn Fn(&[TextSpan], f32) -> f32,
+}
+
+impl Measure<'_> {
+    fn spans_w(&self, spans: &[TextSpan]) -> f32 {
+        (self.spans)(spans, common::FONT_SIZE)
+    }
+
+    fn component_w(&self, component: &Component) -> f32 {
+        self.spans_w(&format_component_spans(component, common::WHITE))
+    }
+
+    /// `Font.split`.
+    fn wrap(&self, component: &Component, width: f32) -> Vec<Vec<TextSpan>> {
+        wrap_spans(
+            &format_component_spans(component, common::WHITE),
+            width.max(1.0),
+            &|line| self.spans_w(line),
+        )
+    }
+}
+
+/// The element sink with the GUI-unit-to-pixel scale, so widget code can lay
+/// out the way vanilla does.
+struct Draw<'a> {
+    gs: f32,
+    elements: &'a mut Vec<MenuElement>,
+}
+
+impl Draw<'_> {
+    fn reborrow(&mut self) -> Draw<'_> {
+        Draw {
+            gs: self.gs,
+            elements: self.elements,
+        }
+    }
+
+    fn spans(&mut self, x: f32, y: f32, spans: Vec<TextSpan>, centered: bool) {
+        self.elements.push(MenuElement::McText {
+            x: x * self.gs,
+            y: y * self.gs,
+            spans,
+            scale: common::FONT_SIZE * self.gs,
+            centered,
+            shadow: true,
+        });
+    }
+
+    fn sprite(&mut self, rect: [f32; 4], sprite: SpriteId) {
+        self.elements.push(MenuElement::Image {
+            x: rect[0] * self.gs,
+            y: rect[1] * self.gs,
+            w: rect[2] * self.gs,
+            h: rect[3] * self.gs,
+            sprite,
+            tint: common::WHITE,
+        });
+    }
+
+    fn fill(&mut self, rect: [f32; 4], color: [f32; 4]) {
+        self.elements.push(MenuElement::Rect {
+            x: rect[0] * self.gs,
+            y: rect[1] * self.gs,
+            w: rect[2] * self.gs,
+            h: rect[3] * self.gs,
+            corner_radius: 0.0,
+            color,
+        });
+    }
+
+    /// `AbstractButton`: the nine-sliced button sprite with its label centred.
+    fn button(&mut self, rect: [f32; 4], label: &Component, highlighted: bool) {
+        let gs = self.gs;
+        self.elements.push(MenuElement::NineSlice {
+            x: rect[0] * gs,
+            y: rect[1] * gs,
+            w: rect[2] * gs,
+            h: rect[3] * gs,
+            sprite: if highlighted {
+                SpriteId::ButtonHover
+            } else {
+                SpriteId::ButtonNormal
+            },
+            border: 3.0 * gs,
+            tint: common::WHITE,
+        });
+        // TODO: a label wider than the button scrolls in vanilla
+        // (`extractScrollingStringOverContents`, margin 2).
+        self.spans(
+            rect[0] + rect[2] / 2.0,
+            rect[1] + (rect[3] - common::FONT_SIZE) / 2.0 + 1.0 / gs,
+            format_component_spans(label, common::WHITE),
+            true,
+        );
+    }
+    /// `Checkbox`: the box sprite, then its label centred beside it.
+    fn checkbox(&mut self, at: [f32; 2], label: &Component, selected: bool, focused: bool) {
+        let sprite = match (selected, focused) {
+            (true, true) => SpriteId::CheckboxSelectedHighlighted,
+            (true, false) => SpriteId::CheckboxSelected,
+            (false, true) => SpriteId::CheckboxHighlighted,
+            (false, false) => SpriteId::Checkbox,
+        };
+        self.sprite([at[0], at[1], CHECKBOX_SIZE, CHECKBOX_SIZE], sprite);
+        self.spans(
+            at[0] + CHECKBOX_SIZE + CHECKBOX_SPACING,
+            at[1] + CHECKBOX_SIZE / 2.0 - LINE_H / 2.0,
+            format_component_spans(label, common::WHITE),
+            false,
+        );
+    }
+
+    /// `ItemDisplayWidget`: the 16x16 item at the widget's top-left, with its
+    /// count decoration.
+    fn item(&mut self, rect: [f32; 4], item: &DialogItem, decorations: bool) {
+        let gs = self.gs;
+        self.elements.push(MenuElement::ItemIcon {
+            x: rect[0] * gs,
+            y: rect[1] * gs,
+            w: common::SLOT_SIZE * gs,
+            h: common::SLOT_SIZE * gs,
+            item_name: item.icon_name().to_owned(),
+            tint: common::WHITE,
+        });
+        // TODO: vanilla also draws the durability bar and the cooldown
+        // overlay; Pomme has no renderer for either yet.
+        if decorations && item.count() != 1 {
+            common::push_item_count(
+                self.elements,
+                rect[0] * gs,
+                rect[1] * gs,
+                common::SLOT_SIZE * gs,
+                gs,
+                item.count(),
+            );
+        }
+    }
+
+    /// The `widget/text_field` border and its black fill.
+    fn field_border(&mut self, rect: [f32; 4], focused: bool) {
+        let border = if focused {
+            common::WHITE
+        } else {
+            common::rgb(0xa0a0a0)
+        };
+        self.fill(rect, border);
+        self.fill(
+            [rect[0] + 1.0, rect[1] + 1.0, rect[2] - 2.0, rect[3] - 2.0],
+            [0.0, 0.0, 0.0, 1.0],
+        );
+    }
+
+    /// `EditBox`: the bordered field with its scrolled text and caret.
+    fn edit_box(&mut self, rect: [f32; 4], field: &TextFieldState, focused: bool, m: &Measure) {
+        let gs = self.gs;
+        self.field_border(rect, focused);
+        let fs = common::FONT_SIZE * gs;
+        let wf = |text: &str| (m.text)(text, fs);
+        // `EditBox.updateTextPosition` / `getInnerWidth`.
+        let inner_w = (rect[2] - 8.0) * gs;
+        let text_x = (rect[0] + 4.0) * gs;
+        let text_y = (rect[1] + (BUTTON_H - common::FONT_SIZE) / 2.0) * gs;
+        let info = field.render_info(inner_w, focused, &wf);
+        let shown = &field.value()[info.display_start..info.display_end];
+        self.elements.push(MenuElement::ScissorPush {
+            x: text_x,
+            y: rect[1] * gs,
+            w: inner_w,
+            h: rect[3] * gs,
+        });
+        common::push_field_text(
+            self.elements,
+            &info,
+            shown,
+            Some(&[TextSpan::new(shown.to_owned(), EDIT_TEXT)]),
+            text_x,
+            text_y,
+            fs,
+            gs,
+            gs,
+            EDIT_TEXT,
+            None,
+            &wf,
+        );
+        self.elements.push(MenuElement::ScissorPop);
+    }
+
+    /// `MultiLineEditBox`: the wrapped lines inside the scrolled text area,
+    /// with the caret, the selection and the area's own scrollbar.
+    fn text_area(&mut self, rect: [f32; 4], field: &MultilineField, focused: bool, m: &Measure) {
+        let gs = self.gs;
+        self.field_border(rect, focused);
+        let fs = common::FONT_SIZE * gs;
+        let wf = |text: &str| (m.text)(text, fs);
+        let line_h = LINE_H * gs;
+        let inner_x = (rect[0] + TEXT_PADDING) * gs;
+        let top = rect[1] * gs;
+        let bottom = (rect[1] + rect[3]) * gs;
+        let inner_top = (rect[1] + TEXT_PADDING) * gs - field.scroll();
+        self.elements.push(MenuElement::ScissorPush {
+            x: (rect[0] + 1.0) * gs,
+            y: top + gs,
+            w: (rect[2] - 2.0) * gs,
+            h: (rect[3] - 2.0) * gs,
+        });
+        let value = field.value();
+        let cursor = field.cursor();
+        let (selection_start, selection_end) = field.selection();
+        // `insertCursor`: a bar inside the text, an underscore past its end.
+        let insert_mode = cursor < value.len();
+        let mut caret_drawn = false;
+        for (index, (begin, end)) in field.lines().iter().enumerate() {
+            let y = inner_top + index as f32 * line_h;
+            // `withinContentAreaTopBottom`.
+            if y + line_h < top || y > bottom {
+                continue;
+            }
+            let shown = &value[*begin..*end];
+            let on_this_line = !caret_drawn && cursor >= *begin && cursor <= *end;
+            caret_drawn |= on_this_line;
+            let selection = (field.has_selection()
+                && selection_start <= *end
+                && selection_end >= *begin)
+                .then(|| {
+                    (
+                        selection_start.clamp(*begin, *end) - begin,
+                        selection_end.clamp(*begin, *end) - begin,
+                    )
+                });
+            let info = crate::ui::text_edit::TextFieldRenderInfo {
+                display_start: *begin,
+                display_end: *end,
+                caret_byte: cursor.saturating_sub(*begin).min(shown.len()),
+                caret_visible: focused && on_this_line && field.caret_visible(),
+                selection,
+                insert_mode,
+            };
+            common::push_field_text(
+                self.elements,
+                &info,
+                shown,
+                Some(&[TextSpan::new(shown.to_owned(), EDIT_TEXT)]),
+                inner_x,
+                y,
+                fs,
+                gs,
+                gs,
+                EDIT_TEXT,
+                None,
+                &wf,
+            );
+        }
+        self.elements.push(MenuElement::ScissorPop);
+        // `AbstractTextAreaWidget.scrollBarX` puts the bar outside the box.
+        push_scrollbar(
+            self.elements,
+            (rect[0] + rect[2]) * gs,
+            top,
+            rect[3] * gs,
+            field.line_count() as f32 * line_h + 2.0 * TEXT_PADDING * gs,
+            field.scroll(),
+            gs,
+            SCROLLER_MIN_H * gs,
+        );
+    }
+}
+
+/// What the body draw pass needs beyond the widget itself.
+#[derive(Clone, Copy)]
+struct DrawContext<'a, 'b> {
+    input: WidgetInput,
+    /// The cursor in GUI units.
+    cursor: (f32, f32),
+    /// Whether the cursor is inside the scrolling container, so a clipped
+    /// widget can't be clicked.
+    live: bool,
+    measure: &'a Measure<'b>,
+}
+
+/// `AbstractLayout.AbstractChildWrapper.setX`: an int lerp, truncated.
+fn align_x(available: f32, size: f32) -> f32 {
+    ((available - size) * 0.5).trunc()
+}
+
+/// `setY`, which rounds (Java's `Math.round`) instead.
+fn align_y(available: f32, size: f32) -> f32 {
+    ((available - size) * 0.5 + 0.5).floor()
+}
+
+/// `DialogScreen.makeSureWarningButtonIsInBounds`.
+fn warning_button_position(x: f32, y: f32, w: f32, h: f32) -> (f32, f32) {
+    if x < 0.0 || y < 0.0 || x > w - WARNING_SIZE || y > h - WARNING_SIZE {
+        ((w - 40.0).max(0.0), 5.0f32.min(h))
+    } else {
+        (x, y)
+    }
+}
+
+/// `Tooltip.create`, which splits at 170.
+fn wrapped_tooltip(component: &Component, m: &Measure) -> Vec<TooltipLine> {
+    crate::ui::chat::wrapped_tooltip_lines(component, TOOLTIP_WRAP, &|line| m.spans_w(line))
+}
+
+/// The dialog's keyboard focus ring for this frame.
+struct DialogFocus {
+    ctx: crate::ui::menu::helpers::FocusCtx,
+    ring: Vec<FocusTarget>,
+}
+
+impl DialogFocus {
+    fn new(focus: Option<usize>, input: WidgetInput) -> Self {
+        Self {
+            ctx: crate::ui::menu::helpers::FocusCtx {
+                next_index: 0,
+                focus,
+                clicked: input.clicked,
+                screen_gen: 0,
+                activate: input.activate,
+                fired: false,
+            },
+            ring: Vec::new(),
+        }
+    }
+
+    /// Claims the next ring slot for `target`; every dialog widget is active.
+    fn claim(&mut self, target: FocusTarget, hovered: bool) -> bool {
+        self.ring.push(target);
+        self.ctx.focused(true, hovered)
+    }
+
+    /// Whether the widget was pressed: a click on it, or Enter/Space while it
+    /// holds focus (`AbstractButton.keyPressed`).
+    fn pressed(&mut self, hovered: bool, focused: bool) -> bool {
+        let keyboard = focused && self.ctx.activate && !self.ctx.fired;
+        if keyboard {
+            self.ctx.fired = true;
+        }
+        (hovered && self.ctx.clicked) || keyboard
+    }
+}
+
+/// `WaitingForResponseScreen`, a `HeaderAndFooterLayout(33, 0)`. Returns
+/// whether its Back button was pressed.
+fn build_waiting(
+    mut draw: Draw,
+    w: f32,
+    h: f32,
+    cursor: (f32, f32),
+    clicked: bool,
+    elapsed: f32,
+) -> bool {
+    let title = Component::translate("gui.waitingForResponse.title", Vec::new());
+    draw.spans(
+        w / 2.0,
+        align_y(HEADER_H, LINE_H),
+        format_component_spans(&title, common::WHITE),
+        true,
+    );
+    // The button appears after a second and counts down to active.
+    let seconds_visible = (elapsed as i32).min(5);
+    if seconds_visible < 1 {
+        return false;
+    }
+    let active = seconds_visible >= 5;
+    let label = waiting_label(seconds_visible);
+    let width = 200.0;
+    let rect = [
+        align_x(w, width),
+        (HEADER_H + CONTENT_MARGIN_TOP).min(h - BUTTON_H),
+        width,
+        BUTTON_H,
+    ];
+    let hovered = active && common::hit_test(cursor, rect);
+    draw.button(rect, &label, hovered);
+    hovered && clicked
+}
+
+/// `WaitingForResponseScreen.BUTTON_LABELS`: the seconds left are the
+/// translation's argument, not text appended to it.
+fn waiting_label(seconds_visible: i32) -> Component {
+    if seconds_visible >= 5 {
+        Component::translate("gui.back", Vec::new())
+    } else {
+        Component::translate(
+            "gui.waitingForResponse.button.inactive",
+            vec![Argument::Number((5 - seconds_visible).to_string())],
+        )
+    }
+}
+
+/// A measured child of the body column, in GUI units.
+struct Child {
+    w: f32,
+    h: f32,
+    content: ChildContent,
+}
+
+enum ChildContent {
+    /// A `plain_message` body's `FocusableTextWidget`.
+    Message {
+        lines: Vec<Vec<TextSpan>>,
+    },
+    /// An `ItemDisplayWidget`, with the text widget of its description.
+    Item {
+        index: usize,
+        description: Option<(Vec<Vec<TextSpan>>, f32, f32)>,
+    },
+    Input(usize),
+    /// `packControlsIntoColumns` of the list buttons.
+    Buttons(ButtonGrid),
+}
+
+/// The widgets `DialogScreen.init` puts in the body column, measured like
+/// their vanilla counterparts.
+fn measure_children(
+    dialog: &DialogData,
+    grid_buttons: &[DialogButton],
+    columns: usize,
+    m: &Measure,
+) -> Vec<Child> {
+    let mut children = Vec::new();
+    for (index, body) in dialog.bodies.iter().enumerate() {
+        children.push(match body {
+            DialogBody::Message { contents, width } => {
+                let lines = m.wrap(contents, width - 2.0 * TEXT_PADDING);
+                Child {
+                    w: *width,
+                    h: lines.len() as f32 * LINE_H + 2.0 * TEXT_PADDING,
+                    content: ChildContent::Message { lines },
+                }
+            }
+            DialogBody::Item {
+                description,
+                width,
+                height,
+                ..
+            } => {
+                let description = description.as_ref().map(|(contents, desc_w)| {
+                    let lines = m.wrap(contents, desc_w - 2.0 * TEXT_PADDING);
+                    let desc_h = lines.len() as f32 * LINE_H + 2.0 * TEXT_PADDING;
+                    (lines, *desc_w, desc_h)
+                });
+                let (w, h) = match &description {
+                    Some((_, desc_w, desc_h)) => (width + GRID_GAP + desc_w, height.max(*desc_h)),
+                    None => (*width, *height),
+                };
+                Child {
+                    w,
+                    h,
+                    content: ChildContent::Item { index, description },
+                }
+            }
+        });
+    }
+    for (index, input) in dialog.inputs.iter().enumerate() {
+        let (w, h) = input_size(input, m);
+        children.push(Child {
+            w,
+            h,
+            content: ChildContent::Input(index),
+        });
+    }
+    if !grid_buttons.is_empty() {
+        let widths: Vec<f32> = grid_buttons.iter().map(|button| button.width).collect();
+        let grid = pack_controls_into_columns(&widths, columns);
+        children.push(Child {
+            w: grid.w,
+            h: grid.h,
+            content: ChildContent::Buttons(grid),
+        });
+    }
+    children
+}
+
+/// The control `InputControlHandlers` builds, plus the label
+/// `CommonLayouts.labeledElement` puts over it.
+fn input_size(input: &DialogInput, m: &Measure) -> (f32, f32) {
+    match input {
+        DialogInput::Text {
+            label,
+            label_visible,
+            width,
+            multiline,
+            ..
+        } => {
+            let box_h = multiline.map_or(BUTTON_H, |multiline| multiline.widget_height());
+            if *label_visible {
+                (width.max(m.component_w(label)), box_h + LABEL_GAP)
+            } else {
+                (*width, box_h)
+            }
+        }
+        // `Checkbox`: the box, its spacing and the label.
+        DialogInput::Boolean { label, .. } => (
+            CHECKBOX_SIZE + CHECKBOX_SPACING + m.component_w(label),
+            CHECKBOX_SIZE,
+        ),
+        DialogInput::SingleOption { width, .. } | DialogInput::NumberRange { width, .. } => {
+            (*width, BUTTON_H)
+        }
+    }
+}
+
+/// `DialogScreen.packControlsIntoColumns`: a grid whose columns are as wide as
+/// their widest cell, with a partial last row centred across all of them.
+struct ButtonGrid {
+    /// Per button: its index, and its rect relative to the grid's top-left.
+    cells: Vec<(usize, [f32; 4])>,
+    w: f32,
+    h: f32,
+}
+
+fn pack_controls_into_columns(widths: &[f32], columns: usize) -> ButtonGrid {
+    let columns = columns.max(1);
+    let count = widths.len();
+    let last_full_row = count / columns;
+    let in_full_rows = last_full_row * columns;
+    let mut column_widths = vec![0.0f32; columns];
+    for (index, width) in widths.iter().enumerate().take(in_full_rows) {
+        let column = index % columns;
+        column_widths[column] = column_widths[column].max(*width);
+    }
+    // The trailing row is one child spanning every column, so its width is
+    // divided between them (`GridLayout`'s `Divisor`).
+    let trailing: Vec<f32> = widths[in_full_rows..].to_vec();
+    let trailing_w =
+        trailing.iter().sum::<f32>() + GRID_GAP * trailing.len().saturating_sub(1) as f32;
+    if !trailing.is_empty() {
+        let share = trailing_w - GRID_GAP * (columns - 1) as f32;
+        for (column, width) in divisor(share, columns).enumerate() {
+            column_widths[column] = column_widths[column].max(width);
+        }
+    }
+    let mut offsets = Vec::with_capacity(columns);
+    let mut x = 0.0;
+    for width in &column_widths {
+        offsets.push(x);
+        x += width + GRID_GAP;
+    }
+    let grid_w = column_widths.iter().sum::<f32>() + GRID_GAP * (columns - 1) as f32;
+    let mut cells = Vec::with_capacity(count);
+    for (index, width) in widths.iter().enumerate().take(in_full_rows) {
+        let (row, column) = (index / columns, index % columns);
+        cells.push((
+            index,
+            [
+                offsets[column] + align_x(column_widths[column], *width),
+                row as f32 * (BUTTON_H + GRID_GAP),
+                *width,
+                BUTTON_H,
+            ],
+        ));
+    }
+    let mut rows = last_full_row as f32;
+    if !trailing.is_empty() {
+        let mut x = align_x(grid_w, trailing_w);
+        let y = last_full_row as f32 * (BUTTON_H + GRID_GAP);
+        for (offset, width) in trailing.iter().enumerate() {
+            cells.push((in_full_rows + offset, [x, y, *width, BUTTON_H]));
+            x += width + GRID_GAP;
+        }
+        rows += 1.0;
+    }
+    ButtonGrid {
+        cells,
+        w: grid_w,
+        h: (rows * (BUTTON_H + GRID_GAP) - GRID_GAP).max(0.0),
+    }
+}
+
+/// `Mth.Divisor`: `total` split into `parts`, remainder first.
+fn divisor(total: f32, parts: usize) -> impl Iterator<Item = f32> {
+    let whole = (total / parts as f32).floor();
+    let remainder = total - whole * parts as f32;
+    (0..parts).map(move |index| whole + if (index as f32) < remainder { 1.0 } else { 0.0 })
+}
+
+/// The buttons of the body's grid (`ButtonListDialogScreen`) and of the footer
+/// (`SimpleDialogScreen`'s actions, or the exit button).
 fn dialog_buttons(
     kind: &DialogKind,
     server_links: &[ServerLink],
     dialog_list_labels: &[Component],
-) -> Vec<DialogButton> {
+) -> (Vec<DialogButton>, Vec<DialogButton>) {
     let static_button = |label: Component, width: f32, click: ClickEvent| DialogButton {
         label,
         tooltip: None,
         width,
         action: Some(BoundAction::Static(click)),
     };
-    let (mut buttons, exit) = match kind {
-        DialogKind::Notice { action } => return vec![action.clone()],
+    let (grid, exit) = match kind {
+        DialogKind::Notice { action } => return (Vec::new(), vec![action.clone()]),
         DialogKind::Confirmation { yes, no } => {
-            return vec![yes.as_ref().clone(), no.as_ref().clone()];
+            return (Vec::new(), vec![yes.as_ref().clone(), no.as_ref().clone()]);
         }
         DialogKind::MultiAction { actions, exit, .. } => (actions.clone(), exit),
         DialogKind::DialogList {
@@ -1708,26 +2312,155 @@ fn dialog_buttons(
             exit,
         ),
     };
-    buttons.extend(exit.clone());
-    buttons
+    (grid, exit.iter().cloned().collect())
 }
 
+/// What the body pass writes back into the dialog.
+struct BodyState<'a> {
+    focused_text: &'a mut Option<usize>,
+    /// The `CycleButton` under the cursor, which takes the next wheel event.
+    wheel_target: &'a mut Option<usize>,
+    click_sound: &'a mut bool,
+    tooltip: &'a mut Option<Vec<TooltipLine>>,
+}
+
+/// Draws one body child at `rect` (GUI units) and reports the click it made.
 #[allow(clippy::too_many_arguments)]
-fn render_input(
-    elements: &mut Vec<MenuElement>,
-    input: &mut DialogInput,
+fn draw_child(
+    mut draw: Draw,
+    child: &Child,
+    rect: [f32; 4],
+    dialog: &mut DialogData,
+    grid_buttons: &[DialogButton],
+    focus: &mut DialogFocus,
+    state: &mut BodyState,
+    ctx: DrawContext,
+) -> Option<BoundClick> {
+    let [x, y, w, h] = rect;
+    match &child.content {
+        // `FocusableTextWidget`, centred with its padding.
+        ChildContent::Message { lines } => {
+            let hits = draw_message(&mut draw, lines, [x, y, w, h], ctx);
+            if ctx.live
+                && ctx.input.clicked
+                && let Some(click) =
+                    style_at(&hits, ctx.input.cursor).and_then(|style| style.click_event.clone())
+            {
+                return Some(BoundClick::Style(click));
+            }
+            None
+        }
+        ChildContent::Item { index, description } => {
+            let DialogBody::Item {
+                item,
+                show_decorations,
+                show_tooltip,
+                width,
+                height,
+                ..
+            } = &dialog.bodies[*index]
+            else {
+                return None;
+            };
+            // The row aligns its children vertically middle.
+            let item_y = y + align_y(h, *height);
+            let item_rect = [x, item_y, *width, *height];
+            draw.item(item_rect, item, *show_decorations);
+            if *show_tooltip
+                && ctx.live
+                && common::hit_test(ctx.cursor, item_rect)
+                && let Some(lines) = item_tooltip(item, ctx.input.advanced_tooltips)
+            {
+                *state.tooltip = Some(lines);
+            }
+            if let Some((lines, desc_w, desc_h)) = description {
+                let desc_rect = [
+                    x + width + GRID_GAP,
+                    y + align_y(h, *desc_h),
+                    *desc_w,
+                    *desc_h,
+                ];
+                let hits = draw_message(&mut draw, lines, desc_rect, ctx);
+                if ctx.live
+                    && ctx.input.clicked
+                    && let Some(click) = style_at(&hits, ctx.input.cursor)
+                        .and_then(|style| style.click_event.clone())
+                {
+                    return Some(BoundClick::Style(click));
+                }
+            }
+            None
+        }
+        ChildContent::Input(index) => {
+            draw_input(draw, dialog, *index, [x, y, w, h], focus, state, ctx);
+            None
+        }
+        ChildContent::Buttons(grid) => {
+            let mut action = None;
+            for (index, cell) in &grid.cells {
+                let button = &grid_buttons[*index];
+                let rect = [x + cell[0], y + cell[1], cell[2], cell[3]];
+                let hovered = ctx.live && common::hit_test(ctx.cursor, rect);
+                let focused = focus.claim(FocusTarget::ListButton(*index), hovered);
+                draw.button(rect, &button.label, hovered || focused);
+                if hovered && let Some(text) = &button.tooltip {
+                    *state.tooltip = Some(wrapped_tooltip(text, ctx.measure));
+                }
+                if focus.pressed(hovered, focused) {
+                    *state.click_sound = true;
+                    action = Some(BoundClick::Button(button.action.clone()));
+                }
+            }
+            action
+        }
+    }
+}
+
+/// `FocusableTextWidget`: centred lines inside the widget's padding, whose
+/// styles stay clickable.
+fn draw_message(
+    draw: &mut Draw,
+    lines: &[Vec<TextSpan>],
+    rect: [f32; 4],
+    ctx: DrawContext,
+) -> Vec<StyleHitRegion> {
+    let gs = draw.gs;
+    let mut hits = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let line_w = ctx.measure.spans_w(line);
+        let x = rect[0] + (rect[2] - line_w) / 2.0;
+        let y = rect[1] + TEXT_PADDING + index as f32 * LINE_H;
+        push_hit_regions(&mut hits, line, x * gs, y * gs, LINE_H * gs, &|span| {
+            ctx.measure.spans_w(std::slice::from_ref(span)) * gs
+        });
+        draw.spans(x, y, line.clone(), false);
+    }
+    hits
+}
+
+/// The item tooltip `ItemDisplayWidget` shows, built from the stack the body
+/// carries.
+fn item_tooltip(item: &DialogItem, advanced: bool) -> Option<Vec<TooltipLine>> {
+    let lines = crate::ui::chat::item_tooltip_lines(item.template(), advanced);
+    (!lines.is_empty()).then_some(lines)
+}
+
+/// The control `InputControlHandlers` builds for one input.
+#[allow(clippy::too_many_arguments)]
+fn draw_input(
+    mut draw: Draw,
+    dialog: &mut DialogData,
     index: usize,
-    focused_text: &mut Option<usize>,
-    cx: f32,
-    y: f32,
-    gs: f32,
-    fs: f32,
-    cursor: (f32, f32),
-    clicked: bool,
-    mouse_held: bool,
-    text_width_fn: &dyn Fn(&str, f32) -> f32,
-) -> f32 {
-    let number = input.number_value();
+    rect: [f32; 4],
+    focus: &mut DialogFocus,
+    state: &mut BodyState,
+    ctx: DrawContext,
+) {
+    let [x, y, w, _] = rect;
+    let gs = draw.gs;
+    let Some(input) = dialog.inputs.get_mut(index) else {
+        return;
+    };
     match input {
         DialogInput::Text {
             label,
@@ -1737,123 +2470,148 @@ fn render_input(
             multiline,
             ..
         } => {
-            // TODO: a multiline input still draws (and edits) as one line.
-            let h = multiline.map_or(20.0, |multiline| multiline.widget_height());
-            let label_h = if *label_visible { 11.0 } else { 0.0 };
-            let x = cx - *width * gs / 2.0;
+            // `CommonLayouts.labeledElement` stacks the label over the box,
+            // both left-aligned in the column.
+            let mut box_y = y;
             if *label_visible {
-                elements.push(MenuElement::McText {
-                    x,
-                    y,
-                    spans: format_component_spans(label, common::WHITE),
-                    scale: fs,
-                    centered: false,
-                    shadow: true,
-                });
+                draw.spans(x, y, format_component_spans(label, common::WHITE), false);
+                box_y += LABEL_GAP;
             }
-            let fy = y + label_h * gs;
-            let rect = [x, fy, *width * gs, h * gs];
-            if clicked && common::hit_test(cursor, rect) {
-                *focused_text = Some(index);
-                field.set_focused(true);
-            } else if clicked && *focused_text == Some(index) {
-                field.set_focused(false);
-                *focused_text = None;
+            let box_h = multiline.map_or(BUTTON_H, |multiline| multiline.widget_height());
+            let box_rect = [x, box_y, *width, box_h];
+            let hovered = ctx.live && common::hit_test(ctx.cursor, box_rect);
+            let focused = focus.claim(FocusTarget::Input(index), hovered);
+            if focused {
+                *state.focused_text = Some(index);
+            } else if *state.focused_text == Some(index) {
+                *state.focused_text = None;
             }
-            push_text_field(
-                elements,
-                rect,
-                field,
-                *focused_text == Some(index),
-                gs,
-                fs,
-                text_width_fn,
-            );
-            label_h * gs + h * gs
+            let inner_w = (*width - 8.0) * gs;
+            let wf = |text: &str| (ctx.measure.text)(text, common::FONT_SIZE * gs);
+            match field {
+                TextField::Single(field) => {
+                    draw.edit_box(box_rect, field, focused, ctx.measure);
+                    // `EditBox.onClick` puts the caret where the text was
+                    // clicked.
+                    if hovered && ctx.input.clicked {
+                        let rel_x = ctx.input.cursor.0.floor() - (box_rect[0] + 4.0) * gs;
+                        let pos = field.pos_from_click(rel_x, inner_w, &wf);
+                        field.on_click(pos, ctx.input.shift, inner_w, &wf);
+                        field.set_focused(true);
+                    }
+                }
+                TextField::Multi(field) => {
+                    field.set_width(inner_w, &wf);
+                    // `MultiLineEditBox.seekCursorScreen`.
+                    // TODO: a double click selects the word under it
+                    // (`selectWordAtCursor`); Pomme tracks no double clicks
+                    // for dialog widgets.
+                    if hovered && ctx.input.clicked {
+                        field.set_selecting(ctx.input.shift);
+                        let rel_x = ctx.input.cursor.0 - (box_rect[0] + TEXT_PADDING) * gs;
+                        let rel_y =
+                            ctx.input.cursor.1 - (box_rect[1] + TEXT_PADDING) * gs + field.scroll();
+                        field.seek_cursor_to_point(rel_x, rel_y, LINE_H * gs, &wf);
+                        field.set_selecting(false);
+                        field.set_focused(true);
+                    }
+                    field.scroll_to_cursor(box_h * gs, LINE_H * gs, TEXT_PADDING * gs);
+                    draw.text_area(box_rect, field, focused, ctx.measure);
+                }
+            }
         }
+        // `Checkbox`: a 17px box, its spacing, then the label.
         DialogInput::Boolean {
             label, selected, ..
         } => {
-            let label = format!(
-                "[{}] {}",
-                if *selected { 'x' } else { ' ' },
-                label.plain_text()
-            );
-            let w = 200.0 * gs;
-            let rect = [cx - w / 2.0, y, w, BUTTON_H * gs];
-            let hovered = common::push_button(
-                elements, cursor, rect[0], rect[1], rect[2], rect[3], gs, fs, &label, true,
-            );
-            if clicked && hovered {
+            let hovered = ctx.live && common::hit_test(ctx.cursor, rect);
+            let focused = focus.claim(FocusTarget::Input(index), hovered);
+            draw.checkbox([x, y], label, *selected, focused);
+            if focus.pressed(hovered, focused) {
                 *selected = !*selected;
+                *state.click_sound = true;
             }
-            BUTTON_H * gs
         }
+        // `CycleButton`: shift-click and the wheel cycle backwards.
         DialogInput::SingleOption {
             label,
             label_visible,
-            width,
             entries,
             selected,
             ..
         } => {
-            let selected_entry = entries
+            let value = entries
                 .get(*selected)
-                .map(|(_, display)| display.plain_text())
-                .unwrap_or_default();
-            let label = if *label_visible {
-                format!("{}: {selected_entry}", label.plain_text())
+                .map(|(_, display)| display.clone())
+                .unwrap_or_else(|| Component::text(""));
+            let message = if *label_visible {
+                Component::translate(
+                    "options.generic_value".to_owned(),
+                    vec![
+                        Argument::Component(Box::new(label.clone())),
+                        Argument::Component(Box::new(value)),
+                    ],
+                )
             } else {
-                selected_entry
+                value
             };
-            let w = *width * gs;
-            let rect = [cx - w / 2.0, y, w, BUTTON_H * gs];
-            let hovered = common::push_button(
-                elements, cursor, rect[0], rect[1], rect[2], rect[3], gs, fs, &label, true,
-            );
-            if clicked && hovered && !entries.is_empty() {
-                *selected = (*selected + 1) % entries.len();
+            let hovered = ctx.live && common::hit_test(ctx.cursor, rect);
+            let focused = focus.claim(FocusTarget::Input(index), hovered);
+            draw.button(rect, &message, hovered || focused);
+            if hovered {
+                *state.wheel_target = Some(index);
             }
-            BUTTON_H * gs
+            if focus.pressed(hovered, focused) && !entries.is_empty() {
+                let step = if ctx.input.shift {
+                    entries.len() - 1
+                } else {
+                    1
+                };
+                *selected = (*selected + step) % entries.len();
+                *state.click_sound = true;
+            }
         }
         DialogInput::NumberRange {
             label,
             label_format,
-            width,
+            range,
             slider,
             dragging,
             ..
         } => {
+            let hovered = ctx.live && common::hit_test(ctx.cursor, rect);
+            let focused = focus.claim(FocusTarget::Input(index), hovered);
             // `NumberRangeInput.computeLabel`.
             // TODO: the slider draws its message as plain text, so the label
             // component's own styling is dropped.
-            let display = Component::translate(
+            let message = Component::translate(
                 label_format.clone(),
                 vec![
                     Argument::Component(Box::new(label.clone())),
-                    Argument::String(value_to_string(number.unwrap_or_default())),
+                    Argument::String(value_to_string(range.scaled_value(*slider))),
                 ],
             )
             .plain_text();
+            let fs = common::FONT_SIZE * gs;
             let result = common::push_slider(
-                elements,
-                cursor,
-                clicked,
-                mouse_held,
-                cx - *width * gs / 2.0,
-                y,
-                *width * gs,
+                draw.elements,
+                ctx.input.cursor,
+                ctx.input.clicked && ctx.live,
+                ctx.input.held,
+                x * gs,
+                y * gs,
+                w * gs,
                 BUTTON_H * gs,
                 gs,
                 fs,
-                &display,
+                &message,
                 *slider,
                 true,
-                false,
+                focused,
                 false,
                 *dragging,
                 &common::LabelScroll {
-                    text_width_fn,
+                    text_width_fn: ctx.measure.text,
                     time_secs: SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
@@ -1862,107 +2620,15 @@ fn render_input(
             );
             *dragging = result.dragging;
             if let Some(value) = result.new_value {
+                if *slider != value {
+                    *state.click_sound |= ctx.input.clicked;
+                }
                 *slider = value;
             }
-            BUTTON_H * gs
         }
     }
 }
 
-fn push_text_field(
-    elements: &mut Vec<MenuElement>,
-    rect: [f32; 4],
-    field: &TextFieldState,
-    focused: bool,
-    gs: f32,
-    fs: f32,
-    text_width_fn: &dyn Fn(&str, f32) -> f32,
-) {
-    let border = if focused {
-        common::WHITE
-    } else {
-        common::rgb(0xa0a0a0)
-    };
-    elements.push(MenuElement::Rect {
-        x: rect[0],
-        y: rect[1],
-        w: rect[2],
-        h: rect[3],
-        corner_radius: 0.0,
-        color: border,
-    });
-    elements.push(MenuElement::Rect {
-        x: rect[0] + gs,
-        y: rect[1] + gs,
-        w: rect[2] - 2.0 * gs,
-        h: rect[3] - 2.0 * gs,
-        corner_radius: 0.0,
-        color: [0.0, 0.0, 0.0, 1.0],
-    });
-    let x = rect[0] + 4.0 * gs;
-    let y = rect[1] + (20.0 * gs - fs) / 2.0;
-    let inner_w = (rect[2] - 8.0 * gs).max(gs);
-    let wf = |s: &str| text_width_fn(s, fs);
-    let info = field.render_info(inner_w, focused, &wf);
-    let shown = &field.value()[info.display_start..info.display_end];
-    elements.push(MenuElement::ScissorPush {
-        x,
-        y: rect[1],
-        w: inner_w,
-        h: rect[3],
-    });
-    common::push_field_text(
-        elements,
-        &info,
-        shown,
-        None,
-        x,
-        y,
-        fs,
-        gs,
-        gs,
-        common::WHITE,
-        None,
-        &wf,
-    );
-    elements.push(MenuElement::ScissorPop);
-}
-
-fn push_component_button(
-    elements: &mut Vec<MenuElement>,
-    cursor: (f32, f32),
-    rect: [f32; 4],
-    gs: f32,
-    fs: f32,
-    label: &Component,
-) -> bool {
-    let hovered = common::hit_test(cursor, rect);
-    elements.push(MenuElement::NineSlice {
-        x: rect[0],
-        y: rect[1],
-        w: rect[2],
-        h: rect[3],
-        sprite: if hovered {
-            SpriteId::ButtonHover
-        } else {
-            SpriteId::ButtonNormal
-        },
-        border: 3.0 * gs,
-        tint: common::WHITE,
-    });
-    elements.push(MenuElement::McText {
-        x: rect[0] + rect[2] / 2.0,
-        y: rect[1] + (rect[3] - fs) / 2.0,
-        spans: format_component_spans(label, common::WHITE),
-        scale: fs,
-        centered: true,
-        shadow: true,
-    });
-    hovered
-}
-
-/// `StringTag.escapeWithoutQuotes` with `SnbtGrammar.escapeControlCharacters`:
-/// the quotes and backslash are escaped, but none are added.
 fn escape_without_quotes(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
@@ -2006,6 +2672,7 @@ mod tests {
     use simdnbt::owned::NbtList;
 
     use super::*;
+    use crate::chat_component::Content;
 
     fn json_dialog(value: &Value) -> Result<DialogData, String> {
         parse_dialog(&Node::new(value, None), &DialogRegistry::default())
@@ -2494,6 +3161,51 @@ mod tests {
         );
         // An unknown tag is an empty holder set.
         assert!(list_labels(&registry, "#minecraft:missing".into()).is_empty());
+    }
+
+    #[test]
+    fn button_columns_pack_like_the_grid_layout() {
+        // Two full rows, then a partial row centred across both columns.
+        let grid = pack_controls_into_columns(&[100.0, 150.0, 100.0, 150.0, 80.0], 2);
+        let rects: Vec<[f32; 4]> = grid.cells.iter().map(|(_, rect)| *rect).collect();
+        // Each column is as wide as its widest cell, and a narrower cell
+        // centres in it.
+        assert_eq!(rects[0], [0.0, 0.0, 100.0, 20.0]);
+        assert_eq!(rects[1], [102.0, 0.0, 150.0, 20.0]);
+        assert_eq!(rects[2], [0.0, 22.0, 100.0, 20.0]);
+        assert_eq!(rects[3], [102.0, 22.0, 150.0, 20.0]);
+        // The trailing row is centred over the whole grid.
+        assert_eq!(rects[4], [86.0, 44.0, 80.0, 20.0]);
+        assert_eq!((grid.w, grid.h), (252.0, 64.0));
+
+        // A single row of one button is the grid itself.
+        let grid = pack_controls_into_columns(&[150.0], 2);
+        assert_eq!(grid.cells[0].1, [0.0, 0.0, 150.0, 20.0]);
+        assert_eq!(grid.h, 20.0);
+    }
+
+    #[test]
+    fn layout_alignment_rounds_like_the_layouts() {
+        // `setX` truncates, `setY` rounds: a 20-high button in the 33-high
+        // footer sits at `height - 26`.
+        assert_eq!(align_x(33.0, 20.0), 6.0);
+        assert_eq!(align_y(33.0, 20.0), 7.0);
+        assert_eq!(align_y(20.0, LINE_H), 6.0);
+    }
+
+    #[test]
+    fn waiting_button_counts_down_in_its_translation() {
+        // `BUTTON_LABELS`: the seconds are the argument, not appended text.
+        let label = waiting_label(1);
+        let Content::Translate { key, args, .. } = &label.content else {
+            panic!("expected a translated label");
+        };
+        assert_eq!(key, "gui.waitingForResponse.button.inactive");
+        assert!(matches!(args.as_slice(), [Argument::Number(n)] if n == "4"));
+        assert!(matches!(
+            &waiting_label(5).content,
+            Content::Translate { key, .. } if key == "gui.back"
+        ));
     }
 
     #[test]

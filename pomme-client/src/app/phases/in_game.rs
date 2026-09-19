@@ -1529,12 +1529,22 @@ pub(crate) fn build_server_screens(
             sw,
             sh,
             gs,
-            core.input.cursor_pos(),
-            core.input.left_just_pressed() && !modal_open,
-            core.input.left_held() && !modal_open,
+            crate::ui::server_dialog::WidgetInput {
+                cursor: core.input.cursor_pos(),
+                clicked: core.input.left_just_pressed() && !modal_open,
+                held: core.input.left_held() && !modal_open,
+                shift: core.input.shift_held(),
+                activate: !modal_open
+                    && (core.input.enter_pressed()
+                        || core.input.key_just_pressed(winit::keyboard::KeyCode::Space)),
+                advanced_tooltips: game.advanced_item_tooltips,
+            },
             &|t, s| gfx.renderer.menu_text_width(t, s),
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
         );
+        if dialog.take_click_sound() {
+            core.audio.play_ui_click();
+        }
         settle_server_dialog(action, core, connection, game);
         core.input.clear_just_pressed_actions();
         core.apply_cursor_grab(&gfx.window, Some(game));

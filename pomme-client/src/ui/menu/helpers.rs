@@ -157,7 +157,7 @@ pub(super) fn push_text_field(
 
 /// One Tab step around a focus ring of `n` widgets (`None` = nothing focused
 /// yet), wrapping at the ends. `n` must be non-zero.
-pub(super) fn step_ring(cur: Option<usize>, n: usize, reverse: bool) -> usize {
+pub(crate) fn step_ring(cur: Option<usize>, n: usize, reverse: bool) -> usize {
     match cur {
         Some(f) if reverse => (f + n - 1) % n,
         Some(f) => (f + 1) % n,
@@ -185,19 +185,19 @@ pub(super) fn focus_cursor(
 }
 
 /// Per-frame keyboard focus state threaded through a screen's widget builders.
-pub(super) struct FocusCtx {
+pub(crate) struct FocusCtx {
     /// Running index assigned to each focusable as it is built.
-    pub(super) next_index: usize,
+    pub(crate) next_index: usize,
     /// The focused widget index (from `MainMenu::focus`), if any.
-    pub(super) focus: Option<usize>,
+    pub(crate) focus: Option<usize>,
     /// Left button pressed this frame; a click on a widget focuses it.
-    pub(super) clicked: bool,
+    pub(crate) clicked: bool,
     /// `MainMenu::screen_gen` at build time.
-    pub(super) screen_gen: u32,
+    pub(crate) screen_gen: u32,
     /// Enter / Space pressed this frame (`InputWithModifiers.isSelection`).
-    pub(super) activate: bool,
+    pub(crate) activate: bool,
     /// Set once a keyboard activation fires, so the click sound still plays.
-    pub(super) fired: bool,
+    pub(crate) fired: bool,
 }
 
 impl FocusCtx {
@@ -205,7 +205,7 @@ impl FocusCtx {
     /// matching vanilla Tab navigation) and reports whether the widget is
     /// focused. A click takes focus (`ContainerEventHandler.mouseClicked`);
     /// widgets built earlier in the frame see that next frame.
-    pub(super) fn focused(&mut self, enabled: bool, hovered: bool) -> bool {
+    pub(crate) fn focused(&mut self, enabled: bool, hovered: bool) -> bool {
         if !enabled {
             return false;
         }
@@ -1130,23 +1130,25 @@ pub(super) fn nine_slice(
     });
 }
 
-pub(super) fn push_scrollbar(
+/// `AbstractScrollArea.extractScrollbar`: a 6px track at `track_x` with a
+/// thumb no shorter than `min_thumb` (both in framebuffer pixels).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_scrollbar(
     elements: &mut Vec<MenuElement>,
-    right_x: f32,
+    track_x: f32,
     top: f32,
     h: f32,
     total: f32,
     scroll: f32,
     gs: f32,
+    min_thumb: f32,
 ) {
     let max_scroll = (total - h).max(0.0);
     if max_scroll <= 0.0 {
         return;
     }
-    // 6px track, inset 2px from the content's right edge (vanilla spacing).
     let track_w = 6.0 * gs;
-    let track_x = right_x - track_w - 2.0 * gs;
-    let thumb_h = (h * h / total).max(16.0 * gs); // vanilla min thumb is larger
+    let thumb_h = (h * h / total).max(min_thumb);
     let thumb_y = top + (scroll / max_scroll) * (h - thumb_h);
     nine_slice(
         elements,

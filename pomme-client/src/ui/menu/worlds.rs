@@ -259,12 +259,13 @@ impl MainMenu {
         elements.push(MenuElement::ScissorPop);
         push_scrollbar(
             &mut elements,
-            screen_w,
+            screen_w - 8.0 * gs,
             list_top,
             list_h,
             total_content,
             self.scroll_offset,
             gs,
+            16.0 * gs,
         );
 
         let wide_w = WIDE_BTN_W * gs;

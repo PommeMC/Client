@@ -511,12 +511,13 @@ impl MainMenu {
         elements.push(MenuElement::ScissorPop);
         push_scrollbar(
             elements,
-            content_x + content_w,
+            content_x + content_w - 8.0 * gs,
             list_top,
             list_h,
             total,
             self.scroll_offset,
             gs,
+            16.0 * gs,
         );
     }
 
@@ -683,12 +684,13 @@ impl MainMenu {
         elements.push(MenuElement::ScissorPop);
         push_scrollbar(
             elements,
-            content_x + content_w,
+            content_x + content_w - 8.0 * gs,
             content_y,
             content_h,
             total,
             self.scroll_offset,
             gs,
+            16.0 * gs,
         );
     }
 
