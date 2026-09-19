@@ -20,6 +20,12 @@ fn table_id(dir: Direction, name: &str) -> u32 {
     PacketTable::native().id(Phase::Game, dir, name).unwrap()
 }
 
+fn config_table_id(dir: Direction, name: &str) -> u32 {
+    PacketTable::native()
+        .id(Phase::Configuration, dir, name)
+        .unwrap()
+}
+
 #[test]
 fn native_matches_azalea() {
     assert_eq!(
@@ -212,6 +218,8 @@ fn packet_ids_match_azalea() {
         recipes.id(),
         table_id(Direction::Clientbound, "recipe_book_add")
     );
+
+    dialog_packet_ids_match_azalea();
 
     // `net::chat` decodes and encodes these itself; only the ids are shared.
     use azalea_protocol::packets::game::{
@@ -4301,4 +4309,87 @@ fn translate_game_event_777() {
         panic!("wrong packet");
     };
     assert_eq!(p.event, EventType::WaitForLevelChunks);
+}
+
+/// The dialog packets pomme dispatches on, in both phases.
+fn dialog_packet_ids_match_azalea() {
+    use azalea_protocol::packets::config::{
+        ClientboundConfigPacket, ServerboundConfigPacket, c_clear_dialog as cfg_clear,
+        c_server_links as cfg_links, c_show_dialog as cfg_show, s_custom_click_action as cfg_click,
+    };
+    use azalea_protocol::packets::game::{
+        c_clear_dialog, c_server_links, c_show_dialog, s_custom_click_action,
+    };
+
+    let id = || Identifier::new("minecraft:test");
+    let game = [
+        (
+            ClientboundGamePacket::ServerLinks(c_server_links::ClientboundServerLinks {
+                links: Vec::new(),
+            })
+            .id(),
+            "server_links",
+        ),
+        (
+            ClientboundGamePacket::ClearDialog(c_clear_dialog::ClientboundClearDialog).id(),
+            "clear_dialog",
+        ),
+        (
+            ClientboundGamePacket::ShowDialog(c_show_dialog::ClientboundShowDialog {
+                dialog: Holder::Direct(simdnbt::owned::Nbt::None),
+            })
+            .id(),
+            "show_dialog",
+        ),
+    ];
+    for (azalea, name) in game {
+        assert_eq!(azalea, table_id(Direction::Clientbound, name), "{name}");
+    }
+    let click = ServerboundGamePacket::CustomClickAction(
+        s_custom_click_action::ServerboundCustomClickAction {
+            id: id(),
+            payload: simdnbt::owned::Nbt::None,
+        },
+    );
+    assert_eq!(
+        click.id(),
+        table_id(Direction::Serverbound, "custom_click_action")
+    );
+
+    let config = [
+        (
+            ClientboundConfigPacket::ServerLinks(cfg_links::ClientboundServerLinks {
+                links: Vec::new(),
+            })
+            .id(),
+            "server_links",
+        ),
+        (
+            ClientboundConfigPacket::ClearDialog(cfg_clear::ClientboundClearDialog).id(),
+            "clear_dialog",
+        ),
+        (
+            ClientboundConfigPacket::ShowDialog(cfg_show::ClientboundShowDialog {
+                dialog: simdnbt::owned::Nbt::None,
+            })
+            .id(),
+            "show_dialog",
+        ),
+    ];
+    for (azalea, name) in config {
+        assert_eq!(
+            azalea,
+            config_table_id(Direction::Clientbound, name),
+            "{name}"
+        );
+    }
+    let click =
+        ServerboundConfigPacket::CustomClickAction(cfg_click::ServerboundCustomClickAction {
+            id: id(),
+            payload: simdnbt::owned::Nbt::None,
+        });
+    assert_eq!(
+        click.id(),
+        config_table_id(Direction::Serverbound, "custom_click_action")
+    );
 }
