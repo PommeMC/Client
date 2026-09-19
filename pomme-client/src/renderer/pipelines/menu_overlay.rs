@@ -1516,7 +1516,12 @@ impl MenuOverlayPipeline {
                         // In particular, odd/even name widths are not symmetrically centered.
                         let center_tooltip_gui = left_gui + content_gui_w / 2 - 12;
                         let anchor_x_gui = center_tooltip_gui - name_gui_w / 2;
-                        let anchor_y_gui = top_gui - 15;
+                        // ClientBundleTooltip receives `y` at the bundle image component,
+                        // after the 9px title line plus Vanilla's 2px first-component gap.
+                        // We previously used the whole-tooltip text origin (`top_gui`),
+                        // putting the selected-name tooltip exactly 11 GUI pixels too high.
+                        let image_top_gui = top_gui + 11;
+                        let anchor_y_gui = image_top_gui - 15;
                         let mut selected_x_gui = anchor_x_gui + 12;
                         let mut selected_y_gui = anchor_y_gui - 12;
                         if selected_x_gui + name_gui_w > screen_gui_w {
