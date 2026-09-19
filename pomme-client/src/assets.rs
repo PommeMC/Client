@@ -35,18 +35,24 @@ impl<'a> AssetId<'a> {
     }
 }
 
+/// `Identifier` namespace (`path` false) or path characters; only the path
+/// allows `/`.
+pub(crate) fn identifier_chars(text: &str, path: bool) -> bool {
+    text.bytes().all(|byte| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(byte, b'_' | b'.' | b'-')
+            || path && byte == b'/'
+    })
+}
+
 pub(crate) fn valid_asset_key(asset_key: &str) -> bool {
-    // `Identifier` namespace and path characters; only the path allows `/`.
-    let allowed = |text: &str, extra: &[u8]| {
-        text.bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || extra.contains(&byte))
-    };
     let Some((namespace, path)) = asset_key.split_once('/') else {
         return false;
     };
     !matches!(namespace, "" | "." | "..")
-        && allowed(namespace, b"_.-")
-        && allowed(path, b"/._-")
+        && identifier_chars(namespace, false)
+        && identifier_chars(path, true)
         && !path
             .split('/')
             .any(|component| matches!(component, "" | "." | ".."))
