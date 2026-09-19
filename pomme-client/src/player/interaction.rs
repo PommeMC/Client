@@ -1328,7 +1328,7 @@ pub fn attack_strength_delay(attributes: &AttributeMap) -> f32 {
     if speed <= 0.0 {
         f32::INFINITY
     } else {
-        (20.0 / speed) as f32
+        (1.0 / speed * 20.0) as f32
     }
 }
 
