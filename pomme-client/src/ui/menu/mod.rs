@@ -540,7 +540,8 @@ pub struct MainMenu {
     links_open: bool,
     theme_open: bool,
     /// Return target for Language/Accessibility, which open from both the
-    /// title-screen icon row and the Options grid.
+    /// title-screen icon row and the Options grid, and for Chat Settings,
+    /// which also open from chat.
     settings_back: Screen,
     theme: PanoramaTheme,
     transition: Option<ThemeTransition>,
@@ -747,7 +748,7 @@ impl MainMenu {
                 settings.attack_indicator,
             ),
             slider_can_change_value: true,
-            chat_options: settings.chat,
+            chat_options: settings.chat.sanitized(),
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
@@ -765,7 +766,10 @@ impl MainMenu {
         }
     }
 
+    /// Chat Settings opened from chat; leaving them leaves the menu, back to
+    /// the chat screen that opened them.
     pub fn open_chat_settings(&mut self) {
+        self.settings_back = Screen::Main;
         self.set_screen(Screen::OptionsChatSettings);
     }
 
@@ -1200,6 +1204,54 @@ mod tests {
                 expected,
                 "stored slider value {stored} should clamp to {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn partial_chat_settings_keep_the_rest() {
+        let mut json = serde_json::to_value(Settings {
+            fov: 90,
+            ..Settings::default()
+        })
+        .unwrap();
+        json["chat"] = serde_json::json!({ "opacity": 0.3 });
+        let loaded: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.fov, 90);
+        assert_eq!(
+            loaded.chat,
+            ChatOptions {
+                opacity: 0.3,
+                ..ChatOptions::default()
+            }
+        );
+    }
+
+    #[test]
+    fn chat_settings_sanitize_like_option_instance_set() {
+        let default = ChatOptions::default();
+        assert_eq!(default.sanitized(), default);
+        let invalid = ChatOptions {
+            opacity: 1.5,
+            scale: -0.1,
+            width: f32::NAN,
+            delay_secs: 7.0,
+            ..default
+        };
+        assert_eq!(invalid.sanitized(), default);
+        for (stored, expected) in [(0.55, 0.5), (6.0, 6.0), (-0.05, 0.0), (-1.0, 0.0)] {
+            let chat = ChatOptions {
+                delay_secs: stored,
+                ..default
+            };
+            assert_eq!(chat.sanitized().delay_secs, expected, "delay {stored}");
+        }
+        for tenths in 0..=60 {
+            let secs = tenths as f32 / 10.0;
+            let chat = ChatOptions {
+                delay_secs: secs,
+                ..default
+            };
+            assert_eq!(chat.sanitized().delay_secs, secs, "delay {secs}");
         }
     }
 

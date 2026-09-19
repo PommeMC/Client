@@ -255,11 +255,14 @@ pub(crate) const FIELD_SELECTION: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 /// rects span `textY-1 .. textY+lineHeight+1` (one above, two below the 8px
 /// glyph line). `ghost` is chat's inline suggestion suffix, drawn one `bar_w`
 /// left of the caret (vanilla draws it at `cursorX - 1`, under the caret).
+/// `spans` styles the shown text (ChatScreen's Brigadier coloring); `None`
+/// draws it plain white.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_field_text(
     elements: &mut Vec<MenuElement>,
     info: &TextFieldRenderInfo,
     shown: &str,
+    spans: Option<&[crate::ui::text::TextSpan]>,
     text_x: f32,
     text_y: f32,
     fs: f32,
@@ -281,13 +284,23 @@ pub(crate) fn push_field_text(
             color: FIELD_SELECTION,
         });
     }
-    elements.push(MenuElement::Text {
-        x: text_x,
-        y: text_y,
-        text: shown.into(),
-        scale: fs,
-        color: WHITE,
-        centered: false,
+    elements.push(match spans {
+        Some(spans) => MenuElement::McText {
+            x: text_x,
+            y: text_y,
+            spans: spans.to_vec(),
+            scale: fs,
+            centered: false,
+            shadow: false,
+        },
+        None => MenuElement::Text {
+            x: text_x,
+            y: text_y,
+            text: shown.into(),
+            scale: fs,
+            color: WHITE,
+            centered: false,
+        },
     });
     let caret_x = text_x + wf(&shown[..info.caret_byte]);
     if let Some((text, color)) = ghost {
@@ -312,78 +325,6 @@ pub(crate) fn push_field_text(
             });
         } else {
             // Vanilla appends the `_` one pixel after the text (`drawX += 1`).
-            elements.push(MenuElement::Text {
-                x: caret_x + bar_w,
-                y: text_y,
-                text: "_".into(),
-                scale: fs,
-                color: caret_color,
-                centered: false,
-            });
-        }
-    }
-}
-
-/// Span-aware variant of `push_field_text`, used by ChatScreen for Brigadier
-/// syntax coloring while preserving the exact EditBox selection/caret/ghost
-/// geometry.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn push_field_spans(
-    elements: &mut Vec<MenuElement>,
-    info: &TextFieldRenderInfo,
-    shown: &str,
-    spans: &[crate::ui::text::TextSpan],
-    text_x: f32,
-    text_y: f32,
-    fs: f32,
-    bar_w: f32,
-    pad_y: f32,
-    caret_color: [f32; 4],
-    ghost: Option<(&str, [f32; 4])>,
-    wf: &dyn Fn(&str) -> f32,
-) {
-    if let Some((a, b)) = info.selection {
-        let x0 = text_x + wf(&shown[..a]);
-        let x1 = text_x + wf(&shown[..b]);
-        elements.push(MenuElement::Rect {
-            x: x0,
-            y: text_y - pad_y,
-            w: x1 - x0,
-            h: fs + 3.0 * pad_y,
-            corner_radius: 0.0,
-            color: FIELD_SELECTION,
-        });
-    }
-    elements.push(MenuElement::McText {
-        x: text_x,
-        y: text_y,
-        spans: spans.to_vec(),
-        scale: fs,
-        centered: false,
-        shadow: false,
-    });
-    let caret_x = text_x + wf(&shown[..info.caret_byte]);
-    if let Some((text, color)) = ghost {
-        elements.push(MenuElement::Text {
-            x: caret_x - bar_w,
-            y: text_y,
-            text: text.into(),
-            scale: fs,
-            color,
-            centered: false,
-        });
-    }
-    if info.caret_visible {
-        if info.insert_mode {
-            elements.push(MenuElement::Rect {
-                x: caret_x,
-                y: text_y - pad_y,
-                w: bar_w,
-                h: fs + 3.0 * pad_y,
-                corner_radius: 0.0,
-                color: caret_color,
-            });
-        } else {
             elements.push(MenuElement::Text {
                 x: caret_x + bar_w,
                 y: text_y,

@@ -1350,7 +1350,7 @@ fn handle_chat_ui_action(
             }
         }
         ChatUiAction::OpenChatSettings => {
-            game.chat.close();
+            game.chat.close_for_settings();
             core.menu.open_chat_settings();
             game.options_from_game = true;
             game.paused = true;
@@ -1369,6 +1369,8 @@ fn handle_chat_ui_action(
                 Err(e) => tracing::warn!("Could not encode custom chat click action {id:?}: {e}"),
             }
         }
+        // TODO: open the dialog screen (`ClientPacketListener.showDialog`);
+        // dialogs land with the next PR in the stack.
         ChatUiAction::ShowDialog(_) => {}
     }
 }
@@ -1389,6 +1391,9 @@ fn handle_unattended_command(command: &str, connection: &ConnectionHandle, game:
             connection
                 .packet_tx
                 .send_raw(crate::net::chat::encode_outbound_command(command));
+            // `setScreen(screenAfterCommand)` re-adds ChatScreen, whose
+            // `removed` resets the scroll.
+            game.chat.reset_chat_scroll();
         }
         UnattendedCommandCheck::SignatureRequired => {
             // Vanilla never signs a server-provided click command silently.
@@ -1870,8 +1875,9 @@ pub fn update_game(
         core.menu.gui_scale_setting,
     );
     let text_fs = common::FONT_SIZE * text_gs;
+    let chat_was_open = game.chat.is_open();
     if game.chat.has_pending_modal_prompt() {
-        // ConfirmLinkScreen captures input above the underlying screen.
+        // The ConfirmScreen replaces ChatScreen and takes its input.
     } else if let Some(msg) = game.chat.handle_key_input(
         &text_events,
         enter,
@@ -1886,6 +1892,9 @@ pub fn update_game(
         game.command_tree.as_deref(),
     ) {
         core.send_chat_message(connection, msg);
+    }
+    // Enter closes chat even when there was nothing to send.
+    if chat_was_open && !game.chat.is_open() {
         core.apply_cursor_grab(&gfx.window, Some(game));
     }
     if game.chat.is_open() {
@@ -2817,7 +2826,7 @@ pub fn update_game(
 
     // F1 hides the closed-chat overlay; an open chat is a screen and renders
     // regardless (vanilla Hud.extractChat vs ChatScreen).
-    if !game.hide_gui || game.chat.is_open() {
+    if !game.hide_gui || game.chat.is_focused() {
         let command_tree = game.command_tree.clone();
         let chat_action = game.chat.build(
             &mut elements,
@@ -2836,14 +2845,6 @@ pub fn update_game(
         );
         if let Some(action) = chat_action {
             handle_chat_ui_action(action, core, connection, game);
-        }
-        if game.chat.is_open() && core.input.cursor_moved_this_frame() {
-            let icon = if game.chat.hovering_clickable(core.input.cursor_pos()) {
-                winit::window::CursorIcon::Pointer
-            } else {
-                winit::window::CursorIcon::Default
-            };
-            gfx.window.set_cursor(icon);
         }
     }
 
@@ -2881,18 +2882,35 @@ pub fn update_game(
     }
 
     if game.chat.has_pending_modal_prompt() {
-        if let Some(action) = game.chat.build_modal_prompt(
-            &mut elements,
-            sw,
-            sh,
-            gs,
-            core.input.cursor_pos(),
-            core.input.left_just_pressed(),
-        ) {
+        let cursor = core.input.cursor_pos();
+        let clicked = core.input.left_just_pressed();
+        // `AbstractButton.onClick` plays the click; this is the same
+        // last-frame hit test the modal presses with.
+        if clicked && game.chat.hovering_clickable(cursor, false) {
+            core.audio.play_ui_click();
+        }
+        if let Some(action) =
+            game.chat
+                .build_modal_prompt(&mut elements, sw, sh, gs, cursor, clicked, &|spans, s| {
+                    gfx.renderer.menu_spans_width(spans, s)
+                })
+        {
             handle_chat_ui_action(action, core, connection, game);
         }
         core.input.clear_just_pressed_actions();
         core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+
+    if game.chat.is_open() && core.input.cursor_moved_this_frame() {
+        let icon = if game
+            .chat
+            .hovering_clickable(core.input.cursor_pos(), core.input.shift_held())
+        {
+            winit::window::CursorIcon::Pointer
+        } else {
+            winit::window::CursorIcon::Default
+        };
+        gfx.window.set_cursor(icon);
     }
 
     // Chat consumes keys, not clicks; nothing else clears them while only chat
@@ -3299,7 +3317,8 @@ pub fn update_game(
         }
         if !core.menu.is_options_screen() {
             game.options_from_game = false;
-            game.paused = true;
+            // Chat Settings opened from chat return to it, unpaused.
+            game.paused = !game.chat.return_from_settings(game.command_tree.as_deref());
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
     }

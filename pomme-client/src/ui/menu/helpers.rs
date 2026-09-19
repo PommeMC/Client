@@ -150,7 +150,7 @@ pub(super) fn push_text_field(
         h,
     });
     common::push_field_text(
-        elements, &info, displayed, text_x, text_y, fs, gs, gs, WHITE, None, &wf,
+        elements, &info, displayed, None, text_x, text_y, fs, gs, gs, WHITE, None, &wf,
     );
     elements.push(MenuElement::ScissorPop);
 }

@@ -1,5 +1,6 @@
 use std::cell::OnceCell;
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,19 +9,30 @@ use azalea_inventory::default_components::get_default_component;
 use azalea_registry::builtin::ItemKind;
 
 use super::common;
-use crate::chat_component::{Argument, ClickEvent, Component, HoverEvent, ResolvedStyle};
+use crate::chat_component::{
+    Argument, ClickEvent, Component, HoverEvent, ResolvedStyle, normalize_identifier,
+};
 use crate::net::commands::{CommandPresentation, CommandTokenKind, CommandTree};
 use crate::net::sender::ChatMark;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
-use crate::ui::text::{TextSpan, format_component_spans};
+use crate::ui::text::{
+    TextSpan, format_component_spans, format_component_spans_with_parent, parse_uuid_value,
+    with_alpha,
+};
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
 const MAX_MESSAGES: usize = 100;
 const CHAT_X: f32 = 4.0;
 const BOTTOM_MARGIN: f32 = 40.0;
 const MESSAGE_LIFETIME_SECS: f32 = 10.0;
+const TAG_TOOLTIP_MAX_WIDTH: f32 = 210.0;
 const INPUT_HEIGHT: f32 = 12.0;
+/// ChatScreen's EditBox x, in GUI units.
+const INPUT_X: f32 = 4.0;
 const MAX_MESSAGE_LEN: usize = 256;
+/// `Options.getBackgroundColor(Integer.MIN_VALUE)` with the default Text
+/// Background "Chat Only", which Pomme doesn't expose.
+const INPUT_BG_ALPHA: f32 = 128.0 / 255.0;
 
 const SUGGEST_ROW_H: f32 = 12.0;
 const MAX_SUGGESTION_ROWS: usize = 10;
@@ -68,6 +80,7 @@ impl ChatVisibilitySetting {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ChatOptions {
     pub visibility: ChatVisibilitySetting,
     pub opacity: f32,
@@ -86,8 +99,6 @@ pub struct ChatOptions {
     pub save_drafts: bool,
 }
 
-// TODO: connections send these defaults until the chat settings are
-// configurable.
 impl Default for ChatOptions {
     fn default() -> Self {
         Self {
@@ -115,8 +126,15 @@ impl ChatOptions {
         (self.width.clamp(0.0, 1.0) * 280.0 + 40.0).floor()
     }
 
+    /// Vanilla `addMessageToDisplayQueue`'s wrap width, floored. Unbounded at
+    /// scale 0, where nothing is drawn.
     fn wrap_width_px(self) -> f32 {
-        (self.width_px() / self.scale.clamp(0.01, 1.0)).ceil()
+        (self.width_px() / self.scale.clamp(0.0, 1.0)).floor()
+    }
+
+    /// Vanilla `extractRenderState`'s `maxWidth`, which rounds up instead.
+    fn render_width_px(self) -> f32 {
+        (self.width_px() / self.scale.clamp(0.0, 1.0)).ceil()
     }
 
     pub fn height_px(self, focused: bool) -> f32 {
@@ -136,6 +154,34 @@ impl ChatOptions {
         (9.0 * (self.line_spacing.clamp(0.0, 1.0) + 1.0))
             .floor()
             .max(1.0)
+    }
+
+    /// Vanilla `OptionInstance.set` on load: an invalid value falls back to
+    /// the option's default instead of being clamped.
+    pub fn sanitized(self) -> Self {
+        let default = Self::default();
+        // `UnitDouble.validateValue`.
+        let unit = |v: f32, d: f32| if (0.0..=1.0).contains(&v) { v } else { d };
+        // `chatDelay` is `IntRange(0, 60)` in tenths, xmapped through `(int)`.
+        let tenths = (self.delay_secs * 10.0) as i32;
+        Self {
+            opacity: unit(self.opacity, default.opacity),
+            line_spacing: unit(self.line_spacing, default.line_spacing),
+            text_background_opacity: unit(
+                self.text_background_opacity,
+                default.text_background_opacity,
+            ),
+            scale: unit(self.scale, default.scale),
+            width: unit(self.width, default.width),
+            height_focused: unit(self.height_focused, default.height_focused),
+            height_unfocused: unit(self.height_unfocused, default.height_unfocused),
+            delay_secs: if (0..=60).contains(&tenths) {
+                tenths as f32 / 10.0
+            } else {
+                default.delay_secs
+            },
+            ..self
+        }
     }
 }
 
@@ -205,6 +251,43 @@ impl ChatSuggestion {
             tooltip: None,
         }
     }
+}
+
+/// Vanilla `ChatComponent.ChatMethod`: which key opened chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatMethod {
+    Message,
+    Command,
+}
+
+/// Vanilla `ChatScreen.ExitReason`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatExitReason {
+    /// Another screen replaced chat (death, chat settings).
+    Interrupted,
+    /// Escape or the close key.
+    Intentional,
+    /// Submitted.
+    Done,
+}
+
+/// Completions and the input range they replace, as vanilla `Suggestions`.
+#[derive(Clone, Debug)]
+struct SuggestionSet {
+    range: Range<usize>,
+    list: Vec<ChatSuggestion>,
+}
+
+/// Vanilla `CommandSuggestions.pendingSuggestions`.
+#[derive(Debug)]
+enum PendingSuggestions {
+    Done(SuggestionSet),
+    /// Waiting on `ClientboundCommandSuggestions` for `request`; `local` is
+    /// what an empty answer leaves.
+    Awaiting {
+        request: String,
+        local: SuggestionSet,
+    },
 }
 
 impl From<String> for ChatSuggestion {
@@ -309,10 +392,78 @@ pub(crate) enum CommandConfirmationKind {
     ParseErrors,
 }
 
+impl CommandConfirmationKind {
+    fn message_key(self) -> &'static str {
+        match self {
+            Self::SignatureRequired => "multiplayer.confirm_command.signature_required",
+            Self::PermissionsRequired => "multiplayer.confirm_command.permissions_required",
+            Self::ParseErrors => "multiplayer.confirm_command.parse_errors",
+        }
+    }
+
+    fn accept_key(self) -> &'static str {
+        match self {
+            // `openSignedCommandSendConfirmationWindow` only offers
+            // suggest_command without a screen to return to; chat is one.
+            Self::SignatureRequired => "chat.copy",
+            Self::PermissionsRequired | Self::ParseErrors => {
+                "multiplayer.confirm_command.run_command"
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
-struct PendingCommandConfirmation {
+struct PendingCommand {
     command: String,
     kind: CommandConfirmationKind,
+}
+
+/// The ConfirmScreen vanilla swaps in for ChatScreen; answering it returns to
+/// the same live chat input.
+#[derive(Clone, Debug)]
+enum ChatModal {
+    /// `Screen.clickUrlAction`'s untrusted ConfirmLinkScreen.
+    Link { url: String },
+    /// `ClientPacketListener.openSendConfirmationWindow`.
+    Command(PendingCommand),
+}
+
+impl ChatModal {
+    fn confirm_screen(&self) -> ConfirmScreen {
+        match self {
+            Self::Link { url } => {
+                let mut warning = Component::translate("chat.link.warning", Vec::new());
+                warning.style.color = Some(0xffcccc);
+                ConfirmScreen {
+                    title: Component::translate("chat.link.confirm", Vec::new()),
+                    message: Component::text(url.clone()),
+                    warning: Some(warning),
+                    buttons: vec![
+                        ("gui.yes", CONFIRM_LINK_BUTTON_WIDTH),
+                        ("chat.copy", CONFIRM_LINK_BUTTON_WIDTH),
+                        ("gui.no", CONFIRM_LINK_BUTTON_WIDTH),
+                    ],
+                }
+            }
+            Self::Command(pending) => {
+                let mut command = Component::text(pending.command.clone());
+                command.style.color = Some(0xffff55);
+                ConfirmScreen {
+                    title: Component::translate("multiplayer.confirm_command.title", Vec::new()),
+                    message: Component::translate(
+                        pending.kind.message_key(),
+                        vec![Argument::Component(Box::new(command))],
+                    ),
+                    warning: None,
+                    buttons: vec![
+                        (pending.kind.accept_key(), CONFIRM_BUTTON_WIDTH),
+                        ("gui.back", CONFIRM_BUTTON_WIDTH),
+                    ],
+                }
+            }
+        }
+    }
 }
 
 pub struct ChatState {
@@ -335,21 +486,23 @@ pub struct ChatState {
     /// Vanilla `newMessageSinceScroll`: changes the open-chat scrollbar color
     /// when new text arrives while the user is reading older lines.
     new_message_since_scroll: bool,
+    /// The showing `SuggestionsList` (empty when hidden): its entries,
+    /// `current` and `offset`.
     suggestions: Vec<ChatSuggestion>,
     suggest_index: usize,
     suggest_offset: usize,
-    suggest_anchor: String,
-    suggest_applied: bool,
-    /// Vanilla `setAllowSuggestions(false)` after a history recall: the popup
-    /// stays hidden until the next real edit.
+    /// The list's `originalContents` and the range its entries replace.
+    suggest_original: String,
+    suggest_range: Range<usize>,
+    tab_cycles: bool,
+    /// Vanilla `CommandSuggestions.keepSuggestions`, set while applying one.
+    keep_suggestions: bool,
+    /// Whether finished completions may show the list by themselves; off
+    /// on open and after a history recall, until the next edit.
     allow_suggestions: bool,
-    last_computed: String,
-    /// Monotonic tab-complete transaction id (vanilla `pendingSuggestionsId`).
-    /// Never reset, so a response from a previous chat session can't match.
-    next_suggest_id: u32,
-    /// Id and input snapshot of the in-flight server request; a response is
-    /// applied only if both still match.
-    awaiting: Option<(u32, String)>,
+    pending_suggestions: Option<PendingSuggestions>,
+    /// Vanilla `ClientSuggestionProvider.pendingSuggestionsId`.
+    pending_suggestions_id: i32,
     /// Request produced by the last recompute, drained once per frame by the
     /// game loop and sent as `ServerboundCommandSuggestion`.
     outgoing_request: Option<(u32, String)>,
@@ -361,12 +514,10 @@ pub struct ChatState {
     suggestion_regions: Vec<(usize, [f32; 4])>,
     queue_region: Option<[f32; 4]>,
     last_suggestion_cursor: Option<(f32, f32)>,
-    /// Vanilla's chatLinksPrompt confirmation state. Kept inside ChatScreen so
-    /// accepting/cancelling returns to the same live chat input.
-    pending_link: Option<String>,
-    link_buttons: Option<([f32; 4], [f32; 4], [f32; 4])>,
-    pending_command: Option<PendingCommandConfirmation>,
-    command_buttons: Option<([f32; 4], [f32; 4])>,
+    modal: Option<ChatModal>,
+    /// The modal's button rectangles as last drawn; a click only counts once
+    /// they exist.
+    modal_buttons: Vec<[f32; 4]>,
     delayed_deletions: Vec<([u8; 256], Instant)>,
     delayed_messages: VecDeque<PendingChatLine>,
     /// Last-seen updates in the order they happened, for the network loop.
@@ -374,6 +525,9 @@ pub struct ChatState {
     previous_message_time: Option<Instant>,
     latest_draft: Option<String>,
     is_restored_draft: bool,
+    /// Input and draft flag of a chat screen that Chat Settings replaced,
+    /// re-opened when settings close (vanilla re-inits the parent screen).
+    settings_parent: Option<(String, bool)>,
 }
 
 impl ChatState {
@@ -391,27 +545,27 @@ impl ChatState {
             suggestions: Vec::new(),
             suggest_index: 0,
             suggest_offset: 0,
-            suggest_anchor: String::new(),
-            suggest_applied: false,
-            allow_suggestions: true,
-            last_computed: String::new(),
-            next_suggest_id: 0,
-            awaiting: None,
+            suggest_original: String::new(),
+            suggest_range: 0..0,
+            tab_cycles: false,
+            keep_suggestions: false,
+            allow_suggestions: false,
+            pending_suggestions: None,
+            pending_suggestions_id: -1,
             outgoing_request: None,
             hit_regions: Vec::new(),
             suggestion_regions: Vec::new(),
             queue_region: None,
             last_suggestion_cursor: None,
-            pending_link: None,
-            link_buttons: None,
-            pending_command: None,
-            command_buttons: None,
+            modal: None,
+            modal_buttons: Vec::new(),
             delayed_deletions: Vec::new(),
             delayed_messages: VecDeque::new(),
             chat_marks: Vec::new(),
             previous_message_time: None,
             latest_draft: None,
             is_restored_draft: false,
+            settings_parent: None,
         }
     }
 
@@ -430,16 +584,16 @@ impl ChatState {
         if previous.delay_secs > 0.0 && self.options.delay_secs <= 0.0 {
             self.flush_delayed_messages(Instant::now());
         }
-        if !self.options.auto_suggestions {
-            self.clear_suggestions();
-            self.allow_suggestions = false;
-        } else if self.open && self.input.value() != self.last_computed {
-            self.allow_suggestions = true;
-        }
     }
 
     pub fn has_pending_modal_prompt(&self) -> bool {
-        self.pending_link.is_some() || self.pending_command.is_some()
+        self.modal.is_some()
+    }
+
+    /// Vanilla `ChatComponent.isChatFocused`: ChatScreen is the current
+    /// screen, which a modal replaces.
+    pub fn is_focused(&self) -> bool {
+        self.open && self.modal.is_none()
     }
 
     pub fn only_secure(&self) -> bool {
@@ -447,8 +601,25 @@ impl ChatState {
     }
 
     pub fn request_command_confirmation(&mut self, command: String, kind: CommandConfirmationKind) {
-        self.pending_command = Some(PendingCommandConfirmation { command, kind });
-        self.command_buttons = None;
+        self.open_modal(ChatModal::Command(PendingCommand { command, kind }));
+    }
+
+    fn open_modal(&mut self, modal: ChatModal) {
+        self.modal = Some(modal);
+        self.modal_buttons.clear();
+        // Swapping the screen runs `ChatScreen.removed`.
+        self.reset_chat_scroll();
+    }
+
+    fn close_modal(&mut self) {
+        self.modal = None;
+        self.modal_buttons.clear();
+    }
+
+    /// Vanilla `ChatComponent.resetChatScroll`.
+    pub fn reset_chat_scroll(&mut self) {
+        self.scroll_pos = 0;
+        self.new_message_since_scroll = false;
     }
 
     pub fn request_open_url(&mut self, url: String) -> Option<ChatUiAction> {
@@ -459,7 +630,7 @@ impl ChatState {
             return None;
         }
         if self.options.links_prompt {
-            self.pending_link = Some(url);
+            self.open_modal(ChatModal::Link { url });
             None
         } else {
             Some(ChatUiAction::OpenUrl(url))
@@ -477,21 +648,20 @@ impl ChatState {
         source: ChatMessageSource,
         tag: Option<ChatMessageTag>,
     ) {
-        let pending = PendingChatLine {
+        // Vanilla `handlePlayerChatMessage` reads Only Show Secure Chat when
+        // the packet arrives, so toggling it later doesn't hide shown lines.
+        let suppress_display = self.options.only_secure
+            && source == ChatMessageSource::Player
+            && matches!(tag, Some(ChatMessageTag::NotSecure));
+        self.enqueue_or_accept(PendingChatLine {
             spans,
             signature,
             ack_signature: signature,
             force_hidden_ack: false,
-            suppress_display: false,
+            suppress_display,
             source,
             tag,
-        };
-        let now = Instant::now();
-        if source == ChatMessageSource::Player && self.will_delay_messages(now) {
-            self.delayed_messages.push_back(pending);
-            return;
-        }
-        self.accept_pending_message(pending, now);
+        });
     }
 
     pub fn push_validation_error(
@@ -499,7 +669,7 @@ impl ChatState {
         spans: Vec<TextSpan>,
         invalid_signature: Option<[u8; 256]>,
     ) {
-        let pending = PendingChatLine {
+        self.enqueue_or_accept(PendingChatLine {
             spans,
             signature: None,
             ack_signature: invalid_signature,
@@ -507,17 +677,11 @@ impl ChatState {
             suppress_display: false,
             source: ChatMessageSource::Player,
             tag: Some(ChatMessageTag::Error),
-        };
-        let now = Instant::now();
-        if self.will_delay_messages(now) {
-            self.delayed_messages.push_back(pending);
-        } else {
-            self.accept_pending_message(pending, now);
-        }
+        });
     }
 
     pub fn push_fully_filtered(&mut self, signature: Option<[u8; 256]>) {
-        let pending = PendingChatLine {
+        self.enqueue_or_accept(PendingChatLine {
             spans: Vec::new(),
             signature: None,
             ack_signature: signature,
@@ -525,29 +689,28 @@ impl ChatState {
             suppress_display: true,
             source: ChatMessageSource::Player,
             tag: None,
-        };
+        });
+    }
+
+    /// Vanilla `ChatListener.handleMessage`: player chat waits in the delay
+    /// queue while the chat delay is running; system messages never do.
+    fn enqueue_or_accept(&mut self, pending: PendingChatLine) {
         let now = Instant::now();
-        if self.will_delay_messages(now) {
+        if pending.source == ChatMessageSource::Player && self.will_delay_messages(now) {
             self.delayed_messages.push_back(pending);
         } else {
             self.accept_pending_message(pending, now);
         }
     }
 
-    fn source_visible(&self, source: ChatMessageSource, tag: Option<&ChatMessageTag>) -> bool {
-        let visibility_ok = match source {
+    fn source_visible(&self, source: ChatMessageSource) -> bool {
+        match source {
             ChatMessageSource::SystemClient => true,
             ChatMessageSource::SystemServer => {
                 self.options.visibility != ChatVisibilitySetting::Hidden
             }
             ChatMessageSource::Player => self.options.visibility == ChatVisibilitySetting::Full,
-        };
-        if !visibility_ok {
-            return false;
         }
-        !(self.options.only_secure
-            && source == ChatMessageSource::Player
-            && matches!(tag, Some(ChatMessageTag::NotSecure)))
     }
 
     fn will_delay_messages(&self, now: Instant) -> bool {
@@ -560,7 +723,7 @@ impl ChatState {
     }
 
     fn accept_pending_message(&mut self, pending: PendingChatLine, now: Instant) -> bool {
-        if pending.suppress_display || !self.source_visible(pending.source, pending.tag.as_ref()) {
+        if pending.suppress_display || !self.source_visible(pending.source) {
             self.mark_processed(pending.ack_signature, false);
             return false;
         }
@@ -680,6 +843,9 @@ impl ChatState {
         None
     }
 
+    // TODO: vanilla times deletions on `Hud.tickCount` and ChatListener.tick
+    // holds the delay queue (shifting `previousMessageTime`) while the game is
+    // paused. Pomme has no paused tick clock, so both run on wall time here.
     pub fn tick(&mut self) {
         let now = Instant::now();
         let mut queue = std::mem::take(&mut self.delayed_deletions);
@@ -702,50 +868,75 @@ impl ChatState {
         self.open
     }
 
-    pub fn open(&mut self) {
-        self.open = true;
-        let restored = self.latest_draft.clone();
-        self.is_restored_draft = restored.is_some();
-        self.input
-            .set_value(restored.as_deref().unwrap_or(""), f32::MAX, &|_| 0.0);
-        self.input.set_focused(true);
-        self.clear_suggestions();
-        self.allow_suggestions = self.options.auto_suggestions;
-        self.history_pos = self.sent_history.len();
-        self.history_buffer.clear();
-    }
-
-    pub fn open_with_slash(&mut self) {
-        self.open = true;
-        let restored = self
-            .latest_draft
-            .clone()
-            .filter(|draft| draft.starts_with('/'));
-        self.is_restored_draft = restored.is_some();
-        self.input
-            .set_value(restored.as_deref().unwrap_or("/"), f32::MAX, &|_| 0.0);
-        self.input.set_focused(true);
-        self.clear_suggestions();
-        self.allow_suggestions = self.options.auto_suggestions;
-        self.history_pos = self.sent_history.len();
-        self.history_buffer.clear();
-    }
-
-    pub fn close(&mut self) {
-        if self.open {
-            let value = self.input.value().trim().to_owned();
-            if self.options.save_drafts && !value.is_empty() {
-                self.latest_draft = Some(self.input.value().to_owned());
-            } else {
-                self.latest_draft = None;
+    /// Vanilla `ChatComponent.openScreen`: restores the saved draft when the
+    /// method allows it, else starts from the method's prefix.
+    pub fn open(&mut self, method: ChatMethod, tree: Option<&CommandTree>) {
+        let draft = self.latest_draft.clone().filter(|draft| match method {
+            ChatMethod::Message => true,
+            // A draft's method is fixed by its `/` when it was saved.
+            ChatMethod::Command => draft.starts_with('/'),
+        });
+        match draft {
+            Some(draft) => self.open_with(&draft, true, tree),
+            None => {
+                let prefix = match method {
+                    ChatMethod::Message => "",
+                    ChatMethod::Command => "/",
+                };
+                self.open_with(prefix, false, tree);
             }
         }
+    }
+
+    /// Vanilla `ChatScreen.init`. The initial `setValue` runs before the
+    /// responder is attached, so it doesn't count as an edit.
+    fn open_with(&mut self, initial: &str, is_draft: bool, tree: Option<&CommandTree>) {
+        self.open = true;
+        self.is_restored_draft = is_draft;
+        self.history_pos = self.sent_history.len();
+        self.history_buffer.clear();
+        self.input.set_value(initial, f32::MAX, &|_| 0.0);
+        self.input.set_focused(true);
+        self.clear_suggestions();
+        self.allow_suggestions = false;
+        self.update_command_info(tree);
+    }
+
+    /// Vanilla `ChatScreen.removed`: what happens to the draft depends on why
+    /// the screen went away.
+    pub fn close(&mut self, reason: ChatExitReason) {
+        if self.open {
+            let value = self.input.value();
+            let discard = match reason {
+                ChatExitReason::Interrupted => false,
+                ChatExitReason::Intentional => !self.options.save_drafts,
+                ChatExitReason::Done => true,
+            };
+            if discard || java_is_blank(value) {
+                self.latest_draft = None;
+            } else if !self.is_restored_draft {
+                self.latest_draft = Some(value.to_owned());
+            }
+        }
+        self.settings_parent = None;
         self.finish_close();
     }
 
-    fn close_after_submit(&mut self) {
-        self.latest_draft = None;
-        self.finish_close();
+    /// Chat Settings opened from chat replace it, with chat as the parent
+    /// screen they return to.
+    pub fn close_for_settings(&mut self) {
+        let parent = (self.input.value().to_owned(), self.is_restored_draft);
+        self.close(ChatExitReason::Interrupted);
+        self.settings_parent = Some(parent);
+    }
+
+    /// Re-open the chat that Chat Settings replaced, if any.
+    pub fn return_from_settings(&mut self, tree: Option<&CommandTree>) -> bool {
+        let Some((initial, is_draft)) = self.settings_parent.take() else {
+            return false;
+        };
+        self.open_with(&initial, is_draft, tree);
+        true
     }
 
     fn finish_close(&mut self) {
@@ -753,10 +944,7 @@ impl ChatState {
         self.is_restored_draft = false;
         self.input.set_focused(false);
         self.clear_suggestions();
-        self.pending_link = None;
-        self.link_buttons = None;
-        self.pending_command = None;
-        self.command_buttons = None;
+        self.close_modal();
         // Vanilla resets the chat scroll when the screen closes.
         self.scroll_pos = 0;
         self.new_message_since_scroll = false;
@@ -766,32 +954,24 @@ impl ChatState {
     /// Escape before the screen itself closes. Returns true only when this call
     /// actually closed chat and the game should recapture the cursor.
     pub fn handle_escape(&mut self) -> bool {
-        if self.pending_link.take().is_some() {
-            self.link_buttons = None;
-            return false;
-        }
-        if self.pending_command.take().is_some() {
-            self.command_buttons = None;
+        // ConfirmScreen answers Escape with `callback.accept(false)`.
+        if self.modal.is_some() {
+            self.close_modal();
             return false;
         }
         if !self.open {
             return false;
         }
         if !self.suggestions.is_empty() {
-            self.suggestions.clear();
-            self.suggest_anchor.clear();
-            self.suggest_index = 0;
-            self.suggest_applied = false;
-            self.allow_suggestions = false;
-            self.last_computed = self.input.value().to_owned();
+            self.hide_suggestions();
             return false;
         }
-        self.close();
+        self.close(ChatExitReason::Intentional);
         true
     }
 
     fn lines_per_page(&self) -> usize {
-        let height = self.options.height_px(self.open);
+        let height = self.options.height_px(self.is_focused());
         (height / self.options.line_height()).floor().max(1.0) as usize
     }
 
@@ -825,7 +1005,7 @@ impl ChatState {
     /// pointer is over the completion rectangle; otherwise ChatScreen scrolls
     /// the message backlog by one line with Shift or seven lines normally.
     pub fn handle_scroll(&mut self, cursor: (f32, f32), delta: f32, shift: bool) {
-        if !self.open || delta == 0.0 {
+        if !self.is_focused() || delta == 0.0 {
             return;
         }
         let step = delta.clamp(-1.0, 1.0);
@@ -846,7 +1026,13 @@ impl ChatState {
     }
 
     /// Up/Down sent-message recall, vanilla `ChatScreen.moveInHistory`.
-    fn move_in_history(&mut self, delta: i32, inner_w: f32, width_fn: &dyn Fn(&str) -> f32) {
+    fn move_in_history(
+        &mut self,
+        delta: i32,
+        inner_w: f32,
+        width_fn: &dyn Fn(&str) -> f32,
+        tree: Option<&CommandTree>,
+    ) {
         let end = self.sent_history.len();
         let target = self
             .history_pos
@@ -856,17 +1042,45 @@ impl ChatState {
             return;
         }
         if target == end {
-            let draft = std::mem::take(&mut self.history_buffer);
-            self.input.set_value(&draft, inner_w, width_fn);
-        } else {
-            if self.history_pos == end {
-                self.history_buffer = self.input.value().to_string();
-            }
-            let entry = self.sent_history[target].clone();
-            self.input.set_value(&entry, inner_w, width_fn);
+            self.history_pos = end;
+            let draft = self.history_buffer.clone();
+            self.set_input_value(&draft, inner_w, width_fn, tree);
+            return;
         }
+        if self.history_pos == end {
+            self.history_buffer = self.input.value().to_string();
+        }
+        let entry = self.sent_history[target].clone();
+        self.set_input_value(&entry, inner_w, width_fn, tree);
+        self.set_allow_suggestions(false);
         self.history_pos = target;
-        self.allow_suggestions = false;
+    }
+
+    /// Vanilla `EditBox.setValue` (or `insertText`) followed by its responder,
+    /// `ChatScreen.onEdited`: every programmatic value change goes through
+    /// here.
+    fn set_input_value(
+        &mut self,
+        value: &str,
+        inner_w: f32,
+        width_fn: &dyn Fn(&str) -> f32,
+        tree: Option<&CommandTree>,
+    ) {
+        self.input.set_value(value, inner_w, width_fn);
+        self.on_edited(tree);
+    }
+
+    fn on_edited(&mut self, tree: Option<&CommandTree>) {
+        self.set_allow_suggestions(true);
+        self.update_command_info(tree);
+        self.is_restored_draft = false;
+    }
+
+    fn set_allow_suggestions(&mut self, allow: bool) {
+        self.allow_suggestions = allow;
+        if !allow {
+            self.hide_suggestions();
+        }
     }
 
     /// Vanilla `ChatComponent.addRecentChat`: consecutive duplicates collapse.
@@ -879,81 +1093,199 @@ impl ChatState {
         }
     }
 
-    fn clear_suggestions(&mut self) {
+    /// Vanilla `CommandSuggestions.hide`.
+    fn hide_suggestions(&mut self) {
         self.suggestions.clear();
-        self.suggest_anchor.clear();
         self.suggest_index = 0;
         self.suggest_offset = 0;
-        self.suggest_applied = false;
-        self.last_computed.clear();
-        self.awaiting = None;
-        self.outgoing_request = None;
+        self.tab_cycles = false;
     }
 
-    /// Recompute command completions from the current input. Only command input
-    /// (leading `/`) yields suggestions; anything else clears them. Local
-    /// literals show immediately; argument positions also queue a server
-    /// request whose response replaces them (vanilla requests per keystroke
-    /// with latest-id-wins, no debounce).
-    fn recompute_suggestions(&mut self, tree: Option<&CommandTree>) {
-        self.clear_suggestions();
-        let input = self.input.value().to_string();
-        self.last_computed = input.clone();
-        if self.options.visibility == ChatVisibilitySetting::Hidden {
+    fn clear_suggestions(&mut self) {
+        self.hide_suggestions();
+        self.pending_suggestions = None;
+    }
+
+    /// Vanilla `CommandSuggestions.updateCommandInfo`: completes the input up
+    /// to the caret on every edit, asking the server where an argument could
+    /// follow. Whether the result shows by itself is `update_usage_info`'s
+    /// call.
+    fn update_command_info(&mut self, tree: Option<&CommandTree>) {
+        if !self.keep_suggestions {
+            self.hide_suggestions();
+        }
+        let value = self.input.value();
+        let cursor = self.input.cursor();
+        if value.starts_with('/') {
+            if cursor < 1 || (!self.suggestions.is_empty() && self.keep_suggestions) {
+                return;
+            }
+            let Some(tree) = tree else {
+                self.pending_suggestions = None;
+                return;
+            };
+            let local = tree.suggestions(&value[1..cursor]);
+            let needs_server = local.needs_server;
+            let local = SuggestionSet {
+                range: cursor - local.partial_len..cursor,
+                list: local
+                    .options
+                    .into_iter()
+                    .map(ChatSuggestion::plain)
+                    .collect(),
+            };
+            if needs_server {
+                // `ClientSuggestionProvider.customSuggestion`.
+                self.pending_suggestions_id += 1;
+                let request = value[..cursor].to_owned();
+                self.outgoing_request = Some((self.pending_suggestions_id as u32, request.clone()));
+                self.pending_suggestions = Some(PendingSuggestions::Awaiting { request, local });
+            } else {
+                self.pending_suggestions = Some(PendingSuggestions::Done(local));
+                self.update_usage_info();
+            }
+        } else {
+            // TODO: vanilla completes non-blank messages from the server's
+            // `ClientboundCustomChatCompletions` entries, which Pomme ignores.
+            self.pending_suggestions = None;
+        }
+    }
+
+    /// The tail of vanilla `updateUsageInfo`, run once completions finish.
+    fn update_usage_info(&mut self) {
+        self.hide_suggestions();
+        if self.allow_suggestions && self.options.auto_suggestions {
+            self.show_suggestions();
+        }
+    }
+
+    /// Vanilla `CommandSuggestions.showSuggestions`: list the finished
+    /// completions, if any.
+    fn show_suggestions(&mut self) {
+        let Some(PendingSuggestions::Done(set)) = &self.pending_suggestions else {
+            return;
+        };
+        if set.list.is_empty() {
             return;
         }
-        if let Some(cmd) = input.strip_prefix('/')
-            && let Some(tree) = tree
-        {
-            let sug = tree.suggestions(cmd);
-            let cut = input.len() - sug.partial_len;
-            self.suggest_anchor = input[..cut].to_string();
-            self.suggestions = sug.options.into_iter().map(ChatSuggestion::plain).collect();
-            if sug.needs_server {
-                self.next_suggest_id = self.next_suggest_id.wrapping_add(1);
-                let request = (self.next_suggest_id, input);
-                self.awaiting = Some(request.clone());
-                self.outgoing_request = Some(request);
-            }
+        let value = self.input.value();
+        let partial = &value[..self.input.cursor()];
+        let last_word = partial[last_word_index(partial)..].to_lowercase();
+        self.suggestions = sort_suggestions_with_partial_first(set.list.clone(), &last_word);
+        self.suggest_range = set.range.clone();
+        self.suggest_original = value.to_owned();
+        self.suggest_offset = 0;
+        self.tab_cycles = false;
+        self.last_suggestion_cursor = None;
+        self.select_suggestion(0);
+    }
+
+    /// Vanilla `SuggestionsList.select`, wrapping around either end.
+    fn select_suggestion(&mut self, index: isize) {
+        let n = self.suggestions.len() as isize;
+        if n > 0 {
+            self.suggest_index = index.rem_euclid(n) as usize;
         }
     }
 
-    /// The tab-complete request queued by the last recompute, if any. The
-    /// command is the full input including the leading `/`, matching what
-    /// vanilla sends (the response range indexes into that exact string).
+    /// Vanilla `SuggestionsList.cycle`.
+    fn cycle_suggestion(&mut self, direction: isize) {
+        self.select_suggestion(self.suggest_index as isize + direction);
+        self.keep_suggestion_visible();
+    }
+
+    /// Vanilla `SuggestionsList.useSuggestion`: replace the completed range of
+    /// the list's original input, keeping the list open.
+    fn use_suggestion(
+        &mut self,
+        inner_w: f32,
+        width_fn: &dyn Fn(&str) -> f32,
+        tree: Option<&CommandTree>,
+    ) {
+        let Some(text) = self
+            .suggestions
+            .get(self.suggest_index)
+            .map(|s| s.text.clone())
+        else {
+            return;
+        };
+        let Some(applied) = apply_suggestion(&self.suggest_original, &self.suggest_range, &text)
+        else {
+            return;
+        };
+        self.keep_suggestions = true;
+        self.set_input_value(&applied, inner_w, width_fn, tree);
+        let end = self.suggest_range.start + text.len();
+        self.input.move_cursor_to(end, false, inner_w, width_fn);
+        self.keep_suggestions = false;
+        self.tab_cycles = true;
+    }
+
+    /// The tab-complete request queued by the last edit, if any: the input up
+    /// to the caret, which the response's range indexes into.
     pub fn take_suggestion_request(&mut self) -> Option<(u32, String)> {
         self.outgoing_request.take()
     }
 
-    /// Apply a `ClientboundCommandSuggestions` response. `start` is the offset
-    /// into the sent command string where the completed range begins. Stale
-    /// responses (id or input no longer matching) are dropped; an empty
-    /// response keeps the local literal suggestions.
+    /// Apply a `ClientboundCommandSuggestions` response. `start` is the
+    /// UTF-16 offset into the sent request where the completed range begins;
+    /// the range runs to the request's end. Only the latest request's id
+    /// matches (vanilla `completeCustomSuggestions`), and an empty answer
+    /// leaves the local literals.
     pub fn apply_server_suggestions(
         &mut self,
         id: u32,
         start: usize,
         options: Vec<ChatSuggestion>,
     ) {
-        let Some((want_id, want_input)) = &self.awaiting else {
-            return;
-        };
-        if id != *want_id || !self.open || self.input.value() != *want_input {
+        if id as i32 != self.pending_suggestions_id {
             return;
         }
-        self.awaiting = None;
-        if options.is_empty() {
-            return;
-        }
-        // Java's StringRange counts UTF-16 units, not bytes.
-        let Some(start) = utf16_offset_to_byte(self.input.value(), start) else {
+        self.pending_suggestions_id = -1;
+        let Some(PendingSuggestions::Awaiting { request, local }) = &self.pending_suggestions
+        else {
             return;
         };
-        let partial = self.input.value()[start..].to_ascii_lowercase();
-        self.suggest_anchor = self.input.value()[..start].to_string();
-        self.suggestions = sort_suggestions_with_partial_first(options, &partial);
-        self.suggest_index = 0;
-        self.suggest_applied = false;
+        let set = if options.is_empty() {
+            local.clone()
+        } else {
+            let Some(start) = utf16_offset_to_byte(request, start) else {
+                return;
+            };
+            SuggestionSet {
+                range: start..request.len(),
+                list: options,
+            }
+        };
+        self.pending_suggestions = Some(PendingSuggestions::Done(set));
+        self.update_usage_info();
+    }
+
+    /// Vanilla `CommandSuggestions.hasAllowedInput`: what Enter may send under
+    /// the chat visibility's restrictions.
+    fn has_allowed_input(&self, tree: Option<&CommandTree>) -> bool {
+        let value = self.input.value();
+        let (is_command, is_message) = match value.strip_prefix('/') {
+            Some(command) => (
+                true,
+                tree.is_some_and(|tree| {
+                    tree.presentation(command, self.input.cursor().saturating_sub(1))
+                        .is_message
+                }),
+            ),
+            None => (false, !java_is_blank(value)),
+        };
+        !(is_message && !self.messages_allowed()) && (!is_command || self.commands_allowed())
+    }
+
+    /// Vanilla `ChatAbilities.canSendMessages`.
+    fn messages_allowed(&self) -> bool {
+        self.options.visibility == ChatVisibilitySetting::Full
+    }
+
+    /// Vanilla `ChatAbilities.canSendCommands`.
+    fn commands_allowed(&self) -> bool {
+        self.options.visibility != ChatVisibilitySetting::Hidden
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -975,21 +1307,15 @@ impl ChatState {
             return None;
         }
 
-        // Up/Down cycle the suggestion popup when it's showing, else recall
+        // Up/Down cycle the suggestion list when it's showing, else recall
         // sent-message history (vanilla CommandSuggestions gets keys first).
         if up || down {
+            let direction = if up { -1 } else { 1 };
             if !self.suggestions.is_empty() {
-                let n = self.suggestions.len();
-                self.suggest_index = if up {
-                    (self.suggest_index + n - 1) % n
-                } else {
-                    (self.suggest_index + 1) % n
-                };
-                self.keep_suggestion_visible();
-            } else if up {
-                self.move_in_history(-1, inner_w, width_fn);
+                self.cycle_suggestion(direction);
+                self.tab_cycles = false;
             } else {
-                self.move_in_history(1, inner_w, width_fn);
+                self.move_in_history(direction as i32, inner_w, width_fn, tree);
             }
         }
         let lines_per_page = self.lines_per_page();
@@ -1001,7 +1327,6 @@ impl ChatState {
         }
 
         let mut clipboard = SystemClipboard;
-        let before_edits = self.input.value().to_string();
         for ev in events {
             if self.is_restored_draft
                 && matches!(
@@ -1012,93 +1337,59 @@ impl ChatState {
                     }
                 )
             {
-                self.input.set_value("", inner_w, width_fn);
-                self.is_restored_draft = false;
-                self.latest_draft = None;
+                self.set_input_value("", inner_w, width_fn, tree);
                 continue;
             }
+            let before = self.input.value().to_owned();
             self.input.handle(ev, &mut clipboard, inner_w, width_fn);
-        }
-        // A real edit re-enables the popup and turns a restored draft into a
-        // normal live edit (vanilla `ChatScreen.onEdited`).
-        if self.input.value() != before_edits {
-            self.is_restored_draft = false;
-            self.allow_suggestions = self.options.auto_suggestions;
+            if self.input.value() != before {
+                self.on_edited(tree);
+            }
         }
 
-        // Tab opens a hidden completion list again; once visible it applies the
-        // highlighted completion, and further Tabs cycle it.
-        if tab && self.suggestions.is_empty() && !self.allow_suggestions {
-            self.allow_suggestions = true;
-            self.last_computed.clear();
-            self.recompute_suggestions(tree);
-        }
-        if tab && !self.suggestions.is_empty() {
-            let n = self.suggestions.len();
-            if self.suggest_applied {
-                self.suggest_index = if shift {
-                    (self.suggest_index + n - 1) % n
-                } else {
-                    (self.suggest_index + 1) % n
-                };
-                self.keep_suggestion_visible();
+        // Tab uses the highlighted entry of a showing list, cycling first
+        // once a Tab has applied one; without a list it only shows it.
+        if tab {
+            if self.suggestions.is_empty() {
+                self.show_suggestions();
+            } else {
+                if self.tab_cycles {
+                    self.cycle_suggestion(if shift { -1 } else { 1 });
+                }
+                self.use_suggestion(inner_w, width_fn, tree);
             }
-            let applied = format!(
-                "{}{}",
-                self.suggest_anchor, self.suggestions[self.suggest_index].text
-            );
-            self.input.set_value(&applied, inner_w, width_fn);
-            self.suggest_applied = true;
-            self.last_computed = applied;
             return None;
         }
 
-        if self.input.value() != self.last_computed {
-            // While suppressed, recompute without the tree: clears the popup.
-            self.recompute_suggestions(tree.filter(|_| self.allow_suggestions));
-        }
-
         if enter {
+            if !self.has_allowed_input(tree) {
+                return None;
+            }
             let normalized = normalize_chat_message(self.input.value());
-            if normalized.is_empty() {
-                self.input.set_value("", inner_w, width_fn);
-                self.close_after_submit();
-                return None;
-            }
-            let is_command = normalized.starts_with('/');
-            let allowed = match self.options.visibility {
-                ChatVisibilitySetting::Full => true,
-                ChatVisibilitySetting::System => is_command,
-                ChatVisibilitySetting::Hidden => false,
-            };
-            if !allowed {
-                return None;
-            }
-            self.add_recent_chat(&normalized);
-            self.input.set_value("", inner_w, width_fn);
-            self.close_after_submit();
-            return Some(normalized);
+            let message = (!normalized.is_empty()).then(|| {
+                self.add_recent_chat(&normalized);
+                normalized
+            });
+            self.close(ChatExitReason::Done);
+            return message;
         }
 
         None
     }
 
-    /// The grey inline completion: the remainder of the selected suggestion
-    /// past what is already typed. Mirrors vanilla
-    /// `CommandSuggestions.calculateSuggestionSuffix` (case-sensitive; the
-    /// cursor is always at the end of pomme's chat input).
-    fn ghost_suffix(&self) -> Option<&str> {
-        // Vanilla only shows the inline suffix with the cursor at the end.
+    /// The grey inline completion: the rest of the selected entry applied to
+    /// the list's original input, past the current value. Vanilla
+    /// `CommandSuggestions.calculateSuggestionSuffix`, drawn only with the
+    /// caret at the end.
+    fn ghost_suffix(&self) -> Option<String> {
         if !self.input.cursor_at_end() {
             return None;
         }
         let selected = self.suggestions.get(self.suggest_index)?;
-        let rest = self
-            .input
-            .value()
-            .strip_prefix(self.suggest_anchor.as_str())?;
-        let suffix = selected.text.strip_prefix(rest)?;
-        (!suffix.is_empty()).then_some(suffix)
+        let applied =
+            apply_suggestion(&self.suggest_original, &self.suggest_range, &selected.text)?;
+        let suffix = applied.strip_prefix(self.input.value())?;
+        (!suffix.is_empty()).then(|| suffix.to_owned())
     }
 
     fn style_at(&self, cursor: (f32, f32)) -> Option<Arc<ResolvedStyle>> {
@@ -1108,14 +1399,18 @@ impl ChatState {
             .map(|r| r.style.clone())
     }
 
-    pub fn hovering_clickable(&self, cursor: (f32, f32)) -> bool {
+    /// Whether the pointing-hand cursor applies: a hovered button
+    /// (`AbstractWidget`), click-event text, or insertion text while Shift
+    /// is held (`DrawingFocusedGraphicsAccess.changeCursorOnInsertions`).
+    pub fn hovering_clickable(&self, cursor: (f32, f32), shift: bool) -> bool {
         if !self.open {
             return false;
         }
-        if let Some((yes, copy, no)) = self.link_buttons {
-            return common::hit_test(cursor, yes)
-                || common::hit_test(cursor, copy)
-                || common::hit_test(cursor, no);
+        if self.modal.is_some() {
+            return self
+                .modal_buttons
+                .iter()
+                .any(|rect| common::hit_test(cursor, *rect));
         }
         if self
             .queue_region
@@ -1130,42 +1425,9 @@ impl ChatState {
         {
             return true;
         }
-        !self.has_pending_modal_prompt()
-            && self
-                .style_at(cursor)
-                .is_some_and(|style| style.click_event.is_some())
-    }
-
-    fn apply_suggestion(&mut self, idx: usize, inner_w: f32, width_fn: &dyn Fn(&str) -> f32) {
-        let Some(suggestion) = self.suggestions.get(idx).cloned() else {
-            return;
-        };
-        self.suggest_index = idx;
-        let applied = format!("{}{}", self.suggest_anchor, suggestion.text);
-        self.input.set_value(&applied, inner_w, width_fn);
-        self.suggest_applied = true;
-        self.last_computed = applied;
-    }
-
-    fn handle_link_prompt_click(&mut self, cursor: (f32, f32)) -> Option<ChatUiAction> {
-        let url = self.pending_link.clone()?;
-        let (yes, copy, no) = self.link_buttons?;
-        if common::hit_test(cursor, yes) {
-            self.pending_link = None;
-            self.link_buttons = None;
-            return Some(ChatUiAction::OpenUrl(url));
-        }
-        if common::hit_test(cursor, copy) {
-            common::set_clipboard(&url);
-            self.pending_link = None;
-            self.link_buttons = None;
-            return None;
-        }
-        if common::hit_test(cursor, no) {
-            self.pending_link = None;
-            self.link_buttons = None;
-        }
-        None
+        self.style_at(cursor).is_some_and(|style| {
+            style.click_event.is_some() || (shift && style.insertion.is_some())
+        })
     }
 
     fn handle_click(
@@ -1174,6 +1436,7 @@ impl ChatState {
         shift: bool,
         inner_w: f32,
         width_fn: &dyn Fn(&str) -> f32,
+        tree: Option<&CommandTree>,
     ) -> Option<ChatUiAction> {
         if self.has_pending_modal_prompt() {
             return None;
@@ -1193,7 +1456,8 @@ impl ChatState {
             .find(|(_, rect)| common::hit_test(cursor, *rect))
             .copied()
         {
-            self.apply_suggestion(idx, inner_w, width_fn);
+            self.select_suggestion(idx as isize);
+            self.use_suggestion(inner_w, width_fn, tree);
             return None;
         }
 
@@ -1201,8 +1465,7 @@ impl ChatState {
         if shift {
             if let Some(insertion) = &style.insertion {
                 self.input.insert_text(insertion, inner_w, width_fn);
-                self.allow_suggestions = self.options.auto_suggestions;
-                self.last_computed.clear();
+                self.on_edited(tree);
             }
             return None;
         }
@@ -1211,9 +1474,7 @@ impl ChatState {
             ClickEvent::OpenUrl(url) => self.request_open_url(url.clone()),
             ClickEvent::RunCommand(command) => Some(ChatUiAction::RunCommand(command.clone())),
             ClickEvent::SuggestCommand(command) => {
-                self.input.set_value(command, inner_w, width_fn);
-                self.allow_suggestions = self.options.auto_suggestions;
-                self.last_computed.clear();
+                self.set_input_value(command, inner_w, width_fn, tree);
                 None
             }
             ClickEvent::CopyToClipboard(value) => {
@@ -1221,18 +1482,18 @@ impl ChatState {
                 None
             }
             ClickEvent::ShowDialog(dialog) => Some(ChatUiAction::ShowDialog(dialog.clone())),
-            ClickEvent::Custom { id, payload } => {
-                if id == "minecraft:internal/go_to_restrictions_screen"
-                    || id == "internal/go_to_restrictions_screen"
-                {
-                    Some(ChatUiAction::OpenChatSettings)
-                } else {
-                    Some(ChatUiAction::Custom {
-                        id: id.clone(),
-                        payload: payload.clone(),
-                    })
+            ClickEvent::Custom { id, payload } => match normalize_identifier(id).as_str() {
+                QUEUE_EXPAND_ID => {
+                    self.accept_next_delayed_message();
+                    None
                 }
-            }
+                // TODO: vanilla opens RestrictionsScreen (ChatScreen.java:250).
+                GO_TO_RESTRICTIONS_SCREEN => Some(ChatUiAction::OpenChatSettings),
+                _ => Some(ChatUiAction::Custom {
+                    id: id.clone(),
+                    payload: payload.clone(),
+                }),
+            },
             ClickEvent::ChangePage(_) => None,
         }
     }
@@ -1258,21 +1519,30 @@ impl ChatState {
         self.hit_regions.clear();
         self.suggestion_regions.clear();
         self.queue_region = None;
-        let chat_scale = self.options.scale.clamp(0.01, 1.0);
+        // Under a modal the chat draws as Hud's unfocused background layer.
+        let focused = self.is_focused();
+        let chat_scale = self.options.scale.clamp(0.0, 1.0);
+        // Vanilla `pose.scale(0, 0)` collapses every message, tag, queue and
+        // restricted-prompt draw (and their click targets) at Chat Text
+        // Size 0; the input box is drawn outside that pose.
+        let hud_visible = chat_scale > 0.0;
         let chat_width = self.options.wrap_width_px();
+        let render_width = self.options.render_width_px();
         let chat_fs = common::FONT_SIZE * gs * chat_scale;
+        let unit = gs * chat_scale;
         let entry_height = self.options.line_height();
-        let lh = entry_height * gs * chat_scale;
+        let lh = entry_height * unit;
+        let text_opacity = self.options.effective_text_opacity();
         let spacing = self.options.line_spacing.clamp(0.0, 1.0);
         let text_baseline_offset = (8.0 * (spacing + 1.0) - 4.0 * spacing).round();
         // Vanilla scales the ChatComponent pose, then translates x by 4 in
         // that local coordinate space. The -4 background start therefore
         // lands exactly on screen x=0 at every chat scale.
-        let origin = CHAT_X * gs * chat_scale;
+        let origin = CHAT_X * unit;
         let bg_x = 0.0;
-        let bg_w = (chat_width + 12.0) * gs * chat_scale;
+        let bg_w = (render_width + 12.0) * unit;
         let screen_gui_h = screen_h / gs;
-        let chat_bottom = ((screen_gui_h - BOTTOM_MARGIN) / chat_scale).floor() * chat_scale * gs;
+        let chat_bottom = ((screen_gui_h - BOTTOM_MARGIN) / chat_scale).floor() * unit;
         let now = Instant::now();
         // Measure wrapping at gui-scale 1 so wrap points stay fixed when the
         // gui scale changes (vanilla wraps in gui-space, then scales). Use the
@@ -1284,12 +1554,12 @@ impl ChatState {
         let total_lines: usize = self
             .messages
             .iter()
-            .filter(|m| self.source_visible(m.source, m.tag.as_ref()))
+            .filter(|m| self.source_visible(m.source))
             .map(|m| m.wrapped(chat_width, self.options.colors, &width0).len())
             .sum();
         // Clamp the scroll to the wrapped backlog (vanilla scrollChat clamps
         // against `trimmedMessages`).
-        if self.open && self.scroll_pos > 0 {
+        if focused && self.scroll_pos > 0 {
             self.scroll_pos = self
                 .scroll_pos
                 .min(total_lines.saturating_sub(lines_per_page));
@@ -1300,16 +1570,21 @@ impl ChatState {
         // lines of a message share its alpha.
         let mut display: Vec<DisplayLine> = Vec::new();
         let mut skipped = 0usize;
-        'gather: for (message_id, msg) in self.messages.iter().rev().enumerate() {
-            if !self.source_visible(msg.source, msg.tag.as_ref()) {
+        let messages = if hud_visible {
+            &self.messages
+        } else {
+            &VecDeque::new()
+        };
+        'gather: for (message_id, msg) in messages.iter().rev().enumerate() {
+            if !self.source_visible(msg.source) {
                 continue;
             }
-            let alpha = if self.open {
+            let alpha = if focused {
                 1.0
             } else {
                 line_alpha(now.duration_since(msg.received).as_secs_f32())
             };
-            if !self.open && alpha <= 1e-5 {
+            if !focused && alpha <= 1e-5 {
                 continue;
             }
             let wrapped = msg.wrapped(chat_width, self.options.colors, &width0);
@@ -1351,22 +1626,23 @@ impl ChatState {
                     color: vanilla_black_fill(bg_a),
                 });
             }
-            let text_a = alpha * self.options.effective_text_opacity();
+            let text_a = alpha * text_opacity;
+            let text_top = entry_bottom - text_baseline_offset * unit;
             if let Some(tag) = tag {
                 let mut indicator = tag.indicator_color();
                 indicator[3] *= text_a;
+                let indicator_rect = [0.0, entry_top, 2.0 * unit, lh];
                 elements.push(MenuElement::Rect {
-                    x: 0.0,
-                    y: entry_top,
-                    w: 2.0 * gs * chat_scale,
-                    h: lh,
+                    x: indicator_rect[0],
+                    y: indicator_rect[1],
+                    w: indicator_rect[2],
+                    h: indicator_rect[3],
                     corner_radius: 0.0,
                     color: indicator,
                 });
-                let indicator_rect = [0.0, entry_top, 2.0 * gs * chat_scale, lh];
-                if common::hit_test(cursor, indicator_rect) {
-                    let lines = component_tooltip_lines(&tag.tooltip_component());
-                    common::push_tooltip_lines(elements, cursor, screen_w, screen_h, gs, lines);
+                // Only the focused (chat open) access shows tag tooltips.
+                if focused && common::hit_test(cursor, indicator_rect) {
+                    push_tag_tooltip(elements, tag, cursor, screen_w, screen_h, gs, &width0);
                 }
             }
 
@@ -1387,15 +1663,19 @@ impl ChatState {
                 span_x += span_w;
             }
 
-            if matches!(tag, Some(ChatMessageTag::Modified { .. })) {
+            // Vanilla `handleTagIcon`: the background access draws no icon.
+            if focused && let Some(tag @ ChatMessageTag::Modified { .. }) = tag {
+                // The 9x9 icon's top sits one pixel above the text top; its
+                // hover box runs down to the text bottom (9x10).
                 let line_width = spans_width_fn(line_spans, chat_fs);
                 let icon_rect = [
-                    origin + line_width + 4.0 * gs * chat_scale,
-                    entry_top,
-                    9.0 * gs * chat_scale,
-                    9.0 * gs * chat_scale,
+                    origin + line_width + 4.0 * unit,
+                    text_top - unit,
+                    9.0 * unit,
+                    9.0 * unit,
                 ];
-                let icon_hovered = common::hit_test(cursor, icon_rect);
+                let hover_rect = [icon_rect[0], icon_rect[1], icon_rect[2], 10.0 * unit];
+                let icon_hovered = common::hit_test(cursor, hover_rect);
                 let message_hovered = *end_of_entry
                     && display.iter().enumerate().any(
                         |(line_idx, (other_spans, _, _, _, other_message_id))| {
@@ -1421,24 +1701,15 @@ impl ChatState {
                         tint: common::WHITE,
                     });
                 }
-                if icon_hovered && let Some(tag) = tag {
-                    let lines = component_tooltip_lines(&tag.tooltip_component());
-                    common::push_tooltip_lines(elements, cursor, screen_w, screen_h, gs, lines);
+                if icon_hovered {
+                    push_tag_tooltip(elements, tag, cursor, screen_w, screen_h, gs, &width0);
                 }
             }
 
-            let faded: Vec<TextSpan> = line_spans
-                .iter()
-                .map(|s| {
-                    let mut s = s.clone();
-                    s.color[3] *= text_a;
-                    s
-                })
-                .collect();
             chat_text_elements.push(MenuElement::McText {
                 x: origin,
-                y: entry_bottom - text_baseline_offset * gs * chat_scale,
-                spans: faded,
+                y: text_top,
+                spans: with_alpha(line_spans, text_a),
                 scale: chat_fs,
                 centered: false,
                 shadow: true,
@@ -1446,12 +1717,12 @@ impl ChatState {
         }
         elements.extend(chat_text_elements);
 
-        if self.open && self.options.visibility != ChatVisibilitySetting::Full {
+        if hud_visible && focused && self.options.visibility != ChatVisibilitySetting::Full {
             let restricted_y = chat_bottom - (display.len() as f32 + 1.0) * lh;
             elements.push(MenuElement::Rect {
-                x: 2.0 * gs * chat_scale,
+                x: 2.0 * unit,
                 y: restricted_y,
-                w: (chat_width + 10.0) * gs * chat_scale,
+                w: (render_width + 10.0) * unit,
                 h: lh,
                 corner_radius: 0.0,
                 color: vanilla_black_fill(self.options.text_background_opacity),
@@ -1460,10 +1731,22 @@ impl ChatState {
             restricted.style.color = Some(0xff5555);
             restricted.style.underlined = Some(true);
             restricted.style.click_event = Some(ClickEvent::Custom {
-                id: "minecraft:internal/go_to_restrictions_screen".to_owned(),
+                id: GO_TO_RESTRICTIONS_SCREEN.to_owned(),
                 payload: None,
             });
-            let restricted_spans = format_component_spans(&restricted, common::rgb(0xff5555));
+            let mut restricted_spans = format_component_spans(&restricted, common::WHITE);
+            // Vanilla clips an overlong prompt and adds the full text as a
+            // hover tooltip (`RESTRICTED_CHAT_MESSAGE_WITH_HOVER`).
+            if width0(&restricted_spans) > render_width {
+                restricted.style.hover_event = Some(HoverEvent::Text(Box::new(
+                    Component::translate("chat_screen.restricted", Vec::new()),
+                )));
+                restricted_spans = clip_spans(
+                    &format_component_spans(&restricted, common::WHITE),
+                    render_width,
+                    &width0,
+                );
+            }
             let mut x = origin;
             for span in &restricted_spans {
                 let width = spans_width_fn(std::slice::from_ref(span), chat_fs);
@@ -1480,29 +1763,21 @@ impl ChatState {
             }
             elements.push(MenuElement::McText {
                 x: origin,
-                y: restricted_y + (entry_height - text_baseline_offset - 1.0) * gs * chat_scale,
-                spans: restricted_spans,
+                y: restricted_y + (entry_height - text_baseline_offset - 1.0) * unit,
+                spans: with_alpha(&restricted_spans, text_opacity),
                 scale: chat_fs,
                 centered: false,
                 shadow: true,
             });
         }
 
-        if !self.delayed_messages.is_empty() {
+        if hud_visible && !self.delayed_messages.is_empty() {
             let queue_count = self.delayed_messages.len();
-            let queue_h = common::FONT_SIZE * gs * chat_scale;
-            let queue_rect = [
-                2.0 * gs * chat_scale,
-                chat_bottom,
-                (chat_width + 6.0) * gs * chat_scale,
-                queue_h,
-            ];
-            self.queue_region = Some(queue_rect);
             elements.push(MenuElement::Rect {
-                x: queue_rect[0],
-                y: queue_rect[1],
-                w: queue_rect[2],
-                h: queue_rect[3],
+                x: 2.0 * unit,
+                y: chat_bottom,
+                w: (render_width + 6.0) * unit,
+                h: 9.0 * unit,
                 corner_radius: 0.0,
                 color: vanilla_black_fill(self.options.text_background_opacity),
             });
@@ -1510,41 +1785,51 @@ impl ChatState {
                 "chat.queue",
                 vec![Argument::Number(queue_count.to_string())],
             );
-            let mut queue_spans = format_component_spans(&queue_component, common::WHITE);
-            let queue_alpha = 0.5 * self.options.effective_text_opacity();
-            for span in &mut queue_spans {
-                span.color[3] *= queue_alpha;
-            }
+            let queue_spans = format_component_spans(&queue_component, common::WHITE);
+            let text_y = chat_bottom + unit;
+            // Only the queue text's glyphs carry the expand click and tooltip
+            // (vanilla `QUEUE_EXPAND_TEXT_STYLE`), not the rest of the bar.
+            let queue_rect = [
+                origin,
+                text_y,
+                spans_width_fn(&queue_spans, chat_fs),
+                common::FONT_SIZE * unit,
+            ];
+            self.queue_region = Some(queue_rect);
             elements.push(MenuElement::McText {
                 x: origin,
-                y: chat_bottom + gs * chat_scale,
-                spans: queue_spans,
+                y: text_y,
+                spans: with_alpha(&queue_spans, 0.5 * text_opacity),
                 scale: chat_fs,
                 centered: false,
                 shadow: true,
             });
-            if self.open && common::hit_test(cursor, queue_rect) {
+            if focused && common::hit_test(cursor, queue_rect) {
                 let tooltip = Component::translate("chat.queue.tooltip", Vec::new());
-                common::push_tooltip_lines(
+                push_hover_tooltip(
                     elements,
+                    &HoverEvent::Text(Box::new(tooltip)),
                     cursor,
                     screen_w,
                     screen_h,
                     gs,
-                    component_tooltip_lines(&tooltip),
+                    advanced_item_tooltips,
+                    &width0,
                 );
             }
         }
 
-        if self.open && total_lines > lines_per_page && !display.is_empty() {
-            let count = display.len();
-            let chat_height = count as f32 * lh;
-            let virtual_height = total_lines as f32 * lh;
-            let bar_h = (chat_height * chat_height / virtual_height).max(gs * chat_scale);
-            let offset = self.scroll_pos as f32 * chat_height / total_lines as f32;
+        if focused && total_lines > lines_per_page && !display.is_empty() {
+            // Vanilla sizes the bar in whole gui units with integer division,
+            // so a long backlog can round its height down to nothing.
+            let entry_units = entry_height as usize;
+            let chat_height = display.len() * entry_units;
+            let virtual_height = total_lines * entry_units;
+            let offset = (self.scroll_pos * chat_height / total_lines) as f32 * unit;
+            let bar_h = (chat_height * chat_height / virtual_height) as f32 * unit;
             let bar_bottom = chat_bottom - offset;
             let bar_top = bar_bottom - bar_h;
-            let x = origin + (chat_width + 4.0) * gs * chat_scale;
+            let x = origin + (render_width + 4.0) * unit;
             let color = if self.new_message_since_scroll {
                 common::rgb(0xcc3333)
             } else {
@@ -1554,22 +1839,22 @@ impl ChatState {
             elements.push(MenuElement::Rect {
                 x,
                 y: bar_top,
-                w: 2.0 * gs * chat_scale,
+                w: 2.0 * unit,
                 h: bar_h,
                 corner_radius: 0.0,
                 color: [color[0], color[1], color[2], alpha],
             });
             elements.push(MenuElement::Rect {
-                x: x + gs * chat_scale,
+                x: x + unit,
                 y: bar_top,
-                w: gs * chat_scale,
+                w: unit,
                 h: bar_h,
                 corner_radius: 0.0,
                 color: [0.8, 0.8, 0.8, alpha],
             });
         }
 
-        if self.open {
+        if focused {
             let ui_fs = common::FONT_SIZE * gs;
             let input_h = INPUT_HEIGHT * gs;
             // Vanilla pins the input as a full-width bar at the very bottom of
@@ -1583,196 +1868,67 @@ impl ChatState {
                 w: screen_w - 4.0 * gs,
                 h: input_h,
                 corner_radius: 0.0,
-                color: vanilla_black_fill(self.options.text_background_opacity),
+                color: vanilla_black_fill(INPUT_BG_ALPHA),
             });
 
             // ChatScreen's EditBox is independent of ChatComponent scale:
             // x=4, y=height-12, width=screenWidth-4 in GUI coordinates.
-            let text_x = 4.0 * gs;
+            let text_x = INPUT_X * gs;
             let inner_w = screen_w - text_x;
             let wf = |s: &str| text_width_fn(s, ui_fs);
             let info = self.input.render_info(inner_w, true, &wf);
             let shown = &self.input.value()[info.display_start..info.display_end];
 
-            // The ghost is the inline suggestion suffix, shown only while the
-            // caret sits at the end of the input. Commands use Vanilla's
-            // Brigadier syntax colors while ordinary messages remain white.
-            let presentation = self
-                .input
-                .value()
-                .strip_prefix('/')
-                .and_then(|command| command_tree.map(|tree| tree.presentation(command)));
-            if let Some(presentation) = presentation.as_ref() {
-                let all_spans = command_input_spans(self.input.value(), presentation);
-                let visible_spans = slice_spans(&all_spans, info.display_start, info.display_end);
-                common::push_field_spans(
-                    elements,
-                    &info,
-                    shown,
-                    &visible_spans,
-                    text_x,
-                    text_y,
-                    ui_fs,
-                    gs,
-                    gs,
-                    CARET_COLOR,
-                    self.ghost_suffix().map(|g| (g, GHOST_TEXT)),
-                    &wf,
-                );
+            // EditBox formatters, first match wins: ChatScreen's restored
+            // draft (grey italic), then CommandSuggestions' Brigadier colours;
+            // ordinary messages stay unformatted.
+            let presentation = self.input.value().strip_prefix('/').and_then(|command| {
+                command_tree
+                    .map(|tree| tree.presentation(command, self.input.cursor().saturating_sub(1)))
+            });
+            let all_spans = if self.is_restored_draft {
+                let mut draft = TextSpan::new(self.input.value().to_owned(), common::rgb(0xaaaaaa));
+                draft.italic = true;
+                Some(vec![draft])
             } else {
-                common::push_field_text(
-                    elements,
-                    &info,
-                    shown,
-                    text_x,
-                    text_y,
-                    ui_fs,
-                    gs,
-                    gs,
-                    CARET_COLOR,
-                    self.ghost_suffix().map(|g| (g, GHOST_TEXT)),
-                    &wf,
-                );
-            }
+                presentation
+                    .as_ref()
+                    .map(|presentation| command_input_spans(self.input.value(), presentation))
+            };
+            let visible_spans =
+                all_spans.map(|spans| slice_spans(&spans, info.display_start, info.display_end));
+            let ghost = self.ghost_suffix();
+            common::push_field_text(
+                elements,
+                &info,
+                shown,
+                visible_spans.as_deref(),
+                text_x,
+                text_y,
+                ui_fs,
+                gs,
+                gs,
+                CARET_COLOR,
+                ghost.as_deref().map(|g| (g, GHOST_TEXT)),
+                &wf,
+            );
 
+            let gui_w = |s: &str| text_width_fn(s, ui_fs) / gs;
             if !self.suggestions.is_empty() {
-                let row_h = SUGGEST_ROW_H * gs;
-                let visible = self.suggestions.len().min(MAX_SUGGESTION_ROWS);
-                let max_offset = self.suggestions.len() - visible;
-                self.suggest_offset = self.suggest_offset.min(max_offset);
-                let offset = self.suggest_offset;
-
-                let pad = gs;
-                let max_w = self.suggestions[offset..offset + visible]
-                    .iter()
-                    .map(|s| text_width_fn(&s.text, ui_fs))
-                    .fold(0.0_f32, f32::max);
-                // Vanilla showSuggestions computes x from the width of the
-                // input prefix (not EditBox.x), then the unbordered list moves
-                // one pixel left and adds one pixel to the supplied width.
-                let supplied_w = max_w + gs;
-                let popup_w = supplied_w + gs;
-                let anchor_w = text_width_fn(&self.suggest_anchor, ui_fs);
-                let popup_x = anchor_w.clamp(0.0, (screen_w - supplied_w).max(0.0)) - gs;
-                let popup_top = bar_y - gs - visible as f32 * row_h;
-                let mouse_moved = self.last_suggestion_cursor != Some(cursor);
-                self.last_suggestion_cursor = Some(cursor);
-                let mut hovered_idx = None;
-
-                for i in 0..visible {
-                    let idx = offset + i;
-                    let row_y = popup_top + i as f32 * row_h;
-                    let rect = [popup_x, row_y, popup_w, row_h];
-                    self.suggestion_regions.push((idx, rect));
-                    if mouse_moved && common::hit_test(cursor, rect) {
-                        hovered_idx = Some(idx);
-                    }
-                    elements.push(MenuElement::Rect {
-                        x: popup_x,
-                        y: row_y,
-                        w: popup_w,
-                        h: row_h,
-                        corner_radius: 0.0,
-                        color: vanilla_black_fill(SUGGEST_BG_ALPHA),
-                    });
-                    elements.push(MenuElement::Text {
-                        x: popup_x + pad,
-                        y: row_y + (row_h - ui_fs) / 2.0,
-                        text: self.suggestions[idx].text.clone(),
-                        scale: ui_fs,
-                        color: if idx == self.suggest_index {
-                            SUGGEST_SELECTED
-                        } else {
-                            SUGGEST_TEXT
-                        },
-                        centered: false,
-                    });
-                }
-                if let Some(idx) = hovered_idx {
-                    self.suggest_index = idx;
-                    if let Some(tooltip) = self.suggestions[idx].tooltip.as_ref() {
-                        let lines = component_tooltip_lines(tooltip);
-                        common::push_tooltip_lines(elements, cursor, screen_w, screen_h, gs, lines);
-                    }
-                }
+                self.push_suggestion_list(elements, cursor, screen_w, screen_h, gs, &gui_w);
             } else {
-                let mut usage: Vec<(String, [f32; 4])> = Vec::new();
-                let mut usage_start = 0usize;
-                if let Some(presentation) = presentation.as_ref() {
-                    usage_start = presentation.usage_start.saturating_add(1);
-                    usage.extend(
-                        presentation
-                            .usage
-                            .iter()
-                            .cloned()
-                            .map(|line| (line, common::rgb(0xaaaaaa))),
-                    );
-                    if presentation
-                        .tokens
-                        .iter()
-                        .any(|token| token.kind == CommandTokenKind::Unparsed)
-                        && usage.is_empty()
-                    {
-                        let key = if presentation.tokens.len() <= 1 {
-                            "command.unknown.command"
-                        } else {
-                            "command.unknown.argument"
-                        };
-                        usage.push((
-                            crate::lang::translate(key).unwrap_or(key).to_owned(),
-                            common::rgb(0xff5555),
-                        ));
-                    }
-                    if self.options.visibility == ChatVisibilitySetting::Hidden {
-                        let key = "chat_screen.commands_not_allowed";
-                        usage.push((
-                            crate::lang::translate(key).unwrap_or(key).to_owned(),
-                            common::rgb(0xff5555),
-                        ));
-                    }
-                } else if !self.input.value().trim().is_empty()
-                    && self.options.visibility != ChatVisibilitySetting::Full
-                {
-                    let key = "chat_screen.messages_not_allowed";
-                    usage.push((
-                        crate::lang::translate(key).unwrap_or(key).to_owned(),
-                        common::rgb(0xff5555),
-                    ));
-                }
-
-                if !usage.is_empty() {
-                    let usage_w = usage
-                        .iter()
-                        .map(|(line, _)| text_width_fn(line, ui_fs))
-                        .fold(0.0_f32, f32::max);
-                    let prefix_end = usage_start.min(self.input.value().len());
-                    let usage_x = (text_x
-                        + text_width_fn(&self.input.value()[..prefix_end], ui_fs))
-                    .clamp(text_x, (screen_w - usage_w - gs).max(text_x));
-                    for (index, (line, color)) in usage.into_iter().enumerate() {
-                        let y = screen_h - 27.0 * gs - 12.0 * gs * index as f32;
-                        elements.push(MenuElement::Rect {
-                            x: usage_x - gs,
-                            y,
-                            w: usage_w + 2.0 * gs,
-                            h: 12.0 * gs,
-                            corner_radius: 0.0,
-                            color: vanilla_black_fill(SUGGEST_BG_ALPHA),
-                        });
-                        elements.push(MenuElement::Text {
-                            x: usage_x,
-                            y: y + 2.0 * gs,
-                            text: line,
-                            scale: ui_fs,
-                            color,
-                            centered: false,
-                        });
-                    }
-                }
+                self.push_usage(
+                    elements,
+                    presentation.as_ref(),
+                    screen_w,
+                    screen_h,
+                    gs,
+                    &gui_w,
+                    &|spans| spans_width_fn(spans, ui_fs) / gs,
+                );
             }
 
-            if !self.has_pending_modal_prompt()
-                && let Some(style) = self.style_at(cursor)
+            if let Some(style) = self.style_at(cursor)
                 && let Some(hover) = &style.hover_event
             {
                 push_hover_tooltip(
@@ -1783,17 +1939,215 @@ impl ChatState {
                     screen_h,
                     gs,
                     advanced_item_tooltips,
+                    &width0,
                 );
             }
 
-            if clicked && !self.has_pending_modal_prompt() {
-                return self.handle_click(cursor, shift, inner_w, &wf);
+            if clicked {
+                return self.handle_click(cursor, shift, inner_w, &wf, command_tree);
             }
         }
 
         None
     }
 
+    /// The showing list's rectangle in GUI units: vanilla `showSuggestions`
+    /// places it at the completed range's screen x, clamped on screen, and
+    /// the `SuggestionsList` constructor anchors it above the input.
+    fn suggestion_rect(
+        &self,
+        screen_w: f32,
+        screen_h: f32,
+        gui_w: &dyn Fn(&str) -> f32,
+    ) -> [f32; 4] {
+        let max_w = self
+            .suggestions
+            .iter()
+            .map(|s| gui_w(&s.text))
+            .fold(0.0_f32, f32::max);
+        // `EditBox.getScreenX` over the list's original input.
+        let screen_x = INPUT_X
+            + self
+                .suggest_original
+                .get(..self.suggest_range.start)
+                .map_or(0.0, gui_w);
+        let x = screen_x.max(0.0).min(screen_w - max_w);
+        let height = self.suggestions.len().min(MAX_SUGGESTION_ROWS) as f32 * SUGGEST_ROW_H;
+        // The unbordered input shifts the list one left.
+        [x - 1.0, screen_h - 12.0 - 3.0 - height, max_w + 1.0, height]
+    }
+
+    /// Vanilla `SuggestionsList.extractRenderState`: hovering selects only
+    /// when the mouse moved, and the selected entry's tooltip shows while
+    /// any row is hovered.
+    fn push_suggestion_list(
+        &mut self,
+        elements: &mut Vec<MenuElement>,
+        cursor: (f32, f32),
+        screen_w: f32,
+        screen_h: f32,
+        gs: f32,
+        gui_w: &dyn Fn(&str) -> f32,
+    ) {
+        let count = self.suggestions.len();
+        let limit = count.min(MAX_SUGGESTION_ROWS);
+        self.suggest_offset = self.suggest_offset.min(count - limit);
+        let offset = self.suggest_offset;
+        let [x, y, w, h] = self.suggestion_rect(screen_w / gs, screen_h / gs, gui_w);
+        let fill = |elements: &mut Vec<MenuElement>, x: f32, y: f32, w: f32, h: f32, color| {
+            elements.push(MenuElement::Rect {
+                x: x * gs,
+                y: y * gs,
+                w: w * gs,
+                h: h * gs,
+                corner_radius: 0.0,
+                color,
+            });
+        };
+        let bg = vanilla_black_fill(SUGGEST_BG_ALPHA);
+        let mouse = ((cursor.0 / gs).floor(), (cursor.1 / gs).floor());
+        let mouse_moved = self.last_suggestion_cursor != Some(mouse);
+        self.last_suggestion_cursor = Some(mouse);
+
+        // Dotted edges mark entries scrolled out above or below.
+        let has_previous = offset > 0;
+        let has_next = count > offset + limit;
+        if has_previous || has_next {
+            fill(elements, x, y - 1.0, w, 1.0, bg);
+            fill(elements, x, y + h, w, 1.0, bg);
+            for (dotted, edge_y) in [(has_previous, y - 1.0), (has_next, y + h)] {
+                if dotted {
+                    for dot in (0..w as usize).step_by(2) {
+                        fill(elements, x + dot as f32, edge_y, 1.0, 1.0, common::WHITE);
+                    }
+                }
+            }
+        }
+
+        let mut hovered = false;
+        for row in 0..limit {
+            let index = row + offset;
+            let row_y = y + row as f32 * SUGGEST_ROW_H;
+            fill(elements, x, row_y, w, SUGGEST_ROW_H, bg);
+            self.suggestion_regions
+                .push((index, [x * gs, row_y * gs, w * gs, SUGGEST_ROW_H * gs]));
+            if mouse.0 > x && mouse.0 < x + w && mouse.1 > row_y && mouse.1 < row_y + SUGGEST_ROW_H
+            {
+                if mouse_moved {
+                    self.select_suggestion(index as isize);
+                }
+                hovered = true;
+            }
+            elements.push(MenuElement::Text {
+                x: (x + 1.0) * gs,
+                y: (row_y + 2.0) * gs,
+                text: self.suggestions[index].text.clone(),
+                scale: common::FONT_SIZE * gs,
+                color: if index == self.suggest_index {
+                    SUGGEST_SELECTED
+                } else {
+                    SUGGEST_TEXT
+                },
+                centered: false,
+            });
+        }
+        if hovered && let Some(tooltip) = &self.suggestions[self.suggest_index].tooltip {
+            let lines = component_tooltip_lines(tooltip);
+            common::push_tooltip_lines(elements, cursor, screen_w, screen_h, gs, lines);
+        }
+    }
+
+    /// Vanilla `CommandSuggestions.extractUsage` over the lines
+    /// `updateCommandInfo`/`updateUsageInfo` collect.
+    #[allow(clippy::too_many_arguments)]
+    fn push_usage(
+        &self,
+        elements: &mut Vec<MenuElement>,
+        presentation: Option<&CommandPresentation>,
+        screen_w: f32,
+        screen_h: f32,
+        gs: f32,
+        gui_w: &dyn Fn(&str) -> f32,
+        spans_w: &dyn Fn(&[TextSpan]) -> f32,
+    ) {
+        let value = self.input.value();
+        let restricted = |key: &str| {
+            let mut component = Component::translate(key, Vec::new());
+            component.style.color = Some(0xff5555);
+            format_component_spans(&component, common::WHITE)
+        };
+        let mut lines: Vec<Vec<TextSpan>> = Vec::new();
+        // Where the suggestion context starts; plain messages pin the box to
+        // x = 0 instead.
+        let mut anchor = None;
+        if value.starts_with('/') {
+            // updateUsageInfo only runs once the caret is past the `/`.
+            if self.input.cursor() > 0
+                && let Some(presentation) = presentation
+            {
+                anchor = Some(presentation.usage_start + 1);
+                lines.extend(
+                    presentation
+                        .usage
+                        .iter()
+                        .map(|line| vec![TextSpan::new(line.clone(), common::rgb(0xaaaaaa))]),
+                );
+                if let Some(error_at) = presentation.error_at
+                    && lines.is_empty()
+                    && self.input.cursor_at_end()
+                {
+                    let key = if presentation.unknown_command {
+                        "command.unknown.command"
+                    } else {
+                        "command.unknown.argument"
+                    };
+                    let error = parse_error_component(value, error_at + 1, key);
+                    lines.push(format_component_spans(&error, common::WHITE));
+                }
+                if !self.commands_allowed() {
+                    lines.push(restricted("chat_screen.commands_not_allowed"));
+                }
+                if presentation.is_message && !self.messages_allowed() {
+                    lines.push(restricted("chat_screen.messages_not_allowed"));
+                }
+            }
+        } else if !java_is_blank(value) && !self.messages_allowed() {
+            lines.push(restricted("chat_screen.messages_not_allowed"));
+        }
+        if lines.is_empty() {
+            return;
+        }
+
+        let width = lines
+            .iter()
+            .map(|line| spans_w(line))
+            .fold(0.0_f32, f32::max);
+        let x = anchor.map_or(0.0, |start| {
+            let screen_x = INPUT_X + value.get(..start).map_or(0.0, gui_w);
+            screen_x.max(0.0).min(screen_w / gs - width)
+        });
+        for (index, spans) in lines.into_iter().enumerate() {
+            let y = screen_h / gs - 27.0 - SUGGEST_ROW_H * index as f32;
+            elements.push(MenuElement::Rect {
+                x: (x - 1.0) * gs,
+                y: y * gs,
+                w: (width + 2.0) * gs,
+                h: SUGGEST_ROW_H * gs,
+                corner_radius: 0.0,
+                color: vanilla_black_fill(SUGGEST_BG_ALPHA),
+            });
+            elements.push(MenuElement::McText {
+                x: x * gs,
+                y: (y + 2.0) * gs,
+                spans,
+                scale: common::FONT_SIZE * gs,
+                centered: false,
+                shadow: true,
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn build_modal_prompt(
         &mut self,
         elements: &mut Vec<MenuElement>,
@@ -1802,209 +2156,229 @@ impl ChatState {
         gs: f32,
         cursor: (f32, f32),
         clicked: bool,
+        spans_width_fn: &dyn Fn(&[TextSpan], f32) -> f32,
     ) -> Option<ChatUiAction> {
-        if let Some(pending) = self.pending_command.clone() {
-            let was_visible = self.command_buttons.is_some();
-            self.command_buttons = Some(push_command_prompt(
-                elements,
-                &pending.command,
-                pending.kind,
-                cursor,
-                screen_w,
-                screen_h,
-                gs,
-            ));
-            if clicked && was_visible {
-                let (accept, cancel) = self.command_buttons?;
-                if common::hit_test(cursor, accept) {
-                    self.pending_command = None;
-                    self.command_buttons = None;
-                    match pending.kind {
-                        CommandConfirmationKind::SignatureRequired => {
-                            common::set_clipboard(&format!("/{}", pending.command));
-                        }
-                        CommandConfirmationKind::PermissionsRequired
-                        | CommandConfirmationKind::ParseErrors => {
-                            return Some(ChatUiAction::RunCommandUnsigned(pending.command));
-                        }
-                    }
-                } else if common::hit_test(cursor, cancel) {
-                    self.pending_command = None;
-                    self.command_buttons = None;
-                }
-            }
+        let modal = self.modal.clone()?;
+        let was_drawn = !self.modal_buttons.is_empty();
+        let width0 = |spans: &[TextSpan]| spans_width_fn(spans, common::FONT_SIZE);
+        self.modal_buttons = modal
+            .confirm_screen()
+            .push(elements, cursor, screen_w, screen_h, gs, &width0);
+        if !clicked || !was_drawn {
             return None;
         }
-
-        let url = self.pending_link.clone()?;
-        let was_visible = self.link_buttons.is_some();
-        self.link_buttons = Some(push_link_prompt(
-            elements, &url, cursor, screen_w, screen_h, gs,
-        ));
-        if clicked && was_visible {
-            return self.handle_link_prompt_click(cursor);
+        let pressed = self
+            .modal_buttons
+            .iter()
+            .position(|rect| common::hit_test(cursor, *rect))?;
+        self.close_modal();
+        match modal {
+            ChatModal::Link { url } => match pressed {
+                0 => Some(ChatUiAction::OpenUrl(url)),
+                1 => {
+                    common::set_clipboard(&url);
+                    None
+                }
+                _ => None,
+            },
+            ChatModal::Command(pending) if pressed == 0 => match pending.kind {
+                CommandConfirmationKind::SignatureRequired => {
+                    common::set_clipboard(&format!("/{}", pending.command));
+                    None
+                }
+                CommandConfirmationKind::PermissionsRequired
+                | CommandConfirmationKind::ParseErrors => {
+                    Some(ChatUiAction::RunCommandUnsigned(pending.command))
+                }
+            },
+            ChatModal::Command(_) => None,
         }
-        None
     }
 }
 
-fn push_command_prompt(
-    elements: &mut Vec<MenuElement>,
-    command: &str,
-    kind: CommandConfirmationKind,
-    cursor: (f32, f32),
-    screen_w: f32,
-    screen_h: f32,
-    gs: f32,
-) -> ([f32; 4], [f32; 4]) {
-    common::push_overlay(elements, screen_w, screen_h, 0.5);
-    let ui_fs = common::FONT_SIZE * gs;
-    let title =
-        crate::lang::translate("multiplayer.confirm_command.title").unwrap_or("Confirm Command");
-    elements.push(MenuElement::Text {
-        x: screen_w / 2.0,
-        y: screen_h / 2.0 - 44.0 * gs,
-        text: title.to_owned(),
-        scale: ui_fs,
-        color: common::WHITE,
-        centered: true,
-    });
-    let (message_key, message_fallback, accept_key, accept_fallback) = match kind {
-        CommandConfirmationKind::SignatureRequired => (
-            "multiplayer.confirm_command.signature_required",
-            "This command requires a signed message argument.",
-            "chat.copy",
-            "Copy to Clipboard",
-        ),
-        CommandConfirmationKind::PermissionsRequired => (
-            "multiplayer.confirm_command.permissions_required",
-            "This command requires elevated permissions.",
-            "multiplayer.confirm_command.run_command",
-            "Run Command",
-        ),
-        CommandConfirmationKind::ParseErrors => (
-            "multiplayer.confirm_command.parse_errors",
-            "This command could not be parsed safely.",
-            "multiplayer.confirm_command.run_command",
-            "Run Command",
-        ),
-    };
-    let message = crate::lang::translate(message_key).unwrap_or(message_fallback);
-    elements.push(MenuElement::Text {
-        x: screen_w / 2.0,
-        y: screen_h / 2.0 - 24.0 * gs,
-        text: message.to_owned(),
-        scale: ui_fs,
-        color: common::WHITE,
-        centered: true,
-    });
-    elements.push(MenuElement::Text {
-        x: screen_w / 2.0,
-        y: screen_h / 2.0 - 6.0 * gs,
-        text: format!("/{command}"),
-        scale: ui_fs,
-        color: common::rgb(0xffff55),
-        centered: true,
-    });
-    let bw = 150.0 * gs;
-    let bh = 20.0 * gs;
-    let gap = 8.0 * gs;
-    let bx = (screen_w - (2.0 * bw + gap)) / 2.0;
-    let by = screen_h / 2.0 + 22.0 * gs;
-    let accept = [bx, by, bw, bh];
-    let cancel = [bx + bw + gap, by, bw, bh];
-    let accept_label = crate::lang::translate(accept_key).unwrap_or(accept_fallback);
-    let cancel_label = crate::lang::translate("gui.back").unwrap_or("Back");
-    common::push_button(
-        elements,
-        cursor,
-        accept[0],
-        accept[1],
-        accept[2],
-        accept[3],
-        gs,
-        ui_fs,
-        accept_label,
-        true,
-    );
-    common::push_button(
-        elements,
-        cursor,
-        cancel[0],
-        cancel[1],
-        cancel[2],
-        cancel[3],
-        gs,
-        ui_fs,
-        cancel_label,
-        true,
-    );
-    (accept, cancel)
+/// Vanilla `ChatComponent.QUEUE_EXPAND_ID`.
+const QUEUE_EXPAND_ID: &str = "minecraft:internal/expand_chat_queue";
+/// Vanilla `ChatComponent.GO_TO_RESTRICTIONS_SCREEN`.
+const GO_TO_RESTRICTIONS_SCREEN: &str = "minecraft:internal/go_to_restrictions_screen";
+
+/// `Button.DEFAULT_WIDTH`.
+const CONFIRM_BUTTON_WIDTH: i32 = 150;
+/// `ConfirmLinkScreen.BUTTON_WIDTH`.
+const CONFIRM_LINK_BUTTON_WIDTH: i32 = 100;
+/// `ConfirmScreen.addMessage`'s `setMaxRows`.
+const CONFIRM_MESSAGE_MAX_ROWS: usize = 15;
+const LINE_HEIGHT: i32 = 9;
+
+/// Vanilla `ConfirmScreen`: title, wrapped message, optional extra line and a
+/// button row in a vertical `LinearLayout` centred on the screen.
+struct ConfirmScreen {
+    title: Component,
+    message: Component,
+    /// `ConfirmLinkScreen.addAdditionalText`'s warning.
+    warning: Option<Component>,
+    /// Lang key and gui-unit width of each button, left to right.
+    buttons: Vec<(&'static str, i32)>,
 }
 
-fn push_link_prompt(
-    elements: &mut Vec<MenuElement>,
-    url: &str,
-    cursor: (f32, f32),
-    screen_w: f32,
-    screen_h: f32,
-    gs: f32,
-) -> ([f32; 4], [f32; 4], [f32; 4]) {
-    // Vanilla's untrusted ConfirmLinkScreen uses Yes / Copy to Clipboard / No.
-    common::push_overlay(elements, screen_w, screen_h, 0.5);
-    let ui_fs = common::FONT_SIZE * gs;
-    let title = crate::lang::translate("chat.link.confirm")
-        .unwrap_or("Are you sure you want to open the following website?");
-    elements.push(MenuElement::Text {
-        x: screen_w / 2.0,
-        y: screen_h / 2.0 - 54.0 * gs,
-        text: title.to_owned(),
-        scale: ui_fs,
-        color: common::WHITE,
-        centered: true,
-    });
-    elements.push(MenuElement::Text {
-        x: screen_w / 2.0,
-        y: screen_h / 2.0 - 34.0 * gs,
-        text: url.to_owned(),
-        scale: ui_fs,
-        color: common::WHITE,
-        centered: true,
-    });
-    let warning = crate::lang::translate("chat.link.warning")
-        .unwrap_or("Never open links from people that you don't trust!");
-    elements.push(MenuElement::Text {
-        x: screen_w / 2.0,
-        y: screen_h / 2.0 - 16.0 * gs,
-        text: warning.to_owned(),
-        scale: ui_fs,
-        color: common::rgb(0xffcccc),
-        centered: true,
-    });
-    let bw = 100.0 * gs;
-    let bh = 20.0 * gs;
-    let gap = 4.0 * gs;
-    let total = 3.0 * bw + 2.0 * gap;
-    let bx = (screen_w - total) / 2.0;
-    let by = screen_h / 2.0 + 12.0 * gs;
-    let yes = [bx, by, bw, bh];
-    let copy = [bx + bw + gap, by, bw, bh];
-    let no = [bx + 2.0 * (bw + gap), by, bw, bh];
-    let yes_label = crate::lang::translate("gui.yes").unwrap_or("Yes");
-    let copy_label = crate::lang::translate("chat.copy").unwrap_or("Copy to Clipboard");
-    let no_label = crate::lang::translate("gui.no").unwrap_or("No");
-    common::push_button(
-        elements, cursor, yes[0], yes[1], yes[2], yes[3], gs, ui_fs, yes_label, true,
-    );
-    common::push_button(
-        elements, cursor, copy[0], copy[1], copy[2], copy[3], gs, ui_fs, copy_label, true,
-    );
-    common::push_button(
-        elements, cursor, no[0], no[1], no[2], no[3], gs, ui_fs, no_label, true,
-    );
-    (yes, copy, no)
+/// A text line's top-left in gui units.
+struct PlacedLine {
+    x: i32,
+    y: i32,
+    spans: Vec<TextSpan>,
 }
 
+/// [`ConfirmScreen`] positions in gui units; buttons as `[x, y, w, h]`.
+struct ConfirmLayout {
+    lines: Vec<PlacedLine>,
+    buttons: Vec<[i32; 4]>,
+}
+
+impl ConfirmScreen {
+    /// `ConfirmScreen.init` + `repositionElements` on a `width` x `height`
+    /// gui-unit screen. Vertical spacing 8, children centred; the button row
+    /// has spacing 4 and 16 padding above each button.
+    fn layout(
+        &self,
+        width: i32,
+        height: i32,
+        width0: &dyn Fn(&[TextSpan]) -> f32,
+    ) -> ConfirmLayout {
+        let text_width = |spans: &[TextSpan]| width0(spans).round() as i32;
+
+        let title = format_component_spans(&self.title, common::WHITE);
+        // MultiLineTextWidget(maxWidth = width - 50, maxRows = 15, centred);
+        // MultiLineLabel ends a cut-off last row with an ellipsis.
+        let max_width = (width - 50).max(1);
+        let mut message = wrap_spans(
+            &format_component_spans(&self.message, common::WHITE),
+            max_width as f32,
+            width0,
+        );
+        if message.len() > CONFIRM_MESSAGE_MAX_ROWS {
+            message.truncate(CONFIRM_MESSAGE_MAX_ROWS);
+            let last = message.last_mut().expect("15 rows");
+            *last = clip_spans(last, width0(last), width0);
+        }
+        let message_width = message
+            .iter()
+            .map(|line| text_width(line))
+            .max()
+            .unwrap_or(0)
+            .min(max_width);
+        let warning = self
+            .warning
+            .as_ref()
+            .map(|warning| format_component_spans(warning, common::WHITE));
+        let row_width =
+            self.buttons.iter().map(|(_, w)| w).sum::<i32>() + 4 * (self.buttons.len() as i32 - 1);
+
+        let title_width = text_width(&title);
+        let mut children = vec![
+            (title_width, LINE_HEIGHT),
+            (message_width, message.len() as i32 * LINE_HEIGHT),
+        ];
+        let warning_width = warning.as_deref().map(text_width);
+        if let Some(warning_width) = warning_width {
+            children.push((warning_width, LINE_HEIGHT));
+        }
+        children.push((row_width, 16 + 20));
+        let layout_width = children.iter().map(|&(w, _)| w).max().unwrap_or(0);
+        let layout_height =
+            children.iter().map(|&(_, h)| h).sum::<i32>() + 8 * (children.len() as i32 - 1);
+        // `FrameLayout.centerInRectangle` truncates the half offsets.
+        let left = (width - layout_width) / 2;
+        let centred = |child_width: i32| left + (layout_width - child_width) / 2;
+        let mut y = (height - layout_height) / 2;
+
+        let mut lines = vec![PlacedLine {
+            x: centred(title_width),
+            y,
+            spans: title,
+        }];
+        y += LINE_HEIGHT + 8;
+        let mid_x = centred(message_width) + message_width / 2;
+        for line in message {
+            lines.push(PlacedLine {
+                x: mid_x - text_width(&line) / 2,
+                y,
+                spans: line,
+            });
+            y += LINE_HEIGHT;
+        }
+        y += 8;
+        if let (Some(spans), Some(warning_width)) = (warning, warning_width) {
+            lines.push(PlacedLine {
+                x: centred(warning_width),
+                y,
+                spans,
+            });
+            y += LINE_HEIGHT + 8;
+        }
+        let mut x = centred(row_width);
+        let buttons = self
+            .buttons
+            .iter()
+            .map(|&(_, w)| {
+                let rect = [x, y + 16, w, 20];
+                x += w + 4;
+                rect
+            })
+            .collect();
+        ConfirmLayout { lines, buttons }
+    }
+
+    /// Draws the screen and returns its button rectangles in pixels.
+    fn push(
+        &self,
+        elements: &mut Vec<MenuElement>,
+        cursor: (f32, f32),
+        screen_w: f32,
+        screen_h: f32,
+        gs: f32,
+        width0: &dyn Fn(&[TextSpan]) -> f32,
+    ) -> Vec<[f32; 4]> {
+        // TODO: vanilla also blurs the world behind in-world screens
+        // (`Screen.extractBlurredBackground`); this is only the flat
+        // inworld_menu_background.png tint (black at 64/255).
+        common::push_overlay(
+            elements,
+            screen_w,
+            screen_h,
+            vanilla_black_fill(64.0 / 255.0)[3],
+        );
+        let layout = self.layout(
+            (screen_w / gs).ceil() as i32,
+            (screen_h / gs).ceil() as i32,
+            width0,
+        );
+        let fs = common::FONT_SIZE * gs;
+        for line in layout.lines {
+            elements.push(MenuElement::McText {
+                x: line.x as f32 * gs,
+                y: line.y as f32 * gs,
+                spans: line.spans,
+                scale: fs,
+                centered: false,
+                shadow: true,
+            });
+        }
+        layout
+            .buttons
+            .iter()
+            .zip(&self.buttons)
+            .map(|(rect, (key, _))| {
+                let [x, y, w, h] = rect.map(|v| v as f32 * gs);
+                let label = crate::lang::translate(key).unwrap_or(key);
+                common::push_button(elements, cursor, x, y, w, h, gs, fs, label, true);
+                [x, y, w, h]
+            })
+            .collect()
+    }
+}
+
+/// Vanilla `GuiGraphicsExtractor.componentHoverEffect`. `width0` measures
+/// styled runs in gui units, as for chat wrapping.
+#[allow(clippy::too_many_arguments)]
 fn push_hover_tooltip(
     elements: &mut Vec<MenuElement>,
     hover: &HoverEvent,
@@ -2013,9 +2387,13 @@ fn push_hover_tooltip(
     screen_h: f32,
     gs: f32,
     advanced_item_tooltips: bool,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
 ) {
     let lines = match hover {
-        HoverEvent::Text(component) => component_tooltip_lines(component),
+        HoverEvent::Text(component) => {
+            let max_width = ((screen_w / gs).ceil() / 2.0).floor().max(200.0);
+            wrapped_tooltip_lines(component, max_width, width0)
+        }
         HoverEvent::Item(value) => item_tooltip_lines(value, advanced_item_tooltips),
         HoverEvent::Entity(value) if advanced_item_tooltips => entity_tooltip_lines(value),
         HoverEvent::Entity(_) => Vec::new(),
@@ -2025,8 +2403,43 @@ fn push_hover_tooltip(
     }
 }
 
-fn component_tooltip_lines(component: &Component) -> Vec<TooltipLine> {
+/// Vanilla `DrawingFocusedGraphicsAccess.showTooltip`.
+fn push_tag_tooltip(
+    elements: &mut Vec<MenuElement>,
+    tag: &ChatMessageTag,
+    cursor: (f32, f32),
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
+) {
+    let lines = wrapped_tooltip_lines(&tag.tooltip_component(), TAG_TOOLTIP_MAX_WIDTH, width0);
+    common::push_tooltip_lines(elements, cursor, screen_w, screen_h, gs, lines);
+}
+
+/// Vanilla `Font.split(component, max_width)` as tooltip lines, `max_width`
+/// in gui units.
+fn wrapped_tooltip_lines(
+    component: &Component,
+    max_width: f32,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
+) -> Vec<TooltipLine> {
     let spans = format_component_spans(component, common::WHITE);
+    wrap_spans(&spans, max_width, width0)
+        .into_iter()
+        .map(|spans| TooltipLine {
+            spans,
+            right_align: false,
+        })
+        .collect()
+}
+
+fn component_tooltip_lines(component: &Component) -> Vec<TooltipLine> {
+    span_tooltip_lines(format_component_spans(component, common::WHITE))
+}
+
+/// One tooltip line per `\n`-separated run, unwrapped.
+fn span_tooltip_lines(spans: Vec<TextSpan>) -> Vec<TooltipLine> {
     let mut lines = vec![TooltipLine {
         spans: Vec::new(),
         right_align: false,
@@ -2066,23 +2479,20 @@ fn entity_tooltip_lines(value: &serde_json::Value) -> Vec<TooltipLine> {
     }
 
     if let Some(id) = map.get("id").and_then(serde_json::Value::as_str) {
-        let path = id.split(':').next_back().unwrap_or(id);
-        let key = format!("entity.minecraft.{path}");
-        let translated = crate::lang::translate(&key).unwrap_or(id);
-        let type_component = Component::translate(
-            "gui.entity_tooltip.type",
-            vec![Argument::String(translated.to_owned())],
+        // `EntityType.getDescription`: `entity.<namespace>.<path>`.
+        let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
+        let description = Component::translate(
+            format!("entity.{namespace}.{}", path.replace('/', ".")),
+            Vec::new(),
         );
-        let mut type_lines = component_tooltip_lines(&type_component);
-        for line in &mut type_lines {
-            for span in &mut line.spans {
-                span.color = common::rgb(0xaaaaaa);
-            }
-        }
-        lines.extend(type_lines);
+        lines.extend(component_tooltip_lines(&Component::translate(
+            "gui.entity_tooltip.type",
+            vec![Argument::Component(Box::new(description))],
+        )));
     }
-    if let Some(uuid) = map.get("uuid").and_then(serde_json::Value::as_str) {
-        lines.push(TooltipLine::new(uuid.to_owned(), common::rgb(0xaaaaaa)));
+    // `UUIDUtil.LENIENT_CODEC`: an int array or a hyphenated string.
+    if let Some(uuid) = map.get("uuid").and_then(parse_uuid_value) {
+        lines.push(TooltipLine::new(uuid.to_string(), common::WHITE));
     }
     lines
 }
@@ -2124,7 +2534,7 @@ fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipL
     } else {
         rarity
     };
-    let rarity_color = item_rarity_color(rarity);
+    let rarity_rgb = item_rarity_rgb(rarity);
 
     let path = id.split(':').next_back().unwrap_or(id);
     let item_key = format!("item.minecraft.{path}");
@@ -2139,24 +2549,24 @@ fn item_tooltip_lines(value: &serde_json::Value, advanced: bool) -> Vec<TooltipL
     let item_name = component_value(components, "item_name")
         .and_then(|value| Component::from_value(value).ok());
     let mut lines = if let Some(name) = custom_name.as_ref().or(item_name.as_ref()) {
-        let mut lines = component_tooltip_lines(name);
-        for line in &mut lines {
-            for span in &mut line.spans {
-                // Parent rarity/italic styles in ItemStack#getStyledHoverName
-                // inherit only where the supplied component does not override
-                // them. The native component decoder has already resolved
-                // explicit colors; preserve non-white explicit colors here.
-                if span.color == common::WHITE {
-                    span.color = rarity_color;
-                }
-                if custom_name.is_some() {
-                    span.italic = true;
-                }
-            }
-        }
-        lines
+        // `ItemStack.getStyledHoverName` wraps the name in a parent carrying
+        // the rarity color (and italic for a custom name), so the name's own
+        // explicit style wins.
+        let parent = ResolvedStyle {
+            color: Some(rarity_rgb),
+            italic: custom_name.is_some(),
+            ..ResolvedStyle::default()
+        };
+        span_tooltip_lines(format_component_spans_with_parent(
+            name,
+            &parent,
+            common::WHITE,
+        ))
     } else {
-        vec![TooltipLine::new(default_name.to_owned(), rarity_color)]
+        vec![TooltipLine::new(
+            default_name.to_owned(),
+            common::rgb(rarity_rgb),
+        )]
     };
 
     for component_name in ["enchantments", "stored_enchantments"] {
@@ -2295,12 +2705,12 @@ fn item_rarity_from_name(name: &str) -> Option<Rarity> {
     }
 }
 
-fn item_rarity_color(rarity: Rarity) -> [f32; 4] {
+fn item_rarity_rgb(rarity: Rarity) -> u32 {
     match rarity {
-        Rarity::Common => common::WHITE,
-        Rarity::Uncommon => common::rgb(0xffff55),
-        Rarity::Rare => common::rgb(0x55ffff),
-        Rarity::Epic => common::rgb(0xff55ff),
+        Rarity::Common => 0xffffff,
+        Rarity::Uncommon => 0xffff55,
+        Rarity::Rare => 0x55ffff,
+        Rarity::Epic => 0xff55ff,
     }
 }
 
@@ -2371,6 +2781,77 @@ fn utf16_offset_to_byte(s: &str, utf16: usize) -> Option<usize> {
     (units == utf16).then_some(s.len())
 }
 
+/// Brigadier `Suggestion.apply`: `text` in place of `range` of `input`.
+fn apply_suggestion(input: &str, range: &Range<usize>, text: &str) -> Option<String> {
+    Some(format!(
+        "{}{text}{}",
+        input.get(..range.start)?,
+        input.get(range.end..)?
+    ))
+}
+
+/// Vanilla `CommandSuggestions.getLastWordIndex`: just past the last `\s+`
+/// run.
+fn last_word_index(text: &str) -> usize {
+    text.rfind([' ', '\t', '\n', '\u{b}', '\u{c}', '\r'])
+        .map_or(0, |i| i + 1)
+}
+
+/// Vanilla `CommandSuggestions.getExceptionMessage` for a dispatcher
+/// exception at byte `cursor` of `input`: `command.context.parse_error` with
+/// Brigadier's `CommandSyntaxException.getContext`.
+fn parse_error_component(input: &str, cursor: usize, key: &str) -> Component {
+    const CONTEXT_AMOUNT: usize = 10;
+    let before = input.get(..cursor).unwrap_or(input);
+    let position: usize = before.chars().map(char::len_utf16).sum();
+    let mut units = 0;
+    let mut tail = before.len();
+    for (i, c) in before.char_indices().rev() {
+        units += c.len_utf16();
+        if units > CONTEXT_AMOUNT {
+            break;
+        }
+        tail = i;
+    }
+    let ellipsis = if position > CONTEXT_AMOUNT { "..." } else { "" };
+    Component::translate(
+        "command.context.parse_error",
+        vec![
+            Argument::Component(Box::new(Component::translate(key, Vec::new()))),
+            Argument::Number(position.to_string()),
+            Argument::String(format!("{ellipsis}{}<--[HERE]", &before[tail..])),
+        ],
+    )
+}
+
+/// Java `Character.isWhitespace`: Unicode separators except the no-break
+/// spaces, plus the ASCII controls Java counts.
+fn java_is_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\t'..='\r'
+            | '\u{1c}'..='\u{1f}'
+            | ' '
+            | '\u{1680}'
+            | '\u{2000}'..='\u{2006}'
+            | '\u{2008}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{205f}'
+            | '\u{3000}'
+    )
+}
+
+/// Java `String.isBlank` / commons-lang3 `StringUtils.isBlank`.
+fn java_is_blank(s: &str) -> bool {
+    s.chars().all(java_is_whitespace)
+}
+
+/// Java `String.trim`: strips everything up to U+0020 from both ends.
+fn java_trim(s: &str) -> &str {
+    s.trim_matches(|c: char| c <= ' ')
+}
+
 fn sort_suggestions_with_partial_first(
     options: Vec<ChatSuggestion>,
     partial: &str,
@@ -2383,11 +2864,25 @@ fn sort_suggestions_with_partial_first(
     hits
 }
 
-/// Trim ends, collapse internal whitespace runs to single spaces, and clamp to
-/// the max message length. Mirrors vanilla `ChatScreen.normalizeChatMessage`.
-/// A leading `/` is preserved so commands still route correctly downstream.
+/// Vanilla `ChatScreen.normalizeChatMessage`:
+/// `trimChatMessage(StringUtils.normalizeSpace(message.trim()))`.
 fn normalize_chat_message(s: &str) -> String {
-    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    // commons-lang3 `normalizeSpace`: each `Character.isWhitespace` run
+    // becomes one space and U+00A0 a plain one, then a Java trim.
+    let mut spaced = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for c in java_trim(s).chars() {
+        if java_is_whitespace(c) {
+            pending_space = !spaced.is_empty();
+        } else {
+            if pending_space {
+                spaced.push(' ');
+                pending_space = false;
+            }
+            spaced.push(if c == '\u{a0}' { ' ' } else { c });
+        }
+    }
+    let collapsed = java_trim(&spaced);
     let mut units = 0;
     let mut out = String::with_capacity(collapsed.len());
     for c in collapsed.chars() {
@@ -2409,6 +2904,8 @@ fn normalize_chat_message(s: &str) -> String {
 /// `ChatComponent.AlphaCalculator.timeBased`: full opacity until ~90% of the
 /// lifetime, then a squared fade over the final ~10%.
 fn line_alpha(age_secs: f32) -> f32 {
+    // TODO: vanilla ages lines on `Hud.tickCount`, which freezes while
+    // paused; wall time keeps fading here as Pomme has no paused tick clock.
     let mut t = 1.0 - age_secs / MESSAGE_LIFETIME_SECS;
     t *= 10.0;
     t = t.clamp(0.0, 1.0);
@@ -2441,7 +2938,6 @@ fn command_input_spans(input: &str, presentation: &CommandPresentation) -> Vec<T
         }
         if start < end {
             let color = match token.kind {
-                CommandTokenKind::Literal => literal,
                 CommandTokenKind::Argument(index) => ARGUMENT_COLORS[index % ARGUMENT_COLORS.len()],
                 CommandTokenKind::Unparsed => unparsed,
             };
@@ -2644,6 +3140,33 @@ pub(crate) fn wrap_spans(
     lines.iter().map(|line| merge_chars(line)).collect()
 }
 
+/// Vanilla `ComponentRenderUtils.clipText`: the longest prefix whose width
+/// fits `max_w` less the ellipsis (`Font.substrByWidth`), then an unstyled
+/// "...". Widths are gui units, measured by `width0` as in [`wrap_spans`].
+fn clip_spans(
+    spans: &[TextSpan],
+    max_w: f32,
+    width0: &dyn Fn(&[TextSpan]) -> f32,
+) -> Vec<TextSpan> {
+    let ellipsis = TextSpan::new("...".to_owned(), common::WHITE);
+    let mut remaining = max_w - width0(std::slice::from_ref(&ellipsis));
+    let mut out = Vec::new();
+    'spans: for span in spans {
+        for (i, ch) in span.text.char_indices() {
+            remaining -= width0(&[span.with_text(ch.to_string())]);
+            if remaining < 0.0 {
+                if i > 0 {
+                    out.push(span.with_text(span.text[..i].to_owned()));
+                }
+                break 'spans;
+            }
+        }
+        out.push(span.clone());
+    }
+    out.push(ellipsis);
+    out
+}
+
 /// Coalesce a run of styled characters into `TextSpan`s, merging neighbours
 /// that share the same style.
 fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
@@ -2662,6 +3185,10 @@ fn merge_chars(chars: &[(char, CharStyle)]) -> Vec<TextSpan> {
 
 #[cfg(test)]
 mod tests {
+    use azalea_protocol::packets::game::c_commands::{
+        BrigadierNodeStub, BrigadierParser, ClientboundCommands, EntityParser, NodeType,
+    };
+
     use super::*;
 
     fn span(text: &str, color: [f32; 4]) -> TextSpan {
@@ -2721,24 +3248,60 @@ mod tests {
         ));
     }
 
+    /// One modal frame on an 800x600 screen at gui scale 1, glyphs 6 units
+    /// per char.
+    fn build_modal(
+        chat: &mut ChatState,
+        cursor: (f32, f32),
+        clicked: bool,
+    ) -> Option<ChatUiAction> {
+        let spans_width = |spans: &[TextSpan], _: f32| {
+            spans
+                .iter()
+                .map(|span| span.text.chars().count() as f32 * 6.0)
+                .sum()
+        };
+        let mut elements = Vec::new();
+        chat.build_modal_prompt(
+            &mut elements,
+            800.0,
+            600.0,
+            1.0,
+            cursor,
+            clicked,
+            &spans_width,
+        )
+    }
+
+    fn rect_center(rect: [f32; 4]) -> (f32, f32) {
+        (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0)
+    }
+
+    fn hit_region(style: ResolvedStyle) -> ChatHitRegion {
+        ChatHitRegion {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0,
+            y1: 10.0,
+            style: Arc::new(style),
+        }
+    }
+
     #[test]
     fn command_confirmation_is_modal_and_requires_explicit_acceptance() {
         let mut chat = ChatState::new();
+        chat.open(ChatMethod::Message, None);
         chat.request_command_confirmation(
             "unknown command".to_owned(),
             CommandConfirmationKind::ParseErrors,
         );
         assert!(chat.has_pending_modal_prompt());
 
-        let mut elements = Vec::new();
-        assert!(
-            chat.build_modal_prompt(&mut elements, 800.0, 600.0, 1.0, (0.0, 0.0), false)
-                .is_none()
-        );
-        let (accept, _) = chat.command_buttons.expect("command buttons");
-        let cursor = (accept[0] + accept[2] / 2.0, accept[1] + accept[3] / 2.0);
+        // The first frame only lays the buttons out; a click needs them drawn.
+        assert!(build_modal(&mut chat, (400.0, 300.0), true).is_none());
+        let accept = chat.modal_buttons[0];
         assert!(matches!(
-            chat.build_modal_prompt(&mut elements, 800.0, 600.0, 1.0, cursor, true),
+            build_modal(&mut chat, rect_center(accept), true),
             Some(ChatUiAction::RunCommandUnsigned(ref command)) if command == "unknown command"
         ));
         assert!(!chat.has_pending_modal_prompt());
@@ -2750,6 +3313,163 @@ mod tests {
         assert!(chat.has_pending_modal_prompt());
         chat.handle_escape();
         assert!(!chat.has_pending_modal_prompt());
+        assert!(chat.is_open());
+    }
+
+    #[test]
+    fn link_confirm_layout_matches_vanilla_positions() {
+        let screen = ChatModal::Link {
+            url: "https://example.com".to_owned(),
+        }
+        .confirm_screen();
+        // 400x300 gui units, 10 units per char. Title and warning are their
+        // lang keys (17 chars), the URL 19; the button row is 3x100 + 2x4.
+        let layout = screen.layout(400, 300, &width);
+        // Layout 308 wide, 9+8+9+8+9+8+36 = 87 tall: origin (46, 106).
+        let positions: Vec<(i32, i32)> = layout.lines.iter().map(|l| (l.x, l.y)).collect();
+        assert_eq!(positions, vec![(115, 106), (105, 123), (115, 140)]);
+        assert_eq!(
+            layout.buttons,
+            vec![[46, 173, 100, 20], [150, 173, 100, 20], [254, 173, 100, 20]]
+        );
+        assert_eq!(layout.lines[2].spans[0].color, common::rgb(0xffcccc));
+    }
+
+    #[test]
+    fn command_confirm_layout_uses_default_button_width() {
+        let screen = ChatModal::Command(PendingCommand {
+            command: "say".to_owned(),
+            kind: CommandConfirmationKind::PermissionsRequired,
+        })
+        .confirm_screen();
+        let layout = screen.layout(400, 300, &width);
+        // Without a lang table the message is its 48-char key (480 > 350)
+        // wrapped to 2 rows, so the layout is 350 wide from x 25 and the
+        // 304-wide row starts at 48. 9+8+18+8+36 = 79 tall, so the
+        // top is (300 - 79) / 2 = 110 and the buttons sit at 110+43+16.
+        assert_eq!(layout.lines[0].y, 110);
+        assert_eq!(layout.lines[1].y, 127);
+        assert_eq!(layout.lines[2].y, 136);
+        assert_eq!(
+            layout.buttons,
+            vec![[48, 169, 150, 20], [202, 169, 150, 20]]
+        );
+    }
+
+    #[test]
+    fn long_link_wraps_at_screen_width_less_50() {
+        let url = format!("https://example.com/{}", "a".repeat(80));
+        let screen = ChatModal::Link { url }.confirm_screen();
+        let layout = screen.layout(400, 300, &width);
+        // Title, the 100-char URL in rows of at most 35 chars, the warning.
+        let message_rows = layout.lines.len() - 2;
+        assert_eq!(message_rows, 3);
+        for line in &layout.lines[1..=message_rows] {
+            assert!(width(&line.spans) <= 350.0);
+        }
+    }
+
+    #[test]
+    fn command_message_argument_is_yellow_without_placeholders() {
+        let mut message = ChatModal::Command(PendingCommand {
+            command: "give @s dirt".to_owned(),
+            kind: CommandConfirmationKind::ParseErrors,
+        })
+        .confirm_screen()
+        .message;
+        // The lang table isn't loaded in tests; supply the en_us template.
+        let crate::chat_component::Content::Translate { fallback, .. } = &mut message.content
+        else {
+            panic!("translatable message");
+        };
+        *fallback = Some(
+            "You are trying to execute an unrecognized or invalid command.\nAre you sure?\nCommand: %s"
+                .to_owned(),
+        );
+        let spans = format_component_spans(&message, common::WHITE);
+        assert!(spans.iter().all(|span| !span.text.contains("%s")));
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text == "give @s dirt" && span.color == common::rgb(0xffff55))
+        );
+        let lines = wrap_spans(&spans, 1000.0, &width);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(line_text(&lines[2]), "Command: give @s dirt");
+    }
+
+    #[test]
+    fn modal_blocks_chat_scroll_and_resets_it_on_open() {
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Message, None);
+        chat.scroll_chat(5);
+        chat.new_message_since_scroll = true;
+        assert_eq!(chat.scroll_pos, 5);
+        chat.request_open_url("https://example.com".to_owned());
+        assert!(chat.has_pending_modal_prompt());
+        assert_eq!(chat.scroll_pos, 0);
+        assert!(!chat.new_message_since_scroll);
+
+        chat.handle_scroll((0.0, 0.0), 1.0, false);
+        assert_eq!(chat.scroll_pos, 0);
+        assert!(!chat.is_focused());
+    }
+
+    #[test]
+    fn every_modal_button_shows_the_pointer() {
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Message, None);
+        chat.request_command_confirmation(
+            "say hi".to_owned(),
+            CommandConfirmationKind::ParseErrors,
+        );
+        build_modal(&mut chat, (0.0, 0.0), false);
+        let buttons = chat.modal_buttons.clone();
+        assert_eq!(buttons.len(), 2);
+        for rect in buttons {
+            assert!(chat.hovering_clickable(rect_center(rect), false));
+        }
+        assert!(!chat.hovering_clickable((0.0, 0.0), false));
+    }
+
+    #[test]
+    fn shift_hover_over_insertion_shows_the_pointer() {
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Message, None);
+        chat.hit_regions.push(hit_region(ResolvedStyle {
+            insertion: Some("Steve".to_owned()),
+            ..ResolvedStyle::default()
+        }));
+        assert!(!chat.hovering_clickable((5.0, 5.0), false));
+        assert!(chat.hovering_clickable((5.0, 5.0), true));
+    }
+
+    #[test]
+    fn expand_chat_queue_click_is_handled_locally() {
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Message, None);
+        chat.delayed_messages.push_back(PendingChatLine {
+            spans: vec![span("queued", common::WHITE)],
+            signature: None,
+            ack_signature: None,
+            force_hidden_ack: false,
+            suppress_display: false,
+            source: ChatMessageSource::Player,
+            tag: None,
+        });
+        chat.hit_regions.push(hit_region(ResolvedStyle {
+            click_event: Some(ClickEvent::Custom {
+                id: "internal/expand_chat_queue".to_owned(),
+                payload: None,
+            }),
+            ..ResolvedStyle::default()
+        }));
+        assert!(
+            chat.handle_click((5.0, 5.0), false, 100.0, &|_| 0.0, None)
+                .is_none()
+        );
+        assert!(chat.delayed_messages.is_empty());
+        assert_eq!(chat.messages.len(), 1);
     }
 
     #[test]
@@ -2757,6 +3477,19 @@ mod tests {
         assert_eq!(normalize_chat_message("  hello   world  "), "hello world");
         assert_eq!(normalize_chat_message("/say   hi   there"), "/say hi there");
         assert_eq!(normalize_chat_message("   "), "");
+    }
+
+    #[test]
+    fn normalize_follows_java_whitespace() {
+        // U+2007/U+202F aren't Java whitespace, U+00A0 becomes a plain space,
+        // U+001F is whitespace, and String.trim strips ASCII controls.
+        assert_eq!(
+            normalize_chat_message("a\u{202f}b\u{2007}c"),
+            "a\u{202f}b\u{2007}c"
+        );
+        assert_eq!(normalize_chat_message("a\u{a0}\u{a0}b"), "a  b");
+        assert_eq!(normalize_chat_message("a\u{1f}\t b"), "a b");
+        assert_eq!(normalize_chat_message("\u{1}hi\u{a0}"), "hi");
     }
 
     #[test]
@@ -2831,8 +3564,27 @@ mod tests {
         let mut chat = ChatState::new();
         chat.push_message(vec![span("older", common::WHITE)]);
         chat.push_message(vec![span("newer", common::WHITE)]);
-        chat.open();
+        chat.open(ChatMethod::Message, None);
 
+        let elements = build_elements(&mut chat);
+        let first_history_text = elements
+            .iter()
+            .position(|element| {
+                mc_text(element).is_some_and(|text| text == "newer" || text == "older")
+            })
+            .expect("history text element");
+        let backgrounds_before_text = elements[..first_history_text]
+            .iter()
+            .filter(|element| matches!(element, MenuElement::Rect { .. }))
+            .count();
+        assert!(
+            backgrounds_before_text >= 2,
+            "all visible row backgrounds must be emitted before history text"
+        );
+    }
+
+    /// A frame of `chat` at gui scale 1, glyphs one unit per char per font px.
+    fn build_elements(chat: &mut ChatState) -> Vec<MenuElement> {
         let text_width = |text: &str, scale: f32| text.chars().count() as f32 * scale;
         let spans_width = |spans: &[TextSpan], scale: f32| {
             spans
@@ -2857,25 +3609,153 @@ mod tests {
             },
         );
         assert!(action.is_none());
+        elements
+    }
 
-        let first_history_text = elements
-            .iter()
-            .position(|element| {
-                let MenuElement::McText { spans, .. } = element else {
-                    return false;
-                };
-                let text: String = spans.iter().map(|span| span.text.as_str()).collect();
-                text == "newer" || text == "older"
-            })
-            .expect("history text element");
-        let backgrounds_before_text = elements[..first_history_text]
-            .iter()
-            .filter(|element| matches!(element, MenuElement::Rect { .. }))
-            .count();
-        assert!(
-            backgrounds_before_text >= 2,
-            "all visible row backgrounds must be emitted before history text"
+    fn mc_text(element: &MenuElement) -> Option<String> {
+        let MenuElement::McText { spans, .. } = element else {
+            return None;
+        };
+        Some(line_text(spans))
+    }
+
+    fn mc_texts(elements: &[MenuElement]) -> Vec<String> {
+        elements.iter().filter_map(mc_text).collect()
+    }
+
+    #[test]
+    fn chat_scale_zero_draws_no_messages_or_hit_regions() {
+        let mut chat = ChatState::new();
+        chat.set_options(ChatOptions {
+            scale: 0.0,
+            ..Default::default()
+        });
+        let mut message = span("hello", common::WHITE);
+        message.component_style = Some(Arc::new(ResolvedStyle::default()));
+        chat.push_message(vec![message]);
+        chat.open(ChatMethod::Message, None);
+        let elements = build_elements(&mut chat);
+        assert!(!mc_texts(&elements).contains(&"hello".to_owned()));
+        assert!(chat.hit_regions.is_empty());
+    }
+
+    #[test]
+    fn only_secure_applies_at_arrival_not_render() {
+        let not_secure = |chat: &mut ChatState, text: &str| {
+            chat.push_message_with_source(
+                vec![span(text, common::WHITE)],
+                None,
+                ChatMessageSource::Player,
+                Some(ChatMessageTag::NotSecure),
+            );
+        };
+        let mut chat = ChatState::new();
+        not_secure(&mut chat, "shown");
+        chat.set_options(ChatOptions {
+            only_secure: true,
+            ..Default::default()
+        });
+        not_secure(&mut chat, "hidden");
+        assert_eq!(chat.messages.len(), 1);
+        chat.open(ChatMethod::Message, None);
+        let texts = mc_texts(&build_elements(&mut chat));
+        assert!(texts.contains(&"shown".to_owned()));
+        assert!(!texts.contains(&"hidden".to_owned()));
+    }
+
+    #[test]
+    fn only_secure_hidden_arrival_acknowledges_as_not_shown() {
+        let mut chat = ChatState::new();
+        chat.set_options(ChatOptions {
+            only_secure: true,
+            ..Default::default()
+        });
+        let signature = [0x42u8; 256];
+        chat.push_message_with_source(
+            vec![span("unsigned", common::WHITE)],
+            Some(signature),
+            ChatMessageSource::Player,
+            Some(ChatMessageTag::NotSecure),
         );
+        assert!(chat.messages.is_empty());
+        assert_eq!(chat.previous_message_time, None);
+        assert_eq!(
+            chat.take_chat_marks(),
+            vec![ChatMark::Processed {
+                signature,
+                shown: false
+            }]
+        );
+    }
+
+    #[test]
+    fn clip_spans_keeps_fitting_prefix_and_appends_plain_ellipsis() {
+        let mut styled = span("abcdef", common::rgb(0xff5555));
+        styled.underline = true;
+        let clipped = clip_spans(&[styled], 60.0, &width);
+        assert_eq!(line_text(&clipped), "abc...");
+        assert!(clipped[0].underline);
+        assert!(!clipped[1].underline);
+        assert_eq!(clipped[1].color, common::WHITE);
+    }
+
+    #[test]
+    fn tag_tooltip_wraps_at_vanilla_width() {
+        let tag = ChatMessageTag::Modified {
+            original: "word ".repeat(10),
+        };
+        // 10 units per char: 210 units hold 21 chars of "word word ...".
+        let lines = wrapped_tooltip_lines(&tag.tooltip_component(), TAG_TOOLTIP_MAX_WIDTH, &width);
+        assert!(lines.len() > 2);
+        assert!(
+            lines
+                .iter()
+                .all(|line| width(&line.spans) <= TAG_TOOLTIP_MAX_WIDTH)
+        );
+    }
+
+    #[test]
+    fn show_entity_reads_int_array_uuid() {
+        let value = serde_json::json!({
+            "id": "minecraft:pig",
+            "uuid": [0x00112233_i64, 0x44556677, -2003195205, -857870593]
+        });
+        let lines = entity_tooltip_lines(&value);
+        let uuid = lines.last().unwrap();
+        assert_eq!(
+            line_text(&uuid.spans),
+            "00112233-4455-6677-8899-aabbccddeeff"
+        );
+        assert_eq!(uuid.spans[0].color, common::WHITE);
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|span| span.color == common::WHITE)
+        );
+    }
+
+    #[test]
+    fn show_item_name_style_overrides_rarity_parent() {
+        let item = |name: serde_json::Value| {
+            serde_json::json!({
+                "id": "minecraft:diamond_sword",
+                "components": {
+                    "minecraft:custom_name": name,
+                    "minecraft:rarity": "epic"
+                }
+            })
+        };
+        let explicit = item_tooltip_lines(
+            &item(serde_json::json!({"text":"Sword","italic":false,"color":"white"})),
+            false,
+        );
+        assert!(!explicit[0].spans[0].italic);
+        assert_eq!(explicit[0].spans[0].color, common::WHITE);
+
+        let bare = item_tooltip_lines(&item(serde_json::json!({"text":"Sword"})), false);
+        assert!(bare[0].spans[0].italic);
+        assert_eq!(bare[0].spans[0].color, common::rgb(0xff55ff));
     }
 
     #[test]
@@ -2905,63 +3785,88 @@ mod tests {
         chat.input.set_value(input, f32::MAX, &|_| 0.0);
     }
 
-    /// A chat awaiting a server response for `input` with request id 1.
+    /// An open chat whose latest request, id 0, was for `input`.
     fn awaiting_chat(input: &str) -> ChatState {
         let mut chat = ChatState::new();
         chat.open = true;
+        chat.allow_suggestions = true;
         set_input(&mut chat, input);
-        chat.awaiting = Some((1, input.to_string()));
+        chat.pending_suggestions_id = 0;
+        chat.pending_suggestions = Some(PendingSuggestions::Awaiting {
+            request: input.to_owned(),
+            local: SuggestionSet {
+                range: input.len()..input.len(),
+                list: Vec::new(),
+            },
+        });
         chat
     }
 
     #[test]
     fn server_suggestions_replace_and_select_first() {
         let mut chat = awaiting_chat("/gamemode c");
-        chat.suggestions = vec!["stale".into()];
-        chat.suggest_index = 3;
-        chat.suggest_applied = true;
-        chat.apply_server_suggestions(1, 10, vec!["creative".into()]);
+        chat.apply_server_suggestions(0, 10, vec!["creative".into()]);
         assert_eq!(chat.suggestions, vec!["creative"]);
-        assert_eq!(chat.suggest_anchor, "/gamemode ");
+        assert_eq!(chat.suggest_range, 10..11);
         assert_eq!(chat.suggest_index, 0);
-        assert!(!chat.suggest_applied);
-        assert!(chat.awaiting.is_none());
+        assert!(!chat.tab_cycles);
+        assert_eq!(chat.pending_suggestions_id, -1);
     }
 
     #[test]
     fn server_suggestions_stale_dropped() {
-        // Wrong id.
+        // Not the latest request's id.
         let mut chat = awaiting_chat("/gamemode c");
-        chat.apply_server_suggestions(2, 10, vec!["creative".into()]);
-        assert!(chat.suggestions.is_empty());
-        assert!(chat.awaiting.is_some());
-
-        // Input changed since the request.
-        let mut chat = awaiting_chat("/gamemode c");
-        set_input(&mut chat, "/gamemode cr");
         chat.apply_server_suggestions(1, 10, vec!["creative".into()]);
         assert!(chat.suggestions.is_empty());
+        assert_eq!(chat.pending_suggestions_id, 0);
+
+        // The input moved on to something that needed no request.
+        let mut chat = awaiting_chat("/gamemode c");
+        chat.pending_suggestions = None;
+        chat.apply_server_suggestions(0, 10, vec!["creative".into()]);
+        assert!(chat.suggestions.is_empty());
+        assert_eq!(chat.pending_suggestions_id, -1);
     }
 
     #[test]
     fn server_suggestions_empty_keeps_local() {
         let mut chat = awaiting_chat("/time set d");
-        chat.suggestions = vec!["day".into()];
-        chat.suggest_anchor = "/time set ".to_string();
-        chat.apply_server_suggestions(1, 10, Vec::new());
+        chat.pending_suggestions = Some(PendingSuggestions::Awaiting {
+            request: "/time set d".to_owned(),
+            local: SuggestionSet {
+                range: 10..11,
+                list: vec!["day".into()],
+            },
+        });
+        chat.apply_server_suggestions(0, 10, Vec::new());
         assert_eq!(chat.suggestions, vec!["day"]);
-        assert!(chat.awaiting.is_none());
+        assert_eq!(chat.suggest_range, 10..11);
+    }
+
+    #[test]
+    fn server_suggestions_reset_offset() {
+        let mut chat = awaiting_chat("/give @p ");
+        chat.suggestions = (0..15).map(|i| format!("old{i}").into()).collect();
+        chat.suggest_offset = 5;
+        chat.suggest_index = 12;
+        let options = (0..15).map(|i| format!("item{i}").into()).collect();
+        chat.apply_server_suggestions(0, 9, options);
+        assert_eq!(chat.suggestions.len(), 15);
+        assert_eq!(chat.suggest_offset, 0);
+        assert_eq!(chat.suggest_index, 0);
     }
 
     #[test]
     fn ghost_is_selected_suggestion_remainder() {
         let mut chat = ChatState::new();
         set_input(&mut chat, "/gam");
-        chat.suggest_anchor = "/".to_string();
+        chat.suggest_original = "/gam".to_owned();
+        chat.suggest_range = 1..4;
         chat.suggestions = vec!["gamemode".into(), "gamerule".into()];
-        assert_eq!(chat.ghost_suffix(), Some("emode"));
+        assert_eq!(chat.ghost_suffix().as_deref(), Some("emode"));
         chat.suggest_index = 1;
-        assert_eq!(chat.ghost_suffix(), Some("erule"));
+        assert_eq!(chat.ghost_suffix().as_deref(), Some("erule"));
         // Case mismatch shows no ghost (vanilla is case-sensitive here).
         set_input(&mut chat, "/GAM");
         assert_eq!(chat.ghost_suffix(), None);
@@ -2983,14 +3888,498 @@ mod tests {
     fn server_suggestions_non_ascii_start() {
         // "/msg héllo " is 11 UTF-16 units but 12 bytes ('é' is 2 bytes).
         let mut chat = awaiting_chat("/msg héllo w");
-        chat.apply_server_suggestions(1, 11, vec!["world".into()]);
-        assert_eq!(chat.suggest_anchor, "/msg héllo ");
+        chat.apply_server_suggestions(0, 11, vec!["world".into()]);
+        assert_eq!(chat.suggest_range, 12..13);
         assert_eq!(chat.suggestions, vec!["world"]);
 
         // Out-of-range start is dropped.
         let mut chat = awaiting_chat("/msg héllo w");
-        chat.apply_server_suggestions(1, 99, vec!["world".into()]);
+        chat.apply_server_suggestions(0, 99, vec!["world".into()]);
         assert!(chat.suggestions.is_empty());
+    }
+
+    fn node(node_type: NodeType, children: Vec<u32>, executable: bool) -> BrigadierNodeStub {
+        BrigadierNodeStub {
+            is_executable: executable,
+            children,
+            redirect_node: None,
+            node_type,
+            is_restricted: false,
+        }
+    }
+
+    fn literal(name: &str, children: Vec<u32>, executable: bool) -> BrigadierNodeStub {
+        node(
+            NodeType::Literal {
+                name: name.to_owned(),
+            },
+            children,
+            executable,
+        )
+    }
+
+    fn argument(
+        name: &str,
+        parser: BrigadierParser,
+        children: Vec<u32>,
+        executable: bool,
+    ) -> BrigadierNodeStub {
+        node(
+            NodeType::Argument {
+                name: name.to_owned(),
+                parser,
+                suggestions_type: None,
+            },
+            children,
+            executable,
+        )
+    }
+
+    /// time set (day|night), msg <targets> <message>, gamemode <mode>,
+    /// gamerule.
+    fn test_tree() -> CommandTree {
+        CommandTree::from_packet(&ClientboundCommands {
+            entries: vec![
+                node(NodeType::Root, vec![1, 5, 8, 10], false),
+                literal("time", vec![2], false),
+                literal("set", vec![3, 4], false),
+                literal("day", vec![], true),
+                literal("night", vec![], true),
+                literal("msg", vec![6], false),
+                argument(
+                    "targets",
+                    BrigadierParser::Entity(EntityParser {
+                        single: false,
+                        players_only: true,
+                    }),
+                    vec![7],
+                    false,
+                ),
+                argument("message", BrigadierParser::Message, vec![], true),
+                literal("gamemode", vec![9], false),
+                argument("gamemode", BrigadierParser::Bool, vec![], true),
+                literal("gamerule", vec![], true),
+            ],
+            root_index: 0,
+        })
+    }
+
+    #[derive(Default)]
+    struct Keys {
+        events: Vec<TextInputEvent>,
+        enter: bool,
+        tab: bool,
+        shift: bool,
+        up: bool,
+        down: bool,
+    }
+
+    const TAB: Keys = Keys {
+        events: Vec::new(),
+        enter: false,
+        tab: true,
+        shift: false,
+        up: false,
+        down: false,
+    };
+
+    fn press(chat: &mut ChatState, keys: Keys, tree: &CommandTree) -> Option<String> {
+        chat.handle_key_input(
+            &keys.events,
+            keys.enter,
+            keys.tab,
+            keys.shift,
+            keys.up,
+            keys.down,
+            false,
+            false,
+            f32::MAX,
+            &|_| 0.0,
+            Some(tree),
+        )
+    }
+
+    fn type_text(chat: &mut ChatState, text: &str, tree: &CommandTree) {
+        let events = text.chars().map(TextInputEvent::Char).collect();
+        press(
+            chat,
+            Keys {
+                events,
+                ..Default::default()
+            },
+            tree,
+        );
+    }
+
+    fn backspace() -> Keys {
+        Keys {
+            events: vec![TextInputEvent::Key {
+                code: winit::keyboard::KeyCode::Backspace,
+                mods: crate::ui::text_edit::KeyMods {
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                    super_key: false,
+                },
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A chat reopened on the saved draft "draft".
+    fn restored_draft_chat(tree: &CommandTree) -> ChatState {
+        let mut chat = ChatState::new();
+        chat.set_options(ChatOptions {
+            save_drafts: true,
+            ..Default::default()
+        });
+        chat.open(ChatMethod::Message, Some(tree));
+        type_text(&mut chat, "draft", tree);
+        chat.close(ChatExitReason::Intentional);
+        chat.open(ChatMethod::Message, Some(tree));
+        assert_eq!(chat.input.value(), "draft");
+        assert!(chat.is_restored_draft);
+        chat
+    }
+
+    #[test]
+    fn restored_draft_first_backspace_clears() {
+        let tree = test_tree();
+        let mut chat = restored_draft_chat(&tree);
+        press(&mut chat, backspace(), &tree);
+        assert_eq!(chat.input.value(), "");
+        assert!(!chat.is_restored_draft);
+    }
+
+    #[test]
+    fn programmatic_edits_clear_the_restored_draft() {
+        let tree = test_tree();
+        let wf = |_: &str| 0.0;
+
+        let mut chat = restored_draft_chat(&tree);
+        chat.hit_regions.push(ChatHitRegion {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0,
+            y1: 10.0,
+            style: Arc::new(ResolvedStyle {
+                insertion: Some(" more".to_owned()),
+                click_event: Some(ClickEvent::SuggestCommand("/time set day".to_owned())),
+                ..ResolvedStyle::default()
+            }),
+        });
+        chat.handle_click((5.0, 5.0), true, f32::MAX, &wf, Some(&tree));
+        assert_eq!(chat.input.value(), "draft more");
+        assert!(!chat.is_restored_draft);
+
+        chat.is_restored_draft = true;
+        chat.handle_click((5.0, 5.0), false, f32::MAX, &wf, Some(&tree));
+        assert_eq!(chat.input.value(), "/time set day");
+        assert!(!chat.is_restored_draft);
+
+        // Backspace after a history recall edits the recalled line instead of
+        // wiping it as a draft.
+        let mut chat = restored_draft_chat(&tree);
+        chat.sent_history.push_back("hello".to_owned());
+        chat.history_pos = 1;
+        let up = Keys {
+            up: true,
+            ..Default::default()
+        };
+        press(&mut chat, up, &tree);
+        assert_eq!(chat.input.value(), "hello");
+        assert!(!chat.is_restored_draft);
+        press(&mut chat, backspace(), &tree);
+        assert_eq!(chat.input.value(), "hell");
+    }
+
+    #[test]
+    fn commands_key_restores_only_command_drafts() {
+        let tree = test_tree();
+        let mut chat = restored_draft_chat(&tree);
+        chat.close(ChatExitReason::Interrupted);
+        chat.open(ChatMethod::Command, Some(&tree));
+        assert_eq!(chat.input.value(), "/");
+        assert!(!chat.is_restored_draft);
+    }
+
+    #[test]
+    fn exit_reasons_decide_the_draft() {
+        let tree = test_tree();
+        let closed_with = |reason, save_drafts, text: &str| {
+            let mut chat = ChatState::new();
+            chat.set_options(ChatOptions {
+                save_drafts,
+                ..Default::default()
+            });
+            chat.open(ChatMethod::Message, Some(&tree));
+            type_text(&mut chat, text, &tree);
+            chat.close(reason);
+            chat.latest_draft
+        };
+        let draft = Some("hi".to_owned());
+        assert_eq!(closed_with(ChatExitReason::Interrupted, false, "hi"), draft);
+        assert_eq!(closed_with(ChatExitReason::Intentional, true, "hi"), draft);
+        assert_eq!(closed_with(ChatExitReason::Intentional, false, "hi"), None);
+        assert_eq!(closed_with(ChatExitReason::Done, true, "hi"), None);
+        assert_eq!(closed_with(ChatExitReason::Interrupted, true, "  "), None);
+    }
+
+    #[test]
+    fn submit_closes_as_done() {
+        let tree = test_tree();
+        let mut chat = ChatState::new();
+        chat.set_options(ChatOptions {
+            save_drafts: true,
+            ..Default::default()
+        });
+        chat.open(ChatMethod::Message, Some(&tree));
+        type_text(&mut chat, "hi  there", &tree);
+        let enter = Keys {
+            enter: true,
+            ..Default::default()
+        };
+        assert_eq!(press(&mut chat, enter, &tree).as_deref(), Some("hi there"));
+        assert!(!chat.is_open());
+        assert_eq!(chat.latest_draft, None);
+    }
+
+    #[test]
+    fn chat_settings_return_to_the_same_chat() {
+        let tree = test_tree();
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Message, Some(&tree));
+        type_text(&mut chat, "unsent", &tree);
+        chat.close_for_settings();
+        assert!(!chat.is_open());
+        assert!(chat.return_from_settings(Some(&tree)));
+        assert!(chat.is_open());
+        assert_eq!(chat.input.value(), "unsent");
+        assert!(!chat.return_from_settings(Some(&tree)));
+
+        // Something else replacing the settings drops the parent chat.
+        chat.close_for_settings();
+        chat.close(ChatExitReason::Interrupted);
+        assert!(!chat.return_from_settings(Some(&tree)));
+    }
+
+    #[test]
+    fn open_computes_but_hides_suggestions() {
+        let tree = test_tree();
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Command, Some(&tree));
+        assert!(chat.suggestions.is_empty());
+        assert!(matches!(
+            chat.pending_suggestions,
+            Some(PendingSuggestions::Done(_))
+        ));
+
+        // Tab only shows the list; the input is untouched.
+        press(&mut chat, TAB, &tree);
+        assert_eq!(chat.input.value(), "/");
+        assert_eq!(
+            chat.suggestions,
+            vec!["gamemode", "gamerule", "msg", "time"]
+        );
+    }
+
+    #[test]
+    fn history_back_to_draft_keeps_suggestions_allowed() {
+        let tree = test_tree();
+        let mut chat = ChatState::new();
+        chat.sent_history.push_back("hello".to_owned());
+        chat.open(ChatMethod::Message, Some(&tree));
+        type_text(&mut chat, "/ti", &tree);
+        assert_eq!(chat.suggestions, vec!["time"]);
+        assert!(!chat.handle_escape());
+        assert!(chat.suggestions.is_empty());
+
+        let up = Keys {
+            up: true,
+            ..Default::default()
+        };
+        press(&mut chat, up, &tree);
+        assert_eq!(chat.input.value(), "hello");
+        assert!(!chat.allow_suggestions);
+        let down = Keys {
+            down: true,
+            ..Default::default()
+        };
+        press(&mut chat, down, &tree);
+        assert_eq!(chat.input.value(), "/ti");
+        assert!(chat.allow_suggestions);
+        assert_eq!(chat.suggestions, vec!["time"]);
+    }
+
+    #[test]
+    fn tab_applies_then_cycles() {
+        let tree = test_tree();
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Command, Some(&tree));
+        type_text(&mut chat, "g", &tree);
+        assert_eq!(chat.suggestions, vec!["gamemode", "gamerule"]);
+        press(&mut chat, TAB, &tree);
+        assert_eq!(chat.input.value(), "/gamemode");
+        assert_eq!(chat.suggestions.len(), 2);
+        press(&mut chat, TAB, &tree);
+        assert_eq!(chat.input.value(), "/gamerule");
+        press(&mut chat, TAB, &tree);
+        assert_eq!(chat.input.value(), "/gamemode");
+        // Applying never asks the server again.
+        assert!(chat.take_suggestion_request().is_none());
+    }
+
+    #[test]
+    fn arrow_selection_is_applied_by_the_next_tab() {
+        let tree = test_tree();
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Command, Some(&tree));
+        type_text(&mut chat, "g", &tree);
+        let up = Keys {
+            up: true,
+            ..Default::default()
+        };
+        press(&mut chat, up, &tree);
+        assert_eq!(chat.suggest_index, 1);
+        press(&mut chat, TAB, &tree);
+        assert_eq!(chat.input.value(), "/gamerule");
+    }
+
+    #[test]
+    fn suggestions_complete_and_apply_at_the_caret() {
+        let tree = test_tree();
+        let wf = |_: &str| 0.0;
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Message, Some(&tree));
+        set_input(&mut chat, "/ti day");
+        chat.input.move_cursor_to(3, false, f32::MAX, &wf);
+        chat.allow_suggestions = true;
+        chat.update_command_info(Some(&tree));
+        assert_eq!(chat.suggestions, vec!["time"]);
+        assert_eq!(chat.suggest_range, 1..3);
+        press(&mut chat, TAB, &tree);
+        assert_eq!(chat.input.value(), "/time day");
+        assert_eq!(chat.input.cursor(), 5);
+    }
+
+    #[test]
+    fn server_request_is_the_input_up_to_the_caret() {
+        let tree = test_tree();
+        let wf = |_: &str| 0.0;
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Message, Some(&tree));
+        set_input(&mut chat, "/gamemode cx");
+        chat.input.move_cursor_to(11, false, f32::MAX, &wf);
+        chat.update_command_info(Some(&tree));
+        assert_eq!(
+            chat.take_suggestion_request(),
+            Some((0, "/gamemode c".to_owned()))
+        );
+    }
+
+    #[test]
+    fn request_ids_count_up_and_reset_on_answer() {
+        let tree = test_tree();
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Command, Some(&tree));
+        type_text(&mut chat, "gamemode ", &tree);
+        assert_eq!(chat.take_suggestion_request().map(|r| r.0), Some(0));
+        type_text(&mut chat, "t", &tree);
+        assert_eq!(chat.take_suggestion_request().map(|r| r.0), Some(1));
+        chat.apply_server_suggestions(1, 10, vec!["true".into()]);
+        assert_eq!(chat.suggestions, vec!["true"]);
+        type_text(&mut chat, "r", &tree);
+        assert_eq!(chat.take_suggestion_request().map(|r| r.0), Some(0));
+    }
+
+    #[test]
+    fn escape_hides_the_list_then_closes() {
+        let tree = test_tree();
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Command, Some(&tree));
+        type_text(&mut chat, "t", &tree);
+        assert!(!chat.suggestions.is_empty());
+        assert!(!chat.handle_escape());
+        assert!(chat.suggestions.is_empty());
+        assert!(chat.is_open());
+        assert!(chat.handle_escape());
+        assert!(!chat.is_open());
+    }
+
+    #[test]
+    fn commands_only_blocks_messages_and_message_commands() {
+        let tree = test_tree();
+        let submit = |text: &str| {
+            let mut chat = ChatState::new();
+            chat.set_options(ChatOptions {
+                visibility: ChatVisibilitySetting::System,
+                ..Default::default()
+            });
+            chat.open(ChatMethod::Message, Some(&tree));
+            type_text(&mut chat, text, &tree);
+            let enter = Keys {
+                enter: true,
+                ..Default::default()
+            };
+            let sent = press(&mut chat, enter, &tree);
+            (sent, chat.is_open())
+        };
+        assert_eq!(submit("hello"), (None, true));
+        assert_eq!(submit("/msg x hi"), (None, true));
+        assert_eq!(
+            submit("/time set day"),
+            (Some("/time set day".to_owned()), false)
+        );
+    }
+
+    #[test]
+    fn suggestion_rect_matches_vanilla_geometry() {
+        let mut chat = ChatState::new();
+        chat.suggest_original = "/give @p ".to_owned();
+        chat.suggest_range = 9..9;
+        chat.suggestions = vec!["apple".into(), "stick".into()];
+        let gui_w = |s: &str| s.chars().count() as f32 * 6.0;
+        // getScreenX(9) = 4 + 54, shifted one left; width 30 + 1; two rows
+        // ending 15 above the bottom.
+        assert_eq!(
+            chat.suggestion_rect(320.0, 240.0, &gui_w),
+            [57.0, 201.0, 31.0, 24.0]
+        );
+        // Clamped so the widest entry stays on screen.
+        assert_eq!(chat.suggestion_rect(80.0, 240.0, &gui_w)[0], 49.0);
+        // The width counts every entry, not just the visible rows.
+        chat.suggestions = (0..11).map(|i| "a".repeat(i + 1).into()).collect();
+        let rect = chat.suggestion_rect(320.0, 240.0, &gui_w);
+        assert_eq!(rect[2], 67.0);
+        assert_eq!(rect[3], 120.0);
+    }
+
+    #[test]
+    fn parse_error_carries_brigadier_context() {
+        let expected = |key: &str, position: &str, context: &str| {
+            Component::translate(
+                "command.context.parse_error",
+                vec![
+                    Argument::Component(Box::new(Component::translate(key, Vec::new()))),
+                    Argument::Number(position.to_owned()),
+                    Argument::String(context.to_owned()),
+                ],
+            )
+        };
+        assert_eq!(
+            parse_error_component("/foo", 1, "command.unknown.command"),
+            expected("command.unknown.command", "1", "/<--[HERE]")
+        );
+        // Past ten characters the context keeps the last ten behind "...".
+        assert_eq!(
+            parse_error_component("/time set abcdefg", 17, "command.unknown.argument"),
+            expected("command.unknown.argument", "17", "...et abcdefg<--[HERE]")
+        );
+        // Positions count UTF-16 units.
+        assert_eq!(
+            parse_error_component("/é", 3, "command.unknown.argument"),
+            expected("command.unknown.argument", "2", "/é<--[HERE]")
+        );
     }
 
     #[test]
@@ -3011,6 +4400,7 @@ mod tests {
         assert_eq!(options.visibility, ChatVisibilitySetting::Full);
         assert_eq!(options.width_px(), 320.0);
         assert_eq!(options.wrap_width_px(), 320.0);
+        assert_eq!(options.render_width_px(), 320.0);
         assert_eq!(options.height_px(true), 180.0);
         assert_eq!(options.height_px(false), 90.0);
         assert_eq!(options.line_height(), 9.0);
@@ -3022,6 +4412,16 @@ mod tests {
         assert!(options.auto_suggestions);
         assert!(!options.only_secure);
         assert!(!options.save_drafts);
+    }
+
+    #[test]
+    fn scaled_chat_wraps_floored_and_renders_ceiled() {
+        let options = ChatOptions {
+            scale: 0.7,
+            ..Default::default()
+        };
+        assert_eq!(options.wrap_width_px(), 457.0);
+        assert_eq!(options.render_width_px(), 458.0);
     }
 
     #[test]
@@ -3065,67 +4465,25 @@ mod tests {
     #[test]
     fn visibility_matches_vanilla_chat_abilities() {
         let mut chat = ChatState::new();
-        assert!(chat.source_visible(ChatMessageSource::Player, None));
-        assert!(chat.source_visible(ChatMessageSource::SystemServer, None));
-        assert!(chat.source_visible(ChatMessageSource::SystemClient, None));
+        assert!(chat.source_visible(ChatMessageSource::Player));
+        assert!(chat.source_visible(ChatMessageSource::SystemServer));
+        assert!(chat.source_visible(ChatMessageSource::SystemClient));
 
         let mut options = ChatOptions {
             visibility: ChatVisibilitySetting::System,
             ..Default::default()
         };
         chat.set_options(options);
-        assert!(!chat.source_visible(ChatMessageSource::Player, None));
-        assert!(chat.source_visible(ChatMessageSource::SystemServer, None));
-        assert!(chat.source_visible(ChatMessageSource::SystemClient, None));
+        assert!(!chat.source_visible(ChatMessageSource::Player));
+        assert!(chat.source_visible(ChatMessageSource::SystemServer));
+        assert!(chat.source_visible(ChatMessageSource::SystemClient));
 
         options.visibility = ChatVisibilitySetting::Hidden;
         chat.set_options(options);
-        assert!(!chat.source_visible(ChatMessageSource::Player, None));
-        assert!(!chat.source_visible(ChatMessageSource::SystemServer, None));
+        assert!(!chat.source_visible(ChatMessageSource::Player));
+        assert!(!chat.source_visible(ChatMessageSource::SystemServer));
         // Client-local system messages remain visible in Vanilla.
-        assert!(chat.source_visible(ChatMessageSource::SystemClient, None));
-    }
-
-    #[test]
-    fn save_chat_drafts_restores_and_first_backspace_clears() {
-        let mut chat = ChatState::new();
-        let options = ChatOptions {
-            save_drafts: true,
-            ..Default::default()
-        };
-        chat.set_options(options);
-        chat.open();
-        set_input(&mut chat, "draft text");
-        chat.close();
-        chat.open();
-        assert_eq!(chat.input.value(), "draft text");
-        assert!(chat.is_restored_draft);
-
-        let event = TextInputEvent::Key {
-            code: winit::keyboard::KeyCode::Backspace,
-            mods: crate::ui::text_edit::KeyMods {
-                shift: false,
-                ctrl: false,
-                alt: false,
-                super_key: false,
-            },
-        };
-        chat.handle_key_input(
-            &[event],
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            f32::MAX,
-            &|_| 0.0,
-            None,
-        );
-        assert_eq!(chat.input.value(), "");
-        assert!(!chat.is_restored_draft);
-        assert!(chat.latest_draft.is_none());
+        assert!(chat.source_visible(ChatMessageSource::SystemClient));
     }
 
     #[test]
@@ -3258,7 +4616,7 @@ mod tests {
         let mut chat = awaiting_chat("/example v");
         let tooltip = Component::text("server tooltip");
         chat.apply_server_suggestions(
-            1,
+            0,
             9,
             vec![ChatSuggestion {
                 text: "value".to_owned(),

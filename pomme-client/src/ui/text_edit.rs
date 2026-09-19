@@ -124,6 +124,10 @@ impl TextFieldState {
         &self.value[start..end]
     }
 
+    pub fn cursor(&self) -> usize {
+        self.cursor_pos
+    }
+
     pub fn cursor_at_end(&self) -> bool {
         self.cursor_pos == self.value.len()
     }
