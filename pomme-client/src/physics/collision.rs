@@ -4,9 +4,7 @@ use glam::{DVec3, dvec3};
 use super::aabb::Aabb;
 use super::block_shape;
 use crate::entity::components::Velocity;
-use crate::world::block::{
-    block_id, block_properties, collision_shape_position, has_collision,
-};
+use crate::world::block::{block_id, block_properties, collision_shape_position, has_collision};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
