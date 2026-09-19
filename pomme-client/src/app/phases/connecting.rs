@@ -1,9 +1,10 @@
 use crate::app::TICK_RATE;
 use crate::app::core::AppCore;
-use crate::app::phases::in_game::GameState;
+use crate::app::phases::in_game::{GameState, build_server_screens};
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama, draw_status};
 use crate::net::connection::ConnectionHandle;
 use crate::singleplayer::World;
+use crate::ui::{common, hud};
 
 pub enum ConnectingUpdateResult {
     None,
@@ -83,9 +84,48 @@ pub fn update_connecting(
         ConnectionPhase::Connecting => "Connecting to the server...",
     };
 
-    if draw_status(core, dt, gfx, panorama, status_text, Some("Cancel")) {
+    if game.server_dialog.is_some() || game.chat.has_pending_modal_prompt() {
+        draw_server_dialog(core, dt, gfx, panorama, connection, game);
+    } else if draw_status(core, dt, gfx, panorama, status_text, Some("Cancel")) {
         return ConnectingUpdateResult::ManualDisconnect;
     }
 
     ConnectingUpdateResult::None
+}
+
+/// A configuration-phase dialog, shown in place of the connect screen with
+/// the confirm screen its links can open.
+fn draw_server_dialog(
+    core: &mut AppCore,
+    dt: f32,
+    gfx: &mut Gfx,
+    panorama: &mut Panorama,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    panorama.update(dt);
+
+    let sw = gfx.renderer.screen_width() as f32;
+    let sh = gfx.renderer.screen_height() as f32;
+    let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
+    if !game.chat.has_pending_modal_prompt()
+        && let Some(dialog) = game.server_dialog.as_mut()
+    {
+        let fs = common::FONT_SIZE * gs;
+        dialog.handle_text_input(&core.input.drain_text_events(), sw - 16.0 * gs, &|s| {
+            gfx.renderer.menu_text_width(s, fs)
+        });
+    }
+
+    let mut elements = Vec::new();
+    build_server_screens(&mut elements, sw, sh, gs, core, gfx, connection, game);
+    core.input.clear_just_pressed_actions();
+
+    let cursor = core.input.cursor_pos();
+    if let Err(e) =
+        gfx.renderer
+            .render_menu(&gfx.window, panorama.scroll(), 2.0, elements, cursor, false)
+    {
+        tracing::error!("Render error: {e}");
+    }
 }

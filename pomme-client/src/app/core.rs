@@ -1214,6 +1214,9 @@ impl AppCore {
                 NetworkEvent::Registries(registries) => {
                     game.registries = registries;
                 }
+                NetworkEvent::DialogRegistry(registry) => {
+                    game.dialog_registry = registry;
+                }
                 NetworkEvent::ContainerSlot {
                     container_id,
                     index,
@@ -2027,6 +2030,11 @@ impl AppCore {
                     // report the last session's slot.
                     self.input.set_selected_slot(0);
                     game.start_level_load();
+                    // `startWaitingForNewLevel` swaps in the level-loading
+                    // screen, replacing a configuration-phase dialog.
+                    game.configuring = false;
+                    game.server_dialog = None;
+                    self.apply_cursor_grab(window, Some(game));
                 }
                 NetworkEvent::SecureChatEnforced { enforced } => {
                     game.server_enforces_secure_chat = enforced;
@@ -2056,7 +2064,10 @@ impl AppCore {
                     // models the max-health base, so it remains unchanged here.
                     let _ = keep_attribute_modifiers;
                     game.dead = false;
+                    // `startWaitingForNewLevel` replaces an open dialog here too.
+                    game.server_dialog = None;
                     game.start_level_load();
+                    self.apply_cursor_grab(window, Some(game));
                     game.player.reset_for_respawn(keep_entity_data);
                     game.interaction.reset_player_transients_for_respawn();
                     // A fresh LocalPlayer gets a fresh KeyboardInput and packet
@@ -2123,7 +2134,12 @@ impl AppCore {
                     game.silent_entities.clear();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
+                    // `ServerReconfigScreen` replaces any dialog; the server
+                    // links carry over.
+                    game.server_dialog = None;
+                    game.configuring = true;
                     self.clear_server_ui(game, renderer);
+                    self.apply_cursor_grab(window, Some(game));
                 }
                 NetworkEvent::Disconnected { reason } => {
                     tracing::warn!("Disconnected: {reason}");

@@ -162,6 +162,10 @@ pub struct GameState {
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
+    pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
+    /// The connection is in the configuration phase (the join, or a
+    /// reconfiguration), where dialogs can't run commands.
+    pub configuring: bool,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
     pub server_enforces_secure_chat: bool,
@@ -397,6 +401,8 @@ impl GameState {
             },
             server_dialog: None,
             server_links: Vec::new(),
+            dialog_registry: Arc::default(),
+            configuring: true,
             command_tree: None,
             tab_list: TabList::new(),
             server_enforces_secure_chat: false,
@@ -573,7 +579,7 @@ impl GameState {
     ) -> bool {
         match crate::ui::server_dialog::ServerDialogState::open(
             reference,
-            &self.registries,
+            &self.dialog_registry,
             &self.server_links,
         ) {
             Ok(dialog) => {
@@ -1401,12 +1407,7 @@ fn handle_chat_ui_action(
                 .packet_tx
                 .send_raw(crate::net::chat::encode_outbound_command(&command));
         }
-        ChatUiAction::Custom { id, payload } => {
-            match crate::net::chat::encode_outbound_custom_click_action(&id, payload.as_ref()) {
-                Ok(frame) => connection.packet_tx.send_raw(frame),
-                Err(e) => tracing::warn!("Could not encode custom chat click action {id:?}: {e}"),
-            }
-        }
+        ChatUiAction::Custom { id, payload } => connection.packet_tx.send_custom_click(id, payload),
         ChatUiAction::ShowDialog(dialog) => {
             game.chat
                 .close(crate::ui::chat::ChatExitReason::Interrupted);
@@ -1464,6 +1465,13 @@ pub(crate) fn settle_server_dialog(
             Some(action) => action,
             None => return,
         },
+        // `ClientConfigurationPacketListenerImpl.createDialogAccess`.
+        Some(ServerDialogAction::RunCommand(command)) if game.configuring => {
+            tracing::warn!(
+                "Commands are not supported in configuration phase, trying to run '{command}'"
+            );
+            return;
+        }
         Some(ServerDialogAction::RunCommand(command)) => ChatUiAction::RunCommand(command),
         Some(ServerDialogAction::Custom { id, payload }) => ChatUiAction::Custom { id, payload },
         Some(ServerDialogAction::ShowDialog(reference)) => {
@@ -1472,6 +1480,90 @@ pub(crate) fn settle_server_dialog(
         }
     };
     handle_chat_ui_action(action, core, connection, game);
+}
+
+/// The server dialog and the confirm screen a chat or dialog link opens over
+/// it, with their clicks settled. The connecting screen shares it for
+/// configuration-phase dialogs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_server_screens(
+    elements: &mut Vec<MenuElement>,
+    sw: f32,
+    sh: f32,
+    gs: f32,
+    core: &mut AppCore,
+    gfx: &Gfx,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    let modal_open = game.chat.has_pending_modal_prompt();
+    if let Some(dialog) = game.server_dialog.as_mut() {
+        let action = dialog.build(
+            elements,
+            sw,
+            sh,
+            gs,
+            core.input.cursor_pos(),
+            core.input.left_just_pressed() && !modal_open,
+            core.input.left_held() && !modal_open,
+            &|t, s| gfx.renderer.menu_text_width(t, s),
+            &|spans, s| gfx.renderer.menu_spans_width(spans, s),
+        );
+        settle_server_dialog(action, core, connection, game);
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+
+    if game.chat.has_pending_modal_prompt() {
+        let cursor = core.input.cursor_pos();
+        let clicked = core.input.left_just_pressed();
+        // `AbstractButton.onClick` plays the click; this is the same
+        // last-frame hit test the modal presses with.
+        if clicked && game.chat.hovering_clickable(cursor, false) {
+            core.audio.play_ui_click();
+        }
+        if let Some(action) =
+            game.chat
+                .build_modal_prompt(elements, sw, sh, gs, cursor, clicked, &|spans, s| {
+                    gfx.renderer.menu_spans_width(spans, s)
+                })
+        {
+            handle_chat_ui_action(action, core, connection, game);
+        }
+        core.input.clear_just_pressed_actions();
+        core.apply_cursor_grab(&gfx.window, Some(game));
+    }
+}
+
+/// A key press while a server dialog is open: Escape cancels it, Tab cycles
+/// its text fields, and anything else types.
+pub(crate) fn server_dialog_key(
+    code: winit::keyboard::KeyCode,
+    event: &winit::event::KeyEvent,
+    core: &mut AppCore,
+    window: &winit::window::Window,
+    connection: &ConnectionHandle,
+    game: &mut GameState,
+) {
+    use winit::keyboard::KeyCode;
+
+    match code {
+        KeyCode::Escape => {
+            let action = game
+                .server_dialog
+                .as_mut()
+                .and_then(|dialog| dialog.handle_escape());
+            settle_server_dialog(action, core, connection, game);
+            core.input.clear_action(input::Action::OpenMenu);
+            core.apply_cursor_grab(window, Some(game));
+        }
+        KeyCode::Tab => {
+            if let Some(dialog) = game.server_dialog.as_mut() {
+                dialog.handle_tab(core.input.shift_held());
+            }
+        }
+        _ => core.input.on_menu_key_event(event),
+    }
 }
 
 /// Carry out the button/dismiss action a benchmark result overlay reported,
@@ -2946,43 +3038,7 @@ pub fn update_game(
         });
     }
 
-    let modal_open = game.chat.has_pending_modal_prompt();
-    if let Some(dialog) = game.server_dialog.as_mut() {
-        let action = dialog.build(
-            &mut elements,
-            sw,
-            sh,
-            gs,
-            core.input.cursor_pos(),
-            core.input.left_just_pressed() && !modal_open,
-            core.input.left_held() && !modal_open,
-            &|t, s| gfx.renderer.menu_text_width(t, s),
-            &|spans, s| gfx.renderer.menu_spans_width(spans, s),
-        );
-        settle_server_dialog(action, core, connection, game);
-        core.input.clear_just_pressed_actions();
-        core.apply_cursor_grab(&gfx.window, Some(game));
-    }
-
-    if game.chat.has_pending_modal_prompt() {
-        let cursor = core.input.cursor_pos();
-        let clicked = core.input.left_just_pressed();
-        // `AbstractButton.onClick` plays the click; this is the same
-        // last-frame hit test the modal presses with.
-        if clicked && game.chat.hovering_clickable(cursor, false) {
-            core.audio.play_ui_click();
-        }
-        if let Some(action) =
-            game.chat
-                .build_modal_prompt(&mut elements, sw, sh, gs, cursor, clicked, &|spans, s| {
-                    gfx.renderer.menu_spans_width(spans, s)
-                })
-        {
-            handle_chat_ui_action(action, core, connection, game);
-        }
-        core.input.clear_just_pressed_actions();
-        core.apply_cursor_grab(&gfx.window, Some(game));
-    }
+    build_server_screens(&mut elements, sw, sh, gs, core, gfx, connection, game);
 
     if game.chat.is_open() && core.input.cursor_moved_this_frame() {
         let icon = if game

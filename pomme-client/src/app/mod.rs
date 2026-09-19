@@ -420,10 +420,32 @@ impl ApplicationHandler for App {
                             panorama,
                             connect_phase,
                             connection,
-                            game,
+                            mut game,
                             world,
                         } => {
+                            // A configuration-phase dialog replaces the
+                            // connect screen and takes its keys.
                             if event.state.is_pressed()
+                                && let PhysicalKey::Code(code) = event.physical_key
+                                && game.server_dialog.is_some()
+                            {
+                                crate::app::phases::in_game::server_dialog_key(
+                                    code,
+                                    &event,
+                                    &mut self.core,
+                                    &gfx.window,
+                                    &connection,
+                                    &mut game,
+                                );
+                                AppPhase::Connecting {
+                                    gfx,
+                                    panorama,
+                                    connect_phase,
+                                    connection,
+                                    game,
+                                    world,
+                                }
+                            } else if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                             {
                                 leave_world(
@@ -462,31 +484,14 @@ impl ApplicationHandler for App {
                                         self.core.input.on_menu_key_event(&event);
                                     }
                                 } else if game.server_dialog.is_some() {
-                                    match code {
-                                        KeyCode::Escape => {
-                                            let action = game
-                                                .server_dialog
-                                                .as_mut()
-                                                .and_then(|dialog| dialog.handle_escape());
-                                            crate::app::phases::in_game::settle_server_dialog(
-                                                action,
-                                                &mut self.core,
-                                                &connection,
-                                                &mut game,
-                                            );
-                                            self.core
-                                                .input
-                                                .clear_action(crate::app::input::Action::OpenMenu);
-                                            self.core
-                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
-                                        }
-                                        KeyCode::Tab => {
-                                            if let Some(dialog) = game.server_dialog.as_mut() {
-                                                dialog.handle_tab(self.core.input.shift_held());
-                                            }
-                                        }
-                                        _ => self.core.input.on_menu_key_event(&event),
-                                    }
+                                    crate::app::phases::in_game::server_dialog_key(
+                                        code,
+                                        &event,
+                                        &mut self.core,
+                                        &gfx.window,
+                                        &connection,
+                                        &mut game,
+                                    );
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {

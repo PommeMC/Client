@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
+use simdnbt::owned::NbtCompound;
 
-use crate::chat_component::{ClickEvent, Component};
+use crate::chat_component::{ClickEvent, Component, normalize_identifier};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 use crate::ui::chat::{
     StyleHitRegion, component_tooltip_lines, push_hit_regions, style_at, wrap_spans,
@@ -26,10 +27,61 @@ pub enum DialogReference {
     ProtocolId(u32),
 }
 
+impl DialogReference {
+    /// A dialog sent inline (`Holder.Direct`) rather than by registry id.
+    pub fn inline(nbt: &NbtCompound) -> Result<Self, String> {
+        nbt_compound_to_value(nbt).map(Self::Value)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ServerLink {
     pub label: Component,
     pub url: String,
+}
+
+/// The server's `minecraft:dialog` registry: entries in protocol-id order,
+/// plus its tags as entry indices.
+#[derive(Clone, Debug, Default)]
+pub struct DialogRegistry {
+    entries: Vec<(String, NbtCompound)>,
+    tags: HashMap<String, Vec<usize>>,
+}
+
+impl DialogRegistry {
+    pub fn new(entries: Vec<(String, NbtCompound)>, tags: HashMap<String, Vec<usize>>) -> Self {
+        Self { entries, tags }
+    }
+
+    /// The same entries with their tags replaced, as a tag reload does.
+    pub fn with_tags(&self, tags: HashMap<String, Vec<usize>>) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            tags,
+        }
+    }
+
+    fn by_id(&self, id: usize) -> Option<&NbtCompound> {
+        self.entries.get(id).map(|(_, nbt)| nbt)
+    }
+
+    fn by_key(&self, key: &str) -> Option<&NbtCompound> {
+        let key = normalize_identifier(key);
+        self.entries
+            .iter()
+            .find(|(entry, _)| *entry == key)
+            .map(|(_, nbt)| nbt)
+    }
+
+    /// A tag's entries; an unknown tag is empty, like an unbound one.
+    fn tag(&self, tag: &str) -> Vec<DialogReference> {
+        self.tags
+            .get(&normalize_identifier(tag))
+            .into_iter()
+            .flatten()
+            .map(|&id| DialogReference::ProtocolId(id as u32))
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -256,17 +308,17 @@ pub struct ServerDialogState {
 impl ServerDialogState {
     pub fn open(
         reference: DialogReference,
-        registries: &azalea_core::registry_holder::RegistryHolder,
+        registry: &DialogRegistry,
         server_links: &[ServerLink],
     ) -> Result<Self, String> {
-        let value = resolve_dialog_reference(reference, registries)?;
-        let dialog = parse_dialog(&value)?;
+        let value = resolve_dialog_reference(reference, registry)?;
+        let dialog = parse_dialog(&value, registry)?;
         let dialog_list_labels = match &dialog.kind {
             DialogKind::DialogList { dialogs, .. } => dialogs
                 .iter()
                 .map(|reference| {
-                    resolve_dialog_reference(reference.clone(), registries)
-                        .and_then(|value| parse_dialog(&value))
+                    resolve_dialog_reference(reference.clone(), registry)
+                        .and_then(|value| parse_dialog(&value, registry))
                         .map(|dialog| dialog.external_title.unwrap_or(dialog.title))
                         .unwrap_or_else(|_| Component::text(dialog_reference_label(reference)))
                 })
@@ -773,32 +825,21 @@ fn click_to_action(click: ClickEvent) -> Option<ServerDialogAction> {
 
 fn resolve_dialog_reference(
     reference: DialogReference,
-    registries: &azalea_core::registry_holder::RegistryHolder,
+    registry: &DialogRegistry,
 ) -> Result<Value, String> {
     if let DialogReference::Value(value @ Value::Object(_)) = reference {
         return Ok(value);
     }
-    let key: azalea_registry::identifier::Identifier = "minecraft:dialog".into();
-    let registry = registries
-        .extra
-        .get(&key)
-        .ok_or_else(|| "server sent no minecraft:dialog registry".to_owned())?;
     let by_index = |id: u64| {
         registry
-            .map
-            .get_index(id as usize)
-            .map(|(_, nbt)| nbt)
+            .by_id(id as usize)
             .ok_or_else(|| format!("unknown dialog protocol id {id}"))
     };
     let nbt = match reference {
         DialogReference::ProtocolId(id) => by_index(id.into())?,
-        DialogReference::Value(Value::String(id)) => {
-            let ident: azalea_registry::identifier::Identifier = id.as_str().into();
-            registry
-                .map
-                .get(&ident)
-                .ok_or_else(|| format!("unknown dialog registry key {id}"))?
-        }
+        DialogReference::Value(Value::String(id)) => registry
+            .by_key(&id)
+            .ok_or_else(|| format!("unknown dialog registry key {id}"))?,
         DialogReference::Value(Value::Number(id)) => by_index(
             id.as_u64()
                 .ok_or_else(|| "dialog registry id must be unsigned".to_owned())?,
@@ -810,12 +851,12 @@ fn resolve_dialog_reference(
     nbt_compound_to_value(nbt)
 }
 
-pub(crate) fn nbt_compound_to_value(nbt: &simdnbt::owned::NbtCompound) -> Result<Value, String> {
+fn nbt_compound_to_value(nbt: &NbtCompound) -> Result<Value, String> {
     serde_json::to_value(simdnbt::owned::NbtTag::Compound(nbt.clone()))
         .map_err(|e| format!("dialog NBT is not serializable: {e}"))
 }
 
-fn parse_dialog(value: &Value) -> Result<DialogData, String> {
+fn parse_dialog(value: &Value, registry: &DialogRegistry) -> Result<DialogData, String> {
     let map = value
         .as_object()
         .ok_or_else(|| "dialog must be an object".to_owned())?;
@@ -869,7 +910,7 @@ fn parse_dialog(value: &Value) -> Result<DialogData, String> {
             columns: usize_field(map, "columns", 2).max(1),
         },
         "dialog_list" => DialogKind::DialogList {
-            dialogs: parse_dialog_list(map.get("dialogs"))?,
+            dialogs: parse_dialog_list(map.get("dialogs"), registry)?,
             exit: map.get("exit_action").map(parse_button).transpose()?,
             columns: usize_field(map, "columns", 2).max(1),
             button_width: number_field(map, "button_width", 150.0).clamp(1.0, 1024.0),
@@ -1159,11 +1200,17 @@ fn parse_click_action_map(map: &Map<String, Value>, kind: &str) -> Result<ClickE
     }
 }
 
-fn parse_dialog_list(value: Option<&Value>) -> Result<Vec<DialogReference>, String> {
+/// `Dialog.LIST_CODEC` (`RegistryCodecs.homogeneousList`): a `#tag`, one
+/// holder, or a list of holders.
+fn parse_dialog_list(
+    value: Option<&Value>,
+    registry: &DialogRegistry,
+) -> Result<Vec<DialogReference>, String> {
     let Some(value) = value else {
         return Err("dialog_list has no dialogs".to_owned());
     };
     match value {
+        Value::String(tag) if tag.starts_with('#') => Ok(registry.tag(&tag[1..])),
         Value::Array(values) => Ok(values.iter().cloned().map(DialogReference::Value).collect()),
         Value::String(_) | Value::Object(_) | Value::Number(_) => {
             Ok(vec![DialogReference::Value(value.clone())])
@@ -1624,7 +1671,7 @@ mod tests {
                 "action":{"type":"dynamic/run_command","template":"say $(name)"}
             }
         });
-        let dialog = parse_dialog(&value).unwrap();
+        let dialog = parse_dialog(&value, &DialogRegistry::default()).unwrap();
         assert_eq!(dialog.title.plain_text(), "Title");
         assert_eq!(dialog.inputs.len(), 1);
         let DialogKind::Notice { action } = dialog.kind else {
@@ -1660,7 +1707,71 @@ mod tests {
                 {"key":"n","type":"number_range","label":"N","start":0,"end":10}
             ]
         });
-        let dialog = parse_dialog(&value).unwrap();
+        let dialog = parse_dialog(&value, &DialogRegistry::default()).unwrap();
         assert_eq!(dialog.inputs.len(), 4);
+    }
+
+    fn notice(title: &str) -> NbtCompound {
+        let mut nbt = NbtCompound::new();
+        nbt.insert("type", "minecraft:notice");
+        nbt.insert("title", title);
+        nbt
+    }
+
+    fn test_registry() -> DialogRegistry {
+        DialogRegistry::new(
+            vec![
+                ("minecraft:first".to_owned(), notice("First")),
+                ("minecraft:second".to_owned(), notice("Second")),
+                ("pomme:third".to_owned(), notice("Third")),
+            ],
+            HashMap::from([("minecraft:quick_actions".to_owned(), vec![2, 0])]),
+        )
+    }
+
+    fn dialog_list(dialogs: Value) -> DialogReference {
+        DialogReference::Value(serde_json::json!({
+            "type": "dialog_list",
+            "title": "List",
+            "dialogs": dialogs,
+        }))
+    }
+
+    fn list_labels(registry: &DialogRegistry, dialogs: Value) -> Vec<String> {
+        ServerDialogState::open(dialog_list(dialogs), registry, &[])
+            .unwrap()
+            .dialog_list_labels
+            .iter()
+            .map(Component::plain_text)
+            .collect()
+    }
+
+    #[test]
+    fn dialog_list_resolves_tags_ids_and_inline_dialogs() {
+        let registry = test_registry();
+        assert_eq!(
+            list_labels(&registry, "#quick_actions".into()),
+            ["Third", "First"]
+        );
+        assert_eq!(list_labels(&registry, "second".into()), ["Second"]);
+        assert_eq!(
+            list_labels(
+                &registry,
+                serde_json::json!(["pomme:third", {"type": "notice", "title": "Inline"}])
+            ),
+            ["Third", "Inline"]
+        );
+        // An unknown tag is an empty holder set.
+        assert!(list_labels(&registry, "#minecraft:missing".into()).is_empty());
+    }
+
+    #[test]
+    fn tag_reload_replaces_the_dialog_tags() {
+        let registry = test_registry().with_tags(HashMap::from([(
+            "minecraft:quick_actions".to_owned(),
+            vec![1],
+        )]));
+        assert_eq!(list_labels(&registry, "#quick_actions".into()), ["Second"]);
+        assert!(ServerDialogState::open(DialogReference::ProtocolId(2), &registry, &[]).is_ok());
     }
 }
