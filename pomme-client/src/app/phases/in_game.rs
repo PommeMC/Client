@@ -2970,7 +2970,7 @@ pub fn update_game(
                 (name != "air").then(|| {
                     let light =
                         get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
-                    (name, light)
+                    (name, light, data.clone())
                 })
             }
             _ => None,
@@ -3000,6 +3000,7 @@ pub fn update_game(
         swing_progress,
         use_anim,
         held_item,
+        game.scoreboard.member_team_color(&core.user.username),
         destroy_info,
         game.show_chunk_borders,
         sky,
@@ -3306,6 +3307,7 @@ fn emit_item_copies(
     item_id: u32,
     damage: i32,
     count: i32,
+    item_stack: Option<&azalea_inventory::ItemStackData>,
     anchor_rel_pos: glam::Vec3,
     age_f: f32,
     bob_offset: f32,
@@ -3329,6 +3331,7 @@ fn emit_item_copies(
     let mut push = |copy_offset: glam::Mat4| {
         infos.push(ItemRenderInfo {
             item_name: item_name.to_string(),
+            item_stack: item_stack.cloned(),
             model_matrix: base * copy_offset * ground_transform,
             light,
             nether_lighting,
@@ -3381,6 +3384,7 @@ fn build_item_render_infos(
             item.item_id,
             item.damage,
             item.count,
+            item.stack.as_ref(),
             (*lerped - anchor).as_vec3(),
             age_f,
             item.bob_offset,
@@ -3404,6 +3408,7 @@ fn build_item_render_infos(
             pickup.item_id,
             pickup.damage,
             pickup.count,
+            pickup.stack.as_ref(),
             (*pickup.position - anchor).as_vec3(),
             age_f,
             pickup.bob_offset,

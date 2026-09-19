@@ -312,6 +312,10 @@ pub struct BakedQuad {
     pub texture: String,
     pub cullface: Option<Direction>,
     pub tint: super::registry::Tint,
+    /// Raw vanilla face `tintindex`. Terrain resolves this through `tint`,
+    /// while item models use it to index the `ItemTintSource` palette from
+    /// their item definition.
+    pub tint_index: Option<u32>,
     /// The default table's shade, for GUI and held items.
     pub shade_light: f32,
     /// The face terrain shades this quad as, `None` for `shade: false`.
@@ -332,26 +336,6 @@ pub struct MultipartEntry {
     pub when: HashMap<String, String>,
     pub quads: Vec<BakedQuad>,
 }
-
-const FOLIAGE_TINTED: &[&str] = &[
-    "oak_leaves",
-    "dark_oak_leaves",
-    "jungle_leaves",
-    "acacia_leaves",
-    "mangrove_leaves",
-    "vine",
-];
-
-const DRY_FOLIAGE_TINTED: &[&str] = &["leaf_litter"];
-
-const GRASS_TINTED: &[&str] = &[
-    "grass_block",
-    "grass",
-    "short_grass",
-    "tall_grass",
-    "fern",
-    "large_fern",
-];
 
 pub fn load_all_block_textures(
     jar_assets_dir: &Path,
@@ -406,7 +390,6 @@ pub fn bake_all_models(
         packs,
         |block_name, blockstate| {
             total += 1;
-            let block_tint = determine_tint(block_name);
             let mut variants_map: HashMap<String, BakedModel> = HashMap::new();
 
             if let Some(variants) = &blockstate.variants {
@@ -420,8 +403,9 @@ pub fn bake_all_models(
                         packs,
                     );
                     if let Some(mut baked) =
-                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
+                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)
                     {
+                        apply_block_tints(&mut baked, block_name);
                         if is_non_occluding(block_name) {
                             baked.occludes = false;
                         }
@@ -439,9 +423,10 @@ pub fn bake_all_models(
                         &mut model_cache,
                         packs,
                     );
-                    if let Some(baked) =
-                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
+                    if let Some(mut baked) =
+                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, Tint::None)
                     {
+                        apply_block_tints(&mut baked, block_name);
                         let when = parse_when_condition(&case.when);
                         entries.push(MultipartEntry {
                             when,
@@ -490,8 +475,25 @@ pub fn bake_all_models(
 pub struct BakedItemModels {
     pub models: HashMap<String, BakedModel>,
     pub generated_textures: HashSet<String>,
-    pub flat_texture_keys: HashMap<String, String>,
+    pub flat_texture_keys: HashMap<String, Vec<String>>,
     pub ground_transforms: HashMap<String, Mat4>,
+    pub tint_sources: HashMap<String, Vec<ItemTintSource>>,
+}
+
+/// Vanilla 26.2 item-model tint sources. Colors keep the codec's full packed
+/// ARGB integer because `dye` and `firework` preserve their configured default
+/// alpha when no component color is present; sources that Vanilla explicitly
+/// opacifies do so during evaluation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ItemTintSource {
+    Constant(u32),
+    Grass { color: u32 },
+    Dye { default: u32 },
+    Firework { default: u32 },
+    Potion { default: u32 },
+    MapColor { default: u32 },
+    CustomModelData { index: usize, default: u32 },
+    Team { default: u32 },
 }
 
 /// Every `minecraft/items/*.json` name across the jar and the active packs,
@@ -520,6 +522,146 @@ fn item_definition_names(
         .collect()
 }
 
+fn load_grass_colormap(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    packs: Option<&crate::resource_pack::ResourcePackManager>,
+) -> Option<Vec<[u8; 3]>> {
+    let path = resolve_asset_path_with_packs(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/textures/colormap/grass.png",
+        packs,
+    );
+    crate::renderer::util::load_png(&path).map(|(data, _, _)| {
+        data.chunks(4)
+            .take(256 * 256)
+            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .collect()
+    })
+}
+
+fn grass_color(colormap: Option<&[[u8; 3]]>, temperature: f32, downfall: f32) -> u32 {
+    let temperature = temperature.clamp(0.0, 1.0);
+    let downfall = downfall.clamp(0.0, 1.0) * temperature;
+    let x = ((1.0 - temperature) * 255.0) as usize;
+    let y = ((1.0 - downfall) * 255.0) as usize;
+    let Some(pixel) = colormap.and_then(|pixels| pixels.get(y * 256 + x)) else {
+        return 0x91BD59;
+    };
+    ((pixel[0] as u32) << 16) | ((pixel[1] as u32) << 8) | pixel[2] as u32
+}
+
+fn opaque(color: u32) -> u32 {
+    color | 0xFF00_0000
+}
+
+/// Vanilla `ExtraCodecs.RGB_COLOR_CODEC`: either a signed 32-bit packed color
+/// or a three-float vector converted with `ARGB.colorFromFloat(1, r, g, b)`.
+fn parse_rgb_color(value: &serde_json::Value) -> Result<u32, String> {
+    if let Some(integer) = value.as_i64() {
+        let integer =
+            i32::try_from(integer).map_err(|_| "color integer is outside i32".to_string())?;
+        return Ok(integer as u32);
+    }
+    let components = value
+        .as_array()
+        .ok_or_else(|| "color must be an integer or three-float array".to_string())?;
+    if components.len() != 3 {
+        return Err("color vector must contain exactly three floats".to_string());
+    }
+    let mut channel = [0_u32; 3];
+    for (dst, value) in channel.iter_mut().zip(components) {
+        let value = value
+            .as_f64()
+            .ok_or_else(|| "color vector entries must be numbers".to_string())?
+            as f32;
+        // Mojang's ARGB.as8BitChannel is floor(value * 255). ARGB.color then
+        // keeps the low eight bits of each channel.
+        *dst = ((value * 255.0).floor() as i32 as u32) & 0xFF;
+    }
+    Ok(0xFF00_0000 | channel[0] << 16 | channel[1] << 8 | channel[2])
+}
+
+fn required_color(value: &serde_json::Value, field: &str) -> Result<u32, String> {
+    parse_rgb_color(
+        value
+            .get(field)
+            .ok_or_else(|| format!("missing required `{field}` color"))?,
+    )
+}
+
+fn required_unit_float(value: &serde_json::Value, field: &str) -> Result<f32, String> {
+    let number = value
+        .get(field)
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| format!("missing or invalid `{field}` float"))? as f32;
+    if !(0.0..=1.0).contains(&number) {
+        return Err(format!("`{field}` must be in [0, 1]"));
+    }
+    Ok(number)
+}
+
+fn parse_item_tint_sources(
+    values: &[serde_json::Value],
+    grass_colormap: Option<&[[u8; 3]]>,
+) -> Result<Vec<ItemTintSource>, String> {
+    values
+        .iter()
+        .map(|value| {
+            let ty = value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(strip_mc_prefix)
+                .ok_or_else(|| "item tint source is missing a string `type`".to_string())?;
+            match ty {
+                "constant" => Ok(ItemTintSource::Constant(opaque(required_color(
+                    value, "value",
+                )?))),
+                "grass" => Ok(ItemTintSource::Grass {
+                    color: opaque(grass_color(
+                        grass_colormap,
+                        required_unit_float(value, "temperature")?,
+                        required_unit_float(value, "downfall")?,
+                    )),
+                }),
+                "dye" => Ok(ItemTintSource::Dye {
+                    default: required_color(value, "default")?,
+                }),
+                "firework" => Ok(ItemTintSource::Firework {
+                    default: required_color(value, "default")?,
+                }),
+                "potion" => Ok(ItemTintSource::Potion {
+                    default: required_color(value, "default")?,
+                }),
+                "map_color" => Ok(ItemTintSource::MapColor {
+                    default: required_color(value, "default")?,
+                }),
+                "custom_model_data" => {
+                    let index = match value.get("index") {
+                        None => 0,
+                        Some(index) => {
+                            let index = index.as_i64().ok_or_else(|| {
+                                "`index` must be a non-negative integer".to_string()
+                            })?;
+                            usize::try_from(index)
+                                .map_err(|_| "`index` must be a non-negative integer".to_string())?
+                        }
+                    };
+                    Ok(ItemTintSource::CustomModelData {
+                        index,
+                        default: required_color(value, "default")?,
+                    })
+                }
+                "team" => Ok(ItemTintSource::Team {
+                    default: required_color(value, "default")?,
+                }),
+                other => Err(format!("unsupported item tint source type `{other}`")),
+            }
+        })
+        .collect()
+}
+
 pub fn bake_item_models(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
@@ -527,11 +669,13 @@ pub fn bake_item_models(
 ) -> BakedItemModels {
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
     let mut flat_item_textures: HashSet<String> = HashSet::new();
-    let mut flat_keys: HashMap<String, String> = HashMap::new();
+    let mut flat_keys: HashMap<String, Vec<String>> = HashMap::new();
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
+    let mut tint_sources: HashMap<String, Vec<ItemTintSource>> = HashMap::new();
+    let grass_colormap = load_grass_colormap(jar_assets_dir, asset_index, packs);
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
-    for item_name in item_definition_names(jar_assets_dir, packs) {
+    'items: for item_name in item_definition_names(jar_assets_dir, packs) {
         let item_name = item_name.as_str();
         let item_asset_key = format!("minecraft/items/{item_name}.json");
         let item_path =
@@ -548,8 +692,8 @@ pub fn bake_item_models(
             continue;
         }
 
-        let tint = determine_tint(item_name);
         let mut merged: Option<BakedModel> = None;
+        let mut item_tints = Vec::new();
         // Vanilla applies each composite part's own GROUND transform. Pomme
         // merges the parts into one mesh, so it can apply only one; no vanilla
         // composite disagrees (beds share `block/template_bed`), so the first
@@ -571,20 +715,44 @@ pub fn bake_item_models(
                     part.path
                 ),
             }
-            // A flat sprite (layer0, no elements) only makes sense as the
-            // sole part; `merged` stays empty so no 3D model is inserted.
-            if parts.len() == 1 && resolved.elements.is_empty() {
-                if let Some(value) = resolved.textures.get("layer0")
-                    && let Some(key) = texture_to_name(value)
-                {
-                    flat_item_textures.insert(key.clone());
-                    flat_keys.insert(item_name.to_string(), key);
+            let part_tints = match parse_item_tint_sources(&part.tints, grass_colormap.as_deref()) {
+                Ok(tints) => tints,
+                Err(error) => {
+                    tracing::error!("Couldn't parse item model '{item_name}': {error}");
+                    continue 'items;
                 }
+            };
+            let tint_base = item_tints.len() as u32;
+            // A generated flat item may have several layers. Vanilla assigns
+            // tint index N to layerN, so keep every layer in order instead of
+            // collapsing the item to layer0.
+            if parts.len() == 1 && resolved.elements.is_empty() {
+                let mut keys = Vec::new();
+                for layer in 0..5 {
+                    let Some(value) = resolved.textures.get(&format!("layer{layer}")) else {
+                        break;
+                    };
+                    if let Some(key) = texture_to_name(value) {
+                        flat_item_textures.insert(key.clone());
+                        keys.push(key);
+                    }
+                }
+                if !keys.is_empty() {
+                    flat_keys.insert(item_name.to_string(), keys);
+                }
+                item_tints.extend(part_tints);
                 break;
             }
-            let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) else {
+            let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, Tint::None) else {
                 continue;
             };
+            for quad in &mut baked.quads {
+                if let Some(index) = quad.tint_index {
+                    quad.tint_index =
+                        (index < part_tints.len() as u32).then_some(tint_base + index);
+                }
+            }
+            item_tints.extend(part_tints);
             if let Some(m) = part.transform {
                 for quad in &mut baked.quads {
                     for p in &mut quad.positions {
@@ -604,6 +772,9 @@ pub fn bake_item_models(
         }
         if let Some(transform) = ground_transform {
             ground_transforms.insert(item_name.to_string(), transform);
+        }
+        if !item_tints.is_empty() {
+            tint_sources.insert(item_name.to_string(), item_tints);
         }
         if let Some(mut baked) = merged {
             apply_gui_lambert(&mut baked.quads, BLOCK_GUI_ROTATION_DEG);
@@ -626,6 +797,7 @@ pub fn bake_item_models(
         generated_textures: flat_item_textures,
         flat_texture_keys: flat_keys,
         ground_transforms,
+        tint_sources,
     }
 }
 
@@ -840,6 +1012,7 @@ fn add_chest_cube(
             texture: texture.to_string(),
             cullface: None,
             tint: super::registry::Tint::None,
+            tint_index: None,
             shade_light: spec.shade,
             shade_face: None,
         });
@@ -863,6 +1036,7 @@ enum UvPattern {
 struct ModelPart {
     path: String,
     transform: Option<Mat4>,
+    tints: Vec<serde_json::Value>,
 }
 
 /// Model references to bake for one item. `minecraft:composite` contributes
@@ -876,14 +1050,42 @@ fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
         collect_parts_from_node(node, None, &mut parts);
     }
     if parts.is_empty()
-        && let Some(path) = first_item_model_ref(json)
+        && let Some(node) = find_first_item_model_node(json)
+        && let Some(path) = node.get("model").and_then(|value| value.as_str())
     {
         parts.push(ModelPart {
-            path,
+            path: strip_mc_prefix(path).to_string(),
             transform: None,
+            tints: node
+                .get("tints")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default(),
         });
     }
     parts
+}
+
+fn find_first_item_model_node(json: &serde_json::Value) -> Option<&serde_json::Value> {
+    match json {
+        serde_json::Value::Object(map) => {
+            if map
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(strip_mc_prefix)
+                == Some("model")
+                && map
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+            {
+                return Some(json);
+            }
+            map.values().find_map(find_first_item_model_node)
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(find_first_item_model_node),
+        _ => None,
+    }
 }
 
 /// First `model` reference in an item definition, falling back to a special
@@ -930,6 +1132,11 @@ fn collect_parts_from_node(
                 parts.push(ModelPart {
                     path: strip_mc_prefix(path).to_string(),
                     transform,
+                    tints: node
+                        .get("tints")
+                        .and_then(|value| value.as_array())
+                        .cloned()
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -1339,6 +1546,9 @@ fn bake_resolved_model(
                 texture: texture_name,
                 cullface,
                 tint: quad_tint,
+                tint_index: face_def
+                    .tint_index
+                    .and_then(|index| u32::try_from(index).ok()),
                 shade_light: shade_face.map_or(1.0, |face| face.shade_light()),
                 shade_face,
             });
@@ -1563,7 +1773,7 @@ fn face_textures_base(
         get("west"),
     );
 
-    let tint = determine_tint(block_name);
+    let tint = determine_tint(block_name, 0);
 
     if let (Some(up), Some(down), Some(north), Some(south), Some(east), Some(west)) =
         (up, down, north, south, east, west)
@@ -1645,20 +1855,43 @@ fn is_non_occluding(block_name: &str) -> bool {
         || matches!(block_name, "glass" | "tinted_glass" | "ice" | "frosted_ice")
 }
 
-fn determine_tint(block_name: &str) -> Tint {
-    if block_name == "redstone_wire" {
-        Tint::Redstone
-    } else if GRASS_TINTED.contains(&block_name) {
-        Tint::Grass
-    } else if DRY_FOLIAGE_TINTED.contains(&block_name) {
-        Tint::DryFoliage
-    } else if FOLIAGE_TINTED.contains(&block_name) || block_name.ends_with("_leaves") {
-        // TODO: spruce_leaves and birch_leaves use fixed constant colors in
-        // vanilla (BlockColors), not biome foliage; the `_leaves` suffix rule
-        // mistints them.
-        Tint::Foliage
-    } else {
-        Tint::None
+fn apply_block_tints(model: &mut BakedModel, block_name: &str) {
+    for quad in &mut model.quads {
+        quad.tint = quad
+            .tint_index
+            .map_or(Tint::None, |index| determine_tint(block_name, index));
+    }
+}
+
+/// Vanilla 26.2 `BlockColors.createDefault`, indexed by model `tintindex`.
+///
+/// Most blocks use layer 0. Pink petals and wildflowers intentionally register
+/// a blank layer 0 and grass on layer 1, so tint selection must be per quad.
+fn determine_tint(block_name: &str, tint_index: u32) -> Tint {
+    match (block_name, tint_index) {
+        ("redstone_wire", 0) => Tint::Redstone,
+
+        ("large_fern" | "tall_grass", 0) => Tint::DoubleGrass,
+        ("fern" | "short_grass" | "potted_fern" | "bush" | "grass_block" | "sugar_cane", 0) => {
+            Tint::Grass
+        }
+        ("pink_petals" | "wildflowers", 1) => Tint::Grass,
+
+        ("spruce_leaves", 0) => Tint::Constant(0x619961),
+        ("birch_leaves", 0) => Tint::Constant(0x80A755),
+        (
+            "oak_leaves" | "jungle_leaves" | "acacia_leaves" | "dark_oak_leaves" | "vine"
+            | "mangrove_leaves",
+            0,
+        ) => Tint::Foliage,
+        ("leaf_litter", 0) => Tint::DryFoliage,
+
+        ("water_cauldron", 0) => Tint::Water,
+        ("attached_melon_stem" | "attached_pumpkin_stem", 0) => Tint::Constant(0xE0C71C),
+        ("melon_stem" | "pumpkin_stem", 0) => Tint::Stem,
+        ("lily_pad", 0) => Tint::Constant(0x208030),
+
+        _ => Tint::None,
     }
 }
 
@@ -1728,6 +1961,30 @@ mod tests {
         let baked = bake_resolved_model(&resolved, 0, 270, Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 1);
         assert!((baked.quads[0].shade_light - Direction::South.shade_light()).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn baked_quad_preserves_raw_tint_index() {
+        let face = FaceDef {
+            uv: Some([0.0, 0.0, 16.0, 16.0]),
+            texture: "all".to_string(),
+            cullface: None,
+            rotation: None,
+            tint_index: Some(1),
+        };
+        let resolved = ResolvedModel {
+            textures: HashMap::from([("all".to_string(), "item/test".to_string())]),
+            elements: vec![ElementDef {
+                from: [0.0, 0.0, 0.0],
+                to: [16.0, 16.0, 16.0],
+                rotation: None,
+                faces: HashMap::from([("south".to_string(), face)]),
+                shade: true,
+            }],
+            ground_transform: Mat4::IDENTITY,
+        };
+        let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
+        assert_eq!(baked.quads[0].tint_index, Some(1));
     }
 
     /// Every face must show the full-tile texture upright at rotation 0 and
@@ -1824,6 +2081,197 @@ mod tests {
     }
 
     #[test]
+    fn vanilla_block_tint_sources_match_26_2_registration() {
+        assert_eq!(determine_tint("fern", 0), Tint::Grass);
+        assert_eq!(determine_tint("bush", 0), Tint::Grass);
+        assert_eq!(determine_tint("large_fern", 0), Tint::DoubleGrass);
+        assert_eq!(determine_tint("tall_grass", 0), Tint::DoubleGrass);
+        assert_eq!(determine_tint("pink_petals", 0), Tint::None);
+        assert_eq!(determine_tint("pink_petals", 1), Tint::Grass);
+        assert_eq!(determine_tint("spruce_leaves", 0), Tint::Constant(0x619961));
+        assert_eq!(determine_tint("birch_leaves", 0), Tint::Constant(0x80A755));
+        assert_eq!(determine_tint("oak_leaves", 0), Tint::Foliage);
+        assert_eq!(determine_tint("leaf_litter", 0), Tint::DryFoliage);
+        assert_eq!(determine_tint("water_cauldron", 0), Tint::Water);
+        assert_eq!(determine_tint("redstone_wire", 0), Tint::Redstone);
+        assert_eq!(determine_tint("sugar_cane", 0), Tint::Grass);
+        assert_eq!(
+            determine_tint("attached_melon_stem", 0),
+            Tint::Constant(0xE0C71C)
+        );
+        assert_eq!(determine_tint("melon_stem", 0), Tint::Stem);
+        assert_eq!(determine_tint("lily_pad", 0), Tint::Constant(0x208030));
+        assert_eq!(determine_tint("stone", 0), Tint::None);
+    }
+
+    #[test]
+    fn block_tint_is_applied_only_to_tintindexed_quads() {
+        let mut model = BakedModel {
+            quads: vec![
+                BakedQuad {
+                    positions: [[0.0; 3]; 4],
+                    uvs: [[0.0; 2]; 4],
+                    texture: "fern".to_string(),
+                    cullface: None,
+                    tint: Tint::None,
+                    tint_index: Some(0),
+                    shade_light: 1.0,
+                    shade_face: None,
+                },
+                BakedQuad {
+                    positions: [[0.0; 3]; 4],
+                    uvs: [[0.0; 2]; 4],
+                    texture: "fern_overlay".to_string(),
+                    cullface: None,
+                    tint: Tint::None,
+                    tint_index: None,
+                    shade_light: 1.0,
+                    shade_face: None,
+                },
+            ],
+            is_full_cube: false,
+            occludes: false,
+        };
+
+        apply_block_tints(&mut model, "fern");
+        assert_eq!(model.quads[0].tint, Tint::Grass);
+        assert_eq!(model.quads[1].tint, Tint::None);
+    }
+
+    #[test]
+    fn item_model_node_preserves_tint_sources() {
+        let json = serde_json::json!({
+            "model": {
+                "type": "minecraft:model",
+                "model": "minecraft:item/tinted",
+                "tints": [
+                    {"type": "minecraft:constant", "value": 0x123456},
+                    {"type": "minecraft:dye", "default": 0x654321}
+                ]
+            }
+        });
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].path, "item/tinted");
+        let tints = parse_item_tint_sources(&parts[0].tints, None).unwrap();
+        assert_eq!(
+            tints,
+            vec![
+                ItemTintSource::Constant(0xFF123456),
+                ItemTintSource::Dye { default: 0x654321 }
+            ]
+        );
+    }
+
+    #[test]
+    fn item_tint_parser_keeps_arbitrary_palette_length_and_all_26_2_codecs() {
+        let values = vec![
+            serde_json::json!({"type": "minecraft:constant", "value": 0x010203}),
+            serde_json::json!({"type": "minecraft:dye", "default": 0x111213}),
+            serde_json::json!({"type": "minecraft:firework", "default": 0x212223}),
+            serde_json::json!({"type": "minecraft:potion", "default": 0x313233}),
+            serde_json::json!({"type": "minecraft:map_color", "default": 0x414243}),
+            serde_json::json!({
+                "type": "minecraft:custom_model_data",
+                "index": 7,
+                "default": 0x515253
+            }),
+            serde_json::json!({"type": "minecraft:team", "default": 0x616263}),
+        ];
+        let tints = parse_item_tint_sources(&values, None).unwrap();
+        assert_eq!(tints.len(), values.len());
+        assert_eq!(
+            tints[5],
+            ItemTintSource::CustomModelData {
+                index: 7,
+                default: 0x515253
+            }
+        );
+        assert_eq!(tints[6], ItemTintSource::Team { default: 0x616263 });
+    }
+
+    #[test]
+    fn selected_item_model_keeps_the_selected_nodes_tints() {
+        let json = serde_json::json!({
+            "model": {
+                "type": "minecraft:condition",
+                "property": "minecraft:using_item",
+                "on_true": {"type": "minecraft:model", "model": "minecraft:item/alternate"},
+                "on_false": {
+                    "type": "minecraft:model",
+                    "model": "minecraft:item/plain",
+                    "tints": [{"type": "minecraft:constant", "value": 0xABCDEF}]
+                }
+            }
+        });
+        let parts = collect_model_parts(&json);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].path, "item/plain");
+        assert_eq!(
+            parse_item_tint_sources(&parts[0].tints, None).unwrap(),
+            vec![ItemTintSource::Constant(0xFFABCDEF)]
+        );
+    }
+
+    #[test]
+    fn grass_item_tint_uses_vanilla_colormap_coordinates() {
+        let mut colormap = vec![[0_u8; 3]; 256 * 256];
+        colormap[127 * 256 + 127] = [0x91, 0xBD, 0x59];
+        let tint = parse_item_tint_sources(
+            &[serde_json::json!({
+                "type": "minecraft:grass",
+                "temperature": 0.5,
+                "downfall": 1.0
+            })],
+            Some(&colormap),
+        )
+        .unwrap();
+        assert_eq!(tint, vec![ItemTintSource::Grass { color: 0xFF91BD59 }]);
+    }
+
+    #[test]
+    fn item_tint_rgb_codec_accepts_vanilla_vector_form_and_preserves_integer_alpha() {
+        assert_eq!(
+            parse_rgb_color(&serde_json::json!([1.0, 0.5, 0.0])).unwrap(),
+            0xFFFF7F00
+        );
+        assert_eq!(
+            parse_rgb_color(&serde_json::json!(-2146360781_i64)).unwrap(),
+            0x80112233
+        );
+    }
+
+    #[test]
+    fn item_tint_parser_rejects_missing_required_fields_and_invalid_ranges() {
+        assert!(
+            parse_item_tint_sources(&[serde_json::json!({"type": "minecraft:dye"})], None,)
+                .is_err()
+        );
+        assert!(
+            parse_item_tint_sources(
+                &[serde_json::json!({
+                    "type": "minecraft:grass",
+                    "temperature": 1.1,
+                    "downfall": 1.0
+                })],
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_item_tint_sources(
+                &[serde_json::json!({
+                    "type": "minecraft:custom_model_data",
+                    "index": -1,
+                    "default": 0xffffff
+                })],
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn unsupported_item_transformation_encoding_is_rejected() {
         let raw_matrix = serde_json::json!([
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0
@@ -1859,6 +2307,41 @@ mod tests {
     }
 
     use crate::test_util::test_temp_dir;
+
+    #[test]
+    fn generated_item_layers_stop_at_first_missing_layer() {
+        let root = test_temp_dir("generated_layer_gap");
+        let jar = root.join("jar");
+        let items = jar.join("minecraft/items");
+        let models = jar.join("minecraft/models/item");
+        std::fs::create_dir_all(&items).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            items.join("holey.json"),
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/holey"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("holey.json"),
+            r#"{
+                "parent":"minecraft:item/generated",
+                "textures":{
+                    "layer0":"minecraft:item/zero",
+                    "layer2":"minecraft:item/two"
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(models.join("generated.json"), r#"{}"#).unwrap();
+
+        let baked = bake_item_models(&jar, &None, None);
+        assert_eq!(
+            baked.flat_texture_keys.get("holey").map(Vec::as_slice),
+            Some(["item/zero".to_string()].as_slice())
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn item_definition_and_ground_transform_follow_resource_pack_override() {
@@ -1914,12 +2397,12 @@ mod tests {
         packs.enable_local_pack("test_pack");
         let baked = bake_item_models(&jar, &None, Some(&packs));
         assert_eq!(
-            baked.flat_texture_keys.get("test_item").map(String::as_str),
-            Some("other:item/replacement")
+            baked.flat_texture_keys.get("test_item").map(Vec::as_slice),
+            Some(["other:item/replacement".to_string()].as_slice())
         );
         assert_eq!(
-            baked.flat_texture_keys.get("pack_only").map(String::as_str),
-            Some("other:item/replacement")
+            baked.flat_texture_keys.get("pack_only").map(Vec::as_slice),
+            Some(["other:item/replacement".to_string()].as_slice())
         );
         let transform = baked.ground_transforms["test_item"];
         let origin = transform.transform_point3(Vec3::ZERO);

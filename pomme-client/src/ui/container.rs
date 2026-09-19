@@ -12,7 +12,7 @@ use azalea_inventory::operations::{
 
 use super::common::{
     FONT_SIZE, SLOT_LABEL_COLOR, SLOT_SIZE, SLOT_STRIDE, WHITE, hit_test, push_gradient_overlay,
-    push_item_icon, push_slot,
+    push_item_icon,
 };
 use crate::player::menu_click::{self, ContainerKind};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -233,6 +233,31 @@ impl<'e> SlotCtx<'e> {
     /// Draws a slot at GUI-unit position (x, y), recording it as hovered when
     /// the cursor is over it.
     pub fn slot(&mut self, x: f32, y: f32, item: &ItemStack, empty: Option<SpriteId>, num: u16) {
+        self.slot_with_owner(x, y, item, empty, num, true);
+    }
+
+    /// Vanilla's `fakeItem` path: the icon has no LivingEntity owner, so
+    /// `minecraft:team` tint sources use their configured default.
+    pub fn fake_slot(
+        &mut self,
+        x: f32,
+        y: f32,
+        item: &ItemStack,
+        empty: Option<SpriteId>,
+        num: u16,
+    ) {
+        self.slot_with_owner(x, y, item, empty, num, false);
+    }
+
+    fn slot_with_owner(
+        &mut self,
+        x: f32,
+        y: f32,
+        item: &ItemStack,
+        empty: Option<SpriteId>,
+        num: u16,
+        use_player_team: bool,
+    ) {
         let shown = self
             .preview
             .as_ref()
@@ -241,7 +266,7 @@ impl<'e> SlotCtx<'e> {
         let px = self.ox + x * self.scale;
         let py = self.oy + y * self.scale;
         let size = SLOT_SIZE * self.scale;
-        if push_slot(
+        if super::common::push_slot_with_owner(
             self.elements,
             px,
             py,
@@ -250,6 +275,7 @@ impl<'e> SlotCtx<'e> {
             self.cursor,
             shown,
             empty,
+            use_player_team,
         ) {
             self.hovered = self.hovered.or(Some(num));
         }
