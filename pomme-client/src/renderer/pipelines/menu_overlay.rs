@@ -1299,13 +1299,17 @@ impl MenuOverlayPipeline {
                 } else {
                     Vec::new()
                 };
-                let title_h = 11.0 * gs; // first tooltip component gets vanilla's 2px gap
+                // ClientTextTooltip is 10 GUI px tall. GuiGraphicsExtractor adds a
+                // separate 2px gap after the first component when advancing localY,
+                // but that gap is *not* included in the tooltip's measured height.
+                let title_component_h = 10.0 * gs;
+                let image_y_offset = 12.0 * gs;
                 let image_h = if items.is_empty() {
                     empty_lines.len() as f32 * 9.0 * gs + 21.0 * gs
                 } else {
                     (rows as f32 * 24.0 + 21.0) * gs
                 };
-                let content_h = title_h + image_h;
+                let content_h = title_component_h + image_h;
                 // DefaultTooltipPositioner operates in GUI-scaled integer coordinates.
                 // The cursor stored by Pomme is framebuffer-space, so convert once here,
                 // run Vanilla's (+12,-12) positioning/clamp, then return to framebuffer space.
@@ -1364,7 +1368,7 @@ impl MenuOverlayPipeline {
                     },
                     &mut obfuscation_rng,
                 );
-                let top = top + title_h;
+                let image_top = top + image_y_offset;
                 if items.is_empty() {
                     for (line_no, text) in empty_lines.iter().enumerate() {
                         self.push_text(
@@ -1372,7 +1376,7 @@ impl MenuOverlayPipeline {
                             &[TextSpan::new(text.clone(), [0.6667, 0.6667, 0.6667, 1.0])],
                             McTextDraw {
                                 x: left,
-                                y: top + line_no as f32 * 9.0 * gs,
+                                y: image_top + line_no as f32 * 9.0 * gs,
                                 scale: fs,
                                 drop_shadow: true,
                             },
@@ -1382,7 +1386,7 @@ impl MenuOverlayPipeline {
                 } else {
                     let shown_items = &items[..shown.min(items.len())];
                     let overflow = items.len() > 12;
-                    let grid_y = top + rows as f32 * 24.0 * gs;
+                    let grid_y = image_top + rows as f32 * 24.0 * gs;
                     let mut slot_number = 1usize;
                     for row in 1..=rows {
                         for col in 1..=4usize {
@@ -1517,24 +1521,23 @@ impl MenuOverlayPipeline {
                         let center_tooltip_gui = left_gui + content_gui_w / 2 - 12;
                         let anchor_x_gui = center_tooltip_gui - name_gui_w / 2;
                         // ClientBundleTooltip receives `y` at the bundle image component,
-                        // after the 9px title line plus Vanilla's 2px first-component gap.
-                        // We previously used the whole-tooltip text origin (`top_gui`),
-                        // putting the selected-name tooltip exactly 11 GUI pixels too high.
-                        let image_top_gui = top_gui + 11;
+                        // after ClientTextTooltip's 10px height plus Vanilla's 2px
+                        // first-component gap.
+                        let image_top_gui = top_gui + 12;
                         let anchor_y_gui = image_top_gui - 15;
                         let mut selected_x_gui = anchor_x_gui + 12;
                         let mut selected_y_gui = anchor_y_gui - 12;
                         if selected_x_gui + name_gui_w > screen_gui_w {
                             selected_x_gui = (selected_x_gui - 24 - name_gui_w).max(4);
                         }
-                        let selected_content_gui_h = 7;
+                        let selected_content_gui_h = 8;
                         if selected_y_gui + selected_content_gui_h + 3 > screen_gui_h {
                             selected_y_gui = screen_gui_h - selected_content_gui_h - 3;
                         }
                         let selected_x = selected_x_gui as f32 * gs;
                         let selected_y = selected_y_gui as f32 * gs;
-                        // A single text component has vanilla tooltip height 7 (9 - 2).
-                        let selected_content_h = 7.0 * gs;
+                        // A one-line tooltip is -2 + ClientTextTooltip::getHeight(10) = 8.
+                        let selected_content_h = 8.0 * gs;
                         let selected_padding = 3.0 * gs;
                         let selected_margin = 9.0 * gs;
                         let selected_inset = selected_padding + selected_margin;
@@ -1588,7 +1591,7 @@ impl MenuOverlayPipeline {
                     0.0
                 };
                 let grid_h = rows as f32 * 24.0 * gs;
-                let bar_y = top + description_h.max(grid_h) + 4.0 * gs;
+                let bar_y = image_top + description_h.max(grid_h) + 4.0 * gs;
                 let fill = ((*fullness * 94.0).floor() as i32).clamp(0, 94) as f32;
                 let fill_id = if *fullness >= 1.0 {
                     SpriteId::BundleProgressFull
