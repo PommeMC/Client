@@ -31,7 +31,7 @@ fn dialog_holder_reference(
         azalea_registry::Holder::Reference(dialog) => {
             Ok(DialogReference::ProtocolId(dialog.to_u32()))
         }
-        azalea_registry::Holder::Direct(nbt) => DialogReference::inline(nbt),
+        azalea_registry::Holder::Direct(nbt) => Ok(DialogReference::inline(nbt)),
     }
 }
 

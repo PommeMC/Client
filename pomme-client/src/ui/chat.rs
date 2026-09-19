@@ -349,7 +349,7 @@ pub enum ChatUiAction {
         id: String,
         payload: Option<simdnbt::owned::NbtTag>,
     },
-    ShowDialog(serde_json::Value),
+    ShowDialog(crate::chat_component::DialogHolder),
 }
 
 pub struct ChatBuildContext<'a> {

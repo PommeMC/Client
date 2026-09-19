@@ -93,7 +93,7 @@ fn validated_server_link_url(url: &str) -> Option<String> {
 /// always an inline dialog.
 fn parse_inline_dialog(raw: &[u8], pos: &mut usize) -> Result<DialogReference, String> {
     match read_nbt_tag(raw, pos)? {
-        NbtTag::Compound(nbt) => DialogReference::inline(&nbt),
+        NbtTag::Compound(nbt) => Ok(DialogReference::inline(&nbt)),
         _ => Err("dialog is not a compound".to_owned()),
     }
 }
@@ -213,20 +213,20 @@ mod tests {
 
     #[test]
     fn configuration_dialogs_are_inline() {
-        let mut dialog = NbtCompound::new();
-        dialog.insert("type", "minecraft:notice");
-        dialog.insert("title", "Rules");
+        let mut expected = NbtCompound::new();
+        expected.insert("type", "minecraft:notice");
+        expected.insert("title", "Rules");
         let mut raw = Vec::new();
         write_varint(&mut raw, packet_id(Phase::Configuration, "show_dialog"));
-        NbtTag::Compound(dialog).write(&mut raw);
+        NbtTag::Compound(expected.clone()).write(&mut raw);
         let events = decode(Phase::Configuration, &raw);
         let [NetworkEvent::ShowDialog { dialog }] = events.as_slice() else {
             panic!("expected one show_dialog event");
         };
-        let DialogReference::Value(value) = dialog else {
+        let DialogReference::Holder(crate::chat_component::DialogHolder::Nbt(tag)) = dialog else {
             panic!("expected an inline dialog");
         };
-        assert_eq!(value["title"], "Rules");
+        assert_eq!(tag, &NbtTag::Compound(expected));
 
         let mut raw = Vec::new();
         write_varint(&mut raw, packet_id(Phase::Configuration, "clear_dialog"));

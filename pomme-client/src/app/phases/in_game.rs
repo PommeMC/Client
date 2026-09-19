@@ -1411,7 +1411,7 @@ fn handle_chat_ui_action(
         ChatUiAction::ShowDialog(dialog) => {
             game.chat
                 .close(crate::ui::chat::ChatExitReason::Interrupted);
-            game.open_server_dialog(crate::ui::server_dialog::DialogReference::Value(dialog));
+            game.open_server_dialog(crate::ui::server_dialog::DialogReference::Holder(dialog));
         }
     }
 }
@@ -1452,6 +1452,40 @@ pub(crate) fn settle_server_dialog(
 ) {
     use crate::ui::server_dialog::ServerDialogAction;
 
+    // Vanilla swaps in the after-action screen only where the click event
+    // reaches `setScreen` (`DialogScreen.runAction`).
+    let (activate, follow_up) = match action {
+        None => (false, None),
+        // `Screen.clickUrlAction`: the confirm screen replaces the dialog,
+        // while opening the link straight away (or chat links being off)
+        // leaves the screen alone.
+        Some(ServerDialogAction::OpenUrl(url)) => match game.chat.request_open_url(url) {
+            Some(action) => (false, Some(action)),
+            None => (game.chat.has_pending_modal_prompt(), None),
+        },
+        // `ClientConfigurationPacketListenerImpl.createDialogAccess`.
+        Some(ServerDialogAction::RunCommand(command)) if game.configuring => {
+            tracing::warn!(
+                "Commands are not supported in configuration phase, trying to run '{command}'"
+            );
+            (false, None)
+        }
+        Some(ServerDialogAction::RunCommand(command)) => {
+            (true, Some(ChatUiAction::RunCommand(command)))
+        }
+        Some(ServerDialogAction::Custom { id, payload }) => {
+            (true, Some(ChatUiAction::Custom { id, payload }))
+        }
+        // `showDialog` only warns when the dialog doesn't resolve, leaving the
+        // current one up.
+        Some(ServerDialogAction::ShowDialog(reference)) => {
+            game.open_server_dialog(reference);
+            (false, None)
+        }
+    };
+    if activate && let Some(dialog) = game.server_dialog.as_mut() {
+        dialog.activate();
+    }
     if game
         .server_dialog
         .as_ref()
@@ -1459,27 +1493,9 @@ pub(crate) fn settle_server_dialog(
     {
         game.server_dialog = None;
     }
-    let action = match action {
-        None => return,
-        Some(ServerDialogAction::OpenUrl(url)) => match game.chat.request_open_url(url) {
-            Some(action) => action,
-            None => return,
-        },
-        // `ClientConfigurationPacketListenerImpl.createDialogAccess`.
-        Some(ServerDialogAction::RunCommand(command)) if game.configuring => {
-            tracing::warn!(
-                "Commands are not supported in configuration phase, trying to run '{command}'"
-            );
-            return;
-        }
-        Some(ServerDialogAction::RunCommand(command)) => ChatUiAction::RunCommand(command),
-        Some(ServerDialogAction::Custom { id, payload }) => ChatUiAction::Custom { id, payload },
-        Some(ServerDialogAction::ShowDialog(reference)) => {
-            game.open_server_dialog(reference);
-            return;
-        }
-    };
-    handle_chat_ui_action(action, core, connection, game);
+    if let Some(action) = follow_up {
+        handle_chat_ui_action(action, core, connection, game);
+    }
 }
 
 /// The server dialog and the confirm screen a chat or dialog link opens over
