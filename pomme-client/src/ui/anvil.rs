@@ -210,7 +210,7 @@ fn push_name_text(
         h: 16.0 * s,
     });
     push_field_text(
-        elements, &info, shown, field_x, text_y, fs, s, s, WHITE, None, &wf,
+        elements, &info, shown, None, field_x, text_y, fs, s, s, WHITE, None, &wf,
     );
     elements.push(MenuElement::ScissorPop);
 }

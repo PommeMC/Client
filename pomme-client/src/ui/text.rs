@@ -102,8 +102,19 @@ pub fn with_alpha(spans: &[TextSpan], alpha: f32) -> Vec<TextSpan> {
 /// Flatten a native component into styled spans, keeping each run's resolved
 /// style.
 pub fn format_component_spans(component: &Component, base_color: [f32; 4]) -> Vec<TextSpan> {
+    format_component_spans_with_parent(component, &ResolvedStyle::default(), base_color)
+}
+
+/// [`format_component_spans`] under an inherited parent style, which the
+/// component's own explicit style overrides (vanilla appending it to a styled
+/// parent).
+pub fn format_component_spans_with_parent(
+    component: &Component,
+    parent: &ResolvedStyle,
+    base_color: [f32; 4],
+) -> Vec<TextSpan> {
     let mut spans = Vec::new();
-    component.visit_text(&ResolvedStyle::default(), &mut |text, style| {
+    component.visit_text(parent, &mut |text, style| {
         let color = style.color.map(rgb24).unwrap_or(base_color);
         spans.push(TextSpan {
             text: text.to_owned(),
@@ -231,7 +242,8 @@ fn parse_player_profile(
     (uuid, name, textures)
 }
 
-fn parse_uuid_value(value: &serde_json::Value) -> Option<uuid::Uuid> {
+/// Vanilla `UUIDUtil.LENIENT_CODEC`: a four-int array or a UUID string.
+pub(crate) fn parse_uuid_value(value: &serde_json::Value) -> Option<uuid::Uuid> {
     if let Some(value) = value.as_str() {
         return uuid::Uuid::parse_str(value).ok();
     }

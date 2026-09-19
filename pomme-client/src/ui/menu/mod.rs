@@ -105,10 +105,6 @@ struct Settings {
     theme: u8,
     #[serde(default)]
     chat: ChatOptions,
-    #[serde(default)]
-    force_unicode_font: bool,
-    #[serde(default = "default_japanese_glyph_variants")]
-    japanese_glyph_variants: bool,
 }
 
 fn default_fov() -> u32 {
@@ -151,17 +147,6 @@ fn default_attack_indicator() -> u8 {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_japanese_glyph_variants() -> bool {
-    ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .into_iter()
-        .find_map(|name| std::env::var(name).ok())
-        .is_some_and(|locale| {
-            locale.eq_ignore_ascii_case("ja")
-                || locale.starts_with("ja_")
-                || locale.starts_with("ja-")
-        })
 }
 
 fn default_chunk_detail() -> u32 {
@@ -215,8 +200,6 @@ impl Default for Settings {
             display_mode: 0,
             theme: 0,
             chat: ChatOptions::default(),
-            force_unicode_font: false,
-            japanese_glyph_variants: default_japanese_glyph_variants(),
         }
     }
 }
@@ -557,7 +540,8 @@ pub struct MainMenu {
     links_open: bool,
     theme_open: bool,
     /// Return target for Language/Accessibility, which open from both the
-    /// title-screen icon row and the Options grid.
+    /// title-screen icon row and the Options grid, and for Chat Settings,
+    /// which also open from chat.
     settings_back: Screen,
     theme: PanoramaTheme,
     transition: Option<ThemeTransition>,
@@ -633,8 +617,6 @@ pub struct MainMenu {
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
     pub chat_options: ChatOptions,
-    pub force_unicode_font: bool,
-    pub japanese_glyph_variants: bool,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
     /// Set by slider drags, written by `flush_settings`.
@@ -766,9 +748,7 @@ impl MainMenu {
                 settings.attack_indicator,
             ),
             slider_can_change_value: true,
-            chat_options: settings.chat,
-            force_unicode_font: settings.force_unicode_font,
-            japanese_glyph_variants: settings.japanese_glyph_variants,
+            chat_options: settings.chat.sanitized(),
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
@@ -786,7 +766,10 @@ impl MainMenu {
         }
     }
 
+    /// Chat Settings opened from chat; leaving them leaves the menu, back to
+    /// the chat screen that opened them.
     pub fn open_chat_settings(&mut self) {
+        self.settings_back = Screen::Main;
         self.set_screen(Screen::OptionsChatSettings);
     }
 
@@ -814,13 +797,6 @@ impl MainMenu {
     /// `Mth::square`).
     pub fn fov_effect(&self) -> f32 {
         self.fov_effect_scale * self.fov_effect_scale
-    }
-
-    pub(crate) fn font_options(&self) -> crate::ui::font::FontOptions {
-        crate::ui::font::FontOptions {
-            uniform: self.force_unicode_font,
-            japanese_variants: self.japanese_glyph_variants,
-        }
     }
 
     /// Per-category volumes for the audio engine, indexed by `SoundCategory`;
@@ -894,8 +870,6 @@ impl MainMenu {
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
                 chat: self.chat_options,
-                force_unicode_font: self.force_unicode_font,
-                japanese_glyph_variants: self.japanese_glyph_variants,
             },
         )
         .is_err();
@@ -1230,6 +1204,54 @@ mod tests {
                 expected,
                 "stored slider value {stored} should clamp to {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn partial_chat_settings_keep_the_rest() {
+        let mut json = serde_json::to_value(Settings {
+            fov: 90,
+            ..Settings::default()
+        })
+        .unwrap();
+        json["chat"] = serde_json::json!({ "opacity": 0.3 });
+        let loaded: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.fov, 90);
+        assert_eq!(
+            loaded.chat,
+            ChatOptions {
+                opacity: 0.3,
+                ..ChatOptions::default()
+            }
+        );
+    }
+
+    #[test]
+    fn chat_settings_sanitize_like_option_instance_set() {
+        let default = ChatOptions::default();
+        assert_eq!(default.sanitized(), default);
+        let invalid = ChatOptions {
+            opacity: 1.5,
+            scale: -0.1,
+            width: f32::NAN,
+            delay_secs: 7.0,
+            ..default
+        };
+        assert_eq!(invalid.sanitized(), default);
+        for (stored, expected) in [(0.55, 0.5), (6.0, 6.0), (-0.05, 0.0), (-1.0, 0.0)] {
+            let chat = ChatOptions {
+                delay_secs: stored,
+                ..default
+            };
+            assert_eq!(chat.sanitized().delay_secs, expected, "delay {stored}");
+        }
+        for tenths in 0..=60 {
+            let secs = tenths as f32 / 10.0;
+            let chat = ChatOptions {
+                delay_secs: secs,
+                ..default
+            };
+            assert_eq!(chat.sanitized().delay_secs, secs, "delay {secs}");
         }
     }
 

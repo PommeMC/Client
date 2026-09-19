@@ -233,7 +233,6 @@ impl ApplicationHandler for App {
                         jar_assets_dir: &self.core.data_dirs.jar_assets_dir,
                         asset_index: &self.core.asset_index,
                         packs: &self.core.resource_packs,
-                        options: self.core.menu.font_options(),
                     },
                     &self.core.data_dirs.game_dir,
                     self.core.menu.vsync,
@@ -665,9 +664,9 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(focused) => {
                 self.core.unfocused_since = (!focused).then(Instant::now);
                 // The window manager may release a locked/confined cursor when
-                // focus changes without telling Pomme. Invalidate the cached
-                // applied state so a quick refocus (< pause-on-lost-focus
-                // delay) cannot leave gameplay logically captured but the OS
+                // focus changes without telling Pomme. Mark the OS grab stale
+                // so a quick refocus (< pause-on-lost-focus delay) re-locks
+                // instead of leaving gameplay logically captured but the OS
                 // cursor actually free.
                 self.core.invalidate_cursor_grab_state();
                 if focused {

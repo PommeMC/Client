@@ -369,9 +369,9 @@ impl InputState {
                         should_apply_cursor_grab = true;
                     }
 
+                    // Same order as Escape: modal, then suggestions, then chat.
                     if game.chat.is_open() {
-                        game.chat.close();
-                        should_apply_cursor_grab = true;
+                        should_apply_cursor_grab |= game.chat.handle_escape();
                     }
 
                     self.recent_actions.remove(&Action::Close);
@@ -389,7 +389,10 @@ impl InputState {
                         && !game.gui_open()
                         && !game.chat.is_open()
                     {
-                        game.chat.open();
+                        game.chat.open(
+                            crate::ui::chat::ChatMethod::Message,
+                            game.command_tree.as_deref(),
+                        );
                         // The frame flag is written at end of update; set it now
                         // so keys later in this same event batch already type.
                         self.text_capture = true;
@@ -404,7 +407,10 @@ impl InputState {
                         && !game.gui_open()
                         && !game.chat.is_open()
                     {
-                        game.chat.open_with_slash();
+                        game.chat.open(
+                            crate::ui::chat::ChatMethod::Command,
+                            game.command_tree.as_deref(),
+                        );
                         self.text_capture = true;
                         should_apply_cursor_grab = true;
                     }

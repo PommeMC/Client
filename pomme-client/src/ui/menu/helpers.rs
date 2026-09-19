@@ -150,7 +150,7 @@ pub(super) fn push_text_field(
         h,
     });
     common::push_field_text(
-        elements, &info, displayed, text_x, text_y, fs, gs, gs, WHITE, None, &wf,
+        elements, &info, displayed, None, text_x, text_y, fs, gs, gs, WHITE, None, &wf,
     );
     elements.push(MenuElement::ScissorPop);
 }
@@ -451,16 +451,11 @@ fn wrap_motd_spans(
     let mut current_w: f32 = 0.0;
 
     for span in spans {
-        let make_span = |text: String| TextSpan {
-            inline_object: None,
-            ..span.with_text(text)
-        };
-
         for part in span.text.split_inclusive([' ', '\n']) {
             if part.contains('\n') {
                 let text = part.trim_end_matches('\n');
                 if !text.is_empty() {
-                    current_line.push(make_span(text.to_string()));
+                    current_line.push(span.with_text(text.to_string()));
                 }
                 lines.push(std::mem::take(&mut current_line));
                 current_w = 0.0;
@@ -480,7 +475,7 @@ fn wrap_motd_spans(
                 last.text.push_str(part);
                 continue;
             }
-            current_line.push(make_span(part.to_string()));
+            current_line.push(span.with_text(part.to_string()));
         }
     }
     if !current_line.is_empty() {

@@ -13,7 +13,9 @@ use simdnbt::owned::{NbtCompound, NbtTag};
 use uuid::Uuid;
 
 use super::NetworkEvent;
-use crate::chat_component::{Argument, Component, HoverEvent, Style, nbt_to_value};
+use crate::chat_component::{
+    Argument, Component, HoverEvent, Style, nbt_to_value, normalize_identifier,
+};
 use crate::net::chat_security::{LastSeenUpdate, SignedChatBody};
 use crate::ui::chat::{ChatMessageSource, ChatMessageTag};
 use crate::ui::text::format_component_spans;
@@ -230,12 +232,14 @@ pub fn encode_outbound_custom_click_action(
     identifier: &str,
     payload: Option<&NbtTag>,
 ) -> Result<Vec<u8>, String> {
-    if identifier.is_empty() || identifier.len() > 32_767 {
-        return Err("custom click identifier is empty or too long".into());
+    // The id is an `Identifier`, written as its `toString`.
+    let identifier = normalize_identifier(identifier);
+    if identifier.len() > 32_767 {
+        return Err("custom click identifier is too long".into());
     }
     let mut out = Vec::new();
     write_varint(&mut out, game_serverbound_id("custom_click_action"));
-    write_wire_string(&mut out, identifier);
+    write_wire_string(&mut out, &identifier);
 
     // Vanilla wraps Optional<Tag> in a length-prefixed sub-buffer. None is the
     // normal network-NBT end tag (single 0 byte); Some carries an unnamed tag.
@@ -1504,6 +1508,24 @@ mod tests {
         let style = error.component_style.as_ref().unwrap();
         assert_eq!(style.color, Some(0xff5555));
         assert!(style.italic);
+    }
+
+    #[test]
+    fn custom_click_packet_writes_the_normalized_identifier() {
+        let id = game_serverbound_id("custom_click_action");
+        let mut expected = Vec::new();
+        write_varint(&mut expected, id);
+        expected.push(13);
+        expected.extend_from_slice(b"minecraft:foo");
+        // Optional<Tag> sub-buffer: length 1, end tag.
+        expected.extend_from_slice(&[1, 0]);
+        assert_eq!(
+            encode_outbound_custom_click_action("foo", None).unwrap(),
+            expected
+        );
+
+        let frame = encode_outbound_custom_click_action("a:b", None).unwrap();
+        assert_eq!(&frame[frame.len() - 6..], &[3, b'a', b':', b'b', 1, 0]);
     }
 
     #[test]
