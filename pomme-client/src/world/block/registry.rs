@@ -74,6 +74,7 @@ pub struct BlockRegistry {
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
     flat_item_texture_keys: HashMap<String, String>,
+    item_gui_transforms: HashMap<String, model::DisplayTransform>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
     /// Block name -> its single `BlockState`, for one-state blocks (see
     /// `placeable_block_for_item`).
@@ -123,6 +124,7 @@ impl BlockRegistry {
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
         let flat_item_texture_keys = baked_items.flat_texture_keys;
+        let item_gui_transforms = baked_items.gui_transforms;
         let item_ground_transforms = baked_items.ground_transforms;
 
         Self {
@@ -132,6 +134,7 @@ impl BlockRegistry {
             item_models,
             flat_item_textures,
             flat_item_texture_keys,
+            item_gui_transforms,
             item_ground_transforms,
             placeable_blocks: build_placeable_blocks(),
         }
@@ -162,6 +165,13 @@ impl BlockRegistry {
 
     pub fn get_flat_item_texture_key(&self, name: &str) -> Option<&str> {
         self.flat_item_texture_keys.get(name).map(String::as_str)
+    }
+
+    pub(crate) fn get_item_gui_transform(&self, name: &str) -> model::DisplayTransform {
+        self.item_gui_transforms
+            .get(name)
+            .copied()
+            .unwrap_or(model::DisplayTransform::IDENTITY)
     }
 
     pub fn get_item_ground_transform(&self, name: &str) -> Option<glam::Mat4> {

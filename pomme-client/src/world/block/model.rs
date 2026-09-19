@@ -84,20 +84,20 @@ enum GuiLight {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct DisplayTransform {
-    pub rotation: Vec3,
-    pub translation: Vec3,
-    pub scale: Vec3,
+pub(crate) struct DisplayTransform {
+    pub(crate) rotation: Vec3,
+    pub(crate) translation: Vec3,
+    pub(crate) scale: Vec3,
 }
 
 impl DisplayTransform {
-    const IDENTITY: Self = Self {
+    pub(crate) const IDENTITY: Self = Self {
         rotation: Vec3::ZERO,
         translation: Vec3::ZERO,
         scale: Vec3::ONE,
     };
 
-    pub fn to_matrix(self) -> Mat4 {
+    pub(crate) fn to_matrix(self) -> Mat4 {
         Mat4::from_translation(self.translation)
             * Mat4::from_rotation_x(self.rotation.x.to_radians())
             * Mat4::from_rotation_y(self.rotation.y.to_radians())
@@ -106,7 +106,7 @@ impl DisplayTransform {
     }
 }
 
-fn parse_display_transform(json: &serde_json::Value) -> Option<DisplayTransform> {
+pub(crate) fn parse_display_transform(json: &serde_json::Value) -> Option<DisplayTransform> {
     let obj = json.as_object()?;
     let rotation = obj
         .get("rotation")
@@ -128,6 +128,7 @@ fn parse_display_transform(json: &serde_json::Value) -> Option<DisplayTransform>
     })
 }
 
+#[cfg(test)]
 fn default_block_gui_transform() -> DisplayTransform {
     DisplayTransform {
         rotation: Vec3::new(30.0, 225.0, 0.0),
@@ -522,6 +523,7 @@ pub struct BakedItemModels {
     pub models: HashMap<String, BakedModel>,
     pub generated_textures: HashSet<String>,
     pub flat_texture_keys: HashMap<String, String>,
+    pub(crate) gui_transforms: HashMap<String, DisplayTransform>,
     pub ground_transforms: HashMap<String, Mat4>,
 }
 
@@ -559,6 +561,7 @@ pub fn bake_item_models(
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
     let mut flat_item_textures: HashSet<String> = HashSet::new();
     let mut flat_keys: HashMap<String, String> = HashMap::new();
+    let mut gui_transforms: HashMap<String, DisplayTransform> = HashMap::new();
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
@@ -654,10 +657,12 @@ pub fn bake_item_models(
         if let Some(transform) = ground_transform {
             ground_transforms.insert(item_name.to_string(), transform);
         }
+        let gui_transform = gui_transform.unwrap_or(DisplayTransform::IDENTITY);
+        gui_transforms.insert(item_name.to_string(), gui_transform);
         if let Some(mut baked) = merged {
             apply_gui_lambert(
                 &mut baked.quads,
-                gui_transform.unwrap_or_else(default_block_gui_transform),
+                gui_transform,
                 gui_light.unwrap_or_default(),
             );
             item_models.insert(item_name.to_string(), baked);
@@ -665,6 +670,7 @@ pub fn bake_item_models(
     }
 
     item_models.insert("chest".to_string(), bake_chest_item_model());
+    gui_transforms.insert("chest".to_string(), chest_gui_transform());
     ground_transforms.insert("chest".to_string(), default_block_ground_transform());
     flat_keys.remove("chest");
 
@@ -678,6 +684,7 @@ pub fn bake_item_models(
         models: item_models,
         generated_textures: flat_item_textures,
         flat_texture_keys: flat_keys,
+        gui_transforms,
         ground_transforms,
     }
 }
@@ -2106,7 +2113,7 @@ mod tests {
     }
 
     #[test]
-    fn item_definition_and_ground_transform_follow_resource_pack_override() {
+    fn item_definition_and_display_transforms_follow_resource_pack_override() {
         let root = test_temp_dir("item_model_pack");
         let jar = root.join("jar");
         let instance = root.join("instance");
@@ -2145,7 +2152,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             pack_models.join("replacement.json"),
-            r#"{"parent":"minecraft:item/generated","textures":{"layer0":"other:item/replacement"}}"#,
+            r#"{"parent":"minecraft:item/generated","textures":{"layer0":"other:item/replacement"},"display":{"gui":{"translation":[32,-96,0],"scale":[8,-8,1]}}}"#,
         )
         .unwrap();
         // An item the jar does not define at all.
@@ -2165,6 +2172,14 @@ mod tests {
         assert_eq!(
             baked.flat_texture_keys.get("pack_only").map(String::as_str),
             Some("other:item/replacement")
+        );
+        assert_eq!(
+            baked.gui_transforms["test_item"],
+            DisplayTransform {
+                rotation: Vec3::ZERO,
+                translation: Vec3::new(2.0, -5.0, 0.0),
+                scale: Vec3::new(4.0, -4.0, 1.0),
+            }
         );
         let transform = baked.ground_transforms["test_item"];
         let origin = transform.transform_point3(Vec3::ZERO);
