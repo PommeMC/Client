@@ -13,7 +13,9 @@ use simdnbt::owned::{NbtCompound, NbtTag};
 use uuid::Uuid;
 
 use super::NetworkEvent;
-use crate::chat_component::{Argument, Component, HoverEvent, Style, nbt_to_value};
+use crate::chat_component::{
+    Argument, Component, HoverEvent, Style, nbt_to_value, normalize_identifier,
+};
 use crate::net::chat_security::{LastSeenUpdate, SignedChatBody};
 use crate::ui::chat::{ChatMessageSource, ChatMessageTag};
 use crate::ui::text::format_component_spans;
@@ -224,6 +226,34 @@ fn write_last_seen_update(out: &mut Vec<u8>, update: &LastSeenUpdate) {
     write_varint(out, update.offset);
     out.extend_from_slice(&update.acknowledged);
     out.push(update.checksum);
+}
+
+pub fn encode_outbound_custom_click_action(
+    identifier: &str,
+    payload: Option<&NbtTag>,
+) -> Result<Vec<u8>, String> {
+    // The id is an `Identifier`, written as its `toString`.
+    let identifier = normalize_identifier(identifier);
+    if identifier.len() > 32_767 {
+        return Err("custom click identifier is too long".into());
+    }
+    let mut out = Vec::new();
+    write_varint(&mut out, game_serverbound_id("custom_click_action"));
+    write_wire_string(&mut out, &identifier);
+
+    // Vanilla wraps Optional<Tag> in a length-prefixed sub-buffer. None is the
+    // normal network-NBT end tag (single 0 byte); Some carries an unnamed tag.
+    let mut tag_bytes = Vec::new();
+    match payload {
+        Some(tag) => tag.write(&mut tag_bytes),
+        None => tag_bytes.push(0),
+    }
+    if tag_bytes.len() > 65_536 {
+        return Err("custom click payload exceeds Vanilla's 65536-byte limit".into());
+    }
+    write_varint(&mut out, tag_bytes.len() as u32);
+    out.extend_from_slice(&tag_bytes);
+    Ok(out)
 }
 
 /// Returns `None` when this is not a chat packet. Chat packets are always
@@ -1478,5 +1508,54 @@ mod tests {
         let style = error.component_style.as_ref().unwrap();
         assert_eq!(style.color, Some(0xff5555));
         assert!(style.italic);
+    }
+
+    #[test]
+    fn custom_click_packet_writes_the_normalized_identifier() {
+        let id = game_serverbound_id("custom_click_action");
+        let mut expected = Vec::new();
+        write_varint(&mut expected, id);
+        expected.push(13);
+        expected.extend_from_slice(b"minecraft:foo");
+        // Optional<Tag> sub-buffer: length 1, end tag.
+        expected.extend_from_slice(&[1, 0]);
+        assert_eq!(
+            encode_outbound_custom_click_action("foo", None).unwrap(),
+            expected
+        );
+
+        let frame = encode_outbound_custom_click_action("a:b", None).unwrap();
+        assert_eq!(&frame[frame.len() - 6..], &[3, b'a', b':', b'b', 1, 0]);
+    }
+
+    #[test]
+    fn custom_click_packet_preserves_exact_nbt_tag_types() {
+        let mut compound = NbtCompound::new();
+        compound.insert("byte", NbtTag::Byte(-5));
+        compound.insert("short", NbtTag::Short(300));
+        compound.insert("long", NbtTag::Long(9_000_000_000));
+        compound.insert("float", NbtTag::Float(1.5));
+        compound.insert("bytes", NbtTag::ByteArray(vec![0, 128, 255]));
+        compound.insert("ints", NbtTag::IntArray(vec![-1, 2, 3]));
+        compound.insert("longs", NbtTag::LongArray(vec![-4, 5, 6]));
+        let payload = NbtTag::Compound(compound);
+
+        let frame = encode_outbound_custom_click_action("minecraft:test", Some(&payload)).unwrap();
+        let mut pos = 0usize;
+        let packet_id = read_varint(&frame, &mut pos).unwrap();
+        assert_eq!(
+            PacketTable::native().name_of(Phase::Game, Direction::Serverbound, packet_id),
+            Some("custom_click_action")
+        );
+        assert_eq!(
+            read_string(&frame, &mut pos, 32_767, "id").unwrap(),
+            "minecraft:test"
+        );
+        let payload_len = read_varint_req(&frame, &mut pos, "payload length").unwrap() as usize;
+        let bytes = take(&frame, &mut pos, payload_len, "payload").unwrap();
+        let mut cursor = Cursor::new(bytes);
+        let decoded = simdnbt::owned::read_tag(&mut cursor).unwrap();
+        assert_eq!(decoded, payload);
+        assert_eq!(pos, frame.len());
     }
 }

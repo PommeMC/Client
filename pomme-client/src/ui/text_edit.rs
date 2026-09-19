@@ -124,6 +124,10 @@ impl TextFieldState {
         &self.value[start..end]
     }
 
+    pub fn cursor(&self) -> usize {
+        self.cursor_pos
+    }
+
     pub fn cursor_at_end(&self) -> bool {
         self.cursor_pos == self.value.len()
     }
@@ -506,11 +510,11 @@ fn is_allowed_chat_character(c: char) -> bool {
 }
 
 /// UTF-16 code-unit length, matching Java `String.length()`.
-fn utf16_len(s: &str) -> usize {
+pub(crate) fn utf16_len(s: &str) -> usize {
     s.chars().map(|c| c.len_utf16()).sum()
 }
 
-fn truncate_to_utf16(s: &str, max: usize) -> String {
+pub(crate) fn truncate_to_utf16(s: &str, max: usize) -> String {
     let mut acc = 0usize;
     let mut out = String::new();
     for c in s.chars() {

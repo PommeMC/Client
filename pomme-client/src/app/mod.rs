@@ -273,7 +273,7 @@ impl ApplicationHandler for App {
                             uuid: self.core.user.uuid,
                             access_token: self.core.user.access_token.clone(),
                             view_distance: self.core.view_distance(),
-                            chat_options: crate::ui::chat::ChatOptions::default(),
+                            chat_options: self.core.menu.chat_options,
                         },
                     );
 
@@ -282,6 +282,7 @@ impl ApplicationHandler for App {
                         &self.core.resource_packs,
                         self.core.menu.render_distance,
                         false,
+                        self.core.menu.chat_options,
                     );
 
                     let gfx = Gfx {
@@ -463,12 +464,16 @@ impl ApplicationHandler for App {
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
-                                            game.chat.close();
+                                            let closed = game.chat.handle_escape();
                                             self.core
                                                 .input
                                                 .clear_action(crate::app::input::Action::OpenMenu);
-                                            self.core
-                                                .apply_cursor_grab(&gfx.window, Some(&mut game));
+                                            if closed {
+                                                self.core.apply_cursor_grab(
+                                                    &gfx.window,
+                                                    Some(&mut game),
+                                                );
+                                            }
                                         }
                                         _ => {
                                             let f3_held = self.core.input.key_pressed(KeyCode::F3);
@@ -568,10 +573,10 @@ impl ApplicationHandler for App {
                     {
                         self.core.input.on_menu_scroll(scroll);
                     }
-                    // Open chat captures the wheel for backlog scrolling
-                    // (vanilla ChatScreen.mouseScrolled, clamped to ±1).
+                    // Queued raw: ChatScreen routes it to the completion popup
+                    // or the backlog, with Shift's slower multiplier.
                     AppPhase::InGame { game, .. } if game.chat.is_open() => {
-                        game.chat.scroll_chat(scroll.signum() as i32);
+                        self.core.input.on_menu_scroll(scroll);
                     }
                     // Vanilla MouseHandler: a spectator's wheel moves the menu
                     // selection (sign-inverted) while it is open, and adjusts
@@ -622,6 +627,23 @@ impl ApplicationHandler for App {
 
             WindowEvent::Focused(focused) => {
                 self.core.unfocused_since = (!focused).then(Instant::now);
+                // The window manager may silently drop a cursor lock on focus
+                // change, so a quick refocus (under the pause-on-lost-focus
+                // delay) re-issues the grab.
+                self.core.invalidate_cursor_grab_state();
+                if focused {
+                    match self.phase.get_mut() {
+                        AppPhase::Setup { .. } => {}
+                        AppPhase::InMenu { gfx, .. }
+                        | AppPhase::Connecting { gfx, .. }
+                        | AppPhase::SavingWorld { gfx, .. } => {
+                            self.core.apply_cursor_grab(&gfx.window, None);
+                        }
+                        AppPhase::InGame { gfx, game, .. } => {
+                            self.core.apply_cursor_grab(&gfx.window, Some(game));
+                        }
+                    }
+                }
             }
 
             WindowEvent::RedrawRequested => {
@@ -681,6 +703,7 @@ impl ApplicationHandler for App {
                                     &core.resource_packs,
                                     core.menu.render_distance,
                                     world.is_some(),
+                                    core.menu.chat_options,
                                 );
                                 core.apply_cursor_grab(&gfx.window, None);
 
