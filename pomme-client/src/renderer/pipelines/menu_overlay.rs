@@ -1288,7 +1288,11 @@ impl MenuOverlayPipeline {
                         items: items.clone(),
                     });
                 let rows = items.len().min(12).div_ceil(4);
-                let content_w = 96.0 * gs;
+                // GuiGraphicsExtractor takes the maximum width of every tooltip component.
+                // The bundle image contributes 96px, while a longer title can widen the
+                // whole tooltip; the image itself is then centered inside that width.
+                let content_w = (96.0 * gs).max(self.mc_text_width(title, fs));
+                let bundle_x_offset = ((content_w - 96.0 * gs) / 2.0).floor();
                 let empty_description =
                     crate::lang::translate("item.minecraft.bundle.empty.description")
                         .unwrap_or("Can hold a mixed stack of items");
@@ -1315,8 +1319,8 @@ impl MenuOverlayPipeline {
                     top = (*screen_h - content_h - 4.0).max(4.0);
                 }
                 let px = gs;
-                // Tooltip sprites include their own 9px border. Match the shared tooltip
-                // renderer: content sits 15 GUI pixels inside the outer nine-slice.
+                // TooltipRenderUtil uses x/y - 12 and content width/height + 24:
+                // 3px padding plus the 9px sprite margin on each side.
                 let padding = 3.0 * px;
                 let margin = 9.0 * px;
                 let inset = padding + margin;
@@ -1360,7 +1364,7 @@ impl MenuOverlayPipeline {
                             &mut vertices,
                             &[TextSpan::new(text.clone(), [0.6667, 0.6667, 0.6667, 1.0])],
                             McTextDraw {
-                                x: left,
+                                x: left + bundle_x_offset,
                                 y: top + line_no as f32 * 9.0 * gs,
                                 scale: fs,
                                 drop_shadow: true,
@@ -1375,7 +1379,8 @@ impl MenuOverlayPipeline {
                     let mut slot_number = 1usize;
                     for row in 1..=rows {
                         for col in 1..=4usize {
-                            let draw_x = left + content_w - col as f32 * 24.0 * gs;
+                            let draw_x =
+                                left + bundle_x_offset + 96.0 * gs - col as f32 * 24.0 * gs;
                             let draw_y = grid_y - row as f32 * 24.0 * gs;
                             if overflow && col == 1 && row == 1 {
                                 let hidden: i32 = items
@@ -1517,7 +1522,7 @@ impl MenuOverlayPipeline {
                         let selected_bg_x = selected_x - selected_inset;
                         let selected_bg_y = selected_y - selected_inset;
                         let selected_bg_w = name_w + 2.0 * selected_inset;
-                        let selected_bg_h = 9.0 * gs + 2.0 * selected_inset;
+                        let selected_bg_h = selected_content_h + 2.0 * selected_inset;
                         if let Some(bg) =
                             self.sprite_atlas.regions.get(&SpriteId::TooltipBackground)
                         {
@@ -1576,7 +1581,7 @@ impl MenuOverlayPipeline {
                 {
                     push_nine_slice(
                         &mut vertices,
-                        left + gs,
+                        left + bundle_x_offset + gs,
                         bar_y,
                         fill * gs,
                         13.0 * gs,
@@ -1592,7 +1597,7 @@ impl MenuOverlayPipeline {
                 {
                     push_nine_slice(
                         &mut vertices,
-                        left,
+                        left + bundle_x_offset,
                         bar_y,
                         96.0 * gs,
                         13.0 * gs,
@@ -1614,7 +1619,7 @@ impl MenuOverlayPipeline {
                         &mut vertices,
                         &[TextSpan::new(label.to_string(), white)],
                         McTextDraw {
-                            x: left + 48.0 * gs - label_w / 2.0,
+                            x: left + bundle_x_offset + 48.0 * gs - label_w / 2.0,
                             y: bar_y + 3.0 * gs,
                             scale: fs,
                             drop_shadow: true,
