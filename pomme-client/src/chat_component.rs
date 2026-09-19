@@ -3,6 +3,8 @@ use std::fmt;
 use serde_json::{Map, Value};
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 
+use crate::assets::{AssetId, identifier_chars};
+
 /// A vanilla text component, decoded by pomme because azalea's decoder drops
 /// hover events.
 /// TODO: decode straight from NBT instead of through JSON, which loses tag
@@ -383,10 +385,8 @@ pub(crate) fn nbt_to_value(tag: &NbtTag) -> Value {
         NbtTag::Short(v) => (*v).into(),
         NbtTag::Int(v) => (*v).into(),
         NbtTag::Long(v) => (*v).into(),
-        NbtTag::Float(v) => serde_json::Number::from_f64(f64::from(*v))
-            .map_or_else(|| java_decimal(format!("{v:e}")).into(), Value::Number),
-        NbtTag::Double(v) => serde_json::Number::from_f64(*v)
-            .map_or_else(|| java_decimal(format!("{v:e}")).into(), Value::Number),
+        NbtTag::Float(v) => float_value(f64::from(*v)),
+        NbtTag::Double(v) => float_value(*v),
         NbtTag::ByteArray(v) => v.iter().map(|&b| Value::from(b as i8)).collect(),
         NbtTag::String(v) => v.to_str().into_owned().into(),
         NbtTag::List(list) => list.as_nbt_tags().iter().map(nbt_to_value).collect(),
@@ -399,6 +399,11 @@ pub(crate) fn nbt_to_value(tag: &NbtTag) -> Value {
         NbtTag::IntArray(v) => v.iter().copied().map(Value::from).collect(),
         NbtTag::LongArray(v) => v.iter().copied().map(Value::from).collect(),
     }
+}
+
+fn float_value(v: f64) -> Value {
+    serde_json::Number::from_f64(v)
+        .map_or_else(|| java_decimal(format!("{v:e}")).into(), Value::Number)
 }
 
 /// Java's `toString` of a boxed NBT number (vanilla `JavaOps`), or `None` for
@@ -550,14 +555,15 @@ fn default_object_fallback(content: &Content) -> String {
         return String::new();
     };
     if let Some(sprite) = value.get("sprite").and_then(Value::as_str) {
-        let atlas = value
-            .get("atlas")
-            .and_then(Value::as_str)
-            .map_or("blocks", short_identifier);
+        let sprite = AssetId::parse(sprite).canonical();
+        let atlas = value.get("atlas").and_then(Value::as_str).map_or_else(
+            || "blocks".to_owned(),
+            |atlas| AssetId::parse(atlas).canonical(),
+        );
         return if atlas == "blocks" {
-            format!("[{}]", short_identifier(sprite))
+            format!("[{sprite}]")
         } else {
-            format!("[{}@{atlas}]", short_identifier(sprite))
+            format!("[{sprite}@{atlas}]")
         };
     }
     if let Some(player) = value.get("player") {
@@ -569,16 +575,6 @@ fn default_object_fallback(content: &Content) -> String {
             .unwrap_or_else(|| "[unknown player head]".to_owned());
     }
     "[object]".to_owned()
-}
-
-/// Vanilla `AtlasSprite.toShortName`: the path alone in the `minecraft`
-/// namespace.
-fn short_identifier(id: &str) -> &str {
-    match id.split_once(':') {
-        Some(("minecraft" | "", path)) => path,
-        Some(_) => id,
-        None => id,
-    }
 }
 
 fn visit_translation(
@@ -910,19 +906,10 @@ fn parse_click_event(value: &Value, legacy: bool) -> Result<Option<ClickEvent>, 
     }
 }
 
-/// Vanilla `Identifier.parse` validity: `[a-z0-9_.-]` namespace (default
-/// `minecraft`), `[a-z0-9_.-/]` path.
+/// Vanilla `Identifier.parse` validity.
 fn valid_identifier(id: &str) -> bool {
     let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
-    let allowed = |text: &str, slash: bool| {
-        text.chars().all(|c| {
-            c.is_ascii_lowercase()
-                || c.is_ascii_digit()
-                || matches!(c, '_' | '-' | '.')
-                || slash && c == '/'
-        })
-    };
-    namespace != ".." && allowed(namespace, false) && allowed(path, true)
+    namespace != ".." && identifier_chars(namespace, false) && identifier_chars(path, true)
 }
 
 /// A modern `show_text` holds its component in `value`, and item/entity

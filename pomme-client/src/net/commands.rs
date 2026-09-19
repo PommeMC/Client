@@ -249,12 +249,9 @@ impl CommandTree {
             .collect()
     }
 
-    /// Brigadier's `CommandDispatcher.parseNodes`, with each argument skipped
-    /// by StringReader rules instead of parsed. A literal matching the next
-    /// word is the only candidate, else every argument child is tried in
-    /// order; a redirect returns at once, and otherwise the first parse that
-    /// consumed the input without errors wins. Arguments past a redirect to
-    /// the root aren't collected (`visitArguments`' `rejectRootRedirects`).
+    /// Brigadier's `CommandDispatcher.parseNodes`, skipping arguments by
+    /// StringReader rules instead of parsing them. Arguments past a redirect
+    /// to the root aren't collected (`visitArguments`' `rejectRootRedirects`).
     fn parse_nodes(&self, node: u32, input: &str, cursor: usize) -> CommandParse {
         let Some(node) = self.node(node) else {
             return CommandParse::stopped(input, cursor, false);
