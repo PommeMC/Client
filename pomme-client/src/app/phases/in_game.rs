@@ -497,8 +497,7 @@ impl GameState {
         self.inventory_open
             || self.creative_inventory_open
             || self.open_container.is_some()
-            || self.server_dialog.is_some()
-            || self.chat.has_pending_modal_prompt()
+            || self.dialog_open()
             || self.game_mode_switcher.is_some()
     }
 
@@ -1519,12 +1518,19 @@ pub(crate) fn build_server_screens(
     game: &mut GameState,
     // The client tick count, or `None` where the phase runs no game ticks.
     tick: Option<u64>,
+    text_events: &[crate::ui::text_edit::TextInputEvent],
 ) {
     let modal_open = game.chat.has_pending_modal_prompt();
     if let Some(dialog) = game.server_dialog.as_mut() {
+        // The dialog types while it is the top screen; a confirm screen over
+        // it takes the keyboard instead.
+        if !modal_open {
+            let fs = common::FONT_SIZE * gs;
+            dialog.handle_text_input(text_events, gs, &|s| gfx.renderer.menu_text_width(s, fs));
+        }
         let scroll = core.input.consume_menu_scroll();
         if scroll != 0.0 && !modal_open {
-            dialog.handle_scroll(core.input.cursor_pos(), scroll);
+            dialog.handle_scroll(scroll);
         }
         let action = dialog.build(
             elements,
@@ -2085,12 +2091,9 @@ pub fn update_game(
     );
     let text_fs = common::FONT_SIZE * text_gs;
     let chat_was_open = game.chat.is_open();
-    if game.chat.has_pending_modal_prompt() {
-        // The ConfirmScreen replaces ChatScreen and takes its input.
-    } else if let Some(dialog) = game.server_dialog.as_mut() {
-        dialog.handle_text_input(&text_events, text_gs, &|s| {
-            gfx.renderer.menu_text_width(s, text_fs)
-        });
+    if game.dialog_open() {
+        // The dialog, or the ConfirmScreen over it, replaces ChatScreen and
+        // takes its input; `build_server_screens` hands the typing on.
     } else if let Some(msg) = game.chat.handle_key_input(
         &text_events,
         enter,
@@ -3112,6 +3115,7 @@ pub fn update_game(
         connection,
         game,
         Some(game.tick_count),
+        &text_events,
     );
 
     if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {

@@ -1518,9 +1518,9 @@ mod tests {
 
     #[test]
     fn custom_click_packet_writes_the_normalized_identifier() {
-        // Optional<Tag> sub-buffer: length 1, end tag.
         let mut expected = vec![68, 13];
         expected.extend_from_slice(b"minecraft:foo");
+        // Optional<Tag> sub-buffer: length 1, end tag.
         expected.extend_from_slice(&[1, 0]);
         assert_eq!(
             encode_outbound_custom_click_action(Phase::Game, "foo", None).unwrap(),

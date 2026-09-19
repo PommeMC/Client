@@ -22,7 +22,7 @@ pub(super) fn push_separator(elements: &mut Vec<MenuElement>, x: f32, y: f32, w:
     });
 }
 
-pub(super) fn push_outline(
+pub(crate) fn push_outline(
     elements: &mut Vec<MenuElement>,
     x: f32,
     y: f32,
@@ -1130,6 +1130,31 @@ pub(super) fn nine_slice(
     });
 }
 
+/// A list's scrollbar, whose track sits 2px in from the content's right edge.
+pub(super) fn push_list_scrollbar(
+    elements: &mut Vec<MenuElement>,
+    content_right: f32,
+    top: f32,
+    h: f32,
+    total: f32,
+    scroll: f32,
+    gs: f32,
+) {
+    push_scrollbar(
+        elements,
+        content_right - (SCROLLBAR_W + 2.0) * gs,
+        top,
+        h,
+        total,
+        scroll,
+        gs,
+        16.0 * gs,
+    );
+}
+
+/// `AbstractScrollArea.SCROLLBAR_WIDTH`.
+const SCROLLBAR_W: f32 = 6.0;
+
 /// `AbstractScrollArea.extractScrollbar`: a 6px track at `track_x`, with the
 /// thumb clamped between `min_thumb` and the track less 8px (both in
 /// framebuffer pixels), as `scrollerHeight` does.
@@ -1148,7 +1173,7 @@ pub(crate) fn push_scrollbar(
     if max_scroll <= 0.0 {
         return;
     }
-    let track_w = 6.0 * gs;
+    let track_w = SCROLLBAR_W * gs;
     let thumb_h = (h * h / total).clamp(min_thumb, (h - 8.0 * gs).max(min_thumb));
     let thumb_y = top + (scroll / max_scroll) * (h - thumb_h);
     nine_slice(

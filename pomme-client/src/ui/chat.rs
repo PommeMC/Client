@@ -2595,25 +2595,23 @@ pub(crate) fn item_tooltip_lines(
     }
 
     if tooltip_component_visible(tooltip_display, "lore") {
-        match raw_component(raw_components, "lore") {
-            Some(NbtTag::List(lore)) => {
-                for line in lore.as_nbt_tags() {
-                    if let Ok(component) = Component::from_nbt_tag(&line) {
-                        lines.extend(component_tooltip_lines(&component));
-                    }
-                }
-            }
-            _ => {
-                if let Some(lore) =
-                    component_value(components, "lore").and_then(serde_json::Value::as_array)
-                {
-                    for line in lore {
-                        if let Ok(component) = Component::from_value(line) {
-                            lines.extend(component_tooltip_lines(&component));
-                        }
-                    }
-                }
-            }
+        let lore: Vec<Component> = match raw_component(raw_components, "lore") {
+            Some(NbtTag::List(lore)) => lore
+                .as_nbt_tags()
+                .into_iter()
+                .filter_map(|line| Component::from_nbt_tag(&line).ok())
+                .collect(),
+            _ => component_value(components, "lore")
+                .and_then(serde_json::Value::as_array)
+                .map(|lore| {
+                    lore.iter()
+                        .filter_map(|line| Component::from_value(line).ok())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        for line in &lore {
+            lines.extend(component_tooltip_lines(line));
         }
     }
 
@@ -3149,47 +3147,27 @@ pub(crate) fn wrap_spans(
     let mut lines: Vec<StyledLine> = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {
-        let mut width = 0.0f32;
-        let mut had_non_zero = false;
-        let mut last_space: Option<usize> = None;
-        let mut i = start;
-        let mut split = false;
-
-        while i < chars.len() {
-            let (ch, style) = &chars[i];
-            if *ch == '\n' {
-                lines.push(chars[start..i].to_vec());
-                start = i + 1;
-                split = true;
+        // Each character is measured with its own style, as the splitter's
+        // sink does.
+        let widths = chars[start..]
+            .iter()
+            .enumerate()
+            .map(|(offset, (ch, style))| {
+                (
+                    start + offset,
+                    *ch,
+                    width0(&merge_chars(&[(*ch, style.clone())])),
+                )
+            });
+        match crate::ui::text::find_line_break(widths, max_w) {
+            Some((end, next)) => {
+                lines.push(chars[start..end].to_vec());
+                start = next;
+            }
+            None => {
+                lines.push(chars[start..].to_vec());
                 break;
             }
-            if *ch == ' ' {
-                last_space = Some(i);
-            }
-
-            let char_span = merge_chars(&[(*ch, style.clone())]);
-            let char_width = width0(&char_span);
-            width += char_width;
-            if had_non_zero && width > max_w {
-                if let Some(space) = last_space {
-                    // `FlatComponents.splitAt(lineBreak, 1, ...)`: the chosen
-                    // delimiter space is omitted from both display lines.
-                    lines.push(chars[start..space].to_vec());
-                    start = space + 1;
-                } else {
-                    lines.push(chars[start..i].to_vec());
-                    start = i;
-                }
-                split = true;
-                break;
-            }
-            had_non_zero |= char_width != 0.0;
-            i += 1;
-        }
-
-        if !split {
-            lines.push(chars[start..].to_vec());
-            break;
         }
     }
 

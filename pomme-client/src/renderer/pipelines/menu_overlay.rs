@@ -10,7 +10,7 @@ use pyronyx::vk;
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{packing, shader, util};
 use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
-use crate::ui::text::TextSpan;
+use crate::ui::text::{InlineObject, TextSpan};
 
 const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
 const ICON_FONT_BYTES: &[u8] = include_bytes!("../fonts/fa-solid-900.ttf");
@@ -245,7 +245,7 @@ pub struct MenuOverlayPipeline {
     favicon_regions: std::collections::HashMap<String, [f32; 4]>,
     /// Inline objects drawn since the app last drained them, so the next
     /// frame's atlas holds what the text actually asked for.
-    drawn_inline_objects: std::collections::HashMap<String, crate::ui::text::InlineObject>,
+    drawn_inline_objects: std::collections::HashMap<String, InlineObject>,
     favicon_atlas_size: u32,
     overlay_image: vk::Image,
     overlay_view: vk::ImageView,
@@ -1606,7 +1606,7 @@ impl MenuOverlayPipeline {
     #[allow(clippy::too_many_arguments)]
     fn push_text_into(
         &self,
-        drawn_objects: &mut std::collections::HashMap<String, crate::ui::text::InlineObject>,
+        drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
         vertices: &mut Vec<Vertex>,
         spans: &[TextSpan],
         draw: McTextDraw,
@@ -1633,7 +1633,7 @@ impl MenuOverlayPipeline {
     /// the atlas for the next frame.
     pub fn drain_drawn_inline_objects(
         &mut self,
-    ) -> std::collections::hash_map::Drain<'_, String, crate::ui::text::InlineObject> {
+    ) -> std::collections::hash_map::Drain<'_, String, InlineObject> {
         self.drawn_inline_objects.drain()
     }
 
@@ -4141,12 +4141,10 @@ pub const ATLAS_CELL: u32 = 64;
 /// Whether the object has a glyph at all: a player head always does, an atlas
 /// sprite only in one of the atlases the client stitches
 /// (`AtlasManager.KNOWN_ATLASES`).
-fn object_has_glyph(object: &crate::ui::text::InlineObject) -> bool {
+fn object_has_glyph(object: &InlineObject) -> bool {
     match object {
-        crate::ui::text::InlineObject::Player { .. } => true,
-        crate::ui::text::InlineObject::AtlasSprite { atlas, .. } => {
-            crate::ui::object_glyph::is_known_atlas(atlas)
-        }
+        InlineObject::Player { .. } => true,
+        InlineObject::AtlasSprite { atlas, .. } => crate::ui::object_glyph::is_known_atlas(atlas),
     }
 }
 
@@ -4220,7 +4218,7 @@ fn push_mc_text(
     spans: &[TextSpan],
     draw: McTextDraw,
     obfuscation_rng: &mut ObfuscationRng,
-    drawn_objects: &mut std::collections::HashMap<String, crate::ui::text::InlineObject>,
+    drawn_objects: &mut std::collections::HashMap<String, InlineObject>,
 ) {
     let McTextDraw {
         x,
@@ -4290,8 +4288,8 @@ fn push_mc_text(
                 let sy = (cy - px_scale).round();
                 let key = object.atlas_key();
                 let fallback = match object {
-                    crate::ui::text::InlineObject::Player { .. } => SpriteId::SteveHead,
-                    crate::ui::text::InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
+                    InlineObject::Player { .. } => SpriteId::SteveHead,
+                    InlineObject::AtlasSprite { .. } => SpriteId::UnknownServer,
                 };
                 let mut draw_object = |dx: f32, color: [f32; 4]| {
                     push_atlas_image(
@@ -4312,14 +4310,12 @@ fn push_mc_text(
                 draw_object(0.0, span.color);
                 drawn_objects.entry(key).or_insert_with(|| object.clone());
                 inline_object_advance(span.bold) * px_scale
-            } else if ch == '\u{fffc}' && span.inline_object.is_some() {
-                // `FontManager.getSpriteFont`: an atlas with no provider
-                // renders the missing-font glyph.
-                let gi = gm.missing();
-                push_mc_glyph_quads(verts, gi, [cx, cy], px_scale, span, shadow_color);
-                (gi.advance + if span.bold { gi.bold_offset } else { 0.0 }) * px_scale
             } else {
-                let gi = if span.obfuscated && ch != ' ' {
+                let gi = if ch == '\u{fffc}' && span.inline_object.is_some() {
+                    // `FontManager.getSpriteFont`: an atlas with no provider
+                    // renders the missing-font glyph.
+                    gm.missing()
+                } else if span.obfuscated && ch != ' ' {
                     let width = gm.glyph(ch, font).advance.ceil() as i32;
                     gm.random_glyph(width, font, |len| obfuscation_rng.next_int(len))
                 } else {

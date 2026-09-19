@@ -4,7 +4,7 @@ use crate::app::phases::in_game::{GameState, build_server_screens};
 use crate::app::phases::{ConnectionPhase, Gfx, Panorama, draw_status};
 use crate::net::connection::ConnectionHandle;
 use crate::singleplayer::World;
-use crate::ui::{common, hud};
+use crate::ui::hud;
 
 pub enum ConnectingUpdateResult {
     None,
@@ -84,7 +84,7 @@ pub fn update_connecting(
         ConnectionPhase::Connecting => "Connecting to the server...",
     };
 
-    if game.server_dialog.is_some() || game.chat.has_pending_modal_prompt() {
+    if game.dialog_open() {
         draw_server_dialog(core, dt, gfx, panorama, connection, game);
     } else if draw_status(core, dt, gfx, panorama, status_text, Some("Cancel")) {
         return ConnectingUpdateResult::ManualDisconnect;
@@ -108,24 +108,27 @@ fn draw_server_dialog(
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
     let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
-    if !game.chat.has_pending_modal_prompt()
-        && let Some(dialog) = game.server_dialog.as_mut()
-    {
-        let fs = common::FONT_SIZE * gs;
-        dialog.handle_text_input(&core.input.drain_text_events(), gs, &|s| {
-            gfx.renderer.menu_text_width(s, fs)
-        });
-    }
 
     // A configuration-phase dialog can carry object glyphs, which load into
     // the same atlas the in-game text uses.
     core.sync_game_dynamic_atlas(game, &mut gfx.renderer, false);
 
     let mut elements = Vec::new();
+    let text_events = core.input.drain_text_events();
     // The connecting screen runs no client ticks, so the dialog's own
     // timers fall back to wall time.
-    build_server_screens(&mut elements, sw, sh, gs, core, gfx, connection, game, None);
-    core.input.clear_just_pressed_actions();
+    build_server_screens(
+        &mut elements,
+        sw,
+        sh,
+        gs,
+        core,
+        gfx,
+        connection,
+        game,
+        None,
+        &text_events,
+    );
 
     let cursor = core.input.cursor_pos();
     if let Err(e) =

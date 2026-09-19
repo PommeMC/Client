@@ -5,15 +5,18 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use simdnbt::owned::{NbtCompound, NbtTag};
 
+use crate::assets::strip_default_namespace;
 use crate::chat_component::{
     Argument, ClickEvent, Component, DialogHolder, java_float_text, normalize_identifier,
 };
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
-use crate::ui::chat::{StyleHitRegion, push_hit_regions, style_at, wrap_spans};
+use crate::ui::chat::{push_hit_regions, style_at, wrap_spans};
 use crate::ui::common;
-use crate::ui::menu::helpers::push_scrollbar;
+use crate::ui::menu::helpers::{push_outline, push_scrollbar};
 use crate::ui::text::{TextSpan, format_component_spans};
-use crate::ui::text_edit::{MultilineField, SystemClipboard, TextFieldState, TextInputEvent};
+use crate::ui::text_edit::{
+    MultilineField, SystemClipboard, TextFieldRenderInfo, TextFieldState, TextInputEvent,
+};
 
 /// The body column's `LinearLayout.spacing` (`DialogScreen.init`).
 const BODY_SPACING: f32 = 10.0;
@@ -254,19 +257,7 @@ struct DialogItem {
 impl DialogItem {
     /// The texture name `MenuElement::ItemIcon` keys on (`item_resource_name`).
     fn icon_name(&self) -> &str {
-        self.id.strip_prefix("minecraft:").unwrap_or(&self.id)
-    }
-
-    fn count(&self) -> i32 {
-        self.count
-    }
-
-    fn template(&self) -> &Value {
-        &self.template
-    }
-
-    fn components(&self) -> Option<&NbtCompound> {
-        self.components.as_ref()
+        strip_default_namespace(&self.id)
     }
 }
 
@@ -341,7 +332,7 @@ impl MultilineOptions {
     fn widget_height(&self) -> f32 {
         self.height.unwrap_or_else(|| {
             let lines = i64::from(self.max_lines.unwrap_or(4));
-            (9 * lines + 8).min(512) as i32
+            (LINE_H as i64 * lines + 8).min(512) as i32
         }) as f32
     }
 }
@@ -660,19 +651,17 @@ impl ServerDialogState {
 
     /// Wheel input: the body's `ScrollableLayout` scrolls, unless a
     /// `CycleButton` under the cursor takes the wheel itself.
-    pub fn handle_scroll(&mut self, cursor: (f32, f32), delta: f32) {
+    pub fn handle_scroll(&mut self, delta: f32) {
         if let Some(index) = self.wheel_target.take()
             && let DialogMode::Dialog(dialog) = &mut self.mode
             && let Some(DialogInput::SingleOption {
                 entries, selected, ..
             }) = dialog.inputs.get_mut(index)
         {
-            // `CycleButton.mouseScrolled`.
-            let step = if delta > 0.0 { entries.len() - 1 } else { 1 };
-            *selected = (*selected + step) % entries.len().max(1);
+            // `CycleButton.mouseScrolled`: scrolling up cycles backwards.
+            *selected = cycle(*selected, entries.len(), delta <= 0.0);
             return;
         }
-        let _ = cursor;
         self.scroll = (self.scroll - delta * SCROLL_RATE).clamp(0.0, self.scroll_max);
     }
 
@@ -736,10 +725,10 @@ impl ServerDialogState {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// `DialogScreen`: a `HeaderAndFooterLayout` whose contents are the body
     /// column inside a `ScrollableLayout`. Laid out in vanilla's GUI units and
     /// drawn at `gs` framebuffer pixels per unit.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         &mut self,
         elements: &mut Vec<MenuElement>,
@@ -1064,6 +1053,15 @@ fn click_to_action(click: ClickEvent) -> Option<ServerDialogAction> {
     }
 }
 
+/// `CycleButton.cycleValue`: the next entry, wrapping either way.
+fn cycle(selected: usize, len: usize, forward: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let step = if forward { 1 } else { len - 1 };
+    (selected + step) % len
+}
+
 /// `CompoundTag.put`, which replaces an entry rather than adding a second one.
 fn put(compound: &mut NbtCompound, key: &str, tag: NbtTag) {
     compound.remove(key);
@@ -1329,7 +1327,9 @@ fn parse_dialog(node: &Node, registry: &DialogRegistry) -> Result<DialogData, St
     let title = node.component_field("title")?;
     let external_title = node.optional_component("external_title")?;
     let can_close_with_escape = node.bool_or("can_close_with_escape", true);
-    // TODO: `pause` (`DialogScreen.isPauseScreen`) isn't honoured in singleplayer.
+    // TODO: `pause` (`DialogScreen.isPauseScreen`) is decoded for the codec's
+    // validation but never acted on: nothing in Pomme pauses the integrated
+    // server, so there is no tick loop for the flag to stop.
     let pause = node.bool_or("pause", true);
     let after_action = match node.string_or("after_action", "close").as_str() {
         "close" => AfterAction::Close,
@@ -1359,7 +1359,7 @@ fn parse_dialog(node: &Node, registry: &DialogRegistry) -> Result<DialogData, St
             .collect::<Result<_, _>>()?,
         None => Vec::new(),
     };
-    let kind = match strip_minecraft(&kind) {
+    let kind = match strip_default_namespace(&kind) {
         "notice" => DialogKind::Notice {
             action: node
                 .field("action")
@@ -1420,7 +1420,7 @@ fn exit_action(node: &Node) -> Result<Option<DialogButton>, String> {
 }
 
 fn parse_body(node: &Node) -> Result<DialogBody, String> {
-    match strip_minecraft(&node.string_field("type")?) {
+    match strip_default_namespace(&node.string_field("type")?) {
         "plain_message" => Ok(DialogBody::Message {
             contents: node.component_field("contents")?,
             width: node.width(200)?,
@@ -1485,7 +1485,7 @@ fn parse_input(node: &Node) -> Result<DialogInput, String> {
     if !is_valid_variable_name(&key) {
         return Err(format!("{key} is not a valid input name"));
     }
-    match strip_minecraft(&node.string_field("type")?) {
+    match strip_default_namespace(&node.string_field("type")?) {
         "text" => {
             let max_length = node.positive_int("max_length", 32)?;
             let initial = node.string_or("initial", "");
@@ -1639,7 +1639,7 @@ fn default_ok_button() -> DialogButton {
 
 fn parse_action(node: &Node) -> Result<BoundAction, String> {
     let kind = node.string_field("type")?;
-    match strip_minecraft(&kind) {
+    match strip_default_namespace(&kind) {
         "dynamic/run_command" => Ok(BoundAction::DynamicRunCommand {
             template: ParsedTemplate::parse(&node.string_field("template")?)?,
         }),
@@ -1802,16 +1802,6 @@ impl Draw<'_> {
     }
 
     /// `AbstractButton`: the nine-sliced button sprite with its label centred.
-    /// `GuiGraphics.outline`: a one-unit frame, which a focused body widget
-    /// draws around itself.
-    fn outline(&mut self, rect: [f32; 4], color: [f32; 4]) {
-        let [x, y, w, h] = rect;
-        self.fill([x, y, w, 1.0], color);
-        self.fill([x, y + h - 1.0, w, 1.0], color);
-        self.fill([x, y + 1.0, 1.0, h - 2.0], color);
-        self.fill([x + w - 1.0, y + 1.0, 1.0, h - 2.0], color);
-    }
-
     fn button(&mut self, rect: [f32; 4], label: &Component, highlighted: bool) {
         let gs = self.gs;
         self.elements.push(MenuElement::NineSlice {
@@ -1836,6 +1826,20 @@ impl Draw<'_> {
             true,
         );
     }
+    /// `GuiGraphics.outline`: the one-unit frame a focused body widget draws
+    /// around itself.
+    fn outline(&mut self, rect: [f32; 4]) {
+        let gs = self.gs;
+        push_outline(
+            self.elements,
+            rect[0] * gs,
+            rect[1] * gs,
+            rect[2] * gs,
+            rect[3] * gs,
+            gs,
+        );
+    }
+
     /// `Checkbox`: the box sprite, then its label centred beside it.
     fn checkbox(&mut self, at: [f32; 2], label: &Component, selected: bool, focused: bool) {
         let sprite = match (selected, focused) {
@@ -1867,14 +1871,14 @@ impl Draw<'_> {
         });
         // TODO: vanilla also draws the durability bar and the cooldown
         // overlay; Pomme has no renderer for either yet.
-        if decorations && item.count() != 1 {
+        if decorations && item.count != 1 {
             common::push_item_count(
                 self.elements,
                 rect[0] * gs,
                 rect[1] * gs,
                 common::SLOT_SIZE * gs,
                 gs,
-                item.count(),
+                item.count,
             );
         }
     }
@@ -1890,6 +1894,34 @@ impl Draw<'_> {
         self.fill(
             [rect[0] + 1.0, rect[1] + 1.0, rect[2] - 2.0, rect[3] - 2.0],
             [0.0, 0.0, 0.0, 1.0],
+        );
+    }
+
+    /// A field's shown slice, with its selection and caret, in `EditBox`'s
+    /// plain unstyled text.
+    fn field_text(
+        &mut self,
+        info: &TextFieldRenderInfo,
+        shown: &str,
+        x: f32,
+        y: f32,
+        fs: f32,
+        wf: &dyn Fn(&str) -> f32,
+    ) {
+        let gs = self.gs;
+        common::push_field_text(
+            self.elements,
+            info,
+            shown,
+            Some(&[TextSpan::new(shown.to_owned(), EDIT_TEXT)]),
+            x,
+            y,
+            fs,
+            gs,
+            gs,
+            EDIT_TEXT,
+            None,
+            wf,
         );
     }
 
@@ -1911,20 +1943,7 @@ impl Draw<'_> {
             w: inner_w,
             h: rect[3] * gs,
         });
-        common::push_field_text(
-            self.elements,
-            &info,
-            shown,
-            Some(&[TextSpan::new(shown.to_owned(), EDIT_TEXT)]),
-            text_x,
-            text_y,
-            fs,
-            gs,
-            gs,
-            EDIT_TEXT,
-            None,
-            &wf,
-        );
+        self.field_text(&info, shown, text_x, text_y, fs, &wf);
         self.elements.push(MenuElement::ScissorPop);
     }
 
@@ -1970,7 +1989,7 @@ impl Draw<'_> {
                         selection_end.clamp(*begin, *end) - begin,
                     )
                 });
-            let info = crate::ui::text_edit::TextFieldRenderInfo {
+            let info = TextFieldRenderInfo {
                 display_start: *begin,
                 display_end: *end,
                 caret_byte: cursor.saturating_sub(*begin).min(shown.len()),
@@ -1978,20 +1997,7 @@ impl Draw<'_> {
                 selection,
                 insert_mode,
             };
-            common::push_field_text(
-                self.elements,
-                &info,
-                shown,
-                Some(&[TextSpan::new(shown.to_owned(), EDIT_TEXT)]),
-                inner_x,
-                y,
-                fs,
-                gs,
-                gs,
-                EDIT_TEXT,
-                None,
-                &wf,
-            );
+            self.field_text(&info, shown, inner_x, y, fs, &wf);
         }
         self.elements.push(MenuElement::ScissorPop);
         // `AbstractTextAreaWidget.scrollBarX` puts the bar outside the box.
@@ -2411,15 +2417,11 @@ fn draw_child(
         ChildContent::Message { lines } => {
             let hovered = ctx.live && common::hit_test(ctx.cursor, rect);
             let focused = focus.claim(FocusTarget::Body(index), hovered);
-            let hits = draw_message(&mut draw, lines, [x, y, w, h], ctx);
+            let clicked = draw_message(&mut draw, lines, [x, y, w, h], ctx);
             if focused {
-                draw.outline(rect, common::WHITE);
+                draw.outline(rect);
             }
-            if ctx.live
-                && ctx.input.clicked
-                && let Some(click) =
-                    style_at(&hits, ctx.input.cursor).and_then(|style| style.click_event.clone())
-            {
+            if let Some(click) = clicked {
                 return Some(BoundClick::Style(click));
             }
             // `keyPressed`: the message's first click event fires.
@@ -2452,7 +2454,7 @@ fn draw_child(
             // `ItemDisplayWidget` is an active widget: it takes focus and
             // outlines itself, but has no key action.
             if focus.claim(FocusTarget::Body(index), hovered) {
-                draw.outline(item_rect, common::WHITE);
+                draw.outline(item_rect);
             }
             draw.item(item_rect, item, *show_decorations);
             if *show_tooltip
@@ -2468,12 +2470,7 @@ fn draw_child(
                     *desc_w,
                     *desc_h,
                 ];
-                let hits = draw_message(&mut draw, lines, desc_rect, ctx);
-                if ctx.live
-                    && ctx.input.clicked
-                    && let Some(click) = style_at(&hits, ctx.input.cursor)
-                        .and_then(|style| style.click_event.clone())
-                {
+                if let Some(click) = draw_message(&mut draw, lines, desc_rect, ctx) {
                     return Some(BoundClick::Style(click));
                 }
             }
@@ -2516,12 +2513,14 @@ fn first_click_event(lines: &[Vec<TextSpan>]) -> Option<ClickEvent> {
 
 /// `FocusableTextWidget`: centred lines inside the widget's padding, whose
 /// styles stay clickable.
+/// Draws the message and reports the click event under the cursor, when this
+/// frame's click landed on styled text.
 fn draw_message(
     draw: &mut Draw,
     lines: &[Vec<TextSpan>],
     rect: [f32; 4],
     ctx: DrawContext,
-) -> Vec<StyleHitRegion> {
+) -> Option<ClickEvent> {
     let gs = draw.gs;
     let mut hits = Vec::new();
     for (index, line) in lines.iter().enumerate() {
@@ -2533,13 +2532,17 @@ fn draw_message(
         });
         draw.spans(x, y, line.clone(), false);
     }
-    hits
+    if !ctx.live || !ctx.input.clicked {
+        return None;
+    }
+    style_at(&hits, ctx.input.cursor).and_then(|style| style.click_event.clone())
 }
 
 /// The item tooltip `ItemDisplayWidget` shows, built from the stack the body
 /// carries.
 fn item_tooltip(item: &DialogItem, advanced: bool) -> Option<Vec<TooltipLine>> {
-    let lines = crate::ui::chat::item_tooltip_lines(item.template(), item.components(), advanced);
+    let lines =
+        crate::ui::chat::item_tooltip_lines(&item.template, item.components.as_ref(), advanced);
     (!lines.is_empty()).then_some(lines)
 }
 
@@ -2618,7 +2621,6 @@ fn draw_input(
                 }
             }
         }
-        // `Checkbox`: a 17px box, its spacing, then the label.
         DialogInput::Boolean {
             label, selected, ..
         } => {
@@ -2660,12 +2662,8 @@ fn draw_input(
                 *state.wheel_target = Some(index);
             }
             if focus.pressed(hovered, focused) && !entries.is_empty() {
-                let step = if ctx.input.shift {
-                    entries.len() - 1
-                } else {
-                    1
-                };
-                *selected = (*selected + step) % entries.len();
+                // `CycleButton.onPress`: shift cycles backwards.
+                *selected = cycle(*selected, entries.len(), !ctx.input.shift);
                 *state.click_sound = true;
             }
         }
@@ -2764,21 +2762,15 @@ fn escape_without_quotes(value: &str) -> String {
     out
 }
 
-fn strip_minecraft(value: &str) -> &str {
-    value.strip_prefix("minecraft:").unwrap_or(value)
-}
-
 fn dialog_reference_label(reference: &DialogReference) -> String {
     match reference {
         DialogReference::Holder(DialogHolder::Json(Value::String(id))) => id.clone(),
         DialogReference::Holder(DialogHolder::Nbt(NbtTag::String(id))) => id.to_string(),
         DialogReference::ProtocolId(id) => format!("#{id}"),
-        DialogReference::Holder(_) => tr("menu.custom_screen_info.title", "Server Dialog"),
+        DialogReference::Holder(_) => crate::lang::translate("menu.custom_screen_info.title")
+            .unwrap_or("Server Dialog")
+            .to_owned(),
     }
-}
-
-fn tr(key: &str, fallback: &str) -> String {
-    crate::lang::translate(key).unwrap_or(fallback).to_owned()
 }
 
 #[cfg(test)]

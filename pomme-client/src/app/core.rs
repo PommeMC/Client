@@ -53,6 +53,24 @@ enum PlayerSkinSource {
     Name(String),
 }
 
+/// Fetches the skin a source names; `uuid` is the profile id a `Uuid` source
+/// looks up.
+async fn fetch_skin(
+    source: &PlayerSkinSource,
+    uuid: Option<uuid::Uuid>,
+) -> Result<crate::renderer::SkinData, String> {
+    match source {
+        PlayerSkinSource::Textures(textures) => {
+            crate::renderer::fetch_skin_texture_from_profile_property(textures).await
+        }
+        PlayerSkinSource::Name(name) => crate::renderer::fetch_skin_texture_by_name(name).await,
+        PlayerSkinSource::Uuid => {
+            let uuid = uuid.unwrap_or_default().to_string().replace('-', "");
+            crate::renderer::fetch_skin_texture(&uuid).await
+        }
+    }
+}
+
 struct PlayerSkinResult {
     uuid: uuid::Uuid,
     source: PlayerSkinSource,
@@ -346,7 +364,6 @@ pub struct AppCore {
     /// 8x8 RGBA faces of fetched player skins, for the spectator menu's
     /// face atlas (the GPU-side skins keep no CPU pixels).
     player_faces: HashMap<uuid::Uuid, Vec<u8>>,
-    player_faces_no_hat: HashMap<uuid::Uuid, Vec<u8>>,
     player_faces_dirty: bool,
     /// Inline object glyphs (sprites and heads) the text drew recently,
     /// keyed as the text renderer looks them up.
@@ -365,6 +382,10 @@ pub struct AppCore {
     game_dynamic_atlas_keys: HashSet<String>,
 }
 
+/// Folds the credits roll's keys into a `CREDITS_KEY_*` mask. Both control
+/// keys count separately in vanilla's `speedupModifiers`, so this can't go
+/// through `InputState::ctrl_held`, which folds them into one winit modifier
+/// bit.
 fn credits_key_mask(mut is_set: impl FnMut(KeyCode) -> bool) -> u8 {
     [
         (KeyCode::ArrowUp, CREDITS_KEY_UP),
@@ -378,7 +399,7 @@ fn credits_key_mask(mut is_set: impl FnMut(KeyCode) -> bool) -> u8 {
     .sum()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CursorOp {
     Keep,
     Grab,
@@ -484,7 +505,6 @@ impl AppCore {
             player_skin_rx,
             requested_player_skins: HashMap::new(),
             player_faces: HashMap::new(),
-            player_faces_no_hat: HashMap::new(),
             player_faces_dirty: false,
             inline_objects: HashMap::new(),
             player_heads: HashMap::new(),
@@ -660,14 +680,12 @@ impl AppCore {
         connection.packet_tx.send_chat(msg);
     }
 
+    /// Queues a tab-list player's entity skin: the textures the server sent,
+    /// else a session-server lookup by id.
     fn queue_player_skin(&mut self, uuid: uuid::Uuid, textures: Option<String>) {
         let source = textures
             .map(PlayerSkinSource::Textures)
             .unwrap_or(PlayerSkinSource::Uuid);
-        self.queue_player_skin_source(uuid, source);
-    }
-
-    fn queue_player_skin_source(&mut self, uuid: uuid::Uuid, source: PlayerSkinSource) {
         if self.requested_player_skins.get(&uuid) == Some(&source) {
             return;
         }
@@ -681,18 +699,7 @@ impl AppCore {
 
         let tx = self.player_skin_tx.clone();
         self.tokio_rt.spawn(async move {
-            let result = match &source {
-                PlayerSkinSource::Textures(textures) => {
-                    crate::renderer::fetch_skin_texture_from_profile_property(textures).await
-                }
-                PlayerSkinSource::Name(name) => {
-                    crate::renderer::fetch_skin_texture_by_name(name).await
-                }
-                PlayerSkinSource::Uuid => {
-                    let uuid_str = uuid.to_string().replace('-', "");
-                    crate::renderer::fetch_skin_texture(&uuid_str).await
-                }
-            };
+            let result = fetch_skin(&source, Some(uuid)).await;
             let _ = tx.send(PlayerSkinResult {
                 uuid,
                 source,
@@ -714,16 +721,6 @@ impl AppCore {
                         data.height,
                     ) {
                         self.player_faces.insert(skin.uuid, face);
-                        if let Some(base) =
-                            crate::renderer::pipelines::menu_overlay::extract_face_8x8_with_hat(
-                                &data.pixels,
-                                data.width,
-                                data.height,
-                                false,
-                            )
-                        {
-                            self.player_faces_no_hat.insert(skin.uuid, base);
-                        }
                         self.player_faces_dirty = true;
                     }
                     renderer.update_player_entity_skin(&skin.uuid, &data);
@@ -821,12 +818,14 @@ impl AppCore {
                     InlineObjectContent::Sprite { frames, .. } => {
                         // Every frame of an animation is packed; the base key
                         // points at the one showing.
-                        for frame in 0..frames.frame_count() {
-                            entries.push((
-                                format!("{key}#{frame}"),
-                                frames.pixels(frame).to_vec(),
-                                frames.size,
-                            ));
+                        if frames.animated() {
+                            for frame in 0..frames.frame_count() {
+                                entries.push((
+                                    format!("{key}#{frame}"),
+                                    frames.pixels(frame).to_vec(),
+                                    frames.size,
+                                ));
+                            }
                         }
                         entries.push((key.clone(), frames.pixels(0).to_vec(), frames.size));
                         self.game_dynamic_atlas_keys.insert(key.clone());
@@ -954,18 +953,7 @@ impl AppCore {
         let id = profile.id;
         let tx = self.head_tx.clone();
         self.tokio_rt.spawn(async move {
-            let result = match &source {
-                PlayerSkinSource::Textures(textures) => {
-                    crate::renderer::fetch_skin_texture_from_profile_property(textures).await
-                }
-                PlayerSkinSource::Name(name) => {
-                    crate::renderer::fetch_skin_texture_by_name(name).await
-                }
-                PlayerSkinSource::Uuid => {
-                    let uuid = id.unwrap_or_default().to_string().replace('-', "");
-                    crate::renderer::fetch_skin_texture(&uuid).await
-                }
-            };
+            let result = fetch_skin(&source, id).await;
             let _ = tx.send(HeadResult { profile, result });
         });
     }
@@ -1000,7 +988,6 @@ impl AppCore {
     fn remove_player_skin(&mut self, renderer: &mut Renderer, uuid: &uuid::Uuid) {
         self.requested_player_skins.remove(uuid);
         let removed = self.player_faces.remove(uuid).is_some();
-        self.player_faces_no_hat.remove(uuid);
         if removed {
             self.player_faces_dirty = true;
         }
@@ -1050,7 +1037,6 @@ impl AppCore {
         game.subtitles.clear();
         self.requested_player_skins.clear();
         self.player_faces.clear();
-        self.player_faces_no_hat.clear();
         self.player_faces_dirty = false;
         self.inline_objects.clear();
         self.player_heads.clear();
@@ -2295,7 +2281,6 @@ impl AppCore {
                     // `startWaitingForNewLevel` replaces an open dialog here too.
                     game.server_dialog = None;
                     game.start_level_load();
-                    self.apply_cursor_grab(window, Some(game));
                     game.player.reset_for_respawn(keep_entity_data);
                     game.interaction.reset_player_transients_for_respawn();
                     // A fresh LocalPlayer gets a fresh KeyboardInput and packet

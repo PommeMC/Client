@@ -772,14 +772,18 @@ fn chat_types_from_registry_holder(
     super::chat::ChatTypeRegistry::from_entries(entries)
 }
 
+/// The registry the dialog glyphs and holders resolve against.
+fn dialog_registry_key() -> azalea_registry::identifier::Identifier {
+    "minecraft:dialog".into()
+}
+
 fn dialog_registry(
     holder: &azalea_core::registry_holder::RegistryHolder,
     tags: std::collections::HashMap<String, Vec<usize>>,
 ) -> DialogRegistry {
-    let key: azalea_registry::identifier::Identifier = "minecraft:dialog".into();
     let entries = holder
         .extra
-        .get(&key)
+        .get(&dialog_registry_key())
         .map(|registry| {
             registry
                 .map
@@ -795,8 +799,7 @@ fn dialog_registry(
 fn dialog_tags(
     tags: &azalea_protocol::common::tags::TagMap,
 ) -> Option<std::collections::HashMap<String, Vec<usize>>> {
-    let key: azalea_registry::identifier::Identifier = "minecraft:dialog".into();
-    let tags = tags.0.get(&key)?;
+    let tags = tags.0.get(&dialog_registry_key())?;
     Some(
         tags.iter()
             .map(|tag| {

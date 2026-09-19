@@ -474,9 +474,7 @@ impl TextFieldState {
         let caret_on_screen = rel_cursor >= 0 && rel_cursor <= displayed_len as isize;
         let caret_byte = rel_cursor.clamp(0, displayed_len as isize) as usize;
 
-        let elapsed = self.focused_time.elapsed().as_millis() as u64;
-        let caret_visible =
-            focused && (elapsed / CURSOR_BLINK_INTERVAL_MS).is_multiple_of(2) && caret_on_screen;
+        let caret_visible = focused && caret_visible(self.focused_time) && caret_on_screen;
 
         let insert_mode =
             self.cursor_pos < self.value.len() || utf16_len(&self.value) >= self.max_length;
@@ -504,7 +502,11 @@ impl TextFieldState {
     }
 }
 
-/// `StringUtil.isAllowedChatCharacter`: not `§`, `>= ' '`, not DEL.
+/// `TextCursorUtils.isCursorVisible`: the caret blinks on and off.
+fn caret_visible(since: Instant) -> bool {
+    (since.elapsed().as_millis() as u64 / CURSOR_BLINK_INTERVAL_MS).is_multiple_of(2)
+}
+
 /// Vanilla `MultilineTextField`: the text model behind `MultiLineEditBox`.
 /// Positions are byte indices, as in [`TextFieldState`]; the display lines are
 /// byte ranges of `value`, re-flowed on every change.
@@ -622,10 +624,8 @@ impl MultilineField {
         self.lines[index.min(self.lines.len() - 1)]
     }
 
-    /// `TextCursorUtils.isCursorVisible`.
     pub fn caret_visible(&self) -> bool {
-        (self.focused_time.elapsed().as_millis() as u64 / CURSOR_BLINK_INTERVAL_MS)
-            .is_multiple_of(2)
+        caret_visible(self.focused_time)
     }
 
     /// Re-wraps on a new width; the layout owns it, so it arrives with each
@@ -638,7 +638,7 @@ impl MultilineField {
     }
 
     pub fn set_value(&mut self, value: &str, width_fn: &dyn Fn(&str) -> f32) {
-        let value = self.truncate_full(value);
+        let value = truncate_to_utf16(value, self.character_limit);
         if self.overflows_line_limit(&value, width_fn) {
             return;
         }
@@ -680,7 +680,7 @@ impl MultilineField {
     /// `deleteText`: `dir` characters, or the selection when there is one.
     pub fn delete_text(&mut self, dir: i32, width_fn: &dyn Fn(&str) -> f32) {
         if !self.has_selection() {
-            self.select_cursor = self.step(self.cursor, dir);
+            self.select_cursor = offset_by_chars(&self.value, self.cursor, dir);
         }
         self.insert_text("", width_fn);
     }
@@ -688,7 +688,7 @@ impl MultilineField {
     /// `seekCursor`, clamped to the value and following `selecting`.
     pub fn seek_cursor(&mut self, whence: Whence) {
         self.cursor = match whence {
-            Whence::Relative(delta) => self.step(self.cursor, delta),
+            Whence::Relative(delta) => offset_by_chars(&self.value, self.cursor, delta),
             Whence::End => self.value.len(),
         };
         self.cursor = floor_char_boundary(&self.value, self.cursor.min(self.value.len()));
@@ -882,21 +882,6 @@ impl MultilineField {
         self.insert_text("", width_fn);
     }
 
-    /// One `char` step from `position`.
-    fn step(&self, position: usize, dir: i32) -> usize {
-        match dir {
-            d if d < 0 => self.value[..position]
-                .chars()
-                .next_back()
-                .map_or(0, |c| position - c.len_utf8()),
-            d if d > 0 => self.value[position..]
-                .chars()
-                .next()
-                .map_or(position, |c| position + c.len_utf8()),
-            _ => position,
-        }
-    }
-
     /// `getPreviousWord`.
     fn previous_word(&self) -> (usize, usize) {
         if self.value.is_empty() {
@@ -904,10 +889,10 @@ impl MultilineField {
         }
         let mut start = floor_char_boundary(&self.value, self.cursor.min(self.value.len() - 1));
         while start > 0 && self.char_before(start).is_some_and(char::is_whitespace) {
-            start = self.step(start, BACKWARDS);
+            start = offset_by_chars(&self.value, start, BACKWARDS);
         }
         while start > 0 && self.char_before(start).is_some_and(|c| !c.is_whitespace()) {
-            start = self.step(start, BACKWARDS);
+            start = offset_by_chars(&self.value, start, BACKWARDS);
         }
         (start, self.word_end(start))
     }
@@ -919,10 +904,10 @@ impl MultilineField {
         }
         let mut start = floor_char_boundary(&self.value, self.cursor.min(self.value.len() - 1));
         while start < self.value.len() && self.char_at(start).is_some_and(|c| !c.is_whitespace()) {
-            start = self.step(start, FORWARDS);
+            start = offset_by_chars(&self.value, start, FORWARDS);
         }
         while start < self.value.len() && self.char_at(start).is_some_and(char::is_whitespace) {
-            start = self.step(start, FORWARDS);
+            start = offset_by_chars(&self.value, start, FORWARDS);
         }
         (start, self.word_end(start))
     }
@@ -930,7 +915,7 @@ impl MultilineField {
     fn word_end(&self, from: usize) -> usize {
         let mut end = from;
         while end < self.value.len() && self.char_at(end).is_some_and(|c| !c.is_whitespace()) {
-            end = self.step(end, FORWARDS);
+            end = offset_by_chars(&self.value, end, FORWARDS);
         }
         end
     }
@@ -941,10 +926,6 @@ impl MultilineField {
 
     fn char_before(&self, position: usize) -> Option<char> {
         self.value[..position].chars().next_back()
-    }
-
-    fn truncate_full(&self, input: &str) -> String {
-        truncate_to_utf16(input, self.character_limit)
     }
 
     fn overflows_line_limit(&self, value: &str, width_fn: &dyn Fn(&str) -> f32) -> bool {
@@ -967,44 +948,19 @@ pub fn split_lines(value: &str, width: f32, width_fn: &dyn Fn(&str) -> f32) -> V
     let mut lines = Vec::new();
     let mut start = 0usize;
     while start < value.len() {
-        let mut accumulated = 0.0f32;
-        let mut had_non_zero = false;
-        let mut last_space = None;
-        let mut split = false;
-        for (offset, c) in value[start..].char_indices() {
+        let widths = value[start..].char_indices().map(|(offset, c)| {
             let index = start + offset;
-            if c == '\n' {
-                lines.push((start, index));
-                start = index + 1;
-                split = true;
-                break;
+            (index, c, width_fn(&value[index..index + c.len_utf8()]))
+        });
+        match crate::ui::text::find_line_break(widths, width) {
+            Some((end, next)) => {
+                lines.push((start, end));
+                start = next;
             }
-            if c == ' ' {
-                last_space = Some(index);
+            None => {
+                lines.push((start, value.len()));
+                return lines;
             }
-            let char_w = width_fn(&value[index..index + c.len_utf8()]);
-            accumulated += char_w;
-            if had_non_zero && accumulated > width {
-                match last_space {
-                    // The space a line breaks on belongs to neither line.
-                    Some(space) => {
-                        lines.push((start, space));
-                        start = space + 1;
-                    }
-                    // A word longer than the line breaks mid-word.
-                    None => {
-                        lines.push((start, index));
-                        start = index;
-                    }
-                }
-                split = true;
-                break;
-            }
-            had_non_zero |= char_w != 0.0;
-        }
-        if !split {
-            lines.push((start, value.len()));
-            return lines;
         }
     }
     // `reflowDisplayLines`: a trailing newline leaves an empty last line.
@@ -1014,6 +970,7 @@ pub fn split_lines(value: &str, width: f32, width_fn: &dyn Fn(&str) -> f32) -> V
     lines
 }
 
+/// `StringUtil.isAllowedChatCharacter`: not `§`, `>= ' '`, not DEL.
 fn is_allowed_chat_character(c: char) -> bool {
     c != '\u{a7}' && c >= ' ' && c != '\u{7f}'
 }

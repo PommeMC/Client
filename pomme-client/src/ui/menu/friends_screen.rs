@@ -509,15 +509,14 @@ impl MainMenu {
             );
         }
         elements.push(MenuElement::ScissorPop);
-        push_scrollbar(
+        push_list_scrollbar(
             elements,
-            content_x + content_w - 8.0 * gs,
+            content_x + content_w,
             list_top,
             list_h,
             total,
             self.scroll_offset,
             gs,
-            16.0 * gs,
         );
     }
 
@@ -682,15 +681,14 @@ impl MainMenu {
             }
         }
         elements.push(MenuElement::ScissorPop);
-        push_scrollbar(
+        push_list_scrollbar(
             elements,
-            content_x + content_w - 8.0 * gs,
+            content_x + content_w,
             content_y,
             content_h,
             total,
             self.scroll_offset,
             gs,
-            16.0 * gs,
         );
     }
 

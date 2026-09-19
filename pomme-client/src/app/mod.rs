@@ -427,8 +427,7 @@ impl ApplicationHandler for App {
                             // connect screen and takes its keys.
                             if event.state.is_pressed()
                                 && let PhysicalKey::Code(code) = event.physical_key
-                                && (game.server_dialog.is_some()
-                                    || game.chat.has_pending_modal_prompt())
+                                && game.dialog_open()
                             {
                                 crate::app::phases::in_game::server_dialog_key(
                                     code,

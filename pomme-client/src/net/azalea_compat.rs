@@ -16,14 +16,8 @@ use glam::DVec3;
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
 use pomme_protocol::wire;
 
-fn table_id(dir: Direction, name: &str) -> u32 {
-    PacketTable::native().id(Phase::Game, dir, name).unwrap()
-}
-
-fn config_table_id(dir: Direction, name: &str) -> u32 {
-    PacketTable::native()
-        .id(Phase::Configuration, dir, name)
-        .unwrap()
+fn table_id(phase: Phase, dir: Direction, name: &str) -> u32 {
+    PacketTable::native().id(phase, dir, name).unwrap()
 }
 
 #[test]
@@ -125,12 +119,18 @@ fn packet_ids_match_azalea() {
         location: Default::default(),
         using_secondary_action: false,
     });
-    assert_eq!(interact.id(), table_id(Direction::Serverbound, "interact"));
+    assert_eq!(
+        interact.id(),
+        table_id(Phase::Game, Direction::Serverbound, "interact")
+    );
 
     let attack = ServerboundGamePacket::Attack(s_attack::ServerboundAttack {
         entity_id: MinecraftEntityId(0),
     });
-    assert_eq!(attack.id(), table_id(Direction::Serverbound, "attack"));
+    assert_eq!(
+        attack.id(),
+        table_id(Phase::Game, Direction::Serverbound, "attack")
+    );
 
     // azalea's block variant still carries the pre-1.21.4 `slot` field, which
     // is why `wire.rs` hand-encodes the position and flag; only the id is
@@ -142,7 +142,7 @@ fn packet_ids_match_azalea() {
     );
     assert_eq!(
         pick_block.id(),
-        table_id(Direction::Serverbound, "pick_item_from_block")
+        table_id(Phase::Game, Direction::Serverbound, "pick_item_from_block")
     );
     let pick_entity = ServerboundGamePacket::PickItemFromEntity(
         azalea_protocol::packets::game::s_pick_item_from_entity::ServerboundPickItemFromEntity {
@@ -152,7 +152,7 @@ fn packet_ids_match_azalea() {
     );
     assert_eq!(
         pick_entity.id(),
-        table_id(Direction::Serverbound, "pick_item_from_entity")
+        table_id(Phase::Game, Direction::Serverbound, "pick_item_from_entity")
     );
 
     let teleport = ServerboundGamePacket::TeleportToEntity(
@@ -162,7 +162,7 @@ fn packet_ids_match_azalea() {
     );
     assert_eq!(
         teleport.id(),
-        table_id(Direction::Serverbound, "teleport_to_entity")
+        table_id(Phase::Game, Direction::Serverbound, "teleport_to_entity")
     );
 
     let particles = ClientboundGamePacket::LevelParticles(
@@ -180,7 +180,7 @@ fn packet_ids_match_azalea() {
     );
     assert_eq!(
         particles.id(),
-        table_id(Direction::Clientbound, "level_particles")
+        table_id(Phase::Game, Direction::Clientbound, "level_particles")
     );
 
     let boss_event = ClientboundGamePacket::BossEvent(
@@ -191,7 +191,7 @@ fn packet_ids_match_azalea() {
     );
     assert_eq!(
         boss_event.id(),
-        table_id(Direction::Clientbound, "boss_event")
+        table_id(Phase::Game, Direction::Clientbound, "boss_event")
     );
 
     let advancements = ClientboundGamePacket::UpdateAdvancements(
@@ -205,7 +205,7 @@ fn packet_ids_match_azalea() {
     );
     assert_eq!(
         advancements.id(),
-        table_id(Direction::Clientbound, "update_advancements")
+        table_id(Phase::Game, Direction::Clientbound, "update_advancements")
     );
 
     let recipes = ClientboundGamePacket::RecipeBookAdd(
@@ -216,7 +216,7 @@ fn packet_ids_match_azalea() {
     );
     assert_eq!(
         recipes.id(),
-        table_id(Direction::Clientbound, "recipe_book_add")
+        table_id(Phase::Game, Direction::Clientbound, "recipe_book_add")
     );
 
     dialog_packet_ids_match_azalea();
@@ -232,7 +232,7 @@ fn packet_ids_match_azalea() {
     });
     assert_eq!(
         system_chat.id(),
-        table_id(Direction::Clientbound, "system_chat")
+        table_id(Phase::Game, Direction::Clientbound, "system_chat")
     );
     let action_bar = ClientboundGamePacket::SetActionBarText(
         c_set_action_bar_text::ClientboundSetActionBarText {
@@ -241,7 +241,7 @@ fn packet_ids_match_azalea() {
     );
     assert_eq!(
         action_bar.id(),
-        table_id(Direction::Clientbound, "set_action_bar_text")
+        table_id(Phase::Game, Direction::Clientbound, "set_action_bar_text")
     );
     let chat = ServerboundGamePacket::Chat(s_chat::ServerboundChat {
         message: String::new(),
@@ -250,13 +250,16 @@ fn packet_ids_match_azalea() {
         signature: None,
         last_seen_messages: Default::default(),
     });
-    assert_eq!(chat.id(), table_id(Direction::Serverbound, "chat"));
+    assert_eq!(
+        chat.id(),
+        table_id(Phase::Game, Direction::Serverbound, "chat")
+    );
     let chat_command = ServerboundGamePacket::ChatCommand(s_chat_command::ServerboundChatCommand {
         command: String::new(),
     });
     assert_eq!(
         chat_command.id(),
-        table_id(Direction::Serverbound, "chat_command")
+        table_id(Phase::Game, Direction::Serverbound, "chat_command")
     );
 
     for (name, body) in [
@@ -264,7 +267,10 @@ fn packet_ids_match_azalea() {
         ("command_suggestions", vec![42, 1, 0, 0]),
     ] {
         let mut frame = Vec::new();
-        wire::write_varint(&mut frame, table_id(Direction::Clientbound, name));
+        wire::write_varint(
+            &mut frame,
+            table_id(Phase::Game, Direction::Clientbound, name),
+        );
         frame.extend(body);
         let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
             &mut std::io::Cursor::new(&frame[..]),
@@ -292,7 +298,7 @@ fn packet_ids_match_azalea() {
     });
     assert_eq!(
         title.id(),
-        table_id(Direction::Clientbound, "set_title_text")
+        table_id(Phase::Game, Direction::Clientbound, "set_title_text")
     );
 
     let subtitle =
@@ -301,7 +307,7 @@ fn packet_ids_match_azalea() {
         });
     assert_eq!(
         subtitle.id(),
-        table_id(Direction::Clientbound, "set_subtitle_text")
+        table_id(Phase::Game, Direction::Clientbound, "set_subtitle_text")
     );
 
     let animation = ClientboundGamePacket::SetTitlesAnimation(
@@ -313,13 +319,16 @@ fn packet_ids_match_azalea() {
     );
     assert_eq!(
         animation.id(),
-        table_id(Direction::Clientbound, "set_titles_animation")
+        table_id(Phase::Game, Direction::Clientbound, "set_titles_animation")
     );
 
     let clear = ClientboundGamePacket::ClearTitles(c_clear_titles::ClientboundClearTitles {
         reset_times: true,
     });
-    assert_eq!(clear.id(), table_id(Direction::Clientbound, "clear_titles"));
+    assert_eq!(
+        clear.id(),
+        table_id(Phase::Game, Direction::Clientbound, "clear_titles")
+    );
 
     use azalea_protocol::packets::game::c_hurt_animation;
 
@@ -330,7 +339,7 @@ fn packet_ids_match_azalea() {
         });
     assert_eq!(
         hurt_animation.id(),
-        table_id(Direction::Clientbound, "hurt_animation")
+        table_id(Phase::Game, Direction::Clientbound, "hurt_animation")
     );
 
     use azalea_protocol::packets::game::{c_sound, c_sound_entity, c_stop_sound};
@@ -345,7 +354,10 @@ fn packet_ids_match_azalea() {
         pitch: 1.0,
         seed: 0,
     });
-    assert_eq!(sound.id(), table_id(Direction::Clientbound, "sound"));
+    assert_eq!(
+        sound.id(),
+        table_id(Phase::Game, Direction::Clientbound, "sound")
+    );
 
     let sound_entity = ClientboundGamePacket::SoundEntity(c_sound_entity::ClientboundSoundEntity {
         sound: sound_holder(),
@@ -357,7 +369,7 @@ fn packet_ids_match_azalea() {
     });
     assert_eq!(
         sound_entity.id(),
-        table_id(Direction::Clientbound, "sound_entity")
+        table_id(Phase::Game, Direction::Clientbound, "sound_entity")
     );
 
     let stop_sound = ClientboundGamePacket::StopSound(c_stop_sound::ClientboundStopSound {
@@ -366,7 +378,7 @@ fn packet_ids_match_azalea() {
     });
     assert_eq!(
         stop_sound.id(),
-        table_id(Direction::Clientbound, "stop_sound")
+        table_id(Phase::Game, Direction::Clientbound, "stop_sound")
     );
 }
 
@@ -580,7 +592,7 @@ fn translate_game_login_26_1() {
 /// misdecode until azalea catches up.
 #[test]
 fn translate_set_player_team_26_1() {
-    let team_id = table_id(Direction::Clientbound, "set_player_team");
+    let team_id = table_id(Phase::Game, Direction::Clientbound, "set_player_team");
     // Bare TAG_String roots are valid network components.
     let display: &[u8] = &[8, 0, 4, b'T', b'e', b'a', b'm'];
     let prefix: &[u8] = &[8, 0, 1, b'P'];
@@ -621,7 +633,7 @@ fn translate_set_player_team_26_1() {
 /// verbatim.
 #[test]
 fn translate_set_player_team_26_1_reset_color() {
-    let team_id = table_id(Direction::Clientbound, "set_player_team");
+    let team_id = table_id(Phase::Game, Direction::Clientbound, "set_player_team");
     let component: &[u8] = &[8, 0, 1, b'x'];
 
     let mut old = Vec::new();
@@ -990,7 +1002,7 @@ fn suppress_unknown_outbound_774() {
     let mut frame = Vec::new();
     wire::write_varint(
         &mut frame,
-        table_id(Direction::Serverbound, "set_game_rule"),
+        table_id(Phase::Game, Direction::Serverbound, "set_game_rule"),
     );
     frame.push(0);
     assert!(
@@ -1005,7 +1017,10 @@ fn suppress_unknown_outbound_774() {
 #[test]
 fn remap_outbound_ids_774() {
     let mut frame = Vec::new();
-    wire::write_varint(&mut frame, table_id(Direction::Serverbound, "swing"));
+    wire::write_varint(
+        &mut frame,
+        table_id(Phase::Game, Direction::Serverbound, "swing"),
+    );
     frame.push(0); // main hand
     let frames = translation_for(774).translate_outbound_game_frame(frame);
     assert_eq!(
@@ -1172,7 +1187,7 @@ fn translate_entity_data_particles_772() {
     let mut expected = Vec::new();
     wire::write_varint(
         &mut expected,
-        table_id(Direction::Clientbound, "set_entity_data"),
+        table_id(Phase::Game, Direction::Clientbound, "set_entity_data"),
     );
     wire::write_varint(&mut expected, 9);
     expected.extend_from_slice(&[10, 17, 1]); // 26.2 particles serializer
@@ -1383,7 +1398,10 @@ fn translate_explode_772() {
         .unwrap();
 
     let mut expected = Vec::new();
-    wire::write_varint(&mut expected, table_id(Direction::Clientbound, "explode"));
+    wire::write_varint(
+        &mut expected,
+        table_id(Phase::Game, Direction::Clientbound, "explode"),
+    );
     for c in [1.0f64, 65.0, -2.0] {
         expected.extend_from_slice(&c.to_be_bytes());
     }
@@ -1422,7 +1440,7 @@ fn translate_player_command_770() {
     let mut frame = Vec::new();
     wire::write_varint(
         &mut frame,
-        table_id(Direction::Serverbound, "player_command"),
+        table_id(Phase::Game, Direction::Serverbound, "player_command"),
     );
     wire::write_varint(&mut frame, 9); // entity id
     wire::write_varint(&mut frame, 1); // action: START_SPRINTING
@@ -1645,7 +1663,7 @@ fn translate_container_click_769() {
     let mut frame = Vec::new();
     wire::write_varint(
         &mut frame,
-        table_id(Direction::Serverbound, "container_click"),
+        table_id(Phase::Game, Direction::Serverbound, "container_click"),
     );
     wire::write_varint(&mut frame, 1); // container id
     wire::write_varint(&mut frame, 2); // state id
@@ -1887,7 +1905,10 @@ fn translate_set_carried_item_767() {
 #[test]
 fn translate_player_input_767() {
     let mut frame = Vec::new();
-    wire::write_varint(&mut frame, table_id(Direction::Serverbound, "player_input"));
+    wire::write_varint(
+        &mut frame,
+        table_id(Phase::Game, Direction::Serverbound, "player_input"),
+    );
     frame.push(0b0011_0101); // forward, left, jump, shift
 
     let frames = translation_for(767).translate_outbound_game_frame(frame);
@@ -1909,7 +1930,11 @@ fn translate_move_player_flags_767() {
     let mut frame = Vec::new();
     wire::write_varint(
         &mut frame,
-        table_id(Direction::Serverbound, "move_player_status_only"),
+        table_id(
+            Phase::Game,
+            Direction::Serverbound,
+            "move_player_status_only",
+        ),
     );
     frame.push(2); // horizontal collision only, not on ground
 
@@ -1983,7 +2008,10 @@ fn translate_projectile_power_766() {
 #[test]
 fn translate_use_item_766() {
     let mut frame = Vec::new();
-    wire::write_varint(&mut frame, table_id(Direction::Serverbound, "use_item"));
+    wire::write_varint(
+        &mut frame,
+        table_id(Phase::Game, Direction::Serverbound, "use_item"),
+    );
     frame.push(0); // main hand
     wire::write_varint(&mut frame, 7); // sequence
     frame.extend_from_slice(&90.0f32.to_be_bytes());
@@ -2428,7 +2456,7 @@ fn translate_container_click_765() {
     let mut frame = Vec::new();
     wire::write_varint(
         &mut frame,
-        table_id(Direction::Serverbound, "container_click"),
+        table_id(Phase::Game, Direction::Serverbound, "container_click"),
     );
     wire::write_varint(&mut frame, 1); // container id
     wire::write_varint(&mut frame, 2); // state id
@@ -2458,7 +2486,11 @@ fn translate_creative_slot_765() {
     let mut frame = Vec::new();
     wire::write_varint(
         &mut frame,
-        table_id(Direction::Serverbound, "set_creative_mode_slot"),
+        table_id(
+            Phase::Game,
+            Direction::Serverbound,
+            "set_creative_mode_slot",
+        ),
     );
     frame.extend_from_slice(&36i16.to_be_bytes()); // slot
     wire::write_varint(&mut frame, 2); // count
@@ -2476,7 +2508,10 @@ fn translate_creative_slot_765() {
 #[test]
 fn translate_chat_command_765() {
     let mut frame = Vec::new();
-    wire::write_varint(&mut frame, table_id(Direction::Serverbound, "chat_command"));
+    wire::write_varint(
+        &mut frame,
+        table_id(Phase::Game, Direction::Serverbound, "chat_command"),
+    );
     frame.extend_from_slice(&[3, b's', b'a', b'y']);
 
     let frames = translation_for(765).translate_outbound_game_frame(frame);
@@ -2829,7 +2864,7 @@ fn translate_resource_pack_response_764() {
         let mut frame = Vec::new();
         wire::write_varint(
             &mut frame,
-            table_id(Direction::Serverbound, "resource_pack"),
+            table_id(Phase::Game, Direction::Serverbound, "resource_pack"),
         );
         frame.extend_from_slice(&[9; 16]); // pack uuid
         wire::write_varint(&mut frame, action);
@@ -3381,7 +3416,7 @@ fn translate_passthrough_777() {
     };
     assert_eq!(
         old_id(777, Direction::Clientbound, "respawn"),
-        table_id(Direction::Clientbound, "respawn") + 2
+        table_id(Phase::Game, Direction::Clientbound, "respawn") + 2
     );
     assert_eq!(
         config_id(777, Direction::Clientbound, "store_cookie"),
@@ -3401,7 +3436,10 @@ fn translate_passthrough_777() {
         wire::write_varint(&mut old, old_id(777, Direction::Clientbound, name));
         old.extend_from_slice(&[0xAA; 5]);
         let mut expected = Vec::new();
-        wire::write_varint(&mut expected, table_id(Direction::Clientbound, name));
+        wire::write_varint(
+            &mut expected,
+            table_id(Phase::Game, Direction::Clientbound, name),
+        );
         expected.extend_from_slice(&[0xAA; 5]);
         assert_eq!(
             &t.translate_game_frame(old.into_boxed_slice()).unwrap()[..],
@@ -3637,7 +3675,7 @@ fn translate_explode_777() {
         .translate_game_frame(old.into_boxed_slice())
         .unwrap();
     let expected = build(
-        table_id(Direction::Clientbound, "explode"),
+        table_id(Phase::Game, Direction::Clientbound, "explode"),
         native_table,
         None,
     );
@@ -3793,7 +3831,7 @@ fn translate_level_particles_777() {
         let mut expected = Vec::new();
         wire::write_varint(
             &mut expected,
-            table_id(Direction::Clientbound, "level_particles"),
+            table_id(Phase::Game, Direction::Clientbound, "level_particles"),
         );
         body(&mut expected);
         expected.extend_from_slice(&0.1f32.to_be_bytes());
@@ -3929,7 +3967,7 @@ fn translate_entity_data_777() {
     let mut expected = Vec::new();
     wire::write_varint(
         &mut expected,
-        table_id(Direction::Clientbound, "set_entity_data"),
+        table_id(Phase::Game, Direction::Clientbound, "set_entity_data"),
     );
     wire::write_varint(&mut expected, 7);
     expected.extend_from_slice(&[0, 0, 5, 1, 1, 9, 0xFF]);
@@ -3944,7 +3982,7 @@ fn translate_entity_data_777() {
 fn translate_outbound_777() {
     let t = translation_for(777);
     assert!(t.translates_outbound());
-    let sb = |name| table_id(Direction::Serverbound, name);
+    let sb = |name| table_id(Phase::Game, Direction::Serverbound, name);
     let old_sb = |name| old_id(777, Direction::Serverbound, name);
     let frame = |id, payload: &[u8]| {
         let mut out = Vec::new();
@@ -4053,7 +4091,10 @@ fn translate_light_777() {
             update(old_id(777, Direction::Clientbound, "light_update"), true).into_boxed_slice(),
         )
         .unwrap();
-    let expected = update(table_id(Direction::Clientbound, "light_update"), false);
+    let expected = update(
+        table_id(Phase::Game, Direction::Clientbound, "light_update"),
+        false,
+    );
     assert_eq!(&translated[..], &expected[..]);
     let ClientboundGamePacket::LightUpdate(p) = translate_and_decode(
         777,
@@ -4086,7 +4127,11 @@ fn translate_light_777() {
         )
         .unwrap();
     let expected = chunk(
-        table_id(Direction::Clientbound, "level_chunk_with_light"),
+        table_id(
+            Phase::Game,
+            Direction::Clientbound,
+            "level_chunk_with_light",
+        ),
         false,
     );
     assert_eq!(&translated[..], &expected[..]);
@@ -4129,7 +4174,10 @@ fn translate_player_chat_777() {
             .into_boxed_slice(),
         )
         .unwrap();
-    let expected = chat(table_id(Direction::Clientbound, "player_chat"), &longs);
+    let expected = chat(
+        table_id(Phase::Game, Direction::Clientbound, "player_chat"),
+        &longs,
+    );
     assert_eq!(&translated[..], &expected[..]);
     let ClientboundGamePacket::PlayerChat(_) = translate_and_decode(
         777,
@@ -4236,7 +4284,7 @@ fn translate_commands_777() {
         .translate_game_frame(old.clone().into_boxed_slice())
         .unwrap();
     let expected = tree(
-        table_id(Direction::Clientbound, "commands"),
+        table_id(Phase::Game, Direction::Clientbound, "commands"),
         &native_feature,
         native_parser("uuid"),
         native_parser("brigadier:integer"),
@@ -4285,7 +4333,7 @@ fn translate_recipe_display_777() {
         .translate_game_frame(old.clone().into_boxed_slice())
         .unwrap();
     let expected = ghost(
-        table_id(Direction::Clientbound, "place_ghost_recipe"),
+        table_id(Phase::Game, Direction::Clientbound, "place_ghost_recipe"),
         &[slot("composite"), 2, slot("item"), 5, slot("item"), 7],
         &named(&[slot("tag")]),
     );
@@ -4343,7 +4391,11 @@ fn dialog_packet_ids_match_azalea() {
         ),
     ];
     for (azalea, name) in game {
-        assert_eq!(azalea, table_id(Direction::Clientbound, name), "{name}");
+        assert_eq!(
+            azalea,
+            table_id(Phase::Game, Direction::Clientbound, name),
+            "{name}"
+        );
     }
     let click = ServerboundGamePacket::CustomClickAction(
         s_custom_click_action::ServerboundCustomClickAction {
@@ -4353,7 +4405,7 @@ fn dialog_packet_ids_match_azalea() {
     );
     assert_eq!(
         click.id(),
-        table_id(Direction::Serverbound, "custom_click_action")
+        table_id(Phase::Game, Direction::Serverbound, "custom_click_action")
     );
 
     let config = [
@@ -4379,7 +4431,7 @@ fn dialog_packet_ids_match_azalea() {
     for (azalea, name) in config {
         assert_eq!(
             azalea,
-            config_table_id(Direction::Clientbound, name),
+            table_id(Phase::Configuration, Direction::Clientbound, name),
             "{name}"
         );
     }
@@ -4390,6 +4442,10 @@ fn dialog_packet_ids_match_azalea() {
         });
     assert_eq!(
         click.id(),
-        config_table_id(Direction::Serverbound, "custom_click_action")
+        table_id(
+            Phase::Configuration,
+            Direction::Serverbound,
+            "custom_click_action"
+        )
     );
 }

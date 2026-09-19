@@ -53,6 +53,40 @@ fn short_hash(value: &str) -> String {
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// `StringSplitter.splitLines`' walk: where the line that starts the run
+/// breaks. `chars` yields each item's index, character and width in order;
+/// `None` means the rest fits on one line. The pair is the line's end and
+/// where the next one starts, so the newline (or the space the line broke on)
+/// belongs to neither.
+pub(crate) fn find_line_break(
+    chars: impl Iterator<Item = (usize, char, f32)>,
+    max_w: f32,
+) -> Option<(usize, usize)> {
+    let mut width = 0.0f32;
+    let mut had_non_zero = false;
+    let mut last_space = None;
+    for (index, ch, char_width) in chars {
+        if ch == '\n' {
+            return Some((index, index + 1));
+        }
+        if ch == ' ' {
+            last_space = Some(index);
+        }
+        width += char_width;
+        if had_non_zero && width > max_w {
+            return Some(match last_space {
+                // `FlatComponents.splitAt(lineBreak, 1, ...)`: the chosen
+                // delimiter space is omitted from both display lines.
+                Some(space) => (space, space + 1),
+                // A word longer than the line breaks mid-word.
+                None => (index, index),
+            });
+        }
+        had_non_zero |= char_width != 0.0;
+    }
+    None
+}
+
 /// A styled run of text (color plus formatting flags). The shared span type for
 /// rendering rich chat and server-MOTD text.
 #[derive(Clone, Debug, PartialEq)]
