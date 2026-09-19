@@ -1045,11 +1045,6 @@ fn send_chat(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedTe
     let _ = event_tx.try_send(NetworkEvent::ChatMessage { spans });
 }
 
-fn send_action_bar(event_tx: &Sender<NetworkEvent>, message: &azalea_chat::FormattedText) {
-    let spans = format_text_spans(message, [1.0; 4]);
-    let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
-}
-
 fn score_number_format(
     format: &azalea_chat::numbers::NumberFormat,
 ) -> crate::ui::hud::ScoreNumberFormat {
