@@ -509,7 +509,7 @@ impl MainMenu {
             );
         }
         elements.push(MenuElement::ScissorPop);
-        push_scrollbar(
+        push_list_scrollbar(
             elements,
             content_x + content_w,
             list_top,
@@ -681,7 +681,7 @@ impl MainMenu {
             }
         }
         elements.push(MenuElement::ScissorPop);
-        push_scrollbar(
+        push_list_scrollbar(
             elements,
             content_x + content_w,
             content_y,

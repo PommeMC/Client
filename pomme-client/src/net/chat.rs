@@ -228,7 +228,10 @@ fn write_last_seen_update(out: &mut Vec<u8>, update: &LastSeenUpdate) {
     out.push(update.checksum);
 }
 
+/// `ServerboundCustomClickActionPacket`, a common packet sent in whichever
+/// phase the connection is in.
 pub fn encode_outbound_custom_click_action(
+    phase: Phase,
     identifier: &str,
     payload: Option<&NbtTag>,
 ) -> Result<Vec<u8>, String> {
@@ -237,8 +240,11 @@ pub fn encode_outbound_custom_click_action(
     if identifier.len() > 32_767 {
         return Err("custom click identifier is too long".into());
     }
+    let packet_id = PacketTable::native()
+        .id(phase, Direction::Serverbound, "custom_click_action")
+        .expect("custom_click_action in packet table");
     let mut out = Vec::new();
-    write_varint(&mut out, game_serverbound_id("custom_click_action"));
+    write_varint(&mut out, packet_id);
     write_wire_string(&mut out, &identifier);
 
     // Vanilla wraps Optional<Tag> in a length-prefixed sub-buffer. None is the
@@ -714,12 +720,12 @@ fn component_has_non_default_font(component: &Component) -> bool {
     modified
 }
 
-fn read_component(raw: &[u8], pos: &mut usize) -> Result<Component, String> {
+pub(super) fn read_component(raw: &[u8], pos: &mut usize) -> Result<Component, String> {
     let tag = read_nbt_tag(raw, pos)?;
     Component::from_nbt_tag(&tag).map_err(|e| format!("invalid text component: {e}"))
 }
 
-fn read_nbt_tag(raw: &[u8], pos: &mut usize) -> Result<NbtTag, String> {
+pub(super) fn read_nbt_tag(raw: &[u8], pos: &mut usize) -> Result<NbtTag, String> {
     let slice = raw
         .get(*pos..)
         .ok_or_else(|| "NBT begins past end of packet".to_owned())?;
@@ -735,7 +741,7 @@ fn write_wire_string(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(value.as_bytes());
 }
 
-fn read_string(
+pub(super) fn read_string(
     raw: &[u8],
     pos: &mut usize,
     max_chars: usize,
@@ -754,7 +760,7 @@ fn read_string(
     Ok(value.to_owned())
 }
 
-fn read_bool(raw: &[u8], pos: &mut usize) -> Result<bool, String> {
+pub(super) fn read_bool(raw: &[u8], pos: &mut usize) -> Result<bool, String> {
     Ok(take(raw, pos, 1, "boolean")?[0] != 0)
 }
 
@@ -777,7 +783,7 @@ fn read_i64(raw: &[u8], pos: &mut usize, field: &str) -> Result<i64, String> {
     ))
 }
 
-fn read_varint_req(raw: &[u8], pos: &mut usize, field: &str) -> Result<u32, String> {
+pub(super) fn read_varint_req(raw: &[u8], pos: &mut usize, field: &str) -> Result<u32, String> {
     read_varint(raw, pos).ok_or_else(|| format!("truncated/invalid varint for {field}"))
 }
 
@@ -797,7 +803,7 @@ fn take<'a>(raw: &'a [u8], pos: &mut usize, len: usize, field: &str) -> Result<&
     Ok(value)
 }
 
-fn ensure_end(raw: &[u8], pos: usize, packet: &str) -> Result<(), String> {
+pub(super) fn ensure_end(raw: &[u8], pos: usize, packet: &str) -> Result<(), String> {
     if pos == raw.len() {
         Ok(())
     } else {
@@ -1512,20 +1518,24 @@ mod tests {
 
     #[test]
     fn custom_click_packet_writes_the_normalized_identifier() {
-        let id = game_serverbound_id("custom_click_action");
-        let mut expected = Vec::new();
-        write_varint(&mut expected, id);
-        expected.push(13);
+        let mut expected = vec![68, 13];
         expected.extend_from_slice(b"minecraft:foo");
         // Optional<Tag> sub-buffer: length 1, end tag.
         expected.extend_from_slice(&[1, 0]);
         assert_eq!(
-            encode_outbound_custom_click_action("foo", None).unwrap(),
+            encode_outbound_custom_click_action(Phase::Game, "foo", None).unwrap(),
             expected
         );
 
-        let frame = encode_outbound_custom_click_action("a:b", None).unwrap();
-        assert_eq!(&frame[frame.len() - 6..], &[3, b'a', b':', b'b', 1, 0]);
+        let frame = encode_outbound_custom_click_action(Phase::Game, "a:b", None).unwrap();
+        assert_eq!(frame, [68, 3, b'a', b':', b'b', 1, 0]);
+    }
+
+    /// The configuration phase registers the packet under its own id.
+    #[test]
+    fn custom_click_packet_uses_the_configuration_id() {
+        let frame = encode_outbound_custom_click_action(Phase::Configuration, "a:b", None).unwrap();
+        assert_eq!(frame, [8, 3, b'a', b':', b'b', 1, 0]);
     }
 
     #[test]
@@ -1540,7 +1550,9 @@ mod tests {
         compound.insert("longs", NbtTag::LongArray(vec![-4, 5, 6]));
         let payload = NbtTag::Compound(compound);
 
-        let frame = encode_outbound_custom_click_action("minecraft:test", Some(&payload)).unwrap();
+        let frame =
+            encode_outbound_custom_click_action(Phase::Game, "minecraft:test", Some(&payload))
+                .unwrap();
         let mut pos = 0usize;
         let packet_id = read_varint(&frame, &mut pos).unwrap();
         assert_eq!(

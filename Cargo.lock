@@ -5236,6 +5236,7 @@ dependencies = [
  "pyronyx",
  "rand 0.9.4",
  "raw-window-handle",
+ "regex",
  "reqwest",
  "rsa",
  "scopeguard",

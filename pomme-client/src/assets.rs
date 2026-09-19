@@ -35,6 +35,12 @@ impl<'a> AssetId<'a> {
     }
 }
 
+/// `Identifier.toString` omits the default namespace, so ids written either
+/// way compare equal once stripped.
+pub(crate) fn strip_default_namespace(value: &str) -> &str {
+    value.strip_prefix("minecraft:").unwrap_or(value)
+}
+
 /// `Identifier` namespace (`path` false) or path characters; only the path
 /// allows `/`.
 pub(crate) fn identifier_chars(text: &str, path: bool) -> bool {

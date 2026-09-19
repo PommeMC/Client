@@ -420,10 +420,32 @@ impl ApplicationHandler for App {
                             panorama,
                             connect_phase,
                             connection,
-                            game,
+                            mut game,
                             world,
                         } => {
+                            // A configuration-phase dialog replaces the
+                            // connect screen and takes its keys.
                             if event.state.is_pressed()
+                                && let PhysicalKey::Code(code) = event.physical_key
+                                && game.dialog_open()
+                            {
+                                crate::app::phases::in_game::server_dialog_key(
+                                    code,
+                                    &event,
+                                    &mut self.core,
+                                    &gfx.window,
+                                    &connection,
+                                    &mut game,
+                                );
+                                AppPhase::Connecting {
+                                    gfx,
+                                    panorama,
+                                    connect_phase,
+                                    connection,
+                                    game,
+                                    world,
+                                }
+                            } else if event.state.is_pressed()
                                 && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                             {
                                 leave_world(
@@ -461,6 +483,18 @@ impl ApplicationHandler for App {
                                     if !game.handle_debug_key(code, f3_held, &connection) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
+                                } else if game.server_dialog.is_some()
+                                    || (game.chat.has_pending_modal_prompt()
+                                        && !game.chat.is_open())
+                                {
+                                    crate::app::phases::in_game::server_dialog_key(
+                                        code,
+                                        &event,
+                                        &mut self.core,
+                                        &gfx.window,
+                                        &connection,
+                                        &mut game,
+                                    );
                                 } else if game.chat.is_open() {
                                     match code {
                                         KeyCode::Escape => {
@@ -569,7 +603,9 @@ impl ApplicationHandler for App {
                         self.core.input.on_menu_scroll(scroll);
                     }
                     AppPhase::InGame { game, .. }
-                        if game.options_from_game || game.creative_inventory_open =>
+                        if game.dialog_open()
+                            || game.options_from_game
+                            || game.creative_inventory_open =>
                     {
                         self.core.input.on_menu_scroll(scroll);
                     }

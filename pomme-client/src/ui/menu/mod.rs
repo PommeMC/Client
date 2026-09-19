@@ -1,6 +1,6 @@
 mod credits;
 mod friends_screen;
-mod helpers;
+pub(crate) mod helpers;
 mod main_screen;
 mod options;
 mod servers;
