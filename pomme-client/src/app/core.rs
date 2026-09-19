@@ -2134,9 +2134,13 @@ impl AppCore {
         // Vanilla `LocalPlayer.tick` returns immediately until the client has
         // loaded, while `ClientLevel.tickEntities` still advances remote entities.
         if !game.client_loaded {
-            game.entity_store.tick_living(
+            let push_box = (game.player.health > 0.0
+                && !crate::player::is_spectator(game.player.game_mode))
+            .then(|| game.player.bounding_box());
+            *game.player.velocity += game.entity_store.tick_living(
                 &game.chunk_store,
                 game.player.position,
+                push_box,
                 game.server_simulation_distance,
             );
             self.input.clear_click_counts();
@@ -2151,6 +2155,7 @@ impl AppCore {
             game.entity_store.tick_living(
                 &game.chunk_store,
                 game.player.position,
+                None,
                 game.server_simulation_distance,
             );
             self.input.clear_click_counts();
@@ -2164,6 +2169,7 @@ impl AppCore {
             game.entity_store.tick_living(
                 &game.chunk_store,
                 game.player.position,
+                None,
                 game.server_simulation_distance,
             );
             game.player.tick_death();
@@ -2328,32 +2334,15 @@ impl AppCore {
             crate::player::is_creative(game.player.game_mode),
         );
 
-        game.entity_store.tick_living(
+        let push_box = (game.player.health > 0.0
+            && !crate::player::is_spectator(game.player.game_mode))
+        .then(|| game.player.bounding_box());
+        *game.player.velocity += game.entity_store.tick_living(
             &game.chunk_store,
             game.player.position,
+            push_box,
             game.server_simulation_distance,
         );
-
-        // ClientLevel exposes the local player as a push target for remote living
-        // entity ticks. This is the ordinary default-team/non-climbable path;
-        // team collision rules and climbable suppression remain out of scope.
-        if game.player.health > 0.0 && !crate::player::is_spectator(game.player.game_mode) {
-            let local_box = game.player.bounding_box();
-            for entity in game.entity_store.living.values_mut() {
-                if entity.health <= 0.0
-                    || !crate::entity::living_entity_aabb(entity).intersects(&local_box)
-                {
-                    continue;
-                }
-                if let Some((local_impulse, remote_impulse)) =
-                    crate::entity::living_push_impulses(game.player.position, entity.position)
-                {
-                    game.player.velocity.x += local_impulse.x;
-                    game.player.velocity.z += local_impulse.z;
-                    entity.velocity += remote_impulse;
-                }
-            }
-        }
 
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);

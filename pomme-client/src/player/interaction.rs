@@ -22,8 +22,8 @@ use pomme_protocol::wire;
 
 use crate::app::input::{self, InputState};
 use crate::audio::{AudioEngine, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
-use crate::entity::{EntityStore, living_entity_dimensions};
 use crate::entity::components::{LookDirection, Position};
+use crate::entity::{EntityStore, living_entity_dimensions};
 use crate::net::sender::PacketSender;
 use crate::particle::ParticleStore;
 use crate::physics::aabb::{self, Aabb, Axis, Face};
