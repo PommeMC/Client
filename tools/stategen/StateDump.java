@@ -74,6 +74,11 @@ public final class StateDump {
         // unshifted interaction/collision shape.
         List<Integer> collisionShapeUsesOffset = new ArrayList<>();
         List<Integer> outlineShapeUsesOffset = new ArrayList<>();
+        // Runtime parameters for BlockBehaviour.OffsetType. Keep these generated
+        // from vanilla so Pomme does not duplicate the block registration list.
+        List<Integer> positionOffsetType = new ArrayList<>();
+        List<Float> maxHorizontalOffset = new ArrayList<>();
+        List<Float> maxVerticalOffset = new ArrayList<>();
         // state id -> 6 face masks (64 hex chars each), only for canOcclude && useShape states
         Map<Integer, String[]> faceMasks = new LinkedHashMap<>();
 
@@ -115,6 +120,22 @@ public final class StateDump {
                     state, collisionZero, collisionProbe, m, id, "collision") ? 1 : 0);
             outlineShapeUsesOffset.add(shapeUsesPositionOffset(
                     state, outlineZero, outlineProbe, m, id, "outline") ? 1 : 0);
+            Object block = m.getBlock.invoke(state);
+            boolean hasOffset = (Boolean) m.hasOffsetFunction.invoke(state);
+            int offsetType = 0;
+            float maxHorizontal = 0.0f;
+            float maxVertical = 0.0f;
+            if (hasOffset) {
+                Object zeroOffset = m.getOffset.invoke(state, m.zeroPos);
+                offsetType = m.vec3("y").getDouble(zeroOffset) == 0.0 ? 1 : 2;
+                maxHorizontal = ((Float) m.getMaxHorizontalOffset.invoke(block)).floatValue();
+                if (offsetType == 2) {
+                    maxVertical = ((Float) m.getMaxVerticalOffset.invoke(block)).floatValue();
+                }
+            }
+            positionOffsetType.add(offsetType);
+            maxHorizontalOffset.add(maxHorizontal);
+            maxVerticalOffset.add(maxVertical);
             if (occludes && shaped) {
                 String[] masks = new String[6];
                 for (int d = 0; d < 6; d++) {
@@ -142,6 +163,9 @@ public final class StateDump {
             writeIntArray(w, "full_face_sturdy", fullFaceSturdy);
             writeIntArray(w, "collision_shape_uses_offset", collisionShapeUsesOffset);
             writeIntArray(w, "outline_shape_uses_offset", outlineShapeUsesOffset);
+            writeIntArray(w, "position_offset_type", positionOffsetType);
+            writeFloatArray(w, "max_horizontal_offset", maxHorizontalOffset);
+            writeFloatArray(w, "max_vertical_offset", maxVerticalOffset);
             writeShapeArray(w, "collision_shapes", collisionShapes);
             writeShapeArray(w, "outline_shapes", outlineShapes);
             w.write("  \"face_masks\": {");
@@ -177,6 +201,17 @@ public final class StateDump {
             sb.append(values.get(i));
         }
         w.write(sb.toString());
+        w.write("],\n");
+    }
+
+    private static void writeFloatArray(BufferedWriter w, String key, List<Float> values) throws IOException {
+        w.write("  \"" + key + "\": [");
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) {
+                w.write(',');
+            }
+            w.write(Float.toString(values.get(i)));
+        }
         w.write("],\n");
     }
 
@@ -327,6 +362,9 @@ public final class StateDump {
         final Method canBeReplaced;
         final Method isFaceSturdy;
         final Method getOffset;
+        final Method hasOffsetFunction;
+        final Method getMaxHorizontalOffset;
+        final Method getMaxVerticalOffset;
         final Method getFaceOcclusionShape;
         final Method getCollisionShape;
         final Method getShape;
@@ -355,6 +393,12 @@ public final class StateDump {
             getCollisionShape = stateClass.getMethod("getCollisionShape", getter, pos);
             getShape = stateClass.getMethod("getShape", getter, pos);
             getOffset = stateClass.getMethod("getOffset", pos);
+            hasOffsetFunction = stateClass.getMethod("hasOffsetFunction");
+            Class<?> blockBehaviour = Class.forName("net.minecraft.world.level.block.state.BlockBehaviour");
+            getMaxHorizontalOffset = blockBehaviour.getDeclaredMethod("getMaxHorizontalOffset");
+            getMaxHorizontalOffset.setAccessible(true);
+            getMaxVerticalOffset = blockBehaviour.getDeclaredMethod("getMaxVerticalOffset");
+            getMaxVerticalOffset.setAccessible(true);
             getLightEmission = stateClass.getMethod("getLightEmission");
             canOcclude = stateClass.getMethod("canOcclude");
             useShapeForLightOcclusion = stateClass.getMethod("useShapeForLightOcclusion");

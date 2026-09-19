@@ -383,6 +383,11 @@ struct StateDumpFile {
     /// block state's positional offset. Render/model offsets are independent.
     collision_shape_uses_offset: Vec<u8>,
     outline_shape_uses_offset: Vec<u8>,
+    /// `BlockBehaviour.OffsetType`: 0 none, 1 XZ, 2 XYZ.
+    position_offset_type: Vec<u8>,
+    /// Runtime clamp parameters used by vanilla's registered offset function.
+    max_horizontal_offset: Vec<f32>,
+    max_vertical_offset: Vec<f32>,
     /// Flattened vanilla AABBs (`[min_x,min_y,min_z,max_x,max_y,max_z,...]`),
     /// one entry per state. `StateDump` obtains these from vanilla itself.
     collision_shapes: Vec<Vec<f64>>,
@@ -451,6 +456,9 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
             "outline_shape_uses_offset",
             dump.outline_shape_uses_offset.len(),
         ),
+        ("position_offset_type", dump.position_offset_type.len()),
+        ("max_horizontal_offset", dump.max_horizontal_offset.len()),
+        ("max_vertical_offset", dump.max_vertical_offset.len()),
         ("collision_shapes", dump.collision_shapes.len()),
         ("outline_shapes", dump.outline_shapes.len()),
     ] {
@@ -490,6 +498,33 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
             return Err(format!(
                 "state {i}: full_face_sturdy is {}, expected a 6-bit mask",
                 dump.full_face_sturdy[i]
+            )
+            .into());
+        }
+        let offset_type = dump.position_offset_type[i];
+        if offset_type > 2 {
+            return Err(format!(
+                "state {i}: position_offset_type is {offset_type}, expected 0..=2"
+            )
+            .into());
+        }
+        let max_horizontal = dump.max_horizontal_offset[i];
+        let max_vertical = dump.max_vertical_offset[i];
+        if !max_horizontal.is_finite()
+            || !max_vertical.is_finite()
+            || max_horizontal < 0.0
+            || max_vertical < 0.0
+        {
+            return Err(format!(
+                "state {i}: invalid offset bounds {max_horizontal}/{max_vertical}"
+            )
+            .into());
+        }
+        if (offset_type == 0 && (max_horizontal != 0.0 || max_vertical != 0.0))
+            || (offset_type == 1 && max_vertical != 0.0)
+        {
+            return Err(format!(
+                "state {i}: offset type {offset_type} is inconsistent with bounds {max_horizontal}/{max_vertical}"
             )
             .into());
         }
@@ -657,6 +692,21 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
         )?;
         write!(
             line,
+            ", \"q\": {}",
+            scalar_or_array(&dump.position_offset_type[range.clone()])?
+        )?;
+        write!(
+            line,
+            ", \"h\": {}",
+            scalar_or_array_f32(&dump.max_horizontal_offset[range.clone()])?
+        )?;
+        write!(
+            line,
+            ", \"y\": {}",
+            scalar_or_array_f32(&dump.max_vertical_offset[range.clone()])?
+        )?;
+        write!(
+            line,
             ", \"s\": {}",
             scalar_or_array_u32(&state_collision_shapes[range.clone()])?
         )?;
@@ -716,6 +766,15 @@ fn scalar_or_array(values: &[u8]) -> Result<String, Error> {
     let first = *values.first().ok_or("block with zero states")?;
     if values.iter().all(|&v| v == first) {
         Ok(first.to_string())
+    } else {
+        Ok(serde_json::to_string(values)?)
+    }
+}
+
+fn scalar_or_array_f32(values: &[f32]) -> Result<String, Error> {
+    let first = *values.first().ok_or("block with zero states")?;
+    if values.iter().all(|&v| v.to_bits() == first.to_bits()) {
+        Ok(serde_json::to_string(&first)?)
     } else {
         Ok(serde_json::to_string(values)?)
     }
