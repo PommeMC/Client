@@ -13,6 +13,8 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 use super::NetworkEvent;
+use super::chat::ChatPacketError;
+use super::chat_security::{ChatSender, ProfileKeyPair};
 use super::conn::{Conn, MemoryEnd, RawWriter};
 use super::handler::{handle_game_packet, handle_raw_game_packet};
 use super::sender::{Outbound, PacketSender};
@@ -39,6 +41,10 @@ pub enum ConnectionError {
 
     #[error("encryption failed: {0}")]
     Encryption(String),
+
+    /// A client-side disconnect with a vanilla translation key.
+    #[error("{}", crate::lang::translate(.0).unwrap_or(.0))]
+    ClientDisconnect(&'static str),
 
     #[error("joining {0} servers is not supported yet")]
     Unjoinable(String),
@@ -72,11 +78,11 @@ pub struct ConnectArgs {
     pub uuid: uuid::Uuid,
     pub access_token: Option<String>,
     pub view_distance: u8,
+    pub chat_options: crate::ui::chat::ChatOptions,
 }
 
 pub struct ConnectionHandle {
     pub event_rx: crossbeam_channel::Receiver<NetworkEvent>,
-    pub chat_tx: crossbeam_channel::Sender<String>,
     pub packet_tx: PacketSender,
     pub task: tokio::task::JoinHandle<()>,
 }
@@ -93,14 +99,11 @@ impl Drop for ConnectionHandle {
 
 pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> ConnectionHandle {
     let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
-    let (chat_tx, chat_rx) = crossbeam_channel::bounded::<String>(64);
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<Outbound>();
     let game_packet_tx = packet_tx.clone();
     let packet_tx = PacketSender::new(packet_tx);
     let task = rt.spawn(async move {
-        if let Err(e) =
-            connect_to_server(args, event_tx.clone(), chat_rx, game_packet_tx, packet_rx).await
-        {
+        if let Err(e) = connect_to_server(args, event_tx.clone(), game_packet_tx, packet_rx).await {
             tracing::error!("Network error: {e}");
             let reason = friendly_error_reason(&e);
             let _ = event_tx.try_send(NetworkEvent::Disconnected { reason });
@@ -108,7 +111,6 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
     });
     ConnectionHandle {
         event_rx,
-        chat_tx,
         packet_tx,
         task,
     }
@@ -117,7 +119,6 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
 pub async fn connect_to_server(
     args: ConnectArgs,
     event_tx: Sender<NetworkEvent>,
-    chat_rx: crossbeam_channel::Receiver<String>,
     game_packet_tx: mpsc::UnboundedSender<Outbound>,
     mut game_packet_rx: mpsc::UnboundedReceiver<Outbound>,
 ) -> Result<(), ConnectionError> {
@@ -127,6 +128,7 @@ pub async fn connect_to_server(
         uuid,
         access_token,
         view_distance,
+        chat_options,
     } = args;
 
     let mut conn = match transport {
@@ -172,7 +174,7 @@ pub async fn connect_to_server(
         );
     }
 
-    login_sequence(&mut conn, &uuid, access_token.as_deref()).await?;
+    let profile_id = login_sequence(&mut conn, &uuid, access_token.as_deref()).await?;
 
     // 1.20.1 and older have no configuration phase: the server enters play as
     // soon as it has sent the profile, and the registries ride in the game
@@ -191,6 +193,7 @@ pub async fn connect_to_server(
             registries: config_sequence(
                 &mut conn,
                 view_distance,
+                chat_options,
                 &event_tx,
                 &mut game_packet_rx,
                 None,
@@ -201,6 +204,7 @@ pub async fn connect_to_server(
     };
 
     tracing::info!("Entering game state");
+    let (key_pair_tx, key_pair_rx) = mpsc::unbounded_channel();
     let biome_colors = extract_biome_climate(&joined.registries);
     let _ = event_tx.try_send(NetworkEvent::BiomeColors {
         colors: biome_colors,
@@ -210,11 +214,15 @@ pub async fn connect_to_server(
     game_loop(
         conn,
         &event_tx,
-        chat_rx,
-        game_packet_tx,
-        game_packet_rx,
-        joined,
-        view_distance,
+        GameLoopArgs {
+            outbound_tx: game_packet_tx,
+            outbound_rx: game_packet_rx,
+            joined,
+            view_distance,
+            chat_options,
+            chat: ChatSender::new(profile_id, uuid, access_token, key_pair_tx),
+            key_pair_rx,
+        },
     )
     .await
 }
@@ -338,11 +346,12 @@ fn resolve_wire(probed: Option<i32>, selected: i32) -> Result<i32, i32> {
     }
 }
 
+/// Returns the game profile id the server logged us in as.
 async fn login_sequence(
     conn: &mut Conn,
     uuid: &uuid::Uuid,
     access_token: Option<&str>,
-) -> Result<(), ConnectionError> {
+) -> Result<uuid::Uuid, ConnectionError> {
     loop {
         // Read the raw frame ourselves so older-version layouts can be
         // rewritten before the typed decode (26.1's login_finished lacks the
@@ -371,7 +380,7 @@ async fn login_sequence(
                     p.game_profile.name,
                     p.game_profile.uuid
                 );
-                return Ok(());
+                return Ok(p.game_profile.uuid);
             }
             ClientboundLoginPacket::LoginDisconnect(p) => {
                 return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
@@ -438,6 +447,7 @@ async fn handle_encryption(
 async fn config_sequence(
     conn: &mut Conn,
     view_distance: u8,
+    chat_options: crate::ui::chat::ChatOptions,
     event_tx: &Sender<NetworkEvent>,
     outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
     // `Some` on a mid-session reconfiguration: the previous registries,
@@ -469,7 +479,7 @@ async fn config_sequence(
             conn,
             ServerboundConfigPacket::ClientInformation(
                 s_client_information::ServerboundClientInformation {
-                    information: super::client_information(view_distance),
+                    information: super::client_information(view_distance, chat_options),
                 },
             ),
         )
@@ -729,80 +739,54 @@ fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -
     })
 }
 
+struct GameLoopArgs {
+    outbound_tx: mpsc::UnboundedSender<Outbound>,
+    outbound_rx: mpsc::UnboundedReceiver<Outbound>,
+    joined: Joined,
+    view_distance: u8,
+    chat_options: crate::ui::chat::ChatOptions,
+    chat: ChatSender,
+    key_pair_rx: mpsc::UnboundedReceiver<Option<std::sync::Arc<ProfileKeyPair>>>,
+}
+
 async fn game_loop(
     mut conn: Conn,
     event_tx: &Sender<NetworkEvent>,
-    chat_rx: crossbeam_channel::Receiver<String>,
-    outbound_tx: mpsc::UnboundedSender<Outbound>,
-    mut outbound_rx: mpsc::UnboundedReceiver<Outbound>,
-    joined: Joined,
-    view_distance: u8,
+    args: GameLoopArgs,
 ) -> Result<(), ConnectionError> {
+    let GameLoopArgs {
+        outbound_tx,
+        mut outbound_rx,
+        joined,
+        view_distance,
+        chat_options,
+        mut chat,
+        mut key_pair_rx,
+    } = args;
     let Joined {
         registries: mut registry_holder,
         mut deferred_login,
     } = joined;
     let mut chat_types = chat_types_from_registry_holder(&registry_holder);
-    let sender = PacketSender::new(outbound_tx.clone());
-
+    let sender = PacketSender::new(outbound_tx);
     let mut batch_size_calculator = super::chunk_batch::ChunkBatchSizeCalculator::default();
     let shared_tree: crate::net::commands::SharedCommandTree =
         std::sync::Arc::new(parking_lot::Mutex::new(None));
-
-    let chat_outbound_tx = outbound_tx;
-    let chat_tree = shared_tree.clone();
-    tokio::spawn(async move {
-        // TODO: secure chat session + signing for enforce-secure-profile=true servers.
-        // When access_token is set, fetch profile certs
-        // (azalea_auth::certs::fetch_certificates),
-        // send ServerboundChatSessionUpdate, then sign chat and signable-arg commands
-        // (ServerboundChatCommandSigned) with azalea_crypto signing (needs the
-        // "signing" feature). Everything is sent unsigned atm, which only
-        // works on enforce-secure-profile=false.
-        while let Ok(msg) = tokio::task::block_in_place(|| chat_rx.recv()) {
-            let frame = if let Some(command) = msg.strip_prefix('/') {
-                tracing::info!("Sending command: {command:?}");
-                let signable = chat_tree
-                    .lock()
-                    .as_ref()
-                    .map(|tree| tree.has_signable_args(command))
-                    .unwrap_or(false);
-                if signable {
-                    tracing::warn!(
-                        "Command has signable arguments but chat signing is not implemented; sending unsigned"
-                    );
-                }
-                super::chat::encode_outbound_command(command)
-            } else {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                match super::chat::encode_outbound_message(&msg, timestamp) {
-                    Ok(frame) => frame,
-                    Err(e) => {
-                        tracing::warn!("Not sending invalid chat input: {e}");
-                        continue;
-                    }
-                }
-            };
-            if chat_outbound_tx.send(Outbound::Raw(frame)).is_err() {
-                break;
-            }
-        }
-    });
 
     // Share the registries with the game loop for hashing predicted container
     // clicks.
     let _ = event_tx.try_send(NetworkEvent::Registries(registry_holder.clone()));
 
     let translation = super::translate::active();
+    let mut inbound_chat = super::chat::InboundChat::new(crate::version::session_protocol() >= 770);
+    let mut chat_tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    chat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     if deferred_login.is_some() {
         // 1.20.1 sends both from its login handler, where later versions send
         // them in the configuration phase (ClientPacketListener.handleLogin).
         let info = ServerboundGamePacket::ClientInformation(
             azalea_protocol::packets::game::s_client_information::ServerboundClientInformation {
-                client_information: super::client_information(view_distance),
+                client_information: super::client_information(view_distance, chat_options),
             },
         );
         write_game_frame(&mut conn.writer, translation, serialize_frame(&info)?).await?;
@@ -824,16 +808,19 @@ async fn game_loop(
             // server on a bounded pipe can deadlock; split the writer out.
             tokio::select! {
                 Some(out) = outbound_rx.recv() => {
-                    let frame = match out {
-                        Outbound::Packet(mut packet) => {
-                            if let Some(t) = translation {
-                                t.remap_outbound(&mut packet);
-                            }
-                            serialize_frame(&*packet)?
-                        }
-                        Outbound::Raw(bytes) => bytes,
-                    };
-                    write_game_frame(&mut conn.writer, translation, frame).await?;
+                    if let Some(frame) = outbound_frame(out, translation, &mut chat, &shared_tree)? {
+                        write_game_frame(&mut conn.writer, translation, frame).await?;
+                    }
+                    continue;
+                }
+                Some(key_pair) = key_pair_rx.recv() => {
+                    if let Some(frame) = chat.key_pair_ready(key_pair) {
+                        write_game_frame(&mut conn.writer, translation, frame).await?;
+                    }
+                    continue;
+                }
+                _ = chat_tick.tick() => {
+                    chat.tick();
                     continue;
                 }
                 raw = conn.reader.read() => raw,
@@ -853,7 +840,18 @@ async fn game_loop(
             },
             None => raw,
         };
-        if handle_raw_game_packet(&raw, event_tx, &chat_types) {
+        match super::chat::handle_raw_chat_packet(&raw, event_tx, &chat_types, &mut inbound_chat) {
+            Some(Err(ChatPacketError::Malformed(error))) => {
+                tracing::warn!("Skipping malformed chat packet: {error}");
+                continue;
+            }
+            Some(Err(ChatPacketError::Disconnect(key))) => {
+                return Err(ConnectionError::ClientDisconnect(key));
+            }
+            Some(Ok(())) => continue,
+            None => {}
+        }
+        if handle_raw_game_packet(&raw, event_tx) {
             continue;
         }
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
@@ -861,8 +859,21 @@ async fn game_loop(
                 if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
                     // Vanilla clears the client level before acknowledging
                     // (ClientPacketListener.handleConfigurationStart); chat
-                    // survives the transition.
+                    // survives the transition. Whatever the game queued goes
+                    // first, then the pending chat acknowledgement.
+                    // TODO: chat events still in flight to the game thread
+                    // miss this ack; the next login resets the tracker anyway.
                     let _ = event_tx.try_send(NetworkEvent::Reconfiguring);
+                    while let Ok(out) = outbound_rx.try_recv() {
+                        if let Some(frame) =
+                            outbound_frame(out, translation, &mut chat, &shared_tree)?
+                        {
+                            write_game_frame(&mut conn.writer, translation, frame).await?;
+                        }
+                    }
+                    if let Some(frame) = chat.flush_ack() {
+                        write_game_frame(&mut conn.writer, translation, frame).await?;
+                    }
                     let ack = ServerboundGamePacket::ConfigurationAcknowledged(
                         azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
                     );
@@ -870,6 +881,7 @@ async fn game_loop(
                     let holder = config_sequence(
                         &mut conn,
                         view_distance,
+                        chat_options,
                         event_tx,
                         &mut outbound_rx,
                         Some(&registry_holder),
@@ -891,6 +903,12 @@ async fn game_loop(
                 {
                     continue;
                 }
+                if let ClientboundGamePacket::Login(login) = &mut packet {
+                    inbound_chat.reset();
+                    if crate::version::session_protocol() < 776 {
+                        login.online_mode = conn.is_encrypted();
+                    }
+                }
                 handle_game_packet(
                     &packet,
                     &sender,
@@ -898,11 +916,41 @@ async fn game_loop(
                     &registry_holder,
                     &shared_tree,
                     &mut batch_size_calculator,
-                )
+                );
             }
             Err(e) => skip_malformed_packet(e)?,
         }
     }
+}
+
+/// The frame one queued outbound item writes, if any.
+fn outbound_frame(
+    out: Outbound,
+    translation: Option<&super::translate::Translation>,
+    chat: &mut ChatSender,
+    tree: &crate::net::commands::SharedCommandTree,
+) -> Result<Option<Vec<u8>>, ConnectionError> {
+    Ok(match out {
+        Outbound::Packet(mut packet) => {
+            if let Some(t) = translation {
+                t.remap_outbound(&mut packet);
+            }
+            Some(serialize_frame(&*packet)?)
+        }
+        Outbound::Raw(bytes) => Some(bytes),
+        Outbound::ChatInput(input) => match chat.encode_input(&input, tree.lock().as_deref()) {
+            Ok(frame) => Some(frame),
+            Err(error) => {
+                tracing::warn!("Not sending invalid chat input: {error}");
+                None
+            }
+        },
+        Outbound::ChatLogin { online_mode } => {
+            chat.login(online_mode);
+            None
+        }
+        Outbound::ChatMark(mark) => chat.mark(*mark),
+    })
 }
 
 fn serialize_frame<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
@@ -1069,7 +1117,6 @@ mod tests {
         let mut peer = Conn::from_memory(server_end);
 
         let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
-        let (_chat_tx, chat_rx) = crossbeam_channel::bounded(64);
         let (packet_tx, packet_rx) = mpsc::unbounded_channel();
 
         let client = tokio::spawn(connect_to_server(
@@ -1079,9 +1126,9 @@ mod tests {
                 uuid: Uuid::nil(),
                 access_token: None,
                 view_distance: 8,
+                chat_options: crate::ui::chat::ChatOptions::default(),
             },
             event_tx,
-            chat_rx,
             packet_tx,
             packet_rx,
         ));

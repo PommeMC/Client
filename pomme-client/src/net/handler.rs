@@ -10,6 +10,7 @@ use azalea_registry::{Holder, Registry};
 use crossbeam_channel::Sender;
 
 use super::NetworkEvent;
+use super::chat_security::ProfileKeyServices;
 use super::commands::{CommandTree, SharedCommandTree};
 use super::sender::PacketSender;
 use crate::entity::MetaValue;
@@ -80,6 +81,10 @@ pub fn handle_game_packet(
                 entity_id: p.player_id.0,
                 hardcore: p.hardcore,
                 show_death_screen: p.show_death_screen,
+                online_mode: p.online_mode,
+            });
+            let _ = event_tx.try_send(NetworkEvent::SecureChatEnforced {
+                enforced: ProfileKeyServices::get().is_some() && p.enforces_secure_chat,
             });
         }
         ClientboundGamePacket::LevelChunkWithLight(p) => {
@@ -985,6 +990,7 @@ pub fn handle_game_packet(
             use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry};
             let actions = PlayerInfoActions {
                 add_player: p.actions.add_player,
+                initialize_chat: p.actions.initialize_chat,
                 update_game_mode: p.actions.update_game_mode,
                 update_listed: p.actions.update_listed,
                 update_latency: p.actions.update_latency,
@@ -1011,6 +1017,32 @@ pub fn handle_game_packet(
                         .as_ref()
                         .map(|c| crate::ui::text::format_text_spans(c, [1.0, 1.0, 1.0, 1.0])),
                     list_order: e.list_order,
+                    chat_session: if p.actions.initialize_chat {
+                        match (ProfileKeyServices::get(), e.chat_session.as_ref()) {
+                            (Some(services), Some(session)) => match services
+                                .validate_session(e.profile.uuid, session)
+                            {
+                                Ok(session) => Some(session),
+                                Err(error) => {
+                                    tracing::error!(
+                                        player = %e.profile.name,
+                                        "Failed to validate profile key: {error}"
+                                    );
+                                    None
+                                }
+                            },
+                            (None, Some(_)) => {
+                                tracing::warn!(
+                                    player = %e.profile.name,
+                                    "Ignoring chat session due to missing Mojang Services public key"
+                                );
+                                None
+                            }
+                            (_, None) => None,
+                        }
+                    } else {
+                        None
+                    },
                 })
                 .collect();
             let _ = event_tx.try_send(NetworkEvent::PlayerInfoUpdate { actions, entries });
@@ -1035,13 +1067,6 @@ pub fn handle_game_packet(
             );
             *shared_tree.lock() = Some(tree.clone());
             let _ = event_tx.try_send(NetworkEvent::CommandTree { tree });
-        }
-        ClientboundGamePacket::CommandSuggestions(p) => {
-            let _ = event_tx.try_send(NetworkEvent::CommandSuggestions {
-                id: p.id,
-                start: p.suggestions.range().start(),
-                options: p.suggestions.list().iter().map(|s| s.text()).collect(),
-            });
         }
         ClientboundGamePacket::CustomChatCompletions(p) => {
             tracing::debug!(
@@ -1218,18 +1243,7 @@ fn send_entity_moved(
 
 /// Consume packets that azalea's 26.2 codecs cannot represent correctly
 /// before the typed decode runs. Returns whether the packet was consumed.
-pub fn handle_raw_game_packet(
-    raw: &[u8],
-    event_tx: &Sender<NetworkEvent>,
-    chat_types: &super::chat::ChatTypeRegistry,
-) -> bool {
-    if let Some(result) = super::chat::handle_raw_chat_packet(raw, event_tx, chat_types) {
-        if let Err(e) = result {
-            tracing::warn!("Skipping malformed chat packet: {e}");
-        }
-        return true;
-    }
-
+pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bool {
     let mut cur = std::io::Cursor::new(raw);
     let Ok(packet_id) = u32::azalea_read_var(&mut cur) else {
         return false;
@@ -1545,11 +1559,7 @@ mod tests {
         7_u64.azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(
-            &raw,
-            &tx,
-            &crate::net::chat::ChatTypeRegistry::default(),
-        ));
+        assert!(handle_raw_game_packet(&raw, &tx));
         match rx.recv().unwrap() {
             NetworkEvent::PlaySound { category, pos, .. } => {
                 assert_eq!(category, 10);
@@ -1571,11 +1581,7 @@ mod tests {
         9_u64.azalea_write(&mut raw).unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(
-            &raw,
-            &tx,
-            &crate::net::chat::ChatTypeRegistry::default(),
-        ));
+        assert!(handle_raw_game_packet(&raw, &tx));
         match rx.recv().unwrap() {
             NetworkEvent::PlayEntitySound {
                 category,
@@ -1603,11 +1609,7 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = crossbeam_channel::bounded(1);
-        assert!(handle_raw_game_packet(
-            &raw,
-            &tx,
-            &crate::net::chat::ChatTypeRegistry::default(),
-        ));
+        assert!(handle_raw_game_packet(&raw, &tx));
         match rx.recv().unwrap() {
             NetworkEvent::StopSound { sound_id, category } => {
                 assert_eq!(category, Some(10));

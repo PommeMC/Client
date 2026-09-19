@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+use crate::net::chat_security::{SignedChatBody, ValidatedChatSession, verify_player_message};
 use crate::ui::hud::Scoreboard;
 use crate::ui::text::TextSpan;
 
@@ -16,11 +17,13 @@ pub struct PlayerInfoEntry {
     pub latency: i32,
     pub display_name: Option<Vec<TextSpan>>,
     pub list_order: i32,
+    pub chat_session: Option<ValidatedChatSession>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlayerInfoActions {
     pub add_player: bool,
+    pub initialize_chat: bool,
     pub update_game_mode: bool,
     pub update_listed: bool,
     pub update_latency: bool,
@@ -39,6 +42,55 @@ pub struct TabListPlayer {
     pub latency: i32,
     pub listed: bool,
     pub list_order: i32,
+    pub chat_session: Option<ValidatedChatSession>,
+    chat_chain_valid: bool,
+    /// The last accepted message's index and signature.
+    last_chat: Option<(i32, [u8; 256])>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayerChatValidation {
+    Signed,
+    Unsigned,
+    Invalid,
+}
+
+impl TabListPlayer {
+    pub fn validate_chat_message(
+        &mut self,
+        body: &SignedChatBody,
+        signature: Option<&[u8; 256]>,
+        enforces_secure_chat: bool,
+        now_ms: u64,
+    ) -> PlayerChatValidation {
+        let Some(session) = self.chat_session.as_ref() else {
+            return if enforces_secure_chat {
+                PlayerChatValidation::Invalid
+            } else {
+                PlayerChatValidation::Unsigned
+            };
+        };
+        // Vanilla `SignedMessageValidator.KeyBased`: expiry, then the
+        // signature, then the chain, which accepts a repeat of the last
+        // message (a signature covers the index and body).
+        let valid = self.chat_chain_valid
+            && !session.expired_with_grace(now_ms)
+            && signature.is_some_and(|signature| {
+                verify_player_message(session, self.uuid, body, signature)
+                    && self.last_chat.is_none_or(|(index, last)| {
+                        (index, last) == (body.message_index, *signature)
+                            || body.message_index > index
+                    })
+            });
+        self.chat_chain_valid = valid;
+        match signature.filter(|_| valid) {
+            Some(signature) => {
+                self.last_chat = Some((body.message_index, *signature));
+                PlayerChatValidation::Signed
+            }
+            None => PlayerChatValidation::Invalid,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -73,11 +125,19 @@ impl TabList {
                         latency: e.latency,
                         listed: e.listed,
                         list_order: e.list_order,
+                        chat_session: e.chat_session.clone(),
+                        chat_chain_valid: true,
+                        last_chat: None,
                     },
                 );
             } else if let Some(p) = self.players.get_mut(&e.uuid) {
                 if let Some(textures) = &e.textures {
                     p.textures = Some(textures.clone());
+                }
+                if actions.initialize_chat {
+                    p.chat_session = e.chat_session.clone();
+                    p.chat_chain_valid = true;
+                    p.last_chat = None;
                 }
                 if actions.update_game_mode {
                     p.game_mode = e.game_mode;

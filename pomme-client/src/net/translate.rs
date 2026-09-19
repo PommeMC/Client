@@ -66,7 +66,8 @@
 //! 26.1 -> 26.2 wire changes:
 //! - login `login_finished` gained a trailing session-id UUID
 //! - game `login` gained an `onlineMode` bool before the trailing
-//!   `enforcesSecureChat` bool
+//!   `enforcesSecureChat` bool; older clients prepared a chat key pair on an
+//!   encrypted connection instead, so the game loop substitutes that
 //! - game `set_player_team` reordered its `Parameters` fields and turned the
 //!   color from a `ChatFormatting` ordinal into an `Optional<TeamColor>`
 //! - serverbound slot 62 was replaced (`spectate_entity` ->
@@ -142,8 +143,8 @@
 //! - chunk heightmaps were a network-NBT compound of named long arrays; 1.21.5
 //!   packed them into a (type id, long array) list
 //! - `player_chat` gained a leading `globalIndex` varint; zero is synthesized
-//! - serverbound `chat`'s last-seen update gained a trailing checksum byte in
-//!   1.21.5; it is stripped
+//! - serverbound `chat`'s and `chat_command_signed`'s last-seen update gained a
+//!   trailing checksum byte in 1.21.5; it is stripped
 //! - `update_advancements` gained a trailing `showAdvancements` bool; true is
 //!   synthesized
 //! - team `Parameters` carried nametag visibility and collision rule as
@@ -254,7 +255,8 @@
 //! - `update_attributes` keys attributes by resource location and
 //!   `update_mob_effect` has a byte amplifier plus trailing factor NBT
 //! - `level_particles` leads with the particle type id; `chat_command` is
-//!   always the signed form (empty signatures appended)
+//!   always the signed form (empty signatures appended), so
+//!   `chat_command_signed` goes out as it, checksum stripped
 //! - `update_advancements` drops (old-form icons nested in display data);
 //!   serializer ids from `particles` (18) up shift
 //! - `player_chat`/`disguised_chat` carry a direct chat-type registry id where
@@ -560,6 +562,7 @@ struct Ids765 {
     creative_slot_id: u32,
     creative_slot_old_id: u32,
     chat_command_id: u32,
+    chat_command_signed_id: u32,
     chat_command_old_id: u32,
 }
 
@@ -662,6 +665,8 @@ struct Ids769 {
     /// last-seen checksum strip.
     chat_id: u32,
     chat_old_id: u32,
+    chat_command_signed_id: u32,
+    chat_command_signed_old_id: Option<u32>,
     /// Native-space serverbound `container_click` id and the wire
     /// version's, for the hashed-stack rewrite.
     container_click_id: u32,
@@ -1275,13 +1280,21 @@ impl Translation {
             if id == v765.creative_slot_id {
                 return translate_creative_slot_765(v765.creative_slot_old_id, &frame[pos..]);
             }
+            if id == v765.chat_command_signed_id {
+                return strip_last_seen_checksum(v765.chat_command_old_id, &frame[pos..]);
+            }
             if id == v765.chat_command_id {
                 return translate_chat_command_765(v765.chat_command_old_id, &frame[pos..]);
             }
         }
         if let Some(v769) = &ids.v769 {
             if id == v769.chat_id {
-                return translate_chat_769(v769.chat_old_id, &frame[pos..]);
+                return strip_last_seen_checksum(v769.chat_old_id, &frame[pos..]);
+            }
+            if id == v769.chat_command_signed_id
+                && let Some(old_id) = v769.chat_command_signed_old_id
+            {
+                return strip_last_seen_checksum(old_id, &frame[pos..]);
             }
             if id == v769.container_click_id {
                 return translate_container_click(v769.container_click_old_id, &frame[pos..]);
@@ -1584,6 +1597,12 @@ impl GameIds {
                 update_advancements_id: id(Clientbound, "update_advancements"),
                 chat_id: id(Serverbound, "chat"),
                 chat_old_id: required_id(table, Phase::Game, Serverbound, "chat"),
+                chat_command_signed_id: id(Serverbound, "chat_command_signed"),
+                chat_command_signed_old_id: table.id(
+                    Phase::Game,
+                    Serverbound,
+                    "chat_command_signed",
+                ),
                 container_click_id: id(Serverbound, "container_click"),
                 container_click_old_id: required_id(
                     table,
@@ -1651,6 +1670,7 @@ impl GameIds {
                     "set_creative_mode_slot",
                 ),
                 chat_command_id: id(Serverbound, "chat_command"),
+                chat_command_signed_id: id(Serverbound, "chat_command_signed"),
                 chat_command_old_id: required_id(table, Phase::Game, Serverbound, "chat_command"),
             }),
             v764: (protocol <= 764).then(|| Ids764 {
@@ -2185,9 +2205,10 @@ fn translate_creative_slot_765(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     }
 }
 
-/// Serverbound `chat` for 1.21.4 and older: drops the trailing last-seen
+/// Serverbound `chat` or `chat_command_signed` for 1.21.4 and older (1.20.4's
+/// `chat_command` has the signed layout): drops the trailing last-seen
 /// checksum byte 1.21.5 added.
-fn translate_chat_769(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
+fn strip_last_seen_checksum(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
     let Some((&_checksum, body)) = payload.split_last() else {
         return Vec::new();
     };
@@ -3302,7 +3323,9 @@ fn remap_serializer_769(old: u32) -> Option<u32> {
 }
 
 /// Rewrites the game `login` payload: 26.2 added `onlineMode` before the
-/// trailing `enforcesSecureChat` bool.
+/// trailing `enforcesSecureChat` bool. It's written false here; the game loop
+/// substitutes whether the connection is encrypted, which gated
+/// `prepareKeyPair` before 26.2.
 fn translate_game_login(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let (secure_chat, body) = payload.split_last()?;
     let mut out = Vec::with_capacity(payload.len() + 2);
