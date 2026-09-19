@@ -1288,11 +1288,7 @@ impl MenuOverlayPipeline {
                         items: items.clone(),
                     });
                 let rows = items.len().min(12).div_ceil(4);
-                // GuiGraphicsExtractor takes the maximum width of every tooltip component.
-                // The bundle image contributes 96px, while a longer title can widen the
-                // whole tooltip; the image itself is then centered inside that width.
-                let content_w = (96.0 * gs).max(self.mc_text_width(title, fs));
-                let bundle_x_offset = ((content_w - 96.0 * gs) / 2.0).floor();
+                let content_w = 96.0 * gs;
                 let empty_description =
                     crate::lang::translate("item.minecraft.bundle.empty.description")
                         .unwrap_or("Can hold a mixed stack of items");
@@ -1364,7 +1360,7 @@ impl MenuOverlayPipeline {
                             &mut vertices,
                             &[TextSpan::new(text.clone(), [0.6667, 0.6667, 0.6667, 1.0])],
                             McTextDraw {
-                                x: left + bundle_x_offset,
+                                x: left,
                                 y: top + line_no as f32 * 9.0 * gs,
                                 scale: fs,
                                 drop_shadow: true,
@@ -1379,8 +1375,7 @@ impl MenuOverlayPipeline {
                     let mut slot_number = 1usize;
                     for row in 1..=rows {
                         for col in 1..=4usize {
-                            let draw_x =
-                                left + bundle_x_offset + 96.0 * gs - col as f32 * 24.0 * gs;
+                            let draw_x = left + content_w - col as f32 * 24.0 * gs;
                             let draw_y = grid_y - row as f32 * 24.0 * gs;
                             if overflow && col == 1 && row == 1 {
                                 let hidden: i32 = items
@@ -1500,12 +1495,19 @@ impl MenuOverlayPipeline {
                         // selected stack name: it is a second framed tooltip positioned
                         // 15px above the bundle image, not text drawn inside this frame.
                         let name = crate::ui::common::item_display_name(data);
-                        let name_w = self.mc_text_width(&name, fs);
-                        // These are the coordinates passed to vanilla's `graphics.tooltip`,
-                        // not the final text origin. DefaultTooltipPositioner then applies
-                        // (+12, -12) and clamps the resulting tooltip to the screen.
-                        let anchor_x = left + content_w / 2.0 - 12.0 * gs - name_w / 2.0;
-                        let anchor_y = top - 15.0 * gs;
+                        // Font.width() is ceil(stringWidth) in vanilla. Keep that integer
+                        // width through both positioning and background sizing.
+                        let name_gui_w = self.mc_text_width(&name, fs) as i32;
+                        let name_w = name_gui_w as f32 * gs;
+                        // Vanilla does all of this in integer GUI coordinates:
+                        // centerTooltip = x + w / 2 - 12; anchor = centerTooltip - textWidth / 2.
+                        // In particular, odd/even name widths are not symmetrically centered.
+                        let content_gui_w = (content_w / gs).round() as i32;
+                        let left_gui = (left / gs).round() as i32;
+                        let top_gui = (top / gs).round() as i32;
+                        let center_tooltip = left_gui + content_gui_w / 2 - 12;
+                        let anchor_x = (center_tooltip - name_gui_w / 2) as f32 * gs;
+                        let anchor_y = (top_gui - 15) as f32 * gs;
                         let mut selected_x = anchor_x + 12.0 * gs;
                         let mut selected_y = anchor_y - 12.0 * gs;
                         if selected_x + name_w > *screen_w {
@@ -1581,7 +1583,7 @@ impl MenuOverlayPipeline {
                 {
                     push_nine_slice(
                         &mut vertices,
-                        left + bundle_x_offset + gs,
+                        left + gs,
                         bar_y,
                         fill * gs,
                         13.0 * gs,
@@ -1597,7 +1599,7 @@ impl MenuOverlayPipeline {
                 {
                     push_nine_slice(
                         &mut vertices,
-                        left + bundle_x_offset,
+                        left,
                         bar_y,
                         96.0 * gs,
                         13.0 * gs,
@@ -1619,7 +1621,7 @@ impl MenuOverlayPipeline {
                         &mut vertices,
                         &[TextSpan::new(label.to_string(), white)],
                         McTextDraw {
-                            x: left + bundle_x_offset + 48.0 * gs - label_w / 2.0,
+                            x: left + 48.0 * gs - label_w / 2.0,
                             y: bar_y + 3.0 * gs,
                             scale: fs,
                             drop_shadow: true,
