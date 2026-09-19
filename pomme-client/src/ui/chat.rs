@@ -143,7 +143,8 @@ pub struct ChatState {
     /// clamped against the wrapped total in `build`.
     scroll_pos: usize,
     /// Newest messages added while the chat was open and scrolled, whose
-    /// wrapped lines `build` still has to add to `scroll_pos`.
+    /// wrapped lines `build` still has to add to `scroll_pos` (vanilla scrolls
+    /// one line per wrapped line).
     scroll_anchor_pending: usize,
     suggestions: Vec<String>,
     suggest_index: usize,
@@ -237,8 +238,6 @@ impl ChatState {
         if self.messages.len() > MAX_MESSAGES {
             self.messages.pop_front();
         }
-        // Vanilla scrolls one line per wrapped line added while the chat is
-        // open and scrolled; the line count is known once `build` wraps it.
         if self.open && self.scroll_pos > 0 {
             self.scroll_anchor_pending += 1;
         }
@@ -614,7 +613,6 @@ impl ChatState {
         // gui scale changes (vanilla wraps in gui-space, then scales).
         let width0 = |spans: &[TextSpan]| spans_width_fn(spans, common::FONT_SIZE);
 
-        // Apply the one-line-per-wrapped-line scrolls queued since last frame.
         let added: usize = self
             .messages
             .iter()
@@ -626,9 +624,8 @@ impl ChatState {
 
         // Clamp the scroll to the wrapped backlog (vanilla scrollChat clamps
         // against `trimmedMessages`).
-        // TODO: vanilla clamps per added line against the size before that
-        // line and never re-clamps after trimming to 100, so a multi-line
-        // message at the top of a full backlog can overshoot the clamp.
+        // TODO: vanilla clamps per added line and never re-clamps after
+        // trimming, so a multi-line message on a full backlog can overshoot.
         if self.open && self.scroll_pos > 0 {
             let total = self.trimmed_lines(&width0).count();
             self.scroll_pos = self.scroll_pos.min(total.saturating_sub(LINES_PER_PAGE));
@@ -1010,6 +1007,10 @@ mod tests {
         line.iter().map(|s| s.text.clone()).collect()
     }
 
+    fn line_texts(lines: &[Vec<TextSpan>]) -> Vec<String> {
+        lines.iter().map(|l| line_text(l)).collect()
+    }
+
     /// 10 units per char, 20 when bold.
     fn width(spans: &[TextSpan]) -> f32 {
         spans
@@ -1066,8 +1067,7 @@ mod tests {
     #[test]
     fn wrap_spans_hard_breaks_long_word() {
         let lines = wrap_spans(&[span("aaaaaaa", [1.0; 4])], 30.0, &width);
-        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
-        assert_eq!(texts, vec!["aaa", "aaa", "a"]);
+        assert_eq!(line_texts(&lines), vec!["aaa", "aaa", "a"]);
     }
 
     #[test]
@@ -1082,8 +1082,7 @@ mod tests {
         let mut bold = span(" bb", [1.0; 4]);
         bold.bold = true;
         let lines = wrap_spans(&[span("aa", [1.0; 4]), bold], 50.0, &width);
-        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
-        assert_eq!(texts, vec!["aa", "bb"]);
+        assert_eq!(line_texts(&lines), vec!["aa", "bb"]);
     }
 
     #[test]
@@ -1094,13 +1093,11 @@ mod tests {
             30.0,
             &width,
         );
-        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
-        assert_eq!(texts, vec!["aaa", " bbb", "ccc", " ddd", ""]);
+        assert_eq!(line_texts(&lines), vec!["aaa", " bbb", "ccc", " ddd", ""]);
         assert_eq!(lines[3][1].color, red);
         // `Font.split` breaks the same way without the indent.
         let lines = wrap_spans(&[span("aaa bbb\n\nccc", [1.0; 4])], 30.0, &width);
-        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
-        assert_eq!(texts, vec!["aaa", "bbb", "", "ccc"]);
+        assert_eq!(line_texts(&lines), vec!["aaa", "bbb", "", "ccc"]);
     }
 
     /// Three 30-char words; each fills its own line of a 320-wide chat.
