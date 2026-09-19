@@ -1306,14 +1306,25 @@ impl MenuOverlayPipeline {
                     (rows as f32 * 24.0 + 21.0) * gs
                 };
                 let content_h = title_h + image_h;
-                let mut left = *x + 12.0;
-                let mut top = *y - 12.0;
-                if left + content_w > *screen_w {
-                    left = (*x - 24.0 - content_w).max(4.0);
+                // DefaultTooltipPositioner operates in GUI-scaled integer coordinates.
+                // The cursor stored by Pomme is framebuffer-space, so convert once here,
+                // run Vanilla's (+12,-12) positioning/clamp, then return to framebuffer space.
+                let cursor_gui_x = (*x / gs).floor() as i32;
+                let cursor_gui_y = (*y / gs).floor() as i32;
+                let content_gui_w = (content_w / gs).round() as i32;
+                let content_gui_h = (content_h / gs).round() as i32;
+                let screen_gui_w = (*screen_w / gs).floor() as i32;
+                let screen_gui_h = (*screen_h / gs).floor() as i32;
+                let mut left_gui = cursor_gui_x + 12;
+                let mut top_gui = cursor_gui_y - 12;
+                if left_gui + content_gui_w > screen_gui_w {
+                    left_gui = (left_gui - 24 - content_gui_w).max(4);
                 }
-                if top + content_h > *screen_h {
-                    top = (*screen_h - content_h - 4.0).max(4.0);
+                if top_gui + content_gui_h + 3 > screen_gui_h {
+                    top_gui = screen_gui_h - content_gui_h - 3;
                 }
+                let left = left_gui as f32 * gs;
+                let top = top_gui as f32 * gs;
                 let px = gs;
                 // TooltipRenderUtil uses x/y - 12 and content width/height + 24:
                 // 3px padding plus the 9px sprite margin on each side.
@@ -1503,20 +1514,22 @@ impl MenuOverlayPipeline {
                         // Vanilla does all of this in integer GUI coordinates:
                         // centerTooltip = x + w / 2 - 12; anchor = centerTooltip - textWidth / 2.
                         // In particular, odd/even name widths are not symmetrically centered.
-                        let content_gui_w = (content_w / gs).round() as i32;
-                        let center_tooltip = left + (content_gui_w / 2 - 12) as f32 * gs;
-                        let anchor_x = center_tooltip - (name_gui_w / 2) as f32 * gs;
-                        let anchor_y = top - 15.0 * gs;
-                        let mut selected_x = anchor_x + 12.0 * gs;
-                        let mut selected_y = anchor_y - 12.0 * gs;
-                        if selected_x + name_w > *screen_w {
-                            selected_x = (selected_x - 24.0 * gs - name_w).max(4.0 * gs);
+                        let center_tooltip_gui = left_gui + content_gui_w / 2 - 12;
+                        let anchor_x_gui = center_tooltip_gui - name_gui_w / 2;
+                        let anchor_y_gui = top_gui - 15;
+                        let mut selected_x_gui = anchor_x_gui + 12;
+                        let mut selected_y_gui = anchor_y_gui - 12;
+                        if selected_x_gui + name_gui_w > screen_gui_w {
+                            selected_x_gui = (selected_x_gui - 24 - name_gui_w).max(4);
                         }
+                        let selected_content_gui_h = 7;
+                        if selected_y_gui + selected_content_gui_h + 3 > screen_gui_h {
+                            selected_y_gui = screen_gui_h - selected_content_gui_h - 3;
+                        }
+                        let selected_x = selected_x_gui as f32 * gs;
+                        let selected_y = selected_y_gui as f32 * gs;
                         // A single text component has vanilla tooltip height 7 (9 - 2).
                         let selected_content_h = 7.0 * gs;
-                        if selected_y + selected_content_h + 3.0 * gs > *screen_h {
-                            selected_y = *screen_h - selected_content_h - 3.0 * gs;
-                        }
                         let selected_padding = 3.0 * gs;
                         let selected_margin = 9.0 * gs;
                         let selected_inset = selected_padding + selected_margin;
