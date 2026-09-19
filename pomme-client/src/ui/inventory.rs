@@ -97,7 +97,7 @@ pub fn build_inventory(
         }
     }
 
-    ctx.slot(
+    ctx.fake_slot(
         154.0,
         28.0,
         inventory.craft_output(),

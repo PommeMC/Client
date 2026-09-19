@@ -480,9 +480,10 @@ pub struct BakedItemModels {
     pub tint_sources: HashMap<String, Vec<ItemTintSource>>,
 }
 
-/// Vanilla 26.2 item-model tint sources. Colors are stored as RGB
-/// (`0xRRGGBB`); item rendering supplies opaque alpha like vanilla's
-/// `ItemTintSource.calculate` implementations.
+/// Vanilla 26.2 item-model tint sources. Colors keep the codec's full packed
+/// ARGB integer because `dye` and `firework` preserve their configured default
+/// alpha when no component color is present; sources that Vanilla explicitly
+/// opacifies do so during evaluation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ItemTintSource {
     Constant(u32),
@@ -551,66 +552,112 @@ fn grass_color(colormap: Option<&[[u8; 3]]>, temperature: f32, downfall: f32) ->
     ((pixel[0] as u32) << 16) | ((pixel[1] as u32) << 8) | pixel[2] as u32
 }
 
-fn rgb_value(value: Option<&serde_json::Value>, default: u32) -> u32 {
-    value
-        .and_then(|value| value.as_i64())
-        .map(|value| value as u32 & 0x00FF_FFFF)
-        .unwrap_or(default & 0x00FF_FFFF)
+fn opaque(color: u32) -> u32 {
+    color | 0xFF00_0000
+}
+
+/// Vanilla `ExtraCodecs.RGB_COLOR_CODEC`: either a signed 32-bit packed color
+/// or a three-float vector converted with `ARGB.colorFromFloat(1, r, g, b)`.
+fn parse_rgb_color(value: &serde_json::Value) -> Result<u32, String> {
+    if let Some(integer) = value.as_i64() {
+        let integer =
+            i32::try_from(integer).map_err(|_| "color integer is outside i32".to_string())?;
+        return Ok(integer as u32);
+    }
+    let components = value
+        .as_array()
+        .ok_or_else(|| "color must be an integer or three-float array".to_string())?;
+    if components.len() != 3 {
+        return Err("color vector must contain exactly three floats".to_string());
+    }
+    let mut channel = [0_u32; 3];
+    for (dst, value) in channel.iter_mut().zip(components) {
+        let value = value
+            .as_f64()
+            .ok_or_else(|| "color vector entries must be numbers".to_string())?
+            as f32;
+        // Mojang's ARGB.as8BitChannel is floor(value * 255). ARGB.color then
+        // keeps the low eight bits of each channel.
+        *dst = ((value * 255.0).floor() as i32 as u32) & 0xFF;
+    }
+    Ok(0xFF00_0000 | channel[0] << 16 | channel[1] << 8 | channel[2])
+}
+
+fn required_color(value: &serde_json::Value, field: &str) -> Result<u32, String> {
+    parse_rgb_color(
+        value
+            .get(field)
+            .ok_or_else(|| format!("missing required `{field}` color"))?,
+    )
+}
+
+fn required_unit_float(value: &serde_json::Value, field: &str) -> Result<f32, String> {
+    let number = value
+        .get(field)
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| format!("missing or invalid `{field}` float"))? as f32;
+    if !(0.0..=1.0).contains(&number) {
+        return Err(format!("`{field}` must be in [0, 1]"));
+    }
+    Ok(number)
 }
 
 fn parse_item_tint_sources(
     values: &[serde_json::Value],
     grass_colormap: Option<&[[u8; 3]]>,
-) -> Vec<ItemTintSource> {
+) -> Result<Vec<ItemTintSource>, String> {
     values
         .iter()
-        .filter_map(|value| {
-            let ty = value.get("type")?.as_str().map(strip_mc_prefix)?;
-            Some(match ty {
-                "constant" => ItemTintSource::Constant(rgb_value(value.get("value"), 0xFFFFFF)),
-                "grass" => ItemTintSource::Grass {
-                    color: grass_color(
+        .map(|value| {
+            let ty = value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(strip_mc_prefix)
+                .ok_or_else(|| "item tint source is missing a string `type`".to_string())?;
+            match ty {
+                "constant" => Ok(ItemTintSource::Constant(opaque(required_color(
+                    value, "value",
+                )?))),
+                "grass" => Ok(ItemTintSource::Grass {
+                    color: opaque(grass_color(
                         grass_colormap,
-                        value
-                            .get("temperature")
-                            .and_then(serde_json::Value::as_f64)
-                            .unwrap_or(0.5) as f32,
-                        value
-                            .get("downfall")
-                            .and_then(serde_json::Value::as_f64)
-                            .unwrap_or(1.0) as f32,
-                    ),
-                },
-                "dye" => ItemTintSource::Dye {
-                    default: rgb_value(value.get("default"), 0xFFFFFF),
-                },
-                "firework" => ItemTintSource::Firework {
-                    default: rgb_value(value.get("default"), 0x8A8A8A),
-                },
-                "potion" => ItemTintSource::Potion {
-                    default: rgb_value(value.get("default"), 0x385DC6),
-                },
-                "map_color" => ItemTintSource::MapColor {
-                    default: rgb_value(value.get("default"), 0x7F7F7F),
-                },
-                "custom_model_data" => ItemTintSource::CustomModelData {
-                    index: value
-                        .get("index")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0) as usize,
-                    default: rgb_value(value.get("default"), 0xFFFFFF),
-                },
-                "team" => ItemTintSource::Team {
-                    default: rgb_value(value.get("default"), 0xFFFFFF),
-                },
-                other => {
-                    // Preserve the palette slot even for a future/unknown tint
-                    // source type. Dropping an entry would shift every later
-                    // face tint index.
-                    tracing::warn!("Unsupported item tint source type {other}");
-                    ItemTintSource::Constant(0xFFFFFF)
+                        required_unit_float(value, "temperature")?,
+                        required_unit_float(value, "downfall")?,
+                    )),
+                }),
+                "dye" => Ok(ItemTintSource::Dye {
+                    default: required_color(value, "default")?,
+                }),
+                "firework" => Ok(ItemTintSource::Firework {
+                    default: required_color(value, "default")?,
+                }),
+                "potion" => Ok(ItemTintSource::Potion {
+                    default: required_color(value, "default")?,
+                }),
+                "map_color" => Ok(ItemTintSource::MapColor {
+                    default: required_color(value, "default")?,
+                }),
+                "custom_model_data" => {
+                    let index = match value.get("index") {
+                        None => 0,
+                        Some(index) => {
+                            let index = index.as_i64().ok_or_else(|| {
+                                "`index` must be a non-negative integer".to_string()
+                            })?;
+                            usize::try_from(index)
+                                .map_err(|_| "`index` must be a non-negative integer".to_string())?
+                        }
+                    };
+                    Ok(ItemTintSource::CustomModelData {
+                        index,
+                        default: required_color(value, "default")?,
+                    })
                 }
-            })
+                "team" => Ok(ItemTintSource::Team {
+                    default: required_color(value, "default")?,
+                }),
+                other => Err(format!("unsupported item tint source type `{other}`")),
+            }
         })
         .collect()
 }
@@ -628,7 +675,7 @@ pub fn bake_item_models(
     let grass_colormap = load_grass_colormap(jar_assets_dir, asset_index, packs);
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
-    for item_name in item_definition_names(jar_assets_dir, packs) {
+    'items: for item_name in item_definition_names(jar_assets_dir, packs) {
         let item_name = item_name.as_str();
         let item_asset_key = format!("minecraft/items/{item_name}.json");
         let item_path =
@@ -668,7 +715,13 @@ pub fn bake_item_models(
                     part.path
                 ),
             }
-            let part_tints = parse_item_tint_sources(&part.tints, grass_colormap.as_deref());
+            let part_tints = match parse_item_tint_sources(&part.tints, grass_colormap.as_deref()) {
+                Ok(tints) => tints,
+                Err(error) => {
+                    tracing::error!("Couldn't parse item model '{item_name}': {error}");
+                    continue 'items;
+                }
+            };
             let tint_base = item_tints.len() as u32;
             // A generated flat item may have several layers. Vanilla assigns
             // tint index N to layerN, so keep every layer in order instead of
@@ -677,7 +730,7 @@ pub fn bake_item_models(
                 let mut keys = Vec::new();
                 for layer in 0..5 {
                     let Some(value) = resolved.textures.get(&format!("layer{layer}")) else {
-                        continue;
+                        break;
                     };
                     if let Some(key) = texture_to_name(value) {
                         flat_item_textures.insert(key.clone());
@@ -2100,11 +2153,11 @@ mod tests {
         let parts = collect_model_parts(&json);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].path, "item/tinted");
-        let tints = parse_item_tint_sources(&parts[0].tints, None);
+        let tints = parse_item_tint_sources(&parts[0].tints, None).unwrap();
         assert_eq!(
             tints,
             vec![
-                ItemTintSource::Constant(0x123456),
+                ItemTintSource::Constant(0xFF123456),
                 ItemTintSource::Dye { default: 0x654321 }
             ]
         );
@@ -2125,7 +2178,7 @@ mod tests {
             }),
             serde_json::json!({"type": "minecraft:team", "default": 0x616263}),
         ];
-        let tints = parse_item_tint_sources(&values, None);
+        let tints = parse_item_tint_sources(&values, None).unwrap();
         assert_eq!(tints.len(), values.len());
         assert_eq!(
             tints[5],
@@ -2155,22 +2208,67 @@ mod tests {
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].path, "item/plain");
         assert_eq!(
-            parse_item_tint_sources(&parts[0].tints, None),
-            vec![ItemTintSource::Constant(0xABCDEF)]
+            parse_item_tint_sources(&parts[0].tints, None).unwrap(),
+            vec![ItemTintSource::Constant(0xFFABCDEF)]
         );
     }
 
     #[test]
     fn grass_item_tint_uses_vanilla_colormap_coordinates() {
         let mut colormap = vec![[0_u8; 3]; 256 * 256];
-        // Defaults are temperature 0.5 and downfall 1.0, so vanilla samples
-        // floor((1-.5)*255)=127 for both axes.
         colormap[127 * 256 + 127] = [0x91, 0xBD, 0x59];
         let tint = parse_item_tint_sources(
-            &[serde_json::json!({"type": "minecraft:grass"})],
+            &[serde_json::json!({
+                "type": "minecraft:grass",
+                "temperature": 0.5,
+                "downfall": 1.0
+            })],
             Some(&colormap),
+        )
+        .unwrap();
+        assert_eq!(tint, vec![ItemTintSource::Grass { color: 0xFF91BD59 }]);
+    }
+
+    #[test]
+    fn item_tint_rgb_codec_accepts_vanilla_vector_form_and_preserves_integer_alpha() {
+        assert_eq!(
+            parse_rgb_color(&serde_json::json!([1.0, 0.5, 0.0])).unwrap(),
+            0xFFFF7F00
         );
-        assert_eq!(tint, vec![ItemTintSource::Grass { color: 0x91BD59 }]);
+        assert_eq!(
+            parse_rgb_color(&serde_json::json!(-2146360781_i64)).unwrap(),
+            0x80112233
+        );
+    }
+
+    #[test]
+    fn item_tint_parser_rejects_missing_required_fields_and_invalid_ranges() {
+        assert!(
+            parse_item_tint_sources(&[serde_json::json!({"type": "minecraft:dye"})], None,)
+                .is_err()
+        );
+        assert!(
+            parse_item_tint_sources(
+                &[serde_json::json!({
+                    "type": "minecraft:grass",
+                    "temperature": 1.1,
+                    "downfall": 1.0
+                })],
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_item_tint_sources(
+                &[serde_json::json!({
+                    "type": "minecraft:custom_model_data",
+                    "index": -1,
+                    "default": 0xffffff
+                })],
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2209,6 +2307,41 @@ mod tests {
     }
 
     use crate::test_util::test_temp_dir;
+
+    #[test]
+    fn generated_item_layers_stop_at_first_missing_layer() {
+        let root = test_temp_dir("generated_layer_gap");
+        let jar = root.join("jar");
+        let items = jar.join("minecraft/items");
+        let models = jar.join("minecraft/models/item");
+        std::fs::create_dir_all(&items).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            items.join("holey.json"),
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/holey"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("holey.json"),
+            r#"{
+                "parent":"minecraft:item/generated",
+                "textures":{
+                    "layer0":"minecraft:item/zero",
+                    "layer2":"minecraft:item/two"
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(models.join("generated.json"), r#"{}"#).unwrap();
+
+        let baked = bake_item_models(&jar, &None, None);
+        assert_eq!(
+            baked.flat_texture_keys.get("holey").map(Vec::as_slice),
+            Some(["item/zero".to_string()].as_slice())
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn item_definition_and_ground_transform_follow_resource_pack_override() {

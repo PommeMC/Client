@@ -377,7 +377,7 @@ fn bit_is_set(bits: &[u64], index: usize) -> bool {
         .is_some_and(|word| word & (1u64 << (index % 64)) != 0)
 }
 
-fn read_component(raw: &[u8], pos: &mut usize) -> Result<Component, String> {
+pub(crate) fn read_component(raw: &[u8], pos: &mut usize) -> Result<Component, String> {
     let value = read_nbt_value(raw, pos)?;
     Component::from_value(&value).map_err(|e| format!("invalid text component: {e}"))
 }
@@ -398,7 +398,7 @@ fn write_wire_string(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(value.as_bytes());
 }
 
-fn read_string(
+pub(crate) fn read_string(
     raw: &[u8],
     pos: &mut usize,
     max_chars: usize,
@@ -417,7 +417,7 @@ fn read_string(
     Ok(value.to_owned())
 }
 
-fn read_bool(raw: &[u8], pos: &mut usize) -> Result<bool, String> {
+pub(crate) fn read_bool(raw: &[u8], pos: &mut usize) -> Result<bool, String> {
     match *take(raw, pos, 1, "boolean")?.first().unwrap() {
         0 => Ok(false),
         1 => Ok(true),
@@ -425,7 +425,7 @@ fn read_bool(raw: &[u8], pos: &mut usize) -> Result<bool, String> {
     }
 }
 
-fn read_varint_req(raw: &[u8], pos: &mut usize, field: &str) -> Result<u32, String> {
+pub(crate) fn read_varint_req(raw: &[u8], pos: &mut usize, field: &str) -> Result<u32, String> {
     read_varint(raw, pos).ok_or_else(|| format!("truncated/invalid varint for {field}"))
 }
 

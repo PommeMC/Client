@@ -21,15 +21,16 @@ layout(location = 4) in uint tint_index;
 
 layout(location = 0) out vec2 v_tex_coords;
 layout(location = 1) out float v_light;
-layout(location = 2) out vec3 v_tint;
+layout(location = 2) out vec4 v_tint;
 layout(location = 3) out float v_fog;
 layout(location = 4) out vec3 v_fog_color;
 
-vec3 decode_item_tint(uint color) {
-    return vec3(
+vec4 decode_item_tint(uint color) {
+    return vec4(
         float((color >> 16) & 255u),
         float((color >> 8) & 255u),
-        float(color & 255u)
+        float(color & 255u),
+        float((color >> 24) & 255u)
     ) / 255.0;
 }
 
@@ -41,7 +42,7 @@ void main() {
     v_light = light_tint.r;
     v_tint = tint_index < item_tint_count
         ? decode_item_tint(item_tints[item_tint_base + tint_index])
-        : vec3(1.0);
+        : vec4(1.0);
     v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
     v_fog_color = fog_color.rgb;
 }

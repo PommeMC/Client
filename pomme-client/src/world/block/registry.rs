@@ -300,6 +300,10 @@ impl BlockRegistry {
     }
 }
 
+fn opaque_rgb(color: u32) -> u32 {
+    color | 0xFF00_0000
+}
+
 fn evaluate_item_tint(
     source: &model::ItemTintSource,
     stack: Option<&ItemStackData>,
@@ -307,9 +311,11 @@ fn evaluate_item_tint(
 ) -> u32 {
     match *source {
         model::ItemTintSource::Constant(color) | model::ItemTintSource::Grass { color } => color,
+        // Vanilla preserves the configured default alpha for dye/firework, but
+        // opacifies component colors.
         model::ItemTintSource::Dye { default } => stack
             .and_then(|stack| stack.get_component::<DyedColor>())
-            .map(|color| color.rgb as u32 & 0x00FF_FFFF)
+            .map(|color| opaque_rgb(color.rgb as u32))
             .unwrap_or(default),
         model::ItemTintSource::Firework { default } => stack
             .and_then(|stack| stack.get_component::<FireworkExplosion>())
@@ -318,17 +324,17 @@ fn evaluate_item_tint(
         model::ItemTintSource::Potion { default } => stack
             .and_then(|stack| stack.get_component::<PotionContents>())
             .map(|contents| potion_contents_color(&contents, default))
-            .unwrap_or(default),
+            .unwrap_or_else(|| opaque_rgb(default)),
         model::ItemTintSource::MapColor { default } => stack
             .and_then(|stack| stack.get_component::<MapColor>())
-            .map(|color| color.color as u32 & 0x00FF_FFFF)
-            .unwrap_or(default),
+            .map(|color| opaque_rgb(color.color as u32))
+            .unwrap_or_else(|| opaque_rgb(default)),
         model::ItemTintSource::CustomModelData { index, default } => stack
             .and_then(|stack| stack.get_component::<CustomModelData>())
             .and_then(|data| data.colors.get(index).copied())
-            .map(|color| color as u32 & 0x00FF_FFFF)
-            .unwrap_or(default),
-        model::ItemTintSource::Team { default } => team_color.unwrap_or(default),
+            .map(|color| opaque_rgb(color as u32))
+            .unwrap_or_else(|| opaque_rgb(default)),
+        model::ItemTintSource::Team { default } => opaque_rgb(team_color.unwrap_or(default)),
     }
 }
 
@@ -337,7 +343,7 @@ fn average_rgb(colors: &[i32]) -> Option<u32> {
         return None;
     }
     if colors.len() == 1 {
-        return Some(colors[0] as u32 & 0x00FF_FFFF);
+        return Some(opaque_rgb(colors[0] as u32));
     }
     let mut red = 0_u32;
     let mut green = 0_u32;
@@ -349,12 +355,14 @@ fn average_rgb(colors: &[i32]) -> Option<u32> {
         blue += color & 0xFF;
     }
     let count = colors.len() as u32;
-    Some(((red / count) << 16) | ((green / count) << 8) | (blue / count))
+    Some(opaque_rgb(
+        ((red / count) << 16) | ((green / count) << 8) | (blue / count),
+    ))
 }
 
 fn potion_contents_color(contents: &PotionContents, default: u32) -> u32 {
     if let Some(color) = contents.custom_color {
-        return color as u32 & 0x00FF_FFFF;
+        return opaque_rgb(color as u32);
     }
 
     let mut effects: Vec<(u32, u32)> = Vec::new();
@@ -369,7 +377,7 @@ fn potion_contents_color(contents: &PotionContents, default: u32) -> u32 {
             ));
         }
     }
-    weighted_effect_color(&effects).unwrap_or(default)
+    opaque_rgb(weighted_effect_color(&effects).unwrap_or(default))
 }
 
 fn weighted_effect_color(effects: &[(u32, u32)]) -> Option<u32> {
@@ -506,7 +514,7 @@ mod tint_tests {
                 Some(stack),
                 None,
             ),
-            0x445566
+            0xFF445566
         );
         assert_eq!(
             evaluate_item_tint(
@@ -517,14 +525,59 @@ mod tint_tests {
                 Some(stack),
                 None,
             ),
-            0xABCDEF
+            0xFFABCDEF
         );
     }
 
     #[test]
     fn team_tint_uses_owner_team_color_or_default() {
         let source = model::ItemTintSource::Team { default: 0x123456 };
-        assert_eq!(evaluate_item_tint(&source, None, Some(0xABCDEF)), 0xABCDEF);
-        assert_eq!(evaluate_item_tint(&source, None, None), 0x123456);
+        assert_eq!(
+            evaluate_item_tint(&source, None, Some(0xABCDEF)),
+            0xFFABCDEF
+        );
+        assert_eq!(evaluate_item_tint(&source, None, None), 0xFF123456);
+    }
+
+    #[test]
+    fn source_specific_alpha_matches_vanilla_fallback_rules() {
+        let translucent = 0x80112233;
+        assert_eq!(
+            evaluate_item_tint(
+                &model::ItemTintSource::Dye {
+                    default: translucent
+                },
+                None,
+                None,
+            ),
+            translucent
+        );
+        assert_eq!(
+            evaluate_item_tint(
+                &model::ItemTintSource::Firework {
+                    default: translucent
+                },
+                None,
+                None,
+            ),
+            translucent
+        );
+        for source in [
+            model::ItemTintSource::Potion {
+                default: translucent,
+            },
+            model::ItemTintSource::MapColor {
+                default: translucent,
+            },
+            model::ItemTintSource::CustomModelData {
+                index: 0,
+                default: translucent,
+            },
+            model::ItemTintSource::Team {
+                default: translucent,
+            },
+        ] {
+            assert_eq!(evaluate_item_tint(&source, None, None), 0xFF112233);
+        }
     }
 }

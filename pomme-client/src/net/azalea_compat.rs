@@ -459,12 +459,9 @@ fn translate_game_login_26_1() {
 /// 26.1's team `Parameters` order is `displayName, options, visibility,
 /// collision, color, prefix, suffix` with color as a `ChatFormatting`
 /// ordinal; 26.2 reordered to `displayName, prefix, suffix, visibility,
-/// collision, color, options` (`ClientboundSetPlayerTeamPacket.Parameters`
-/// in both references). Vanilla 26.2 also changed color to
-/// `Optional<TeamColor>`, but azalea (ffedf17) still decodes a plain
-/// `ChatFormatting` ordinal, so these frames target azalea's layout — the
-/// ordinal is copied through unchanged. Teams on native 26.2 servers
-/// misdecode until azalea catches up.
+/// collision, color, options` and changed color to `Optional<TeamColor>`.
+/// Pomme owns the native team decoder, so translation targets the real 26.2
+/// layout rather than Azalea's stale packet type.
 #[test]
 fn translate_set_player_team_26_1() {
     let team_id = table_id(Direction::Clientbound, "set_player_team");
@@ -498,14 +495,14 @@ fn translate_set_player_team_26_1() {
     expected.extend_from_slice(suffix);
     expected.push(0); // visibility
     expected.push(1); // collision
-    expected.push(5);
+    expected.push(1); // team color present
+    expected.push(5); // TeamColor DARK_PURPLE
     expected.push(3); // options
     assert_eq!(&translated[..], &expected[..]);
 }
 
-/// RESET (ChatFormatting ordinal 21) passes through as-is — azalea's enum
-/// has all 22 formatting variants; the method-0 player list is copied
-/// verbatim.
+/// RESET (ChatFormatting ordinal 21) has no 26.2 `TeamColor`, so translation
+/// emits an absent optional; the method-0 player list is copied verbatim.
 #[test]
 fn translate_set_player_team_26_1_reset_color() {
     let team_id = table_id(Direction::Clientbound, "set_player_team");
@@ -537,7 +534,7 @@ fn translate_set_player_team_26_1_reset_color() {
     expected.extend_from_slice(component);
     expected.push(0); // visibility
     expected.push(0); // collision
-    expected.push(21);
+    expected.push(0); // no TeamColor
     expected.push(0); // options
     expected.extend_from_slice(&[1, 3, b'b', b'o', b'b']);
     assert_eq!(&translated[..], &expected[..]);
@@ -1373,20 +1370,25 @@ fn translate_set_player_team_769() {
     old.extend_from_slice(&nbt_str("p")); // prefix
     old.extend_from_slice(&nbt_str("s")); // suffix
 
-    let ClientboundGamePacket::SetPlayerTeam(p) = translate_and_decode(769, old) else {
-        panic!("wrong packet");
-    };
-    use azalea_protocol::packets::game::c_set_player_team::{
-        CollisionRule, Method, NameTagVisibility,
-    };
-    let Method::Change(params) = p.method else {
-        panic!("wrong method");
-    };
-    assert!(matches!(
-        params.nametag_visibility,
-        NameTagVisibility::HideForOtherTeams
-    ));
-    assert!(matches!(params.collision_rule, CollisionRule::PushOwnTeam));
+    let translated = translation_for(769)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let mut expected = Vec::new();
+    wire::write_varint(
+        &mut expected,
+        table_id(Direction::Clientbound, "set_player_team"),
+    );
+    expected.extend_from_slice(&utf("crew"));
+    expected.push(2);
+    expected.extend_from_slice(&nbt_str("c"));
+    expected.extend_from_slice(&nbt_str("p"));
+    expected.extend_from_slice(&nbt_str("s"));
+    expected.push(2); // visibility: hideForOtherTeams
+    expected.push(3); // collision: pushOwnTeam
+    expected.push(1); // TeamColor present
+    expected.push(5); // DARK_PURPLE
+    expected.push(3); // options
+    assert_eq!(&translated[..], &expected[..]);
 }
 
 /// The pre-1.21.5 NBT heightmap compound becomes the packed list, on top
@@ -2499,17 +2501,42 @@ fn translate_set_player_team_764() {
     wire::write_varint(&mut old, 1); // one player
     old.extend_from_slice(&[3, b'b', b'o', b'b']);
 
-    let ClientboundGamePacket::SetPlayerTeam(p) = translate_and_decode(764, old) else {
-        panic!("wrong packet");
-    };
-    let azalea_protocol::packets::game::c_set_player_team::Method::Add((parameters, players)) =
-        p.method
-    else {
-        panic!("wrong method");
-    };
-    assert_eq!(parameters.display_name.to_string(), "Reds");
-    assert_eq!(parameters.player_prefix.to_string(), "[R] ");
-    assert_eq!(players, vec!["bob".to_string()]);
+    let translated = translation_for(764)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    assert!(crate::net::handler::handle_raw_game_packet(
+        &translated,
+        &tx,
+        &crate::net::chat::ChatTypeRegistry::default(),
+    ));
+    match rx.recv().unwrap() {
+        crate::net::NetworkEvent::ScoreboardTeam {
+            display_name,
+            prefix,
+            fill_color,
+            members,
+            ..
+        } => {
+            assert_eq!(
+                display_name
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>(),
+                "Reds"
+            );
+            assert_eq!(
+                prefix
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>(),
+                "[R] "
+            );
+            assert_eq!(fill_color, Some(crate::ui::common::rgb(0xFF5555)));
+            assert_eq!(members, Some(vec!["bob".to_string()]));
+        }
+        _ => panic!("wrong packet"),
+    }
 }
 
 /// The full `player_chat` walk: nullable unsigned content transcodes and

@@ -366,6 +366,31 @@ pub fn push_slot(
     item: &ItemStack,
     empty_sprite: Option<SpriteId>,
 ) -> bool {
+    push_slot_with_owner(
+        elements,
+        x,
+        y,
+        size,
+        scale,
+        cursor,
+        item,
+        empty_sprite,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_slot_with_owner(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    scale: f32,
+    cursor: (f32, f32),
+    item: &ItemStack,
+    empty_sprite: Option<SpriteId>,
+    use_player_team: bool,
+) -> bool {
     let hovered = hit_test(cursor, [x, y, size, size]);
     let highlight = |sprite| MenuElement::Image {
         x: x - 4.0 * scale,
@@ -391,7 +416,9 @@ pub fn push_slot(
                 });
             }
         }
-        ItemStack::Present(data) => push_item_icon(elements, x, y, size, scale, data),
+        ItemStack::Present(data) => {
+            push_item_icon_with_owner(elements, x, y, size, scale, data, use_player_team)
+        }
     }
     if hovered {
         elements.push(highlight(SpriteId::SlotHighlightFront));
@@ -408,6 +435,18 @@ pub fn push_item_icon(
     scale: f32,
     data: &ItemStackData,
 ) {
+    push_item_icon_with_owner(elements, x, y, size, scale, data, true);
+}
+
+pub(crate) fn push_item_icon_with_owner(
+    elements: &mut Vec<MenuElement>,
+    x: f32,
+    y: f32,
+    size: f32,
+    scale: f32,
+    data: &ItemStackData,
+    use_player_team: bool,
+) {
     elements.push(MenuElement::ItemIcon {
         x,
         y,
@@ -415,7 +454,7 @@ pub fn push_item_icon(
         h: size,
         item_name: item_resource_name(data.kind),
         item_stack: Some(data.clone()),
-        use_player_team: true,
+        use_player_team,
         item_tints: Vec::new(),
         tint: WHITE,
     });
@@ -659,4 +698,36 @@ pub struct SliderResult {
     pub hovered: bool,
     pub dragging: bool,
     pub new_value: Option<f32>,
+}
+
+#[cfg(test)]
+mod tint_owner_tests {
+    use azalea_inventory::ItemStack;
+    use azalea_registry::builtin::ItemKind;
+
+    use super::*;
+
+    #[test]
+    fn fake_item_icon_does_not_use_player_team_owner() {
+        let item = ItemStack::from(ItemKind::Stone);
+        let mut elements = Vec::new();
+        push_slot_with_owner(
+            &mut elements,
+            0.0,
+            0.0,
+            18.0,
+            1.0,
+            (-1.0, -1.0),
+            &item,
+            None,
+            false,
+        );
+        assert!(elements.iter().any(|element| matches!(
+            element,
+            MenuElement::ItemIcon {
+                use_player_team: false,
+                ..
+            }
+        )));
+    }
 }
