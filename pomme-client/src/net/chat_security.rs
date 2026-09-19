@@ -42,6 +42,22 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("could not build HTTP client: {e}"))
 }
 
+/// Sends `request` and decodes its JSON body; `what` names it in errors.
+async fn fetch_json<T: serde::de::DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    what: &str,
+) -> Result<T, String> {
+    request
+        .send()
+        .await
+        .map_err(|e| format!("could not request {what}: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("{what} request failed: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("{what} response was malformed: {e}"))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LastSeenUpdate {
     pub offset: u32,
@@ -172,17 +188,13 @@ struct KeyPairResponse {
 
 impl ProfileKeyPair {
     async fn fetch(access_token: &str) -> Result<Self, String> {
-        let response = http_client()?
-            .post(PLAYER_CERTIFICATES_URL)
-            .bearer_auth(access_token)
-            .send()
-            .await
-            .map_err(|e| format!("could not request player chat certificate: {e}"))?
-            .error_for_status()
-            .map_err(|e| format!("player certificate request failed: {e}"))?
-            .json::<CertificatesResponse>()
-            .await
-            .map_err(|e| format!("player certificate response was malformed: {e}"))?;
+        let response: CertificatesResponse = fetch_json(
+            http_client()?
+                .post(PLAYER_CERTIFICATES_URL)
+                .bearer_auth(access_token),
+            "player chat certificate",
+        )
+        .await?;
 
         let private_der = decode_pem_body(&response.key_pair.private_key)?;
         let private_key = RsaPrivateKey::from_pkcs8_der(&private_der)
@@ -548,9 +560,8 @@ pub struct SignedChatBody {
     pub last_seen: Vec<[u8; 256]>,
     pub message_index: i32,
     pub modified: bool,
-    /// Vanilla trust level when `onlyShowSecureChat` removes unsigned text.
-    /// A non-default font on unsigned content still marks the message modified,
-    /// but a text-only unsigned replacement no longer does.
+    /// `modified` as `onlyShowSecureChat` sees it, decorated without the
+    /// unsigned content.
     pub modified_when_unsigned_hidden: bool,
     pub fully_filtered: bool,
 }
@@ -570,7 +581,6 @@ enum ServicesState {
 static SERVICES: Mutex<ServicesState> = Mutex::new(ServicesState::NotStarted);
 
 impl ProfileKeyServices {
-    /// Starts the one fetch this process makes.
     pub fn prefetch() {
         {
             let mut state = SERVICES.lock();
@@ -601,16 +611,11 @@ impl ProfileKeyServices {
     }
 
     async fn fetch() -> Result<Self, String> {
-        let value: Value = http_client()?
-            .get(SERVICES_PUBLIC_KEYS_URL)
-            .send()
-            .await
-            .map_err(|e| format!("could not request Mojang services public keys: {e}"))?
-            .error_for_status()
-            .map_err(|e| format!("Mojang services public-key request failed: {e}"))?
-            .json()
-            .await
-            .map_err(|e| format!("Mojang services public-key response was malformed: {e}"))?;
+        let value: Value = fetch_json(
+            http_client()?.get(SERVICES_PUBLIC_KEYS_URL),
+            "Mojang services public keys",
+        )
+        .await?;
         Self::from_response_json(&value)
     }
 

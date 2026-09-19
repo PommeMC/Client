@@ -243,7 +243,7 @@ impl ChatState {
         self.mark_processed(invalid_signature, false);
     }
 
-    /// Vanilla `markMessageAsProcessed`, for a message that isn't displayed.
+    /// Vanilla `markMessageAsProcessed`.
     pub fn mark_processed(&mut self, signature: Option<[u8; 256]>, shown: bool) {
         if let Some(signature) = signature {
             self.chat_marks

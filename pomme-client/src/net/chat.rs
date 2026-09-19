@@ -264,16 +264,11 @@ fn parse_system_chat(
     } else {
         send_chat(
             event_tx,
-            ChatDelivery {
-                component: &component,
-                secure_component: None,
-                missing_profile_component: None,
-                signature: None,
-                sender_uuid: None,
-                signed_body: None,
-                source: ChatMessageSource::SystemServer,
-                tag: Some(ChatMessageTag::SystemSinglePlayer),
-            },
+            ChatDelivery::unsigned(
+                &component,
+                ChatMessageSource::SystemServer,
+                ChatMessageTag::SystemSinglePlayer,
+            ),
         );
     }
     Ok(())
@@ -302,16 +297,11 @@ fn parse_disguised_chat(
     let decorated = decorate(content, &bound);
     send_chat(
         event_tx,
-        ChatDelivery {
-            component: &decorated,
-            secure_component: None,
-            missing_profile_component: None,
-            signature: None,
-            sender_uuid: None,
-            signed_body: None,
-            source: ChatMessageSource::Player,
-            tag: Some(ChatMessageTag::System),
-        },
+        ChatDelivery::unsigned(
+            &decorated,
+            ChatMessageSource::Player,
+            ChatMessageTag::System,
+        ),
     );
     Ok(())
 }
@@ -332,11 +322,9 @@ fn parse_player_chat(
             .unwrap(),
     );
     let message_index = read_varint_req(raw, pos, "player_chat.index")? as i32;
-    let signature = if read_bool(raw, pos)? {
-        Some(read_full_signature(raw, pos, "player_chat.signature")?)
-    } else {
-        None
-    };
+    let signature = read_optional(raw, pos, |raw, pos| {
+        read_full_signature(raw, pos, "player_chat.signature")
+    })?;
 
     let signed_content = read_string(raw, pos, 256, "player_chat.body.content")?;
     let timestamp_ms = read_i64(raw, pos, "player_chat.timestamp")?;
@@ -352,11 +340,7 @@ fn parse_player_chat(
         packed_last_seen.push(read_packed_signature(raw, pos)?);
     }
 
-    let unsigned = if read_bool(raw, pos)? {
-        Some(read_component(raw, pos)?)
-    } else {
-        None
-    };
+    let unsigned = read_optional(raw, pos, read_component)?;
     let filter = read_filter_mask(raw, pos)?;
     let bound = read_bound_chat_type(raw, pos, chat_types)?;
     ensure_end(raw, *pos, "player_chat")?;
@@ -464,11 +448,7 @@ fn parse_command_suggestions(
     let mut options = Vec::new();
     for _ in 0..count {
         let text = read_string(raw, pos, 32_767, "command_suggestions.text")?;
-        let tooltip = if read_bool(raw, pos)? {
-            Some(read_component(raw, pos)?)
-        } else {
-            None
-        };
+        let tooltip = read_optional(raw, pos, read_component)?;
         options.push(crate::ui::chat::ChatSuggestion { text, tooltip });
     }
     ensure_end(raw, *pos, "command_suggestions")?;
@@ -485,6 +465,21 @@ struct ChatDelivery<'a> {
     signed_body: Option<SignedChatBody>,
     source: ChatMessageSource,
     tag: Option<ChatMessageTag>,
+}
+
+impl<'a> ChatDelivery<'a> {
+    fn unsigned(component: &'a Component, source: ChatMessageSource, tag: ChatMessageTag) -> Self {
+        Self {
+            component,
+            secure_component: None,
+            missing_profile_component: None,
+            signature: None,
+            sender_uuid: None,
+            signed_body: None,
+            source,
+            tag: Some(tag),
+        }
+    }
 }
 
 fn send_chat(event_tx: &Sender<NetworkEvent>, delivery: ChatDelivery<'_>) {
@@ -546,11 +541,7 @@ fn read_bound_chat_type(
         chat_types.decoration(holder - 1)?
     };
     let name = read_component(raw, pos)?;
-    let target_name = if read_bool(raw, pos)? {
-        Some(read_component(raw, pos)?)
-    } else {
-        None
-    };
+    let target_name = read_optional(raw, pos, read_component)?;
     Ok(BoundChatType {
         decoration,
         name,
@@ -714,10 +705,6 @@ fn write_wire_string(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(value.as_bytes());
 }
 
-fn java_utf16_len(value: &str) -> usize {
-    value.encode_utf16().count()
-}
-
 fn read_string(
     raw: &[u8],
     pos: &mut usize,
@@ -731,7 +718,7 @@ fn read_string(
     }
     let bytes = take(raw, pos, len, field)?;
     let value = std::str::from_utf8(bytes).map_err(|e| format!("{field} is not UTF-8: {e}"))?;
-    if java_utf16_len(value) > max_chars {
+    if value.encode_utf16().count() > max_chars {
         return Err(format!("{field} exceeds {max_chars} UTF-16 code units"));
     }
     Ok(value.to_owned())
@@ -739,6 +726,19 @@ fn read_string(
 
 fn read_bool(raw: &[u8], pos: &mut usize) -> Result<bool, String> {
     Ok(take(raw, pos, 1, "boolean")?[0] != 0)
+}
+
+/// A boolean-prefixed optional field.
+fn read_optional<T>(
+    raw: &[u8],
+    pos: &mut usize,
+    read: impl FnOnce(&[u8], &mut usize) -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    if read_bool(raw, pos)? {
+        read(raw, pos).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 fn read_i64(raw: &[u8], pos: &mut usize, field: &str) -> Result<i64, String> {
