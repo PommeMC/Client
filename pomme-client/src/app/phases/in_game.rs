@@ -2832,6 +2832,14 @@ pub fn update_game(
     if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
         // Key shortcuts stay quiet while a text field (anvil rename) types.
         let keys_live = !game.wants_text_input();
+        let (menu_scroll_x, menu_scroll_y) = core.input.consume_menu_scroll_xy();
+        // Vanilla BundleMouseActions prefers vertical wheel input, falling back to
+        // negated horizontal input when the vertical axis produced no whole step.
+        let bundle_scroll = if menu_scroll_y != 0.0 {
+            menu_scroll_y
+        } else {
+            -menu_scroll_x
+        };
         let input = crate::ui::container::ContainerInput {
             left_pressed: core.input.left_just_pressed(),
             right_pressed: core.input.right_just_pressed(),
@@ -2845,7 +2853,7 @@ pub fn update_game(
             swap_offhand: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
             throw: keys_live && core.input.key_just_pressed(winit::keyboard::KeyCode::KeyQ),
             throw_all: core.input.ctrl_held(),
-            scroll: core.input.consume_menu_scroll_xy().1,
+            scroll: bundle_scroll,
         };
         // The anvil rename field consumes this frame's typing; a changed
         // accepted name goes to the server (vanilla `onNameChanged`).
